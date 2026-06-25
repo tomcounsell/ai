@@ -2,6 +2,9 @@
 
 Coverage:
 - cmd_resume: session not found, wrong status (pending/running/failed), happy-path transition
+- cmd_resume: abandoned status now resumable (issue #1539)
+- cmd_resume: cancelled still rejected
+- resume_session: shared core function directly
 - cmd_release: no match (no pr_url, no branch match), happy-path by pr_url, happy-path by branch
 - model=None on ClaudeAgentOptions: verify model key is absent when not set (avoids SDK override)
 """
@@ -18,6 +21,7 @@ if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
 from tools.valor_session import (  # noqa: E402
+    ResumeResult,
     _find_session,
     cmd_inspect,
     cmd_kill,
@@ -25,7 +29,11 @@ from tools.valor_session import (  # noqa: E402
     cmd_resume,
     cmd_status,
     cmd_steer,
+    resume_session,
 )
+
+# Module-level constants needed for mocking session_lifecycle
+_RESUMABLE_STATUSES = frozenset({"completed", "killed", "failed", "abandoned"})
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,7 +98,10 @@ class TestCmdResumeNotFound:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):
@@ -113,7 +124,10 @@ class TestCmdResumeWrongStatus:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):
@@ -153,7 +167,10 @@ class TestCmdResumeHappyPath:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=mock_transition),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=mock_transition,
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):
@@ -164,7 +181,7 @@ class TestCmdResumeHappyPath:
         session.save.assert_called()
         assert "Do the patch." in session.queued_steering_messages
         mock_transition.assert_called_once_with(
-            session, "pending", reason="valor-session resume", reject_from_terminal=False
+            session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
 
     def test_steering_message_saved_before_transition(self):
@@ -189,7 +206,8 @@ class TestCmdResumeHappyPath:
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
                     "models.session_lifecycle": MagicMock(
-                        transition_status=MagicMock(side_effect=_record_transition)
+                        transition_status=MagicMock(side_effect=_record_transition),
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
                     ),
                 },
             ),
@@ -217,7 +235,10 @@ class TestCmdResumeHappyPath:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):
@@ -252,7 +273,10 @@ class TestCmdResumeKilledFailedSupport:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=mock_transition),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=mock_transition,
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):
@@ -265,7 +289,7 @@ class TestCmdResumeKilledFailedSupport:
         assert result == 0
         assert "Pick up where we left off." in session.queued_steering_messages
         mock_transition.assert_called_once_with(
-            session, "pending", reason="valor-session resume", reject_from_terminal=False
+            session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
 
     def test_failed_with_uuid_resumes(self):
@@ -274,7 +298,7 @@ class TestCmdResumeKilledFailedSupport:
         assert result == 0
         assert "Recover." in session.queued_steering_messages
         mock_transition.assert_called_once_with(
-            session, "pending", reason="valor-session resume", reject_from_terminal=False
+            session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
 
 
@@ -291,7 +315,10 @@ class TestCmdResumeNullUuidGuard:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):
@@ -318,10 +345,12 @@ class TestCmdResumeNullUuidGuard:
 class TestCmdResumeStatusGuardExactMessage:
     """The operator-facing wording of the status guard must be stable."""
 
-    def test_status_rejection_uses_completed_killed_failed_wording(self, capsys):
+    def test_status_rejection_uses_completed_killed_failed_abandoned_wording(self, capsys):
         session = _make_session("sess-paused", status="paused_circuit")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
+
+        resumable = frozenset({"completed", "killed", "failed", "abandoned"})
 
         with (
             patch("tools.valor_session._load_env"),
@@ -329,7 +358,10 @@ class TestCmdResumeStatusGuardExactMessage:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=MagicMock()),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=resumable,
+                    ),
                 },
             ),
         ):
@@ -339,8 +371,216 @@ class TestCmdResumeStatusGuardExactMessage:
         err = capsys.readouterr().err.strip()
         assert err == (
             "Error: Session sess-paused has status 'paused_circuit'. "
-            "Only completed/killed/failed sessions can be resumed."
+            "Only completed/killed/failed/abandoned sessions can be resumed."
         )
+
+
+# ---------------------------------------------------------------------------
+# cmd_resume: abandoned support (issue #1539)
+# ---------------------------------------------------------------------------
+
+
+class TestCmdResumeAbandonedSupport:
+    """Abandoned sessions are now resumable (issue #1539)."""
+
+    def _run_resume(self, session, message="Continue."):
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        mock_transition = MagicMock()
+        resumable = frozenset({"completed", "killed", "failed", "abandoned"})
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=mock_transition,
+                        RESUMABLE_STATUSES=resumable,
+                    ),
+                },
+            ),
+        ):
+            result = cmd_resume(_resume_args(session_id=session.session_id, message=message))
+        return result, mock_transition
+
+    def test_abandoned_with_uuid_resumes(self):
+        session = _make_session("sess-a", status="abandoned", claude_session_uuid="uuid-abandoned")
+        result, mock_transition = self._run_resume(session, message="Pick up where we left off.")
+        assert result == 0
+        assert "Pick up where we left off." in session.queued_steering_messages
+        mock_transition.assert_called_once()
+        _, kwargs = mock_transition.call_args
+        assert kwargs.get("reject_from_terminal") is False
+
+    def test_cancelled_still_rejected(self, capsys):
+        """Cancelled is an intentional human stop — must never be resumable."""
+        session = _make_session("sess-c", status="cancelled", claude_session_uuid="uuid-c")
+        mock_cls = MagicMock()
+        mock_cls.query.filter.return_value = [session]
+        resumable = frozenset({"completed", "killed", "failed", "abandoned"})
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.agent_session": MagicMock(AgentSession=mock_cls),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=resumable,
+                    ),
+                },
+            ),
+        ):
+            result = cmd_resume(_resume_args(session_id="sess-c"))
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "cancelled" in err
+
+
+# ---------------------------------------------------------------------------
+# resume_session: shared core function (issue #1539)
+# ---------------------------------------------------------------------------
+
+
+class TestResumeSessionCore:
+    """Tests for the shared resume_session() programmatic core."""
+
+    def _make_mock_session(
+        self,
+        session_id="core-sess",
+        status="failed",
+        uuid="uuid-core",
+        steering=None,
+    ):
+        s = MagicMock()
+        s.session_id = session_id
+        s.status = status
+        s.claude_session_uuid = uuid
+        s.model = "claude-opus-4-5"
+        s.queued_steering_messages = list(steering or [])
+        return s
+
+    def _patch_lifecycle(self, mock_transition=None, resumable=None):
+        if resumable is None:
+            resumable = frozenset({"completed", "killed", "failed", "abandoned"})
+        if mock_transition is None:
+            mock_transition = MagicMock()
+        return patch.dict(
+            "sys.modules",
+            {
+                "models.session_lifecycle": MagicMock(
+                    transition_status=mock_transition,
+                    RESUMABLE_STATUSES=resumable,
+                ),
+            },
+        ), mock_transition
+
+    def test_success_returns_resumeresult_with_success_true(self):
+        session = self._make_mock_session(status="failed")
+        patch_ctx, mock_transition = self._patch_lifecycle()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch_ctx,
+        ):
+            result = resume_session(session, "fix it", source="test")
+
+        assert isinstance(result, ResumeResult)
+        assert result.success is True
+        assert result.session_id == "core-sess"
+        assert result.model == "claude-opus-4-5"
+        assert result.claude_session_uuid == "uuid-core"
+        assert result.error is None
+        mock_transition.assert_called_once()
+
+    def test_pending_returns_failure(self):
+        session = self._make_mock_session(status="pending")
+        patch_ctx, _ = self._patch_lifecycle()
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "msg")
+
+        assert result.success is False
+        assert "already pending" in result.error
+
+    def test_running_returns_failure(self):
+        session = self._make_mock_session(status="running")
+        patch_ctx, _ = self._patch_lifecycle()
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "msg")
+
+        assert result.success is False
+        assert "currently running" in result.error
+
+    def test_cancelled_returns_failure(self):
+        session = self._make_mock_session(status="cancelled")
+        resumable = frozenset({"completed", "killed", "failed", "abandoned"})
+        patch_ctx, _ = self._patch_lifecycle(resumable=resumable)
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "msg")
+
+        assert result.success is False
+        assert "cancelled" in result.error
+
+    def test_null_uuid_returns_failure(self):
+        session = self._make_mock_session(status="failed", uuid=None)
+        patch_ctx, _ = self._patch_lifecycle()
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "msg")
+
+        assert result.success is False
+        assert "no transcript UUID" in result.error
+
+    def test_abandoned_resumes_successfully(self):
+        session = self._make_mock_session(status="abandoned")
+        patch_ctx, mock_transition = self._patch_lifecycle()
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "recover", source="auto-resume")
+
+        assert result.success is True
+        mock_transition.assert_called_once()
+        _, kwargs = mock_transition.call_args
+        assert kwargs.get("reject_from_terminal") is False
+
+    def test_steering_message_appended_before_transition(self):
+        call_order: list[str] = []
+        session = self._make_mock_session(status="completed")
+
+        def _record_save():
+            call_order.append("save")
+
+        def _record_transition(s, status, reason="", reject_from_terminal=True):
+            call_order.append("transition")
+
+        session.save.side_effect = _record_save
+        mock_transition = MagicMock(side_effect=_record_transition)
+        patch_ctx, _ = self._patch_lifecycle(mock_transition=mock_transition)
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "continue")
+
+        assert result.success is True
+        assert call_order.index("save") < call_order.index("transition")
+        assert "continue" in session.queued_steering_messages
+
+    def test_transition_error_returns_failure(self):
+        session = self._make_mock_session(status="failed")
+        mock_transition = MagicMock(side_effect=RuntimeError("Redis down"))
+        patch_ctx, _ = self._patch_lifecycle(mock_transition=mock_transition)
+
+        with patch("tools.valor_session._load_env"), patch_ctx:
+            result = resume_session(session, "msg")
+
+        assert result.success is False
+        assert "Could not transition" in result.error
 
 
 # ---------------------------------------------------------------------------
@@ -387,19 +627,28 @@ class TestFindSessionFallbackToAgentSessionId:
     """When session_id filter is empty, fall back to AgentSession.get_by_id()."""
 
     def test_uuid_fallback_when_session_id_empty(self):
+        # Issue #1720: _find_session now retries _CLASS_SET_RETRY_ATTEMPTS times
+        # before falling through to get_by_id.  The filter is called N times
+        # (once per retry attempt) when the class-set is empty, then get_by_id.
+        import tools.valor_session as vs
+
         uuid_session = _make_session("sess-from-uuid")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = uuid_session
 
-        with patch.dict(
-            "sys.modules",
-            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
-        ):
+        with (
+            patch.dict(
+                "sys.modules",
+                {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+            ),
+            patch("tools.valor_session.time.sleep"),
+        ):  # skip backoff in unit tests
             result = _find_session("c00fd40d7a10432ba38b52bead17061f")
 
         assert result is uuid_session
-        mock_cls.query.filter.assert_called_once_with(session_id="c00fd40d7a10432ba38b52bead17061f")
+        # filter is called _CLASS_SET_RETRY_ATTEMPTS times (bounded retry exhaust)
+        assert mock_cls.query.filter.call_count == vs._CLASS_SET_RETRY_ATTEMPTS
         mock_cls.get_by_id.assert_called_once_with("c00fd40d7a10432ba38b52bead17061f")
 
     def test_returns_none_when_neither_lookup_finds(self):
@@ -407,10 +656,13 @@ class TestFindSessionFallbackToAgentSessionId:
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = None
 
-        with patch.dict(
-            "sys.modules",
-            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
-        ):
+        with (
+            patch.dict(
+                "sys.modules",
+                {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+            ),
+            patch("tools.valor_session.time.sleep"),
+        ):  # skip retry backoff
             result = _find_session("nonexistent-id")
 
         assert result is None
@@ -421,10 +673,13 @@ class TestFindSessionFallbackToAgentSessionId:
         mock_cls.query.filter.return_value = []
         mock_cls.get_by_id.return_value = None
 
-        with patch.dict(
-            "sys.modules",
-            {"models.agent_session": MagicMock(AgentSession=mock_cls)},
-        ):
+        with (
+            patch.dict(
+                "sys.modules",
+                {"models.agent_session": MagicMock(AgentSession=mock_cls)},
+            ),
+            patch("tools.valor_session.time.sleep"),
+        ):  # skip retry backoff
             result = _find_session("")
 
         assert result is None
@@ -768,7 +1023,10 @@ class TestRetainForResumeStageCase:
                 "sys.modules",
                 {
                     "models.agent_session": MagicMock(AgentSession=mock_cls),
-                    "models.session_lifecycle": MagicMock(transition_status=mock_transition),
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=mock_transition,
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
                 },
             ),
         ):

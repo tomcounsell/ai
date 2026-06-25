@@ -85,20 +85,9 @@ Every Telegram message dispatched to a session via `dispatch_telegram_session` r
 
 ## Read Path 1: Message Drafter
 
-**Location:** `bridge/message_drafter.py::_build_draft_prompt`
-
-When `session.chat_message_log` is non-empty, `_build_draft_prompt` formats the last `CHAT_LOG_DISPLAY_ENTRIES` entries into a prompt block:
-
-```
-Recent chat in this thread (you have already said the 'out' lines — avoid repeating them):
-[in] Tom: What's the status?
-[out] valor: Working on it.
-[in] Tom: Any blockers?
-```
-
-This block is inserted into the drafter prompt just before the agent output text. The drafter sees its own prior sends and avoids generating duplicate content.
-
-**Fault tolerance:** If `chat_message_log` is `None`, `[]`, or contains entries with missing keys, the block is omitted silently. The drafter never crashes on a malformed log.
+> **Updated (drafter_passthrough_validation):** The `_build_draft_prompt` function was removed when the drafter was repositioned from an LLM rewriter to a pass-through validation filter. The drafter no longer builds an LLM prompt and no longer reads `chat_message_log` directly. This section is retained for historical context; Read Path 2 (PM Completion Runner) is the active consumer of `chat_message_log`.
+>
+> Context about prior outbound messages is now passed to the agent via the harness system prompt (Pass 1 prompt injection in `agent/session_completion.py`) for PM final-delivery turns, not via a drafter prompt block.
 
 ## Read Path 2: PM Completion Runner (issue #1262)
 

@@ -55,6 +55,135 @@ The wrapper has a hard-coded allowlist of subcommands. Unknown subcommands exit 
 
 Adding a new subcommand: append to `ALLOWED_SUBCOMMANDS` in `scripts/sdlc-tool`. The kebab-case name maps to `tools.sdlc_<snake_case>` automatically.
 
+## Cross-Repo Plan Resolution (issue #1761)
+
+`sdlc-tool` forces cwd to `~/src/ai` so the correct `tools/` package loads. This is correct and load-bearing. The consequence: `find_plan_path` inside `sdlc-tool` previously resolved plans from the ai-repo's `docs/plans/`, not the target repo's — causing the PLAN↔CRITIQUE loop when running a local `/do-sdlc` against a non-ai-repo issue.
+
+### SDLC_TARGET_REPO vs SDLC_REPO (GH_REPO)
+
+Two distinct env vars now govern where things live:
+
+| Env var | Shape | Set by | Used for |
+|---------|-------|--------|----------|
+| `SDLC_REPO` | GitHub slug (`org/repo`) | `/do-sdlc` Step 2 via `gh repo view` | `gh` CLI calls (`gh issue view`, `gh pr create`, etc.) |
+| `SDLC_TARGET_REPO` | Filesystem path (absolute) | `/do-sdlc` Step 2 via `git rev-parse --show-toplevel`; bridge path via `agent/sdk_client.py:1590` | `find_plan_path` plans-dir resolution inside `sdlc-tool` |
+
+**Before #1761:** local `/do-sdlc` never set `SDLC_TARGET_REPO`. `find_plan_path` fell through to `_git_toplevel()` (which resolves `~/src/ai` because that is `sdlc-tool`'s forced cwd), then to the `__file__` fallback — also `~/src/ai`. A target-repo plan was never found; `revision_applied: true` was never read; router row 4c was unreachable.
+
+**After #1761:** `/do-sdlc` Step 2 runs `git rev-parse --show-toplevel` in the supervision cwd (the target repo) and exports the result as `SDLC_TARGET_REPO` before the loop starts. Every `sdlc-tool` subprocess (cwd forced to `~/src/ai`) inherits it and uses it as the plans-dir root.
+
+### `find_plan_path` hardening
+
+Three-level plan-dir resolution (unchanged precedence):
+1. `SDLC_TARGET_REPO` env var — explicit override.
+2. `_git_toplevel()` — cwd's git root (falls through on non-git cwd).
+3. `__file__`-relative fallback — `~/src/ai/docs/plans`.
+
+**New guard (level 3 only):** when resolution fell back to the `__file__` path (SDLC_TARGET_REPO unset AND not in a git repo), a bare-`#N` textual match is likely a foreign plan that merely *mentions* the issue number. `find_plan_path` now returns `None` instead of the foreign plan — a recoverable signal (router surfaces "plan not found / re-run /do-plan") rather than silent corruption. The `tracking:` match remains authoritative on all resolution levels and is never suppressed.
+
+### G5 transparent-rewrite migration
+
+With `revision_applied`-stripped plan hashing (see `sdlc-pipeline-portability.md` — D8), a stored pre-#1761 full-bytes `artifact_hash` may mismatch the new body-only `current_plan_hash` for build-ready in-flight issues. `guard_g5_artifact_hash_cache` transparently self-heals on its first router pass: when `cached_hash != current_hash`, it recomputes the legacy full-bytes hash of the current plan. If that legacy hash equals the stored `cached_hash` (only delta is the `revision_applied:` line), it rewrites `record["artifact_hash"]` in-place to the new hash and emits a WARNING log, then falls through to the normal cache-hit path. No operator step required; no backfill script.
+
+## Session resolution and write-path auto-ensure (`find_session(..., ensure=True)`)
+
+All `sdlc-tool` subcommands store/read pipeline state on a **PM `AgentSession`'s `stage_states`** in Redis — not in the plan file or git. They resolve that session through the shared resolver `find_session(session_id=None, issue_number=None, ensure=False)` in `tools/_sdlc_utils.py`.
+
+### Forked-skill issue-number passing — skill arg/env layer (issue #1731)
+
+The recorder-layer precedence (#1671/#1672, see below) only helps when a real `--issue-number N`
+value reaches `find_session`. A separate, earlier failure mode (#1731) prevented the value from
+ever being produced inside forked CRITIQUE/REVIEW skills:
+
+- `do-plan-critique/SKILL.md` assigned `ISSUE_NUM` in the Plan Resolution block but all downstream
+  recorder calls referenced `$ISSUE_NUMBER` (a different, never-assigned variable).
+- `do-pr-review/SKILL.md` set `$SDLC_ISSUE_NUMBER` from env and `$PR_NUMBER` in its
+  context-resolution block, but every recorder call referenced `$ISSUE_NUMBER` (never assigned).
+
+The consequence: `--issue-number $ISSUE_NUMBER` collapsed to `--issue-number ` (empty token),
+which argparse `type=int` rejected with exit code 2 ("expected one argument"). On stage-marker
+calls (then guarded with `2>/dev/null || true`) this silently no-op'd — the marker stayed
+`in_progress`. On the verdict-record call (no `|| true`) it errored — nothing was recorded.
+Either way the router saw no matching verdict and returned `Blocked('no matching dispatch rule')`.
+If a stale non-empty `ISSUE_NUMBER` was inherited from a prior context (the "latched onto #1724"
+symptom), it silently diverted the write to the wrong issue's session.
+
+**The #1731 fix (applied to the skill markdown layer):**
+
+1. `do-plan-critique`: Plan Resolution now unconditionally assigns `ISSUE_NUMBER` (clobbers
+   any inherited value, never `${ISSUE_NUMBER:-…}`). Numeric `$ARGUMENTS` → `ISSUE_NUMBER`.
+   Plan-path `$ARGUMENTS` → extract from plan frontmatter `tracking:` field.
+2. `do-pr-review`: Context-resolution now unconditionally assigns `ISSUE_NUMBER` by extracting
+   `Closes #N`/`Fixes #N`/`Resolves #N` from the PR body (PRIMARY — always runs first), then
+   `tracking: .../issues/N` from the PR body (secondary fallback), with `$SDLC_ISSUE_NUMBER`
+   as a last-resort validated hint only (never authoritative). **`$ARGUMENTS` is the PR number
+   in this skill, not the issue number — it is never used as `ISSUE_NUMBER`.**
+3. Both skills: **positive-integer assertion** `[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { ... exit 1 }`
+   added after every resolution path and before any recorder call. An unresolvable issue
+   number now fails loudly rather than silently diverting.
+4. Both skills: `2>/dev/null || true` swallow stripped from all stage-marker calls so failures
+   surface as visible non-zero exits in the subagent report.
+5. Both skills: every `--issue-number` flag now passes `"$ISSUE_NUMBER"` (quoted) so an empty
+   value produces a clear argparse error rather than a confusing token-drop.
+6. `do-sdlc` §3c: confirmed args-only hand-off (no `export SDLC_ISSUE_NUMBER`) — the skill
+   re-parses the number from `$ARGUMENTS` directly.
+
+**The three layers are distinct and complementary:**
+
+| Layer | Where | PR | What it does |
+|-------|-------|----|-------------|
+| Skill-arg | Forked skill invocations | #1736 (#1731) | Unconditionally passes `--issue-number N` to recorder CLI |
+| Precedence | `find_session()` resolution | #1673 (#1671/#1672) | Issue-based lookup beats env-var fallback when `N` is present |
+| Ownership guard | Recorder CLIs (`sdlc_verdict`, `sdlc_stage_marker`) | PR for #1735 | After resolution, verifies the resolved session owns `N`; exits 1 with stderr if not — prevents silent artifact divert |
+
+No single layer can compensate for the others. Together they close the full divert path.
+
+### Recorder-layer ownership guard (issue #1735)
+
+After `find_session()` resolves a session, the recorder CLIs (`sdlc_verdict` and `sdlc_stage_marker`) apply a final ownership check via `session_owns_issue()` in `tools/_sdlc_utils.py`.
+
+**When it fires:** `--issue-number N` was explicitly passed as a CLI argument AND the resolved session does not own issue N. The recorder exits 1 and prints a stderr diagnostic naming both the issue number and the resolved session id. No write occurs.
+
+**When it does NOT fire:** `--issue-number` was omitted entirely. Bridge PM sessions that rely on env-var resolution (`VALOR_SESSION_ID` / `AGENT_SESSION_ID`) are completely unaffected — the guard is scoped to the explicit-arg path.
+
+**Three ownership predicates** checked by `session_owns_issue(session, N)`:
+1. `session.issue_url` ends with `/issues/{N}` — the standard bridge PM session ownership signal
+2. `session.session_id == "sdlc-local-{N}"` — the deterministic id assigned by `session-ensure` for sessionless-local runs
+3. `session.message_text` matches `\bissue\s*#?\s*{N}\b` (case-insensitive) — catches conversational session creation where neither of the above is set
+
+**How it complements the prior two layers:**
+- The skill-arg layer (PR #1736) guarantees a real N is always produced and passed to the recorder — so the ownership check always has something to evaluate.
+- The precedence layer (PR #1673) resolves the correct session when an `issue_url`-owning PM session or a `sdlc-local-{N}` record exists — so the ownership check usually passes immediately.
+- The ownership guard catches the residual case: a real N was passed, but `find_session()` resolved to a session that happens to be in scope (e.g. via env var) but does not own that issue. Without this guard, the verdict or marker would be silently written to the wrong session.
+
+### Session resolution precedence (issue #1671/#1672)
+
+Resolution order in `find_session`:
+
+1. **Explicit `session_id` argument** — highest precedence. A caller passing a concrete id means it; it overrides everything below, including issue-based resolution.
+2. **Issue-based lookup** via `find_session_by_issue(issue_number)`, attempted when `issue_number >= 1`. This runs **before** env-var resolution so that a write issued with an explicit `--issue-number N` lands on the *same* session the router reads for that issue.
+3. **Env-var session** (`VALOR_SESSION_ID` / `AGENT_SESSION_ID`) — a **last-resort fallback**, consulted only when there is no explicit `session_id` and no issue-based match. Preserves the bridge case byte-for-byte: a write with no `--issue-number` resolves the env-var session exactly as before.
+4. **Auto-ensure** (writes only) — see below.
+
+**Why issue-number beats env-var (#1671/#1672):** Before this fix, the *read* path resolved by issue number while the *write* path resolved by an inherited env-var session first. A forked CRITIQUE/REVIEW subagent (spawned by `/do-sdlc`) that inherited a parent's `VALOR_SESSION_ID` wrote its verdict/marker/dispatch entry to the *parent's* session, while the router reading `--issue-number N` saw an empty verdict and looped on guard G3. Both reads and writes now consult `find_session_by_issue` first for an explicit issue number, so they **converge** on one session.
+
+**`find_session_by_issue` ordering (concern C2):** the `issue_url`-ownership pass runs **first** — a live bridge PM session that owns the issue via its `issue_url` wins over a stale deterministic `sdlc-local-{N}` record. The deterministic-id pass is the fallback for the sessionless-local case it was built for (#1558), reached only when no PM session owns the issue via `issue_url`.
+
+**`ensure_session` reconciliation (concern C1):** the env-var short-circuit in `tools/sdlc_session_ensure.py` is **not** a blind reorder. When the env var resolves to a live PM session, it is kept **only when that session owns the requested issue** (its `issue_url` ends in `/issues/N`) — the legitimate bridge dedup case (#1147), a true no-op. When the env session is live but does *not* own the issue, the resolver consults `find_session_by_issue(N)` and prefers an existing issue-scoped session, falling through to create only if none exists. No duplicate is ever created for the bridge case.
+
+**The `ensure` parameter (issue #1558):**
+
+- **`ensure=False` (default)** — a pure, side-effect-free lookup. Returns the session or `None`. **No session is ever created.** Every *read* path uses this: `verdict get`, `stage-query`, `next-skill`, and `meta-set`/`stage-marker` when called by read-only code. This preserves the original pre-#1558 lookup behavior byte-for-byte.
+- **`ensure=True`** — opt-in auto-create. When no existing PM session is found **and** there is issue context (`issue_number >= 1`) **or** a session-id env var is set, the resolver calls `tools.sdlc_session_ensure.ensure_session(issue_number)` to create (or dedup onto a live bridge session) a `sdlc-local-{N}` PM session, then re-resolves and returns it. A bare sessionless call with no issue context still returns `None` — no fabricated session. An ensure failure (e.g. `ProjectKeyResolutionError`) yields `None` rather than raising.
+
+**Four *write* paths pass `ensure=True`:** `sdlc_meta_set.write_meta`, `sdlc_stage_marker.write_marker`, `sdlc_verdict._cli_record`, and `sdlc_dispatch._cli_record`. The dispatch `record` path joined the other three in #1671 — #1671 explicitly named "dispatch-history entries" as a skew symptom, and without `ensure=True` a cold-start `dispatch record --issue-number N` would env-resolve to a divergent inherited session or silently no-op. The dispatch `get`/`reset` paths stay non-ensuring (`get` is read-only; `reset` must not fabricate a session). This guarantees a state *write* always has a home regardless of how the pipeline is driven — a direct `sdlc-tool verdict record` or `sdlc-tool dispatch record` in a clean (non-`/sdlc`) session now persists instead of silently no-op'ing. The opt-in is grep-able: `grep -rn 'ensure=True' tools/` surfaces exactly the four write sites plus the signature in `_sdlc_utils.py`.
+
+This **supersedes the per-skill `session-ensure` requirement for non-`/sdlc` callers.** The explicit `sdlc-tool session-ensure` call in `/sdlc` Step 1.5 is now belt-and-suspenders (tagged `REDUNDANT-AFTER-#1558` in `SKILL.md`) — auto-ensure on the first write covers callers that never pass through `/sdlc`.
+
+**Read-after-write within `find_session_by_issue`:** an auto-ensured `sdlc-local-{N}` session carries no `issue_url` (so the `issue_url`-ownership pass always misses it — see C2 above), but does carry an issue-anchored `message_text` set by Fix A (#1741: `"Run the full SDLC pipeline for issue #N..."`). The read paths match it by its **deterministic session id** (`sdlc-local-{issue_number}`) — but only after the `issue_url`-ownership pass misses (C2, #1671). When a live bridge PM session owns the issue via `issue_url`, that session wins; the deterministic-id match is the fallback for the sessionless-local case. This is what lets a sessionless `verdict record` be read back by a separate `verdict get`/`stage-query` process (verified end-to-end in `tests/integration/test_sdlc_sessionless_e2e.py`) while a live bridge session is never shadowed by a stale local record.
+
+`tools/sdlc_stage_query.py` is **read-only and intentionally left unchanged** — it keeps its own `_find_session_by_id`/`_find_session_by_issue` helpers (which delegate to the shared `find_session_by_issue`), returns correct `_default_meta()` defaults when no session exists, and finds the session once a write has ensured it. Its `_parse_revision_applied`/`_compute_meta` frontmatter reads were already correct; they fire as soon as a session exists.
+
 ## Loud-vs-silent policy
 
 The two load-bearing recorders (`verdict`, `dispatch`) exit 1 when their inner CLI handler raises. This is the core fix for issue #1175 — without these exit codes, removing `|| true` from skill markdown is cosmetic.
@@ -63,7 +192,8 @@ The two load-bearing recorders (`verdict`, `dispatch`) exit 1 when their inner C
 
 - `tools.sdlc_verdict.main()` and `tools.sdlc_dispatch.main()` catch internal exceptions, print `{}` to stdout (so existing JSON parsers don't break), log the error to stderr, and `sys.exit(1)`.
 - Skill markdown calling `sdlc-tool verdict record ...` and `sdlc-tool dispatch record ...` does **not** wrap these calls in `2>/dev/null || true` — failures must surface to the operator.
-- The other three modules (`stage_marker`, `stage_query`, `session_ensure`) keep `sys.exit(0)` unconditionally; their callers in skill markdown still use `2>/dev/null || true` because they are best-effort.
+- `tools.sdlc_stage_marker` exits 1 on ownership-guard rejection (issue #1735) — the only loud case for that module. All other `stage_marker` paths (degraded substrate, no session, idempotent) remain exit 0.
+- `stage_query` and `session_ensure` keep `sys.exit(0)` unconditionally; their callers in skill markdown still use `2>/dev/null || true` because they are best-effort.
 
 The split is enforced by:
 
@@ -107,7 +237,65 @@ The bridge sets `cwd = target project's worktree` when spawning a PM session. Th
 - **`uv` itself is a hard dependency.** If `uv` is missing on a remote, `sdlc-tool` fails. Same impact as the prior `python -m tools.X` call. The update system's verify step already gates on `uv`.
 - **Loud verdict failures show up as session-log noise.** This is the intended design — failures must be visible. If transient Redis blips become a real annoyance, add a single-retry policy inside `tools.sdlc_verdict.record()` itself, not in the wrapper.
 
+## PR-state repo resolution (`_resolve_target_repo`)
+
+### Problem
+
+`stage-query` fetches PR merge state from GitHub via `gh pr view`. When the PM session runs from a target-repo worktree (e.g. `popoto`, `cuttlefish`), `gh` without a `--repo` flag interrogates that repo's PR list — not the `ai` repo where the SDLC plan and session live. The PR number derived from the plan doc is meaningless against the wrong repo, so `mergeStateStatus` comes back wrong (or `gh` exits non-zero).
+
+### Solution: `_resolve_target_repo()` in `tools/_sdlc_utils.py`
+
+`_resolve_target_repo()` returns an `owner/name` slug (e.g. `tomcounsell/ai`) or `None`. It is called **exactly once per `_compute_meta` invocation** in `tools/sdlc_stage_query.py`; the resolved slug is threaded as the `repo=` keyword argument into both `_fetch_pr_merge_state` and `_gh_pr_list` (via `_lookup_pr_number`). Neither callee calls `_resolve_target_repo` itself — resolution happens once at the top of `_compute_meta`.
+
+### Resolution ladder
+
+| Rung | Source | Type | How it is used |
+|------|--------|------|----------------|
+| 0 | `GH_REPO` env var | `owner/name` slug | Returned directly — zero subprocess cost. Injected by the bridge for bridge-spawned sessions. Passed as `gh --repo GH_REPO ...`. |
+| 1 | `SDLC_TARGET_REPO` env var | **Filesystem path** | Used as the `cwd` for `gh repo view --json nameWithOwner -q .nameWithOwner`. The slug comes from `gh` stdout. **Never passed to `gh --repo`.** |
+| 2 | `_git_toplevel()` | Filesystem path | Used as `cwd` for the same `gh repo view` command. Resolves to the git root of whatever directory `sdlc_stage_query` was invoked from. |
+| 3 | — | — | Returns `None`. Graceful degradation — callers omit `--repo` entirely and `gh` uses its own cwd resolution. |
+
+**Critical distinction:** `SDLC_TARGET_REPO` is a **filesystem path** pointing to the target repo's checkout, not an `owner/name` slug. It is used as the working directory for `gh repo view` so that `gh` interrogates the correct repo. It is **never** passed to `gh --repo`. Only `GH_REPO` (a slug) is passed to `--repo`.
+
+### Meta propagation
+
+The resolved slug is stored in `_compute_meta`'s return dict under the `_resolved_target_repo` key:
+
+```python
+"_resolved_target_repo": resolved_repo,   # owner/name or None
+```
+
+This value flows into `sdlc_router.decide_next_dispatch()` via the `meta` dict it receives. The router uses it in the distinguishable Blocked message described below.
+
+### Blocked reason when merge state is unresolvable
+
+When the router cannot find a dispatch rule and a PR is known (`pr_number` is set) but its merge state is `None` or `"UNKNOWN"`, the router emits a **distinguishable Blocked reason** that names the PR number, its state, and the resolved repo:
+
+```
+Blocked: PR #42 merge state 'UNKNOWN' — could not resolve mergeability
+         (target repo: tomcounsell/ai; check GH_REPO / SDLC_TARGET_REPO env)
+```
+
+This replaces the generic `"no matching dispatch rule"` message and tells the operator exactly which env var to check. The check is in `agent/sdlc_router.py` at the end of the `decide_next_dispatch()` function — it fires only when `pr_merge_state` is `None` or `"UNKNOWN"`, not for real GitHub states like `DIRTY` or `BLOCKED` (those route normally).
+
+### Environment variable reference
+
+| Variable | Value type | Purpose |
+|----------|-----------|---------|
+| `GH_REPO` | `owner/name` slug | Directly identifies the GitHub repo. Injected automatically by the bridge for all bridge-spawned sessions. Takes precedence over everything else. |
+| `SDLC_TARGET_REPO` | Filesystem path | Points to a local checkout of the target repo. Used as `cwd` for `gh repo view` to derive the slug. Useful when running `sdlc-tool` locally in a cross-repo context without a bridge. |
+
+### Failure modes
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `Blocked: PR #N merge state 'UNKNOWN'` | `GH_REPO` not set; `SDLC_TARGET_REPO` points at a non-git dir; `gh` not authenticated | Set `GH_REPO=owner/name` for the target repo, or ensure `SDLC_TARGET_REPO` points at a valid git checkout with `gh` auth |
+| `Blocked: PR #N merge state 'UNKNOWN' (target repo: <none — using cwd>)` | No env var set and `_git_toplevel()` returned `None` (invoked outside a git repo) | Run from inside a git repo, or set `GH_REPO` / `SDLC_TARGET_REPO` |
+| `_resolve_target_repo: gh repo view failed` (in logs) | `gh` exited non-zero in the given cwd — either not a git repo or not authenticated | Check `gh auth status`; verify cwd is a valid git repo |
+
 ## See also
 
 - [SDLC Router Oscillation Guard](sdlc-router-oscillation-guard.md) — the original Guard G1-G5 single-writer verdict design. This wrapper is the missing piece that made the verdict-write path work from any cwd.
 - `docs/plans/sdlc-1175-tool-resolver.md` — original plan with critique findings applied.
+- `docs/plans/sdlc-1642.md` — plan for the PR-state repo resolution ladder (issue #1642).

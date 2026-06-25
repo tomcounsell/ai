@@ -106,7 +106,7 @@ def _fetch_github_title(url: str) -> str | None:
 
 
 _SYSTEM_PROMPT_PREFIXES = ("PROJECT:", "[Prior session context")
-_INTERNAL_SENDERS = {"valor-session (pm)", "valor-session (dev)", "None", ""}
+_INTERNAL_SENDERS = {"valor-session (eng)", "None", ""}
 
 
 def _extract_from_system_prompt(message_text: str) -> str | None:
@@ -328,6 +328,27 @@ class PipelineProgress(BaseModel):
     recovery_attempts: int = 0
     reprieve_count: int = 0
     process_alive: bool | None = None
+
+    # === Granite container PTY identity (issue #1648) ===
+    # Populated for sessions running on the granite PTY path. Null for
+    # SDK-path sessions and pre-deploy granite sessions.
+    exit_reason: str | None = None
+    pm_pid: int | None = None
+    dev_pid: int | None = None
+    pm_transcript_path: str | None = None
+    dev_transcript_path: str | None = None
+    pty_slot: int | None = None
+
+    # Output routing state (issue #1647)
+    # True once a user-facing message has been routed for this session.
+    user_facing_routed: bool = False
+
+    # === Stall advisory (issue #1538) ===
+    # Read-only classification for non-terminal sessions. Populated by
+    # _session_to_pipeline() via classify_session_stall(). None for terminal
+    # sessions (skipped) and when classification raises (fail-soft).
+    stall_advisory: str | None = None  # "healthy", "suspect", "stalled", or None
+    stall_advisory_reason: str | None = None  # short reason slug
 
     # SDLC state
     stages: list[StageState] = []
@@ -624,14 +645,26 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
                 # Trim long PM prompts to the first meaningful line
                 first_line = (raw_text or "").splitlines()[0] if raw_text else ""
                 text = first_line[:120] + ("…" if len(first_line) > 120 else "")
+            elif event_type in (
+                "granite_user_routed",
+                "granite_complete_routed",
+                "granite_delivery_failure",
+            ):
+                text = raw_text or event_type
+            elif entry.get("type") == "exit_anomaly":
+                reason = entry.get("exit_reason", "unknown")
+                text = f"exit anomaly: {reason}"
+                event_type = "exit_anomaly"
             else:
                 text = raw_text or str(entry)
 
+            # Granite events use "ts" key; standard events use "timestamp".
+            ts = _safe_float(entry.get("timestamp") or entry.get("ts"))
             events.append(
                 PipelineEvent(
                     role=event_type,
                     text=text,
-                    timestamp=entry.get("timestamp"),
+                    timestamp=ts,
                     event_type=event_type,
                 )
             )
@@ -657,20 +690,17 @@ def _resolve_persona_display(session) -> str | None:
 
     session_type is the sole discriminator:
       session_type="teammate"  → "Teammate"
-      session_type="pm"        → "Project Manager"
-      session_type="dev"       → "Developer"
+      session_type="eng"       → "Engineer"
     """
     raw = getattr(session, "session_type", None)
     if raw is None:
         return None
     if raw == SessionType.TEAMMATE:
         return "Teammate"
-    if raw == SessionType.PM:
-        return "Project Manager"
-    if raw == SessionType.DEV:
-        return "Developer"
+    if raw == SessionType.ENG:
+        return "Engineer"
     if raw == "chat":
-        return "Project Manager"  # Legacy fallback for pre-migration sessions
+        return "Engineer"  # Legacy fallback for pre-migration sessions
     return _safe_str(raw)
 
 
@@ -700,8 +730,31 @@ def _safe_float(val) -> float | None:
         try:
             return float(val)
         except (ValueError, TypeError):
+            pass
+        try:
+            dt = datetime.datetime.fromisoformat(val)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.UTC)
+            return dt.timestamp()
+        except (ValueError, TypeError):
             return None
     return None
+
+
+def _safe_nullable_int(val) -> int | None:
+    """Return val as an int if it's a real integer value, else None.
+
+    Used for nullable int fields (pm_pid, dev_pid) where MagicMock or other
+    non-integer values should coerce to None rather than raise.
+    """
+    if val is None:
+        return None
+    if isinstance(val, int):
+        return val
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
 
 
 def _session_to_pipeline(session) -> PipelineProgress:
@@ -850,6 +903,26 @@ def _session_to_pipeline(session) -> PipelineProgress:
         if not pr_url:
             pr_url = fallback_pr
 
+    # === Stall advisory (issue #1538) ===
+    # Classify non-terminal sessions only — fail-soft, never breaks dashboard.
+    stall_advisory: str | None = None
+    stall_advisory_reason: str | None = None
+    try:
+        from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES_LOCAL
+
+        if status not in _TERMINAL_STATUSES_LOCAL:
+            from agent.session_stall_classifier import classify_session_stall
+            from agent.session_telemetry import read_session_timeline
+
+            _stall_events = read_session_timeline(
+                _safe_str(session.session_id) or _safe_str(session.agent_session_id) or ""
+            )
+            _verdict = classify_session_stall(_stall_events, session=session)
+            stall_advisory = _verdict.level
+            stall_advisory_reason = _verdict.reason
+    except Exception:
+        pass  # fail-soft: advisory never breaks dashboard rendering
+
     return PipelineProgress(
         agent_session_id=_safe_str(session.agent_session_id) or "",
         session_id=_safe_str(session.session_id),
@@ -902,6 +975,15 @@ def _session_to_pipeline(session) -> PipelineProgress:
         recovery_attempts=recovery_attempts,
         reprieve_count=reprieve_count,
         process_alive=process_alive,
+        exit_reason=_safe_str(getattr(session, "exit_reason", None)),
+        pm_pid=_safe_nullable_int(getattr(session, "pm_pid", None)),
+        dev_pid=_safe_nullable_int(getattr(session, "dev_pid", None)),
+        pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
+        dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
+        pty_slot=_safe_nullable_int(getattr(session, "pty_slot", None)),
+        user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
+        stall_advisory=stall_advisory,
+        stall_advisory_reason=stall_advisory_reason,
     )
 
 

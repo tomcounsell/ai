@@ -43,73 +43,36 @@ def _default_push_kwargs(**overrides) -> dict:
 # ---------------------------------------------------------------------------
 # Routing decision: chat_title → session_type
 #
-# This replicates the exact routing logic from telegram_bridge.py so we
-# can test edge cases. The bridge code is:
+# The bridge now routes all non-teammate chats to "eng":
 #
-#     if chat_title and chat_title.startswith("Dev:"):
-#         _session_type = "dev"
+#     if teammate_routing:
+#         _session_type = SessionType.TEAMMATE
 #     else:
-#         _session_type = "pm"
+#         _session_type = SessionType.ENG
 # ---------------------------------------------------------------------------
 
 
-class TestDevGroupRoutingDecision:
-    """Unit-level tests for the 'Dev:' prefix routing rule."""
+class TestEngGroupRoutingDecision:
+    """Unit-level tests for the Eng/Teammate routing rule."""
 
     @staticmethod
     def _route(chat_title: str | None) -> str:
-        """Replicate the exact bridge routing logic for testing edge cases."""
-        if chat_title and chat_title.startswith("Dev:"):
-            return "dev"
-        return "pm"
+        """Replicate the bridge routing logic: non-teammate → eng."""
+        # Bridge routes DMs and group chats to eng unless config marks as teammate
+        # For testing purposes: simulate that all test chats are non-teammate
+        return "eng"
 
-    def test_dev_prefix_routes_to_dev(self):
-        """'Dev: ProjectName' → session_type='dev'."""
-        assert self._route("Dev: Valor") == "dev"
+    def test_eng_prefix_routes_to_eng(self):
+        """'Eng: ProjectName' → session_type='eng'."""
+        assert self._route("Eng: Valor") == "eng"
 
-    def test_dev_prefix_no_space_routes_to_dev(self):
-        """'Dev:NoSpace' → session_type='dev' (startswith only checks 'Dev:')."""
-        assert self._route("Dev:NoSpace") == "dev"
+    def test_none_title_routes_to_eng(self):
+        """None (DM) → session_type='eng'."""
+        assert self._route(None) == "eng"
 
-    def test_dev_prefix_only_routes_to_dev(self):
-        """'Dev:' with nothing after → still matches prefix."""
-        assert self._route("Dev:") == "dev"
-
-    def test_regular_group_routes_to_pm(self):
-        """'PM: Valor' → session_type='pm'."""
-        assert self._route("PM: Valor") == "pm"
-
-    def test_none_title_routes_to_pm(self):
-        """None (DM) → session_type='pm'."""
-        assert self._route(None) == "pm"
-
-    def test_empty_string_routes_to_pm(self):
-        """Empty string → session_type='pm' (falsy)."""
-        assert self._route("") == "pm"
-
-    def test_lowercase_dev_routes_to_pm(self):
-        """'dev: lowercase' → session_type='pm' (case-sensitive startswith)."""
-        assert self._route("dev: lowercase") == "pm"
-
-    def test_developer_prefix_routes_to_pm(self):
-        """'Developer Chat' starts with 'Dev' but NOT 'Dev:' → pm."""
-        assert self._route("Developer Chat") == "pm"
-
-    def test_dev_in_middle_routes_to_pm(self):
-        """'Important Dev: Task' has 'Dev:' in middle, not start → pm."""
-        assert self._route("Important Dev: Task") == "pm"
-
-    def test_whitespace_only_routes_to_pm(self):
-        """Whitespace-only title is truthy but doesn't start with 'Dev:'."""
-        assert self._route("   ") == "pm"
-
-    def test_dev_with_trailing_whitespace(self):
-        """'Dev: ' with trailing space → dev (prefix matches)."""
-        assert self._route("Dev: ") == "dev"
-
-    def test_dev_with_unicode_project_name(self):
-        """'Dev: 日本語プロジェクト' → dev (prefix still 'Dev:')."""
-        assert self._route("Dev: 日本語プロジェクト") == "dev"
+    def test_empty_string_routes_to_eng(self):
+        """Empty string → session_type='eng' (falsy)."""
+        assert self._route("") == "eng"
 
 
 # ---------------------------------------------------------------------------
@@ -121,70 +84,71 @@ class TestRoutingToSessionCreation:
     """session_type passed to _push_agent_session creates AgentSession with correct flags."""
 
     @pytest.mark.asyncio
-    async def test_pm_session_type_persists(self):
-        """_push_agent_session(session_type='pm') → AgentSession.is_pm=True in Redis."""
-        kwargs = _default_push_kwargs(session_type="pm")
+    async def test_eng_session_type_persists(self):
+        """_push_agent_session(session_type='eng') → AgentSession.is_eng=True in Redis."""
+        kwargs = _default_push_kwargs(session_type="eng")
         await _push_agent_session(**kwargs)
 
         # Retrieve session from Redis
         sessions = list(AgentSession.query.filter(session_id=kwargs["session_id"]))
         assert len(sessions) >= 1, "Session must exist in Redis after _push_agent_session"
         session = sessions[0]
-        assert session.session_type == "pm"
-        assert session.is_pm is True
-        assert session.is_dev is False
+        assert session.session_type == "eng"
+        assert session.is_eng is True
+        assert session.is_teammate is False
 
     @pytest.mark.asyncio
-    async def test_dev_session_type_persists(self):
-        """_push_agent_session(session_type='dev') → AgentSession.is_dev=True in Redis."""
-        kwargs = _default_push_kwargs(session_type="dev")
+    async def test_teammate_session_type_persists(self):
+        """_push_agent_session(session_type='teammate') → AgentSession.is_teammate=True in Redis."""
+        kwargs = _default_push_kwargs(session_type="teammate")
         await _push_agent_session(**kwargs)
 
         sessions = list(AgentSession.query.filter(session_id=kwargs["session_id"]))
         assert len(sessions) >= 1
         session = sessions[0]
-        assert session.session_type == "dev"
-        assert session.is_dev is True
-        assert session.is_pm is False
+        assert session.session_type == "teammate"
+        assert session.is_teammate is True
+        assert session.is_eng is False
 
     @pytest.mark.asyncio
-    async def test_default_session_type_is_pm(self):
-        """_push_agent_session without explicit session_type defaults to 'pm'."""
+    async def test_default_session_type_is_eng(self):
+        """_push_agent_session without explicit session_type defaults to 'eng'."""
         kwargs = _default_push_kwargs()
-        # Don't pass session_type — should default to "pm"
+        # Don't pass session_type — should default to "eng"
         kwargs.pop("session_type", None)
         await _push_agent_session(**kwargs)
 
         sessions = list(AgentSession.query.filter(session_id=kwargs["session_id"]))
         assert len(sessions) >= 1
         session = sessions[0]
-        assert session.session_type == "pm"
-        assert session.is_pm is True
+        assert session.session_type == "eng"
+        assert session.is_eng is True
 
 
 class TestEnqueueJobSessionTypeFlow:
     """enqueue_agent_session (the public API) propagates session_type to Redis."""
 
     @pytest.mark.asyncio
-    async def test_enqueue_pm_creates_pm_session(self):
-        """enqueue_agent_session(session_type='pm') → AgentSession with is_pm=True."""
-        kwargs = _default_push_kwargs(session_type="pm")
+    async def test_enqueue_eng_creates_eng_session(self):
+        """enqueue_agent_session(session_type='eng') → AgentSession with is_eng=True."""
+        kwargs = _default_push_kwargs(session_type="eng")
         await enqueue_agent_session(**kwargs)
 
         sessions = list(AgentSession.query.filter(session_id=kwargs["session_id"]))
         assert len(sessions) >= 1
-        assert sessions[0].session_type == "pm"
+        assert sessions[0].session_type == "eng"
+        assert sessions[0].is_eng is True
 
     @pytest.mark.asyncio
-    async def test_enqueue_dev_creates_dev_session(self):
-        """enqueue_agent_session(session_type='dev') → AgentSession with is_dev=True."""
-        kwargs = _default_push_kwargs(session_type="dev")
+    async def test_enqueue_teammate_creates_teammate_session(self):
+        """enqueue_agent_session(session_type='teammate') → AgentSession with is_teammate=True."""
+        kwargs = _default_push_kwargs(session_type="teammate")
         await enqueue_agent_session(**kwargs)
 
         sessions = list(AgentSession.query.filter(session_id=kwargs["session_id"]))
         assert len(sessions) >= 1
-        assert sessions[0].session_type == "dev"
-        assert sessions[0].is_dev is True
+        assert sessions[0].session_type == "teammate"
+        assert sessions[0].is_teammate is True
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +190,6 @@ class TestWorkflowIdAbsent:
             sender_name="Test",
             chat_id="999",
             telegram_message_id=1,
-            session_type="pm",
+            session_type="eng",
         )
         assert not hasattr(test_session, "workflow_id") or test_session.workflow_id is None

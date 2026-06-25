@@ -74,9 +74,44 @@ async def enrich_message(
         media_download_error = getattr(telegram_message, "media_download_error", None)
         media_type = getattr(telegram_message, "media_type", None)
 
+        if not media_local_path and not media_download_error:
+            # Self-heal path (see sdlc-1330): the bridge persist block may
+            # have silently no-op'd due to a transient Popoto stale-index
+            # condition, leaving the file on disk but the record with
+            # `media_local_path=None`. We recover by searching
+            # `bridge/data/media/` for a file whose filename contains the
+            # message_id. The filename pattern is fully determined by
+            # `bridge/media.py` (download_media): each downloaded file is
+            # named `{prefix}_{timestamp}_{message.id}{ext}`. We require
+            # exactly one match — zero or multiple matches fall through to
+            # the existing "legacy record?" warning so ambiguity is surfaced
+            # rather than silently misrouted.
+            msg_id_for_search = getattr(telegram_message, "message_id", None)
+            if msg_id_for_search:
+                try:
+                    from bridge.media import MEDIA_DIR
+
+                    matches = list(MEDIA_DIR.glob(f"*_{msg_id_for_search}.*"))
+                    if len(matches) == 1:
+                        media_local_path = str(matches[0].resolve())
+                        logger.info(
+                            f"[enrichment] self-heal: recovered orphan media file "
+                            f"{media_local_path} for message_id={msg_id_for_search}"
+                        )
+                    elif len(matches) > 1:
+                        logger.warning(
+                            f"[enrichment] self-heal: multiple matches for "
+                            f"message_id={msg_id_for_search} in {MEDIA_DIR} "
+                            f"({[str(p) for p in matches]}); skipping to avoid "
+                            f"adopting wrong file"
+                        )
+                except Exception as e:
+                    logger.warning(f"[enrichment] self-heal lookup failed: {e}")
+
         if not media_local_path:
             # Bridge attempted the download but it failed (or the bridge ran
-            # before this code shipped, in which case the field is None).
+            # before this code shipped, in which case the field is None),
+            # and self-heal could not recover a unique file.
             if media_download_error:
                 logger.warning(
                     f"[enrichment] media download failed at intake "

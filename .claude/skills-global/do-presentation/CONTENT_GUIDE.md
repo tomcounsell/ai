@@ -126,6 +126,16 @@ Educational decks explain a system to people who want to understand it. Client-f
 
 **For working sessions specifically** (where the audience must make decisions, not just learn): each decision item should be a discrete slide or pair of slides — context + the ask. State your recommended default and let them veto. Never open a decision item with an open question; always with a proposed path.
 
+### The title slide: audience first
+
+For a client-facing deck, the title slide is not about the deck — it is about *them*. The audience and the value to them outrank the deck's topic, so order the slide top-to-bottom:
+
+1. **Top — who it's for.** A small kicker line naming the audience/client (e.g. `Prepared for <Client>`). This is the first thing they read, and it signals the deck was built for them, not a generic template reused.
+2. **Middle — the title.** What the deck is ("the what"). Necessary, but secondary — give it the visual weight of a title, but not the top of the slide.
+3. **Bottom — the identity that anchors it.** The presenter, product, or subject as a name + photo **side by side** (a real face, not a logo, when there is a person/persona involved). This is who they're dealing with.
+
+**Rule:** never bury the client attribution in small muted print. Client name on top, a real name/face at the bottom, the deck title in between. Implement with a full-height flex column (`justify-content: space-between`) rather than absolute positioning — it stays balanced regardless of title length. (See the `.title-slide` / `.kicker` / `.meet` pattern in SKILL.md.)
+
 ## Anti-Patterns (What NOT to Do)
 
 - **Wall of text**: If a slide has more than 6 lines of body text, split it

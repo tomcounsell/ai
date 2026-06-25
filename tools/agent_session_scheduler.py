@@ -31,7 +31,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S
+from agent.constants import WORKER_DOWN_THRESHOLD_S
 from config.enums import SessionType
 from models.reflection import Reflection
 from models.session_lifecycle import NON_TERMINAL_STATUSES
@@ -167,7 +167,7 @@ PERSONA_RESTRICTED_ACTIONS = {
 def _check_persona_permission(action_type: str) -> dict | None:
     """Check if the current persona is allowed to perform the given action.
 
-    Reads persona from PERSONA env var (default: "developer" — permissive).
+    Reads persona from PERSONA env var (default: "engineer" — permissive).
 
     Args:
         action_type: The action being attempted (e.g., "schedule").
@@ -175,7 +175,7 @@ def _check_persona_permission(action_type: str) -> dict | None:
     Returns:
         None if allowed, or a dict with error details if blocked.
     """
-    persona = os.environ.get("PERSONA", "developer").lower()
+    persona = os.environ.get("PERSONA", "engineer").lower()
     restricted = PERSONA_RESTRICTED_ACTIONS.get(persona, set())
 
     if action_type in restricted:
@@ -331,7 +331,7 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     priority = args.priority or "normal"
 
     # Session type: explicit flag > default (pm for issue-based work)
-    session_type = getattr(args, "session_type", None) or SessionType.PM
+    session_type = getattr(args, "session_type", None) or SessionType.ENG
 
     # Parent session inheritance
     parent_id = getattr(args, "parent_session", None)
@@ -340,6 +340,18 @@ def cmd_schedule(args: argparse.Namespace) -> int:
         if not parent_id.strip():
             _output({"status": "error", "message": "--parent-session cannot be empty."})
             return 1
+        # Stopgap (#1633): refuse NEW parent-attached session creation.
+        # See models/child_session_gate.py for rationale and escape hatch.
+        from models.child_session_gate import (
+            BYPASS_WARNING,
+            child_sessions_allowed,
+            child_sessions_disabled_json,
+        )
+
+        if not child_sessions_allowed():
+            _output({"status": "error", **child_sessions_disabled_json()})
+            return 2
+        print(BYPASS_WARNING, file=sys.stderr)
         parent_session = _get_parent_session(parent_id)
         if parent_session is None:
             _output(
@@ -561,11 +573,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         if killed:
             result["killed_sessions"] = [_format_agent_session_info(j) for j in killed]
 
-        # Inline worker health check — avoids cross-file import coupling
+        # Worker health check — shared worktree-aware heartbeat resolver
         try:
-            _hb = Path(__file__).parent.parent / "data" / "last_worker_connected"
-            _age_s = int(time.time() - _hb.stat().st_mtime)
-            result["worker_healthy"] = _age_s < HEARTBEAT_STALENESS_THRESHOLD_S
+            from tools.valor_session import _resolve_heartbeat_path
+
+            _age_s = max(0, int(time.time() - _resolve_heartbeat_path().stat().st_mtime))
+            result["worker_healthy"] = _age_s < WORKER_DOWN_THRESHOLD_S
             result["worker_heartbeat_age_s"] = _age_s
         except Exception:
             result["worker_healthy"] = False
@@ -1219,10 +1232,9 @@ def main():
     sched.add_argument("--after", help="Defer execution until this ISO 8601 datetime")
     sched.add_argument(
         "--session-type",
-        choices=[SessionType.PM, SessionType.TEAMMATE, SessionType.DEV],
-        help="Session type: pm (PM orchestrates), teammate "
-        "(conversational), or dev (direct execution). "
-        "Default: pm for issue/PR work, dev for hotfixes.",
+        choices=[SessionType.ENG, SessionType.TEAMMATE],
+        help="Session type: eng (engineer, full permissions) or teammate "
+        "(conversational). Default: eng.",
     )
     sched.add_argument(
         "--parent-session",

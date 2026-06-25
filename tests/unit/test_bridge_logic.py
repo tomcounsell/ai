@@ -88,17 +88,41 @@ def clean_message(text: str, project: dict | None, default_mentions: list[str]) 
     return result.strip()
 
 
-def build_context_prefix(project: dict | None, session_type: str | None = None) -> str:
-    """Build project context to inject into agent prompt."""
+def build_context_prefix(
+    project: dict | None,
+    session_type: str | None = None,
+    sender_id: int | None = None,
+    persona: str | None = None,
+    email_from: str | None = None,
+    sender_name: str | None = None,
+) -> str:
+    """Build project context to inject into agent prompt.
+
+    Local mirror of bridge.context.build_context_prefix for unit tests
+    (the real module has import-time side effects that require a live bridge).
+    """
     context_parts = []
 
-    if session_type == "teammate":
+    # Teammate sessions get read-only restriction except when the resolved persona
+    # is customer-service (which needs execute-level access).
+    if session_type == "teammate" and persona != "customer-service":
         context_parts.append(
             "RESTRICTION: This user has read-only Teammate access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
             "Answer questions, explain code, and provide guidance only. "
             "If they ask you to make changes, politely explain you can only help with "
             "informational queries for them."
+        )
+
+    # Emit SERVING/SCOPE when the email bridge provides contact information.
+    if email_from:
+        if sender_name:
+            context_parts.append(f"SERVING: {sender_name} <{email_from}>")
+        else:
+            context_parts.append(f"SERVING: {email_from}")
+        context_parts.append(
+            "SCOPE: Only manage data belonging to this contact. "
+            "Do not access or modify records for other users."
         )
 
     if not project:
@@ -394,15 +418,15 @@ class TestBuildContextPrefix:
         result = build_context_prefix(None, session_type=None)
         assert result == ""
 
-    def test_pm_session_without_project(self):
-        """PM session without project should get no restriction."""
-        result = build_context_prefix(None, session_type="pm")
+    def test_eng_session_without_project(self):
+        """Eng session without project should get no restriction."""
+        result = build_context_prefix(None, session_type="eng")
         assert result == ""
         assert "RESTRICTION" not in result
 
-    def test_dev_session_without_project(self):
-        """Dev session without project should get no restriction."""
-        result = build_context_prefix(None, session_type="dev")
+    def test_eng_session_without_project2(self):
+        """Eng session (from dev role) without project should get no restriction."""
+        result = build_context_prefix(None, session_type="eng")
         assert result == ""
         assert "RESTRICTION" not in result
 
@@ -444,9 +468,9 @@ class TestBuildContextPrefix:
         assert "TECH:" not in result  # No context.tech_stack
         assert "REPO:" not in result  # No github.repo
 
-    def test_pm_session_no_restriction(self, valor_project):
-        """PM session should never receive Teammate read-only restriction."""
-        result = build_context_prefix(valor_project, session_type="pm")
+    def test_eng_session_no_restriction(self, valor_project):
+        """Eng session should never receive Teammate read-only restriction."""
+        result = build_context_prefix(valor_project, session_type="eng")
         assert "RESTRICTION" not in result
         assert "PROJECT: Valor AI" in result
 
@@ -467,6 +491,58 @@ class TestBuildContextPrefix:
         assert "RESTRICTION" in result
         assert "read-only Teammate access" in result
         assert "Do NOT make any code changes" in result
+
+    def test_customer_service_persona_no_restriction(self):
+        """customer-service persona must not receive the teammate read-only restriction.
+
+        customer-service maps to SessionType.TEAMMATE but needs execute-level access
+        (agent-browser, Stripe tools, management commands). The restriction would
+        override the soul file and break those capabilities.
+        """
+        result = build_context_prefix(None, session_type="teammate", persona="customer-service")
+        assert "RESTRICTION" not in result
+        assert "read-only Teammate access" not in result
+
+    def test_teammate_persona_still_gets_restriction(self):
+        """Passing persona='teammate' explicitly must still inject the restriction.
+
+        Regression guard: the persona exemption is narrowly scoped to customer-service
+        only. A future caller passing persona='teammate' must not accidentally bypass
+        the read-only gate.
+        """
+        result = build_context_prefix(None, session_type="teammate", persona="teammate")
+        assert "RESTRICTION" in result
+        assert "read-only Teammate access" in result
+
+    def test_email_from_emits_serving_and_scope(self):
+        """When email_from is provided, SERVING and SCOPE lines must appear in output."""
+        result = build_context_prefix(
+            None,
+            session_type="teammate",
+            persona="customer-service",
+            email_from="alice@example.com",
+            sender_name="Alice",
+        )
+        assert "SERVING: Alice <alice@example.com>" in result
+        assert "SCOPE: Only manage data belonging to this contact." in result
+
+    def test_email_from_without_sender_name(self):
+        """SERVING line uses bare email when sender_name is not provided."""
+        result = build_context_prefix(
+            None,
+            session_type=None,
+            email_from="bob@example.com",
+        )
+        assert "SERVING: bob@example.com" in result
+        assert "SCOPE: Only manage data belonging to this contact." in result
+
+    def test_no_email_from_no_serving_lines(self):
+        """Without email_from, no SERVING or SCOPE lines should appear."""
+        result = build_context_prefix(None, session_type="teammate")
+        assert "SERVING:" not in result
+        # Note: SCOPE is also used in sdk_client for session scoping, but the
+        # bridge/context SCOPE line contains the word "contact" — check for that.
+        assert "belonging to this contact" not in result
 
 
 # ============================================================================

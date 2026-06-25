@@ -31,7 +31,7 @@ SUPPORTED_EXTENSIONS = {".md", ".txt", ".markdown", ".text"}
 # Word count threshold for splitting by headings
 LARGE_DOC_WORD_THRESHOLD = 2000
 
-# Max chars for summary fallback when Haiku is unavailable
+# Max chars for summary fallback when LLM is unavailable
 SUMMARY_FALLBACK_MAX_CHARS = 500
 
 # Persistent JSON cache for knowledge-document summaries.
@@ -76,53 +76,69 @@ def _split_by_headings(content: str) -> list[tuple[str, str]]:
     return _chunking_split_by_headings(content)
 
 
+def _summarize_via_ollama(prompt: str) -> str | None:
+    """Try to summarize via local Ollama. Returns None if Ollama is unavailable."""
+    from tools import ollama_client
+
+    base_url, gen_model, _ = ollama_client.resolve_config()
+    return ollama_client.generate(
+        prompt,
+        model=gen_model,
+        timeout_s=8.0,
+        base_url=base_url,
+        caller="indexer",
+    )
+
+
 def _summarize_content(content: str, file_path: str) -> str:
-    """Summarize document content using Haiku, with fallback to truncation.
+    """Summarize document content, preferring local Ollama over cloud Haiku.
 
-    Uses anthropic API directly for cheap/fast summarization.
-    Falls back to first-N-chars if API call fails.
+    Priority: local Ollama → Anthropic Haiku → first-N-chars truncation.
     """
-    try:
-        import anthropic
+    filename = os.path.basename(file_path)
+    prompt = (
+        f"Summarize this document in 1-2 sentences. "
+        f"Focus on what it contains and why someone working on "
+        f"this project would want to read it.\n\n"
+        f"File: {filename}\n\n{content[:4000]}"
+    )
+    cache_input = f"{content[:4000]}\n---\n{filename}"
 
-        client = anthropic.Anthropic()
-        filename = os.path.basename(file_path)
+    def _compute_summary() -> str:
+        # 1. Try local Ollama first
+        result = _summarize_via_ollama(prompt)
+        if result:
+            return result
 
-        def _summarize_via_haiku() -> str:
+        # 2. Fall back to Anthropic Haiku
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic()
             response = client.messages.create(
                 model=HAIKU,
                 max_tokens=300,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Summarize this document in 1-2 sentences. "
-                            f"Focus on what it contains and why someone working on "
-                            f"this project would want to read it.\n\n"
-                            f"File: {filename}\n\n{content[:4000]}"
-                        ),
-                    }
-                ],
+                messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text.strip()
+        except Exception as e:
+            logger.debug(f"Haiku summarization failed: {e}")
+            return ""
 
-        # Cache key: truncated content + filename. Frontmatter and body changes
-        # both flow through the first 4000 chars; bump _CACHE_VERSION on prompt
-        # changes. Falsy results (empty summary) bypass storage.
-        cache_input = f"{content[:4000]}\n---\n{filename}"
+    try:
         summary = get_or_compute(
             _cache,
             cache_input,
-            _summarize_via_haiku,
+            _compute_summary,
             ttl=None,
             version=_CACHE_VERSION,
         )
         if summary:
             return summary
     except Exception as e:
-        logger.debug(f"Haiku summarization failed, using fallback: {e}")
+        logger.debug(f"Summarization failed, using truncation fallback: {e}")
 
-    # Fallback: first N chars
+    # Final fallback: first N chars
     truncated = content[:SUMMARY_FALLBACK_MAX_CHARS].strip()
     if len(content) > SUMMARY_FALLBACK_MAX_CHARS:
         truncated += "..."

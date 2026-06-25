@@ -14,7 +14,10 @@ calls).
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class TestNormalizeTitle:
@@ -56,16 +59,37 @@ class TestGenerateTitleAsyncSpawn:
         assert mock_post.call_count == 0
 
     def test_returns_synchronously_on_valid_input(self):
-        """The function returns before the daemon thread completes."""
-        from tools.memory_search.title_generator import generate_title_async
+        """The function returns before the daemon thread completes.
 
-        # Even with no patches, the call should return without raising.
-        result = generate_title_async("test-mem", "test content")
-        assert result is None  # fire-and-forget contract
+        Patch the worker body itself so the spawned daemon does NO real work
+        (no network call, no Memory.save). Otherwise the generation model is
+        now reachable on signed-in cloud hosts, and the daemon would race past
+        the torn-down patch and leak a save() into a later test's patched
+        models.memory mock.
+        """
+        from tools.memory_search import title_generator
+
+        done = threading.Event()
+
+        with patch.object(title_generator, "_do_generate", side_effect=lambda *a, **k: done.set()):
+            result = title_generator.generate_title_async("test-mem", "test content")
+            assert result is None  # fire-and-forget contract
+            assert done.wait(timeout=2.0)  # daemon ran the (no-op) body and finished
 
 
 class TestDoGenerate:
     """Synchronous worker body — exercises the full save path deterministically."""
+
+    @pytest.fixture(autouse=True)
+    def _generation_available(self):
+        """Treat the generation model as available so these tests are hermetic.
+
+        ``_do_generate`` now consults ``ensure_generation_model`` before the HTTP
+        call; pin it True here so the save-path tests don't depend on the host's
+        Ollama Cloud signin state.
+        """
+        with patch("config.models.ensure_generation_model", return_value=(True, "ok")):
+            yield
 
     def _patched_memory(self, record):
         memory_cls = MagicMock()
@@ -154,3 +178,75 @@ class TestDoGenerate:
             _do_generate("", "content")
             _do_generate("mid", "")
         assert mock_post.call_count == 0
+
+
+class TestGenerationModelConfig:
+    """The generation model id comes from settings, default gemma4:31b-cloud."""
+
+    def test_resolve_uses_generation_setting_default(self):
+        from tools.memory_search.title_generator import _resolve_ollama_config
+
+        _base, model, _timeout = _resolve_ollama_config()
+        assert model == "gemma4:31b-cloud"
+
+
+class TestDefensivePrivateStrip:
+    """Cloud is the default generation target — _do_generate must never egress
+    raw <private> content even if a caller forgot to strip it."""
+
+    def test_strips_private_before_truncation(self):
+        from tools.memory_search.title_generator import _do_generate
+
+        captured = {}
+
+        def _capture(base, model, prompt, timeout):
+            captured["prompt"] = prompt
+            return "A Title"
+
+        with (
+            patch("config.models.ensure_generation_model", return_value=(True, "ok")),
+            patch("agent.private_tag.strip_private", side_effect=lambda s: "CLEAN CONTENT"),
+            patch(
+                "tools.memory_search.title_generator._post_ollama_generate",
+                side_effect=_capture,
+            ),
+            patch.dict(
+                "sys.modules",
+                {"models.memory": MagicMock(Memory=MagicMock())},
+            ),
+        ):
+            _do_generate("mid", "leading <private>SECRET</private> trailing")
+
+        assert "SECRET" not in captured.get("prompt", "")
+        assert "CLEAN CONTENT" in captured.get("prompt", "")
+
+    def test_aborts_on_unmatched_private_opener(self):
+        from tools.memory_search.title_generator import _do_generate
+
+        with (
+            patch("config.models.ensure_generation_model", return_value=(True, "ok")),
+            patch("agent.private_tag.strip_private", side_effect=lambda s: s),
+            patch(
+                "tools.memory_search.title_generator._post_ollama_generate",
+            ) as mock_post,
+        ):
+            _do_generate("mid", "text <private>leak with no close tag")
+
+        mock_post.assert_not_called()
+
+
+class TestGenerationUnavailableSkips:
+    """Typed signal: title-gen skips persistence when the model is unavailable."""
+
+    def test_skips_when_generation_unavailable(self):
+        from tools.memory_search.title_generator import _do_generate
+
+        with (
+            patch("config.models.ensure_generation_model", return_value=(False, "down")),
+            patch(
+                "tools.memory_search.title_generator._post_ollama_generate",
+            ) as mock_post,
+        ):
+            _do_generate("mid", "some content")
+
+        mock_post.assert_not_called()

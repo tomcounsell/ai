@@ -7,7 +7,12 @@ Import model constants from here rather than hardcoding model strings.
 When model versions change, update them in ONE place here.
 """
 
+import logging
 import os
+import shutil
+import subprocess
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # ANTHROPIC DIRECT API MODELS
@@ -74,10 +79,20 @@ OPENROUTER_PIXTRAL = "mistralai/pixtral-large"
 # For creating images from text prompts (Nano Banana style)
 # -----------------------------------------------------------------------------
 
-# Gemini 3 Pro - Native image generation with aspect ratio control
+# Gemini 3 Pro - Native image generation with aspect ratio control (via OpenRouter)
 OPENROUTER_GEMINI_IMAGE_GEN = "google/gemini-3-pro-image-preview"
 
-# Image generation aspect ratios (width x height)
+# OpenAI gpt-image-1 - native image generation (via OpenAI Images API directly)
+OPENAI_IMAGE_GEN = "gpt-image-1"
+
+# Provider alias -> default model. Lets callers say `--provider openai` instead of
+# memorizing model strings; Gemini stays the default so existing behavior is unchanged.
+IMAGE_GEN_PROVIDERS = {
+    "gemini": OPENROUTER_GEMINI_IMAGE_GEN,
+    "openai": OPENAI_IMAGE_GEN,
+}
+
+# Image generation aspect ratios (width x height) — Gemini's native vocabulary.
 IMAGE_ASPECT_RATIOS = {
     "1:1": (1024, 1024),  # Square
     "16:9": (1344, 768),  # Landscape wide
@@ -87,6 +102,19 @@ IMAGE_ASPECT_RATIOS = {
     "3:2": (1248, 832),  # Photo landscape
     "2:3": (832, 1248),  # Photo portrait
     "21:9": (1536, 672),  # Ultrawide/cinematic
+}
+
+# gpt-image-1 only accepts a fixed size set (1024x1024, 1536x1024, 1024x1536).
+# Map our richer aspect-ratio vocabulary onto the nearest supported size.
+OPENAI_IMAGE_SIZES = {
+    "1:1": "1024x1024",
+    "16:9": "1536x1024",
+    "4:3": "1536x1024",
+    "3:2": "1536x1024",
+    "21:9": "1536x1024",
+    "9:16": "1024x1536",
+    "3:4": "1024x1536",
+    "2:3": "1024x1536",
 }
 
 # -----------------------------------------------------------------------------
@@ -106,19 +134,167 @@ OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
 
 # =============================================================================
 # LOCAL OLLAMA MODELS
-# Used for fast, local inference (message classification, intent, AI judge)
+# Local Ollama steady state per machine:
+#   - granite4.1:3b  — classification / structured-output (the model already
+#     resident for the granite PTY operator; reused for bridge message routing,
+#     memory-audit, and email triage). This is the single local classifier.
+#   - nomic-embed-text — embeddings (out of scope here).
+#   - gemma4:31b-mlx — OPTIONAL local generation on RAM-rich Apple-Silicon hosts
+#     (otherwise generation goes to Ollama Cloud gemma4:31b-cloud). Selected by
+#     `ollama_generation_model` (config/settings.py), not a constant here.
+# Classification tasks read OLLAMA_CLASSIFIER_MODEL; generation tasks read
+# settings.models.ollama_generation_model. gemma4:e2b is retired (superseded).
 # =============================================================================
 
-OLLAMA_LOCAL_MODEL = "gemma4:e2b"
+# The single local classifier model. Granite is already resident for the PTY
+# operator, so reusing it for bridge routing / memory-audit / email triage costs
+# zero extra GPU memory. Kept in sync with granite_classifier.DEFAULT_MODEL,
+# which imports this constant (single source of truth).
+OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"
 
-# Models superseded by OLLAMA_LOCAL_MODEL — cleaned up during /update
+# Minimum host RAM (GB) required to run a local gemma4:31b-mlx generation model.
+# Hypothesis: the ~18-20 GB resident MLX 32B must coexist with granite (~2 GB),
+# nomic-embed-text (~0.4 GB), and the OS. Below this, generation must use the
+# cloud variant. The RAM guard lives inside ensure_generation_model() so even a
+# hand-edited bad config on a small host degrades to cloud instead of pulling
+# ~18 GB of weights.
+MIN_LOCAL_GEN_RAM_GB = 48
+
+# Models superseded by the granite/cloud split — cleaned up during /update.
+# gemma4:e2b retired here: classification moved to granite, generation to the
+# configured gemma4:31b (cloud or mlx).
 OLLAMA_SUPERSEDED_MODELS = [
     "gemma2:3b",
     "gemma3:4b",
     "gemma3:12b-it-qat",
     "qwen3:1.7b",
     "qwen3:4b",
+    "gemma4:e2b",
 ]
+
+
+def _host_ram_gb() -> float:
+    """Return total physical RAM in GB via ``sysctl -n hw.memsize`` (macOS).
+
+    Returns ``0.0`` if sysctl is unavailable or unparseable, which makes the
+    RAM guard conservatively treat the host as too small for a local mlx model
+    (degrade to cloud) rather than risk an ~18-20 GB pull.
+    """
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return int(out.stdout.strip()) / (1024**3)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return 0.0
+
+
+def _is_cloud_tag(model: str) -> bool:
+    """True if ``model`` is an Ollama Cloud tag.
+
+    Ollama Cloud tags appear in two shapes: ``<model>:cloud`` (e.g.
+    ``glm-5.1:cloud``) and ``<model>:<size>-cloud`` (e.g. ``gemma4:31b-cloud``).
+    Both route to Ollama's hosted GPUs; treat either as cloud.
+    """
+    return model.endswith(":cloud") or model.endswith("-cloud")
+
+
+def ensure_generation_model(model: str | None = None) -> tuple[bool, str]:
+    """Detection helper for the free-text *generation* model (NOT a startup gate).
+
+    Unlike ``ensure_granite_model`` (a hard worker precondition for the
+    classifier), this is a config-layer availability probe shared by ``/setup``,
+    ``/update``, and the memory title-generator. Each caller consumes the typed
+    ``(model_available, detail)`` result per its own failure-cost profile:
+    ``/update`` warns, the title-generator skips persistence, the ai-judge
+    hard-fails. It never exits the worker or suppresses a service restart.
+
+    Branches by tag:
+
+    - ``:cloud`` tag → near-no-op. A signed-in cloud tag is always reported
+      available; the only real check is cloud-signin, which callers surface as a
+      warning. Does NOT pull (cloud tags are lightweight pointers).
+    - local ``-mlx`` / other tag → **RAM-guard FIRST**: an ``-mlx`` tag on a
+      host below ``MIN_LOCAL_GEN_RAM_GB`` returns ``(False, ...)`` WITHOUT
+      pulling, so a misconfigured small host never triggers an ~18-20 GB pull.
+      Above the threshold, probe→pull-once→re-probe (mirrors
+      ``ensure_granite_model`` for the local branch only).
+
+    Args:
+        model: generation tag to check. When ``None``, reads
+            ``settings.models.ollama_generation_model`` (lazy import to avoid a
+            config import cycle).
+
+    Returns:
+        ``(model_available, detail)`` — ``detail`` is a human-readable reason
+        suitable for a log line.
+    """
+    if model is None:
+        from config.settings import settings  # lazy: avoid import cycle
+
+        model = settings.models.ollama_generation_model
+
+    # Cloud branch: a cloud tag is a lightweight hosted pointer. No pull; the
+    # only real precondition is cloud-signin, surfaced as a warning by callers.
+    # Ollama Cloud tags appear as both ``<model>:cloud`` (e.g. glm-5.1:cloud)
+    # and ``<model>:<size>-cloud`` (e.g. gemma4:31b-cloud) — accept both.
+    if _is_cloud_tag(model):
+        return True, "cloud tag assumed available"
+
+    # Local branch. RAM-guard BEFORE any pull for mlx tags.
+    if "mlx" in model:
+        ram_gb = _host_ram_gb()
+        if ram_gb < MIN_LOCAL_GEN_RAM_GB:
+            return (
+                False,
+                f"RAM too low for local mlx ({ram_gb:.0f}GB < "
+                f"{MIN_LOCAL_GEN_RAM_GB}GB) — use cloud",
+            )
+
+    try:
+        from ollama import chat as _ollama_chat  # noqa: F401
+    except ImportError:
+        return False, "ollama python client is not importable"
+    if shutil.which("ollama") is None:
+        return False, "ollama CLI not found on PATH"
+
+    def _probe() -> bool:
+        try:
+            r = subprocess.run(
+                ["ollama", "run", model, "reply with the single word: ready"],
+                capture_output=True,
+                text=True,
+                timeout=60.0,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        return r.returncode == 0 and bool(r.stdout.strip())
+
+    if _probe():
+        return True, f"{model} responsive"
+
+    logger.warning("generation model %s not responsive — attempting pull...", model)
+    try:
+        subprocess.run(
+            ["ollama", "pull", model],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=1800.0,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"timed out pulling {model}"
+    except subprocess.CalledProcessError as e:
+        return False, f"failed to pull {model}: {(e.stderr or '').strip() or e}"
+
+    if _probe():
+        return True, f"{model} pulled and responsive"
+    return False, f"{model} still not responsive after pull"
 
 
 # =============================================================================

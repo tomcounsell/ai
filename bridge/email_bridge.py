@@ -21,11 +21,14 @@ import email.mime.base
 import email.mime.multipart
 import email.mime.text
 import email.utils
+import hashlib
 import imaplib
 import json
 import logging
 import mimetypes
 import os
+import re
+import shutil
 import smtplib
 import time
 from email import encoders
@@ -56,6 +59,27 @@ REDIS_LAST_POLL_KEY = "email:last_poll_ts"
 
 # TTL for email:msgid reverse-mapping keys (48 hours)
 EMAIL_MSGID_TTL = 48 * 3600
+
+# --- Inbound attachment storage (mirrors the Telegram inbound-media pattern) ---
+# Take these with a grain of salt: provisional, tunable defaults. Both are
+# env-overridable so a machine can loosen/tighten without a code change.
+# Cumulative cap on decoded attachment bytes persisted per inbound email (25 MiB).
+# A SINGLE cumulative knob (no per-file cap) — once exceeded, remaining parts are
+# skipped and the message is marked truncated (critique C4).
+EMAIL_ATTACHMENT_MAX_TOTAL_BYTES = int(
+    os.environ.get("EMAIL_ATTACHMENT_MAX_TOTAL_BYTES", str(25 * 1024 * 1024))
+)
+# Cheap multipart-bomb guard: cap the number of attachment parts decoded per email.
+EMAIL_ATTACHMENT_MAX_PARTS = int(os.environ.get("EMAIL_ATTACHMENT_MAX_PARTS", "50"))
+
+# On-disk location for persisted inbound attachment bytes — parallel to the
+# Telegram media path (bridge/media.py MEDIA_DIR). Redis carries metadata/paths
+# only, never bytes. Created on first use.
+EMAIL_ATTACHMENT_DIR = Path(__file__).parent.parent / "data" / "media" / "email-attachments"
+
+# Fire-and-forget vault mirror so the KnowledgeWatcher indexes inbound files,
+# mirroring bridge/telegram_bridge.py:_ingest_attachments.
+EMAIL_ATTACHMENT_VAULT_SUBDIR = Path.home() / "work-vault" / "email-attachments"
 
 
 def _get_imap_config() -> dict | None:
@@ -171,12 +195,299 @@ def _extract_body(msg: email_lib.message.Message) -> str:
         return ""
 
 
+# =============================================================================
+# Inbound attachment extraction + persistence
+#
+# Split into two phases to keep the read path side-effect-free (critique C1):
+#   1. _extract_attachment_metadata(msg) — PURE. Walks the MIME tree, decodes
+#      payloads into memory, returns metadata dicts. Called inside
+#      parse_email_message, which is ALSO invoked by the read-only
+#      `valor-email read` IMAP fallback — so it must never touch disk.
+#   2. _persist_attachments(parsed) — writes the decoded bytes to disk and
+#      fire-and-forget mirrors them to the work-vault. Called ONLY from the
+#      IMAP poll loop (_email_inbox_loop), never from the read path.
+#
+# An attachment metadata dict has the public keys
+# {filename, content_type, size, path} plus a transient private "_payload"
+# (the decoded bytes) that _persist_attachments consumes and strips. _payload
+# is NEVER serialized — use _public_attachment() at every serialization point.
+# On the read/fallback path bytes are never persisted, so `path` stays None.
+# =============================================================================
+
+# Public (JSON-safe) attachment metadata fields, in canonical order.
+_ATTACHMENT_PUBLIC_FIELDS = ("filename", "content_type", "size", "path")
+
+
+def _public_attachment(att: dict) -> dict:
+    """Project an attachment dict down to its JSON-safe public fields.
+
+    Strips the transient ``_payload`` bytes so the result is always
+    ``json.dumps``-able. Used by every serialization point (history blob,
+    read output, session context).
+    """
+    return {k: att.get(k) for k in _ATTACHMENT_PUBLIC_FIELDS}
+
+
+def _sanitize_attachment_filename(raw: str | None, index: int, content_type: str) -> str:
+    """Reduce an attachment filename to a safe basename (no path traversal).
+
+    Strategy (matches the plan's sanitization contract):
+      - Reduce to ``Path(raw).name`` so any directory components / ``..`` /
+        absolute paths collapse to a bare basename.
+      - Allow only ``[A-Za-z0-9._-]``; replace every other char with ``_``.
+      - Strip leading/trailing dots and underscores so ``.`` / ``..`` / hidden
+        dotfiles cannot survive as a traversal or empty name.
+      - If nothing usable remains, fall back to
+        ``attachment_{index}{guessed_ext}``.
+    The ``{msgid_hash}`` subdir created by _persist_attachments contains the
+    result to a single directory regardless.
+    """
+    base = Path(raw or "").name
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._")
+    if not cleaned or cleaned in (".", ".."):
+        ext = mimetypes.guess_extension(content_type or "") or ""
+        cleaned = f"attachment_{index}{ext}"
+    return cleaned
+
+
+def _is_attachment_part(part: email_lib.message.Message) -> bool:
+    """True if a MIME part should be treated as a downloadable attachment.
+
+    Captures parts with an ``attachment`` Content-Disposition, plus any
+    filename-bearing leaf part (e.g. an ``inline`` CID image) — the plan treats
+    inline/CID parts as ordinary attachments at most. Multipart containers and
+    bare text body parts (no filename, no attachment disposition) are skipped.
+    """
+    if part.is_multipart():
+        return False
+    disposition = str(part.get("Content-Disposition", "")).lower()
+    if "attachment" in disposition:
+        return True
+    try:
+        return bool(part.get_filename())
+    except Exception:
+        return False
+
+
+def _body_references_attachments(text: str | None) -> bool:
+    """Return True if the email body appears to reference attachments.
+
+    Uses a conservative regex over common attachment-reference phrases.
+    Total function: returns False for empty string or None, never raises.
+    """
+    import re
+
+    if not text:
+        return False
+    try:
+        return bool(
+            re.search(
+                r"\b(attach(ed|ment|ments)?|see attached|enclosed|find attached)\b",
+                text,
+                re.IGNORECASE,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _extract_attachment_metadata(
+    msg: email_lib.message.Message,
+) -> tuple[list[dict], bool]:
+    """Walk a parsed message and return (attachments, truncated). PURE — no disk.
+
+    Each attachment dict has public keys ``filename`` (sanitized),
+    ``content_type``, ``size`` (decoded byte length), ``path`` (always ``None``
+    here — set later by _persist_attachments), plus a transient ``_payload``
+    holding the decoded bytes.
+
+    Guardrails (critique C4):
+      - A running cumulative-byte total short-circuits the walk: a part whose
+        ENCODED length already pushes the total over
+        ``EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`` is rejected pre-decode (estimated
+        from the base64 string length), so a multipart bomb never forces a full
+        decode of every part. ``truncated`` is set and the walk stops.
+      - ``EMAIL_ATTACHMENT_MAX_PARTS`` caps the number of parts decoded.
+    Each part is wrapped in its own try/except so one malformed/undecodable part
+    never aborts the rest — it is logged and skipped.
+    """
+    attachments: list[dict] = []
+    truncated = False
+    if not msg.is_multipart():
+        return attachments, truncated
+
+    running_total = 0
+    index = 0
+    for part in msg.walk():
+        if not _is_attachment_part(part):
+            continue
+        if len(attachments) >= EMAIL_ATTACHMENT_MAX_PARTS:
+            truncated = True
+            break
+        try:
+            ctype = part.get_content_type() or "application/octet-stream"
+            # Pre-decode size estimate from the encoded payload string so an
+            # oversized part is rejected BEFORE base64-decoding it into RAM.
+            raw_payload = part.get_payload(decode=False)
+            est = (len(raw_payload) * 3) // 4 if isinstance(raw_payload, str) else 0
+            if running_total + est > EMAIL_ATTACHMENT_MAX_TOTAL_BYTES:
+                truncated = True
+                break
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                logger.warning("[email] Attachment part had no decodable payload, skipping")
+                continue
+            size = len(payload)
+            if running_total + size > EMAIL_ATTACHMENT_MAX_TOTAL_BYTES:
+                # True size exceeded the cap (estimate was low) — skip and stop.
+                truncated = True
+                break
+            running_total += size
+            filename = _sanitize_attachment_filename(part.get_filename(), index, ctype)
+            attachments.append(
+                {
+                    "filename": filename,
+                    "content_type": ctype,
+                    "size": size,
+                    "path": None,
+                    "_payload": payload,
+                }
+            )
+            index += 1
+        except Exception as e:
+            logger.warning(f"[email] Skipping malformed attachment part: {e}")
+            truncated = True
+            continue
+
+    return attachments, truncated
+
+
+def _attachment_storage_key(parsed: dict) -> str:
+    """Derive a stable, collision-resistant subdir key for an email's attachments.
+
+    Hashes the Message-ID. When the Message-ID is empty (some providers omit it),
+    falls back to ``from_addr:subject:timestamp`` so attachments from different
+    Message-ID-less emails do NOT collide into one shared subdir (critique C3).
+    """
+    mid = (parsed.get("message_id") or "").strip()
+    if not mid:
+        ts = int(parsed.get("timestamp") or time.time())
+        mid = f"{parsed.get('from_addr', '')}:{parsed.get('subject', '')}:{ts}"
+    return hashlib.sha256(mid.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _persist_attachments(parsed: dict) -> list[dict]:
+    """Write decoded attachment bytes to disk + mirror to the vault. NOT pure.
+
+    Called ONLY from the IMAP poll loop (never the read path). Mutates each
+    attachment dict in place: pops the transient ``_payload``, sets ``path`` to
+    the on-disk location. Files land under
+    ``data/media/email-attachments/{msgid_hash}/{sanitized_name}``; same-email
+    filename collisions are disambiguated with an index suffix (critique Risk 3).
+    Every failure is logged and never propagates — the poll loop must not break.
+    """
+    attachments = parsed.get("attachments") or []
+    if not attachments:
+        return attachments
+
+    key = _attachment_storage_key(parsed)
+    dest_dir = EMAIL_ATTACHMENT_DIR / key
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"[email] Could not create attachment dir {dest_dir}: {e}")
+        for att in attachments:
+            att.pop("_payload", None)
+        return attachments
+
+    dest_root = str(dest_dir.resolve())
+    used_names: set[str] = set()
+    for att in attachments:
+        payload = att.pop("_payload", None)
+        if payload is None:
+            continue
+        try:
+            name = att.get("filename") or "attachment"
+            stem, suffix = Path(name).stem, Path(name).suffix
+            final = name
+            n = 1
+            while final in used_names or (dest_dir / final).exists():
+                final = f"{stem}_{n}{suffix}"
+                n += 1
+            target = dest_dir / final
+            # Defense in depth: confirm the resolved path stays inside dest_dir.
+            if not str(target.resolve()).startswith(dest_root):
+                logger.warning(f"[email] Blocked attachment path traversal: {name!r}")
+                continue
+            target.write_bytes(payload)
+            used_names.add(final)
+            att["filename"] = final
+            att["path"] = str(target)
+        except Exception as e:
+            logger.warning(f"[email] Failed to persist attachment {att.get('filename')!r}: {e}")
+            continue
+
+    _mirror_attachments_to_vault(parsed)
+    return attachments
+
+
+def _mirror_attachments_to_vault(parsed: dict) -> None:
+    """Fire-and-forget copy of persisted attachments into the work-vault.
+
+    Mirrors bridge/telegram_bridge.py:_ingest_attachments — the KnowledgeWatcher
+    indexes anything dropped under ``~/work-vault/`` recursively, so no further
+    wiring is needed. Target names reuse the Telegram joint-key formula
+    ``{date}_{sender}_{msgid}_{filename}``, substituting the C3 storage key when
+    the Message-ID is empty. Never blocks, never raises — every failure logged.
+    """
+    try:
+        attachments = [a for a in (parsed.get("attachments") or []) if a.get("path")]
+        if not attachments:
+            return
+        EMAIL_ATTACHMENT_VAULT_SUBDIR.mkdir(parents=True, exist_ok=True)
+        ts = float(parsed.get("timestamp") or time.time())
+        date_part = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts))
+        safe_sender = (
+            "".join(
+                c if (c.isalnum() or c in ("-", "_")) else "_"
+                for c in (parsed.get("from_addr") or "unknown")
+            ).strip("_")
+            or "unknown"
+        )
+        mid = (parsed.get("message_id") or "").strip() or _attachment_storage_key(parsed)
+        safe_mid = re.sub(r"[^A-Za-z0-9]", "", mid)[:24] or "nomsgid"
+        for att in attachments:
+            try:
+                src = Path(att["path"])
+                if not src.exists():
+                    continue
+                target = (
+                    EMAIL_ATTACHMENT_VAULT_SUBDIR
+                    / f"{date_part}_{safe_sender}_{safe_mid}_{src.name}"
+                )
+                shutil.copy2(src, target)
+                logger.info(f"[email] Mirrored {src.name} -> {target} (watcher will index)")
+            except Exception as inner_e:
+                logger.warning(
+                    f"[email] Failed to mirror attachment {att.get('path')!r}: {inner_e}"
+                )
+    except Exception as e:
+        logger.warning(f"[email] Vault mirror task failed: {e}")
+
+
 def parse_email_message(raw_bytes: bytes) -> dict | None:
     """Parse raw email bytes into a structured dict.
 
     Returns a dict with keys: from_addr, to_addrs, cc_addrs, subject, body,
-    message_id, in_reply_to.  Returns None if the email cannot be parsed or
-    has no usable body.
+    message_id, in_reply_to, attachments, attachments_truncated.  Returns None
+    if the email cannot be parsed or has neither a usable body nor attachments.
+
+    The ``attachments`` list holds metadata dicts
+    ``{filename, content_type, size, path}`` (plus a transient ``_payload``).
+    Extraction is PURE here — bytes are decoded into memory but NOT written to
+    disk; ``path`` is ``None`` until the poll loop calls _persist_attachments.
+    This keeps the read-only `valor-email read` IMAP fallback side-effect-free
+    (critique C1).
     """
     try:
         msg = email_lib.message_from_bytes(raw_bytes)
@@ -192,9 +503,13 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
 
     subject = _decode_header_value(msg.get("Subject", ""))
     body = _extract_body(msg)
+    attachments, attachments_truncated = _extract_attachment_metadata(msg)
 
-    if not body or not body.strip():
-        logger.debug(f"Email from {from_addr} has empty body, skipping")
+    # Empty-body guard, relaxed for attachment-only emails: a message whose body
+    # is empty but which carries attachments is legitimate (sender just sent a
+    # file) and must NOT be dropped here.
+    if (not body or not body.strip()) and not attachments:
+        logger.debug(f"Email from {from_addr} has empty body and no attachments, skipping")
         return None
 
     message_id = msg.get("Message-ID", "").strip()
@@ -211,6 +526,8 @@ def parse_email_message(raw_bytes: bytes) -> dict | None:
         "body": body.strip(),
         "message_id": message_id,
         "in_reply_to": in_reply_to,
+        "attachments": attachments,
+        "attachments_truncated": attachments_truncated,
     }
 
 
@@ -361,6 +678,11 @@ def _record_history(parsed: dict, mailbox: str = "INBOX") -> None:
                 "timestamp": ts,
                 "message_id": message_id,
                 "in_reply_to": parsed.get("in_reply_to", ""),
+                # Metadata only — never bytes. Projected through _public_attachment
+                # so a stray transient _payload can never reach the blob. Old blobs
+                # written before this field hydrate as [] on read (back-compat).
+                "attachments": [_public_attachment(a) for a in (parsed.get("attachments") or [])],
+                "attachments_truncated": bool(parsed.get("attachments_truncated")),
             }
         )
 
@@ -672,24 +994,162 @@ class EmailOutputHandler:
 
 
 # =============================================================================
+# Subject-line coalescing helpers
+# =============================================================================
+
+# Max age for subject-line coalescing: sessions older than this are ignored.
+# Prevents accidentally merging unrelated threads from months ago.
+COALESCE_MAX_AGE_SECONDS = 48 * 3600
+
+# Regex for stripping leading reply/forward prefixes (case-insensitive, repeated).
+_SUBJECT_PREFIX_RE = re.compile(
+    r"^(?:Re|Fwd|Fw|Aw|AW|Antw|RE|FW|FWD)(?:\[\d+\])?\s*:\s*",
+    re.IGNORECASE,
+)
+
+# Regex for stripping leading bracket ticket tags like [ticket-123]
+_SUBJECT_TICKET_RE = re.compile(r"^\[[^\]]*\]\s*")
+
+
+def normalize_subject(s: str) -> str:
+    """Normalize an email subject for coalescing comparison.
+
+    Strips leading Re/Fwd/AW/Antw prefixes (repeated), bracket ticket tags,
+    collapses whitespace, and lowercases.
+
+    Args:
+        s: Raw subject string.
+
+    Returns:
+        Normalized subject string (lowercase, no reply prefix, no ticket tag).
+    """
+    s = s.strip()
+    # Strip reply/forward prefixes repeatedly
+    while True:
+        stripped = _SUBJECT_PREFIX_RE.sub("", s)
+        if stripped == s:
+            break
+        s = stripped
+    # Strip bracket ticket tags
+    s = _SUBJECT_TICKET_RE.sub("", s)
+    # Collapse whitespace
+    s = " ".join(s.split())
+    return s.lower()
+
+
+def _query_non_terminal_sessions(project_key: str) -> list:
+    """Query AgentSession for non-terminal sessions in a project.
+
+    Bounded to sessions created within the last COALESCE_MAX_AGE_SECONDS
+    (48 hours) to prevent unbounded scans.
+
+    Args:
+        project_key: The project key to filter by.
+
+    Returns:
+        List of AgentSession objects.
+    """
+    from models.agent_session import AgentSession
+    from models.session_lifecycle import NON_TERMINAL_STATUSES
+
+    min_created_at = time.time() - COALESCE_MAX_AGE_SECONDS
+    sessions = []
+    for status in NON_TERMINAL_STATUSES:
+        try:
+            batch = list(AgentSession.query.filter(project_key=project_key, status=status))
+            sessions.extend(batch)
+        except Exception:
+            pass
+    # Filter by age (Python-side, since Popoto may not support gte on float fields)
+    sessions = [s for s in sessions if (getattr(s, "created_at", 0) or 0) >= min_created_at]
+    return sessions
+
+
+def find_coalescing_session_id(
+    project_key: str,
+    customer_id: str,
+    normalized_subject: str,
+) -> str | None:
+    """Find an existing session to coalesce into by subject-line match.
+
+    Scoped to (project_key, customer_id) to limit false-positive blast radius
+    to a single customer's own recent correspondence.
+
+    Applies a 48-hour age bound to prevent stale sessions from resurrecting.
+    Empty normalized_subject never coalesces.
+
+    Args:
+        project_key: The project key.
+        customer_id: The customer ID (from resolver).
+        normalized_subject: The normalized inbound subject line.
+
+    Returns:
+        session_id of the most recently created matching session, or None.
+    """
+    if not normalized_subject or not normalized_subject.strip():
+        return None
+
+    try:
+        sessions = _query_non_terminal_sessions(project_key)
+    except Exception as e:
+        logger.warning(f"[email] find_coalescing_session_id query failed: {e}")
+        return None
+
+    min_created_at = time.time() - COALESCE_MAX_AGE_SECONDS
+    matching = []
+    for s in sessions:
+        extra = getattr(s, "extra_context", None) or {}
+        if extra.get("customer_id") != customer_id:
+            continue
+        stored_subject = normalize_subject(extra.get("email_subject", ""))
+        if stored_subject != normalized_subject:
+            continue
+        created = getattr(s, "created_at", 0) or 0
+        if created < min_created_at:
+            continue
+        matching.append(s)
+
+    if not matching:
+        return None
+
+    # Pick most recently created
+    best = max(matching, key=lambda s: getattr(s, "created_at", 0) or 0)
+    age_hrs = (time.time() - (getattr(best, "created_at", 0) or 0)) / 3600
+    logger.info(
+        f"[email] coalescing matched session={best.session_id} age={age_hrs:.1f}h limit=48h"
+    )
+    return best.session_id
+
+
+# =============================================================================
 # IMAP polling loop
 # =============================================================================
 
 
-async def _process_inbound_email(parsed: dict, config: dict) -> None:
+async def _process_inbound_email(
+    parsed: dict,
+    config: dict,
+    imap_conn=None,
+    imap_uid=None,
+) -> None:
     """Process a single parsed inbound email.
 
-    Resolves the sender to a project, checks for thread continuation via
-    In-Reply-To header, and enqueues an AgentSession.
+    Resolves the sender to a project, optionally runs the customer_resolver to
+    identify the sender, checks for thread continuation (In-Reply-To first, then
+    subject-line coalescing), and enqueues an AgentSession.
 
     Args:
         parsed: Dict from parse_email_message() with keys:
                 from_addr, subject, body, message_id, in_reply_to
         config: The loaded projects.json config dict.
+        imap_conn: Optional open imaplib connection passed through from
+                   _poll_imap so the resolver failure path can apply the
+                   valor-retry Gmail label.
+        imap_uid: Optional IMAP UID bytes for the message (for valor-retry label).
     """
     from agent.agent_session_queue import enqueue_agent_session
     from agent.byob_skill_triggers import infer_requires_real_chrome
-    from bridge.routing import ACTIVE_PROJECTS, find_project_for_email
+    from bridge.routing import ACTIVE_PROJECTS, find_project_for_email, resolve_customer
     from config.enums import SessionType
 
     from_addr = parsed["from_addr"]
@@ -709,24 +1169,61 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
         logger.info(f"[email] Project '{project_key}' not in ACTIVE_PROJECTS, discarding")
         return
 
+    # --- Dynamic customer resolver (optional) ---
+    # If the project declares a customer_resolver, use it to identify the sender.
+    # Projects without a resolver keep the existing static-allow-list flow unchanged.
+    customer_id: str | None = None
+    email_persona: str = project.get("email", {}).get("persona", "teammate")
+
+    if project.get("customer_resolver"):
+        customer_id = await resolve_customer(
+            from_addr, project, imap_conn=imap_conn, imap_uid=imap_uid
+        )
+        if customer_id is None:
+            # Resolver says "not a customer" (or failed) — drop cleanly.
+            # Message is already \Seen; valor-retry label applied by resolve_customer on failure.
+            logger.info(
+                f"[email] Resolver returned None for {from_addr!r}, discarding "
+                f"(project={project_key})"
+            )
+            return
+        # Customer resolved — force customer-service persona for this session
+        email_persona = "customer-service"
+        logger.info(
+            f"[email] Resolver identified customer_id={customer_id!r} "
+            f"for {from_addr!r} (project={project_key})"
+        )
+
     # Derive session type from email.persona (default: teammate for human-facing email)
-    # customer-service maps to TEAMMATE so it never orchestrates dev sessions
-    email_persona = project.get("email", {}).get("persona", "teammate")
-    _non_pm_personas = ("teammate", "customer-service")
-    session_type = SessionType.TEAMMATE if email_persona in _non_pm_personas else SessionType.PM
+    # customer-service maps to TEAMMATE so it never orchestrates eng sessions
+    _non_eng_personas = ("teammate", "customer-service")
+    session_type = SessionType.TEAMMATE if email_persona in _non_eng_personas else SessionType.ENG
 
     working_dir = project.get("working_directory") or config.get("defaults", {}).get(
         "working_directory", "~/src"
     )
 
-    # Check for thread continuation via In-Reply-To
+    # --- Session coalescing (precedence: In-Reply-To > subject-line > new) ---
     existing_session_id = None
+
+    # (1) In-Reply-To: check Redis msgid map
     if in_reply_to:
         try:
             r = _get_redis()
             existing_session_id = r.get(f"email:msgid:{in_reply_to}")
         except Exception as e:
             logger.warning(f"[email] Redis lookup for In-Reply-To failed: {e}")
+
+    # (2) Subject-line coalescing (only for customer-resolver sessions)
+    if not existing_session_id and customer_id:
+        normalized = normalize_subject(subject or "")
+        if normalized:
+            existing_session_id = find_coalescing_session_id(project_key, customer_id, normalized)
+            if existing_session_id:
+                logger.info(
+                    f"[email] Subject-line coalescing: session={existing_session_id} "
+                    f"subject={normalized!r}"
+                )
 
     # Construct session_id
     timestamp = int(time.time())
@@ -749,6 +1246,34 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
         except Exception as e:
             logger.warning(f"[email] Failed to store inbound msgid mapping: {e}")
 
+    # --- Email customer-service triage layer (#1573) ---
+    # For projects with both a customer_resolver and an email.customer_service
+    # config block, run the two-tier triage pipeline inline. In shadow mode
+    # (Phase 1 default) it classifies + writes an audit note but sends nothing
+    # and does NOT short-circuit — the AgentSession spawn below remains the
+    # operator path. Auto/draft lanes (Phase >= 2) short-circuit and we return
+    # before enqueueing. The layer is inert (returns None) for any project
+    # without the config, so existing behavior is unchanged. Fail-safe: any
+    # exception here logs and falls through to the normal spawn.
+    if customer_id is not None:
+        try:
+            from tools.email_cs.handler import handle_customer_email
+
+            cs_outcome = await handle_customer_email(
+                parsed, project, customer_id, session_id=session_id
+            )
+            if cs_outcome is not None and cs_outcome.short_circuit:
+                logger.info(
+                    f"[email] email-cs handled session {session_id} "
+                    f"(disposition={cs_outcome.disposition.value}, "
+                    f"category={cs_outcome.category.value}); skipping AgentSession spawn"
+                )
+                return
+        except Exception as e:
+            logger.error(
+                f"[email] email-cs handler raised (non-fatal, falling through to AgentSession): {e}"
+            )
+
     # BYOB scheduler-gate inference (#1274): scan body + subject for
     # registered triggers (e.g. "linkedin"). Email sessions go through a
     # separate enqueue path from telegram_bridge.py, so the same inference
@@ -757,6 +1282,45 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
     _byob_real_chrome = infer_requires_real_chrome(_byob_text)
     if _byob_real_chrome:
         logger.info(f"[email] byob_inference_set_real_chrome session_id={session_id}")
+
+    # Build extra_context — include customer_id when resolved
+    extra_context: dict = {
+        "transport": "email",
+        "email_message_id": message_id,
+        "email_from": from_addr,
+        "email_to_addrs": parsed.get("to_addrs", []),
+        "email_cc_addrs": parsed.get("cc_addrs", []),
+        "email_subject": subject,
+    }
+    if customer_id is not None:
+        extra_context["customer_id"] = customer_id
+
+    # Inbound attachments: hand the agent readable on-disk paths (plus metadata)
+    # so it can open the files. Only include attachments that were actually
+    # persisted (path set by _persist_attachments); the read/fallback path never
+    # populates this since it doesn't run through _process_inbound_email.
+    _email_attachments = [
+        _public_attachment(a) for a in (parsed.get("attachments") or []) if a.get("path")
+    ]
+
+    # Wedge guard: if the body references attachments but none (or only some) were
+    # recovered, surface that explicitly so the agent can ask the sender to resend.
+    # Inform-not-block policy (see #1775); full injection inspection deferred to #1630.
+    if _body_references_attachments(body) and (
+        not _email_attachments or parsed.get("attachments_truncated")
+    ):
+        # Inform the agent of unrecoverable/truncated attachments — agent uses context
+        # to ask sender to resend.
+        # Policy: inform-not-block (see #1775); full injection inspection deferred to #1630.
+        extra_context["attachments_unrecoverable"] = True
+        extra_context["attachments_truncated"] = bool(parsed.get("attachments_truncated"))
+        extra_context["attachments_recovered_count"] = len(_email_attachments)
+        # attachments_referenced (bool) signals body references attachments without a precise count.
+        # A real referenced-count is deferred to when parse-time extraction is implemented (#1630).
+        extra_context["attachments_referenced"] = True
+
+    if _email_attachments:
+        extra_context["email_attachments"] = _email_attachments
 
     # Enqueue the session with email transport metadata
     try:
@@ -772,14 +1336,7 @@ async def _process_inbound_email(parsed: dict, config: dict) -> None:
             project_config=project,
             session_type=session_type,
             requires_real_chrome=_byob_real_chrome,
-            extra_context_overrides={
-                "transport": "email",
-                "email_message_id": message_id,
-                "email_from": from_addr,
-                "email_to_addrs": parsed.get("to_addrs", []),
-                "email_cc_addrs": parsed.get("cc_addrs", []),
-                "email_subject": subject,
-            },
+            extra_context_overrides=extra_context,
         )
         logger.info(f"[email] Enqueued session {session_id} for {from_addr}")
     except Exception as e:
@@ -904,6 +1461,16 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
                     parsed = parse_email_message(raw_bytes)
                     if parsed is None:
                         continue
+                    # Persist attachment bytes to disk + vault BEFORE recording
+                    # history or enqueueing — this is the ONLY write side-effect
+                    # path (the read-only CLI fallback never reaches here, so it
+                    # never writes; critique C1). After this call each attachment
+                    # dict has a real `path` and its transient `_payload` stripped.
+                    if parsed.get("attachments"):
+                        try:
+                            _persist_attachments(parsed)
+                        except Exception as e:
+                            logger.warning(f"[email] Attachment persistence failed: {e}")
                     # Write-through to the history cache BEFORE enqueueing the
                     # AgentSession so the CLI can observe the message even when
                     # routing skips session creation. Failures are logged only.

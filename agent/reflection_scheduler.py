@@ -19,7 +19,7 @@ import inspect
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +111,12 @@ class ReflectionEntry:
     command: str | None = None  # shell command for agent type
     enabled: bool = True
     timeout: int | None = None  # per-reflection timeout in seconds (None = use default)
+    project_key: str | None = None  # repo-specific gate: only the machine that
+    # owns this project (projects.json) runs the reflection. Enforced at update
+    # time by tools.reflection_machine_filter, which flips `enabled: false` in
+    # the per-machine config/reflections.yaml copy on non-owning machines — so
+    # the scheduler needs no runtime ownership check.
+    params: dict = field(default_factory=dict)  # arbitrary kwargs forwarded to the callable
 
     def __post_init__(self) -> None:
         """Normalize legacy ``interval=N`` to ``schedule='every: Ns'``."""
@@ -254,6 +260,8 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
                 command=raw.get("command"),
                 enabled=raw.get("enabled", True),
                 timeout=int(raw_timeout) if raw_timeout is not None else None,
+                project_key=raw.get("project_key"),
+                params=raw.get("params") or {},
             )
         except (TypeError, ValueError) as e:
             logger.warning("Skipping malformed registry entry %s: %s", raw.get("name", "?"), e)
@@ -299,6 +307,33 @@ def _resolve_callable(dotted_path: str) -> Any:
     return getattr(module, func_name)
 
 
+def _latest_run_timestamp(name: str) -> float | None:
+    """Return the most recent ``ReflectionRun`` timestamp for a reflection name.
+
+    History-based fallback for ``is_reflection_due`` (burst-fire hotfix). When a
+    Reflection record's ``ran_at`` has been lost — e.g. a fresh duplicate record
+    spawned by ``get_or_create`` during a Redis index-rebuild window, where the
+    name index is transiently empty — the record looks "never run" and an
+    ``every:`` schedule would fire on every tick. ``ReflectionRun`` rows are NOT
+    in ``models.__all__`` and so are never destructively rebuilt, making their
+    timestamps a reliable record of when the job actually last ran.
+
+    Returns None if no history rows exist or on any error (fail-open to the
+    existing ``ran_at``-based behavior).
+    """
+    try:
+        from models.reflection_run import ReflectionRun
+
+        timestamps = [
+            r.timestamp
+            for r in ReflectionRun.query.filter(name=name)
+            if isinstance(r.timestamp, (int, float)) and r.timestamp > 0
+        ]
+        return max(timestamps) if timestamps else None
+    except Exception:
+        return None
+
+
 def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> bool:
     """Check if a reflection is due to run.
 
@@ -319,6 +354,14 @@ def is_reflection_due(entry: ReflectionEntry, state: Reflection, now: float) -> 
     ran_at = state.ran_at if isinstance(state.ran_at, (int, float)) else None
 
     if entry.schedule:
+        # Burst-fire guard: a blank ``every:`` record (ran_at lost during an
+        # index-rebuild race) would be treated as "never run" and fire on every
+        # tick. Recover the true last-run from ReflectionRun history so the job
+        # stays suppressed until its real interval elapses. Scoped to ``every:``
+        # because ``cron:`` anchors on ``now`` (never immediately-due on a blank
+        # record) and ``at:`` is a one-shot.
+        if ran_at is None and entry.schedule.partition(":")[0].strip().lower() == "every":
+            ran_at = _latest_run_timestamp(entry.name)
         try:
             next_due = compute_next_due(entry.schedule, last_run=ran_at, now=now)
         except ValueError as e:
@@ -366,12 +409,19 @@ async def execute_function_reflection(entry: ReflectionEntry) -> Any:
     """
     func = _resolve_callable(entry.callable)
 
+    # Check whether this callable accepts a `params` keyword argument.
+    # Only `run_stall_advisory` (and future opt-in callables) declare it;
+    # all other zero-arg reflections must continue to be called with no args.
+    sig = inspect.signature(func)
+    accepts_params = "params" in sig.parameters
+
     if inspect.iscoroutinefunction(func):
-        return await func()
+        return await func(params=entry.params) if accepts_params else await func()
     else:
         # Run sync functions in a thread to avoid blocking the event loop
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, func)
+        call = (lambda: func(params=entry.params)) if accepts_params else func
+        return await loop.run_in_executor(None, call)
 
 
 def _get_memory_rss() -> int | None:
@@ -544,7 +594,7 @@ async def _enqueue_agent_reflection(entry: ReflectionEntry) -> None:
         sender_name=f"reflection ({entry.name})",
         chat_id="0",
         telegram_message_id=0,
-        session_type="pm",
+        session_type="eng",
     )
     logger.info(
         "[reflection] Enqueued agent reflection '%s' as session %s",

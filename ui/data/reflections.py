@@ -47,7 +47,6 @@ REFLECTION_GROUPS: dict[str, str] = {
     "analytics-rollup": GROUP_HOUSEKEEPING,
     "merged-branch-cleanup": GROUP_HOUSEKEEPING,
     "stale-branch-cleanup": GROUP_HOUSEKEEPING,
-    "behavioral-learning": GROUP_HOUSEKEEPING,
     "tech-debt-scan": GROUP_AUDITS,
     "redis-quality-audit": GROUP_AUDITS,
     "skills-audit": GROUP_AUDITS,

@@ -79,10 +79,10 @@ Worker loop
 
 ```bash
 # Create a new session (project_key derived from cwd via projects.json)
-# PM and dev roles both require --slug, or `issue #N` in the message for auto-derivation.
-valor-session create --role pm --message "Plan issue #735"
-valor-session create --role dev --slug fix-the-bug --message "Fix the bug" --parent abc123
-valor-session create --role pm --slug ad-hoc-task --message "..." --project-key valor  # explicit override
+# The eng role requires --slug, or `issue #N` in the message for auto-derivation.
+valor-session create --role eng --message "Plan issue #735"
+valor-session create --role eng --slug fix-the-bug --message "Fix the bug"
+valor-session create --role eng --slug ad-hoc-task --message "..." --project-key valor  # explicit override
 
 # Steer a running session
 valor-session steer --id abc123 --message "Stop after critique stage"
@@ -93,7 +93,7 @@ valor-session status --id abc123
 # List sessions
 valor-session list
 valor-session list --status running
-valor-session list --role pm
+valor-session list --role eng
 
 # Kill sessions
 valor-session kill --id abc123
@@ -101,6 +101,36 @@ valor-session kill --all
 ```
 
 Add `--json` to any command for machine-readable output.
+
+### Worker pre-flight check (`create` and `status`)
+
+After enqueuing a session, `valor-session create` checks whether a worker is actively writing heartbeats. `valor-session status` runs the same check when the session is in `pending` status.
+
+**States:**
+
+- `ok` (heartbeat age < 600s) — silent; no output
+- `down` (heartbeat age ≥ 600s, or file missing) — warning to stderr:
+  ```
+  WARNING: no recent worker heartbeat on this machine (720s) — session will stay pending until a worker is started (run: ./scripts/valor-service.sh worker-start)
+  ```
+
+The warning never claims the session will not run — it reports the current heartbeat age so the operator can judge. The session is enqueued regardless; when a worker starts, it picks up pending sessions normally.
+
+**Threshold:** `WORKER_DOWN_THRESHOLD_S = 600s` (defined in `agent/constants.py`), 2x the worker's 300s heartbeat write cadence. This gives one full missed write cycle of margin before declaring the worker down.
+
+**Worktree-proof path resolution:** The heartbeat file lives at `data/last_worker_connected` in the main checkout. When the CLI runs from a git worktree (`.worktrees/{slug}/`), a naive `__file__`-relative path would point at the worktree's own `data/` dir, which the worker never writes. `_resolve_heartbeat_path()` uses `git rev-parse --path-format=absolute --git-common-dir` (flag order matters — `--path-format=absolute` must precede `--git-common-dir`) to locate the main checkout's `.git` dir and derive the canonical heartbeat path. Relative git output is resolved against the `__file__` anchor, never the process cwd. Any git subprocess failure falls back to the `__file__`-relative path silently.
+
+**JSON contract:** `--json` output always includes these fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `worker_state` | `"ok"` or `"down"` | Structured state for agent callers — always present |
+| `worker_heartbeat_age_s` | integer or `null` | Age of the heartbeat file in seconds; `null` if file is missing; clamped to ≥ 0 |
+| `worker_healthy` | boolean | `true` when `worker_state == "ok"` — kept for backward compatibility |
+
+In `cmd_create`, all three fields are always non-null. In `cmd_status`, `worker_state` and `worker_heartbeat_age_s` are unconditionally present but are `null` when the session is not `pending` (the compute is skipped to avoid running the git subprocess on every status call). `worker_healthy` only appears in `cmd_status` JSON when the session is pending.
+
+Agent callers should branch on `worker_state` rather than parsing the stderr warning text.
 
 ## Backward Compatibility
 
@@ -113,22 +143,26 @@ All symbols that previously lived only in `agent/agent_session_queue.py` are re-
 
 Existing callers (tests, integrations) that import from `agent.agent_session_queue` continue to work unchanged. The canonical location is now `agent.output_router`.
 
-## Drafter Fallback Steering (née "Summarizer Fallback")
+## Drafter Self-Draft Steering (née "Summarizer Fallback")
 
-When both drafter backends (Haiku and OpenRouter) fail, `send_response_with_files()` uses the steering infrastructure to request agent self-draft rather than delivering raw truncated text to Telegram.
+When the drafter detects a blocking flag (empty promise / forward-deferral without evidence), `_inject_self_draft_steering()` in `agent/output_handler.py` uses the steering infrastructure to request a self-draft from the authoring agent rather than delivering a bad message to the user.
 
-**Mechanism:** `push_steering_message(session_id, SELF_DRAFT_INSTRUCTION, sender="summarizer-fallback")` injects a compact self-draft instruction. The agent produces a clean draft on its next turn. (Constants were renamed from `SELF_SUMMARY_INSTRUCTION` per [#1035](https://github.com/tomcounsell/ai/issues/1035); the `sender="summarizer-fallback"` string is kept for backward compatibility with existing Redis-queued steering messages.)
+This is the **primary** flag-handling path — not a fallback. The drafter no longer calls Haiku or OpenRouter; the steering nudge is how the system handles any output that fails validation.
 
-**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"summarizer-fallback"` message is already queued before pushing another. This prevents infinite steering loops if the self-draft output also fails drafting.
+**Mechanism:** `push_steering_message(session_id, SELF_DRAFT_INSTRUCTION, sender="drafter-fallback")` injects a compact self-draft instruction. The agent produces a clean draft on its next turn. (The `sender="drafter-fallback"` string supersedes the older `"summarizer-fallback"` string used before the drafter rewrite.)
 
-**Fallback chain:** If steering cannot be used (no session, Redis down, loop prevention), the system falls through to `is_narration_only()` as a last-resort gate before delivering text.
+**Loop prevention:** `peek_steering_sender(session_id)` checks if a `"drafter-fallback"` message is already queued before pushing another, blocking double-injection if the agent hasn't yet consumed the prior steering message. Additionally, the attempt count is tracked atomically at `steering:attempts:{session_id}` in Redis (`bump_self_draft_attempts`, `reset_self_draft_attempts` in `agent/steering.py`).
+
+**Attempt cap:** `SELF_DRAFT_MAX_ATTEMPTS = 2` (in `agent/steering.py`). After two consecutive steering injections without a clean delivery in between, the handler falls through to the narration fallback rather than injecting a third message. The counter resets on any clean (non-blocking) delivery via `reset_self_draft_attempts`.
+
+**Fallback chain:** If steering cannot be used (no session, Redis down, cap exceeded), the system falls through to the narration fallback — a fixed message substituted in place of the agent's raw output.
 
 See [Message Drafter](message-drafter.md) for the current feature doc covering the drafter module. (The previous pointer to `summarizer-format.md` is gone — content migrated into `message-drafter.md`.)
 
 ## Watchdog-Authored Steering (issue #1128)
 
 The session watchdog (`monitoring/session_watchdog.py`) is now an active
-steering-message **sender** alongside humans, the PM session, and the
+steering-message **sender** alongside humans, parent Eng sessions, and the
 drafter fallback. When one of three conditions fires, the watchdog
 enqueues a targeted message via
 `_inject_watchdog_steer(session_id, reason, message)`, which calls
@@ -157,43 +191,78 @@ not suppress a parallel `error_cascade` or `token_alert` steer.
 **Feature gate.** `WATCHDOG_AUTO_STEER_ENABLED=false` disables the push
 without disabling the detection (still logged at WARNING).
 
-## Parent-Child Steering (PM session to Dev session)
+## Automatic Steering on tool_timeout Recovery
 
-In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering** where a PM session (PM persona) pushes steering messages to its spawned Dev sessions.
+When the per-tool timeout sub-loop (mechanism 10 in `session-recovery-mechanisms.md`) detects a session wedged on a hung MCP or other tool call, `_apply_recovery_transition` handles the `tool_timeout` recovery kind. On the requeue (`pending`) branch — i.e., before `MAX_RECOVERY_ATTEMPTS` is exhausted — the recovery helper now automatically prepends a skip-the-tool steering message to the session's inbox.
+
+### How it works
+
+1. `_compose_tool_timeout_steering(tool_name, original_message)` builds a self-contained message that:
+   - Names the specific tool that timed out
+   - Embeds the user's original request verbatim
+   - Instructs the model to skip the hung tool and answer using available context
+
+2. `entry.push_steering_message(..., front=True)` prepends the message at index 0 of `queued_steering_messages`.
+
+3. On re-pickup, the worker's turn-boundary drain pops this message first and uses it as the turn input.
+
+### Why prepend, not append
+
+`queued_steering_messages` is a FIFO queue. Any previously queued messages would run first if the tool-skip instruction were appended. Prepending via `front=True` ensures the skip instruction is the first thing the model sees on re-pickup, before any human-authored or watchdog-authored messages that were already in the queue.
+
+The `front=True` parameter on `push_steering_message` trims from the back of the list (preserving the new message at index 0 and the oldest existing messages). The default `front=False` behavior (append, trim from head) is unchanged.
+
+### Container-run self-containedness
+
+Container runs launched by the granite PTY harness do not support `--resume`. This means the re-queued session starts fresh — it has no direct memory of the prior turn. The steering message is therefore self-contained: it includes the original request text so the model can answer without needing to re-read prior context.
+
+### Deterministic floor on terminal failure
+
+On the terminal `failed` branch — both the `MAX_RECOVERY_ATTEMPTS` exhaustion path and the not-confirmed-dead path — `_deliver_tool_timeout_degraded_notice(entry, tool_name)` delivers a canned user-facing message through the session's resolved output handler. This is the **deterministic floor**: even if advisory steering was never injected (e.g. the session failed on its first attempt), the user still receives a reply.
+
+- **Idempotency**: Redis `SETNX` on a per-session key prevents double-delivery if both failure branches fire in a race.
+- **Channel-agnostic**: `_resolve_callbacks(project_key, transport)` routes the message through Telegram, email, or file output — whichever transport the session was using.
+
+See [Session Recovery Mechanisms §Per-Tool Timeout Sub-Loop](session-recovery-mechanisms.md#10-per-tool-timeout-sub-loop-_agent_session_tool_timeout_loop) for the recovery trigger conditions and tier budgets.
+
+## Parent-Child Steering (parent Eng session to child Eng session)
+
+In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering**. Parent and child sessions are both Eng sessions (`session_type="eng"`); a parent created its child via `AgentSession.create_child()` for parallel work, and steers it while it runs.
 
 ### How It Works
 
-The PM session invokes `scripts/steer_child.py` via bash to push steering messages to a running child Dev session. The script validates the parent-child relationship before pushing to the same Redis steering queue used by bridge steering.
+The parent Eng session invokes `scripts/steer_child.py` via bash to push steering messages to a running child Eng session. The script validates the parent-child relationship, then routes through one of two paths depending on whether the message is an abort.
 
 ```
-PM session decides to steer
+Parent Eng session decides to steer
     |
     v
 python scripts/steer_child.py --session-id <child_id> --message "focus on tests" --parent-id <parent_id>
     |
     v
-Script validates: child exists, is a Dev session, parent_agent_session_id matches, status is "running"
+Script validates: child exists, is an Eng session (is_eng), parent_agent_session_id matches, status is "running"
     |
-    v
-push_steering_message(child_session_id, text, sender="PM session")
+    +-- non-abort --> steer_session(session_id, message)
+    |                   → AgentSession.queued_steering_messages (turn-boundary inbox)
+    |                   → child consumes at its next turn boundary
     |
-    v
-Child's watchdog picks up on next tool call (existing _handle_steering in health_check.py)
-    |
-    v
-Dev session adjusts behavior
+    +-- --abort -----> push_steering_message(session_id, text, sender="pm", is_abort=True)
+                        → Redis abort queue; the watchdog hook delivers immediately
+                          via additionalContext injection
 ```
+
+The non-abort path uses the turn-boundary inbox (`queued_steering_messages`) via `steer_session()`, which works for both SDK-harness and CLI-harness sessions. The abort path uses the Redis list (`push_steering_message(..., is_abort=True)`) so the watchdog hook can deliver the stop signal immediately rather than waiting for a turn boundary.
 
 ### CLI Usage
 
 ```bash
-# Steer a child Dev session
+# Steer a running child Eng session
 python scripts/steer_child.py --session-id <child_id> --message "skip docs, focus on tests" --parent-id <parent_id>
 
 # Send abort signal to a child
 python scripts/steer_child.py --session-id <child_id> --message "stop" --parent-id <parent_id> --abort
 
-# List active child Dev sessions
+# List active child Eng sessions
 python scripts/steer_child.py --list --parent-id <parent_id>
 ```
 
@@ -201,11 +270,11 @@ The `--parent-id` can also be read from the `VALOR_SESSION_ID` environment varia
 
 ### Validation
 
-The script enforces strict parent-child relationship validation:
+The script enforces strict parent-child relationship validation in `_steer_child()`:
 
 - Target must be an existing AgentSession
-- Target must be a Dev session (`is_dev` check)
-- Target's `parent_agent_session_id` must match the caller's ID
+- Target must be an Eng session (`child.is_eng` check)
+- Target's `parent_agent_session_id` must match the caller's parent ID
 - Target must be in `running` status
 
 All validation failures exit with non-zero code and print an error to stderr.
@@ -214,14 +283,14 @@ All validation failures exit with non-zero code and print an error to stderr.
 
 | Aspect | Bridge Steering | Parent-Child Steering |
 |--------|----------------|----------------------|
-| Caller | Telegram user (via reply thread) | PM session (via bash script) |
+| Caller | Telegram user (via reply thread) | Parent Eng session (via bash script) |
 | Entry point | `bridge/telegram_bridge.py` | `scripts/steer_child.py` |
-| Validation | Session ID match + running status | Parent-child relationship + running status |
-| Redis queue | Same (`steering:{session_id}`) | Same (`steering:{session_id}`) |
-| Consumption | Same (watchdog `_handle_steering`) | Same (watchdog `_handle_steering`) |
-| Sender field | User's name | "PM session" |
+| Validation | Session ID match + running status | Parent-child relationship (`is_eng` + `parent_agent_session_id`) + running status |
+| Non-abort path | Turn-boundary inbox (`queued_steering_messages`) | Turn-boundary inbox (`queued_steering_messages`) via `steer_session()` |
+| Abort path | n/a | Redis abort queue via `push_steering_message(..., is_abort=True)` |
+| Sender field | User's name | `"pm"` (abort path) |
 
-Both paths converge on the same `push_steering_message()` function in `agent/steering.py` and the same consumption path in the watchdog hook.
+The non-abort path converges on `steer_session()` in `agent/agent_session_queue.py` and the same turn-boundary inbox documented above. The abort path uses `push_steering_message()` in `agent/steering.py` with `sender="pm"`.
 
 ## No-Gos
 

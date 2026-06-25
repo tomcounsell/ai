@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from reflections.utils import run_per_project_audit
+from reflections.utilities import run_per_project_audit
 
 
 def _project(slug: str, wd: str = "/tmp") -> dict:
@@ -23,7 +23,7 @@ def _project(slug: str, wd: str = "/tmp") -> dict:
 
 
 def test_empty_projects_returns_ok_no_findings():
-    with patch("reflections.utils.load_local_projects", return_value=[]):
+    with patch("reflections.utilities.load_local_projects", return_value=[]):
         result = run_per_project_audit(
             lambda p: {"status": "ok", "findings": [], "summary": "x", "duration": 0.0},
             name="test-audit",
@@ -45,7 +45,7 @@ def test_skip_if_skips_silently_and_excludes_from_findings():
             "duration": 0.1,
         }
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(
             audit,
             skip_if=lambda repo_root: True,
@@ -73,7 +73,7 @@ def test_one_project_error_continues_others_and_aggregate_is_error():
             "duration": 0.1,
         }
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="tech-debt-scan")
 
     assert result["status"] == "error"
@@ -103,7 +103,7 @@ def test_skip_if_exception_isolated_per_project():
         }
 
     projects = [_project("ai", wd="/tmp/ai"), _project("popoto", wd="/tmp/popoto")]
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, skip_if=skip_if, name="docs-audit")
 
     assert result["status"] == "error"
@@ -125,7 +125,7 @@ def test_slug_prefix_on_findings():
             "duration": 0.1,
         }
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="x")
     assert "[ai] X" in result["findings"]
     assert "[ai] Y" in result["findings"]
@@ -145,7 +145,7 @@ def test_all_disabled_aggregates_to_disabled():
             "error": "global API cap reached",
         }
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="documentation-audit")
     assert result["status"] == "disabled"
     for record in result["projects"]:
@@ -160,7 +160,7 @@ def test_mix_ok_and_disabled_aggregates_to_ok():
             return {"status": "disabled", "findings": [], "summary": "", "duration": 0.0}
         return {"status": "ok", "findings": ["a"], "summary": "", "duration": 0.0}
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="x")
     assert result["status"] == "ok"
 
@@ -181,7 +181,7 @@ def test_mix_error_and_anything_aggregates_to_error():
             }
         return {"status": "ok", "findings": ["a"], "summary": "", "duration": 0.0}
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="x")
     assert result["status"] == "error"
 
@@ -192,7 +192,7 @@ def test_name_appears_in_summary():
     def audit(p):
         return {"status": "ok", "findings": [], "summary": "", "duration": 0.0}
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="hooks-audit")
     assert "hooks-audit" in result["summary"]
 
@@ -208,7 +208,7 @@ def test_skipped_record_has_zero_findings_count():
             "duration": 0.0,
         }
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, skip_if=lambda r: True, name="x")
     assert result["projects"][0]["findings_count"] == 0
     assert result["findings"] == []
@@ -220,7 +220,7 @@ def test_audit_returning_non_dict_recorded_as_error():
     def audit(p):
         return "oops, not a dict"
 
-    with patch("reflections.utils.load_local_projects", return_value=projects):
+    with patch("reflections.utilities.load_local_projects", return_value=projects):
         result = run_per_project_audit(audit, name="x")
     assert result["status"] == "error"
     assert result["projects"][0]["status"] == "error"

@@ -40,7 +40,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from reflections.pm_briefings import daily_log, log_audit, morning
-from reflections.utils import load_local_projects
+from reflections.utilities import load_local_projects
 
 logger = logging.getLogger("reflections.pm_briefings")
 

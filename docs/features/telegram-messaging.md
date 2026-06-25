@@ -415,4 +415,5 @@ See [PM Telegram Tool](pm-telegram-tool.md) for details on the PM send path.
 - [PM Telegram Tool](pm-telegram-tool.md) — PM session self-messaging with file attachments and multi-file albums
 - [TTS](tts.md) — `valor-tts` synthesis + the `--voice-note` / `--cleanup-after-send` send path used by `/do-debrief`
 - [Relay Retry Guard](relay-retry-guard.md) — bounded retries, dead-letter routing, and `cleanup_file` honoring at DLQ placement
+- [Bot End-to-End Testing](bot-e2e-testing.md) — `send --await-reply` synchronous bot-probe + the registered-bot loop-guard
 - `config/personas/segments/tools.md` -- agent persona references to this tool

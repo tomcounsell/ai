@@ -12,6 +12,7 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 """
 
 import asyncio
+import functools
 import logging
 import os
 import re
@@ -21,10 +22,16 @@ import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
+from agent.session_stall_classifier import (
+    NEVER_STARTED_CONFIRM_MARGIN_SECS,
+    NEVER_STARTED_GRACE_SECS,
+)
 from agent.session_state import SessionHandle, _active_events, _active_sessions, _active_workers
 from analytics.collector import record_metric
 from models.agent_session import AgentSession, SessionType
+from models.memory import Memory
 from models.session_lifecycle import ALL_STATUSES, get_authoritative_session
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
@@ -51,6 +58,22 @@ _MCP_SERVER_CMDLINE_RE = re.compile(r"mcp_servers/[\w_]+\.py\b")
 
 # Heartbeat-freshness threshold for the per-PID gate (30 minutes).
 ORPHAN_PROCESS_HEARTBEAT_GRACE_SECONDS = 1800
+
+# === Fast-kill signature for stale `claude --print` one-shots (issue #1632) ===
+#
+# Observed 2026-06-11: rogue orphan subagents spawned bare `claude ... --print`
+# one-shots (~250 MB each) that never exited; 21 accumulated at PPID==1. The
+# bundled-path regex above missed them (argv[0] was bare `claude` on PATH) and
+# the heartbeat gate is irrelevant — no legitimate `--print` one-shot lives
+# longer than a few minutes. Any PPID==1 `claude` process in `--print`/`-p`
+# mode older than this threshold is ALWAYS reapable. Conservative 10 minutes.
+ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS = 600
+
+# Shell executables whose `-c` invocations count as transient wrappers for
+# dead-chain detection (issue #1632 mode 1b): a wrapper that is itself
+# PPID==1 is alive only because it is blocked waiting on its child forever —
+# the chain above the child is dead.
+_SHELL_WRAPPER_NAMES = frozenset({"sh", "zsh", "bash", "dash"})
 
 # Redis key prefix for positive-ID self-protection. Worker writes
 # ``worker:registered_pid:{hostname}:{pid}`` at startup with TTL, refreshed on
@@ -287,6 +310,17 @@ TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
 TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
 TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
 
+# === Path-B mid-run wedge detector constants (#1724) ===
+# Stage-1 cheap quiescence gate: window of continuous PTY-screen quiescence
+# (no new paint detected by the on_pty_read callback) before a running session
+# with a tool in flight is marked a confirmed suspect for stage-2 dispatch.
+# Provisional — tune via env. The value balances false-positive risk (a slow
+# model turn that just happens to be silent) against detection latency. 180s
+# (3 minutes) accommodates slow extended-thinking turns while still catching
+# genuine wedges well within the existing TOOL_TIMEOUT_DEFAULT_SEC (300s) budget.
+# Set to 0 to disable the quiescence gate without disabling the writers.
+MID_RUN_QUIESCENCE_SECS: float = float(os.environ.get("MID_RUN_QUIESCENCE_SECS", "180"))
+
 # Internal-tier tool name set: lightweight built-in tools that should never
 # legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
 # env-overridable in v1 — drift risk is small and documented.
@@ -349,6 +383,83 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         return None
     reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s"
     return tier, reason
+
+
+def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
+    """Return True if a default-tier tool is wedge-eligible (OK to kill); False if alive.
+
+    This is the PTY-liveness gate for the default-tier kill decision (issue #1784).
+    Return value semantics: True = "wedge-eligible, proceed with kill"; False = "defer, PTY is
+    live or liveness is unknown for a granite session."
+
+    Branch order is load-bearing — the first matching branch wins:
+
+    1. Kill-switch escape (FIRST, before any field reads): ``MID_RUN_QUIESCENCE_SECS <= 0``
+       restores age-only default-tier kill for every session (granite and SDK alike).
+       Must be first so the kill-switch is never silently defeated by a None-field
+       short-circuit below it.
+
+    2. Non-PTY / SDK escape: ``last_pty_read_loop_at is None`` — this session has no
+       granite PTY read loop and never accumulates ``mid_run_quiescent_since``. The only
+       liveness signal available is age, so return True to keep the existing 300s
+       default-tier kill for the entire SDK path. Omitting this branch would cause SDK
+       default tools to fall through to branch 3 (``mid_run_quiescent_since is None →
+       False``) and never be killed — a regression blocker.
+
+    2b. Staleness escape: ``last_pty_read_loop_at`` is stale (> ``HEARTBEAT_FRESHNESS_WINDOW``
+       seconds old). When the PTY read loop has died, stage-1 ABSTAINs and
+       ``mid_run_quiescent_since`` is unreliable — returning True here prevents a session
+       whose read loop has crashed from escaping the kill via branch 3's "None → defer" path.
+
+    3. Painting / freshly-active PTY: ``mid_run_quiescent_since is None`` — the granite PTY
+       read loop exists and is fresh (branches 2/2b didn't fire) but the screen is currently
+       painting (stage-1 cleared ``mid_run_quiescent_since``, or it was never quiescent).
+       This is the "alive, defer the kill" case — the whole point of the fix.
+
+    4. Quiescent long enough: tz-normalize ``mid_run_quiescent_since`` and return
+       ``(now - it).total_seconds() >= MID_RUN_QUIESCENCE_SECS``. True once the granite
+       PTY has been quiescent past the window (mirrors the exact predicate stage-1 uses, so
+       there is a single definition of "quiescent long enough").
+    """
+    # Branch 1: kill-switch — age-only kill restored for all sessions.
+    if MID_RUN_QUIESCENCE_SECS <= 0:
+        return True
+
+    # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
+    last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+    if last_pty_read_loop_at is None:
+        return True
+
+    # Branch 2b: staleness escape — if the granite PTY read loop marker is itself stale
+    # (> HEARTBEAT_FRESHNESS_WINDOW seconds old), stage-1 ABSTAINs and
+    # mid_run_quiescent_since is unreliable. Treat as wedge-eligible so a session whose
+    # PTY read loop has died does not escape the kill via branch 3's "None → defer" path.
+    # This is a safety net only; the main health loop's heartbeat checks own recovery
+    # of granite sessions with a dead read loop (not this path).
+    if isinstance(last_pty_read_loop_at, datetime):
+        loop_at_aware = (
+            last_pty_read_loop_at
+            if last_pty_read_loop_at.tzinfo
+            else last_pty_read_loop_at.replace(tzinfo=UTC)
+        )
+        if (now - loop_at_aware).total_seconds() > HEARTBEAT_FRESHNESS_WINDOW:
+            return True
+
+    # Branch 3: granite PTY present but painting (or freshly active) — alive, defer kill.
+    mid_run_quiescent_since = getattr(entry, "mid_run_quiescent_since", None)
+    if mid_run_quiescent_since is None:
+        return False
+
+    # Branch 4: quiescent long enough? Normalize timezone then compare.
+    if not isinstance(mid_run_quiescent_since, datetime):
+        # Defensive: unexpected type — treat as painting to avoid a spurious kill.
+        return False
+    quiescent_aware = (
+        mid_run_quiescent_since
+        if mid_run_quiescent_since.tzinfo
+        else mid_run_quiescent_since.replace(tzinfo=UTC)
+    )
+    return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
 
 
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
@@ -434,7 +545,8 @@ def _recover_interrupted_agent_sessions_startup() -> int:
       the same claude_session_uuid, so resuming would spawn a second harness competing
       with the interactive CLI at that UUID (the #986 hijack rationale).
     - Dev local sessions are re-queued to "pending" like bridge sessions. Dev sessions
-      are worker-owned (spawned via ``valor-session create --role dev`` by the PM) with
+      are worker-owned (spawned via ``valor-session create --role eng`` by the parent
+      session) with
       no human competitor — completion flows via _handle_dev_session_completion, which
       steers the PM and never uses a user-facing send callback (#1092).
     - Legacy records with ``session_type=None`` fall through to the safer abandon path.
@@ -519,11 +631,11 @@ def _recover_interrupted_agent_sessions_startup() -> int:
         is_local = entry.session_id.startswith("local")  # session_id is the reliable discriminator
         session_type = getattr(entry, "session_type", None)
 
-        # Gate the dev re-queue path on explicit equality with SessionType.DEV so that:
+        # Gate the dev re-queue path on explicit equality with SessionType.ENG so that:
         # (a) legacy records with session_type=None fall through to the safer abandon path,
         # (b) any future SessionType member (e.g., REFLECTION, WORKFLOW) also falls through
         #     to abandon rather than being silently re-queued (#1092 Risk 2).
-        if is_local and session_type == SessionType.DEV:
+        if is_local and session_type == SessionType.ENG:
             # Local dev sessions are worker-owned — no human CLI is competing for the
             # claude_session_uuid. Re-queue like a bridge session so the worker resumes
             # the transcript on next pickup (#1092). CAS on expected_status="running"
@@ -655,6 +767,68 @@ def _recover_interrupted_agent_sessions_startup() -> int:
 # === Agent Session Health Monitor ===
 
 
+def _never_started_past_grace(
+    entry: AgentSession,
+    now: datetime | None = None,
+) -> bool:
+    """Return True when a session has NEVER produced output and has exceeded the
+    combined never-started grace + confirmation margin window.
+
+    A session is considered to have "never started" when BOTH conditions hold:
+      - ``sdk_ever_output`` is False: neither ``last_tool_use_at`` nor
+        ``last_turn_at`` has ever been written (no structured SDK output).
+      - The session's wall-clock running time exceeds
+        ``NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS``
+        (default 120 + 30 = 150 seconds).
+
+    The confirmation margin (``NEVER_STARTED_CONFIRM_MARGIN_SECS``) is stacked
+    on top of the base grace to cover worst-case granite cold-start latency
+    (container spin-up + TUI boot + priming). Both constants live in
+    ``agent.session_stall_classifier`` and are env-overridable.
+
+    Call sites that do NOT have ``now`` in scope (e.g. ``_has_progress`` and
+    ``_tier2_reprieve_signal``) should omit the argument — this function
+    derives it internally via ``datetime.now(tz=timezone.utc)``.
+
+    Returns False (safe default) when:
+      - ``sdk_ever_output`` is True (session has produced output).
+      - ``started_at`` and ``created_at`` are both None (legacy / phantom
+        record) — no running_seconds to compute.
+      - ``running_seconds`` is below the combined threshold.
+      - Any unexpected exception is encountered.
+
+    This predicate NEVER raises.
+    """
+    try:
+        # Derive sdk_ever_output the same way _has_progress and
+        # _tier2_reprieve_signal do: True iff either per-turn field is set.
+        sdk_ever_output = bool(
+            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
+        )
+        if sdk_ever_output:
+            return False
+
+        if now is None:
+            now = datetime.now(tz=UTC)
+
+        # Use started_at or created_at as the origin timestamp, mirroring the
+        # pattern established in _has_progress sub-check B (issue #1356).
+        started_at = getattr(entry, "started_at", None)
+        created_at = getattr(entry, "created_at", None)
+        started_ref = started_at if isinstance(started_at, datetime) else created_at
+        if not isinstance(started_ref, datetime):
+            # Legacy / phantom record — no running_seconds, safe default.
+            return False
+
+        started_aware = started_ref if started_ref.tzinfo else started_ref.replace(tzinfo=UTC)
+        running_seconds = (now - started_aware).total_seconds()
+
+        threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+        return running_seconds > threshold
+    except Exception:
+        return False
+
+
 def _has_progress(entry: AgentSession) -> bool:
     """Return True iff the session shows any signal that real work has begun.
 
@@ -766,6 +940,17 @@ def _has_progress(entry: AgentSession) -> bool:
         if isinstance(hb, datetime):
             hb_aware = hb if hb.tzinfo else hb.replace(tzinfo=UTC)
             if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
+                # Sub-check B D0 gate (issue #1724): deny the fresh-heartbeat
+                # fast-path when the session is never-started past grace.
+                # _never_started_past_grace uses now_utc internally (called
+                # without a `now` arg here; it derives now itself). When True,
+                # the session has been running longer than
+                # NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
+                # without any SDK output — a fresh heartbeat must NOT falsely
+                # signal "alive" for a session that has never started.
+                if _never_started_past_grace(entry):
+                    return False
+
                 # Compute running_seconds and apply the no-output budget gate
                 # (NO_OUTPUT_BUDGET_SECONDS = 1800s, 30 min).
                 #
@@ -822,16 +1007,35 @@ def _has_progress(entry: AgentSession) -> bool:
                         _m_err,
                     )
 
-    # Own-progress fields (#944 / #963, narrowed by #1226).
+    # Own-progress fields (#944 / #963, narrowed by #1226, gated by #1614).
     # Only evaluated when sdk_ever_output is False — once the SDK has produced
     # a tool or turn event, per-turn freshness (sub-check A) is authoritative.
+    #
+    # Issue #1614 — confirmed verdict (Branch 2): ungated claude_session_uuid
+    # returned True unconditionally when sdk_ever_output=False, blocking
+    # recovery of zombie sessions whose heartbeat loop had silently exited.
+    # Fix: gate the own-progress fields on heartbeat freshness — only honour
+    # them if the session's last_heartbeat_at is within NO_OUTPUT_BUDGET_SECONDS
+    # (1800s). A stale or absent heartbeat means the executor is likely dead;
+    # own-progress fields must not keep the session alive indefinitely.
+    # AC3 constraint: gate window MUST be >= NO_OUTPUT_BUDGET_SECONDS (1800s);
+    # do NOT use the tighter HEARTBEAT_FRESHNESS_WINDOW (90s) here.
     if not sdk_ever_output:
-        if (entry.turn_count or 0) > 0:
-            return True
-        if bool((entry.log_path or "").strip()):
-            return True
-        if bool(entry.claude_session_uuid):
-            return True
+        _hb_own = getattr(entry, "last_heartbeat_at", None)
+        _own_progress_fresh = False
+        if isinstance(_hb_own, datetime):
+            _hb_own_aware = _hb_own if _hb_own.tzinfo else _hb_own.replace(tzinfo=UTC)
+            _hb_age = (now_utc - _hb_own_aware).total_seconds()
+            if _hb_age < NO_OUTPUT_BUDGET_SECONDS:
+                _own_progress_fresh = True
+        # If heartbeat is stale or absent, fall through — do NOT return True.
+        if _own_progress_fresh:
+            if (entry.turn_count or 0) > 0:
+                return True
+            if bool((entry.log_path or "").strip()):
+                return True
+            if bool(entry.claude_session_uuid):
+                return True
 
     # Child-progress check: a PM session with active children is not stuck.
     # get_children() queries via Popoto parent_agent_session_id index and
@@ -901,7 +1105,9 @@ def _tier2_reprieve_signal(
         getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
     )
     reprieve_count = getattr(entry, "reprieve_count", 0) or 0
-    if not sdk_ever_output and reprieve_count >= MAX_NO_OUTPUT_REPRIEVES:
+    if not sdk_ever_output and (
+        reprieve_count >= MAX_NO_OUTPUT_REPRIEVES or _never_started_past_grace(entry)
+    ):
         return None  # escalate: suppress all Tier 2 reprieves, allow recovery
 
     # "compacting" — reprieve when a compaction completed within
@@ -940,6 +1146,376 @@ def _tier2_reprieve_signal(
             logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
 
     return None
+
+
+# Total wall-clock budget for the SIGTERM->SIGKILL escalation in
+# ``_confirm_subprocess_dead``. Kept to single-digit seconds so the liveness
+# loop is never stalled by a slow kill (issue #1537 No-Go: short grace only).
+SUBPROCESS_KILL_TIMEOUT = 3.0
+# Poll interval while waiting for a signalled PID to exit.
+_SUBPROCESS_KILL_POLL_INTERVAL = 0.1
+
+
+def _increment_subprocess_kill_counter(session, *, escalated: bool) -> None:
+    """Best-effort Redis counter for the recovery subprocess-kill escalation (#1537).
+
+    ``escalated=True``  -> ``{project_key}:session-health:subprocess_kill_escalated``
+        (a kill signal — SIGTERM and/or SIGKILL — was actually delivered because
+        ``task.cancel()`` left the subprocess alive).
+    ``escalated=False`` -> ``{project_key}:session-health:subprocess_kill_failed``
+        (the subprocess could not be confirmed dead; session escalates to ``failed``).
+
+    The escalated counter intentionally does NOT fire on the *already-dead* path
+    (``task.cancel()`` sufficed and no signal was sent): counting that as an
+    escalation would inflate the metric and hide how often the SDK subprocess
+    genuinely ignores cancellation. See ``_confirm_subprocess_dead`` →
+    ``SubprocessKillResult.signal_sent``.
+
+    A counter-backend failure must never propagate out of recovery.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        project_key = getattr(session, "project_key", None) or "unknown"
+        suffix = "subprocess_kill_escalated" if escalated else "subprocess_kill_failed"
+        _R.incr(f"{project_key}:session-health:{suffix}")
+    except Exception as e:
+        logger.debug("[session-health] subprocess_kill counter failed (non-fatal): %s", e)
+
+
+class SubprocessKillResult(NamedTuple):
+    """Outcome of ``_confirm_subprocess_dead`` (issue #1537).
+
+    ``confirmed_dead``
+        ``True`` when the PID is confirmed gone; ``False`` when it cannot be
+        confirmed dead (still alive after SIGKILL, ``PermissionError``, or any
+        unexpected error). Drives the caller's requeue-vs-``failed`` branch.
+    ``signal_sent``
+        ``True`` only when a kill signal (SIGTERM and/or SIGKILL) was actually
+        delivered — i.e. the subprocess survived ``task.cancel()`` and had to be
+        escalated. ``False`` on the *already-dead* path (cancel sufficed, no PID,
+        or the very first liveness probe reports the process gone), so the caller
+        does NOT over-count those as kill escalations.
+    """
+
+    confirmed_dead: bool
+    signal_sent: bool
+
+
+def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> SubprocessKillResult:
+    """Confirm a recovery target's ``claude -p`` subprocess is gone, escalating signals (#1537).
+
+    ``task.cancel()`` does not guarantee the underlying SDK subprocess exited — a
+    true hang ignores cancellation and orphans the PID. This helper closes that
+    gap: it verifies liveness, then escalates SIGTERM -> SIGKILL, polling for exit
+    within a short ``timeout`` so the liveness loop is never stalled.
+
+    Returns a :class:`SubprocessKillResult` ``(confirmed_dead, signal_sent)``:
+
+    * ``confirmed_dead=True`` only when the PID is confirmed gone
+      (``os.kill(pid, 0)`` raises ``ProcessLookupError``); ``False`` when it cannot
+      be confirmed dead (still alive after SIGKILL, ``PermissionError``, or any
+      unexpected error). A non-confirmed result is the signal for the caller to
+      escalate the session to ``failed`` so the orphan reaper owns cleanup, rather
+      than requeuing an invisible orphan to ``pending``.
+    * ``signal_sent=True`` only when SIGTERM and/or SIGKILL was actually delivered.
+      It stays ``False`` on the already-dead path (no PID, or the process was gone
+      at the first probe because ``task.cancel()`` terminated it) so the caller can
+      distinguish "cancel sufficed" from "we had to kill it" and avoid inflating the
+      escalated counter.
+
+    NOTE: this helper is synchronous and uses ``time.sleep`` while polling. It must
+    NOT be awaited directly on the worker event loop; ``_apply_recovery_transition``
+    offloads it via ``run_in_executor`` so the kill grace period (up to ``timeout``
+    seconds) never stalls other worker coroutines.
+
+    PID-reuse caveat: a recorded ``claude_pid`` could in principle be recycled by an
+    unrelated process before recovery runs. The window is the sub-second recovery
+    path and this matches the existing PPID==1 reaper's assumptions (issue #1537
+    Race Condition Analysis); we accept the residual risk rather than tracking PID
+    generations.
+    """
+    if pid is None or pid <= 0:
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+
+    deadline = time.monotonic() + max(timeout, 0.0)
+
+    def _is_dead() -> bool:
+        """``True`` iff signal 0 reports the PID is gone."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            # Process exists but is owned by another user — cannot confirm death.
+            return False
+        except OSError:
+            return False
+        return False
+
+    # Already gone (e.g. task.cancel() did terminate it)? No signal was sent.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+    except PermissionError:
+        return SubprocessKillResult(confirmed_dead=False, signal_sent=False)
+    except OSError:
+        return SubprocessKillResult(confirmed_dead=False, signal_sent=False)
+
+    def _poll_until_dead() -> bool:
+        while time.monotonic() < deadline:
+            if _is_dead():
+                return True
+            time.sleep(_SUBPROCESS_KILL_POLL_INTERVAL)
+        return _is_dead()
+
+    # Escalation step 1: SIGTERM, then poll for graceful exit. From here on a
+    # signal has been delivered, so signal_sent is True regardless of the outcome.
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Raced to exit between the probe and SIGTERM — no signal landed.
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+    except (PermissionError, OSError) as e:
+        logger.debug("[session-health] SIGTERM failed for recovery pid=%s: %s", pid, e)
+        return SubprocessKillResult(confirmed_dead=_is_dead(), signal_sent=False)
+
+    if _poll_until_dead():
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=True)
+
+    # Escalation step 2: SIGKILL only when SIGTERM failed to terminate it.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=True)
+    except (PermissionError, OSError) as e:
+        logger.debug("[session-health] SIGKILL failed for recovery pid=%s: %s", pid, e)
+        return SubprocessKillResult(confirmed_dead=_is_dead(), signal_sent=True)
+
+    return SubprocessKillResult(confirmed_dead=_poll_until_dead(), signal_sent=True)
+
+
+# === MCP hang graceful degradation helpers (issue #1711) ===
+
+
+def _compose_tool_timeout_steering(tool_name: str, original_request: str | None) -> str:
+    """Compose the advisory steering message injected when a tool times out.
+
+    Pure function — never raises. Returns a self-contained string the session
+    can consume on the next turn.
+
+    **Self-contained requirement:** The message must not rely on ``--resume``
+    continuity. When the health-check kills the stuck subprocess, the prior
+    ``claude_session_uuid`` becomes stale; the harness falls back to a fresh
+    run (no ``--resume``) using ``full_context_message``. A fresh run has no
+    prior conversation history, so the steering message must embed the original
+    request verbatim — it is the only thread of context the re-queued turn has.
+
+    Args:
+        tool_name: The tool that timed out (e.g. ``mcp__foo__bar``).
+        original_request: The user's original message text. Truncated to 1500
+            chars. May be None or empty — still returns a valid string.
+    """
+    req = (original_request or "").strip()
+    if req:
+        req_truncated = req[:1500]
+        req_part = f" Original request: {req_truncated}"
+    else:
+        req_part = ""
+    return (
+        f"The tool {tool_name} timed out and is temporarily unavailable — "
+        f"do not call it again this turn. Answer the user's original request "
+        f"as best you can without it, and note which information was "
+        f"unavailable.{req_part}"
+    )
+
+
+async def _deliver_tool_timeout_degraded_notice(
+    entry: "AgentSession",
+    tool_name: str | None,
+) -> None:
+    """Send a one-shot degraded-service notice when a tool timeout leads to
+    session failure.
+
+    Idempotent: the first caller wins via Redis SETNX on
+    ``tool_timeout:degraded_sent:{session_id}`` (1 h TTL). Subsequent calls
+    return immediately.
+
+    Transport is read from ``entry.extra_context["transport"]`` — AgentSession
+    has no top-level ``transport`` field.  Falls back to FileOutputHandler when
+    no registered callback is found.
+
+    Never raises; failures are logged at WARNING and swallowed.
+    """
+    try:
+        session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+        project_key = getattr(entry, "project_key", None) or "unknown"
+
+        # Atomic dedup: only the first caller sends the notice (1 h window).
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+            lock_key = f"tool_timeout:degraded_sent:{session_id}"
+            acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+            if not acquired:
+                logger.debug(
+                    "[session-health] degraded notice already sent for %s — skipping",
+                    session_id,
+                )
+                return
+        except Exception as _lock_err:
+            logger.warning(
+                "[session-health] degraded notice lock failed for %s: %s; proceeding anyway",
+                session_id,
+                _lock_err,
+            )
+
+        # Resolve transport from extra_context (never from a top-level field).
+        transport = (getattr(entry, "extra_context", None) or {}).get("transport")
+
+        # Resolve send callback — fall back to FileOutputHandler when none registered.
+        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+
+        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
+        if send_cb is None:
+            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
+
+            _fallback = FileOutputHandler()
+            send_cb = _fallback.send
+
+        # Compose the user-facing degraded notice.
+        tool_label = tool_name or "the requested service"
+        message = (
+            f"I couldn't finish that — the {tool_label} service didn't respond. "
+            f"Please try again shortly; everything else is working."
+        )
+
+        chat_id = getattr(entry, "chat_id", None) or ""
+        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
+
+        await send_cb(chat_id, message, telegram_message_id, entry)
+
+        # Best-effort telemetry counter.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
+
+            _R2.incr(f"{project_key}:session-health:tool_timeout_degraded_delivered")
+        except Exception:
+            pass
+
+    except Exception as _err:
+        logger.warning(
+            "[session-health] _deliver_tool_timeout_degraded_notice failed for %s: %s",
+            getattr(entry, "session_id", "?"),
+            _err,
+        )
+
+
+async def _deliver_deferred_self_draft_fallback(
+    entry: "AgentSession",
+) -> None:
+    """Deliver a fallback message when a deferred self-draft was never completed.
+
+    Called on every terminal recovery branch (``failed`` and ``abandoned``) when
+    ``entry.extra_context["deferred_self_draft_pending"]`` is truthy.  This flag
+    is written at defer time by ``TelegramRelayOutputHandler.send()`` — the
+    steering queue cannot be used because the agent drains it at turn start,
+    leaving it empty by finalization time.
+
+    Precedence over the generic degraded notice: callers invoke this helper
+    *before* ``_deliver_tool_timeout_degraded_notice``; if the deferred flag is
+    set, only the self-draft fallback fires (not the generic notice).
+
+    Idempotent: the first caller wins via Redis SETNX on
+    ``self_draft_fallback_sent:{session_id}`` (1 h TTL).  The TTL is intentionally
+    NOT per-run — for legitimate resume scenarios, scope it per-run by including
+    ``started_at`` in the key if that becomes necessary.
+
+    Never raises; failures are logged at WARNING and swallowed.
+
+    Terminal-branch-only precondition: must only be called from the ``abandoned``
+    or ``failed`` finalization branches, never from the requeue (``else``) branch
+    where the session will run again and the agent may still deliver.
+    """
+    try:
+        # Check the persisted detection signal — NOT the steering queue.
+        extra_ctx = getattr(entry, "extra_context", None) or {}
+        if not extra_ctx.get("deferred_self_draft_pending"):
+            return
+
+        session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+        project_key = getattr(entry, "project_key", None) or "unknown"
+
+        # Atomic dedup: only the first caller sends the fallback (1 h window).
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+            lock_key = f"self_draft_fallback_sent:{session_id}"
+            acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+            if not acquired:
+                logger.debug(
+                    "[session-health] self-draft fallback already sent for %s — skipping",
+                    session_id,
+                )
+                return
+        except Exception as _lock_err:
+            logger.warning(
+                "[session-health] self-draft fallback lock failed for %s: %s; proceeding anyway",
+                session_id,
+                _lock_err,
+            )
+
+        # Recover the deferred text and apply the narration gate.
+        deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
+        if deferred_text and deferred_text.strip():
+            try:
+                from bridge.message_quality import (  # noqa: PLC0415
+                    NARRATION_FALLBACK_MESSAGE,
+                    is_narration_only,
+                )
+
+                if is_narration_only(deferred_text[:500]):
+                    message = NARRATION_FALLBACK_MESSAGE
+                else:
+                    message = deferred_text
+            except Exception:
+                message = deferred_text
+        else:
+            message = "I couldn't finish responding to that — please try again."
+
+        # Resolve transport from extra_context (no top-level transport field).
+        transport = extra_ctx.get("transport")
+
+        # Resolve send callback — fall back to FileOutputHandler when none registered.
+        from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
+
+        send_cb, _react_cb = _resolve_callbacks(project_key, transport)
+        if send_cb is None:
+            from agent.output_handler import FileOutputHandler  # noqa: PLC0415
+
+            _fallback = FileOutputHandler()
+            send_cb = _fallback.send
+
+        chat_id = getattr(entry, "chat_id", None) or ""
+        telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
+
+        await send_cb(chat_id, message, telegram_message_id, entry)
+
+        # Best-effort telemetry counter.
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
+
+            _R2.incr(f"{project_key}:session-health:deferred_self_draft_fallback_delivered")
+        except Exception:
+            pass
+
+    except Exception as _err:
+        logger.warning(
+            "[session-health] _deliver_deferred_self_draft_fallback failed for %s: %s",
+            getattr(entry, "session_id", "?"),
+            _err,
+        )
 
 
 async def _apply_recovery_transition(
@@ -989,6 +1565,31 @@ async def _apply_recovery_transition(
             "[session-health] recovery counter increment failed (non-fatal): %s",
             _counter_err,
         )
+
+    # AC4 narrow telemetry counter (issue #1614): track recoveries that match
+    # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
+    # but sdk_ever_output=False — the confirmed Branch 2 failure mode).
+    # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it from the
+    # real fields last_tool_use_at and last_turn_at (same derivation as
+    # _has_progress). Do NOT read the attribute directly from entry — use the
+    # derived expression below instead.
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R2
+
+        _sdk_ever_output = bool(
+            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
+        )
+        if bool(getattr(entry, "claude_session_uuid", None)) and not _sdk_ever_output:
+            project_key = getattr(entry, "project_key", "unknown")
+            counter_key = f"{project_key}:session-health:recoveries:zombie_uuid_no_output"
+            _R2.incr(counter_key)
+            logger.info(
+                "[session-health] zombie_uuid_no_output recovery: %s "
+                "(claude_session_uuid set, sdk_ever_output=False)",
+                getattr(entry, "agent_session_id", "?"),
+            )
+    except Exception:
+        pass
 
     # Guard: if response was already delivered, finalize instead of recovering
     # to pending (prevents duplicate delivery, #918).
@@ -1072,6 +1673,8 @@ async def _apply_recovery_transition(
         return False
 
     is_local = worker_key.startswith("local")
+    # Capture tool_name once for use in advisory injection and degraded notice.
+    tool_name = getattr(entry, "current_tool_name", None)
     logger.warning(
         "[session-health] Recovering session %s (chat=%s, session=%s, local=%s, kind=%s): %s",
         entry.agent_session_id,
@@ -1103,6 +1706,34 @@ async def _apply_recovery_transition(
             entry.agent_session_id,
         )
 
+    # Confirm the SDK subprocess actually exited (issue #1537). ``task.cancel()``
+    # does not guarantee a hung ``claude -p`` exited; if it ignored cancellation
+    # it becomes an orphan that no detector tracks once the session leaves
+    # ``running``. Escalate SIGTERM -> SIGKILL against the recorded ``claude_pid``
+    # and capture whether the process is confirmed gone. The requeue ``else``
+    # branch below uses this to avoid silently parking an orphan at ``pending``.
+    # ``_confirm_subprocess_dead`` is synchronous and may ``time.sleep`` for up to
+    # ``SUBPROCESS_KILL_TIMEOUT`` while polling a signalled PID. Offload it to a
+    # thread so the genuine-hang path never stalls the worker event loop (and every
+    # other coroutine sharing it). The helper keeps its sync signature so its unit
+    # tests stay unchanged.
+    _kill_result = await asyncio.get_running_loop().run_in_executor(
+        None,
+        functools.partial(
+            _confirm_subprocess_dead,
+            getattr(entry, "claude_pid", None),
+            timeout=SUBPROCESS_KILL_TIMEOUT,
+        ),
+    )
+    _subprocess_confirmed_dead = _kill_result.confirmed_dead
+    if not _subprocess_confirmed_dead:
+        _increment_subprocess_kill_counter(entry, escalated=False)
+    elif _kill_result.signal_sent:
+        # The subprocess survived task.cancel() and a SIGTERM/SIGKILL was actually
+        # delivered to terminate it — a true escalation. The already-dead path
+        # (cancel sufficed, signal_sent=False) is deliberately NOT counted.
+        _increment_subprocess_kill_counter(entry, escalated=True)
+
     from models.session_lifecycle import (
         StatusConflictError,
         finalize_session,
@@ -1118,8 +1749,68 @@ async def _apply_recovery_transition(
     except Exception as _m_err:
         logger.debug("[session-health] kill counter failed: %s", _m_err)
 
+    # Additive telemetry tap — no behavior change
+    # Emit kill-enriched status_transition before the actual finalize/requeue.
+    # Destination status is determined by the branches below; we emit one rich
+    # event here so finalize_session() suppresses its plain duplicate via
+    # emit_telemetry=False on every call in this recovery path.
+    try:
+        from agent.session_telemetry import record_telemetry_event as _rte
+
+        _dest = (
+            "abandoned"
+            if is_local
+            else (
+                "failed"
+                if entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS
+                or not _subprocess_confirmed_dead
+                else "pending"
+            )
+        )
+        _rte(
+            entry.session_id,
+            {
+                "type": "status_transition",
+                "from": "running",
+                "to": _dest,
+                "reason": reason or "recovery",
+                "kill": {
+                    "confirmed_dead": _kill_result.confirmed_dead if _kill_result else False,
+                    "signal_sent": _kill_result.signal_sent if _kill_result else False,
+                    "pid": getattr(entry, "claude_pid", None),
+                },
+            },
+        )
+        # Reap the session's in-memory telemetry state when this recovery
+        # transition is terminal. The lifecycle finalize call below runs with
+        # emit_telemetry=False (the kill-enriched event above is the dedup
+        # source), so the lifecycle reaper hook never fires on this path — reap
+        # here instead. ``pending`` is a requeue (non-terminal): the session
+        # keeps running, so its telemetry state must survive.
+        if _dest in ("abandoned", "failed"):
+            from agent.session_telemetry import finalize_session as _finalize_telemetry
+
+            _finalize_telemetry(entry.session_id)
+            # AC4 Seat B: reset the self-draft attempt counter on every
+            # health-checker terminal finalize.  These callers pass
+            # emit_telemetry=False, so the finalize_session Seat A reaper
+            # (outside the emit_telemetry guard) would not fire here — this
+            # seat closes that gap.  Best-effort: a Redis failure never blocks
+            # the terminal transition.
+            try:
+                from agent.steering import reset_self_draft_attempts as _reset_attempts
+
+                _reset_attempts(entry.session_id)
+            except Exception:
+                pass
+    except Exception as _tel_err:
+        logger.debug("[session-health] telemetry emit failed (non-fatal): %s", _tel_err)
+
     try:
         if is_local:
+            # Deferred self-draft fallback: fire on abandoned path too (blocker 3).
+            # The agent already stopped; deliver the deferred answer before closing.
+            await _deliver_deferred_self_draft_fallback(entry)
             finalize_session(
                 entry,
                 "abandoned",
@@ -1128,6 +1819,7 @@ async def _apply_recovery_transition(
                     f"(chat={worker_key}, attempts={entry.recovery_attempts}, kind={reason_kind})"
                 ),
                 skip_auto_tag=True,
+                emit_telemetry=False,
             )
             logger.info(
                 "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
@@ -1136,6 +1828,14 @@ async def _apply_recovery_transition(
                 entry.recovery_attempts,
             )
         elif entry.recovery_attempts >= MAX_RECOVERY_ATTEMPTS:
+            # Self-draft fallback takes precedence over the generic degraded notice.
+            # Only send the generic notice when no deferred self-draft was pending.
+            _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
+                "deferred_self_draft_pending"
+            )
+            await _deliver_deferred_self_draft_fallback(entry)
+            if not _has_deferred and reason_kind == "tool_timeout":
+                await _deliver_tool_timeout_degraded_notice(entry, tool_name)
             finalize_session(
                 entry,
                 "failed",
@@ -1143,15 +1843,96 @@ async def _apply_recovery_transition(
                     f"health check: {entry.recovery_attempts} recovery "
                     f"attempts, never progressed (kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
                 entry.recovery_attempts,
             )
+        elif not _subprocess_confirmed_dead:
+            # Issue #1537: the recorded subprocess survived cancel + SIGTERM +
+            # SIGKILL (or could not be confirmed dead). Requeuing to ``pending``
+            # would park a live orphan that no detector tracks — the exact defect
+            # that wedged the worker for 25.5h on 2026-05-31. Escalate to the
+            # ``failed`` terminal status so the in-process orphan reaper
+            # (_TERMINAL_STATUSES) owns cleanup. Do NOT null ``started_at`` into
+            # a pending record.
+            _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
+                "deferred_self_draft_pending"
+            )
+            await _deliver_deferred_self_draft_fallback(entry)
+            if not _has_deferred and reason_kind == "tool_timeout":
+                await _deliver_tool_timeout_degraded_notice(entry, tool_name)
+            finalize_session(
+                entry,
+                "failed",
+                reason=(
+                    f"health check: subprocess {getattr(entry, 'claude_pid', None)} "
+                    f"survived cancel+SIGTERM+SIGKILL; escalating to failed so the "
+                    f"orphan reaper owns cleanup (chat={worker_key}, "
+                    f"attempt {entry.recovery_attempts}, kind={reason_kind})"
+                ),
+                emit_telemetry=False,
+            )
+            logger.warning(
+                "[session-health] Escalated session %s to failed — subprocess "
+                "pid=%s not confirmed dead after cancel+SIGTERM+SIGKILL "
+                "(chat=%s, attempt %s, kind=%s)",
+                entry.agent_session_id,
+                getattr(entry, "claude_pid", None),
+                worker_key,
+                entry.recovery_attempts,
+                reason_kind,
+            )
         else:
             entry.priority = "high"
             entry.started_at = None
+            # Advisory injection (issue #1711): only on the requeue (``else``) branch,
+            # only for ``tool_timeout`` reason kind. Explanation of each constraint:
+            #   • Requeue-branch-only: the ``failed`` and ``abandoned`` branches
+            #     finalize the session — there is no next turn to consume steering.
+            #     Advisory steering is only useful when the session will run again.
+            #   • tool_timeout-only: steering is narrowly targeted at the "model
+            #     attempted a specific tool and it wedged" failure mode. Other reason
+            #     kinds (no_progress, worker_dead) have different root causes and
+            #     different remediation patterns; injecting a tool-skip message for
+            #     them would be misleading and could mask the real issue.
+            if reason_kind == "tool_timeout" and tool_name:
+                try:
+                    entry.push_steering_message(
+                        _compose_tool_timeout_steering(
+                            tool_name, getattr(entry, "message_text", None)
+                        ),
+                        front=True,
+                    )
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+                        _R.incr(
+                            f"{entry.project_key}:session-health:tool_timeout_steering_injected"
+                        )
+                    except Exception:
+                        pass
+                except Exception as _steer_err:
+                    logger.warning(
+                        "[session-health] Failed to inject tool_timeout steering for %s: %s",
+                        entry.agent_session_id,
+                        _steer_err,
+                    )
+            # Clear durable wedge fields on tool_timeout requeue only (same gate
+            # as the steering injection above) so the stale signal does not
+            # re-trip _check_tool_timeout before the resumed session takes its
+            # first new turn.  Each resume generates a fresh UUID/transcript
+            # (bridge_adapter.py:993-995) so the diff-gated tailer has no
+            # tool_use block to re-pin from; once cleared, _check_tool_timeout
+            # returns None until a genuinely new tool_use arrives.
+            # Both fields must be cleared together: a fresh tool name paired with
+            # the frozen last_tool_use_at could still re-trip the budget check.
+            # See issue #1762.
+            if reason_kind == "tool_timeout":
+                entry.current_tool_name = None
+                entry.last_tool_use_at = None
             if (
                 getattr(entry, "exit_returncode", None) == -9
                 and pre_bump_attempts == 0
@@ -1159,7 +1940,10 @@ async def _apply_recovery_transition(
             ):
                 entry.scheduled_at = datetime.now(tz=UTC) + timedelta(seconds=120)
                 try:
-                    entry.save(update_fields=["scheduled_at", "recovery_attempts"])
+                    _oom_fields = ["scheduled_at", "recovery_attempts"]
+                    if reason_kind == "tool_timeout":
+                        _oom_fields += ["current_tool_name", "last_tool_use_at"]
+                    entry.save(update_fields=_oom_fields)
                 except Exception as _sa_err:
                     logger.debug(
                         "[session-health] scheduled_at save failed: %s",
@@ -1174,7 +1958,10 @@ async def _apply_recovery_transition(
                 )
             else:
                 try:
-                    entry.save(update_fields=["recovery_attempts"])
+                    _requeue_fields = ["recovery_attempts"]
+                    if reason_kind == "tool_timeout":
+                        _requeue_fields += ["current_tool_name", "last_tool_use_at"]
+                    entry.save(update_fields=_requeue_fields)
                 except Exception as _ra_err:
                     logger.debug(
                         "[session-health] recovery_attempts save failed: %s",
@@ -1187,6 +1974,7 @@ async def _apply_recovery_transition(
                     f"health check: recovered session "
                     f"(chat={worker_key}, attempt {entry.recovery_attempts}, kind={reason_kind})"
                 ),
+                emit_telemetry=False,
             )
             logger.info(
                 "[session-health] Recovered session %s (chat=%s, attempt %s, kind=%s)",
@@ -1320,9 +2108,11 @@ async def _agent_session_health_check() -> None:
 
         # Delivery guard: if response was already delivered, finalize immediately
         # without going through worker_alive/_has_progress evaluation. turn_count
-        # and claude_session_uuid are sticky fields that permanently block the
-        # no_progress recovery path, so sessions that delivered but failed to
-        # finalize would otherwise stay stuck as "running" indefinitely.
+        # and claude_session_uuid are sticky fields that block the no_progress
+        # recovery path while the heartbeat is fresh (gated on
+        # NO_OUTPUT_BUDGET_SECONDS since #1614 — no longer permanent), so
+        # sessions that delivered but failed to finalize would otherwise stay
+        # stuck as "running" until the heartbeat goes stale.
         if getattr(entry, "response_delivered_at", None) is not None:
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
@@ -1858,9 +2648,192 @@ async def _agent_session_health_loop() -> None:
             await _agent_session_health_check()
             await _agent_session_hierarchy_health_check()
             await _dependency_health_check()
+            # Issue #1632 mode 1c: stale `--print` one-shots accumulate at
+            # ~4/min during an orphan cascade — the hourly cleanup reflection
+            # is too slow. The fast reaper is itself fail-silent (never
+            # raises); the outer try/except here is a second safety layer.
+            _fast_reap_stale_print_oneshots()
         except Exception as e:
             logger.error("[session-health] Error in health check: %s", e, exc_info=True)
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
+
+
+def _eval_mid_run_pty_stage1(entry: "AgentSession", now: datetime) -> None:
+    """Stage-1 PTY quiescence evaluation for the path-B mid-run wedge detector (#1724).
+
+    Evaluates PTY screen liveness for a single session on the 30s tool-timeout
+    sub-loop tick. Updates durable cross-tick state on ``entry`` in place and
+    persists via ``update_fields``. Does NOT recover — it only maintains the
+    ``mid_run_quiescent_since`` timestamp and flags confirmed suspects for the
+    future stage-2 dispatch (task 4). Fail-silent: never raises.
+
+    Eligibility gate:
+    - ``sdk_ever_output=True``: session has produced at least one PM turn.
+    - ``current_tool_name`` is set: a tool is currently in flight.
+    - ``last_pty_read_loop_at`` is not None: PTY writer has initialized.
+
+    Three-state PTY freshness logic (compared against ``last_heartbeat_at``):
+    1. ABSTAIN: ``last_pty_read_loop_at`` is None → writer not initialized yet.
+    2. ABSTAIN: read-loop marker is stale (> HEARTBEAT_FRESHNESS_WINDOW behind
+       ``last_heartbeat_at``) → the pexpect thread may have died; clear
+       ``mid_run_quiescent_since`` and skip this tick.
+    3. FRESH: read-loop marker is current.
+       a. Activity fresh (``last_pty_activity_at`` recently changed): NOT a
+          suspect; clear ``mid_run_quiescent_since``.
+       b. Activity stale (screen not repainting): check the snapshot tuple
+          ``(last_pty_activity_at, byte_offset)`` against the prior tick's
+          ``mid_run_pty_snapshot``. If unchanged, increment the quiescence
+          window (set ``mid_run_quiescent_since`` if not already set); if
+          ``now - mid_run_quiescent_since >= MID_RUN_QUIESCENCE_SECS``,
+          log the confirmed suspect for stage-2. If the snapshot changed,
+          reset ``mid_run_quiescent_since``.
+    """
+    try:
+        # Eligibility: must have produced output and have a tool in flight.
+        sdk_ever_output = bool(
+            getattr(entry, "last_turn_at", None) or getattr(entry, "last_tool_use_at", None)
+        )
+        if not sdk_ever_output:
+            return
+        tool_name = getattr(entry, "current_tool_name", None)
+        if not tool_name:
+            return
+
+        # Eligibility: PTY writer must have initialized.
+        last_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+        if not isinstance(last_loop_at, datetime):
+            # ABSTAIN: writer never initialized (non-granite session or not yet started).
+            return
+
+        last_loop_aware = last_loop_at if last_loop_at.tzinfo else last_loop_at.replace(tzinfo=UTC)
+        last_hb_at = getattr(entry, "last_heartbeat_at", None)
+
+        # Use last_heartbeat_at as the reference clock for staleness checks.
+        # If not set, fall back to now (conservative).
+        if isinstance(last_hb_at, datetime):
+            ref_time = last_hb_at if last_hb_at.tzinfo else last_hb_at.replace(tzinfo=UTC)
+        else:
+            ref_time = now
+
+        loop_age = (ref_time - last_loop_aware).total_seconds()
+        if loop_age > HEARTBEAT_FRESHNESS_WINDOW:
+            # ABSTAIN: the pexpect read-loop writer has gone silent (thread may
+            # have died or been throttled). Clear quiescent_since so we don't
+            # accumulate stale quiescence time across a writer outage.
+            mid_qs = getattr(entry, "mid_run_quiescent_since", None)
+            if mid_qs is not None:
+                try:
+                    entry.mid_run_quiescent_since = None
+                    save = getattr(entry, "save", None)
+                    if callable(save):
+                        save(update_fields=["mid_run_quiescent_since"])
+                except Exception as _clr_err:
+                    logger.debug(
+                        "[session-health] stage-1 mid_run_quiescent_since clear failed: %s",
+                        _clr_err,
+                    )
+            logger.debug(
+                "[session-health] stage-1 ABSTAIN session=%s: "
+                "last_pty_read_loop_at stale by %.0fs (> HEARTBEAT_FRESHNESS_WINDOW=%ds)",
+                getattr(entry, "agent_session_id", "?"),
+                loop_age,
+                HEARTBEAT_FRESHNESS_WINDOW,
+            )
+            return
+
+        # PTY read-loop is fresh. Check whether the screen is repainting.
+        last_activity_at = getattr(entry, "last_pty_activity_at", None)
+        activity_fresh = False
+        if isinstance(last_activity_at, datetime):
+            act_aware = (
+                last_activity_at
+                if last_activity_at.tzinfo
+                else last_activity_at.replace(tzinfo=UTC)
+            )
+            activity_age = (now - act_aware).total_seconds()
+            # Screen is "fresh" if activity within the same HEARTBEAT_FRESHNESS_WINDOW.
+            activity_fresh = activity_age < HEARTBEAT_FRESHNESS_WINDOW
+
+        # Build current snapshot tuple string for cross-tick comparison.
+        # byte_offset is a corroborator (log but do not gate on it).
+        act_iso = last_activity_at.isoformat() if isinstance(last_activity_at, datetime) else "None"
+        # stage-1 proxy: total_input_tokens substitutes for the plan's byte_offset (raw
+        # transcript bytes) because byte_offset is not persisted on AgentSession.
+        # Safe for observe-only stage-1 (corroborator-only, never gates).
+        # Must be replaced with a persisted byte_offset before stage-2 wires recovery.
+        byte_offset = getattr(entry, "total_input_tokens", None)
+        current_snapshot = f"({act_iso},{byte_offset})"
+
+        prior_snapshot = getattr(entry, "mid_run_pty_snapshot", None)
+        mid_qs = getattr(entry, "mid_run_quiescent_since", None)
+
+        update_fields: list[str] = []
+
+        if activity_fresh:
+            # NOT a suspect: screen is repainting. Clear quiescent_since.
+            if mid_qs is not None:
+                entry.mid_run_quiescent_since = None
+                update_fields.append("mid_run_quiescent_since")
+        else:
+            # Screen is quiescent. Compare snapshot to prior tick.
+            if current_snapshot == prior_snapshot:
+                # Same snapshot as last tick: screen has not repainted.
+                if mid_qs is None:
+                    # First quiescent tick: record the start time.
+                    entry.mid_run_quiescent_since = now
+                    update_fields.append("mid_run_quiescent_since")
+                    mid_qs = now
+                # Check whether the quiescence window has been exceeded.
+                if isinstance(mid_qs, datetime):
+                    qs_aware = mid_qs if mid_qs.tzinfo else mid_qs.replace(tzinfo=UTC)
+                    quiescent_secs = (now - qs_aware).total_seconds()
+                    if MID_RUN_QUIESCENCE_SECS > 0 and quiescent_secs >= MID_RUN_QUIESCENCE_SECS:
+                        logger.warning(
+                            "[session-health] stage-1 CONFIRMED SUSPECT session=%s "
+                            "tool=%s quiescent_secs=%.0f byte_offset=%s "
+                            "(awaiting stage-2 dispatch, task #1724)",
+                            getattr(entry, "agent_session_id", "?"),
+                            tool_name,
+                            quiescent_secs,
+                            byte_offset,
+                        )
+                    else:
+                        logger.debug(
+                            "[session-health] stage-1 quiescent session=%s tool=%s "
+                            "quiescent_secs=%.0f / %.0f",
+                            getattr(entry, "agent_session_id", "?"),
+                            tool_name,
+                            quiescent_secs,
+                            MID_RUN_QUIESCENCE_SECS,
+                        )
+            else:
+                # Snapshot changed between ticks (activity resumed): reset.
+                if mid_qs is not None:
+                    entry.mid_run_quiescent_since = None
+                    update_fields.append("mid_run_quiescent_since")
+
+        # Always rewrite snapshot to current (cross-tick state persistence).
+        entry.mid_run_pty_snapshot = current_snapshot
+        update_fields.append("mid_run_pty_snapshot")
+
+        if update_fields:
+            try:
+                save = getattr(entry, "save", None)
+                if callable(save):
+                    save(update_fields=update_fields)
+            except Exception as _save_err:
+                logger.debug(
+                    "[session-health] stage-1 snapshot save failed for %s: %s",
+                    getattr(entry, "agent_session_id", "?"),
+                    _save_err,
+                )
+
+    except Exception:
+        logger.debug(
+            "[session-health] stage-1 eval raised for session %s",
+            getattr(entry, "agent_session_id", "?"),
+            exc_info=True,
+        )
 
 
 async def _agent_session_tool_timeout_check() -> None:
@@ -1897,10 +2870,93 @@ async def _agent_session_tool_timeout_check() -> None:
         if actual_status in _TERMINAL_STATUSES:
             continue
         try:
+            now = datetime.now(tz=UTC)
+
+            # D0: dedicated never-started recovery branch (issue #1724).
+            # Check BEFORE the tool-timeout path so never-started sessions are
+            # caught promptly on the 30s loop without waiting for a tool wedge.
+            # Uses the same race-mitigation pattern as the tool-timeout path:
+            # re-read fresh, re-confirm predicate, then transition.
+            if _never_started_past_grace(entry, now):
+                try:
+                    fresh_ns = AgentSession.get_by_id(entry.agent_session_id)
+                except Exception as _ns_re_err:
+                    logger.debug(
+                        "[session-health] never-started re-read failed for %s: %s",
+                        entry.agent_session_id,
+                        _ns_re_err,
+                    )
+                    fresh_ns = None
+                if fresh_ns is not None and (
+                    getattr(fresh_ns, "status", None) not in _TERMINAL_STATUSES
+                ):
+                    if _never_started_past_grace(fresh_ns, now):
+                        # Increment project-scoped telemetry counter.
+                        try:
+                            from popoto.redis_db import POPOTO_REDIS_DB as _R_NS
+
+                            _R_NS.incr(
+                                f"{fresh_ns.project_key}:session-health:"
+                                f"tier1_falloff:never_started_grace_exceeded"
+                            )
+                        except Exception as _ns_ctr_err:
+                            logger.debug(
+                                "[session-health] never_started_grace_exceeded counter "
+                                "increment failed: %s",
+                                _ns_ctr_err,
+                            )
+                        handle_ns = _active_sessions.get(fresh_ns.agent_session_id)
+                        await _apply_recovery_transition(
+                            fresh_ns,
+                            reason="no progress signal observed (never_started past grace)",
+                            reason_kind="no_progress",
+                            handle=handle_ns,
+                            worker_key=fresh_ns.worker_key,
+                        )
+                        continue
+
+            # === Stage-1 PTY quiescence gate (path B, #1724) ===
+            # Cheap, stateless per-tick evaluation of PTY screen activity for
+            # sessions that have produced output and have a tool in flight.
+            # Updates durable state (mid_run_quiescent_since, mid_run_pty_snapshot)
+            # on the entry object and persists via update_fields. Does NOT recover —
+            # it only flags confirmed suspects for stage-2 (task 4). Fail-silent.
+            _eval_mid_run_pty_stage1(entry, now)
+
             check = _check_tool_timeout(entry)
             if check is None:
                 continue
             tier, reason = check
+
+            # PTY-liveness gate for default-tier tools on granite PTY sessions (#1784).
+            # Internal/mcp tiers keep the age-only predicate (they are short-lived tools
+            # that must not run for minutes). For the default tier, suppress the kill if
+            # the PTY is still painting — a screen still updating is never a wedge.
+            # SDK/non-granite sessions (last_pty_read_loop_at=None) always go through
+            # the age-only path (helper branch 2) so the 300s ceiling is preserved.
+            if tier == "default" and not _pty_quiescent_long_enough(entry, now):
+                logger.debug(
+                    "[session-health] tool-timeout default-tier deferred for %s "
+                    "(%s): PTY still active (mid_run_quiescent_since=%s, "
+                    "MID_RUN_QUIESCENCE_SECS=%s)",
+                    entry.agent_session_id,
+                    getattr(entry, "current_tool_name", "?"),
+                    getattr(entry, "mid_run_quiescent_since", None),
+                    MID_RUN_QUIESCENCE_SECS,
+                )
+                # Deferred-kill observability counter (critique Concern 2).
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _R_DEFER
+
+                    _R_DEFER.incr(
+                        f"{entry.project_key}:session-health:tool_timeouts:default_deferred"
+                    )
+                except Exception as _def_err:
+                    logger.debug(
+                        "[session-health] tool_timeouts:default_deferred incr failed: %s",
+                        _def_err,
+                    )
+                continue
 
             # Race mitigation (issue #1270 Risk 2): re-read both fields from a
             # fresh query before we transition. PostToolUse may have fired
@@ -1928,6 +2984,27 @@ async def _agent_session_tool_timeout_check() -> None:
                 )
                 continue
             tier, reason = recheck
+
+            # Re-evaluate the PTY-liveness gate on the fresh row (#1784 race path):
+            # if the tool resumed painting between the iterator read and the re-read,
+            # abort the recovery — we must not kill a session that just resumed output.
+            if tier == "default" and not _pty_quiescent_long_enough(fresh, now):
+                logger.debug(
+                    "[session-health] tool-timeout default-tier race abort for %s "
+                    "(%s): PTY resumed painting between read and re-read",
+                    fresh.agent_session_id,
+                    getattr(fresh, "current_tool_name", "?"),
+                )
+                continue
+
+            # Extend the default-tier reason string with quiescence context so logs
+            # explain why a live-but-past-deadline default tool was killed.
+            if tier == "default":
+                reason = (
+                    f"{reason}; pty quiescent >= {MID_RUN_QUIESCENCE_SECS}s"
+                    if getattr(fresh, "last_pty_read_loop_at", None) is not None
+                    else reason
+                )
 
             # Bump per-tier counter on the session row. Best-effort; failure
             # must not block the recovery transition (matches the
@@ -2318,6 +3395,27 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
     except Exception as idx_err:
         logger.warning("[agent-session-cleanup] Index repair failed: %s", idx_err)
 
+    # === Class-set orphan cleanup (#1459) ===
+    # repair_indexes() covers $IndexF (field/status indexes) but never touches
+    # the class set ($Idx:AgentSession). TTL expiry removes the hash but not
+    # its class-set member, causing continuous Sentry noise. clean_indexes()
+    # uses SSCAN (production-safe) to remove stale class-set entries.
+    for model_cls, model_label in ((AgentSession, "AgentSession"), (Memory, "Memory")):
+        try:
+            orphans_removed = model_cls.clean_indexes()
+            if orphans_removed:
+                logger.info(
+                    "[agent-session-cleanup] clean_indexes %s: removed %d orphan class-set entries",
+                    model_label,
+                    orphans_removed,
+                )
+        except Exception as ci_err:
+            logger.warning(
+                "[agent-session-cleanup] clean_indexes %s failed (non-fatal): %s",
+                model_label,
+                ci_err,
+            )
+
     # === Cross-process orphan reap pass (#1271) ===
     # Wrapped in try/except — reaper failure must never abort corrupted-record
     # cleanup. On reaper exception, log WARNING and report orphans=0.
@@ -2331,6 +3429,36 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
             exc_info=True,
         )
         orphans_reaped = 0
+
+    # === Telemetry retention sweep ===
+    # Delete JSONL trace files older than 14 days.  Wrapped in try/except so
+    # a filesystem error never aborts the main cleanup function.
+    try:
+        from agent.session_telemetry import _get_telemetry_dir
+
+        retention_days = 14
+        cutoff = datetime.now(tz=UTC) - timedelta(days=retention_days)
+        telemetry_dir = _get_telemetry_dir()
+        stale_count = 0
+        for jsonl_file in telemetry_dir.glob("*.jsonl"):
+            try:
+                mtime = datetime.fromtimestamp(jsonl_file.stat().st_mtime, tz=UTC)
+                if mtime < cutoff:
+                    jsonl_file.unlink()
+                    stale_count += 1
+            except Exception:
+                pass
+        if stale_count:
+            logger.info(
+                "[session-health] Deleted %d stale telemetry traces (older than %d days)",
+                stale_count,
+                retention_days,
+            )
+    except Exception as sweep_err:
+        logger.warning(
+            "[session-health] Telemetry retention sweep failed (non-fatal): %s",
+            sweep_err,
+        )
 
     return {"corrupted": cleaned, "orphans": orphans_reaped}
 
@@ -2348,6 +3476,66 @@ def _psutil_process_for_pid(pid: int):
         return None
     except Exception:
         return None
+
+
+def _is_stale_print_oneshot(cmdline: list, create_time: float) -> bool:
+    """True if ``cmdline`` is a `claude --print` one-shot older than the threshold.
+
+    Issue #1632 mode 1(a). Matches a `claude` executable (bare on PATH or any
+    absolute path, including the bundled SDK path) running in one-shot mode
+    (`--print` or its `-p` alias) whose age exceeds
+    ``ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS``.
+
+    Deliberately narrow:
+      - argv[0] (or argv[1], for `node /path/claude` shapes) must have
+        basename exactly ``claude`` — `python -m worker` can never match.
+      - interactive `claude` (no `--print`/`-p` token) never matches.
+      - ``create_time`` of 0/None (unknown) is treated as NOT stale.
+    """
+    if not cmdline:
+        return False
+    head = [str(x) for x in cmdline[:2]]
+    if not any(tok.rsplit("/", 1)[-1] == "claude" for tok in head):
+        return False
+    args = [str(x) for x in cmdline[1:]]
+    if "--print" not in args and "-p" not in args:
+        return False
+    if not create_time:
+        return False
+    try:
+        age = time.time() - float(create_time)
+    except (TypeError, ValueError):
+        return False
+    return age > ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS
+
+
+def _parent_is_orphaned_shell_wrapper(ppid: int) -> bool:
+    """True if PID ``ppid`` is a live `sh -c`-style wrapper whose own PPID==1.
+
+    Issue #1632 mode 1(b): when a session process dies, its `zsh -c` Bash-tool
+    wrappers reparent to launchd (PPID==1) but stay alive, blocked waiting on
+    their child forever. A claude/MCP/pytest child under such a wrapper is an
+    orphan even though its immediate parent is technically alive — the chain
+    above it is dead.
+
+    Only consults the single parent level; failure of any psutil call returns
+    False (keep the child — conservative default).
+    """
+    if not ppid or ppid <= 1:
+        return False
+    parent = _psutil_process_for_pid(ppid)
+    if parent is None:
+        return False
+    try:
+        if parent.ppid() != 1:
+            return False
+        pcmd = [str(x) for x in (parent.cmdline() or [])]
+    except Exception:
+        return False
+    if len(pcmd) < 2:
+        return False
+    exe = pcmd[0].rsplit("/", 1)[-1]
+    return exe in _SHELL_WRAPPER_NAMES and "-c" in pcmd[1:3]
 
 
 def _session_is_alive(session) -> bool:
@@ -2507,15 +3695,22 @@ def _reap_orphan_session_processes() -> int:
                 continue
             if pid in skip_pids:
                 continue
-            if ppid != 1:
-                continue
             if not cmdline:
                 continue
 
             cmdline_str = " ".join(str(x) for x in cmdline)
             is_claude = bool(_CLAUDE_CMDLINE_RE.search(cmdline_str))
             is_mcp = bool(_MCP_SERVER_CMDLINE_RE.search(cmdline_str))
-            if not (is_claude or is_mcp):
+            is_stale_oneshot = _is_stale_print_oneshot(cmdline, create_time)
+            if not (is_claude or is_mcp or is_stale_oneshot):
+                continue
+
+            # Orphan gate: PPID==1, OR (issue #1632 mode 1b) the immediate
+            # parent is itself an orphaned (PPID==1) `sh -c`/`zsh -c` wrapper —
+            # alive only because it is blocked waiting on this child forever.
+            # The wrapper lookup runs only for signature-matched processes, so
+            # the per-tick psutil cost is a handful of parent reads at most.
+            if ppid != 1 and not _parent_is_orphaned_shell_wrapper(ppid):
                 continue
 
             # === Per-PID heartbeat gate ===
@@ -2534,7 +3729,17 @@ def _reap_orphan_session_processes() -> int:
                         e,
                     )
 
-            if session is not None and _session_is_alive(session):
+            if is_stale_oneshot:
+                # Fast-kill signature (issue #1632 mode 1a): no legitimate
+                # `--print` one-shot lives this long. The heartbeat gate is
+                # intentionally bypassed — an alive owning session does not
+                # legitimize a stuck one-shot child.
+                logger.info(
+                    "[orphan-reap] Stale --print one-shot PID %d (age > %ds) — fast-kill",
+                    pid,
+                    ORPHAN_PRINT_ONESHOT_MAX_AGE_SECONDS,
+                )
+            elif session is not None and _session_is_alive(session):
                 logger.debug("[orphan-reap] Skip PID %d — owning session is alive", pid)
                 continue
 
@@ -2592,6 +3797,85 @@ def _reap_orphan_session_processes() -> int:
             continue
 
     return parent_kills
+
+
+def _fast_reap_stale_print_oneshots() -> int:
+    """Fast-cadence reaper for stale `claude --print` one-shots (issue #1632 mode 1c).
+
+    A trimmed-down sibling of ``_reap_orphan_session_processes`` applying ONLY
+    the fast-kill signature (``_is_stale_print_oneshot`` + PPID==1). It runs
+    from the worker's ``_agent_session_health_loop`` every
+    ``AGENT_SESSION_HEALTH_CHECK_INTERVAL`` seconds because the hourly
+    `agent-session-cleanup` reflection is far too slow for a
+    multiple-spawns-per-minute orphan cascade (observed: ~4/min, ~250 MB each).
+
+    Deliberately minimal surface:
+      - No heartbeat gate, no Redis skip-set scan, no descendant walk — the
+        signature alone is decisive, and a `--print` one-shot has no useful
+        descendants. ``os.getpid()`` is still skipped, and the signature
+        cannot match `python -m worker` (argv[0] basename must be `claude`).
+      - Escalation: first sighting → SIGTERM + stage ``(pid, create_time)``
+        into ``_pending_sigkill_orphans``; if the same tuple is sighted again
+        on a later pass → SIGKILL (the create_time match guards against PID
+        recycling, same contract as the hourly drain).
+      - Fail-silent: every failure path logs at DEBUG and the function never
+        raises — the health loop must not be destabilized by a reap pass.
+
+    Returns the number of processes acted on (TERM or KILL).
+    """
+    if os.environ.get("DISABLE_ORPHAN_PROCESS_REAP") == "1":
+        return 0
+
+    reaped = 0
+    try:
+        import psutil
+
+        proc_iter = iter(psutil.process_iter(["pid", "ppid", "cmdline", "create_time"]))
+        self_pid = os.getpid()
+        while True:
+            try:
+                proc = next(proc_iter)
+            except StopIteration:
+                break
+            except Exception as e:
+                logger.debug("[fast-oneshot-reap] iter exception (stopping): %s", e)
+                break
+
+            try:
+                info = proc.info or {}
+                pid = info.get("pid")
+                ppid = info.get("ppid")
+                cmdline = info.get("cmdline") or []
+                create_time = info.get("create_time") or 0.0
+
+                if pid is None or pid == self_pid or ppid != 1:
+                    continue
+                if not _is_stale_print_oneshot(cmdline, create_time):
+                    continue
+
+                staged = (pid, create_time)
+                if staged in _pending_sigkill_orphans:
+                    proc.kill()
+                    _pending_sigkill_orphans.discard(staged)
+                    logger.info(
+                        "[fast-oneshot-reap] SIGKILL'd surviving stale one-shot PID %d", pid
+                    )
+                else:
+                    proc.terminate()
+                    _pending_sigkill_orphans.add(staged)
+                    logger.info(
+                        "[fast-oneshot-reap] SIGTERM'd stale --print one-shot PID %d (cmd=%s)",
+                        pid,
+                        " ".join(str(x) for x in cmdline)[:100],
+                    )
+                reaped += 1
+                _increment_orphan_process_counter(None)
+            except Exception as e:
+                logger.debug("[fast-oneshot-reap] per-PID exception (continuing): %s", e)
+                continue
+    except Exception as e:
+        logger.debug("[fast-oneshot-reap] pass failed (non-fatal): %s", e)
+    return reaped
 
 
 def _cleanup_orphaned_claude_processes() -> int:

@@ -64,20 +64,15 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS -> MERGE
 
 MERGE is the terminal stage, gated by human authorization.
 
-### D. Stage State Injection (via worker post-completion handler)
+### D. Stage State Tracking (via in-session Skill hooks)
 
-**File**: `agent/agent_session_queue.py` (`_handle_dev_session_completion()`)
+**Files**: `agent/hooks/pre_tool_use.py` + `agent/hooks/post_tool_use.py`, `agent/pipeline_state.py`
 
-When a Dev session completes, the worker's post-completion handler reads the current SDLC pipeline state from the Dev session's AgentSession and steers the parent PM session with a pipeline-state summary. This prevents the PM from fabricating stage completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
+Stage state is written *in-session* as the Eng session invokes and returns from SDLC `/do-*` skills. `pre_tool_use.py::_start_pipeline_stage()` marks the mapped stage `in_progress` via `PipelineStateMachine.start_stage()`; `post_tool_use.py::_complete_pipeline_stage()` reads the `in_progress` stage via `current_stage()` and calls `complete_stage()` when the skill returns. Because the running session updates its own `stage_states` (the earlier `sdlc_stages` field was retired in PR #490), the session always reflects which stages are actually complete vs still pending — preventing fabricated stage-completion claims (e.g., claiming "review passed" without running `/do-pr-review`).
 
-The handler:
-1. Runs after every Dev session finishes (unconditional — the CLI harness is the only execution path)
-2. Reads `stage_states` from the Dev session's AgentSession in Redis (the earlier `sdlc_stages` field was retired in PR #490)
-3. Injects a pipeline-state steering message into the parent PM so the PM sees which stages are actually complete vs still pending
+Only `complete_stage()` fires from the hook. `classify_outcome()` and `fail_stage()` remain defined in `agent/pipeline_state.py` but have no production caller.
 
-This creates a feedback loop: the PM dispatches a Dev session to run a stage, the Dev session updates `stage_states` during execution, and the worker post-completion handler feeds the updated state back to the PM before it decides the next action.
-
-**History**: originally implemented via the SDK `SubagentStop` hook (`agent/hooks/subagent_stop.py`, related commit `c7e5a55d`). The logic was moved to `_handle_dev_session_completion()` in the Phase 5 harness migration (see [Harness Abstraction](harness-abstraction.md)), and the hook file itself was deleted in issue #1024 once the broader SDK path was confirmed fully unreachable.
+**History**: stage tracking was originally implemented via the SDK `SubagentStop` hook (`agent/hooks/subagent_stop.py`, related commit `c7e5a55d`). That hook was stripped to logging-only in the Phase 5 harness migration (see [Harness Abstraction](harness-abstraction.md)) and then deleted entirely in issue #1024. A worker post-completion handler briefly carried the logic afterward, but it was removed when the PM and Dev session roles merged into the single `eng` role (PR #1691); stage marking now lives solely in the in-session pre/post tool-use Skill hooks.
 
 ## Known Tech Debt
 

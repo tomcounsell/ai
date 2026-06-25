@@ -201,8 +201,16 @@ class TestCLI:
 class TestBridgeShortCircuit:
     """Tests for the VALOR_SESSION_ID / AGENT_SESSION_ID env short-circuit."""
 
-    def test_short_circuit_returns_env_session_when_live_pm(self, monkeypatch):
-        """Env var set + live PM session returns it without creating anything."""
+    def test_short_circuit_returns_env_session_when_live_eng(self, monkeypatch):
+        """Env var set + live PM session that OWNS the issue returns it without
+        creating anything and without an issue lookup (C1, #1671).
+
+        The mock bridge session is given a REAL str issue_url ending
+        /issues/1140 — the reconciliation now reads issue_url, so a MagicMock
+        default would truthily match and mask the assertion. With an owning
+        issue_url, the short-circuit keeps the env session and never calls
+        find_session_by_issue.
+        """
         from tools.sdlc_session_ensure import ensure_session
 
         monkeypatch.setenv("VALOR_SESSION_ID", "tg_valor_-1003449100931_691")
@@ -210,10 +218,12 @@ class TestBridgeShortCircuit:
 
         bridge_session = MagicMock()
         bridge_session.session_id = "tg_valor_-1003449100931_691"
-        bridge_session.session_type = "pm"
+        bridge_session.session_type = "eng"
         bridge_session.status = "running"
+        # REAL str issue_url — the env session OWNS issue 1140.
+        bridge_session.issue_url = "https://github.com/tomcounsell/ai/issues/1140"
 
-        # find_session_by_issue must NOT be called on the happy short-circuit path.
+        # find_session_by_issue must NOT be called on the owning short-circuit path.
         fsbi = MagicMock()
 
         with (
@@ -227,6 +237,74 @@ class TestBridgeShortCircuit:
             "created": False,
         }
         fsbi.assert_not_called()
+
+    def test_non_owning_env_session_prefers_existing_issue_session(self, monkeypatch):
+        """C1 (#1671): env var points at a live PM session that does NOT own the
+        issue, AND an sdlc-local-N session exists → ensure_session returns the
+        issue-scoped session, not the divergent env session. No duplicate."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-other-issue")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        # Env session is a live PM but owns a DIFFERENT issue.
+        env_session = MagicMock()
+        env_session.session_id = "parent-pm-other-issue"
+        env_session.session_type = "eng"
+        env_session.status = "running"
+        env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
+
+        # The issue-scoped session that actually owns issue 1171.
+        issue_session = MagicMock()
+        issue_session.session_id = "sdlc-local-1171"
+
+        mock_as = MagicMock()  # create_local must NOT be called (no duplicate).
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=env_session),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=1171)
+
+        assert result == {"session_id": "sdlc-local-1171", "created": False}
+        # No new session fabricated when an issue-scoped one already exists.
+        mock_as.create_local.assert_not_called()
+
+    def test_non_owning_env_session_creates_when_no_issue_session(self, monkeypatch):
+        """C1 (#1671): env session does NOT own the issue and NO issue-scoped
+        session exists yet → fall through to create sdlc-local-N (never return
+        the divergent env session)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-other-issue")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock()
+        env_session.session_id = "parent-pm-other-issue"
+        env_session.session_type = "eng"
+        env_session.status = "running"
+        env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1172"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=env_session),
+            # find_session_by_issue returns None in BOTH the reconciliation
+            # call and the legacy existing-session lookup.
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=1172)
+
+        # Created the issue-scoped session; did NOT return the env session.
+        assert result == {"session_id": "sdlc-local-1172", "created": True}
 
     def test_short_circuit_falls_through_when_env_session_missing(self, monkeypatch):
         """Env var set but no live session — fall through to legacy create path."""
@@ -279,8 +357,8 @@ class TestBridgeShortCircuit:
         # find_session should NOT be called when env vars are empty
         find_session_mock.assert_not_called()
 
-    def test_short_circuit_falls_through_for_non_pm_session(self, monkeypatch):
-        """Env var points at a Dev session — short-circuit must NOT activate (C2)."""
+    def test_short_circuit_falls_through_for_non_owning_session(self, monkeypatch):
+        """Env var points at an Eng session that does not own the issue — must NOT activate (C2)."""
         from tools.sdlc_session_ensure import ensure_session
 
         monkeypatch.setenv("VALOR_SESSION_ID", "dev_session_id")
@@ -288,7 +366,7 @@ class TestBridgeShortCircuit:
 
         dev_session = MagicMock()
         dev_session.session_id = "dev_session_id"
-        dev_session.session_type = "dev"
+        dev_session.session_type = "eng"
         dev_session.status = "running"
 
         mock_new_session = MagicMock()
@@ -309,7 +387,7 @@ class TestBridgeShortCircuit:
         # Must NOT return the dev session id; must fall through to create.
         assert result == {"session_id": "sdlc-local-1143", "created": True}
 
-    def test_short_circuit_falls_through_for_terminal_status_pm_session(self, monkeypatch):
+    def test_short_circuit_falls_through_for_terminal_status_eng_session(self, monkeypatch):
         """Env points at a terminal-status PM session (AD1) — fall through."""
         from tools.sdlc_session_ensure import ensure_session
 
@@ -325,7 +403,7 @@ class TestBridgeShortCircuit:
         ):
             terminal_session = MagicMock()
             terminal_session.session_id = "completed_pm_id"
-            terminal_session.session_type = "pm"
+            terminal_session.session_type = "eng"
             terminal_session.status = terminal_status
 
             mock_new_session = MagicMock()
@@ -379,14 +457,34 @@ class TestBridgeShortCircuit:
         assert result == {"session_id": "sdlc-local-1145", "created": True}
 
 
-def _make_orphan_session(session_id, age_seconds, heartbeat=None, session_type="pm"):
-    """Build a MagicMock AgentSession with orphan-relevant fields."""
+def _make_orphan_session(
+    session_id,
+    age_seconds,
+    heartbeat=None,
+    session_type="eng",
+    last_activity_seconds=None,
+):
+    """Build a MagicMock AgentSession with orphan-relevant fields.
+
+    ``age_seconds`` sets ``created_at`` (creation age). By default the session's
+    last-activity timestamps (``updated_at``/``started_at``) mirror
+    ``created_at`` — i.e. a session that was created and never advanced a stage,
+    which is the genuinely-dead-orphan shape.
+
+    Pass ``last_activity_seconds`` to model a LIVE pipeline that was created long
+    ago but recently refreshed ``updated_at`` via a stage_states write (#1676):
+    ``created_at`` stays at ``age_seconds`` while ``updated_at`` is set to the
+    fresher ``last_activity_seconds``.
+    """
     s = MagicMock()
     s.session_id = session_id
     s.session_type = session_type
     s.status = "running"
     s.last_heartbeat_at = heartbeat
     s.created_at = datetime.now(UTC) - timedelta(seconds=age_seconds)
+    activity_age = age_seconds if last_activity_seconds is None else last_activity_seconds
+    s.updated_at = datetime.now(UTC) - timedelta(seconds=activity_age)
+    s.started_at = s.updated_at
     s.issue_url = None
     return s
 
@@ -537,6 +635,121 @@ class TestKillOrphans:
 
         assert result["count"] == 0
 
+    def test_live_local_pipeline_with_fresh_updated_at_not_listed(self):
+        """#1676: a worker-less sdlc-local-N PM session with last_heartbeat_at=None
+        but a FRESH updated_at (advanced a stage recently) must NOT be reaped.
+
+        This is the core defect: on a skills-only machine no worker writes a
+        heartbeat, so a live /do-sdlc pipeline matched the old zombie criteria
+        after 10 minutes and --kill-orphans destroyed its stage_states mid-run.
+        The fix exempts it because every stage_states write refreshes updated_at.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        # Created 1 hour ago (well past threshold), but advanced a stage 30s ago.
+        live = _make_orphan_session(
+            "sdlc-local-1676",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+            last_activity_seconds=30,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [live]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+        assert result["orphans"] == []
+
+    def test_stale_local_pipeline_no_heartbeat_still_listed(self):
+        """#1676: a worker-less sdlc-local-N PM session with last_heartbeat_at=None
+        AND a stale updated_at (no stage advanced for the full window) is still a
+        genuine zombie and MUST be reaped — preserving original dead-orphan
+        behavior for sessions that truly stalled.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        # Created AND last-active well past the threshold.
+        stale = _make_orphan_session(
+            "sdlc-local-1677",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+            last_activity_seconds=ORPHAN_AGE_SECONDS + 600,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [stale]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 1
+        assert result["orphans"][0]["session_id"] == "sdlc-local-1677"
+
+    def test_fresh_updated_at_exempts_even_at_creation_boundary(self):
+        """#1676: updated_at just under the threshold exempts a session whose
+        created_at is exactly at the threshold — last activity, not creation, is
+        the liveness clock.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        s = _make_orphan_session(
+            "sdlc-local-1678",
+            age_seconds=ORPHAN_AGE_SECONDS,
+            heartbeat=None,
+            last_activity_seconds=ORPHAN_AGE_SECONDS - 1,
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [s]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+
+    def test_falls_back_to_started_at_when_updated_at_missing(self):
+        """#1676: when updated_at is None, _last_activity_at falls back to
+        started_at. A fresh started_at exempts an old-created_at session.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        s = _make_orphan_session(
+            "sdlc-local-1679",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+        )
+        s.updated_at = None
+        s.started_at = datetime.now(UTC) - timedelta(seconds=30)
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [s]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 0
+
+    def test_falls_back_to_created_at_when_no_activity_timestamps(self):
+        """#1676: when both updated_at and started_at are None, the reaper falls
+        back to created_at — an old, never-advanced session is still a zombie.
+        """
+        from tools.sdlc_session_ensure import ORPHAN_AGE_SECONDS, _kill_orphans
+
+        s = _make_orphan_session(
+            "sdlc-local-1680",
+            age_seconds=ORPHAN_AGE_SECONDS + 3600,
+            heartbeat=None,
+        )
+        s.updated_at = None
+        s.started_at = None
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [s]
+
+        with patch("models.agent_session.AgentSession", mock_as):
+            result = _kill_orphans(dry_run=True)
+
+        assert result["count"] == 1
+        assert result["orphans"][0]["session_id"] == "sdlc-local-1680"
+
     def test_cli_dry_run_exits_zero_with_valid_json(self):
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(
@@ -575,3 +788,114 @@ class TestKillOrphans:
         # argparse .error() exits 2
         assert result.returncode != 0
         assert "mutually exclusive" in result.stderr.lower()
+
+
+class TestCreateLocalMessageText:
+    """Fix A (#1741): create_local receives a non-empty, issue-anchored message_text.
+
+    Without Fix A, ``message_text`` was not passed to ``create_local``, so the
+    AgentSession was created with ``message_text=None``. The executor then built
+    the PTY container's first turn as "MESSAGE: None", which primed the granite
+    PM with a phantom task and triggered a silent [/complete] no-op.
+
+    These tests assert that ``create_local`` is always called with:
+    - ``message_text`` kwarg present and non-empty
+    - the text references the issue number (issue-anchored)
+    - when ``issue_url`` is supplied, it is also embedded in the text
+    """
+
+    def test_create_local_receives_message_text(self):
+        """create_local is called with a non-empty message_text kwarg."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1741"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result = ensure_session(issue_number=1741)
+
+        assert result == {"session_id": "sdlc-local-1741", "created": True}
+        mock_as.create_local.assert_called_once()
+        _, kwargs = mock_as.create_local.call_args
+        assert "message_text" in kwargs, "create_local was not called with message_text kwarg"
+        assert kwargs["message_text"], "message_text must be non-empty"
+
+    def test_message_text_is_issue_anchored(self):
+        """message_text references the issue number so the PM has a real goal anchor."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1742"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=1742)
+
+        _, kwargs = mock_as.create_local.call_args
+        msg = kwargs["message_text"]
+        # Must reference the issue number so the PM can find the work to do.
+        assert "1742" in msg, f"message_text must reference issue number 1742; got: {msg!r}"
+
+    def test_message_text_embeds_issue_url_when_provided(self):
+        """When issue_url is supplied, it is embedded in message_text."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1743"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        issue_url = "https://github.com/tomcounsell/ai/issues/1743"
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=1743, issue_url=issue_url)
+
+        _, kwargs = mock_as.create_local.call_args
+        msg = kwargs["message_text"]
+        assert issue_url in msg, (
+            f"message_text must embed the issue_url when supplied; got: {msg!r}"
+        )
+
+    def test_message_text_present_without_issue_url(self):
+        """message_text is non-empty even when no issue_url is supplied."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-1744"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            ensure_session(issue_number=1744)
+
+        _, kwargs = mock_as.create_local.call_args
+        msg = kwargs.get("message_text", "")
+        assert msg and msg.strip(), "message_text must be non-empty even without issue_url"
+        assert "1744" in msg

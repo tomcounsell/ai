@@ -89,6 +89,7 @@ class TestReconcilerGapDetection:
         with (
             patch("bridge.reconciler.is_duplicate_message", side_effect=mock_is_duplicate),
             patch("bridge.reconciler.record_message_processed", side_effect=mock_record),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
             # First scan: should detect messages 6 and 7 as missed
             result = await reconcile_once(
@@ -171,6 +172,7 @@ class TestReconcilerGapDetection:
         with (
             patch("bridge.reconciler.is_duplicate_message", side_effect=mock_is_duplicate),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
                 client=client,
@@ -183,3 +185,197 @@ class TestReconcilerGapDetection:
         assert result == 1
         assert enqueued[0]["telegram_message_id"] == 6
         assert enqueued[0]["message_text"] == "Real missed message"
+
+
+class TestReconcilerExtendedLookback:
+    """Issue #1408: the 30-minute lookback recovers older messages.
+
+    A message 20 minutes old would have aged out of the old 10-minute window
+    before the reconciler could act (the documented dead-zone scenario). With
+    the extended 30-minute lookback it must be recovered.
+    """
+
+    @pytest.mark.asyncio
+    async def test_constants_extended(self):
+        """Lookback is 30 minutes and the per-scan limit is 30 messages."""
+        from bridge.reconciler import RECONCILE_LOOKBACK_MINUTES, RECONCILE_MESSAGE_LIMIT
+
+        assert RECONCILE_LOOKBACK_MINUTES == 30
+        assert RECONCILE_MESSAGE_LIMIT == 30
+
+    @pytest.mark.asyncio
+    async def test_twenty_minute_old_message_recovered(self):
+        """A 20-minute-old message is recovered (would fail under the old 10-min window)."""
+        dialog = _make_dialog("Cyndra Dev", entity_id=700)
+        # 20 minutes old: outside the old 10-min window, inside the new 30-min window.
+        missed = _make_message(900, text="please review this", minutes_ago=20)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[missed])
+
+        enqueued = []
+
+        async def mock_enqueue(**kwargs):
+            enqueued.append(kwargs)
+
+        should_respond_fn = AsyncMock(return_value=(True, False))
+        project = {"_key": "cyndra", "working_directory": "/tmp/cyndra"}
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["cyndra dev"],
+                should_respond_fn=should_respond_fn,
+                enqueue_agent_session_fn=mock_enqueue,
+                find_project_fn=MagicMock(return_value=project),
+            )
+
+        assert result == 1
+        assert len(enqueued) == 1
+        assert enqueued[0]["telegram_message_id"] == 900
+
+
+class TestReconcilerPersonaResolution:
+    """Reconciler must resolve persona for parity with the live handler.
+
+    Finding 2 bug: reconciler enqueued every chat with the eng default, so a
+    teammate-configured chat wrongly ran as an eng PM<->Dev loop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_teammate_chat_enqueues_teammate_session(self):
+        """A teammate-configured chat enqueues session_type=teammate + project_config."""
+        from config.enums import SessionType
+
+        dialog = _make_dialog("Cyndra Dev Team", entity_id=800)
+        missed = _make_message(901, text="@valor look here", minutes_ago=5)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[missed])
+
+        enqueued = []
+
+        async def mock_enqueue(**kwargs):
+            enqueued.append(kwargs)
+
+        project = {
+            "_key": "cyndra",
+            "working_directory": "/tmp/cyndra",
+            "telegram": {"groups": {"Cyndra Dev Team": {"persona": "teammate"}}},
+        }
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["cyndra dev team"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=mock_enqueue,
+                find_project_fn=MagicMock(return_value=project),
+            )
+
+        assert result == 1
+        assert enqueued[0]["session_type"] == SessionType.TEAMMATE
+        assert enqueued[0]["project_config"] is project
+
+    @pytest.mark.asyncio
+    async def test_eng_chat_enqueues_eng_session(self):
+        """A chat with no teammate persona still enqueues an eng session."""
+        from config.enums import SessionType
+
+        dialog = _make_dialog("Dev: Popoto", entity_id=810)
+        missed = _make_message(902, text="fix the build", minutes_ago=5)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[missed])
+
+        enqueued = []
+
+        async def mock_enqueue(**kwargs):
+            enqueued.append(kwargs)
+
+        project = {"_key": "popoto", "working_directory": "/tmp/popoto"}
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["dev: popoto"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=mock_enqueue,
+                find_project_fn=MagicMock(return_value=project),
+            )
+
+        assert result == 1
+        assert enqueued[0]["session_type"] == SessionType.ENG
+
+    @pytest.mark.asyncio
+    async def test_persona_failure_warns_and_continues_with_eng(self, caplog):
+        """A persona-resolution exception falls back to eng and the scan continues."""
+        import logging
+
+        from config.enums import SessionType
+
+        dialog = _make_dialog("Dev: Popoto", entity_id=820)
+        missed = _make_message(903, text="status?", minutes_ago=5)
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[missed])
+
+        enqueued = []
+
+        async def mock_enqueue(**kwargs):
+            enqueued.append(kwargs)
+
+        project = {"_key": "popoto", "working_directory": "/tmp/popoto"}
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+            patch("bridge.reconciler.resolve_persona", side_effect=RuntimeError("boom")),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["dev: popoto"],
+                should_respond_fn=AsyncMock(return_value=(True, False)),
+                enqueue_agent_session_fn=mock_enqueue,
+                find_project_fn=MagicMock(return_value=project),
+            )
+
+        assert result == 1
+        assert enqueued[0]["session_type"] == SessionType.ENG
+        assert any(
+            "[reconciler] persona resolution failed" in r.getMessage() for r in caplog.records
+        )

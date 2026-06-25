@@ -32,6 +32,16 @@ pytest tests/unit/test_observer.py::TestX    # Single class
 
 1. **Per-worker Redis db.** The autouse `redis_test_db` fixture (`tests/conftest.py`) maps each worker to its own db (`gw0` → db=1, `gw1` → db=2, …). Tests that build a raw `redis.Redis(...)` client or set `REDIS_URL` for a subprocess must use the per-worker db, not a hardcoded `db=1`. Use the `redis_test_url` fixture or read `PYTEST_XDIST_WORKER` to derive it (`gw{N}` → db={N+1}, default db=1 when unset).
 2. **File-level grouping (`--dist=loadfile`).** All tests in one file land on the same worker. Files whose tests share global resources (npm/npx caches, host-level lockfiles, a single GitHub issue, an in-process module variable) rely on this — they otherwise collide under inter-test parallelism.
+3. **Host-coupled liveness checks must mock their probe.** Tests that assert process-liveness behaviour (e.g. `test_watchdog_recovery.py::TestWatchdogDetectsUnexpectedExit`) must not rely on a global `pgrep`/process scan, because a real `python -m worker` running on the dev box masks the test's fabricated process. Mock the probe (`monitoring.worker_watchdog._get_worker_pid`) to the test's own spawned PID so the assertion is deterministic with or without a coexisting real worker (issue #1578, Category E).
+
+### Known-failing clusters resolved on `main` (issue #1578)
+
+The previously known-bad clusters on `main` were driven to green in #1578. The fixes were **test-only** — assertions were re-pointed to current source/templates, never weakened, and no test was deleted:
+
+- Feature/refactor drift (Category A/C): `test_session_modal_liveness_render`, `test_bridge_relay`, `test_sdlc_skill_md_parity`, `test_reflection_scheduler` (`every:` not `interval:`), `test_model_relationships`, `test_long_task_checkpointing` (`skills-global`), `test_harness_oom_backoff` and `test_health_check_recovery_finalization` (`inspect.getsource` re-pointed from `_agent_session_health_check` to `_apply_recovery_transition`, where #1270 moved the OOM/reprieve logic).
+- Env/install (Category D): `test_skills_audit` (`audit_skills` import path).
+- Isolation (Category E): `test_watchdog_recovery` (mock `_get_worker_pid`), `test_memory_ingestion` (per-worker Redis key prefix), `test_compose_system_prompt` (deterministic read).
+- Performance/timing (Category F): `test_memory_prefetch` and `test_benchmarks` thresholds recalibrated with inline measurement comments; `test_doc_impact_finder_sdk::TestLiveHaikuReranking` re-pointed to `impact_finder_core._rerank_single_candidate` with its prompt-builder contract.
 
 ## Feature Markers
 
@@ -136,6 +146,7 @@ tests/
 | integration | `test_cross_repo_build.py` | 8 | Cross-repo build flow |
 | integration | `test_artifact_inference.py` | 15 | Artifact-based pipeline stage inference (real gh CLI + filesystem) |
 | unit | `test_continuation_pm.py` | 8 | Continuation PM creation, depth cap, dedup, steer failure fallback |
+| unit | `test_do_plan_critique_barrier.py` | — | Roster membership gate: terminal-fence detection, missing-critic gap surfacing, incomplete-roster STOP verdict (#1690) |
 | integration | `test_parent_child_round_trip.py` | 11 | Parent-child linkage, dev session completion steering, continuation PM round-trip |
 
 ### `sessions` — Session lifecycle and health
@@ -153,6 +164,7 @@ tests/
 | integration | `test_agent_session_lifecycle.py` | 58 | Session lifecycle, history, summarizer |
 | integration | `test_lifecycle_transition.py` | 16 | Session state transitions |
 | integration | `test_session_heartbeat_progress.py` | 12 | Two-tier no-progress detector: dual heartbeat freshness, Tier 2 reprieve gates, recovery_attempts/reprieve_count fields, DISABLE_PROGRESS_KILL kill-switch |
+| unit | `test_session_health_tool_timeout.py` | 4 | Wedge-signal reset on tool_timeout requeue: regression for issue #1762 double-count loop, genuine post-recovery exhaustion, save-error resilience, degraded notice on terminal failure |
 | e2e | `test_session_continuity.py` | 11 | Session creation, resume, transcript |
 
 ### `summarizer` — Response processing
@@ -289,6 +301,15 @@ tests/
 | unit | `test_sdk_permissions.py` | 7 | SDK permissions |
 | unit | `test_workflow_sdk_integration.py` | 6 | Workflow SDK integration |
 
+### `granite` — Granite PTY container and builder harness
+
+| Level | File | Tests | Description |
+|-------|------|------:|-------------|
+| unit | `granite_container/test_granite_classifier.py` | 46+ | PM prefix-token classification, harness selector (strict + fallback paths) |
+| unit | `test_pi_builder.py` | 39 | `parse_pi_final_text` edge cases; `PiSubprocessBuilder` init, run_turn, timeout, cwd, close |
+| unit | `granite_container/test_container_builder_gate.py` | 10 | `PI_SUBPROCESS_TIMEOUT_S` constant, `BuilderHarness` protocol, caller-owned gate |
+| integration | `test_pi_builder_e2e.py` | 5 | Real `pi -p --mode json` against local `ollama/gemma4:31b`; skipped if pi/ollama absent |
+
 ### Other
 
 | Level | File | Tests | Description |
@@ -303,10 +324,10 @@ tests/
 | `redis_test_db` | autouse | `conftest.py` | Per-worker Redis db isolation |
 | `sample_config` | function | `conftest.py` | 3-project sample configuration |
 | `valor_project` | function | `conftest.py` | Single project config |
-| `mock_telegram_client` | function | `e2e/conftest.py` | AsyncMock Telethon client |
-| `make_telegram_event` | function | `e2e/conftest.py` | Telegram event factory |
-| `mock_agent_response` | function | `e2e/conftest.py` | Canned agent response |
-| `e2e_config` | function | `e2e/conftest.py` | Config with test overrides |
+| `mock_telegram_client` | function | `tests/e2e/conftest.py` | AsyncMock Telethon client |
+| `make_telegram_event` | function | `tests/e2e/conftest.py` | Telegram event factory |
+| `mock_agent_response` | function | `tests/e2e/conftest.py` | Canned agent response |
+| `e2e_config` | function | `tests/e2e/conftest.py` | Config with test overrides |
 | `perplexity_api_key` | function | `tools/conftest.py` | Perplexity API key (skip if missing) |
 | `anthropic_api_key` | function | `tools/conftest.py` | Anthropic API key (skip if missing) |
 

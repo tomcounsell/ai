@@ -93,6 +93,40 @@ def _path_is_tcc_restricted(path: Path) -> bool:
     return False
 
 
+def _parse_zshenv_models(zshenv_path: Path) -> dict[str, str]:
+    """Extract ``MODELS__*`` exports from ``~/.zshenv``.
+
+    ``/setup`` writes the per-machine generation model
+    (``MODELS__OLLAMA_GENERATION_MODEL``) to ``~/.zshenv`` — NOT the
+    iCloud-synced ``.env`` — so the launchd-spawned worker (which never
+    reads the shell) would otherwise fall back to the gemma4 default.
+    These vars are non-secret operational overrides and must be baked into
+    the plist in both lean and full injection modes so the worker honors
+    the machine's chosen model variant.
+
+    Returns a (possibly empty) dict of ``MODELS__*`` key/value pairs. Never
+    raises — a malformed or absent ``~/.zshenv`` yields ``{}``.
+    """
+    models: dict[str, str] = {}
+    if not zshenv_path.exists():
+        return models
+    try:
+        for raw_line in zshenv_path.read_text().splitlines():
+            line = raw_line.strip()
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if not line.startswith("MODELS__") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and value:
+                models[key] = value
+    except Exception as e:
+        print(f"Warning: could not parse {zshenv_path} MODELS__ vars: {e}", file=sys.stderr)
+    return models
+
+
 def inject(
     plist_path: Path,
     env_file: Path | None,
@@ -125,8 +159,8 @@ def inject(
         elif env_file is not None:
             resolved_vault = env_file.expanduser().parent
 
-    secrets_mode = (
-        resolved_vault is not None and _path_is_tcc_restricted(resolved_vault.expanduser())
+    secrets_mode = resolved_vault is not None and _path_is_tcc_restricted(
+        resolved_vault.expanduser()
     )
 
     # Gather candidate keys/values from .env --------------------------------
@@ -148,6 +182,13 @@ def inject(
     shell_vault = os_environ.get("VALOR_VAULT_DIR")
     if shell_vault:
         env_vars.setdefault("VALOR_VAULT_DIR", shell_vault)
+
+    # Per-machine MODELS__* overrides live in ~/.zshenv (written by /setup),
+    # not the .env. They are non-secret and required by the launchd worker in
+    # both lean and full modes — merge them in after the allowlist filter so
+    # they survive lean injection. zshenv values win over any .env value.
+    for key, value in _parse_zshenv_models(Path.home() / ".zshenv").items():
+        env_vars[key] = value
 
     # Merge into the plist --------------------------------------------------
     with open(plist_path, "rb") as f:
@@ -180,9 +221,7 @@ def _write_plist_atomic(path: Path, body: dict, mode: int) -> None:
     """
     import tempfile
 
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
-    )
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     tmp_path = Path(tmp_name)
     try:
         os.fchmod(fd, mode)

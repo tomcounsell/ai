@@ -28,8 +28,10 @@ in bridge/telegram_bridge.py's send callback.
 import asyncio
 import json
 import logging
+import os
 
 import redis
+from telethon.errors import FloodWaitError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,11 @@ OUTBOX_KEY_PATTERN = "telegram:outbox:*"
 
 # Maximum relay attempts before routing to dead letter
 MAX_RELAY_RETRIES = 3
+
+# Flood-wait handling constants — provisional, tune from production flood-wait telemetry
+RELAY_FLOOD_WAIT_BUFFER_SECS = int(os.environ.get("RELAY_FLOOD_WAIT_BUFFER_SECS", "5"))
+RELAY_FLOOD_WAIT_MAX_SLEEP_SECS = int(os.environ.get("RELAY_FLOOD_WAIT_MAX_SLEEP_SECS", "300"))
+RELAY_FLOOD_WAIT_MAX = int(os.environ.get("RELAY_FLOOD_WAIT_MAX", "10"))
 
 # Known message types accepted by the relay dispatcher
 KNOWN_MESSAGE_TYPES = {None, "reaction", "custom_emoji_message"}
@@ -75,7 +82,6 @@ def _safe_unlink(path: str) -> None:
 
 def _get_redis_connection() -> redis.Redis:
     """Get a synchronous Redis connection for queue operations."""
-    import os
 
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
     return redis.Redis.from_url(redis_url, decode_responses=True)
@@ -139,6 +145,8 @@ async def _send_queued_reaction(
                 f"Relay: failed to set reaction {emoji} on msg {reply_to} in chat {chat_id}"
             )
         return ok
+    except FloodWaitError:
+        raise
     except Exception as e:
         logger.warning(f"Relay: reaction send failed: {e}")
         return False
@@ -215,8 +223,86 @@ async def _send_custom_emoji_message(
             f"Relay: sent emoji message (plain text fallback) to chat {chat_id} (msg_id={msg_id})"
         )
         return msg_id
+    except FloodWaitError:
+        raise
     except Exception as e:
         logger.error(f"Relay: emoji message send failed entirely: {e}")
+        return None
+
+
+async def _maybe_send_oversized_text_as_file(
+    telegram_client,
+    chat_id,
+    text: str,
+    reply_to,
+    session_id: str,
+) -> "int | None":
+    """Convert oversized text (>4096 chars) to a .txt attachment and send it.
+
+    Serves both the file+text path and the text-only path in _send_queued_message,
+    providing a single oversized-text detection + conversion point for both branches.
+    Deliberately does NOT perform the terminal send for normal-length text — callers
+    must handle the fall-through case themselves.
+
+    Returns the Telegram message ID of the uploaded .txt file, or None if the text
+    is within the 4096-char limit (no action taken) or if the conversion/send fails
+    (fall-through to caller's normal send path).
+
+    Analogue of the text-only inline block at _send_queued_message lines 388-438
+    (#1749 defect 2).
+    """
+    if not text or len(text) <= 4096:
+        return None
+
+    preview = text[:200].replace("\n", " ")
+    logger.error(
+        "Relay: oversized text reached relay (len=%d > 4096) — "
+        "converting to .txt attachment. session_id=%s chat_id=%s preview=%r",
+        len(text),
+        session_id,
+        chat_id,
+        preview,
+    )
+    try:
+        import tempfile
+        import time as _time
+
+        ts = int(_time.time())
+        safe_sid = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(session_id))
+        fd, overflow_path = tempfile.mkstemp(
+            suffix=".txt",
+            prefix=f"relay_overlong_{safe_sid}_{ts}_",
+        )
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+
+        caption = "[auto-attached: response exceeded 4096 chars]"
+        sent = await telegram_client.send_file(
+            int(chat_id),
+            overflow_path,
+            caption=caption,
+            reply_to=reply_to,
+        )
+        if isinstance(sent, list):
+            msg_id = getattr(sent[0], "id", None) if sent else None
+        else:
+            msg_id = getattr(sent, "id", None)
+        logger.info(
+            "Relay: sent oversized text as .txt attachment to chat %s "
+            "(file=%s, orig_len=%d, msg_id=%s)",
+            chat_id,
+            overflow_path,
+            len(text),
+            msg_id,
+        )
+        return msg_id
+    except Exception as overflow_err:
+        # Fall through to caller's normal send path; Telethon will raise
+        # MessageTooLongError which is handled by the existing retry + dead-letter path.
+        logger.error(
+            "Relay: length-guard .txt conversion failed (%s); falling back to normal send",
+            overflow_err,
+        )
         return None
 
 
@@ -237,12 +323,17 @@ async def _send_queued_message(
     Returns:
         The Telegram message ID on success, None on failure.
         For albums, returns the ID of the first message in the album.
-    """
-    import os
 
+    Note: this function may mutate ``message`` in-place with ``_file_sent`` and
+    ``_file_msg_id`` idempotency keys after a successful file send, and with
+    ``_flood_waits`` after a FloodWait event. These keys are preserved when the
+    message is re-queued so subsequent attempts can skip the already-sent file
+    and avoid re-counting flood events (#1749 defects 1 and 4).
+    """
     chat_id = message.get("chat_id")
     reply_to = message.get("reply_to")
     text = message.get("text", "")
+    session_id = message.get("session_id") or "unknown"
 
     # Normalize file_path (string, legacy) and file_paths (list, current)
     file_paths = message.get("file_paths")
@@ -257,9 +348,16 @@ async def _send_queued_message(
     # Local session IDs (e.g. "local-<uuid>") are not Telegram chat IDs.
     # Drop them silently — their output was already written by FileOutputHandler.
     try:
-        int(chat_id)
+        chat_id_int = int(chat_id)
     except (ValueError, TypeError):
         logger.debug(f"Relay: dropping non-Telegram chat_id '{chat_id}' (local session)")
+        return None
+
+    # chat_id=0 is not a valid Telegram peer (causes PeerIdInvalidError).
+    if chat_id_int == 0:
+        logger.warning(
+            f"Relay: dropping message with zero chat_id (invalid Telegram peer): {message}"
+        )
         return None
 
     # Must have either text or files
@@ -322,6 +420,8 @@ async def _send_queued_message(
                         if message.get("cleanup_file"):
                             _safe_unlink(voice_path)
                         return msg_id
+                    except FloodWaitError:
+                        raise
                     except Exception as voice_err:
                         logger.warning(
                             "Relay: voice-note send failed (%s); "
@@ -331,28 +431,61 @@ async def _send_queued_message(
                         )
                         # Fall through to standard send path below.
 
-                # Single file or album (default path)
-                file_arg = available[0] if len(available) == 1 else available
-                sent = await telegram_client.send_file(
-                    int(chat_id),
-                    file_arg,
-                    caption=text or None,
-                    reply_to=reply_to_id,
-                )
-                # Telethon returns a list for albums, single Message for one file
-                if isinstance(sent, list):
-                    msg_id = getattr(sent[0], "id", None) if sent else None
+                # Single file or album (default path).
+                # Send file without caption, then text as a separate message so
+                # Telegram's narrow caption column doesn't constrain the text layout.
+                # Idempotency guard: if a prior attempt already sent the file but crashed
+                # before returning, skip the send and reuse the recorded msg_id (#1749
+                # defect 1; analogue of the #1205 text-dedup guard).
+                if message.get("_file_sent"):
+                    msg_id = message.get("_file_msg_id")
+                    logger.info(
+                        "Relay: skipping already-sent file(s) for chat %s (idempotency guard, "
+                        "msg_id=%s) (#1749 defect 1)",
+                        chat_id,
+                        msg_id,
+                    )
                 else:
-                    msg_id = getattr(sent, "id", None)
-                file_names = [os.path.basename(fp) for fp in available]
-                logger.info(
-                    f"Relay: sent PM file(s) to chat {chat_id} "
-                    f"(files={file_names}, "
-                    f"caption={len(text)} chars, msg_id={msg_id})"
-                )
+                    file_arg = available[0] if len(available) == 1 else available
+                    sent = await telegram_client.send_file(
+                        int(chat_id),
+                        file_arg,
+                        reply_to=reply_to_id,
+                    )
+                    # Telethon returns a list for albums, single Message for one file
+                    if isinstance(sent, list):
+                        msg_id = getattr(sent[0], "id", None) if sent else None
+                    else:
+                        msg_id = getattr(sent, "id", None)
+                    file_names = [os.path.basename(fp) for fp in available]
+                    logger.info(
+                        f"Relay: sent PM file(s) to chat {chat_id} "
+                        f"(files={file_names}, msg_id={msg_id})"
+                    )
+                    # Record successful file send for idempotency on retry (#1749 defect 1)
+                    message["_file_sent"] = True
+                    message["_file_msg_id"] = msg_id
+
                 if message.get("cleanup_file"):
                     for fp in available:
                         _safe_unlink(fp)
+
+                if text:
+                    # Oversized follow-up text guard: reuses the same helper as the
+                    # text-only path so both branches share one conversion code path
+                    # (#1749 defect 2).
+                    attach_id = await _maybe_send_oversized_text_as_file(
+                        telegram_client, chat_id, text, reply_to_id, session_id
+                    )
+                    if attach_id is not None:
+                        # Oversized text shipped as .txt attachment; skip raw send_message.
+                        return attach_id
+                    await telegram_client.send_message(
+                        int(chat_id),
+                        text,
+                        reply_to=reply_to_id,
+                    )
+                    logger.info(f"Relay: sent follow-up text to chat {chat_id} ({len(text)} chars)")
                 return msg_id
             else:
                 # All files missing -- fall back to text-only
@@ -371,57 +504,11 @@ async def _send_queued_message(
         # but if any caller bypasses the drafter and writes >4096 chars to the outbox, we
         # convert to a .txt file attachment rather than split or drop. NEVER split messages
         # (see docs/plans/message-drafter.md No-Gos: "No message splitting. Ever.").
-        if text and len(text) > 4096:
-            session_id = message.get("session_id") or "unknown"
-            preview = text[:200].replace("\n", " ")
-            logger.error(
-                "Relay: oversized text reached relay (len=%d > 4096) — "
-                "converting to .txt attachment. session_id=%s chat_id=%s preview=%r",
-                len(text),
-                session_id,
-                chat_id,
-                preview,
-            )
-            try:
-                import tempfile
-                import time as _time
-
-                ts = int(_time.time())
-                safe_sid = "".join(c if c.isalnum() or c in "-_" else "_" for c in str(session_id))
-                fd, overflow_path = tempfile.mkstemp(
-                    suffix=".txt",
-                    prefix=f"relay_overlong_{safe_sid}_{ts}_",
-                )
-                with os.fdopen(fd, "w") as fh:
-                    fh.write(text)
-
-                caption = "[auto-attached: response exceeded 4096 chars]"
-                sent = await telegram_client.send_file(
-                    int(chat_id),
-                    overflow_path,
-                    caption=caption,
-                    reply_to=reply_to_id,
-                )
-                if isinstance(sent, list):
-                    msg_id = getattr(sent[0], "id", None) if sent else None
-                else:
-                    msg_id = getattr(sent, "id", None)
-                logger.info(
-                    "Relay: sent oversized text as .txt attachment to chat %s "
-                    "(file=%s, orig_len=%d, msg_id=%s)",
-                    chat_id,
-                    overflow_path,
-                    len(text),
-                    msg_id,
-                )
-                return msg_id
-            except Exception as overflow_err:
-                # Fall through to normal text send; Telethon will raise MessageTooLongError
-                # which is handled by the existing retry + dead-letter path.
-                logger.error(
-                    "Relay: length-guard .txt conversion failed (%s); falling back to normal send",
-                    overflow_err,
-                )
+        attach_id = await _maybe_send_oversized_text_as_file(
+            telegram_client, chat_id, text, reply_to_id, session_id
+        )
+        if attach_id is not None:
+            return attach_id
 
         # Text-only send path
         from bridge.markdown import send_markdown
@@ -438,6 +525,8 @@ async def _send_queued_message(
             f"(reply_to={reply_to}, {len(text)} chars, msg_id={msg_id})"
         )
         return msg_id
+    except FloodWaitError:
+        raise
     except Exception as e:
         logger.error(f"Relay: failed to send message to chat {chat_id}: {e}", exc_info=True)
         return None
@@ -632,6 +721,16 @@ async def _dead_letter_message(message: dict, reason: str) -> None:
             logger.debug(f"Relay: discarding dead letter for non-Telegram chat_id '{chat_id}'")
             return
 
+        # chat_id=0 is not a valid Telegram peer — don't persist, it loops forever.
+        # Narrowed from <= 0: group/supergroup IDs are legitimately negative;
+        # narrowing only this guard without dead_letters.py:57 is a no-op (#1749 defect 3).
+        if chat_id_int == 0:
+            logger.warning(
+                f"Relay: discarding dead letter for chat_id=0 (not a valid Telegram peer): "
+                f"{chat_id!r}"
+            )
+            return
+
         try:
             from bridge.dead_letters import persist_failed_delivery
 
@@ -696,6 +795,7 @@ async def process_outbox(telegram_client) -> int:
                 # Dispatch to handler with unified error handling
                 success = False
                 msg_id = None
+                session_id = message.get("session_id")
                 try:
                     if msg_type == "reaction":
                         success = await _send_queued_reaction(telegram_client, message)
@@ -705,6 +805,34 @@ async def process_outbox(telegram_client) -> int:
                     else:
                         msg_id = await _send_queued_message(telegram_client, message)
                         success = msg_id is not None
+                except FloodWaitError as flood_err:
+                    # Borrows only blocking-sleep shape from telegram_bridge.py connect-loop
+                    # handler; NOT a connect-path handler; intentionally omits
+                    # _write_flood_backoff side-effect (#1749 defect 4).
+                    wait_secs = min(
+                        flood_err.seconds + RELAY_FLOOD_WAIT_BUFFER_SECS,
+                        RELAY_FLOOD_WAIT_MAX_SLEEP_SECS,
+                    )
+                    logger.warning(
+                        f"FloodWaitError: Telegram requests {flood_err.seconds}s backoff, "
+                        f"sleeping {wait_secs}s (send-path handler, #1749 defect 4)"
+                    )
+                    await asyncio.sleep(wait_secs)
+                    flood_waits = message.get("_flood_waits", 0) + 1
+                    message["_flood_waits"] = flood_waits
+                    if flood_waits >= RELAY_FLOOD_WAIT_MAX:
+                        logger.error(
+                            f"FloodWait backstop reached ({flood_waits} floods), "
+                            f"dead-lettering message"
+                        )
+                        await _dead_letter_message(message, reason="flood_backstop")
+                        # Do not fall through to generic retry; backstopped msgs are dead-lettered
+                        continue
+                    else:
+                        # Re-queue without burning _relay_attempts; carries _file_sent if set
+                        await asyncio.to_thread(r.rpush, key, json.dumps(message))
+                        continue
+                    success = False
                 except Exception as handler_err:
                     logger.warning(
                         f"Relay: handler exception for {msg_type or 'default'} "

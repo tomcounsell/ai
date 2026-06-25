@@ -40,6 +40,7 @@ ALLOWLIST_PREFIXES = (
     # cleanup. See docs/features/vault-path.md for the canonical reference.
     "docs/features/",
     "docs/guides/",
+    "docs/infra/",  # infra runbooks name the established vault default in prose
     "docs/tools-reference.md",  # generated tool reference; touched by `/update`
     # Worker watchdog comment names the default in TCC explanation.
     "worker/",
@@ -56,9 +57,9 @@ ALLOWLIST_PREFIXES = (
     # explicitly names VALOR_VAULT_DIR.
     "config/projects.example.json",
     # Persona overlay: descriptive prose that names the established default.
-    "config/personas/project-manager.md",
+    "config/personas/engineer.md",
     "bridge/routing.py",
-    "reflections/utils.py",
+    "reflections/utilities.py",
     "agent/reflection_scheduler.py",
     "agent/sdk_client.py",
     "tools/google_workspace/auth.py",
@@ -70,17 +71,26 @@ ALLOWLIST_PREFIXES = (
     "ui/data/memories.py",
     "utils/api_keys.py",
     "scripts/migrate_model_relationships.py",
+    "scripts/migrate_reflections_yaml.py",  # migration helper: copies the legacy vault reflections.yaml
     "scripts/update/env_sync.py",
     "scripts/update/run.py",
     "scripts/update/service.py",
     "scripts/update/verify.py",
     "scripts/update/cal_integration.py",
+    # zshenv loader + reflections-yaml + persona-drift update steps target the
+    # iCloud-synced vault loader by design (cross-machine shell config lives there).
+    "scripts/update/zshenv_sync.py",
+    "scripts/update/reflections_yaml.py",
+    "scripts/update/persona_drift.py",
     "scripts/reflections_report.py",
+    # Granite container seeds identity overlay from the established vault default.
+    "agent/granite_container/container.py",
     # Shell scripts that fall back to ~/Desktop/Valor when VALOR_VAULT_DIR is unset.
     "scripts/install_worker.sh",
     "scripts/install_autoexperiment.sh",
     "scripts/install_nightly_tests.sh",
     "scripts/install_sdlc_reflection.sh",
+    "scripts/install_email_bridge.sh",  # copies legacy vault projects.json/reflections.yaml into config/
     "scripts/start_bridge.sh",
     "scripts/valor-service.sh",
     "scripts/calendar_hook.sh",
@@ -93,9 +103,11 @@ ALLOWLIST_PREFIXES = (
     # Skill files: each documents the established default in prose; the M8
     # contract test in test_setup_skill.py enforces vault-aware bash usage.
     ".claude/skills-global/setup/SKILL.md",
-    ".claude/skills-global/update/SKILL.md",
+    ".claude/skills/update/SKILL.md",
     ".claude/skills-global/do-deploy/SKILL.md",
     ".claude/skills-global/do-pr-review/SKILL.md",
+    # Project-only skill: documents the established vault default for its env vars.
+    ".claude/skills/ebook-ingest/SKILL.md",
     ".claude/agents/baseline-verifier.md",
     # Worker comment that mentions the default location.
     "worker/__main__.py",
@@ -220,6 +232,6 @@ def test_no_hardcoded_vault_path():
 def test_scan_actually_finds_files(kind):
     """Sanity: the scan globs match real files in this repo."""
     found = list(REPO_ROOT.glob(f"**/*.{kind}"))
-    assert any(
-        f.is_file() and not _is_excluded_dir(f.relative_to(REPO_ROOT)) for f in found
-    ), f"scan glob for *.{kind} returned no files — globbing is broken"
+    assert any(f.is_file() and not _is_excluded_dir(f.relative_to(REPO_ROOT)) for f in found), (
+        f"scan glob for *.{kind} returned no files — globbing is broken"
+    )

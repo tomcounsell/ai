@@ -6,7 +6,7 @@ context: fork
 
 # SDLC — Single-Stage Router
 
-This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM session handles pipeline progression by re-invoking `/sdlc` after each stage completes.
+This skill is a **router**, not an orchestrator. It assesses where work stands, invokes ONE sub-skill, and returns. The PM session handles pipeline progression by re-invoking `/sdlc` after each stage completes. In a local Claude Code session (no PM loop), use `/do-sdlc` to supervise the full pipeline in one invocation.
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 
@@ -45,10 +45,10 @@ After resolving the issue number, ensure a local SDLC session exists in Redis so
 
 ```bash
 SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
-sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
+sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true  <!-- REDUNDANT-AFTER-#1558: kept as belt-and-suspenders; remove once resolver auto-ensure is proven -->
 ```
 
-This is idempotent -- running it multiple times for the same issue reuses the same session. Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call is a true no-op — it returns the already-active session without creating a new record. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
+As of #1558, this explicit call is **belt-and-suspenders rather than the sole guarantee**: the `find_session(..., ensure=True)` resolver auto-ensures a PM session on the first state *write* (`verdict record`, `meta-set`, `stage-marker`), so non-`/sdlc` callers (direct `sdlc-tool` invocations, individual `/do-*` skills) no longer silently no-op. Keeping the up-front ensure here makes a session exist before the first read too, which is harmless (idempotent). This is idempotent -- running it multiple times for the same issue reuses the same session. Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call is a true no-op — it returns the already-active session without creating a new record. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
 
 ## Step 2: Assess Current State
 
@@ -175,29 +175,43 @@ sdlc-tool dispatch get --issue-number {issue_number}
 
 The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_helpers.update_stage_states()` — it is the correct runtime entry point. Never call `record_dispatch()` directly from a shell or skill script; always use `sdlc-tool dispatch record`.
 
-## Step 4: Dispatch ONE Sub-Skill
+## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)
 
-**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G6) and dispatch rules (14 rows) against live state.
+**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (16 rows) against live state.
 
 ```bash
 # Get the next dispatch decision
 sdlc-tool next-skill --issue-number {issue_number}
 ```
 
-The tool outputs JSON:
+The tool outputs JSON in one of three shapes:
+
+Single dispatch:
 ```json
 {"skill": "/do-build", "reason": "...", "row_id": "4a", "dispatched": true}
 ```
 
-Or when blocked:
+Multi-dispatch (parallel-safe pair, e.g. DOCS + PATCH after REVIEW):
+```json
+{"multi": true, "dispatched": true,
+ "skills": ["/do-docs", "/do-patch"],
+ "dispatches": [
+   {"skill": "/do-docs", "reason": "...", "row_id": "9"},
+   {"skill": "/do-patch", "reason": "...", "row_id": "8"}
+ ],
+ "reason": "parallel-safe pair: /do-docs (9) + /do-patch (8)"}
+```
+
+Blocked:
 ```json
 {"blocked": true, "reason": "G4: stage oscillation ...", "guard_id": "G4"}
 ```
 
 **How to use the output:**
-1. If `dispatched` is `true`: record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
-2. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
-3. If neither key is present (error): log the `error` field and escalate to the human.
+1. If `multi` is `true`: invoke the `pthread` skill to run all listed `skills` as parallel sub-agents. Record dispatch for the *first* skill in the list (the multi-dispatch is gated by guards as one decision -- a guard fire on the first dispatch replaces the whole pair). After both sub-agents complete, re-invoke `/sdlc` to re-dispatch based on the new pipeline state.
+2. If `dispatched` is `true` (single): record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
+3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
+4. If neither key is present (error): log the `error` field and escalate to the human.
 
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):
 ```bash

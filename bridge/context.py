@@ -8,6 +8,9 @@ from pathlib import Path
 
 from telethon import TelegramClient
 
+# Reuse the canonical tool-log filter from bridge.response (single source of truth).
+# See docs/features/bridge-response-improvements.md and issue #1359.
+from bridge.response import filter_tool_logs
 from tools.link_analysis import (
     extract_urls,
     get_metadata,
@@ -97,78 +100,57 @@ DEICTIC_CONTEXT_PATTERNS = [
 
 
 # =============================================================================
-# Tool Log Filtering
-# =============================================================================
-
-
-def filter_tool_logs(response: str) -> str:
-    """
-    Remove tool execution traces from response.
-
-    Agent may include lines like "🛠️ exec: ls -la" in stdout.
-    These are internal logs, not meant for the user.
-
-    Returns:
-        Filtered response, or empty string if only logs remain.
-    """
-    if not response:
-        return ""
-
-    lines = response.split("\n")
-    filtered = []
-
-    # Generic pattern: emoji followed by word and colon (catches most tool logs)
-    generic_tool_pattern = re.compile(
-        r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
-    )
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Skip empty lines in sequence (but keep some structure)
-        if not stripped:
-            # Only add blank line if last line wasn't blank
-            if filtered and filtered[-1].strip():
-                filtered.append(line)
-            continue
-
-        # Skip lines that match the generic tool log pattern
-        if generic_tool_pattern.match(stripped):
-            continue
-
-        # If we got here, keep the line
-        filtered.append(line)
-
-    # Remove leading/trailing blank lines
-    while filtered and not filtered[0].strip():
-        filtered.pop(0)
-    while filtered and not filtered[-1].strip():
-        filtered.pop()
-
-    return "\n".join(filtered)
-
-
-# =============================================================================
 # Context Building
 # =============================================================================
 
 
 def build_context_prefix(
-    project: dict | None, session_type: str | None, sender_id: int | None = None
+    project: dict | None,
+    session_type: str | None,
+    sender_id: int | None = None,
+    persona: str | None = None,
+    email_from: str | None = None,
+    sender_name: str | None = None,
 ) -> str:
-    """Build project context to inject into agent prompt."""
-    from config.enums import SessionType
+    """Build project context to inject into agent prompt.
+
+    Args:
+        project: Project configuration dict from projects.json.
+        session_type: Session type string (e.g. "teammate", "pm", "dev").
+        sender_id: Telegram user ID for permission checking (unused, reserved).
+        persona: Resolved persona name (e.g. "customer-service", "teammate").
+            When provided and equals "customer-service", the read-only restriction
+            is suppressed — customer-service sessions need execute-level access.
+        email_from: Email address of the person being served. When present,
+            emits SERVING/SCOPE lines so the agent knows who it's helping.
+        sender_name: Display name paired with email_from (optional).
+    """
+    from config.enums import PersonaType, SessionType
 
     context_parts = []
 
-    # Teammate sessions get uniform read-only access - no per-user permission levels
-    if session_type == SessionType.TEAMMATE:
+    # Teammate sessions get uniform read-only access - no per-user permission levels.
+    # Exception: customer-service persona maps to SessionType.TEAMMATE but requires
+    # execute-level access (agent-browser, Stripe tools, management commands).
+    # Skip the restriction when persona is explicitly set to customer-service.
+    if session_type == SessionType.TEAMMATE and persona != PersonaType.CUSTOMER_SERVICE:
         context_parts.append(
             "RESTRICTION: This user has read-only Teammate access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
             "Answer questions, explain code, and provide guidance only. "
             "If they ask you to make changes, politely explain you can only help with "
             "informational queries for them."
+        )
+
+    # Emit who is being served when the email bridge provides this information.
+    if email_from:
+        if sender_name:
+            context_parts.append(f"SERVING: {sender_name} <{email_from}>")
+        else:
+            context_parts.append(f"SERVING: {email_from}")
+        context_parts.append(
+            "SCOPE: Only manage data belonging to this contact. "
+            "Do not access or modify records for other users."
         )
 
     if not project:

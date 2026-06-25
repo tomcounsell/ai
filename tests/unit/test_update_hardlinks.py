@@ -109,3 +109,29 @@ def test_user_bin_scripts_table_contains_sdlc_tool():
     """Regression guard: ensure the registry isn't empty."""
     paths = [src for src, _ in hardlinks.USER_BIN_SCRIPTS]
     assert "scripts/sdlc-tool" in paths
+
+
+def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
+    """Namespaced commands (e.g. granite/prime-pm-role.md) must hardlink globally.
+
+    Regression for the granite PTY production hang: PR #1694 moved persona
+    delivery to /granite:prime-pm-role slash commands living in
+    .claude/commands/granite/. The granite container runs claude in OTHER
+    repos' worktrees, so the command is only resolvable if it syncs to
+    ~/.claude/commands/granite/. A top-level-only glob left it unsynced, and
+    every granite session hung on "Unknown command: /granite:prime-pm-role".
+    """
+    src_ns = fake_project / ".claude" / "commands" / "granite"
+    src_ns.mkdir(parents=True)
+    src_cmd = src_ns / "prime-pm-role.md"
+    src_cmd.write_text("---\nname: prime-pm-role\n---\nPrime the PM persona.\n")
+
+    hardlinks._sync_commands(
+        fake_project / ".claude" / "commands",
+        fake_home / ".claude" / "commands",
+        hardlinks.HardlinkSyncResult(),
+    )
+
+    dst_cmd = fake_home / ".claude" / "commands" / "granite" / "prime-pm-role.md"
+    assert dst_cmd.exists(), "namespaced command was not synced into ~/.claude/commands/granite/"
+    assert os.stat(src_cmd).st_ino == os.stat(dst_cmd).st_ino, "synced as copy, not hardlink"

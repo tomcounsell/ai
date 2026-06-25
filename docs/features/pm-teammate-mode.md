@@ -17,7 +17,7 @@ PM session receives message
     v
 Intent Classifier (Haiku, four-way, ~$0.0001/call)
     |
-    |-- Teammate (confidence > 0.90) --> Teammate Handler (read-only tools)
+    |-- Teammate (confidence > 0.90) --> Teammate Handler (operational capabilities)
     |                                       |
     |                                       v
     |                                   Direct response to Telegram
@@ -56,8 +56,9 @@ Classification signals:
 Provides teammate-specific instructions that replace the PM dispatch block when a message is classified as teammate.
 
 - **Research-first behavior**: instructions prioritize evidence gathering before answering -- search code with Grep/Glob, query memory system, consult docs, then cite findings
-- **Tools available**: Read, Glob, Grep, Bash (read-only commands: git log, git status, gh issue view, gh pr list)
-- **Tools blocked**: file writes, branch creation, test execution, Agent tool (no Dev session spawning)
+- **Tools available**: Read, Glob, Grep, Bash (all commands, audit-logged via `[teammate-audit]`), GitHub issue/PR operations, knowledge base writes (`~/work-vault/`), memory system
+- **Write enforcement**: `pre_tool_use.py` code-blocks Write/Edit/MultiEdit to source code paths; allowed paths are `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level `.md` files, and `~/work-vault/`. See [Teammate Session Permissions](teammate-session-permissions.md).
+- **Eng session delegation**: when source code changes are needed, the teammate surfaces `valor-session create --role eng --slug <slug> --message "<task>"` and waits for human go-ahead rather than refusing
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `TEAMMATE_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with teammate-specific additions (conversational tone, cite file paths, direct answers)
 - **Delivery**: teammate sessions use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). Falls through to the message drafter when no delivery instruction is set.
@@ -87,13 +88,13 @@ In `_execute_agent_request()`, after determining the session type is "pm" or "te
 3. If `is_teammate` is true, injects teammate instructions via `build_teammate_instructions()` instead of PM dispatch instructions
 4. If `is_work` or classifier fails, preserves current behavior exactly
 
-### `bridge/message_drafter.py` (née `bridge/summarizer.py`)
+### `bridge/message_drafter.py`
 
-Teammate sessions bypass structured formatting entirely:
+Teammate sessions bypass structured formatting entirely. Since the drafter is now a pass-through validation filter (no LLM call), this bypass is built into `_compose_structured_draft()`:
 
-- `_build_draft_prompt()` appends `persona=teammate` context so the LLM produces conversational prose instead of bullets
-- `_compose_structured_draft()` returns the LLM draft directly without emoji prefix, bullet parsing, or structured template
-- `DRAFTER_SYSTEM_PROMPT` includes a teammate format rule: respond in prose, no bullets, no status emoji
+- When `persona == "teammate"`, `_compose_structured_draft()` returns the agent's prose verbatim — no emoji prefix, no bullet parsing, no stage header, no structured template
+- The persona hint still flows through `draft_message(persona="teammate")`; `_build_draft_prompt()` and the LLM rewrite path were removed in the drafter_passthrough_validation refactor
+- Wire-format validators still run; violations are surfaced via self-draft steering exactly as for other personas
 
 ### `agent/output_router.py` + `agent/agent_session_queue.py`
 
@@ -116,7 +117,7 @@ In the output router (`route_session_output()`), checks the `is_teammate` flag:
 |------|---------|
 | `agent/intent_classifier.py` | Haiku-based four-way classifier (teammate/collaboration/other/work) |
 | `agent/teammate_handler.py` | Teammate instruction builder (research-first) and nudge cap constant |
-| `bridge/message_drafter.py` | Teammate prose bypass in `_compose_structured_draft()` and prompt context |
+| `bridge/message_drafter.py` | Teammate prose bypass in `_compose_structured_draft()` (no structured header, no bullets) |
 | `agent/teammate_metrics.py` | Popoto-backed classification and response time counters (see [Popoto Index Hygiene](popoto-index-hygiene.md)) |
 | `agent/sdk_client.py` | Integration point: classifier call and instruction injection |
 | `agent/agent_session_queue.py` | Integration point: reduced nudge cap for teammate sessions |

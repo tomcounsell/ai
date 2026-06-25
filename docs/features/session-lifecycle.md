@@ -45,6 +45,8 @@ For terminal transitions. Executes all completion side effects in order:
 4. **Parent finalization** -- `_finalize_parent_sync(parent_id, ...)` (unless `skip_parent=True` or no parent)
 5. **Status + timestamp + save** -- sets `session.status`, `session.completed_at`, calls `session.save()`
 
+**Telemetry**: emits a `status_transition` event to the session's JSONL telemetry file (see [Session Telemetry](session-telemetry.md)), then calls `agent.session_telemetry.finalize_session()` to flush the file handle and evict in-memory state. Pass `emit_telemetry=False` to suppress the event (used by `session_health._apply_recovery_transition`, which emits its own kill-enriched `status_transition` first to avoid duplicate events).
+
 **Idempotent**: if the session is already in the target terminal state, logs and returns without re-executing side effects.
 
 **Kill-is-terminal guard** (`reject_from_terminal`, default `True`): When the session is already in a terminal state and the caller is trying to transition it to a *different* terminal status (e.g., `killed -> completed`), raises `StatusConflictError` instead of overwriting. This mirrors the symmetric guard on `transition_status()` and enforces the rule that **once terminal, always terminal — unless the caller has explicitly documented why they need to re-classify**. Callers with legitimate re-classification needs (rare; e.g., escalating `abandoned -> failed` on timeout) must pass `reject_from_terminal=False` explicitly. See the *Kill-is-Terminal Invariant* section below for the full rationale and the audit of catch-and-log call sites.
@@ -63,6 +65,8 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
 
 **Idempotent**: if the session is already in the target state, logs and returns.
 
+**Telemetry**: emits a `status_transition` event to the session's JSONL telemetry file (see [Session Telemetry](session-telemetry.md)). Pass `emit_telemetry=False` to suppress the event when the caller is already emitting a richer telemetry record.
+
 **Lazy-load safety**: Before saving, `transition_status()` backfills `session._saved_field_values["status"]` with the current status. This mirrors the same backfill in `finalize_session()` — both functions share the same Popoto lazy-load coupling. See `finalize_session()` above for the full explanation.
 
 **Terminal respawn protection**: By default, `transition_status()` rejects transitions from terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`). This prevents accidental respawning of finished sessions. Callers that legitimately need terminal-to-non-terminal transitions must pass `reject_from_terminal=False` explicitly. Currently two callers use this opt-out:
@@ -70,6 +74,20 @@ For non-terminal transitions. Logs the lifecycle transition and updates the stat
 - `user_prompt_submit.py` hook: `completed->running` (user reactivates local session)
 
 See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full audit of all recovery paths.
+
+### Recovery Confirms Subprocess Death (issue #1537)
+
+When the liveness check recovers a no-progress `running` session, `_apply_recovery_transition()` (`agent/session_health.py`) calls `handle.task.cancel()` with a `TASK_CANCEL_TIMEOUT` of 0.25s. Cancellation alone does **not** guarantee the underlying `claude -p` subprocess exited — a true hang ignores `CancelledError` and orphans the PID. Once the DB record leaves `running`, that orphan is invisible to every detector (the forward scan only queries `status="running"`; the in-process and PPID==1 reapers only act on terminal-status / launchd-reparented processes), so it wedges the worker's execution slot until a human runs `worker-restart`. This was the root cause of the 2026-05-31 incident (a 25.5h hang).
+
+Recovery now confirms subprocess termination before deciding how to transition:
+
+1. **`_confirm_subprocess_dead(pid, *, timeout)`** runs after the `task.cancel()` await. It probes liveness with `os.kill(pid, 0)`, then escalates **SIGTERM → SIGKILL** against the recorded `entry.claude_pid`, polling for exit within a short single-digit-second grace (`SUBPROCESS_KILL_TIMEOUT = 3.0`). SIGKILL is sent **only** when SIGTERM fails to terminate the PID. It returns `True` only when the PID is confirmed gone (`ProcessLookupError`); a `None`/non-positive PID short-circuits to `True` (nothing to kill); `PermissionError` or a PID that survives SIGKILL returns `False`.
+2. **The requeue `else` branch** (below `MAX_RECOVERY_ATTEMPTS`) branches on that boolean:
+   - **Confirmed dead** → the existing requeue-to-`pending` path runs (nulls `started_at`, bumps priority to `high`, `transition_status(..., "pending")`).
+   - **Not confirmed dead** → `finalize_session(entry, "failed", ...)` escalates the session to the `failed` terminal status so the in-process orphan reaper (which acts on `TERMINAL_STATUSES`) owns cleanup. `started_at` is **not** nulled into a `pending` record. This is the exact fix for #1537: a hung subprocess can never be silently parked at `pending` as an untracked orphan.
+3. **Observability:** best-effort Redis counters (failure never propagates out of recovery) — `{project_key}:session-health:subprocess_kill_escalated` when a recorded PID was confirmed dead via the kill path, and `:subprocess_kill_failed` when the subprocess could not be confirmed dead.
+
+**PID-reuse caveat:** a recorded `claude_pid` could in principle be recycled by an unrelated process before recovery runs. The window is the sub-second recovery path and this matches the existing PPID==1 reaper's assumptions; the residual risk is accepted rather than tracking PID generations.
 
 ## Kill-is-Terminal Invariant
 
@@ -133,6 +151,21 @@ Before consolidation, completion side effects were scattered across 4 paths, eac
 | Branch checkpoint | Path B only | All paths (unless `skip_checkpoint`) |
 | Parent finalization | Path B only | All paths (unless `skip_parent`) |
 
+## Child Session Creation Temporarily Disabled (#1633)
+
+Creation of NEW parent-attached child sessions is refused as a stopgap until the #1633 refactor lands. The granite PTY cutover (PR #1612) runs every session in a container that owns its own PM+Dev claude TUI pair from a bounded pool, so parent-spawned child AgentSessions (the old PM→Dev pattern) double-consume scarce pool slots and risk starvation/deadlock when a parent in `waiting_for_children` holds a slot its child needs. Dependent work should run as subagents inside the current session instead.
+
+Gated creation paths (all share `models/child_session_gate.py`):
+
+- `valor-session create --parent <id>` — exit 2 with a stderr error; `--json` emits `{"error": "child_sessions_disabled", "issue": 1633, ...}`. Nothing is written to Redis on the refused path.
+- `agent/agent_session_queue.py::_push_agent_session` — raises `ChildSessionsDisabledError` before any persistence when `parent_agent_session_id` is set (covers every enqueue caller).
+- `.claude/hooks/user_prompt_submit.py` — when `VALOR_PARENT_SESSION_ID` is set, the hook silently skips creating the parent-linked tracking record (the subprocess itself still runs).
+- `python -m tools.agent_session_scheduler schedule --parent-session <id>` — exit 2 with the structured error.
+
+**Escape hatch (genuine emergencies only):** `VALOR_ALLOW_CHILD_SESSIONS=1` bypasses the block with a loud warning at each creation site.
+
+**Unaffected:** existing child sessions keep working end to end — resume, steer, kill, the `children` subcommands, and `waiting_for_children` parent finalization (below) for already-linked sessions. PM continuation chains (`session_completion.py` `create_pm`, issue #1195) are deliberately exempt: their parents are terminal and hold no pool slot. The child-session pattern itself survives untouched per #1633; only NEW parent-attached creation is refused.
+
 ## Parent Finalization
 
 When a child session completes, `finalize_session()` checks if the parent should also be finalized:
@@ -176,6 +209,12 @@ When a nudge (auto-continue) is enqueued during session execution, the session s
 - If `status = "pending"`: a nudge was enqueued, skip completion
 - If session no longer exists: nudge fallback recreated it, skip completion
 - Otherwise: proceed with normal completion via `finalize_session()`
+
+### Consecutive-Failure Circuit Breaker (issue #1413)
+
+`agent/health_check.py::watchdog_hook` runs a cheap deterministic check on **every** tool call (complementing the Haiku watchdog, which judges holistic progress every `CHECK_INTERVAL` calls). It counts back-to-back failed tool calls per session — a failure being a `tool_response` dict with `is_error == True` (or, on rare SDK paths, a string starting with `"Error: "`); all other shapes are treated as success. When `CONSECUTIVE_FAILURE_THRESHOLD` (default 5) failures occur in a row, the session is flagged via the shared `AgentSession.watchdog_unhealthy` field with a reason naming the last failing tools, e.g. `"5 consecutive tool failures (Bash, Bash, Edit, Read, Bash) — strategy reassessment required"`.
+
+Any successful tool call resets the counter and clears the recent-failure ring (`deque(maxlen=5)`). After the breaker fires, the counter resets so it re-fires every 5 *additional* consecutive failures. Because `watchdog_unhealthy` is read by the output router before auto-continuing, a tripped breaker pauses the nudge loop and surfaces the session to the operator/PM for reassessment. The counter and ring are process-local in-memory state (reset on worker restart) — no schema change, no Redis persistence.
 
 ## Stale Object Hazard and the `finalized_by_execute` Gate
 
@@ -259,13 +298,29 @@ A stale caller can at worst append a spurious `session_events` entry. It cannot 
 
 `scripts/reflections.py` scans bridge logs daily for `"Stale index entry"` warnings. A non-zero count triggers a finding tagged `(regression marker for #898)`. The `finalized_by_execute` fix should eliminate all such warnings; a reappearance indicates a regression.
 
+## Timestamp Convention — `updated_at` is Explicit UTC
+
+`AgentSession.updated_at` is always an explicit UTC wall-clock timestamp. It is stamped inside the `save()` override using `bridge.utc.utc_now()`, not by a Popoto `auto_now` field.
+
+**Why:** Popoto's `auto_now` calls `datetime.now()` (no `tz` argument), which mints a naive datetime in the host's local timezone. On non-UTC hosts the stored value is naive-local, but every downstream reader (watchdog, dashboard, stale-cleanup) interprets it as UTC. The result is a future-dated `updated_at` for sessions created on hosts running ahead of UTC, causing the watchdog/dashboard to report sessions as perpetually "fresh" and stale-cleanup to skip them forever.
+
+**The fix (issue #1645):** `auto_now` was removed from the field declaration. The `save()` override stamps `self.updated_at = utc_now()` unconditionally unless `update_fields` is provided *without* `"updated_at"` — in which case the stamp is skipped entirely (no in-memory mutation without a matching persist, to avoid memory/Redis desync).
+
+**Rule for new fields:** `auto_now=True` must not be added to any `DatetimeField`. Always stamp explicitly with `utc_now()` at the appropriate call site. This constraint is documented on the field declaration at `models/agent_session.py` line 153–155 (#1645).
+
+### First-deploy callout
+
+`_heal_future_updated_at()` (a classmethod on `AgentSession`) runs once at worker startup after the fix is deployed. It clamps any `updated_at` that is in the future down to `max(created_at, now)`. After the clamp, those previously-future-dated records appear newly-updated to the watchdog and dashboard staleness checks for exactly one staleness window — operators should **not** interpret this momentary freshness as real session activity. No threshold change is required; the clamp only moves timestamps from future to now.
+
+The heal is idempotent: a re-run clamps only still-future records, so a mid-run restart is safe.
+
 ## Stale Session Cleanup
 
 `_cleanup_stale_sessions()` in `scripts/update/run.py` runs during every `/update` deploy and terminates `running` or `pending` sessions that have no live process. It is a safety net for sessions that were never finalized due to a crash or abrupt restart.
 
 **Primary liveness check — `updated_at` recency (30-minute window):** The function first checks each session's `updated_at` timestamp. If `updated_at` is within the last 30 minutes, the session is considered live and unconditionally skipped. The worker writes a periodic `updated_at` heartbeat every 25 minutes via `_heartbeat_loop` in `agent/agent_session_queue.py`, so even sessions blocked on a long Claude API call stay fresh in Redis. Sessions skipped for recent activity are counted and reported in the `/update` log as "Skipped N live session(s) (recent heartbeat)".
 
-**Fallback liveness check — `created_at` age (120-minute threshold):** When `updated_at` is `None` (sessions created before the heartbeat feature was added), the function falls back to checking `created_at` age. Sessions younger than 120 minutes are skipped. This preserves the original safety margin for legacy sessions.
+**Fallback liveness check — `created_at` age (120-minute threshold):** When `updated_at` is `None` (sessions created before the heartbeat feature was added), the function falls back to checking `created_at` age. Sessions younger than 120 minutes are skipped. This preserves the original safety margin for pre-heartbeat sessions.
 
 **Secondary defense — `_active_workers` registry:** Before either timestamp check, any session whose `worker_key` maps to a not-done asyncio Task in `_active_workers` is unconditionally skipped. Workers are keyed by `worker_key` (`project_key` for slugless PM/dev sessions and PM sessions at PLAN/ISSUE/CRITIQUE/MERGE stages; `slug` for slugged-dev sessions and PM sessions at BUILD/TEST/PATCH/REVIEW/DOCS stages; or `chat_id` for teammate sessions). This registry is only populated during in-process invocations and is always empty when the update script runs as a CLI subprocess.
 
@@ -283,11 +338,108 @@ When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visi
 
 **Implication:** there is a ≤5-minute window (one watchdog tick interval) where ⏳ can briefly persist on the user's message after the session recovers, before the next tick clears the dedup. The recovery message itself lands first, so the user sees the recovery before the reaction is reset for a future stall.
 
+## Deferred Self-Draft Fallback Delivery (issue #1730)
+
+When the message drafter flags an output as an "empty promise" (`needs_self_draft=True`),
+`TelegramRelayOutputHandler.send()` injects a `sender="drafter-fallback"` steering message asking
+the agent to rewrite and resend, then skips the outbox write.  This is called a *deferred delivery*:
+the user's message will be delivered on the agent's next SDK turn after it consumes the steering.
+
+**The failure mode:** if the session is killed by the health checker (`tool_timeout` or
+`no_progress`) before the self-draft completes, the deferred answer is silently lost.  The
+steering queue is empty by finalization time — the agent drains it at turn start — so it cannot be
+used as a detection signal.
+
+**The fix (issue #1730):**
+
+1. **Persist at defer time**: at the point where `steering_deferred=True` in
+   `agent/output_handler.py`, the handler persists two keys into `AgentSession.extra_context`
+   (safe read-modify-write via `get_authoritative_session` re-read):
+   - `"deferred_self_draft_pending"`: `True`
+   - `"deferred_self_draft_text"`: the original output text
+
+2. **Fallback at finalization**: a new async helper `_deliver_deferred_self_draft_fallback(entry)`
+   in `agent/session_health.py` reads `entry.extra_context["deferred_self_draft_pending"]` on all
+   three terminal recovery branches (`failed` × 2, `abandoned` × 1).  On a truthy flag it delivers
+   the recovered `deferred_self_draft_text` — narration-gated inline via the imported
+   `is_narration_only` predicate and `NARRATION_FALLBACK_MESSAGE` constant from
+   `bridge.message_quality`, or an explicit "couldn't finish responding" notice when text is absent.
+   The helper is idempotent via Redis SETNX (`self_draft_fallback_sent:{session_id}`, 1 h TTL).
+
+3. **Precedence**: the self-draft fallback fires *before* the generic degraded notice
+   (`_deliver_tool_timeout_degraded_notice`).  When `deferred_self_draft_pending` is set, the
+   generic notice is suppressed.  The two helpers use distinct SETNX keys so neither blocks the
+   other.
+
+4. **Counter cleanup (AC4 dual-seat)**: `reset_self_draft_attempts(session_id)` is called at
+   every terminal finalize to clean up the `steering:attempts:{session_id}` Redis counter instead
+   of relying on its 1-hour TTL:
+   - **Seat A** (`models/session_lifecycle.py::finalize_session`): outside the `emit_telemetry`
+     guard so it fires unconditionally (covers `completed` + any telemetry-on caller).
+   - **Seat B** (`agent/session_health.py`, next to `finalize_telemetry`): covers the
+     `emit_telemetry=False` health-checker terminal finalizes that Seat A alone would miss.
+
+**Cross-reference:** `_deliver_tool_timeout_degraded_notice` (added in PR #1738, issue #1711) is
+the delivery primitive this fallback is modelled after.  New precedence: self-draft fallback
+supersedes the generic degraded notice when a deferred self-draft was pending.
+
 ## Design Constraints
 
 - **Import safety**: The module uses lazy imports for `tools.session_tags` and `agent.agent_session_queue` so it can be imported from `.claude/hooks/stop.py` subprocess context where those modules may not be on `sys.path`.
 - **Fail-safe side effects**: Each side effect (auto-tag, checkpoint, parent finalization) is wrapped in a try/except that logs and continues. A failure in any side effect never blocks the status save.
 - **Synchronous only**: The module provides sync functions. Callers in async contexts use `asyncio.to_thread()` as needed (matching existing patterns).
+
+## Index-Rebuild Race and Read-Path Retry (issue #1720)
+
+### Root cause
+
+`AgentSession.repair_indexes()` calls popoto's `rebuild_indexes()`, which
+**deletes the class set (`$Class:AgentSession`) at `base.py:2745`** and then
+re-adds all members in `batch_size=1000` pipeline batches (`base.py:2785-2813`).
+
+`session_id` is a plain `Field()` (not an `IndexedField`), so there is no
+`$IndexF:AgentSession:session_id:*` key.  A `query.filter(session_id=...)` on a
+non-indexed field reads `smembers($Class:AgentSession)` and filters in memory
+(`query.py:1341/1758/1790`).  During the class-set delete→re-add window, any
+concurrent reader returns an empty result for a live session — `Session not found`.
+
+`repair_indexes()` runs **hourly** (the `agent-session-cleanup` reflection at
+`agent/session_health.py:2626`) and at **worker startup**
+(`agent/session_pickup.py:411`), so every hour there is a window where live
+sessions transiently disappear from class-set reads.
+
+### Read-path retry defense
+
+Both reader sites apply a bounded retry that re-reads on empty, returns
+immediately on found, and falls through to the existing absent-session fallback
+after the cap:
+
+- `tools/valor_session.py::_find_session` (operator CLI: `valor-session status`)
+- `tools/sdlc_stage_query.py::_find_session_by_id` (SDLC stage dispatch)
+
+**Measured parameters (spike-1, 150 sessions):**
+- `rebuild_indexes()` wall-clock duration: ~600ms
+- p99 class-set-empty window: **651ms**
+- Retry cap: 5 attempts × 200ms = **1000ms total** (covers p99 with ~35% margin)
+
+When the retry fires, both sites emit a `logger.debug` message:
+`"query.filter(session_id=...) returned empty on attempt N/5 — class-set may be mid-rebuild, retrying in 200ms"`
+
+**Hot-path exclusion:** the retry is applied only at operator/dispatch reader
+sites, not at internal worker paths (recovery, steering delivery) where latency
+matters and the caller already handles `None` gracefully.
+
+### Spike-2 finding (informational)
+
+Stale class-set members (phantoms) occur primarily via TTL expiry: each
+`AgentSession` hash has `Meta.ttl = 2592000` (30 days), but index keys
+(including the class set) do not carry a coordinated TTL.  When a hash TTL
+expires, the class-set entry remains until the next `rebuild_indexes()` clears
+and reconstructs it.  Delete paths (`session.delete()`, status transitions) do
+maintain the class set via `srem()`, so manually-deleted sessions are not a
+significant phantom source.  TTL coordination is recorded here as a documented
+finding but is out of scope for issue #1720; the read-path retry already
+neutralizes the `Session not found` symptom regardless of phantom source.
 
 ## Related
 
@@ -295,3 +447,4 @@ When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visi
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Stuck session detection
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) -- Structured LIFECYCLE logging at every state transition
 - [Agent Session Hierarchy](agent-session-scheduling.md#parent-child-session-hierarchy) -- Parent-child relationships and orphan handling
+- [Popoto Index Hygiene](popoto-index-hygiene.md) -- Full index-cleanup pipeline and model exclusion list

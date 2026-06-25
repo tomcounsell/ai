@@ -24,7 +24,7 @@ A two-stage routing system: fast-path pattern matching for obvious cases, LLM cl
    - Short acknowledgments (`continue`, `ok`, `yes`) → `passthrough`
 
 2. **LLM classification** (for everything else):
-   - Primary: Ollama (gemma4:e2b, fast, local, free)
+   - Primary: Ollama (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`, fast, local, free)
    - Fallback: Anthropic Haiku (when Ollama unavailable)
    - Prompt asks for single-word `sdlc`, `collaboration`, `other`, or `question` response
    - Default for ambiguous messages: `collaboration` (cheaper when wrong than SDLC)
@@ -111,5 +111,5 @@ After fetching an issue, the SDLC skill verifies the issue URL matches the expec
 
 - [SDLC Enforcement](sdlc-enforcement.md) -- Quality gates and pipeline stage model
 - [Message Drafter](message-drafter.md) -- Process narration stripping added alongside routing
-- [Chat Dev Session Architecture](pm-dev-session-architecture.md) -- Session routing and orchestration
+- [Eng Session Architecture](eng-session-architecture.md) -- Session routing and orchestration
 - [PM Routing: Collaboration](pm-routing-collaboration.md) -- Four-way classification extending this two-way system

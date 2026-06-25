@@ -2,15 +2,27 @@
 reflections/sentry_triage.py — Sentry issue triage reflection callable.
 
 Queries the Sentry API for unresolved issues across all projects in the org,
-classifies them (A–E), files GitHub issues for actionable ones (dry-run by
-default), and sends a summary to Telegram.
+classifies them (A–E), files GitHub issues for actionable ones, and updates
+Sentry state for A/B/E (gated by SENTRY_TRIAGE_APPLY env var, default off).
+Telegram delivery is delta-based and exception-only: a summary is sent ONLY
+when a genuinely NEW Class C/D issue appears since the previous run, or an
+auto-action fails. The Class C/D human-review pile is a STANDING backlog — in
+dry-run nothing drains it, so re-announcing the same pile every day is pure
+noise. The set of already-surfaced C/D short-ids is persisted between runs; a
+static backlog stays silent (live status is always on the dashboard), and the
+first run seeds that set silently rather than replaying the whole backlog.
 
 Classification:
-  A — Ignore: test/mock/harness noise
-  B — Low: known transients (rate limits, network timeouts)
-  C — Actionable: real bugs worth a GitHub issue
-  D — Investigate: ambiguous, needs human review
-  E — Stale: no events in 30 days, candidate for resolve
+  A — Ignore: test/mock/harness noise        -> Sentry status=ignored (permanent)
+  B — Low: known transients                  -> Sentry status=ignored + ignoreUntilEscalating
+  C — Actionable: real bugs worth a GH issue -> GitHub issue filed
+  D — Investigate: ambiguous, needs review   -> listed only
+  E — Stale: no events in 30 days            -> Sentry status=resolved
+
+Apply gate:
+  The env var SENTRY_TRIAGE_APPLY (default "0" = dry-run) controls BOTH the
+  GitHub-issue filing for tier C AND the Sentry state updates for tiers
+  A/B/E atomically. Set SENTRY_TRIAGE_APPLY=1 to enable live writes.
 
 All functions accept no arguments and return:
   {"status": "ok"|"error"|"disabled", "findings": [...], "summary": str}
@@ -18,6 +30,7 @@ All functions accept no arguments and return:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -27,13 +40,74 @@ from pathlib import Path
 
 import requests
 
-from reflections.utils import PROJECT_ROOT, load_local_projects
+from reflections.utilities import PROJECT_ROOT, load_local_projects
 
 logger = logging.getLogger("reflections.sentry_triage")
 
 SENTRY_API_BASE = "https://yudame.sentry.io/api/0"
 
-DRY_RUN = True  # Safe default: log only, don't file GitHub issues
+# Persisted set of Class C/D issue short-ids surfaced to Tom on the previous run.
+# Delta-based notification reads this to stay silent on a static standing backlog
+# and ping only when a genuinely NEW actionable/investigate issue appears.
+_SEEN_STATE_PATH = PROJECT_ROOT / "data" / "sentry_triage_seen.json"
+
+
+def _load_seen_ids() -> set[str] | None:
+    """Return the Class C/D short-ids surfaced on the previous run.
+
+    Returns None when no state file exists yet (first run since delta-based
+    delivery shipped) so the caller can seed silently instead of re-announcing
+    the entire standing backlog. A corrupt/unreadable file is treated the same
+    as a missing one.
+    """
+    try:
+        raw = _SEEN_STATE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        logger.warning(f"sentry_triage: could not read seen-state: {e}")
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(data, dict):
+        data = data.get("ids", [])
+    if not isinstance(data, list):
+        return None
+    return {str(x) for x in data}
+
+
+def _save_seen_ids(ids: set[str]) -> None:
+    """Persist the current Class C/D short-id set. Best-effort; never raises."""
+    try:
+        _SEEN_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SEEN_STATE_PATH.write_text(json.dumps({"ids": sorted(ids)}, indent=0), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"sentry_triage: could not persist seen-state: {e}")
+
+
+def _apply_enabled() -> bool:
+    """Return True if SENTRY_TRIAGE_APPLY=1 is set (live mode).
+
+    Default is False (dry-run). When True, both GitHub-issue filing for
+    tier C AND Sentry state updates for tiers A/B/E are committed.
+    """
+    return os.environ.get("SENTRY_TRIAGE_APPLY", "0") == "1"
+
+
+# Tier -> Sentry PUT payload map.
+#
+# IMPORTANT: For tier B we want the UI-default "archived until escalating"
+# behavior, which requires explicit statusDetails. A naive {"status":
+# "ignored"} payload defaults the substatus to "archived_forever" instead.
+# See https://github.com/getsentry/sentry-mcp/issues/878 and the Sentry
+# "Update an Issue" API docs.
+_TIER_ACTION_MAP: dict[str, dict] = {
+    "A": {"status": "ignored"},
+    "B": {"status": "ignored", "statusDetails": {"ignoreUntilEscalating": True}},
+    "E": {"status": "resolved"},
+}
 
 # Classification patterns
 _CLASS_A_PATTERNS = [
@@ -52,6 +126,7 @@ _CLASS_A_PATTERNS = [
     "Pass 2 returned _HARNESS_NOT_FOUND",
     "MagicMock",
     "must be set",  # config errors like "TELEGRAM_API_ID and TELEGRAM_API_HASH must be set"
+    "ANTHROPIC_API_KEY",  # API key not configured — always a test/env-misconfiguration event
     "No such file or directory: '/nonexistent",
     'No such file or directory: "/nonexistent',
     'No such file or directory: "/tmp/fake',
@@ -59,6 +134,14 @@ _CLASS_A_PATTERNS = [
     "[test-project]",
     "[test]",
     "[test] failed",
+    "Test error",  # test sentinel error message
+    "surprise!",  # test sentinel
+    "unknown_backend",  # test sentinel for storage backend
+    "db dead",  # test sentinel
+    "DB on fire",  # test sentinel
+    "worker down",  # test sentinel
+    "noapikey",  # test podcast slug used in Stripe tests
+    "audit action=mcp_tool_call",  # security audit log lines, not errors
     "All drafting backends failed",
     "All summarization backends failed",
     "Refusing to clean up worktree",
@@ -73,8 +156,10 @@ _CLASS_B_PATTERNS = [
     "ConnectionRefusedError",
     "Connection refused",
     "connection lost",
+    "connection already closed",  # transient DB/socket connection drop
     "TimeoutError",
     "timed out",
+    "provider timeout",  # external LLM/API provider timeout
     "ETIMEDOUT",
     "ECONNREFUSED",
     "ECONNRESET",
@@ -89,9 +174,12 @@ _CLASS_B_PATTERNS = [
     "Redis connection lost",
     "API down",
     "API error",
+    "API server error",  # external provider 5xx (Grok, Perplexity, etc.)
+    "server error (500)",  # external provider 5xx
     "auth",
     "401",
     "403",
+    "404",
     "AuthenticationError",
     "Permission denied",
     "Event loop is closed",
@@ -293,11 +381,51 @@ def _file_github_issue(
         return None
 
 
+def _update_sentry_issue(issue_id: str, auth_token: str, payload: dict) -> tuple[bool, str | None]:
+    """Update a Sentry issue's state via PUT /api/0/issues/{id}/.
+
+    Args:
+        issue_id: Sentry issue id (numeric or short id accepted by the API).
+        auth_token: Sentry bearer token.
+        payload: Body for the PUT call (see _TIER_ACTION_MAP). For tier B,
+            this MUST include ``statusDetails.ignoreUntilEscalating: True``,
+            otherwise Sentry defaults the substatus to ``archived_forever``
+            rather than ``archived_until_escalating``.
+
+    Returns:
+        (True, None) on 2xx, (False, error_message) otherwise. Per-issue
+        failures are isolated -- callers should loop and surface failures
+        in the digest without aborting the run.
+    """
+    if not issue_id:
+        return False, "missing issue id"
+
+    url = f"{SENTRY_API_BASE}/issues/{issue_id}/"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.put(url, headers=headers, json=payload, timeout=15)
+    except requests.RequestException as e:
+        logger.warning(f"sentry_triage: update PUT failed for {issue_id}: {e}")
+        return False, str(e)
+
+    if 200 <= resp.status_code < 300:
+        return True, None
+
+    body_snippet = (resp.text or "")[:200]
+    logger.warning(
+        f"sentry_triage: update PUT non-2xx for {issue_id}: HTTP {resp.status_code}: {body_snippet}"
+    )
+    return False, f"HTTP {resp.status_code}: {body_snippet}"
+
+
 def _send_telegram_notification(message: str) -> None:
     """Best-effort Telegram notification. Swallows all subprocess failures."""
     try:
         subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
+            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
             timeout=10,
@@ -360,20 +488,46 @@ def run_sentry_triage() -> dict:
 
     findings: list[str] = []
     issues_filed = 0
+    apply_on = _apply_enabled()
 
-    # Report Class A (noise) — just count
-    if classified["A"]:
-        findings.append(f"Class A (noise): {len(classified['A'])} issues to ignore")
-        for issue, cls, reason in classified["A"][:5]:
-            findings.append(f"  {issue.get('shortId', '?')}: {reason}")
+    # Auto-action counters: per-tier (success, total_attempted)
+    auto_action_results: dict[str, dict[str, int]] = {
+        "A": {"ok": 0, "total": 0, "failed": 0},
+        "B": {"ok": 0, "total": 0, "failed": 0},
+        "E": {"ok": 0, "total": 0, "failed": 0},
+    }
+    auto_action_failures: list[str] = []  # human-readable failure detail for digest
 
-    # Report Class B (transients) — just count
-    if classified["B"]:
-        findings.append(f"Class B (transient): {len(classified['B'])} issues to monitor")
-        for issue, cls, reason in classified["B"][:5]:
-            findings.append(f"  {issue.get('shortId', '?')}: {reason}")
+    def _auto_action_tier(tier: str, label: str) -> None:
+        """Apply Sentry state change for all issues in a tier (or dry-run record)."""
+        if not classified[tier]:
+            return
+        payload = _TIER_ACTION_MAP[tier]
+        findings.append(f"Class {tier} ({label}): {len(classified[tier])} issues")
+        for issue, _cls, reason in classified[tier]:
+            short_id = issue.get("shortId", "?")
+            findings.append(f"  {short_id}: {reason}")
+            auto_action_results[tier]["total"] += 1
+            if not apply_on:
+                findings.append(f"    [DRY RUN] would PUT {payload} for {short_id}")
+                continue
+            issue_id = issue.get("id") or issue.get("shortId") or ""
+            ok, err = _update_sentry_issue(str(issue_id), auth_token, payload)
+            if ok:
+                auto_action_results[tier]["ok"] += 1
+                findings.append(f"    Auto-actioned: {short_id} -> {payload['status']}")
+            else:
+                auto_action_results[tier]["failed"] += 1
+                auto_action_failures.append(f"{short_id}: {err}")
+                findings.append(f"    FAILED: {short_id}: {err}")
 
-    # Report Class C (actionable) — file GitHub issues
+    # Tier A (noise) — Sentry status=ignored
+    _auto_action_tier("A", "noise")
+
+    # Tier B (transient) — Sentry status=ignored + ignoreUntilEscalating
+    _auto_action_tier("B", "transient")
+
+    # Tier C (actionable) — file GitHub issues
     if classified["C"]:
         findings.append(f"Class C (actionable): {len(classified['C'])} issues to fix")
         for issue, cls, reason in classified["C"]:
@@ -382,7 +536,7 @@ def run_sentry_triage() -> dict:
             proj = issue.get("project", {}).get("slug", "?")
             findings.append(f"  {short_id} [{proj}]: {title} ({reason})")
 
-            if DRY_RUN:
+            if not apply_on:
                 findings.append("    [DRY RUN] would file GitHub issue")
             else:
                 # Determine project working directory for gh CLI
@@ -400,34 +554,73 @@ def run_sentry_triage() -> dict:
                 else:
                     findings.append(f"    [SKIP] no working directory for project {proj}")
 
-    # Report Class D (investigate) — list for review
+    # Tier D (investigate) — list for review, no auto-action
     if classified["D"]:
         findings.append(f"Class D (investigate): {len(classified['D'])} issues needing review")
         for issue, cls, reason in classified["D"][:5]:
             findings.append(f"  {issue.get('shortId', '?')}: {reason}")
 
-    # Report Class E (stale) — list for resolve
-    if classified["E"]:
-        findings.append(f"Class E (stale): {len(classified['E'])} issues to resolve")
-        for issue, cls, reason in classified["E"][:5]:
-            findings.append(f"  {issue.get('shortId', '?')}: {reason}")
+    # Tier E (stale) — Sentry status=resolved
+    _auto_action_tier("E", "stale")
 
     elapsed = time.time() - t0
+
+    # Aggregate auto-action counts for the summary
+    a_r, b_r, e_r = auto_action_results["A"], auto_action_results["B"], auto_action_results["E"]
+    auto_action_summary = (
+        f"A={a_r['ok']}/{a_r['total']} B={b_r['ok']}/{b_r['total']} E={e_r['ok']}/{e_r['total']}"
+    )
+    total_failed = a_r["failed"] + b_r["failed"] + e_r["failed"]
 
     summary = (
         f"sentry-issue-triage: {len(issues)} issues across {len(by_project)} project(s) "
         f"(A={len(classified['A'])} B={len(classified['B'])} "
         f"C={len(classified['C'])} D={len(classified['D'])} E={len(classified['E'])})"
     )
-    if DRY_RUN:
+    if apply_on:
+        summary += f", auto-actioned: {auto_action_summary}"
+        if total_failed:
+            summary += f" ({total_failed} failed)"
+    else:
         summary += " [DRY RUN]"
     if issues_filed:
         summary += f", {issues_filed} GitHub issues filed"
 
     logger.info(summary)
 
-    # Telegram summary (concise)
-    tg_lines = [f"Sentry triage: {len(issues)} issues"]
+    # Delta-based exception delivery. The human-review pile (Class C actionable +
+    # Class D investigate) is a STANDING backlog — in dry-run nothing drains it,
+    # so re-announcing the same pile every day is pure noise (the "still getting
+    # too many" #1561/#1582 follow-up). Notify only when a genuinely NEW C/D
+    # short-id appears since the last run, or an auto-action actually failed.
+    # Tiers A/B/E are handled without human input and never notify. On the very
+    # first run (no state yet) seed silently so we don't replay the whole
+    # backlog. Live status is always available on the dashboard.
+    current_cd_ids = {
+        str(issue.get("shortId") or issue.get("id"))
+        for issue, _cls, _reason in (classified["C"] + classified["D"])
+    }
+    prev_seen = _load_seen_ids()
+    new_cd_ids: set[str] = set() if prev_seen is None else (current_cd_ids - prev_seen)
+    _save_seen_ids(current_cd_ids)
+
+    needs_attention = bool(new_cd_ids) or total_failed > 0
+    if not needs_attention:
+        logger.info(
+            "sentry_triage: no new actionable issues since last run "
+            f"({len(current_cd_ids)} in standing backlog); suppressing notification"
+        )
+        return {
+            "status": "ok",
+            "findings": findings,
+            "summary": summary,
+            "duration": elapsed,
+        }
+
+    # Telegram summary (concise). Lead with the new-issue count so it's clear why
+    # the otherwise-silent triage spoke up.
+    new_suffix = f" ({len(new_cd_ids)} new)" if new_cd_ids else ""
+    tg_lines = [f"Sentry triage: {len(issues)} issues{new_suffix}"]
     for cls_label, cls_key in [
         ("Noise", "A"),
         ("Transient", "B"),
@@ -438,11 +631,25 @@ def run_sentry_triage() -> dict:
         count = len(classified[cls_key])
         if count:
             tg_lines.append(f"  {cls_label} ({cls_key}): {count}")
+
+    # Auto-action block — distinct from human-review pile (C+D)
+    if a_r["total"] or b_r["total"] or e_r["total"]:
+        verb = "Auto-actioned" if apply_on else "Would auto-action"
+        tg_lines.append(f"{verb}: {auto_action_summary}")
+        if total_failed:
+            tg_lines.append(f"  ({total_failed} failed)")
+            for detail in auto_action_failures[:3]:
+                tg_lines.append(f"  ! {detail}")
+
     if classified["C"]:
         for issue, _, reason in classified["C"][:3]:
             tg_lines.append(f"  -> {issue.get('shortId', '?')}: {issue.get('title', '')[:60]}")
-    if DRY_RUN and classified["C"]:
+    if not apply_on and classified["C"]:
         tg_lines.append("[dry run — no GitHub issues filed]")
+    if not apply_on and (a_r["total"] or b_r["total"] or e_r["total"]):
+        tg_lines.append("[dry run — no Sentry state changes]")
+    if apply_on:
+        tg_lines.append("[LIVE — Sentry state changes applied]")
     _send_telegram_notification("\n".join(tg_lines))
 
     return {

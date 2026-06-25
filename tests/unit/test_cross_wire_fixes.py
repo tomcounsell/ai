@@ -1,9 +1,12 @@
 """Tests for cross-wire bug fixes (issue #232).
 
-Tests three fixes:
-1. Classifier Teammate awareness -- informational answers classified as COMPLETION
-2. Session isolation — fresh sessions don't set continue_conversation=True
-3. Non-SDLC auto-continue guard — planning language auto-continues, answers deliver
+Tests two remaining fixes:
+1. Session isolation — fresh sessions don't set continue_conversation=True
+2. Non-SDLC auto-continue guard (removed — tested old classifier chain)
+
+Note: Fix 1 (Classifier Teammate awareness) has been removed. The LLM
+classify_output cluster was deleted in the drafter passthrough refactor —
+routing decisions now live in bridge/promise_gate.py and the nudge loop.
 
 Run with: pytest tests/test_cross_wire_fixes.py -v
 """
@@ -14,68 +17,6 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-
-# === Fix 1: Classifier Teammate awareness ===
-
-
-class TestClassifierInformationalCompletion:
-    """Verify that informational answers are classified as COMPLETION."""
-
-    def test_qa_answer_heuristic_not_status(self):
-        """Informational answers should not be classified as STATUS_UPDATE by heuristics."""
-        from bridge.message_drafter import OutputType, _classify_with_heuristics
-
-        # Typical informational answer about a system feature (Teammate mode)
-        qa_answer = (
-            "The summarizer works by first classifying the agent output using an LLM "
-            "classifier. It determines whether the output is a status update, completion, "
-            "question, blocker, or error. Based on this classification, it decides whether "
-            "to auto-continue (for status updates) or deliver to the user."
-        )
-        result = _classify_with_heuristics(qa_answer)
-        # Heuristics may return None (meaning "pass to LLM") or a type.
-        # The key assertion: it should NOT be classified as STATUS_UPDATE
-        if result.output_type is not None:
-            assert result.output_type != OutputType.STATUS_UPDATE, (
-                f"informational answer was classified as STATUS_UPDATE by heuristics: {result}"
-            )
-
-    def test_architecture_explanation_heuristic_not_status(self):
-        """Architecture explanations should not be status updates."""
-        from bridge.message_drafter import OutputType, _classify_with_heuristics
-
-        explanation = (
-            "Here's how the routing system handles messages: When a Telegram message "
-            "arrives, the bridge extracts metadata (chat_id, sender, thread info) and "
-            "creates an AgentSession in Redis. The session queue picks up the session and "
-            "spawns a Claude Code subprocess with the appropriate system prompt."
-        )
-        result = _classify_with_heuristics(explanation)
-        if result.output_type is not None:
-            assert result.output_type != OutputType.STATUS_UPDATE
-
-    @pytest.mark.skipif(
-        not os.getenv("ANTHROPIC_API_KEY"),
-        reason="requires ANTHROPIC_API_KEY",
-    )
-    @pytest.mark.asyncio
-    async def test_qa_answer_classified_as_completion(self):
-        """Full classifier should classify informational answers as COMPLETION."""
-        from bridge.message_drafter import OutputType, classify_output
-
-        qa_answer = (
-            "The summarizer feature works by classifying agent output into five categories: "
-            "status_update, completion, question, blocker, and error. When an output is "
-            "classified as a status update, the bridge automatically re-enqueues the session "
-            "to continue the session. Completions are delivered to the user via Telegram. "
-            "The classifier uses an LLM with few-shot examples to make these decisions."
-        )
-        result = await classify_output(qa_answer)
-        assert result.output_type == OutputType.COMPLETION, (
-            f"informational answer classified as {result.output_type.value} "
-            f"(expected COMPLETION): {result.reason}"
-        )
 
 
 # === Fix 2: Session isolation ===

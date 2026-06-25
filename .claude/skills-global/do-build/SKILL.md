@@ -232,6 +232,23 @@ Lint and formatting are handled automatically -- agents should never waste itera
 
 ## Workflow
 
+### Step 0: Substrate Probe (degraded-mode awareness)
+
+Before initializing tasks, probe whether the orchestration substrate (PM
+session + Redis) is reachable, mirroring the `do-docs` pattern. A forked
+sub-skill must announce degraded mode rather than silently lagging state:
+
+```bash
+sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number}
+```
+
+**Always pass `--issue-number {issue_number}`** on every `sdlc-tool` write (stage markers, meta-set, etc.). `--issue-number` is the authoritative session selector: it guarantees the write lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). The `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session is only a *last-resort* fallback, subordinate to `--issue-number`, used when the issue number is genuinely unknown. A forked build subagent that inherited a parent's env-var session must still pass `--issue-number` so its writes are not diverted to the parent's session (#1671/#1672).
+
+Parse the JSON output:
+- `{"stage": "BUILD", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
+- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". Continue the build; stage markers will not be recorded, but the build itself (worktree, agents, tests, PR) does not depend on the substrate.
+- Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
+
 ### Step 1: Initialize Task List
 
 Read the plan and create tasks:
@@ -470,7 +487,7 @@ After pushing and creating the PR, return to the repo root and clean up the work
 
 ```bash
 # Return to repo root BEFORE cleanup (prevents CWD death)
-cd ~/src/ai
+cd "${AI_REPO_ROOT:-$HOME/src/ai}"
 
 python -c "
 from pathlib import Path

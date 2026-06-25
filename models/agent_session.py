@@ -1,18 +1,17 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("pm", "teammate", or "dev").
+Single Popoto model with session_type discriminator ("eng", "teammate", or "granite").
 
-Popoto does not support model inheritance, so PM and Dev sessions are
+Popoto does not support model inheritance, so session types are
 distinguished by the session_type field with factory methods and derived
 properties providing type-specific behavior.
 
 Session types (permission model):
-  PM session (session_type="pm"): Read-only Agent SDK session, PM persona.
-    Owns the Telegram conversation, orchestrates work, spawns child sessions.
+  Eng session (session_type="eng"): Full-permission Agent SDK session, Engineer persona.
+    Owns the Telegram conversation, orchestrates work, runs SDLC pipeline stages,
+    and spawns child sessions — unified PM+Dev role.
   Teammate session (session_type="teammate"): Read-only session, Teammate persona.
     Participates in group conversations without orchestration authority.
-  Dev session (session_type="dev"): Full-permission Agent SDK session, Dev persona.
-    Does the actual coding work, runs SDLC pipeline stages.
 
 Parent-child relationship:
   parent_agent_session_id is the canonical parent link.
@@ -78,37 +77,33 @@ TASK_TYPE_VOCABULARY = {
 }
 
 # Backward-compatible aliases (import from config.enums for new code)
-SESSION_TYPE_PM = SessionType.PM
+SESSION_TYPE_ENG = SessionType.ENG
 SESSION_TYPE_TEAMMATE = SessionType.TEAMMATE
-SESSION_TYPE_DEV = SessionType.DEV
 
 
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("pm", "teammate",
-    or "dev").
+    Single Popoto model with a session_type discriminator ("eng", "teammate",
+    or "granite").
 
     Session types (permission model):
-        PM session (session_type="pm"):
-            Read-only Agent SDK session, PM persona. Owns the Telegram
-            conversation, orchestrates work, spawns child sessions.
+        Eng session (session_type="eng"):
+            Full-permission Agent SDK session, Engineer persona. Owns the
+            Telegram conversation, orchestrates work, runs SDLC pipeline
+            stages, and spawns child sessions — unified PM+Dev role.
         Teammate session (session_type="teammate"):
             Read-only session, Teammate persona. Participates in group
             conversations without orchestration authority.
-        Dev session (session_type="dev"):
-            Full-permission Agent SDK session, Dev persona. Does the actual
-            coding work, runs SDLC pipeline stages.
 
     Parent-child hierarchy:
         parent_agent_session_id: Canonical parent link. Set
-            by all session creators (create_child, create_dev, enqueue_session).
+            by all session creators (create_child, enqueue_session).
 
     Factory methods:
-        create_pm(): Create a PM session (PM persona, read-only).
+        create_eng(): Create an Eng session (Engineer persona, full permissions).
         create_teammate(): Create a Teammate session (read-only).
-        create_child(): Create a child Dev session.
-        create_dev(): Backward-compat wrapper for create_child().
+        create_child(): Create a child Eng session.
         create_local(): Create a local CLI session.
 
     Status values (13 total):
@@ -141,7 +136,7 @@ class AgentSession(Model):
     # === Identity ===
     id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    session_type = KeyField(null=True)  # "pm", "teammate", or "dev" — discriminator
+    session_type = KeyField(null=True)  # "eng", "teammate", or "granite" — discriminator
     project_key = KeyField()
     status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 
@@ -150,7 +145,12 @@ class AgentSession(Model):
     scheduled_at = DatetimeField(null=True)  # UTC datetime; _pop_job() skips if > now()
     created_at = SortedField(type=datetime, partition_by="project_key")
     started_at = DatetimeField(null=True)  # Cannot be SortedField because it starts as None
-    updated_at = DatetimeField(auto_now=True, null=True)  # Renamed from last_activity
+    updated_at = DatetimeField(null=True)
+    # auto_now intentionally not set here. As of popoto>=1.7.1 (#1653) auto_now
+    # mints correct UTC, so re-adding it would be safe — but we keep the explicit
+    # utc_now() stamp in the save() override below, which also covers save paths
+    # that don't route through format_value_pre_save. Only remove the override
+    # after confirming auto_now fires on every save path (see #1653 plan).
     completed_at = DatetimeField(null=True)
     response_delivered_at = DatetimeField(null=True)
     working_dir = Field()
@@ -242,7 +242,7 @@ class AgentSession(Model):
     # project properties. Populated at enqueue time; empty dict for legacy sessions.
     project_config = DictField(null=True)
 
-    # === Dev session fields (null when session_type="pm" or "teammate") ===
+    # === Slugged session fields (null for unslugged eng or teammate sessions) ===
     # KeyField so `query.filter(slug=...)` is an indexed lookup — required for
     # worker pop to find slugged dev sessions by slug (issue #1085).
     slug = KeyField(null=True)  # Derives branch, plan path, worktree
@@ -284,6 +284,75 @@ class AgentSession(Model):
     # fields generically. Default False keeps existing sessions unaffected.
     requires_real_chrome = Field(default=False)
 
+    # === Granite container user-facing delivery tracking (issue #1647) ===
+    # Set to True by BridgeAdapter._publish_exit_summary when at least one
+    # [/user] or non-empty [/complete] payload was confirmed delivered to the
+    # user channel during the granite container run. The executor's emoji branch
+    # at session_executor.py reads this via getattr(..., False) to choose
+    # REACTION_COMPLETE instead of the bare-emoji REACTION_SUCCESS, because the
+    # granite path never calls messenger.send() so has_communicated() stays False.
+    # Default False keeps existing sessions unaffected (no migration needed).
+    user_facing_routed = Field(default=False)
+
+    # Granite-path exit reason (pm_complete, pm_user, pm_max_turns, dev_hang,
+    # pm_hang, startup_unresolved, pm_no_user_message, exception).
+    # Status mapping untouched; dashboard renders warning chip for non-clean values.
+    exit_reason = Field(null=True, default=None)
+
+    # === Granite container PTY identity (issue #1648 dashboard telemetry) ===
+    # Populated by BridgeAdapter._publish_exit_summary from ContainerResult.
+    # Nullable: non-granite sessions and pre-deploy granite sessions leave these
+    # as None. The dashboard uses them to surface active PTY processes and
+    # link to transcript files.
+    #
+    # PM PTY OS process ID. Nullable; None when the session is not running on
+    # the granite path or when the PTY has already exited.
+    pm_pid = IntField(null=True)
+    # Dev PTY OS process ID.
+    dev_pid = IntField(null=True)
+    # Absolute path to the PM Claude Code JSONL transcript file.
+    # Follows Claude Code's naming: ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
+    pm_transcript_path = Field(null=True)
+    # Absolute path to the Dev Claude Code JSONL transcript file.
+    dev_transcript_path = Field(null=True)
+    # Stable physical PTYPool slot index (0-based). Correlated to a specific
+    # (pm_pid, dev_pid) pair only via co-persisted fields — the slot itself is
+    # recycled after each session. The dashboard uses this to show which pool
+    # slot the session occupied.
+    pty_slot = IntField(null=True)
+
+    # === Granite startup failure diagnostic (issue #1710) ===
+    # Populated by BridgeAdapter._publish_exit_summary when the granite
+    # container exits startup_unresolved. Nullable: only set on failed startups.
+    #
+    # startup_failure_kind: "plateau" (N consecutive identical no-progress
+    #   cycles) or "ceiling" (burned the full STARTUP_HARD_CEILING_S).
+    #   Coordination surface for #1539's auto-resume policy: plateau = do NOT
+    #   auto-resume (deterministic stuck), ceiling = slow/never-settled cold start.
+    startup_failure_kind = Field(null=True, default=None)
+    # startup_captured_frame: size-capped PM+Dev buffer snapshot from the
+    #   moment of failure. Human-readable, stripped of ANSI. Lets the dashboard
+    #   and #1538's recorder show the diagnosis without re-deriving it.
+    startup_captured_frame = Field(null=True, default=None)
+
+    # === Crash-recovery reflection fields (issue #1539) ===
+    # crash_signature: write-once stamp set at resume time, recording the
+    # crash signature of the session this resume recovers. Used by the
+    # crash-recovery reflection to attribute outcomes back to the originating
+    # signature. Never overwritten after initial write.
+    # Coordination surface for #1539 auto-resume policy.
+    crash_signature = Field(null=True, default=None)
+
+    # crash_outcome_attributed: idempotency key for the outcome-attribution loop.
+    # Set True after the reflection has credited/debited the originating
+    # CrashSignature record for this session's terminal outcome.
+    # Read via _truthy() — Popoto stores bools as "True"/"False" strings.
+    crash_outcome_attributed = Field(null=True, default=None)
+
+    # auto_resume_attempts: count of times the crash-recovery reflection has
+    # auto-resumed this session. Enforces per-session cap.
+    auto_resume_attempts = Field(null=True, default=None)
+
     # === Continuation PM depth tracking ===
     # Tracks how many continuation PMs have been chained from the original PM.
     # Stored directly on the session (O(1)) rather than walking the parent chain
@@ -310,6 +379,30 @@ class AgentSession(Model):
     recovery_attempts = IntField(default=0)
     # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
     reprieve_count = IntField(default=0)
+
+    # === PTY liveness signals (path B — mid-run wedge detection, #1724) ===
+    # Stamped every read-loop iteration (each _cycle_idle call), unconditionally.
+    # Proves the pexpect read loop is still cycling inside the container thread.
+    # Distinct from last_heartbeat_at (queue-layer) and last_sdk_heartbeat_at
+    # (messenger-layer): those are async; this is synchronous with the PTY loop.
+    last_pty_read_loop_at = DatetimeField(null=True)
+    # Stamped when the normalized screen buffer differs from the prior read.
+    # Proves the PTY screen is still repainting (model/TUI actively rendering).
+    # None until the first screen change after session start.
+    last_pty_activity_at = DatetimeField(null=True)
+    # Cross-tick durable state: UTC timestamp when the screen first went
+    # quiescent (no new paint since last_pty_activity_at). Set on first quiescent
+    # tick; cleared when activity resumes. Used by stage-1 to measure how long
+    # the PTY has been silent while a tool is in flight.
+    mid_run_quiescent_since = DatetimeField(null=True)
+    # Cross-tick durable state: serialized (last_pty_activity_at_iso, total_input_tokens)
+    # Note: total_input_tokens is used as the best available proxy for byte_offset (the plan
+    # specified byte_offset, but it lives only on in-memory tailer cursors and is not persisted
+    # onto AgentSession). This substitution is safe for stage-1 observe-only (the field is an
+    # optional corroborator, never a gating conjunct per plan D2/concern #3), but the discrepancy
+    # should be resolved before stage-2 uses this tuple as a CAS precondition.
+    # None until the first stage-1 evaluation.
+    mid_run_pty_snapshot = Field(null=True)
 
     # === Harness subprocess PID (issue #1269) ===
     # PID of the live `claude -p stream-json` subprocess for THIS session, when
@@ -462,11 +555,11 @@ class AgentSession(Model):
 
     # === Worker routing key ===
 
-    # Stages where slugged PM sessions operate in an isolated worktree.
+    # Stages where slugged Eng sessions operate in an isolated worktree.
     # Uses an allowlist (not denylist) so unknown/future stages fail closed —
     # they serialize on project_key rather than accidentally parallelizing.
     # Matches the worktree-using stages in resolve_branch_for_stage().
-    _PM_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
+    _ENG_WORKTREE_STAGES: frozenset[str] = frozenset({"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"})
 
     @property
     def worker_key(self) -> str:
@@ -474,16 +567,12 @@ class AgentSession(Model):
 
         Teammate sessions run in parallel across chats, keyed by chat_id.
 
-        PM sessions:
-        - Slugless PMs always serialize per project_key (PR #828 invariant).
-        - Slugged PMs at worktree-compatible stages (BUILD/TEST/PATCH/REVIEW/DOCS)
-          route by slug — two sibling PMs with distinct slugs run concurrently.
-        - Slugged PMs at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE/None)
+        Eng sessions:
+        - Slugless Eng sessions always serialize per project_key (PR #828 invariant).
+        - Slugged Eng sessions at worktree-compatible stages (BUILD/TEST/PATCH/REVIEW/DOCS)
+          route by slug — two sibling Eng sessions with distinct slugs run concurrently.
+        - Slugged Eng sessions at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE/None)
           fall back to project_key to prevent git conflicts on main.
-
-        Dev sessions:
-        - Slugged devs route by slug (isolated worktree).
-        - Slugless devs serialize by project_key.
 
         Slugs are assumed unique across the active session keyspace.  If two
         sessions in different projects share a slug, they will share a worker
@@ -491,25 +580,25 @@ class AgentSession(Model):
         """
         if self.session_type == SessionType.TEAMMATE:
             return self.chat_id or self.project_key
-        if self.session_type == SessionType.PM:
-            # Slugged PMs at worktree stages route by slug (parallel-safe).
-            # Slugless PMs and PMs at main-checkout stages serialize by project_key.
-            if self.slug and self._pm_stage_is_worktree_compatible():
+        if self.session_type == SessionType.ENG:
+            # Slugged Eng sessions at worktree stages route by slug (parallel-safe).
+            # Slugless Eng sessions and sessions at main-checkout stages serialize by project_key.
+            if self.slug and self._eng_stage_is_worktree_compatible():
                 return self.slug
             return self.project_key
-        # dev: isolated by slug (worktree) if present, serialized by project otherwise
+        # Fallback: isolated by slug (worktree) if present, serialized by project otherwise
         if self.slug:
             return self.slug
         return self.project_key
 
-    def _pm_stage_is_worktree_compatible(self) -> bool:
-        """Return True only for stages where a slugged PM uses an isolated worktree.
+    def _eng_stage_is_worktree_compatible(self) -> bool:
+        """Return True only for stages where a slugged Eng session uses an isolated worktree.
 
         Uses an allowlist so unknown or future stages fail closed (serialize)
         rather than accidentally parallelizing on an unaudited stage.
         """
         stage = getattr(self, "current_stage", None)
-        return stage in self._PM_WORKTREE_STAGES
+        return stage in self._ENG_WORKTREE_STAGES
 
     @property
     def is_project_keyed(self) -> bool:
@@ -816,6 +905,120 @@ class AgentSession(Model):
         """Create an AgentSession asynchronously with backward-compatible field name support."""
         kwargs = cls._normalize_kwargs(kwargs)
         return await super().async_create(**kwargs)
+
+    # Fields whose partial saves intentionally omit ``updated_at`` at high
+    # frequency (liveness heartbeats and PID bookkeeping). Omitting the stamp
+    # here is by-design — the dedicated heartbeat fields carry freshness — so a
+    # WARNING per write is pure log noise (2 lines per 60s heartbeat per
+    # session) that buries genuine warnings. We downgrade these to DEBUG; any
+    # other omission (e.g. ``status``) still warns.
+    _UPDATED_AT_OMISSION_OK_FIELDS = frozenset(
+        {
+            "last_heartbeat_at",
+            "last_sdk_heartbeat_at",
+            "last_stdout_at",
+            "claude_pid",
+            "harness_pid",
+        }
+    )
+
+    def save(self, *args, update_fields=None, **kwargs):
+        """Override to stamp updated_at with UTC wall-clock time.
+
+        Popoto auto_now mints naive local time (bug #1645); instead we stamp
+        explicitly so the stored value is always UTC wall-clock, consistent
+        with how created_at/started_at are handled (see bridge/utc.py::utc_now).
+
+        update_fields guard: if update_fields omits 'updated_at', skip the stamp
+        entirely (no in-memory mutation without a matching persist, to avoid
+        memory/Redis desync).
+        """
+        from bridge.utc import utc_now
+
+        if update_fields is not None and "updated_at" not in update_fields:
+            # Known high-frequency liveness/PID partial saves log at DEBUG;
+            # everything else keeps the WARNING so real omissions stay visible.
+            if set(update_fields) <= self._UPDATED_AT_OMISSION_OK_FIELDS:
+                logger.debug(
+                    "save() omitted 'updated_at' for liveness fields %s "
+                    "(by design; freshness carried by heartbeat fields)",
+                    list(update_fields),
+                )
+            else:
+                logger.warning(
+                    "save() called with update_fields missing 'updated_at'; "
+                    "timestamp not persisted to avoid memory/Redis desync"
+                )
+            return super().save(*args, update_fields=update_fields, **kwargs)
+        self.updated_at = utc_now()
+        return super().save(*args, update_fields=update_fields, **kwargs)
+
+    @classmethod
+    def _heal_future_updated_at(cls) -> int:
+        """One-shot heal for future-dated updated_at values written before fix #1645.
+
+        Clamps any session whose updated_at is in the future down to
+        max(created_at, now). Idempotent: a re-run clamps only still-future
+        records (partial mid-heal restart is safe because the per-record guard
+        is a strict `if record.updated_at > utc_now()` check, not a bulk update).
+
+        Returns the number of records healed.
+        """
+        from bridge.utc import utc_now
+
+        now = utc_now()
+        count = 0
+        try:
+            all_sessions = cls.query.all()
+        except Exception as e:
+            logger.warning(f"_heal_future_updated_at: could not fetch sessions: {e}")
+            return 0
+
+        for record in all_sessions:
+            try:
+                if record.updated_at is None:
+                    continue  # None is safe — save() will stamp on next write
+
+                # Popoto strips tzinfo on load — treat naive datetimes as UTC
+                # (consistent with bridge/utc.py::to_unix_ts).
+                updated_at_utc = record.updated_at
+                if updated_at_utc.tzinfo is None:
+                    updated_at_utc = updated_at_utc.replace(tzinfo=UTC)
+
+                if updated_at_utc <= now:
+                    continue  # already sane, skip
+
+                # Clamp created_at first (dual-future-dated case, CONCERN — Adversary):
+                # ensures updated_at floor uses the already-clamped value so the
+                # invariant created_at <= updated_at <= now holds.
+                if record.created_at:
+                    created_at_utc = record.created_at
+                    if created_at_utc.tzinfo is None:
+                        created_at_utc = created_at_utc.replace(tzinfo=UTC)
+                    if created_at_utc > now:
+                        record.created_at = now
+                        logger.warning(
+                            f"_heal_future_updated_at: clamped future created_at on {record.id}"
+                        )
+
+                floor = record.created_at if record.created_at else now
+                # Normalize floor to tz-aware for max() comparison
+                if hasattr(floor, "tzinfo") and floor.tzinfo is None:
+                    floor = floor.replace(tzinfo=UTC)
+                record.updated_at = max(floor, now)
+                # Full save (no update_fields) so all changed fields are persisted
+                # and all popoto indexes (including SortedField created_at) are
+                # kept in sync. The save() override will re-stamp utc_now() for
+                # updated_at (idempotent — it will equal now).
+                record.save()
+                count += 1
+                logger.info(f"_heal_future_updated_at: healed session {record.id}")
+            except Exception as e:
+                logger.warning(
+                    f"_heal_future_updated_at: skipped {getattr(record, 'id', '?')}: {e}"
+                )
+
+        return count
 
     @classmethod
     def get_by_id(cls, agent_session_id: str | None) -> "AgentSession | None":
@@ -1204,19 +1407,14 @@ class AgentSession(Model):
     # === Session type helpers ===
 
     @property
-    def is_pm(self) -> bool:
-        """Whether this is a PM session (PM persona, read-only orchestrator)."""
-        return self.session_type == SESSION_TYPE_PM
+    def is_eng(self) -> bool:
+        """Whether this is an Eng session (Engineer persona, full permissions)."""
+        return self.session_type == SESSION_TYPE_ENG
 
     @property
     def is_teammate(self) -> bool:
         """Whether this is a Teammate session (read-only, no orchestration)."""
         return self.session_type == SESSION_TYPE_TEAMMATE
-
-    @property
-    def is_dev(self) -> bool:
-        """Whether this is a Dev session (Dev persona, full permissions)."""
-        return self.session_type == SESSION_TYPE_DEV
 
     @property
     def current_stage(self) -> str | None:
@@ -1302,7 +1500,7 @@ class AgentSession(Model):
         return session
 
     @classmethod
-    def create_pm(
+    def create_eng(
         cls,
         *,
         session_id: str,
@@ -1317,9 +1515,9 @@ class AgentSession(Model):
         telegram_message_key: str | None = None,
         **kwargs,
     ) -> "AgentSession":
-        """Create a PM session (PM persona, read-only orchestrator)."""
+        """Create an Eng session (Engineer persona, full permissions, orchestrates work)."""
         return cls._create_session_with_telegram(
-            session_type=SESSION_TYPE_PM,
+            session_type=SESSION_TYPE_ENG,
             session_id=session_id,
             project_key=project_key,
             working_dir=working_dir,
@@ -1372,7 +1570,7 @@ class AgentSession(Model):
         session_id: str,
         project_key: str,
         working_dir: str,
-        session_type: str = SESSION_TYPE_DEV,
+        session_type: str = SESSION_TYPE_ENG,
         **kwargs,
     ) -> "AgentSession":
         """Create an AgentSession for a local Claude Code CLI session."""
@@ -1427,7 +1625,7 @@ class AgentSession(Model):
 
         session = cls(
             session_id=session_id,
-            session_type=SESSION_TYPE_DEV,
+            session_type=SESSION_TYPE_ENG,
             project_key=project_key,
             working_dir=working_dir,
             parent_agent_session_id=parent_agent_session_id,
@@ -1439,34 +1637,6 @@ class AgentSession(Model):
         )
         session.save()
         return session
-
-    @classmethod
-    def create_dev(
-        cls,
-        *,
-        session_id: str,
-        project_key: str,
-        working_dir: str,
-        parent_agent_session_id: str | None = None,
-        message_text: str,
-        slug: str | None = None,
-        stage_states: dict | None = None,
-        **kwargs,
-    ) -> "AgentSession":
-        """Create a Dev session (backward-compat wrapper for create_child()).
-
-        Deprecated: Use create_child(...) instead.
-        """
-        return cls.create_child(
-            session_id=session_id,
-            project_key=project_key,
-            working_dir=working_dir,
-            parent_agent_session_id=parent_agent_session_id or "",
-            message_text=message_text,
-            slug=slug,
-            stage_states=stage_states,
-            **kwargs,
-        )
 
     def get_parent_session(self) -> "AgentSession | None":
         """Return the parent session if this is a child session."""
@@ -1826,23 +1996,39 @@ class AgentSession(Model):
 
     # === Queued steering message helpers ===
 
-    def push_steering_message(self, text: str) -> None:
+    def push_steering_message(self, text: str, front: bool = False) -> None:
         """Buffer a human reply for the PM session.
 
         Uses partial save (update_fields) to avoid clobbering status on stale
         worker references. See #950.
+
+        Args:
+            text: The steering message text to enqueue.
+            front: When True, prepend to the queue (urgent advisory; trimmed
+                from the back so the new message is never dropped).  When
+                False (default), append as before (trimmed from the front).
         """
         current = self.queued_steering_messages
         if not isinstance(current, list):
             current = []
-        current.append(text)
-        if len(current) > STEERING_QUEUE_MAX:
-            dropped = len(current) - STEERING_QUEUE_MAX
-            logger.warning(
-                f"Steering queue overflow for session {self.session_id}: "
-                f"dropping {dropped} oldest message(s)"
-            )
-            current = current[-STEERING_QUEUE_MAX:]
+        if front:
+            current.insert(0, text)
+            if len(current) > STEERING_QUEUE_MAX:
+                dropped = len(current) - STEERING_QUEUE_MAX
+                logger.warning(
+                    f"Steering queue overflow for session {self.session_id}: "
+                    f"dropping {dropped} oldest message(s) from back (front=True)"
+                )
+                current = current[:STEERING_QUEUE_MAX]
+        else:
+            current.append(text)
+            if len(current) > STEERING_QUEUE_MAX:
+                dropped = len(current) - STEERING_QUEUE_MAX
+                logger.warning(
+                    f"Steering queue overflow for session {self.session_id}: "
+                    f"dropping {dropped} oldest message(s)"
+                )
+                current = current[-STEERING_QUEUE_MAX:]
         self.queued_steering_messages = current
         try:
             self.save(update_fields=["queued_steering_messages", "updated_at"])
@@ -1905,11 +2091,26 @@ class AgentSession(Model):
     def repair_indexes(cls) -> tuple[int, int]:
         """Clear stale IndexedField index entries then rebuild all indexes.
 
-        Popoto's built-in rebuild_indexes() clears KeyField and SortedField
-        indexes but not IndexedField ($IndexF:) indexes. This method fills
-        that gap: it first clears all $IndexF:ClassName:* keys (using Popoto's
-        own Redis connection), then calls rebuild_indexes() so every index is
-        reconstructed cleanly from actual hashes.
+        Popoto's built-in rebuild_indexes() does NOT enumerate $IndexF keys
+        (those are maintained separately by this method's loop).  However,
+        rebuild_indexes() DOES delete the class set ($Class:AgentSession) at
+        base.py:2745, then re-adds members in batch_size=1000 pipeline batches
+        (base.py:2785-2813).  This class-set delete→re-add is the layer that
+        transiently breaks session_id lookups: query.filter(session_id=...) on
+        a non-indexed Field reads smembers($Class:AgentSession) and filters in
+        memory, so it returns empty during the window.  See issue #1720.
+
+        Read-path defense: both caller sites that do query.filter(session_id=...)
+        — tools/valor_session.py::_find_session and
+        tools/sdlc_stage_query.py::_find_session_by_id — apply a bounded retry
+        (cap sized to exceed the measured p99 class-set-empty interval) to cover
+        this window without touching popoto internals.
+
+        This method's own role: clear all $IndexF:ClassName:* keys that
+        rebuild_indexes() does not touch (only status is an IndexedField here),
+        counting stale members before deletion so the caller can report drift.
+        Then call rebuild_indexes() to repopulate the class set, KeyField, and
+        SortedField indexes from actual hashes.
 
         Returns:
             (stale_count, rebuilt_count) — stale pointers removed and sessions

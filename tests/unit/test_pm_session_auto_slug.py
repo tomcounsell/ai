@@ -40,7 +40,7 @@ def _make_args(**overrides) -> argparse.Namespace:
     """
     defaults = dict(
         command="create",
-        role="pm",
+        role="eng",
         message="",
         chat_id=None,
         parent=None,
@@ -69,7 +69,7 @@ class TestPMAutoSlugFromIssueReference:
     def test_pm_role_no_slug_with_hash_issue_reference_derives_slug(self, tmp_path):
         """PM create without --slug and 'issue #N' in message auto-derives sdlc-N."""
         args = _make_args(
-            role="pm",
+            role="eng",
             message="Please run /sdlc on issue #1109 — it's a P0.",
         )
 
@@ -109,7 +109,7 @@ class TestPMAutoSlugFromIssueReference:
     def test_pm_role_no_slug_with_plain_issue_reference_derives_slug(self, tmp_path):
         """'issue 735' (no hash) also works."""
         args = _make_args(
-            role="pm",
+            role="eng",
             message="Start the pipeline for issue 735",
         )
 
@@ -141,7 +141,7 @@ class TestPMAutoSlugFromIssueReference:
     def test_pm_role_explicit_slug_wins_over_issue_parse(self, tmp_path):
         """If --slug is explicit, the CLI must NOT override it with the issue parse."""
         args = _make_args(
-            role="pm",
+            role="eng",
             slug="my-custom-slug",
             message="handle issue #1109",
         )
@@ -179,7 +179,7 @@ class TestPMAutoSlugFromIssueReference:
         now require a slug, and the same auto-derive path PM uses applies.
         """
         args = _make_args(
-            role="dev",
+            role="eng",
             message="work on issue #1109",
         )
 

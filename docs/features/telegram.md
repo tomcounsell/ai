@@ -137,7 +137,7 @@ During processing, the interface shows status through emoji reactions:
 
 ### Contextual Processing Emojis
 
-The processing emoji is selected via embedding cosine similarity against all 73 validated Telegram reaction emojis. The message text is embedded and compared to pre-computed emoji label embeddings, selecting the most contextually relevant reaction in under 50ms (after cache warm-up).
+The processing emoji is selected via embedding cosine similarity against the 72 validated Telegram reaction emojis. The message text is embedded and compared to pre-computed emoji label embeddings, selecting the most contextually relevant reaction in under 50ms (after cache warm-up).
 
 This replaces the previous Ollama intent classification approach, which was limited to 10 hardcoded emojis and had 2-10 second latency with frequent timeouts.
 

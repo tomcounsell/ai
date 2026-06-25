@@ -48,7 +48,13 @@ def extract_prerequisites(plan_text: str) -> list[dict[str, str]]:
             i += 1
             if i < len(lines) and re.match(r"^\s*\|[\s\-:]+\|", lines[i]):
                 i += 1
-            # Parse data rows
+            # Parse data rows. Markdown tables use `|` as the column
+            # separator, and a check command may itself contain literal
+            # `|` (shell pipes). The expectation is that check commands
+            # are written without shell pipes — use Python with
+            # urllib/requests, or wrap in bash -c '...' with escaped
+            # pipes. See docs/plans/completed/granite-interactive-tui-poc-results.md
+            # for examples.
             while i < len(lines):
                 row = lines[i].strip()
                 if not row.startswith("|"):

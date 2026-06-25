@@ -171,9 +171,20 @@ class TestSummarizeContent:
             JsonCache(tmp_path / "summary_cache.json", max_entries=10),
         )
 
+    @patch("tools.knowledge.indexer._summarize_via_ollama", return_value="Ollama summary.")
+    def test_summarize_prefers_ollama(self, mock_ollama):
+        """Verify _summarize_content returns local Ollama result when available."""
+        result = _summarize_content("Some document content here.", "/path/to/doc.md")
+
+        mock_ollama.assert_called_once()
+        assert result == "Ollama summary."
+
     @patch("anthropic.Anthropic")
-    def test_summarize_uses_haiku_constant(self, mock_anthropic_cls):
-        """Verify _summarize_content passes the HAIKU model constant to the API."""
+    @patch("tools.knowledge.indexer._summarize_via_ollama", return_value=None)
+    def test_summarize_falls_back_to_haiku_when_ollama_unavailable(
+        self, mock_ollama, mock_anthropic_cls
+    ):
+        """Verify _summarize_content falls back to Haiku when Ollama returns None."""
         mock_client = MagicMock()
         mock_anthropic_cls.return_value = mock_client
         mock_response = MagicMock()
@@ -188,8 +199,9 @@ class TestSummarizeContent:
         assert result == "A summary of the document."
 
     @patch("anthropic.Anthropic")
-    def test_summarize_fallback_on_api_failure(self, mock_anthropic_cls):
-        """Verify _summarize_content falls back to truncation on API failure."""
+    @patch("tools.knowledge.indexer._summarize_via_ollama", return_value=None)
+    def test_summarize_fallback_on_all_llm_failure(self, mock_ollama, mock_anthropic_cls):
+        """Verify _summarize_content falls back to truncation when both LLMs fail."""
         mock_client = MagicMock()
         mock_anthropic_cls.return_value = mock_client
         mock_client.messages.create.side_effect = Exception("API error")

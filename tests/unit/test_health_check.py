@@ -307,7 +307,7 @@ class TestGetSessionContext:
 
     def test_returns_context_with_session_type(self):
         mock_session = MagicMock()
-        mock_session.session_type = "dev"
+        mock_session.session_type = "eng"
         mock_session.message_text = "Build the auth module"
 
         mock_as_cls = MagicMock()
@@ -325,8 +325,8 @@ class TestGetSessionContext:
                         "total_tool_count": 8,
                     },
                 ):
-                    result = _get_session_context("dev-session")
-                    assert "dev" in result
+                    result = _get_session_context("eng-session")
+                    assert "eng" in result
                     assert "Build the auth module" in result
                     assert "Tool distribution:" in result
                     assert "5 Read" in result

@@ -16,11 +16,11 @@ class TestDMAlwaysTeammate:
         project = {"telegram": {"groups": {}}}
         assert resolve_persona(project, None, is_dm=True) == PersonaType.TEAMMATE
 
-    def test_dm_with_developer_project(self):
+    def test_dm_with_engineer_project(self):
         """DM overrides any project-level config."""
         project = {
             "telegram": {
-                "groups": {"Dev: MyProject": {"persona": "developer"}},
+                "groups": {"Eng: MyProject": {"persona": "engineer"}},
             }
         }
         assert resolve_persona(project, None, is_dm=True) == PersonaType.TEAMMATE
@@ -40,21 +40,13 @@ class TestPersonaMapping:
         }
         assert resolve_persona(project, "Team Chat", is_dm=False) == PersonaType.TEAMMATE
 
-    def test_project_manager_persona_resolves(self):
+    def test_engineer_persona_resolves(self):
         project = {
             "telegram": {
-                "groups": {"PM: MyProject": {"persona": "project-manager"}},
+                "groups": {"Eng: MyProject": {"persona": "engineer"}},
             }
         }
-        assert resolve_persona(project, "PM: MyProject", is_dm=False) == PersonaType.PROJECT_MANAGER
-
-    def test_developer_persona_resolves(self):
-        project = {
-            "telegram": {
-                "groups": {"Dev: MyProject": {"persona": "developer"}},
-            }
-        }
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+        assert resolve_persona(project, "Eng: MyProject", is_dm=False) == PersonaType.ENGINEER
 
     def test_case_insensitive_group_matching(self):
         project = {
@@ -78,27 +70,28 @@ class TestPersonaMapping:
 
 
 # =============================================================================
-# Title prefix fallback (backward compatibility)
+# Title prefix fallback (Eng: is the canonical prefix post-consolidation)
 # =============================================================================
 
 
 class TestTitlePrefixFallback:
-    def test_dev_prefix_returns_developer(self):
-        assert resolve_persona(None, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
-
-    def test_pm_prefix_returns_project_manager(self):
-        assert resolve_persona(None, "PM: MyProject", is_dm=False) == PersonaType.PROJECT_MANAGER
+    def test_eng_prefix_returns_engineer(self):
+        assert resolve_persona(None, "Eng: MyProject", is_dm=False) == PersonaType.ENGINEER
 
     def test_no_prefix_no_config_returns_none(self):
         assert resolve_persona(None, "Random Group", is_dm=False) is None
 
-    def test_dev_prefix_with_empty_project(self):
+    def test_eng_prefix_with_empty_project(self):
         project = {"telegram": {"groups": {}}}
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+        assert resolve_persona(project, "Eng: MyProject", is_dm=False) == PersonaType.ENGINEER
 
-    def test_pm_prefix_with_empty_project(self):
-        project = {"telegram": {"groups": {}}}
-        assert resolve_persona(project, "PM: MyProject", is_dm=False) == PersonaType.PROJECT_MANAGER
+    def test_legacy_dev_prefix_returns_none(self):
+        """Legacy 'Dev:' prefix is no longer recognized -- returns None."""
+        assert resolve_persona(None, "Dev: MyProject", is_dm=False) is None
+
+    def test_legacy_pm_prefix_returns_none(self):
+        """Legacy 'PM:' prefix is no longer recognized -- returns None."""
+        assert resolve_persona(None, "PM: MyProject", is_dm=False) is None
 
 
 # =============================================================================
@@ -113,7 +106,7 @@ class TestUnconfigured:
     def test_project_without_matching_group(self):
         project = {
             "telegram": {
-                "groups": {"Other Group": {"persona": "developer"}},
+                "groups": {"Other Group": {"persona": "engineer"}},
             }
         }
         assert resolve_persona(project, "Unrelated Chat", is_dm=False) is None
@@ -132,11 +125,11 @@ class TestEdgeCases:
         """Empty persona string should not match, fall through to title prefix."""
         project = {
             "telegram": {
-                "groups": {"Dev: MyProject": {"persona": ""}},
+                "groups": {"Eng: MyProject": {"persona": ""}},
             }
         }
         # Empty persona -> ValueError -> falls through to title prefix
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.DEVELOPER
+        assert resolve_persona(project, "Eng: MyProject", is_dm=False) == PersonaType.ENGINEER
 
     def test_unknown_persona_falls_through(self):
         """Unknown persona value not in PersonaType -> fall through."""
@@ -170,10 +163,10 @@ class TestEdgeCases:
         assert resolve_persona(project, "SomeGroup", is_dm=False) is None
 
     def test_persona_config_takes_priority_over_title_prefix(self):
-        """If a Dev: group has teammate persona, persona wins."""
+        """If an Eng: group has teammate persona, persona wins."""
         project = {
             "telegram": {
-                "groups": {"Dev: MyProject": {"persona": "teammate"}},
+                "groups": {"Eng: MyProject": {"persona": "teammate"}},
             }
         }
-        assert resolve_persona(project, "Dev: MyProject", is_dm=False) == PersonaType.TEAMMATE
+        assert resolve_persona(project, "Eng: MyProject", is_dm=False) == PersonaType.TEAMMATE

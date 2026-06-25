@@ -44,7 +44,7 @@ See `docs/guides/infra-docs.md` for the full template and conventions.
 
 Two new fields on build tasks in the plan template:
 
-- **Validates**: Test files/patterns that must pass (e.g., `tests/unit/test_component.py`)
+- **Validates**: Test files/patterns that must pass (e.g., `tests/unit/test_<component>.py`)
 - **Informed By**: Spike task IDs with key findings (e.g., `spike-1 (confirmed: API supports batch calls)`)
 
 These create explicit traceability from spike findings to build tasks and from build tasks to their verification criteria.

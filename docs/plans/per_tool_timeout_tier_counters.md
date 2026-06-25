@@ -233,7 +233,7 @@ If `tests/integration/test_session_health_recovery.py` does not exist, this row 
 - **Synthetic `tool_result` injection** — deferred to a separate issue. v1 does hard recovery only.
 - **Per-`tool_use_id` in-flight registry** — single-slot approximation only in v1.
 - **Per-tool YAML override map** — only the three per-tier env vars in v1.
-- **Steering-message integration** — recovered sessions restart from `pending` without a "your tool wedged" steering note. Deferred.
+- **Steering-message integration** — ~~recovered sessions restart from `pending` without a "your tool wedged" steering note. Deferred.~~ **Implemented by #1711 (PR #1738):** `_apply_recovery_transition` now prepends a skip-the-tool steering message on every `tool_timeout` requeue via `push_steering_message(..., front=True)`, and delivers a channel-agnostic degraded notice on terminal `failed` exits.
 - **Reducing the global health-check interval** — sub-loop runs at 30s; main loop stays at 300s.
 - **Counter rotation / time-window decay** — counters are cumulative for the lifetime of the session row. Project Redis counters are cumulative forever (matches `recoveries:{kind}` precedent).
 

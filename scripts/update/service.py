@@ -330,6 +330,38 @@ def install_worker(project_dir: Path) -> bool:
         return False
 
 
+def install_nightly_tests(project_dir: Path) -> bool:
+    """Install/reload nightly-tests plist via the self-gating install script.
+
+    Delegates to scripts/install_nightly_tests.sh which contains a has_bridge_role()
+    gate — it skips install on non-bridge machines and removes any stale plist.
+    Returns True if the script exits 0 (installed or cleanly skipped).
+    """
+    install_script = project_dir / "scripts" / "install_nightly_tests.sh"
+    if not install_script.exists():
+        logger.warning("install_nightly_tests: install script not found at %s", install_script)
+        return False
+
+    try:
+        result = run_cmd(
+            ["/bin/bash", str(install_script)],
+            cwd=project_dir,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            logger.info("install_nightly_tests: script completed (rc=0)")
+            return True
+        logger.warning(
+            "install_nightly_tests: script exited with rc=%d; stdout=%s",
+            result.returncode,
+            (result.stdout or "").strip()[:200],
+        )
+        return False
+    except Exception as exc:
+        logger.warning("install_nightly_tests: failed to run install script: %s", exc)
+        return False
+
+
 def restart_worker(project_dir: Path) -> bool:
     """Restart worker service. Returns True if successful."""
     service_script = project_dir / "scripts" / "valor-service.sh"
@@ -507,8 +539,12 @@ def restart_webui(project_dir: Path, force: bool = False) -> bool:
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        time.sleep(2)
-        return is_webui_running()
+        # Poll up to 10 seconds; uvicorn needs a few seconds to bind the port.
+        for _ in range(20):
+            time.sleep(0.5)
+            if is_webui_running():
+                return True
+        return False
     except Exception:
         return False
 
@@ -521,7 +557,6 @@ def heal_plist_paths(project_dir: Path) -> list[str]:
 
     Returns list of plist labels that were healed (empty if none needed fixing).
     """
-    import plistlib
 
     local_bin = str(Path.home() / ".local" / "bin")
     launch_agents = Path.home() / "Library" / "LaunchAgents"

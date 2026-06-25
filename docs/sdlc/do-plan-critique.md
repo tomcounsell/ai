@@ -1,6 +1,10 @@
 # do-plan-critique addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-plan-critique/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## Triage Routing (LITE / FULL)
+
+Step 2.6 classifies each plan as LITE (1 Consolidated Critic) or FULL (3 merged critics). Force-FULL applies to doctrine paths (`config/personas/`, `.claude/skills/`, `.claude/skills-global/`, `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/hooks/`) and `appetite: Large` plans. For all other plans an LLM classifier biased toward FULL makes the call. See [`docs/features/plan-critique-triage.md`](../features/plan-critique-triage.md) for the full decision table and crash-resume flow.
+
 ## Required Section Enforcement
 
 The critique must verify all four required plan sections are present and substantive:
@@ -18,6 +22,61 @@ If the plan touches any Popoto model, the critique must verify:
 - A migration function is planned in `scripts/update/migrations.py`
 - The migration is registered in `MIGRATIONS`
 - The plan avoids raw Redis operations
+
+## Artifact-Based Roster Barrier (#1690, supersedes the #1654 wait-and-collect)
+
+The war-room critics (six or seven per CRITICS.md selection rules) write their findings to **per-critic result files** rather than relying on a prose await-all instruction. This barrier is observable on the filesystem and verifiable by a test — it does not depend on the LLM driver choosing to block.
+
+### How the barrier works
+
+**Step 3a — Frozen `_roster.json` manifest.** Before any critic is dispatched, the skill computes the expected roster from CRITICS.md's selection rules (seven critics by default; six when Archaeologist + User are skipped for a Small purely-internal plan) and writes `${CRITIQUE_RUN_DIR}/_roster.json` — a JSON object listing the expected critic names and count. This manifest is the **membership set** the Step 3.5 gate checks against. Because the manifest is frozen before dispatch, the gate cannot be satisfied by dispatching fewer critics than expected (the under-dispatch loophole from the prior prose-await design).
+
+**Step 3 — Atomic per-critic result files.** Each critic writes its findings body first, then appends a **two-line terminal completion fence** as its final action: the unique delimiter `<<<CRITIQUE-RESULT-COMPLETE>>>` as the penultimate non-empty line, immediately followed by `STATUS: COMPLETED` as the last non-empty line. The write is **atomic**: the critic writes to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`, then renames it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. Because both files live inside `${CRITIQUE_RUN_DIR}` (same filesystem), the rename is atomic — the canonical path is never observed in a truncated or partial state.
+
+**Step 3.5 — The `critique-roster-check` membership gate (runs BEFORE Step 4).** The skill calls:
+
+```bash
+critique-roster-check --run-dir "$CRITIQUE_RUN_DIR"
+```
+
+This helper reads `_roster.json` and, for each named roster member, checks that `{name}.result.md` exists and carries the terminal two-line fence. It prints a JSON gate decision and exits 0 when the full roster is complete:
+
+```json
+{"complete": true, "missing": [], "present": ["Skeptic","Operator",...], "roster_count": 7, "completed_count": 7}
+```
+
+Step 4 (aggregation) runs **only after this gate reports `complete: true`**. Step 4 then iterates the full `_roster.json` manifest — every named roster member — rather than "the result files that are present," so a missing file surfaces as a visible gap rather than being silently skipped.
+
+**Why the two-line terminal fence is structurally unforgeable.** Two guarantees compose:
+
+1. *Truncation guard.* Placing the fence at the end of the file (terminal position) means "fence present" is equivalent to "body fully written, then the critic stamped the fence as its deliberate final act." A sentinel written on line 1 would let a critic that crashes after writing the first line pass the gate with an empty or garbage body.
+
+2. *Token-collision guard.* The bare line `STATUS: COMPLETED` is forgeable: critics in this skill routinely quote that exact string in findings prose. Requiring `<<<CRITIQUE-RESULT-COMPLETE>>>` as the penultimate line — a token no critic emits in ordinary prose — makes the fence impossible to forge by quoted output. A file whose body merely ends on the bare `STATUS: COMPLETED` line (without the preceding delimiter) does NOT pass the gate.
+
+A truncated or token-colliding write can only produce a STOP or re-dispatch — the failure direction is always loud, never a silent green.
+
+**Bounded `MAX_CRITIC_REDISPATCH` cap.** If the gate reports `complete: false`, the skill re-dispatches **only the missing critics** (foreground, no `run_in_background`). The cap is named and fixed: **1 initial dispatch + up to 2 re-dispatches = 3 attempts maximum per critic**. There is no unbounded retry or polling loop.
+
+**`MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP verdict.** If the roster is still incomplete after the re-dispatch cap, the skill records the verdict string:
+
+```
+MAJOR REWORK (CRITIQUE INCOMPLETE: roster N/M — missing: {names})
+```
+
+through the normal Step 5.5 path, then sets the `plan_revising` lock (Step 5.6). The substring `MAJOR REWORK` matches the SDLC router's guard **G1** verbatim, routing back to `/do-plan`. The stage always produces a verdict — it never returns empty and never lingers at `in_progress`.
+
+**Cleanup gated on `complete: true`.** After Step 5.5/5.6, `${CRITIQUE_RUN_DIR}` is deleted **only on the `complete: true` path**. On the incomplete / `CRITIQUE INCOMPLETE` path the run dir is **preserved** as forensic evidence of which critics never reported.
+
+### Step 5.5 — mandatory finalize (unchanged from #1654)
+
+**Step 5.5 is mandatory and reached on every exit path.** Every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK, or CRITIQUE INCOMPLETE) flows through a single self-contained block that:
+1. Records the verdict via `sdlc-tool verdict record --stage CRITIQUE` so the router's G1/G5 guards can consume it.
+2. On a READY TO BUILD verdict ONLY, writes the completion stage-marker (`sdlc-tool stage-marker --stage CRITIQUE --status completed`) **co-located in the same block** so the verdict and marker can never desync.
+
+### Context: prior fixes
+
+- **#1654** (v1.3.0) added Step 3.5 "Wait and Collect" as a prose barrier: the driver was instructed to block on all background critics before aggregating. The barrier lived only in prose aimed at an LLM and failed when the driving subagent returned early, dropping a BLOCKER finding from a late-arriving Adversary critic in the #1681 run.
+- **#1690** (v1.4.0, this fix) replaces the prose-await with the artifact-based roster barrier described above. The `critique-roster-check` helper is independently verifiable: a test can create and omit result files and assert the gate behaves — the barrier is checkable, not merely asserted. The `docs/sdlc/` addendum and the `tests/unit/test_do_plan_critique_barrier.py` regression test both reference #1690.
 
 ## Multi-Machine Deployment
 

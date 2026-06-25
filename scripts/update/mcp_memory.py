@@ -278,18 +278,31 @@ def check_ollama_for_titles(host: str = "http://localhost:11434") -> tuple[bool,
             return False, f"Ollama returned non-JSON at {host}"
 
         try:
-            from config.models import OLLAMA_LOCAL_MODEL  # noqa: PLC0415
+            from config.settings import settings  # noqa: PLC0415
+
+            gen_model = settings.models.ollama_generation_model
         except Exception:
-            OLLAMA_LOCAL_MODEL = "gemma4:e2b"  # noqa: N806
+            gen_model = "gemma4:31b-cloud"
+
+        # Cloud generation tags are hosted pointers — not present in local
+        # /api/tags. Treat a configured cloud tag as available (the real check
+        # is cloud-signin, surfaced by /update); only verify local tags by name.
+        try:
+            from config.models import _is_cloud_tag
+
+            is_cloud = _is_cloud_tag(gen_model)
+        except Exception:
+            is_cloud = gen_model.endswith(":cloud") or gen_model.endswith("-cloud")
+        if is_cloud:
+            return True, f"Ollama generation: {gen_model} (cloud)"
 
         models = data.get("models", []) or []
         names = {(m.get("name") or "").split(":")[0] for m in models if isinstance(m, dict)}
-        wanted = OLLAMA_LOCAL_MODEL.split(":")[0]
+        wanted = gen_model.split(":")[0]
         if wanted in names:
-            return True, f"Ollama: {OLLAMA_LOCAL_MODEL} available"
+            return True, f"Ollama: {gen_model} available"
         return False, (
-            f"Ollama up but {OLLAMA_LOCAL_MODEL} not pulled — "
-            "memory titles will fall back to category-only"
+            f"Ollama up but {gen_model} not pulled — memory titles will fall back to category-only"
         )
     except (urllib.error.URLError, TimeoutError, OSError):
         return False, "Ollama not running — memory titles disabled (graceful fallback)"

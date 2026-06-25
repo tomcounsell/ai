@@ -15,13 +15,17 @@ INTERVAL=600  # 10 minutes in seconds
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# Every local Claude Code session in a calendar-mapped project is tracked.
+# Scope is enforced downstream: the EXCLUDED_PROJECTS denylist below plus
+# valor-calendar's own skip for projects absent from calendar_config.json.
+
 # Skip excluded projects (too noisy for calendar tracking)
 EXCLUDED_PROJECTS="valor"
 PROJECTS_JSON_CHECK="${PROJECTS_CONFIG_PATH:-$LOCKDIR/projects.json}"
 if [ -f "$PROJECTS_JSON_CHECK" ]; then
-    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
+    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
         .projects | to_entries[]
-        | select(.value.working_directory == $cwd)
+        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
         | .key
     ' "$PROJECTS_JSON_CHECK" 2>/dev/null || true)
     for excluded in $EXCLUDED_PROJECTS; do
@@ -50,9 +54,9 @@ fi
 if [ -n "$SAVED_SLUG" ]; then
     SLUG="$SAVED_SLUG"
 elif [ -f "$PROJECTS_JSON" ]; then
-    MATCH_KEY=$(jq -r --arg cwd "$PWD" '
+    MATCH_KEY=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
         .projects | to_entries[]
-        | select(.value.working_directory == $cwd)
+        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
         | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
     if [ -n "$MATCH_KEY" ]; then

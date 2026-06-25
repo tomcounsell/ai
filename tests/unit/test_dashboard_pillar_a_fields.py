@@ -29,7 +29,7 @@ def sample_session(monkeypatch):
     s = AgentSession.create(
         project_key="test-dashboard-pillar-a",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         session_id=f"dashboard-pillar-a-{time.time_ns()}",

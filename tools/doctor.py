@@ -286,6 +286,74 @@ def _check_api_keys() -> list[CheckResult]:
     return results
 
 
+def _check_claude_oauth_token() -> CheckResult:
+    """Check CLAUDE_CODE_OAUTH_TOKEN presence and prefix.
+
+    This check is presence+prefix only — no expiry computation, JWT decode,
+    minted-date heuristics, or N-day warnings. The token format may change; only
+    the ``sk-ant-oat01-`` prefix is validated here.
+
+    Reads bare ``os.environ`` (not a settings field) because the token is injected
+    into the PTY child environment at session launch time, not stored in settings.
+    There is no settings.py field for this token by design.
+
+    Remediation: if the token is absent or malformed, run
+    ``claude setup-token`` on a browser-capable machine to mint a fresh token,
+    then set ``CLAUDE_CODE_OAUTH_TOKEN`` in the .env vault.
+
+    Returns a *warning* (``passed=True`` with a ``fix`` message) for absent or
+    malformed tokens — it never hard-fails the run, because the token is optional
+    on non-interactive machines that use API-key auth instead.
+    """
+    import logging
+    import os
+
+    expected_prefix = "sk-ant-oat01-"
+
+    try:
+        token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        if token is None:
+            return CheckResult(
+                name="claude_oauth_token",
+                category="Auth",
+                passed=True,  # warning only
+                message="CLAUDE_CODE_OAUTH_TOKEN not set (optional on API-key machines)",
+                fix=(
+                    "Run: claude setup-token on a browser-capable machine,"
+                    " then add CLAUDE_CODE_OAUTH_TOKEN to .env"
+                ),
+            )
+        if not token.startswith(expected_prefix):
+            return CheckResult(
+                name="claude_oauth_token",
+                category="Auth",
+                passed=True,  # warning only
+                message=(
+                    f"CLAUDE_CODE_OAUTH_TOKEN present but malformed prefix"
+                    f" (expected {expected_prefix!r})"
+                ),
+                fix=(
+                    f"Token prefix does not match {expected_prefix!r}."
+                    " Run: claude setup-token on a browser-capable machine to mint a fresh token"
+                ),
+            )
+        return CheckResult(
+            name="claude_oauth_token",
+            category="Auth",
+            passed=True,
+            message="CLAUDE_CODE_OAUTH_TOKEN present and valid prefix",
+        )
+    except Exception as e:
+        logging.warning("claude_oauth_token check raised: %s", e)
+        return CheckResult(
+            name="claude_oauth_token",
+            category="Auth",
+            passed=True,  # warning only — don't block the run
+            message=f"CLAUDE_CODE_OAUTH_TOKEN check failed unexpectedly: {e}",
+            fix="Run: claude setup-token on a browser-capable machine",
+        )
+
+
 def _check_sdk_auth() -> CheckResult:
     """Check SDK authentication status."""
     try:
@@ -531,6 +599,7 @@ def get_checks(
         lambda: _check_telegram_session(quick=quick),
         _check_api_keys,
         _check_sdk_auth,
+        _check_claude_oauth_token,
         # Resources
         _check_disk_space,
         _check_memory,

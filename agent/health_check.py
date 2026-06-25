@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -28,10 +29,24 @@ logger = logging.getLogger(__name__)
 # Health check fires every N tool uses
 CHECK_INTERVAL = 20
 
+# Tool-failure circuit breaker (issue #1413): number of consecutive failed
+# tool calls that trips the deterministic breaker and flags the session
+# unhealthy. Complements the Haiku watchdog (which runs every CHECK_INTERVAL
+# calls and judges holistic progress) with a cheap per-call failure counter.
+CONSECUTIVE_FAILURE_THRESHOLD = 5
+
 # Track tool call count per session (in-memory, resets with process).
 # Keyed by bridge session ID (VALOR_SESSION_ID env var) when available,
 # falling back to Claude Code's internal session ID. See issue #374 Bug 2.
 _tool_counts: dict[str, int] = {}
+
+# Tool-failure circuit breaker state (in-memory, process-local, resets on
+# worker restart — same lifecycle as _tool_counts). See issue #1413.
+#   _consecutive_failures: per-session count of back-to-back failed tool calls.
+#   _recent_failures: per-session ring of the last failing tool names, used to
+#     build the unhealthy reason string. maxlen mirrors the threshold.
+_consecutive_failures: dict[str, int] = {}
+_recent_failures: dict[str, deque[str]] = {}
 
 
 def _set_unhealthy(session_id: str, reason: str) -> None:
@@ -46,6 +61,71 @@ def _set_unhealthy(session_id: str, reason: str) -> None:
             logger.info(f"[health_check] Set unhealthy flag for {session_id}")
     except Exception as e:
         logger.error(f"[health_check] Failed to set unhealthy flag: {e}")
+
+
+def _is_tool_failure(tool_response: Any) -> bool:
+    """Classify a PostToolUse ``tool_response`` as a failure (issue #1413).
+
+    The SDK annotates ``tool_response`` as ``Any``. At runtime the Claude Code
+    CLI delivers a ``dict`` with ``is_error: bool`` for nearly all tools, but
+    rare/legacy paths surface a string. We treat:
+
+      - a ``dict`` with ``is_error is True`` as a failure
+      - a ``str`` starting with ``"Error: "`` as a failure
+
+    Everything else (``None``, lists, scalars, dicts without ``is_error``) is
+    treated as success — biased toward avoiding false positives.
+    """
+    if isinstance(tool_response, dict):
+        return tool_response.get("is_error") is True
+    if isinstance(tool_response, str):
+        return tool_response.startswith("Error: ")
+    return False
+
+
+def _check_tool_failure_breaker(session_id: str, input_data: PostToolUseHookInput) -> None:
+    """Update the consecutive-failure counter and trip the breaker if needed.
+
+    Called once per tool call from ``watchdog_hook``. On a failed tool call the
+    per-session counter increments and the failing tool name is appended to a
+    bounded ring; on success both reset. When the counter reaches
+    ``CONSECUTIVE_FAILURE_THRESHOLD`` the session is flagged unhealthy via the
+    shared ``watchdog_unhealthy`` field with a reason naming the recent failing
+    tools, then the counter and ring reset so the breaker re-fires every N
+    additional consecutive failures (see issue #1413 Resolved Decisions).
+    """
+    if not session_id:
+        return
+
+    tool_response = input_data.get("tool_response")
+    tool_name = input_data.get("tool_name", "unknown")
+
+    if not _is_tool_failure(tool_response):
+        # Success — clear the streak and the ring.
+        _consecutive_failures[session_id] = 0
+        ring = _recent_failures.get(session_id)
+        if ring is not None:
+            ring.clear()
+        return
+
+    # Failure — bump the counter and record the tool name.
+    _consecutive_failures[session_id] = _consecutive_failures.get(session_id, 0) + 1
+    ring = _recent_failures.get(session_id)
+    if ring is None:
+        ring = deque(maxlen=CONSECUTIVE_FAILURE_THRESHOLD)
+        _recent_failures[session_id] = ring
+    ring.append(tool_name)
+
+    if _consecutive_failures[session_id] >= CONSECUTIVE_FAILURE_THRESHOLD:
+        count = _consecutive_failures[session_id]
+        recent_tools = ", ".join(ring)
+        reason = (
+            f"{count} consecutive tool failures ({recent_tools}) — strategy reassessment required"
+        )
+        _set_unhealthy(session_id, reason)
+        # Reset so the breaker re-fires after the next N consecutive failures.
+        _consecutive_failures[session_id] = 0
+        ring.clear()
 
 
 def is_session_unhealthy(session_id: str) -> str | None:
@@ -540,6 +620,16 @@ async def watchdog_hook(
     # Increment counter
     _tool_counts[session_id] = _tool_counts.get(session_id, 0) + 1
     count = _tool_counts[session_id]
+
+    # === TOOL-FAILURE CIRCUIT BREAKER (every tool call) — issue #1413 ===
+    # Deterministic, cheap complement to the Haiku watchdog: count consecutive
+    # failed tool calls and flag the session unhealthy once the threshold is
+    # reached, naming the recent failing tools. Any success resets the streak.
+    # Wrapped in try/except so a classification bug can never break the hook.
+    try:
+        _check_tool_failure_breaker(session_id, input_data)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"[health_check] circuit breaker check failed (non-fatal): {e}")
 
     # === ACTIVITY STREAM (every tool call) ===
     # Extract tool name and summarize input for the activity log

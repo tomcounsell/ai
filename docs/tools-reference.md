@@ -105,7 +105,7 @@ Paired with two PreToolUse validators (`validate_design_system_sync.py`, `valida
 
 ### Emoji Embedding (`tools.emoji_embedding`)
 
-Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 73 standard Telegram reaction emojis and any available Premium custom emoji packs.
+Embedding-based emoji selection for Telegram reactions. Maps feeling words to the nearest emoji via cosine similarity, searching both the 72 standard Telegram reaction emojis and any available Premium custom emoji packs.
 
 ```python
 from tools.emoji_embedding import find_best_emoji, find_best_emoji_for_message, EmojiResult
@@ -314,7 +314,7 @@ Create, steer, monitor, and kill `AgentSession` records. The primary external in
 # List all sessions
 python -m tools.valor_session list
 python -m tools.valor_session list --status running
-python -m tools.valor_session list --role pm
+python -m tools.valor_session list --role eng
 
 # Inspect a session
 python -m tools.valor_session status --id <SESSION_ID>
@@ -330,12 +330,12 @@ python -m tools.valor_session children --id <SESSION_ID>
 python -m tools.valor_session steer --id <SESSION_ID> --message "Stop after critique"
 
 # Create a new session (project_key derived from cwd via projects.json)
-# Warns to stderr if no active worker is running; --json adds worker_healthy field
-# PM and dev roles both require --slug, or `issue #N` in the message for auto-derivation.
-python -m tools.valor_session create --role pm --message "Plan issue #735"
-python -m tools.valor_session create --role dev --slug fix-the-bug --message "Fix the bug" --parent <PARENT_ID>
+# Warns to stderr if no recent worker heartbeat; --json adds worker_healthy, worker_state, worker_heartbeat_age_s
+# The eng role requires --slug, or `issue #N` in the message for auto-derivation.
+python -m tools.valor_session create --role eng --message "Plan issue #735"
+python -m tools.valor_session create --role eng --slug fix-the-bug --message "Fix the bug"
 # Explicit project key override (useful in scripts/CI where cwd may not match)
-python -m tools.valor_session create --role pm --slug ad-hoc-task --message "..." --project-key valor
+python -m tools.valor_session create --role eng --slug ad-hoc-task --message "..." --project-key valor
 
 # Kill sessions
 python -m tools.valor_session kill --id <SESSION_ID>

@@ -10,11 +10,496 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 
 WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+# ---------------------------------------------------------------------------
+# Unmerged-branch guard (issue #1646)
+# ---------------------------------------------------------------------------
+
+_preserved_branch_count = 0  # restart-fragile counter; supplemented by live git branch --list
+
+
+def merged_via_ancestor(repo_root: str, branch: str, base: str = "main") -> bool:
+    """Return True iff branch tip is a git ancestor of base (non-squash merges only)."""
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", branch, base],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def merged_via_tree(repo_root: str, branch: str, base: str = "main") -> bool:
+    """Return True iff merging branch into base is a no-op (squash-safe oracle).
+
+    Uses git merge-tree --write-tree: landed iff exit 0 AND result tree == base^{tree}.
+    Robust to main advancing past the squash commit. Requires git >= 2.38.
+    """
+    try:
+        # Get base tree oid
+        base_tree = subprocess.run(
+            ["git", "rev-parse", f"{base}^{{tree}}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if base_tree.returncode != 0:
+            return False
+        base_tree_oid = base_tree.stdout.strip()
+
+        # Run merge-tree
+        merge_result = subprocess.run(
+            ["git", "merge-tree", "--write-tree", base, branch],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if merge_result.returncode != 0:
+            # Conflict or other error — not landed
+            return False
+
+        result_tree_oid = merge_result.stdout.strip()
+        return result_tree_oid == base_tree_oid
+    except Exception:
+        return False
+
+
+def _resolve_base(repo_root: str, base: str = "main") -> str | None:
+    """Resolve base branch name; fall back to origin/HEAD default branch."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", base],
+        cwd=repo_root,
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        return base
+    # Try origin/HEAD
+    result2 = subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result2.returncode == 0:
+        ref = result2.stdout.strip()
+        return ref.split("/")[-1] if "/" in ref else None
+    return None
+
+
+def safe_delete_branch(
+    repo_root: str,
+    branch_name: str,
+    *,
+    base: str = "main",
+    predicate,
+    force: bool = False,
+) -> dict:
+    """Delete branch only if merged per predicate; preserve and log if not.
+
+    Args:
+        repo_root: Path to git repo root.
+        branch_name: Branch to delete.
+        base: Base branch to check against (default "main").
+        predicate: Callable(repo_root, branch, base) -> bool; True = landed, safe to delete.
+        force: If True, use git branch -D (needed for squash-merged branches); else -d.
+
+    Returns:
+        dict with keys:
+          - deleted: bool
+          - skipped_unmerged: bool
+          - branch: str (the branch name)
+          - error: str | None
+    """
+    global _preserved_branch_count
+
+    resolved_base = _resolve_base(repo_root, base)
+    if resolved_base is None:
+        logger.warning(
+            "[unmerged-branch-guard] cannot resolve base '%s' for branch '%s'"
+            " — refusing deletion (fail-safe)",
+            base,
+            branch_name,
+        )
+        _preserved_branch_count += 1
+        _log_preserved_count(repo_root)
+        return {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": branch_name,
+            "error": f"cannot resolve base '{base}'",
+        }
+
+    try:
+        landed = predicate(repo_root, branch_name, resolved_base)
+    except Exception as e:
+        logger.warning(
+            "[unmerged-branch-guard] predicate error for branch '%s': %s"
+            " — refusing deletion (fail-safe)",
+            branch_name,
+            e,
+        )
+        _preserved_branch_count += 1
+        _log_preserved_count(repo_root)
+        return {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": branch_name,
+            "error": str(e),
+        }
+
+    if not landed:
+        _preserved_branch_count += 1
+        live_count = _count_live_session_branches(repo_root)
+        logger.warning(
+            "[unmerged-branch-guard] branch '%s' has unmerged commits"
+            " — preserving (preserved=%d, live session/* branches=%s)",
+            branch_name,
+            _preserved_branch_count,
+            live_count,
+        )
+        _log_preserved_count(repo_root)
+        return {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": branch_name,
+            "error": None,
+        }
+
+    # Branch is landed — delete it
+    flag = "-D" if force else "-d"
+    result = subprocess.run(
+        ["git", "branch", flag, branch_name],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return {"deleted": True, "skipped_unmerged": False, "branch": branch_name, "error": None}
+    else:
+        err = result.stderr.strip()
+        logger.warning(
+            "[unmerged-branch-guard] git branch %s '%s' failed: %s", flag, branch_name, err
+        )
+        return {"deleted": False, "skipped_unmerged": False, "branch": branch_name, "error": err}
+
+
+def _count_live_session_branches(repo_root: str) -> str:
+    """Count live session/* branches via git for the observability line."""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--list", "session/*"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            return str(len(lines))
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _log_preserved_count(repo_root: str) -> None:
+    """Emit a greppable preserved=N summary with live branch count."""
+    live_count = _count_live_session_branches(repo_root)
+    logger.warning(
+        "[unmerged-branch-guard] preserved=%d (live session/* branches=%s)",
+        _preserved_branch_count,
+        live_count,
+    )
+
+
+class WorktreeBranchMismatchError(RuntimeError):
+    """Raised when a reused worktree's HEAD does not match the expected branch
+    and cannot be auto-recovered (issue #1377).
+
+    The recoverable case (clean working tree) is handled by
+    ``verify_worktree_branch`` itself via ``git checkout``; this exception is
+    only raised when the worktree has uncommitted state or when the underlying
+    git command fails.
+
+    Attributes:
+        worktree_path: The worktree directory that was checked.
+        expected_branch: The branch the executor wanted the worktree on.
+        actual_branch: The branch git reported (may be empty / detached HEAD).
+        dirty_files: List of porcelain status lines explaining why auto-recovery
+            was refused (empty when the failure was a subprocess error).
+    """
+
+    def __init__(
+        self,
+        worktree_path: Path | str,
+        expected_branch: str,
+        actual_branch: str,
+        dirty_files: list[str] | None = None,
+        cause: str | None = None,
+    ) -> None:
+        self.worktree_path = Path(worktree_path)
+        self.expected_branch = expected_branch
+        self.actual_branch = actual_branch
+        self.dirty_files = list(dirty_files or [])
+        msg = (
+            f"Worktree branch mismatch at {self.worktree_path}: "
+            f"expected={expected_branch!r}, actual={actual_branch!r}"
+        )
+        if self.dirty_files:
+            msg += f", dirty_files={self.dirty_files}"
+        if cause:
+            msg += f" ({cause})"
+        super().__init__(msg)
+
+
+def verify_worktree_branch(worktree_path: Path, expected_branch: str) -> None:
+    """Verify a reused worktree is checked out to the expected branch.
+
+    This is the missing primitive identified by issue #1377: after a BUILD
+    session left ``.worktrees/{slug}/`` on ``session/{slug}``, a subsequent
+    MERGE dev session reusing the same path could end up running with the
+    wrong branch context, silently producing no output until the startup
+    watchdog killed it.
+
+    Behavior:
+      * Matching branch — return silently (no log noise).
+      * Mismatch + clean working tree — run ``git checkout <expected_branch>``
+        and log at INFO with slug/from/to. This is the "operator-friendly"
+        recovery path; the alternative would be to refuse every reused
+        worktree and force a manual cleanup.
+      * Mismatch + dirty working tree — raise :class:`WorktreeBranchMismatchError`
+        with the dirty file list, preserving uncommitted work for inspection.
+      * Underlying git failure (detached HEAD that cannot be parsed, corrupted
+        worktree, etc.) — raise :class:`WorktreeBranchMismatchError` with the
+        git stderr as the cause.
+
+    Args:
+        worktree_path: Absolute path to the worktree to check.
+        expected_branch: The branch name the caller expects (e.g. ``"main"``
+            or ``"session/sdlc-1377"``).
+
+    Raises:
+        TypeError: If ``worktree_path`` is None.
+        ValueError: If ``expected_branch`` is empty / whitespace-only.
+        WorktreeBranchMismatchError: If the worktree path is missing, the
+            branch differs and the worktree is dirty, or the underlying git
+            command fails.
+    """
+    if worktree_path is None:
+        raise TypeError("worktree_path must not be None")
+    if not isinstance(expected_branch, str) or not expected_branch.strip():
+        raise ValueError("expected_branch must be a non-empty string")
+
+    worktree_path = Path(worktree_path)
+    if not worktree_path.exists():
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            "",
+            cause=f"worktree path does not exist: {worktree_path}",
+        )
+
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            "",
+            cause=f"git rev-parse failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+    except FileNotFoundError as e:  # pragma: no cover - git always installed
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            "",
+            cause=f"git executable not found: {e}",
+        ) from e
+
+    actual_branch = head.stdout.strip()
+    if actual_branch == expected_branch:
+        return
+
+    # Branch differs — inspect working tree cleanliness.
+    try:
+        status = subprocess.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git status failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    dirty = [line for line in status.stdout.splitlines() if line.strip()]
+    if dirty:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            dirty_files=dirty,
+        )
+
+    # Pre-check: refuse early if expected_branch is locked by another worktree
+    # (issue #1412). Without this guard, `git checkout` below fails with a raw
+    # "'<branch>' is already used by worktree at '<path>'" stderr leak.
+    try:
+        common_dir = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git rev-parse --git-common-dir failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    # --git-common-dir returns the .git directory of the main repo (may be a
+    # path relative to the worktree, e.g. just ".git" for a standalone repo);
+    # resolve it against the worktree before taking the parent.
+    common_dir_raw = Path(common_dir.stdout.strip())
+    if not common_dir_raw.is_absolute():
+        common_dir_raw = worktree_path / common_dir_raw
+    main_repo_root = common_dir_raw.resolve().parent
+    holding_path = _find_worktree_for_branch(main_repo_root, expected_branch)
+    if holding_path is not None and Path(holding_path).resolve() != worktree_path.resolve():
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=(
+                f"cannot checkout '{expected_branch}': already used by worktree at '{holding_path}'"
+            ),
+        )
+
+    # Clean — auto-recover by checking out the expected branch.
+    try:
+        subprocess.run(
+            ["git", "-C", str(worktree_path), "checkout", expected_branch],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise WorktreeBranchMismatchError(
+            worktree_path,
+            expected_branch,
+            actual_branch,
+            cause=f"git checkout failed: {e.stderr.strip() if e.stderr else e}",
+        ) from e
+
+    slug = worktree_path.name
+    logger.info(
+        "[worktree-branch-recovery] slug=%s path=%s from=%s to=%s "
+        "(auto-checkout of clean worktree, issue #1377)",
+        slug,
+        worktree_path,
+        actual_branch,
+        expected_branch,
+    )
+
+
+def worktree_busy_check(repo_root: Path, slug: str) -> tuple[str, str] | None:
+    """Check whether any non-terminal AgentSession references this worktree.
+
+    Walks the AgentSession table looking for rows whose ``working_dir`` lives
+    inside ``.worktrees/{slug}/`` (or is exactly that directory) and whose
+    ``status`` is not in ``TERMINAL_STATUSES``. The first match wins.
+
+    Imports of ``models.agent_session`` and ``models.session_lifecycle`` are
+    deferred to function body to keep ``worktree_manager.py``'s import-time
+    graph unchanged (worktree_manager is loaded by tooling that should not
+    pay the Popoto bootstrap cost just to validate slugs).
+
+    Path comparison normalizes both sides via ``os.path.normpath`` (no symlink
+    resolution) then matches the worktree's path components segment-by-segment
+    against the session's. ``.worktrees/sdlc-1218`` matches ``.worktrees/
+    sdlc-1218/subdir`` but not ``.worktrees/sdlc-1218-other`` (Risk 5).
+
+    Failure mode: if the Popoto query raises (Redis unavailable, malformed
+    row, anything), the helper logs a WARNING and returns ``None`` (fail-open).
+    Refusing every worktree removal because Redis hiccupped would cause more
+    operational pain than the busy guard prevents.
+
+    Args:
+        repo_root: Path to the main repository.
+        slug: Work item slug whose worktree we want to remove.
+
+    Returns:
+        ``(session_id, agent_session_id)`` of the first live session
+        referencing the worktree, or ``None`` if clear.
+    """
+    try:
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import TERMINAL_STATUSES
+    except Exception as e:  # pragma: no cover - import-time failure
+        logger.warning("worktree_busy_check: model imports failed (%s); fail-open", e)
+        return None
+
+    worktree_dir = (repo_root / WORKTREES_DIR / slug).resolve()
+    worktree_norm = os.path.normpath(str(worktree_dir))
+    worktree_parts = Path(worktree_norm).parts
+
+    try:
+        sessions = AgentSession.query.all()
+    except Exception as e:
+        logger.warning("worktree_busy_check: AgentSession query failed (%s); fail-open", e)
+        return None
+
+    for session in sessions:
+        try:
+            wd = getattr(session, "working_dir", None)
+            if not wd:
+                continue
+            status = getattr(session, "status", None)
+            if not status or status in TERMINAL_STATUSES:
+                continue
+
+            # Normalize without resolving symlinks (Risk 5: realpath could
+            # amplify the match into unrelated directories).
+            try:
+                # Try resolving an absolute path; fall back to normpath for
+                # relative working_dir values like ".worktrees/sdlc-1218".
+                if os.path.isabs(wd):
+                    session_norm = os.path.normpath(wd)
+                else:
+                    session_norm = os.path.normpath(str((repo_root / wd).resolve()))
+            except Exception:
+                session_norm = os.path.normpath(str(wd))
+
+            session_parts = Path(session_norm).parts
+            # Segment-aware containment: the worktree's parts must be a prefix
+            # of the session's parts. This rejects ".worktrees/sdlc-1218-other"
+            # while accepting ".worktrees/sdlc-1218/subdir".
+            if (
+                len(session_parts) >= len(worktree_parts)
+                and session_parts[: len(worktree_parts)] == worktree_parts
+            ):
+                session_id = getattr(session, "session_id", "") or ""
+                agent_session_id = getattr(session, "agent_session_id", "") or ""
+                return (session_id, agent_session_id)
+        except Exception as e:
+            logger.debug("worktree_busy_check: skipping session row (%s)", e)
+            continue
+
+    return None
 
 
 def validate_workspace(
@@ -490,8 +975,21 @@ def get_or_create_worktree(repo_root: Path, slug: str, base_branch: str = "main"
     return create_worktree(repo_root, slug, base_branch)
 
 
-def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> bool:
+def remove_worktree(
+    repo_root: Path,
+    slug: str,
+    delete_branch: bool = True,
+    force: bool = False,
+) -> bool | tuple[Literal["blocked"], str]:
     """Remove a git worktree and optionally its branch.
+
+    Refuses removal if a non-terminal ``AgentSession`` still references the
+    worktree as ``working_dir`` (issue #1357). This prevents the macOS
+    cwd-vanished wedge documented in investigation #1246: deleting a
+    directory out from under a running SDK subprocess does not signal that
+    subprocess; ``getcwd(3)`` starts returning ENOENT, the harness hangs
+    forever in ``proc.communicate()``, and the AgentSession row sits at
+    ``status=running`` until a manual kill.
 
     If the current process CWD is inside the worktree being removed,
     this function changes CWD to repo_root first to prevent the shell
@@ -501,9 +999,15 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
         repo_root: Path to the main repository
         slug: Work item slug
         delete_branch: Whether to also delete the session branch
+        force: If True, removes the worktree even when a live session
+            references it. A WARNING is logged in that case. Use only
+            when the session has already been verified dead but its row
+            has not yet flipped to a terminal status.
 
     Returns:
-        True if successfully removed, False otherwise
+        True if successfully removed, False if the worktree was missing or
+        the git remove command failed, or ``("blocked", session_id)`` when
+        a live session is using the worktree and ``force=False``.
 
     Raises:
         ValueError: If slug contains path traversal or invalid characters
@@ -511,6 +1015,29 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
     _validate_slug(slug)
     worktree_dir = repo_root / WORKTREES_DIR / slug
     branch_name = f"session/{slug}"
+
+    # Refuse-busy guard (issue #1357): ask the AgentSession table whether
+    # any non-terminal session still references this worktree.
+    busy = worktree_busy_check(repo_root, slug)
+    if busy is not None:
+        session_id, agent_session_id = busy
+        if force:
+            logger.warning(
+                "force-removing worktree .worktrees/%s despite live "
+                "session_id=%s agent_session_id=%s",
+                slug,
+                session_id,
+                agent_session_id,
+            )
+        else:
+            logger.warning(
+                "Refusing to remove worktree .worktrees/%s: in use by "
+                "session_id=%s agent_session_id=%s. Pass force=True to override.",
+                slug,
+                session_id,
+                agent_session_id,
+            )
+            return ("blocked", session_id)
 
     if not worktree_dir.exists():
         logger.info(f"Worktree not found: {worktree_dir}")
@@ -548,13 +1075,23 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
         return False
 
     if delete_branch:
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=repo_root,
-            capture_output=True,
-            timeout=10,
+        branch_result = safe_delete_branch(
+            str(repo_root),
+            branch_name,
+            predicate=merged_via_tree,
+            force=True,
         )
-        logger.info(f"Deleted branch: {branch_name}")
+        if branch_result["deleted"]:
+            logger.info(f"Deleted branch: {branch_name}")
+        elif branch_result["skipped_unmerged"]:
+            logger.warning(
+                "[unmerged-branch-guard] branch '%s' preserved — work not yet merged to main",
+                branch_name,
+            )
+        else:
+            logger.warning(
+                "Failed to delete branch %s: %s", branch_name, branch_result.get("error")
+            )
 
     return True
 
@@ -825,9 +1362,14 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
     this function removes the local worktree and branch that would
     otherwise block deletion.
 
+    The branch deletion is guarded by the unmerged-branch guard (issue #1646):
+    safe_delete_branch verifies the merged precondition (via merged_via_tree) before
+    deleting. If the branch has unmerged commits, it is preserved and
+    skipped_unmerged=True is set in the result.
+
     Safe to call in any state:
-    - Worktree exists + branch exists: removes both
-    - Worktree already removed + branch exists: deletes branch
+    - Worktree exists + branch exists: removes both (if merged)
+    - Worktree already removed + branch exists: deletes branch (if merged)
     - Everything already cleaned up: no-op
 
     Args:
@@ -841,6 +1383,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         - slug: The slug that was cleaned up
         - worktree_removed: True if a worktree was removed
         - branch_deleted: True if a local branch was deleted
+        - skipped_unmerged: True if branch was preserved due to unmerged commits
         - already_clean: True if nothing needed cleanup
         - errors: List of error messages for any failed steps
 
@@ -855,6 +1398,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         "slug": slug,
         "worktree_removed": False,
         "branch_deleted": False,
+        "skipped_unmerged": False,
         "already_clean": False,
         "errors": [],
     }
@@ -865,13 +1409,25 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
     # Step 1: Remove worktree if it exists
     if had_worktree:
         removed = remove_worktree(repo_root, slug, delete_branch=False)
-        result["worktree_removed"] = removed
-        if removed:
-            logger.info(f"Post-merge: removed worktree for {slug}")
-        else:
-            msg = f"Failed to remove worktree .worktrees/{slug}"
+        # Issue #1357: remove_worktree returns ("blocked", session_id) when a
+        # live AgentSession references the worktree. Surface that into the
+        # result dict so post_merge_cleanup.py can exit 2 and the operator
+        # knows which session to investigate.
+        if isinstance(removed, tuple) and removed and removed[0] == "blocked":
+            session_id = removed[1]
+            result["worktree_removed"] = False
+            result["blocked_by_session"] = session_id
+            msg = f"blocked: worktree in use by session_id={session_id}"
             result["errors"].append(msg)
             logger.warning(f"Post-merge: {msg}")
+        else:
+            result["worktree_removed"] = bool(removed)
+            if removed:
+                logger.info(f"Post-merge: removed worktree for {slug}")
+            else:
+                msg = f"Failed to remove worktree .worktrees/{slug}"
+                result["errors"].append(msg)
+                logger.warning(f"Post-merge: {msg}")
 
     # Step 2: Prune stale worktree references (handles cases where the
     # directory was manually deleted but git still tracks the worktree)
@@ -879,19 +1435,27 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
 
     # Step 3: Delete local branch if it still exists
     # Re-check after prune -- pruning may unblock branch deletion
+    # Branch deletion is guarded: safe_delete_branch verifies merged precondition (issue #1646)
     if had_branch or _branch_exists(repo_root, branch_name):
-        branch_result = subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=10,
+        branch_del = safe_delete_branch(
+            str(repo_root),
+            branch_name,
+            predicate=merged_via_tree,
+            force=True,
         )
-        if branch_result.returncode == 0:
+        if branch_del["deleted"]:
             result["branch_deleted"] = True
             logger.info(f"Post-merge: deleted local branch {branch_name}")
+        elif branch_del["skipped_unmerged"]:
+            result["skipped_unmerged"] = True
+            msg = (
+                f"[unmerged-branch-guard] branch '{branch_name}'"
+                " preserved — work not yet merged to main"
+            )
+            result["errors"].append(msg)
+            logger.warning(f"Post-merge: {msg}")
         else:
-            msg = f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
+            msg = f"Failed to delete branch {branch_name}: {branch_del.get('error', 'unknown')}"
             result["errors"].append(msg)
             logger.warning(f"Post-merge: {msg}")
     else:

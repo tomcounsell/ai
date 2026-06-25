@@ -215,14 +215,14 @@ td {
   padding: 8px 12px;
 }
 
-/* Blockquotes */
+/* Blockquotes & callouts — full border, NOT a single left accent bar (see "Avoid AI-Slop Tells") */
 blockquote {
-  border-left: 4px solid <accent>;
   background: <accent-bg-translucent>;
   color: <text-secondary>;
-  padding: 8px 16px;
-  border-radius: 0 <radius> <radius> 0;
-  font-style: italic;
+  padding: 14px 20px;
+  border: 1px solid <border>;
+  border-radius: <radius>;
+  font-style: normal;
 }
 
 /* Lists */
@@ -236,6 +236,18 @@ section::after {
   font-size: 11px;
 }
 ```
+
+## Avoid AI-Slop Tells
+
+Certain visual defaults instantly read as "AI-generated slide deck." Do **not** emit them, regardless of what the detected design system suggests:
+
+- **Colored left-border accent bars.** The single biggest tell: a callout, blockquote, or card styled with `border-left: 4px solid <accent>` and `border-radius: 0 r r 0` (accent stripe down one edge). **Every** callout/stat/quote/card you generate must use a **uniform full `1px` border** (or no border at all, background tint only) with even `border-radius` on all four corners. Never a single accent edge.
+- **Emoji** as bullet markers or section icons.
+- **Gradients on body cards.** Gradients are acceptable only on lead/title slide backgrounds — never on content cards or callouts.
+- **A row of three identical giant-number "stat cards"** as a reflex layout. Use it once at most; vary the layout otherwise.
+- **Everything centered.** Content slides use real left-aligned hierarchy; reserve centering for lead/title/section slides.
+
+This applies to the utility classes (`.stat`, `.warn`, `.path-card`, `blockquote`) and any bespoke component — audit the generated `style:` block for `border-left` on these and convert to a full border before exporting.
 
 ## Light Mode Mandate
 

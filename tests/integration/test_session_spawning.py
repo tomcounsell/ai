@@ -53,7 +53,7 @@ class TestAllSessionTypesRouteToHarness:
     """After migration, all session types use get_response_via_harness."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("session_type", ["dev", "pm", "teammate"])
+    @pytest.mark.parametrize("session_type", ["eng", "teammate"])
     async def test_session_type_invokes_harness(self, session_type, redis_test_db):
         """All session types (dev, pm, teammate) call get_response_via_harness."""
         session = _make_session(session_type, f"{session_type}-harness-001", redis_test_db)
@@ -102,12 +102,12 @@ class TestHarnessEnvPassthrough:
 
     def test_parent_agent_session_id_for_child_linkage(self, redis_test_db):
         """Parent session's agent_session_id is used as parent_agent_session_id on child."""
-        pm_session = _make_session("pm", "pm-env-passthrough-001", redis_test_db)
+        pm_session = _make_session("eng", "eng-env-passthrough-001", redis_test_db)
         parent_uuid = pm_session.agent_session_id
 
         dev_session = AgentSession.create(
             session_id="dev-env-passthrough-002",
-            session_type="dev",
+            session_type="eng",
             project_key="test",
             status="pending",
             chat_id="999",
@@ -130,7 +130,7 @@ class TestHarnessEnvPassthrough:
         """
         from config.enums import SessionType
 
-        for session_type in ("pm", "teammate", "dev"):
+        for session_type in ("eng", "teammate"):
             session = _make_session(session_type, f"{session_type}-session-type-001", redis_test_db)
             _harness_env: dict[str, str] = {
                 "AGENT_SESSION_ID": session.agent_session_id or "",
@@ -142,32 +142,31 @@ class TestHarnessEnvPassthrough:
             assert _harness_env["SESSION_TYPE"] == session_type
 
         # Sanity: SessionType enum values match the strings stored in env
-        assert SessionType.PM == "pm"
+        assert SessionType.ENG == "eng"
         assert SessionType.TEAMMATE == "teammate"
-        assert SessionType.DEV == "dev"
 
-    def test_telegram_chat_id_in_harness_env_for_pm(self, redis_test_db):
-        """Issue #1148: TELEGRAM_CHAT_ID injected for PM/Teammate when chat_id set.
+    def test_telegram_chat_id_in_harness_env_for_eng(self, redis_test_db):
+        """Issue #1148: TELEGRAM_CHAT_ID injected for ENG/Teammate when chat_id set.
 
-        Required by tools/send_telegram.py for PM-side message sends.
+        Required by tools/send_telegram.py for eng-side message sends.
         """
         from config.enums import SessionType
 
-        pm = _make_session("pm", "pm-telegram-chat-001", redis_test_db)
+        eng = _make_session("eng", "eng-telegram-chat-001", redis_test_db)
         teammate = _make_session("teammate", "tm-telegram-chat-001", redis_test_db)
 
-        for session, expected_st in ((pm, SessionType.PM), (teammate, SessionType.TEAMMATE)):
+        for session, expected_st in ((eng, SessionType.ENG), (teammate, SessionType.TEAMMATE)):
             _harness_env: dict[str, str] = {}
             _session_type = session.session_type
             # Mirror session_executor.py:1340-1342
-            if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+            if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
                 if session.chat_id:
                     _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
             assert _harness_env.get("TELEGRAM_CHAT_ID") == "999"
             assert _session_type == expected_st
 
-    def test_sentry_token_in_harness_env_for_pm(self, monkeypatch, redis_test_db):
-        """Issue #1148: SENTRY_AUTH_TOKEN injected for PM/Teammate when resolvable.
+    def test_sentry_token_in_harness_env_for_eng(self, monkeypatch, redis_test_db):
+        """Issue #1148: SENTRY_AUTH_TOKEN injected for ENG/Teammate when resolvable.
 
         Uses the shared _resolve_sentry_auth_token helper from sdk_client.
         """
@@ -175,39 +174,12 @@ class TestHarnessEnvPassthrough:
         from config.enums import SessionType
 
         monkeypatch.setenv("SENTRY_PERSONAL_TOKEN", "harness-sentry-token-xyz")
-        pm = _make_session("pm", "pm-sentry-001", redis_test_db)
+        eng = _make_session("eng", "eng-sentry-001", redis_test_db)
 
         _harness_env: dict[str, str] = {}
-        if pm.session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if eng.session_type in (SessionType.ENG, SessionType.TEAMMATE):
             tok = _resolve_sentry_auth_token()
             if tok:
                 _harness_env["SENTRY_AUTH_TOKEN"] = tok
 
         assert _harness_env["SENTRY_AUTH_TOKEN"] == "harness-sentry-token-xyz"
-
-    def test_dev_session_does_not_get_telegram_chat_id(self, monkeypatch, redis_test_db):
-        """Issue #1148 negative test: dev sessions never get PM-only env vars.
-
-        Prevents future regressions that accidentally widen the injection guard.
-        """
-        from agent.sdk_client import _resolve_sentry_auth_token
-        from config.enums import SessionType
-
-        monkeypatch.setenv("SENTRY_PERSONAL_TOKEN", "should-not-appear")
-        dev = _make_session("dev", "dev-no-pm-env-001", redis_test_db)
-
-        _harness_env: dict[str, str] = {}
-        # Mirror the guarded blocks in session_executor.py:1335 + 1340-1346
-        _session_type = dev.session_type
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE) and dev.agent_session_id:
-            _harness_env["VALOR_PARENT_SESSION_ID"] = dev.agent_session_id
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
-            if dev.chat_id:
-                _harness_env["TELEGRAM_CHAT_ID"] = str(dev.chat_id)
-            tok = _resolve_sentry_auth_token()
-            if tok:
-                _harness_env["SENTRY_AUTH_TOKEN"] = tok
-
-        assert "TELEGRAM_CHAT_ID" not in _harness_env
-        assert "SENTRY_AUTH_TOKEN" not in _harness_env
-        assert "VALOR_PARENT_SESSION_ID" not in _harness_env

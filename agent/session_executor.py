@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os  # noqa: F401
 import re
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,7 +13,6 @@ from agent.output_router import NUDGE_MESSAGE, SendToChatResult
 from agent.session_completion import (
     _complete_agent_session,  # noqa: F401
     _diagnose_missing_session,
-    _handle_dev_session_completion,
 )
 from agent.session_health import HEARTBEAT_WRITE_INTERVAL
 from agent.session_logs import save_session_snapshot
@@ -23,13 +21,38 @@ from agent.session_state import (
     SessionHandle,
     _active_sessions,
 )
-from agent.worktree_manager import WORKTREES_DIR, validate_workspace
+from agent.worktree_manager import (
+    WORKTREES_DIR,
+    validate_workspace,
+)
 from config.enums import SessionType
 from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
+
+_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user", "pm_floor_delivered"})
+
+
+def _is_non_clean_granite_exit(agent_session) -> bool:
+    """Return True when the session has a granite exit_reason that signals a real failure.
+
+    None exit_reason = non-granite session or not yet set = clean (default behavior).
+    Clean granite exits: pm_complete (normal end), pm_user (user message sent),
+    pm_floor_delivered (wrap-up guard delivered PM's last assistant message directly
+    when the PM produced a real but prefix-less response — issue #1719).
+    Everything else (exception, pm_hang, dev_hang, startup_unresolved, pm_no_user_message,
+    pm_max_turns) is non-clean → REACTION_ERROR.
+
+    This does NOT suppress the success reaction for clean+communicated=False completions
+    (those still get REACTION_SUCCESS or REACTION_COMPLETE via the normal branch).
+    The communicated=False chip handles that signal non-destructively.
+    """
+    exit_reason = getattr(agent_session, "exit_reason", None)
+    if exit_reason is None:
+        return False
+    return exit_reason not in _CLEAN_GRANITE_EXIT_REASONS
 
 
 def _resolve_session_model(session: AgentSession | None) -> str | None:
@@ -145,9 +168,9 @@ def _schedule_post_session_extraction(session_id: str, response_text: str) -> No
     """Fire-and-forget post-session memory extraction (hotfix #1055).
 
     Synchronous — creates and registers an ``asyncio.create_task``; does NOT
-    await it. Preserves the #987 ordering invariant:
-    ``_handle_dev_session_completion`` must run before this extraction task
-    completes, so the PM nudge fires promptly while extraction is still pending.
+    await it. Preserves the #987 ordering invariant: extraction runs in the
+    background so the eng nudge fires promptly while extraction is still
+    pending.
 
     **CRITICAL**: this function is declared ``def`` (not ``async def``) and
     returns ``None``. Any ``await`` or ``asyncio.gather(...)`` on its result
@@ -640,19 +663,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # here instead of mid-startup with no Telegram message. The session is
         # marked ``failed`` so dashboards / reflections surface it.
 
-        # Synthesis precondition (issue #1272): a slugless dev session needs
+        # Synthesis precondition (issue #1272): a slugless eng session needs
         # ``agent_session_id`` to derive its synthetic slug ``dev-{aid[:8]}``.
-        # If both ``slug`` and ``agent_session_id`` are missing on a dev session
+        # (The ``dev-`` slug prefix is a stable historical literal that the
+        # cleanup regex below still matches; only the session type is ``eng``.)
+        # If both ``slug`` and ``agent_session_id`` are missing on an eng session
         # the synthesis branch below would crash with
         # ``TypeError: 'NoneType' object is not subscriptable``. Fail loudly
         # here so the failure mode is observable instead of obscured.
         _stype_pre = getattr(session, "session_type", None)
         _slug_pre = getattr(session, "slug", None)
         _aid_pre = getattr(session, "agent_session_id", None)
-        if _stype_pre == "dev" and _slug_pre is None and _aid_pre is None:
+        if _stype_pre == "eng" and _slug_pre is None and _aid_pre is None:
             _parent = getattr(session, "parent_agent_session_id", None)
             logger.error(
-                "[executor-guard] Refusing to start slugless dev session with None "
+                "[executor-guard] Refusing to start slugless eng session with None "
                 "agent_session_id (reason=missing_aid_for_synthetic_slug): "
                 f"slug={_slug_pre!r} session_type={_stype_pre} "
                 f"parent_agent_session_id={_parent} "
@@ -668,7 +693,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     session,
                     "failed",
                     reason=(
-                        "slugless dev session requires agent_session_id for "
+                        "slugless eng session requires agent_session_id for "
                         "synthetic slug derivation (issue #1272)"
                     ),
                 )
@@ -763,22 +788,24 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Resolve branch: use slug + stage mapping if available, else session-based
         slug = session.slug
         stage = None
-        # Synthetic-slug synthesis for slugless dev sessions (issue #1272,
+        # Synthetic-slug synthesis for slugless eng sessions (issue #1272,
         # Alternative A from docs/plans/parallel-session-checkout-guard.md).
         #
         # The #887 main-checkout protection guard below short-circuits on
-        # ``slug is None``: ``_stype == "dev" and slug and ...``. That left a
-        # residual hole — a dev session created without a slug (future
+        # ``slug is None``: ``_stype == "eng" and slug and ...``. That left a
+        # residual hole — an eng session created without a slug (future
         # debug harness, test fixture, or any code path that bypasses the
         # CLI) would skip worktree provisioning AND skip the guard, landing
         # in the main checkout. Synthesizing ``dev-{aid[:8]}`` here funnels
-        # every dev session through the existing worktree-creation path so
+        # every eng session through the existing worktree-creation path so
         # the guard always has a slug to enforce against. The
         # ``agent_session_id`` precondition above (executor-guard) ensures
         # ``aid`` is non-None before this line runs.
-        # Synthetic dev slug shape: dev-{first 8 chars of agent_session_id}.
+        # Synthetic slug shape: dev-{first 8 chars of agent_session_id} (the
+        # ``dev-`` prefix is a stable historical literal the cleanup regex
+        # below matches; only the session type is ``eng``).
         is_synthetic_slug = False
-        if not slug and getattr(session, "session_type", None) == "dev":
+        if not slug and getattr(session, "session_type", None) == "eng":
             _aid_for_slug = getattr(session, "agent_session_id", None)
             if _aid_for_slug:
                 slug = f"dev-{_aid_for_slug[:8]}"
@@ -788,7 +815,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # audits can count occurrences without false positives.
                 logger.info(
                     f"[synthetic-slug] Allocated synthetic slug {slug} "
-                    f"for slugless dev session {_aid_for_slug} (issue #1272)"
+                    f"for slugless eng session {_aid_for_slug} (issue #1272)"
                 )
         if slug:
             # Try to read current stage from the AgentSession
@@ -814,6 +841,27 @@ async def _execute_agent_session(session: AgentSession) -> None:
             if is_synthetic_slug:
                 resolved_branch = f"session/{slug}"
                 needs_wt = True
+            # Stageless eng sessions with a pre-provisioned worktree
+            # (typical for /do-todos batch dispatch: a parent eng session creates
+            # child eng sessions with working_dir already pointing at
+            # ``.worktrees/{slug}/`` but no ``current_stage`` set yet).
+            # ``resolve_branch_for_stage`` returns ``("main", False)`` in
+            # that case, which trips the branch-mismatch guard below
+            # because the worktree is on ``session/{slug}`` and
+            # ``git checkout main`` cannot succeed when main is owned by
+            # the primary checkout. Trust the worktree's branch.
+            _stype_early = getattr(session, "session_type", None)
+            if (
+                _stype_early == "eng"
+                and slug
+                and stage is None
+                and resolved_branch == "main"
+                and not needs_wt
+                and WORKTREES_DIR in str(working_dir)
+                and working_dir.exists()
+            ):
+                resolved_branch = f"session/{slug}"
+                needs_wt = True
             branch_name = resolved_branch
             # If branch resolution says we need a worktree and working_dir isn't one,
             # OR the path looks like a worktree but the directory is missing on disk
@@ -831,17 +879,17 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     )
                 except Exception as e:
                     _stype = getattr(session, "session_type", None)
-                    if _stype == "dev":
-                        # Dev sessions with a slug MUST have worktree isolation.
+                    if _stype == "eng":
+                        # Eng sessions with a slug MUST have worktree isolation.
                         # Falling back to the main checkout would contaminate it.
                         # See issue #887: session-isolation-bypass incident (2026-04-10).
                         logger.critical(
                             f"[branch-mapping] FATAL: Failed to create worktree for "
-                            f"dev session slug={slug}: {e} — refusing to proceed in "
+                            f"eng session slug={slug}: {e} — refusing to proceed in "
                             f"main checkout to prevent contamination"
                         )
                         raise RuntimeError(
-                            f"Worktree provisioning failed for dev session "
+                            f"Worktree provisioning failed for eng session "
                             f"slug={slug}: {e}. Refusing to run in main checkout."
                         ) from e
                     else:
@@ -852,31 +900,54 @@ async def _execute_agent_session(session: AgentSession) -> None:
         else:
             branch_name = _session_branch_name(session.session_id)
 
-        # Main-checkout protection guard (issue #887): dev sessions with a slug
+        # Main-checkout protection guard (issue #887): eng sessions with a slug
         # must NEVER run in the repo root. If worktree provisioning was skipped
         # or silently failed, catch it here before any git operations run.
         # The check verifies BOTH that the path is under .worktrees/ AND that the
         # directory actually exists on disk — a stale path string pointing at a
-        # missing worktree would otherwise let a dev session fall back to the
+        # missing worktree would otherwise let an eng session fall back to the
         # parent CWD (the main checkout) at shell-launch time.
         _stype = getattr(session, "session_type", None)
         if (
-            _stype == "dev"
+            _stype == "eng"
             and slug
             and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists())
         ):
             logger.critical(
-                f"[worktree-guard] Dev session {session.session_id} with slug={slug} "
+                f"[worktree-guard] Eng session {session.session_id} with slug={slug} "
                 f"resolved to main checkout or missing worktree ({working_dir}, "
                 f"exists={working_dir.exists()}). Refusing to proceed — this would "
                 f"contaminate the shared working directory. See issue #887."
             )
             raise RuntimeError(
-                f"Dev session with slug={slug} must run in an existing worktree, "
+                f"Eng session with slug={slug} must run in an existing worktree, "
                 f"but working_dir={working_dir} (exists={working_dir.exists()}) "
                 f"is not a usable worktree. This is a safety guard to prevent "
                 f"main checkout contamination (issue #887)."
             )
+
+        # Branch-mismatch guard (issue #1377): a reused worktree handed off
+        # between SDLC stages may still be checked out to the previous stage's
+        # branch. If we proceed without verifying, the Claude Code subprocess
+        # launches on the wrong branch, produces no output, and is killed by
+        # startup-recovery 6+ minutes later. verify_worktree_branch
+        # auto-recovers clean worktrees and raises on dirty ones — the latter
+        # surfaces as a session failure with last_error populated instead of
+        # a silent hang.
+        if _stype == "eng" and slug and WORKTREES_DIR in str(working_dir):
+            from agent.worktree_manager import (  # noqa: PLC0415
+                WorktreeBranchMismatchError,
+                verify_worktree_branch,
+            )
+
+            try:
+                verify_worktree_branch(working_dir, branch_name)
+            except WorktreeBranchMismatchError as e:
+                logger.error(
+                    f"[worktree-branch-guard] Session {session.session_id} "
+                    f"slug={slug}: {e} — refusing to launch harness (issue #1377)"
+                )
+                raise
 
         # Compute task list ID for sub-agent task isolation
         # Tier 2: planned work uses the slug directly
@@ -939,8 +1010,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # Determine session type for routing decisions
         _session_type = getattr(agent_session, "session_type", None) if agent_session else None
 
-        # Calendar heartbeat at session start
-        asyncio.create_task(_calendar_heartbeat(session.project_key, project=session.project_key))
+        # Calendar heartbeat at session start. Planned eng sessions use their
+        # work-item slug as the event title; Telegram-originated sessions have no
+        # slug, so fall back to the project key so their activity still lands on
+        # the project's assigned calendar (rolls into one extending daily event).
+        # The calendar tool skips silently for projects without a mapping.
+        cal_slug = session.slug or session.project_key
+        if cal_slug:
+            asyncio.create_task(_calendar_heartbeat(cal_slug, project=session.project_key))
 
         # Create messenger with bridge callbacks, falling back to file output
         # Find the transport from extra_context to support multiple transports per project
@@ -1461,26 +1538,63 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}"
                 )
 
-        # All session types route to CLI harness (claude -p)
+        # Fix B (issue #1741): fail loud on a messageless task. A None/empty/"None"
+        # first message means the originating intent never reached this record (the
+        # #1460 sdlc-local silent no-op). Guard the PRE-SCOPE value: once
+        # build_harness_turn_input wraps _turn_input in the SCOPE header block, the
+        # bare "None" is buried inside "MESSAGE: None" and can never be detected by a
+        # strip()=="None" check. Container.__init__'s own "if not user_message.strip()"
+        # guard also misses it because the SCOPE block is non-empty. Catch it here.
+        _pre_scope = "" if _turn_input is None else str(_turn_input).strip()
+        if _pre_scope == "" or _pre_scope == "None":
+            _guard_reason = f"empty_container_message: _turn_input stripped to {_turn_input!r}"
+            logger.error(
+                "[executor-guard] session %s: refusing empty container message — %s",
+                session.agent_session_id,
+                _guard_reason,
+            )
+            try:
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
+
+                finalize_session(session, "failed", reason=_guard_reason)
+            except StatusConflictError:
+                logger.info(
+                    "[executor-guard] session %s already terminal, skipping finalize",
+                    session.agent_session_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[executor-guard] last-resort status save for session %s: %s",
+                    session.agent_session_id,
+                    exc,
+                )
+                try:
+                    session.status = "failed"
+                    session.save(update_fields=["status", "updated_at"])
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+
+        # All session types route to the granite PTY container (plan #1572).
+        # The CLI harness in `agent/sdk_client.py` is preserved for the
+        # follow-on issue (per the plan's No-Gos) but no longer called from
+        # this path. The cutover is all-or-nothing: no fallback flag, no
+        # feature gate.
+        from agent.granite_container.bridge_adapter import BridgeAdapter
+        from agent.granite_container.pty_pool import get_pty_pool
         from agent.sdk_client import (
-            HarnessThinkingBlockCorruptionError,
-            _get_prior_session_uuid,
-            _load_persona_overlay_with_log,
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
-            get_response_via_harness,
-            load_pm_system_prompt,
         )
-        from config.enums import AccessLevel, PersonaType
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
         _classification = (
             getattr(agent_session, "classification_type", None) if agent_session else None
         )
-
-        # Look up prior Claude Code session UUID for --resume (#976, extends PR #909 pattern)
-        _prior_uuid = _get_prior_session_uuid(session.session_id)
 
         _harness_input = await build_harness_turn_input(
             message=_turn_input,
@@ -1495,26 +1609,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
             is_cross_repo=(project_key != "valor"),
         )
 
-        # On resumed turns, also build the minimal message (no context prefix)
-        _minimal_input = None
-        if _prior_uuid:
-            _minimal_input = await build_harness_turn_input(
-                message=_turn_input,
-                session_id=session.session_id,
-                sender_name=session.sender_name,
-                chat_title=session.chat_title,
-                project=project_config,
-                task_list_id=task_list_id,
-                session_type=_session_type,
-                sender_id=session.sender_id,
-                classification=_classification,
-                is_cross_repo=(project_key != "valor"),
-                skip_prefix=True,
-            )
-
         logger.info(
-            f"{log_prefix} Routing {_session_type or 'unknown'} session to CLI harness"
-            + (f" (--resume {_prior_uuid[:8]}...)" if _prior_uuid else " (first turn)")
+            f"{log_prefix} Routing {_session_type or 'unknown'} session to the "
+            "granite PTY container"
         )
 
         # Streaming chunks from the CLI harness are suppressed for all session types
@@ -1533,62 +1630,30 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # are silently disabled in the harness subprocess (issue #1148).
         if _session_type:
             _harness_env["SESSION_TYPE"] = _session_type
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE) and session.agent_session_id:
+        if _session_type in (SessionType.ENG, SessionType.TEAMMATE) and session.agent_session_id:
             _harness_env["VALOR_PARENT_SESSION_ID"] = session.agent_session_id
         # PM/Teammate need Telegram + Sentry auth so tools/send_telegram.py and
         # sentry-cli work without manual export. Mirrors ValorAgent.env
         # (sdk_client.py:1264, 1272). chat_id comes from the project config.
-        if _session_type in (SessionType.PM, SessionType.TEAMMATE):
+        if _session_type in (SessionType.ENG, SessionType.TEAMMATE):
             if session.chat_id:
                 _harness_env["TELEGRAM_CHAT_ID"] = str(session.chat_id)
             _sentry_token = _resolve_sentry_auth_token()
             if _sentry_token:
                 _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
-        _harness_requeued = False
-
         # D1 precedence cascade: session.model > settings > codebase default.
+        # Applied to the PM TUI PTY via the spawn-on-acquire spec below; the
+        # Dev PTY stays on GRANITE__DEV_MODEL.
         _effective_model = _resolve_session_model(agent_session)
 
-        # Persona overlay resolution for the harness path.
-        #
-        # PM sessions get the SDLC orchestration overlay (issue #1148). Email-
-        # spawned sessions get the persona named in `project.email.persona`
-        # (default "teammate"), with `teammate` as the fallback overlay if the
-        # requested file is missing. Telegram TEAMMATE sessions get the
-        # `teammate` overlay. Dev sessions still keep the default Claude Code
-        # protocol (no overlay). Drafter call sites in session_completion.py
-        # MUST continue to leave system_prompt at None — see Risk 4 in
-        # docs/plans/sdlc-1148.md.
-        #
-        # Without this branch, email-spawned customer-service sessions ran with
-        # NO system prompt and the harness replied in the default voice — see
-        # docs/features/email-bridge.md "Persona resolution for email-spawned
-        # sessions".
-        _pm_system_prompt: str | None = None
-        _resolved_persona: str | None = None
-        _persona_source: str = "none"
-        _email_persona_requested: str | None = None
-        _email_persona_fallback: str | None = None
-
-        _email_cfg = (project_config or {}).get("email") or {}
-        if isinstance(_email_cfg, dict) and _email_cfg.get("persona"):
-            _email_persona_requested = str(_email_cfg["persona"])
-
-        # Determine persona via the single source of truth in sdk_client.
-        # _persona_source is local-only (for log line below); the actual
-        # persona/access-level mapping comes from _resolve_compose_args.
-        if _session_type == SessionType.PM:
-            _persona_source = "session_type=pm"
-        elif _transport == "email" or _email_persona_requested:
-            if _email_persona_requested:
-                _persona_source = "project.email.persona"
-                _email_persona_fallback = "teammate"
-            else:
-                _persona_source = "email-default"
-        elif _session_type == SessionType.TEAMMATE:
-            _persona_source = "session_type=teammate"
-
+        # Persona is now delivered entirely via the prime commands
+        # (.claude/commands/granite/prime-pm-role.md and prime-dev-role.md).
+        # The compose_system_prompt / --append-system-prompt path has been
+        # removed (issue #1692). Email-spawned sessions receive the
+        # prime-teammate-role prime; session_type drives the prime selection
+        # inside the container. The _resolve_compose_args resolver is
+        # preserved for future prime-command selection keyed on email.persona.
         _composed_persona, _composed_access_level, _ = _resolve_compose_args(
             session_type=_session_type,
             project=project_config,
@@ -1596,102 +1661,68 @@ async def _execute_agent_session(session: AgentSession) -> None:
             chat_title=None,
             is_dm=False,
         )
-        # Email path with no project.email.persona but transport=="email"
-        # historically falls through to the teammate overlay. The resolver
-        # only triggers the email override when project.email.persona is set;
-        # the bare email-default case is handled by leaving the resolver's
-        # default (TEAMMATE) intact for SessionType.TEAMMATE.
-        if (
-            _session_type != SessionType.PM
-            and _transport == "email"
-            and not _email_persona_requested
-        ):
-            _composed_persona = PersonaType.TEAMMATE
-            _composed_access_level = AccessLevel.TEAMMATE
-
-        _resolved_persona = _composed_persona.value if _composed_persona else None
-
-        # Canonical pre-load resolution log line. Emitted before any file I/O
-        # so absence-vs-fallback is visible without triangulating against the
-        # downstream "Persona overlay loaded" / "Appending N-char system
-        # prompt" lines from sdk_client.
         logger.info(
             f"{log_prefix} Resolved persona for session={session.session_id}: "
-            f"{_resolved_persona or '<none>'} (source={_persona_source})"
+            f"{_composed_persona.value if _composed_persona else '<none>'} "
+            f"(source=prime-command; no system-prompt injection)"
         )
 
-        if _composed_access_level == AccessLevel.PM_READONLY:
-            try:
-                _pm_system_prompt = load_pm_system_prompt(str(working_dir))
-            except Exception as e:
-                logger.warning(
-                    f"{log_prefix} [pm-persona-missing] Failed to load PM persona: {e}; "
-                    "session will run without SDLC orchestration rules"
-                )
-        elif _resolved_persona:
-            _pm_system_prompt = _load_persona_overlay_with_log(
-                _resolved_persona,
-                request_id=cid or session.project_key,
-                session_id=session.session_id,
-                fallback=_email_persona_fallback,
-            )
-            # Louder failure mode: if email.persona was explicitly set on the
-            # project dict but neither the requested overlay nor the fallback
-            # could be loaded, the harness will run in the default voice. The
-            # outbound email reply may answer the customer in the wrong voice
-            # — this surfaces it at ERROR before the email:outbox: payload is
-            # relayed.
-            if _pm_system_prompt is None and _email_persona_requested:
-                logger.error(
-                    f"{log_prefix} [persona-load-failed] "
-                    f"project.email.persona='{_email_persona_requested}' is set, "
-                    f"but neither the requested overlay nor fallback="
-                    f"'{_email_persona_fallback}' could be loaded. Session "
-                    f"{session.session_id} will run with NO system prompt and the "
-                    "harness will respond in default voice. Outbound email reply "
-                    "may be wrong-voice — review email:outbox: payload before relay."
-                )
+        # Build the BridgeAdapter for the granite PTY container path.
+        # The adapter is single-shot (one BridgeAdapter, one Container.run,
+        # one user-message). It resolves the bridge send_cb once at
+        # construction and publishes mid-loop `[/user]` / `[/complete]`
+        # payloads through the registered callback. No mid-loop delivery
+        # surfaces via BackgroundTask — the adapter's `run` returns `""`
+        # and BackgroundTask has `send_result=False` so the harness layer
+        # does NOT double-deliver (plan #1572, "Drop standalone
+        # format_short_result" / SIMP-1).
+        # The adapter receives the per-session env (SESSION_TYPE for the
+        # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
+        # attribution, CLAUDE_CODE_TASK_LIST_ID for task-list isolation,
+        # VALOR_PARENT_SESSION_ID for child-session linking) and the
+        # D1-resolved model. No pm_system_prompt is passed — persona arrives
+        # via the prime commands only (issue #1692).
+        _bridge_adapter = BridgeAdapter(
+            agent_session=agent_session,
+            project_key=project_key,
+            transport=_transport or "telegram",
+            pool=get_pty_pool(),
+            session_env=_harness_env,
+            pm_model=_effective_model,
+            session_type=_session_type,
+        )
+
+        # The message the container receives. The container has no
+        # `claude --resume` wiring, so EVERY container run is a brand-new
+        # TUI session — the minimal-context message the harness paired
+        # with `--resume {prior_uuid}` would arrive as a context-free
+        # fragment. Always send the full-context turn input so resumed
+        # (reply-to) threads keep their conversation context.
+        _container_message = _harness_input
 
         async def do_work() -> str:
-            nonlocal _harness_requeued
-            try:
-                raw = await get_response_via_harness(
-                    message=_minimal_input if _prior_uuid else _harness_input,
-                    working_dir=str(working_dir),
-                    env=_harness_env,
-                    prior_uuid=_prior_uuid,
-                    session_id=session.session_id,
-                    full_context_message=_harness_input,
-                    model=_effective_model,
-                    system_prompt=_pm_system_prompt,
-                    # Two-tier no-progress detector callbacks (#1036). These route
-                    # through messenger.notify_* wrappers so exceptions are caught
-                    # and the queue-layer closures bump ORM fields on AgentSession.
-                    on_sdk_started=messenger.notify_sdk_started,
-                    on_stdout_event=messenger.notify_stdout_event,
-                )
-            except HarnessThinkingBlockCorruptionError as exc:
-                # Mode 1 of issue #1099 — extended-thinking + compaction has
-                # corrupted the transcript beyond in-process recovery. Surface a
-                # clean user-facing message and re-raise so BackgroundTask._run_work
-                # records the failure (task.error truthy → session finalizes as
-                # "failed"). No retry — the sentinel only fires after the stale-UUID
-                # fallback has already failed.
-                logger.warning(
-                    "[%s] Harness thinking-block corruption detected; finalizing as failed: %s",
-                    session.session_id,
-                    exc,
-                )
-                raise
-            if raw.startswith(_HARNESS_NOT_FOUND_PREFIX):
-                result, requeued = await _handle_harness_not_found(raw, agent_session)
-                if requeued:
-                    _harness_requeued = True
-                return result
-            return raw
+            return await _bridge_adapter.run(
+                user_message=_container_message,
+                working_dir=str(working_dir),
+            )
 
-        task = BackgroundTask(messenger=messenger)
-        await task.run(do_work(), send_result=True)
+        # Pass working_dir so BackgroundTask._watchdog can detect a vanished
+        # worktree mid-run (issue #1357). Pre-existing local `working_dir` is
+        # the same path used to spawn the SDK subprocess earlier in this
+        # function, so the watchdog observes the exact directory the SDK is
+        # holding open as cwd. project_key is supplied here (not resolved
+        # inside messenger.py) to preserve the messenger's ORM-free invariant
+        # — see tests/unit/test_messenger_callbacks.py::
+        # TestMessengerArchitecturalBoundary.
+        task = BackgroundTask(
+            messenger=messenger,
+            working_dir=str(working_dir),
+            project_key=getattr(session, "project_key", None),
+        )
+        # `send_result=False` is the right call: the BridgeAdapter publishes
+        # `[/user]` and `[/complete]` payloads mid-loop through the bridge
+        # callback. Returning "" keeps the harness layer from double-delivering.
+        await task.run(do_work(), send_result=False)
 
         # === Two-tier no-progress detector: populate cancellable task ref (#1036) ===
         # Now that BackgroundTask.run() has created its session-scoped task at
@@ -1731,9 +1762,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
                 if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
                     elapsed = 0
-                    asyncio.create_task(
-                        _calendar_heartbeat(session.project_key, project=session.project_key)
-                    )
+                    # Fall back to project key when there's no slug so ad-hoc
+                    # (Telegram-originated) sessions still record calendar activity.
+                    cal_slug = session.slug or session.project_key
+                    if cal_slug:
+                        asyncio.create_task(
+                            _calendar_heartbeat(cal_slug, project=session.project_key)
+                        )
                     if agent_session:
                         try:
                             agent_session.updated_at = datetime.now(tz=UTC)
@@ -1761,16 +1796,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
         finally:
             heartbeat.cancel()
 
-        # Post-completion SDLC handling for dev sessions (Phase 3)
-        # Skip if the session was silently re-queued for harness retry — the re-queued
-        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-        # has a chance to succeed.
-        if _harness_requeued:
-            return
-
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)
+        # Bug A (issue #1730): complete_transcript is confirmed to fire on the
+        # deferred-self-draft completion path (defer_reaction=False, since
+        # _inject_self_draft_steering does NOT call _enqueue_nudge).  However, if
+        # complete_transcript itself throws, the session can ghost as ``running`` for
+        # up to the health-check TTL (32 min in the production timeline).  The
+        # defensive fallback below ensures a terminal finalize always lands on the
+        # COMPLETION/DELIVERY exit when complete_transcript fails.  Scoped to this
+        # exit only — the nudge / unconsumed-steering re-enqueue path is gated by
+        # chat_state.defer_reaction=True and the CancelledError path is health-checker-
+        # owned; neither is touched here.
         if agent_session:
             try:
                 from bridge.session_transcript import complete_transcript
@@ -1793,6 +1830,45 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"session {session.session_id} (operation: finalize status to "
                     f"{'completed' if not task.error else 'failed'}): {e}"
                 )
+                # Defensive fallback: if complete_transcript failed and the session is
+                # still running, finalize directly so we never leave a ghost `running`
+                # state.  Scoped to the completion/delivery exit only (not the nudge
+                # path, which is protected by the defer_reaction guard above).
+                # get_authoritative_session re-read + StatusConflictError guard ensure
+                # we never stomp a concurrent nudge or health-checker transition.
+                if not chat_state.defer_reaction:
+                    try:
+                        from models.session_lifecycle import (  # noqa: PLC0415
+                            StatusConflictError,
+                            finalize_session,
+                            get_authoritative_session,
+                        )
+
+                        _auth = get_authoritative_session(session.session_id)
+                        if _auth is not None and _auth.status == "running":
+                            _fallback_status = "completed" if not task.error else "failed"
+                            finalize_session(
+                                _auth,
+                                _fallback_status,
+                                reason=(
+                                    f"completion-exit fallback finalize after "
+                                    f"complete_transcript failure: {e}"
+                                ),
+                            )
+                            logger.info(
+                                "[executor] Defensive completion finalize: session %s → %s",
+                                session.session_id,
+                                _fallback_status,
+                            )
+                    except StatusConflictError:
+                        # CAS conflict = another process already finalized. Success.
+                        pass
+                    except Exception as _fb_err:
+                        logger.warning(
+                            "[executor] Defensive completion finalize failed for %s: %s",
+                            session.session_id,
+                            _fb_err,
+                        )
         else:
             # agent_session lookup returned None (race on status="running" filter,
             # e.g. after health-check recovery). Finalize using outer `session`
@@ -1834,39 +1910,10 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # stall observed in #1055 and the #987 ordering invariant.
         #
         # Runs AFTER both complete_transcript paths above (happy path at ~L1320
-        # and the #917 fallback at ~L1346), and BEFORE _handle_dev_session_completion
-        # below. Extraction runs in the background; its completion or failure does
-        # not delay the PM nudge. See drain_pending_extractions() for shutdown wiring.
+        # and the #917 fallback at ~L1346). Extraction runs in the background;
+        # its completion or failure does not delay the eng nudge. See
+        # drain_pending_extractions() for shutdown wiring.
         _schedule_post_session_extraction(session.session_id, task._result or "")
-
-        # Post-completion SDLC handling for dev sessions (Phase 3)
-        # IMPORTANT ORDERING INVARIANT: This call is placed AFTER the entire
-        # `if agent_session / else` block above. That block calls complete_transcript(),
-        # which calls finalize_session() → _finalize_parent_sync() synchronously
-        # (bridge/session_transcript.py:252, line 292). By the time
-        # _handle_dev_session_completion runs here, _finalize_parent_sync has already
-        # completed on BOTH the `if agent_session:` and `else:` paths. The re-check
-        # guard inside _handle_dev_session_completion will therefore correctly observe
-        # the PM's post-finalization (terminal) status and create a continuation PM.
-        # Moving this call earlier (before complete_transcript) causes the race
-        # described in issue #987: steer is accepted, then _finalize_parent_sync runs
-        # and the PM goes terminal, orphaning the steering message.
-        #
-        # Nudge path note: on the nudge path (defer_reaction=True), complete_transcript
-        # is skipped above, but _finalize_parent_sync still runs via the nudge path's
-        # own finalize_session call. This call is guarded by `_session_type == "dev"`,
-        # not by `defer_reaction`, so it executes on both the nudge and non-nudge paths.
-        #
-        # Skip if the session was silently re-queued for harness retry — the re-queued
-        # session hasn't run yet, so calling _handle_dev_session_completion with an empty
-        # result would emit a spurious "fail" outcome to the PM pipeline before the retry
-        # has a chance to succeed. (The _harness_requeued early-return above handles this.)
-        if _session_type == "dev" and not task.error:
-            await _handle_dev_session_completion(
-                session=session,
-                agent_session=agent_session,
-                result=task._result or "",
-            )
 
         # Save session snapshot for error cases
         if task.error:
@@ -1919,7 +1966,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         chat_title=session.chat_title,
                         priority=session.priority or "normal",
                         sender_id=session.sender_id,
-                        session_type=session.session_type or "pm",
+                        session_type=session.session_type or "eng",
                         project_config=getattr(session, "project_config", None),
                     )
                     logger.info(
@@ -1947,7 +1994,21 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 emoji = None  # Clear reaction
             elif task.error:
                 emoji = REACTION_ERROR
-            elif messenger.has_communicated():
+            elif _is_non_clean_granite_exit(agent_session):
+                # Non-clean granite exit_reason (exception, hang, etc.) → ERROR reaction
+                # regardless of whether the session communicated. Only applies when
+                # exit_reason is explicitly set to a non-clean value (granite path only).
+                emoji = REACTION_ERROR
+            elif messenger.has_communicated() or getattr(
+                agent_session, "user_facing_routed", False
+            ):
+                # The granite container delivers [/user]/[/complete] payloads
+                # through BridgeAdapter, never through messenger.send(), so
+                # has_communicated() stays False even on a real delivery.
+                # BridgeAdapter._publish_exit_summary sets
+                # agent_session.user_facing_routed=True when delivery succeeded;
+                # OR'ing it here makes the emoji branch mean what it should
+                # (issue #1647).
                 emoji = REACTION_COMPLETE
             else:
                 emoji = REACTION_SUCCESS
@@ -1961,19 +2022,41 @@ async def _execute_agent_session(session: AgentSession) -> None:
         if not task.error and not chat_state.defer_reaction:
             try:
                 from agent.branch_manager import mark_work_done
+                from agent.worktree_manager import (  # noqa: PLC0415
+                    merged_via_ancestor,
+                    safe_delete_branch,
+                )
 
                 mark_work_done(working_dir, branch_name)
-                # Also delete the session branch to keep git clean
-                subprocess.run(
-                    ["git", "branch", "-D", branch_name],
-                    cwd=working_dir,
-                    capture_output=True,
-                    timeout=10,
+                # Also delete the session branch to keep git clean — guarded by
+                # the unmerged-branch guard (issue #1646): use merged_via_ancestor
+                # since this path runs at session completion before any PR merge.
+                branch_del = safe_delete_branch(
+                    str(working_dir),
+                    branch_name,
+                    predicate=merged_via_ancestor,
+                    force=False,
                 )
-                logger.info(
-                    f"[{session.project_key}] Auto-marked session done "
-                    f"and cleaned up branch {branch_name}"
-                )
+                if branch_del["deleted"]:
+                    logger.info(
+                        f"[{session.project_key}] Auto-marked session done "
+                        f"and cleaned up branch {branch_name}"
+                    )
+                elif branch_del["skipped_unmerged"]:
+                    logger.warning(
+                        "[unmerged-branch-guard] branch '%s' preserved"
+                        " — work not yet merged to main",
+                        branch_name,
+                    )
+                    logger.info(
+                        f"[{session.project_key}] Auto-marked session done "
+                        f"(branch {branch_name} preserved — unmerged)"
+                    )
+                else:
+                    logger.info(
+                        f"[{session.project_key}] Auto-marked session done "
+                        f"(branch {branch_name} cleanup error: {branch_del.get('error')})"
+                    )
             except Exception as e:
                 logger.warning(f"[{session.project_key}] Failed to auto-mark session done: {e}")
 
@@ -2005,7 +2088,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             _active_sessions.pop(_session_id_for_registry, None)
 
         # === Synthetic-slug worktree cleanup (issue #1272) ===
-        # Slugless dev sessions get a synthesized slug ``dev-{aid[:8]}`` and a
+        # Slugless eng sessions get a synthesized slug ``dev-{aid[:8]}`` and a
         # worktree provisioned for them above. Without an explicit cleanup
         # hook, those worktrees linger forever — ``prune_worktrees()`` only
         # runs ``git worktree prune`` (removes references, not directories)

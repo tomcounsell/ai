@@ -137,6 +137,7 @@ from bridge.routing import (  # noqa: E402
     classify_needs_response,  # noqa: F401
     classify_needs_response_async,  # noqa: F401
     extract_at_mentions,  # noqa: F401
+    find_project_for_bot,
     find_project_for_chat,
     find_project_for_dm,
     get_valor_usernames,  # noqa: F401
@@ -161,6 +162,7 @@ from tools.telegram_history import (  # noqa: E402
     register_chat,
     store_link,
     store_message,
+    update_message_text,
 )
 
 # In-memory coalescing guard: bridges the Redis visibility gap for rapid-fire messages.
@@ -625,6 +627,22 @@ if set(DM_WHITELIST) != set(DM_USER_TO_PROJECT.keys()):
         "Every dms.whitelist[] entry must reference an active project."
     )
 
+# Registered bot peers (issue #1574). Built from projects.<key>.telegram.bots[]
+# for projects owned by this machine. A registered bot is recorded to history
+# but NEVER spawns a session (deterministic loop-guard). Kept separate from
+# DM_USER_TO_PROJECT / GROUP_TO_PROJECT so a bot can never resolve a project on
+# the spawn path. Mutual exclusion with dms.whitelist ids / group chat_ids is
+# enforced at config-validation time (bridge/config_validation.py).
+BOT_ID_TO_PROJECT: dict[int, dict] = {}
+for _bot_proj_key in ACTIVE_PROJECTS:
+    _bot_proj = CONFIG.get("projects", {}).get(_bot_proj_key, {})
+    for _bot_entry in _bot_proj.get("telegram", {}).get("bots", []):
+        if not (isinstance(_bot_entry, dict) and "id" in _bot_entry):
+            continue
+        _bot_cfg = dict(_bot_proj)
+        _bot_cfg["_key"] = _bot_proj_key
+        BOT_ID_TO_PROJECT[int(_bot_entry["id"])] = _bot_cfg
+
 # Propagate config to routing module so imported functions work correctly
 _routing_module.CONFIG = CONFIG
 _routing_module.DEFAULTS = DEFAULTS
@@ -633,6 +651,7 @@ _routing_module.ALL_MONITORED_GROUPS = ALL_MONITORED_GROUPS
 _routing_module.RESPOND_TO_DMS = RESPOND_TO_DMS
 _routing_module.DM_WHITELIST = DM_WHITELIST
 _routing_module.DM_USER_TO_PROJECT = DM_USER_TO_PROJECT
+_routing_module.BOT_ID_TO_PROJECT = BOT_ID_TO_PROJECT
 _routing_module.DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
     "mention_triggers", ["@valor", "valor", "valorengels", "hey valor"]
 )
@@ -1047,14 +1066,21 @@ async def main():
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         sys.exit(1)
 
-    # Validate agent definition files exist on disk. Missing files are not
-    # fatal — the SDK falls back gracefully — but we surface warnings early
-    # so operators can fix them before users hit degraded prompts.
+    # Validate agent definition files are usable on disk. Missing, malformed,
+    # or unreadable files are not fatal — the SDK falls back gracefully — but
+    # we surface warnings early so operators can fix them before users hit
+    # degraded prompts. `_parse_agent_markdown` already logs a precise warning
+    # (with exception class and path) for each fallback path, so we emit a
+    # concise startup-level summary here instead of a misleading per-path line.
     from agent.agent_definitions import validate_agent_files
 
-    missing_agent_files = validate_agent_files()
-    for missing_path in missing_agent_files:
-        logger.warning("Missing agent definition file: %s", missing_path)
+    problematic_agent_files = validate_agent_files()
+    if problematic_agent_files:
+        logger.warning(
+            "Unusable agent definition files detected at startup (%d): %s",
+            len(problematic_agent_files),
+            problematic_agent_files,
+        )
 
     logger.info("Starting Valor bridge")
     logger.info("Agent backend: Claude Agent SDK")
@@ -1102,6 +1128,21 @@ async def main():
         if SHUTTING_DOWN:
             logger.info("Ignoring message during shutdown")
             return
+
+        # Record per-chat last-event timestamp for silent-stream observability
+        # (issue #1408). Done on EVERY incoming event, before dedup/routing, so the
+        # silent-stream watcher has an accurate "last time this chat was alive"
+        # baseline. Best-effort: never raises.
+        from bridge.dedup import record_last_event
+
+        await record_last_event(event.chat_id, getattr(event.message, "date", None))
+
+        # Record bridge-level update liveness signal (stale-stream detector).
+        # Must be pre-dedup so the key reflects every Telethon event, not only
+        # novel ones. Best-effort: never raises.
+        from bridge.liveness import record_update_received
+
+        record_update_received()
 
         # Dedup: skip if we've already processed this message (catch_up replay)
         from bridge.dedup import is_duplicate_message
@@ -1193,6 +1234,25 @@ async def main():
         except Exception as e:
             logger.error(f"Error storing message: {e}")
 
+        # Deterministic registered-bot loop-guard (issue #1574). A message from a
+        # registered bot peer is recorded to history (above) but MUST NEVER spawn a
+        # session: bot replies carry no reply_to, so each would look like a cold
+        # inbound and the bot↔bridge pair would loop forever. The synchronous
+        # `valor-telegram send --await-reply` awaiter polls the recorded history;
+        # it does not depend on a session. This guard is deterministic and applies
+        # regardless of reply-to or question-content, unlike the heuristic
+        # classify_conversation_terminus path. It covers both DM and group flows
+        # (the handler is reached for both). Belt-and-suspenders over the existing
+        # "unowned peer → no project → no spawn" behavior, and config-time mutual
+        # exclusion (validate_telegram_bots) guarantees a bot id can't also be a
+        # whitelisted DM / monitored group that would resolve a project.
+        if sender_id and find_project_for_bot(sender_id):
+            logger.info(
+                f"[routing] Registered bot peer {sender_name} (id={sender_id}) — "
+                "recorded to history, no session spawned (loop-guard #1574)"
+            )
+            return
+
         # Save to subconscious memory (non-fatal, never crashes bridge).
         # Gated on a resolved project_key — unowned messages don't belong to any
         # memory partition and must not pollute the partition table (#1173).
@@ -1255,7 +1315,34 @@ async def main():
             try:
                 from models.telegram import TelegramMessage
 
+                # Two silent failure modes are addressed here (see sdlc-1330):
+                #   1. `query.get(stored_msg_id)` can transiently return `None`
+                #      during a Popoto stale-index condition. The previous
+                #      code silently no-op'd the persist block; we now log a
+                #      WARNING and do ONE bounded re-query. We deliberately
+                #      do NOT call `keys(clean=True)` here — it's a heavy,
+                #      index-mutating call and the worker-side self-heal in
+                #      `bridge/enrichment.py` is the durable safety net.
+                #   2. `_download_media_with_retry` can return `(None, None)`
+                #      ("no_path" outcome) when `client.download_media`
+                #      reports success but the file is missing post-download.
+                #      The persist block sees no error, no path, and was
+                #      previously silent. We now log a WARNING so the
+                #      condition is observable in logs.
                 _record = TelegramMessage.query.get(stored_msg_id)
+                if _record is None:
+                    # Single bounded re-query before giving up.
+                    _record = TelegramMessage.query.get(stored_msg_id)
+                    if _record is None:
+                        logger.warning(
+                            f"[media] TelegramMessage.query.get returned None "
+                            f"(stored_msg_id={stored_msg_id} "
+                            f"chat_id={event.chat_id} "
+                            f"message_id={message.id} "
+                            f"local_path={_local_path} "
+                            f"download_error={_download_error}); "
+                            f"persist skipped, worker self-heal will attempt recovery"
+                        )
                 if _record is not None:
                     if _local_path is not None:
                         # Persist as absolute path so the worker can read it
@@ -1264,6 +1351,22 @@ async def main():
                     if _download_error is not None:
                         _record.media_download_error = _download_error
                     _record.save()
+
+                # Second silent path: download wrapper returned (None, None)
+                # with no error string. message.media truthy means there WAS
+                # media to download.
+                if (
+                    _local_path is None
+                    and _download_error is None
+                    and getattr(message, "media", None)
+                ):
+                    logger.warning(
+                        f"[media] download returned no path with no error "
+                        f"(stored_msg_id={stored_msg_id} "
+                        f"chat_id={event.chat_id} "
+                        f"message_id={message.id}); "
+                        f"file may be missing post-download, worker self-heal will attempt recovery"
+                    )
             except Exception as e:
                 logger.warning(f"[media] failed to persist media_local_path: {e}")
 
@@ -1498,11 +1601,13 @@ async def main():
 
                 # Let 👀 stay visible for a natural "reading" moment
                 await asyncio.sleep(2)
-                emoji = await asyncio.to_thread(find_best_emoji_for_message, clean_text)
+                emoji = await asyncio.to_thread(
+                    find_best_emoji_for_message, clean_text, classification_result.get("type")
+                )
                 await set_reaction(client, event.chat_id, message.id, emoji)
                 logger.debug(f"Embedding emoji selected: {emoji}")
             except Exception as e:
-                logger.debug(f"Embedding emoji selection failed (non-fatal): {e}")
+                logger.warning(f"Emoji reaction selection failed (non-fatal): {e}")
 
         asyncio.create_task(select_and_set_emoji_reaction())
 
@@ -1806,7 +1911,9 @@ async def main():
                             telegram_message_key=stored_msg_id,
                             project_config=project,
                             extra_context_overrides=_completed_extra_overrides,
-                            session_type=getattr(completed, "session_type", None) or SessionType.PM,
+                            session_type=getattr(completed, "session_type", None)
+                            or SessionType.ENG,
+                            message_ts=message.date,
                         )
                         _steering_session_enqueued = True
                         logger.info(
@@ -2135,25 +2242,19 @@ async def main():
             except Exception as e:
                 logger.debug(f"Classification inheritance lookup failed (non-fatal): {e}")
 
-        # Determine session_type from config-driven mode, with title-prefix fallback.
-        # "dev" mode → Dev session (full permissions, dev persona)
-        # Everything else → PM session (PM persona, orchestrates Dev sessions + Teammate)
-        from bridge.routing import resolve_persona
+        # Determine session_type from config-driven persona, with title-prefix fallback.
+        # ENGINEER persona → Eng session (full permissions, engineer persona)
+        # TEAMMATE persona → Teammate session (read-only, no orchestration)
+        # None/other → Eng session (default)
+        from bridge.routing import persona_to_session_type, resolve_persona
 
         _classification = classification_result.get("type")
         _persona = resolve_persona(project, chat_title, is_dm=is_dm)
-        if _persona == PersonaType.DEVELOPER:
-            _session_type = SessionType.DEV  # Dev session — Dev persona, full permissions
+        _session_type = persona_to_session_type(_persona)
+        if _persona == PersonaType.ENGINEER:
             logger.info(
-                f"[{project_name}] Dev mode (config-driven): {chat_title!r} → session_type=dev"
+                f"[{project_name}] Eng mode (config-driven): {chat_title!r} → session_type=eng"
             )
-        else:
-            if _persona == PersonaType.TEAMMATE:
-                _session_type = (
-                    SessionType.TEAMMATE
-                )  # Teammate session — read-only, no orchestration
-            else:
-                _session_type = SessionType.PM  # PM session — orchestrates work, spawns children
 
         # Refresh the coalescing guard timestamp right before enqueue.
         # The initial guard was set early (before awaits) to close the race window;
@@ -2338,6 +2439,7 @@ async def main():
             project_config=project,
             extra_context_overrides=extra_overrides,
             requires_real_chrome=_byob_real_chrome,
+            message_ts=message.date,
         )
         logger.info(
             f"[{project_name}] Queued session for {sender_name} (msg {message_id}, depth={depth})"
@@ -2394,6 +2496,24 @@ async def main():
             project = find_project_for_dm(sender_id) or find_project_for_chat(chat_title)
         else:
             project = find_project_for_chat(chat_title) if chat_title else None
+
+        # Registered-bot edit capture (issue #1574). A Hermes bot streams its
+        # answer via repeated in-place edits on a stable message_id. The awaiter
+        # settles on silence, so it MUST see the latest edited body — otherwise it
+        # would settle on the first partial. This branch sits BEFORE the
+        # `if not project: return` discard because a registered bot deliberately
+        # does NOT resolve a project (see find_project_for_bot). We upsert the
+        # edited content onto the existing history record (same message_id) and
+        # return — never steering, never spawning. Fail-open: any error is logged
+        # and swallowed so a bot edit can never crash the bridge.
+        if sender_id and find_project_for_bot(sender_id):
+            _bot_edited = (message.text or "").strip()
+            if _bot_edited:
+                try:
+                    update_message_text(str(event.chat_id), message.id, _bot_edited)
+                except Exception as e:
+                    logger.warning(f"[edit] Registered-bot edit upsert failed (non-fatal): {e}")
+            return
 
         if not project:
             return
@@ -2487,6 +2607,7 @@ async def main():
                     sender_id=sender_id,
                     session_type=None,
                     project_config=project,
+                    message_ts=message.date,
                 )
                 logger.info(
                     f"[edit] Spawned fresh session {new_session_id} for completed-session edit "
@@ -2663,6 +2784,28 @@ async def main():
     except Exception as e:
         logger.error(f"Dead letter replay failed: {e}")
 
+    # Validate each registered bot id against the live Telegram User.bot flag
+    # (issue #1574, acceptance criterion 4). A swapped token or typo'd id that
+    # points at a HUMAN account would otherwise silently register, and the
+    # deterministic loop-guard would suppress that human's messages. We probe
+    # the live flag now that the client is connected+authorized and surface any
+    # mismatch loudly. This is a warn-not-crash gate: a misconfigured bot entry
+    # must not take down a running bridge, but it must be impossible to miss.
+    if BOT_ID_TO_PROJECT:
+        from bridge.config_validation import ConfigValidationError, validate_bot_live_flags
+
+        async def _resolve_bot_entity(bot_id: int):
+            return await client.get_entity(bot_id)
+
+        try:
+            await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+            logger.info(
+                "Registered bot live-flag validation passed (%d bot(s))",
+                len(BOT_ID_TO_PROJECT),
+            )
+        except ConfigValidationError as e:
+            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", e)
+
     # Register session queue callbacks for each project
     from agent.agent_session_queue import cleanup_stale_branches
     from agent.agent_session_queue import register_callbacks as register_queue_callbacks
@@ -2838,17 +2981,33 @@ async def main():
                 lookback_override=lookback,
             )
             logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
+            # Force Telethon to sync channel update state via getChannelDifference
+            # for all monitored channels. Without this, Telegram withholds realtime
+            # UpdateNewChannelMessage events for low-activity or newly-added channels,
+            # requiring explicit polling to establish the update stream.
+            try:
+                await client.catch_up()
+                logger.info(
+                    "[catchup] Telethon catch_up() complete — channel update streams active"
+                )
+            except Exception as _cu_err:
+                logger.warning(f"[catchup] catch_up() failed (non-fatal): {_cu_err}")
         except Exception as e:
             logger.error(f"Catchup scan failed: {e}", exc_info=True)
 
     _background_tasks.append(asyncio.create_task(_run_catchup()))
 
-    # Start message reconciler (detects live-session gaps)
+    # Start message reconciler (detects live-session gaps). The silent-stream
+    # watcher (issue #1408) rides this same dialog pass via silent_stream_state
+    # rather than running a separate loop with a redundant get_dialogs() call —
+    # it warns when a respond_to_unaddressed chat goes silent 15+ min while the
+    # bridge is connected. Observability only.
     try:
         from agent.agent_session_queue import (
             enqueue_agent_session as _reconciler_enqueue,
         )
         from bridge.reconciler import reconciler_loop
+        from bridge.silent_stream import SilentStreamState
 
         _background_tasks.append(
             asyncio.create_task(
@@ -2858,10 +3017,11 @@ async def main():
                     should_respond_fn=should_respond_async,
                     enqueue_agent_session_fn=_reconciler_enqueue,
                     find_project_fn=find_project_for_chat,
+                    silent_stream_state=SilentStreamState(bridge_start_ts=time.time()),
                 )
             )
         )
-        logger.info("Message reconciler started")
+        logger.info("Message reconciler started (with silent-stream observability)")
     except Exception as e:
         logger.error(f"Failed to start message reconciler: {e}")
 

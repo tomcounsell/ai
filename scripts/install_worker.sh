@@ -49,6 +49,20 @@ VAULT_DIR="${VALOR_VAULT_DIR:-$HOME/.valor}"
 _copy_config_file "$VAULT_DIR/projects.json"     "$PROJECT_DIR/config/projects.json"     "projects.json"
 _copy_config_file "$VAULT_DIR/reflections.yaml"  "$PROJECT_DIR/config/reflections.yaml"  "reflections.yaml"
 
+# Single-machine ownership for repo-specific reflections: disable any reflection
+# carrying a `project_key` this machine does not own (per config/projects.json) in
+# the just-copied local config/reflections.yaml. Computed here, at install time —
+# when projects.json is safely readable — so the launchd scheduler needs no runtime
+# ownership check and repo audits (e.g. docs-auditor) never run on N machines at
+# once, which is what produced duplicate GitHub issues. Best-effort: a non-zero
+# exit must not abort the install.
+if [ -f "$PROJECT_DIR/.venv/bin/python" ]; then
+    "$PROJECT_DIR/.venv/bin/python" -m tools.reflection_machine_filter \
+        --reflections "$PROJECT_DIR/config/reflections.yaml" \
+        --projects "$PROJECT_DIR/config/projects.json" || \
+        echo "WARNING: reflection ownership filter failed — config/reflections.yaml left unfiltered"
+fi
+
 # Check source plist exists
 if [ ! -f "$PLIST_SRC" ]; then
     echo "ERROR: Plist not found at $PLIST_SRC"
@@ -94,6 +108,11 @@ sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL
 #   * Full: bake the entire .env into the plist + chmod 0600. Needed
 #     because launchd-spawned processes can't open iCloud-synced .env
 #     files (TCC hangs indefinitely).
+#
+# In both modes the helper also merges per-machine MODELS__* overrides from
+# ~/.zshenv (where /setup writes the per-machine generation model — NOT the
+# iCloud-synced .env — so the launchd worker, which never reads the shell,
+# still honors the machine's model variant).
 echo "Injecting env vars into plist..."
 "$PROJECT_DIR/.venv/bin/python" "$SCRIPT_DIR/install/inject_plist_env.py" \
     --plist "$PLIST_DST" \

@@ -101,6 +101,40 @@ def resolve_chat(name: str, *, strict: bool = False) -> str | None:
     return None
 
 
+def _lookup_bot_settle_profile(chat_id: str | int | None) -> dict | None:
+    """Find a registered bot's settle_profile by chat id (issue #1574).
+
+    Scans projects.json telegram.bots[] for an entry whose id matches chat_id.
+    Returns the entry's settle_profile (possibly empty dict) when registered,
+    or None when the id is not a registered bot. This is the gate that makes
+    --await-reply refuse unregistered ids.
+    """
+    if chat_id is None:
+        return None
+    try:
+        target = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        from bridge.routing import load_config
+
+        config = load_config()
+    except Exception:
+        return None
+    for proj_cfg in (config.get("projects") or {}).values():
+        if not isinstance(proj_cfg, dict):
+            continue
+        for entry in (proj_cfg.get("telegram") or {}).get("bots") or []:
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            try:
+                if int(entry["id"]) == target:
+                    return entry.get("settle_profile") or {}
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
 def _format_relative_age(ts: float | None) -> str:
     """Format a unix timestamp as a human-readable "X ago" string.
 
@@ -815,6 +849,23 @@ def cmd_send(args: argparse.Namespace) -> int:
         print("Error: Must provide a message or file to send.", file=sys.stderr)
         return 1
 
+    # --await-reply (issue #1574) is only valid against a REGISTERED bot peer.
+    # Refuse on an unregistered id rather than polling history forever — the
+    # registry is what guarantees the bridge records the bot's reply (and never
+    # spawns a session for it). Resolve the bot's settle_profile here so the
+    # awaiter can tune its debounce.
+    await_reply = getattr(args, "await_reply", False)
+    bot_settle_profile: dict | None = None
+    if await_reply:
+        bot_settle_profile = _lookup_bot_settle_profile(chat_id)
+        if bot_settle_profile is None:
+            print(
+                f"Error: --await-reply requires a registered bot; id {chat_id} is not "
+                "in any project's telegram.bots[]. Add it to projects.json.",
+                file=sys.stderr,
+            )
+            return 1
+
     # Validate file exists before queueing
     if file_path and not Path(file_path).exists():
         print(f"Error: File not found: {file_path}", file=sys.stderr)
@@ -1066,6 +1117,64 @@ def cmd_send(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # --await-reply (issue #1574): block on the bot's settled reply and return it.
+    # Registration was already verified above (bot_settle_profile is not None).
+    if await_reply:
+        from tools.valor_telegram_await import (
+            DEFAULT_QUIET_WINDOW_SECONDS,
+            DEFAULT_STATUS_PATTERNS,
+            DEFAULT_TIMEOUT_SECONDS,
+            await_bot_reply,
+        )
+
+        profile = bot_settle_profile or {}
+        quiet_window = float(profile.get("quiet_window_seconds", DEFAULT_QUIET_WINDOW_SECONDS))
+        # CLI --timeout wins; else settle_profile default; else module default.
+        if getattr(args, "timeout", None) is not None:
+            timeout = float(args.timeout)
+        else:
+            timeout = float(profile.get("default_timeout_seconds", DEFAULT_TIMEOUT_SECONDS))
+        status_patterns = profile.get("status_patterns") or DEFAULT_STATUS_PATTERNS
+
+        result = await_bot_reply(
+            chat_id=str(chat_id),
+            send_ts=payload["timestamp"],
+            quiet_window=quiet_window,
+            timeout=timeout,
+            status_patterns=status_patterns,
+        )
+
+        if args.json:
+            out = {
+                "target": {"id": int(chat_id)},
+                "sent": {"text": text, "ts": payload["timestamp"]},
+                "reply": {
+                    "settled_text": result.settled_text,
+                    "footer_present": result.footer_present,
+                    "message_ids": result.message_ids,
+                    "edit_count": result.edit_count,
+                    "started_ts": result.started_ts,
+                    "settled_ts": result.settled_ts,
+                },
+                "transcript": result.transcript,
+                "settled": result.settled,
+                "timed_out": result.timed_out,
+                "elapsed_s": result.elapsed_s,
+            }
+            print(json.dumps(out, indent=2, default=str))
+        else:
+            # Settled prose to stdout; the ⚠️ footer is preserved inside it.
+            print(result.settled_text)
+
+        if result.timed_out:
+            print(
+                f"TIMED OUT after {result.elapsed_s:.1f}s "
+                f"(captured {len(result.message_ids)} message(s))",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
+
     # Confirmation: differentiate "queued" vs. "suppressed by RTR".
     if rtr_should_send:
         parts = []
@@ -1266,6 +1375,35 @@ def main() -> int:
             "Ask the relay to delete the attached file after a successful "
             "send (or after dead-letter placement on retry exhaustion). "
             "Use this for ephemeral temp files; the relay owns lifecycle."
+        ),
+    )
+    send_parser.add_argument(
+        "--await-reply",
+        action="store_true",
+        help=(
+            "After sending, block and return the target bot's SETTLED reply on "
+            "stdout (for E2E assertions). Only valid against a registered bot "
+            "(projects.<key>.telegram.bots[]). Settles on silence (edit-aware), "
+            "bounded by --timeout."
+        ),
+    )
+    send_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help=(
+            "Overall wall-clock cap (seconds) for --await-reply. Defaults to the "
+            "bot's settle_profile.default_timeout_seconds (or 600s). Distinct "
+            "from the short quiet/settle window — a slow multi-minute turn must "
+            "not be cut off by the quiet window."
+        ),
+    )
+    send_parser.add_argument(
+        "--json",
+        action="store_true",
+        help=(
+            "With --await-reply, emit the structured transcript (settled prose, "
+            "footer flag, message ids, timing) as JSON instead of plain prose."
         ),
     )
 

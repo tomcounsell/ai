@@ -4,24 +4,19 @@
     "overview": "Shared config for all Valor machines. Lives in the configured vault directory (default ~/Desktop/Valor/; configurable via VALOR_VAULT_DIR). Each machine reads this file and filters projects by the 'machine' field matched against its ComputerName (scutil --get ComputerName).",
     "personas": "Define overlay file paths and permissions for each role. The bridge loads composable segments + persona overlay as the system prompt.",
     "projects.machine": "Must match the machine's ComputerName exactly (case-insensitive). This is how each machine knows which projects to handle.",
-    "projects.telegram.groups": "Dict mapping group name to persona. Dev: prefix = developer, PM: prefix = project-manager, no prefix = teammate (mention-only).",
+    "projects.telegram.groups": "Dict mapping group name to persona. Eng: prefix = engineer (full permissions, SDLC work + conversational), no prefix = teammate (mention-only).",
     "projects.telegram.groups.chat_id": "Optional Telegram chat ID. Speeds up group resolution but not required.",
+    "projects.telegram.bots": "Optional (issue #1574). Registry of bot peers for E2E testing via 'valor-telegram send --await-reply'. A registered bot's inbound messages are recorded to history but NEVER spawn a session (deterministic loop-guard). Each id must NOT also appear in dms.whitelist (config validation rejects the overlap). settle_profile tunes the awaiter's debounce.",
     "dms": "Global DM config. All DMs use the specified persona regardless of project.",
     "defaults": "Fallback values for projects that don't specify a field."
   },
 
   "personas": {
-    "developer": {
+    "engineer": {
       "name": "Valor",
-      "overlay": "~/Desktop/Valor/personas/developer.md",
+      "overlay": "~/Desktop/Valor/personas/engineer.md",
       "permissions": ["read", "write", "execute"],
-      "description": "Full developer persona — reads code, writes code, runs tests, creates PRs"
-    },
-    "project-manager": {
-      "name": "Valor",
-      "overlay": "~/Desktop/Valor/personas/project-manager.md",
-      "permissions": ["read"],
-      "description": "PM persona — reads code, manages GitHub issues/PRs, drafts communications. No code writes."
+      "description": "Engineer persona — full permissions, handles both SDLC work and conversational responses"
     },
     "teammate": {
       "name": "Valor",
@@ -39,9 +34,22 @@
       "machine": "Machine Name",
       "telegram": {
         "groups": {
-          "Dev: My Project": {"chat_id": -1234567890, "persona": "developer"},
-          "PM: My Project": {"chat_id": -9876543210, "persona": "project-manager"}
+          "Eng: My Project": {"chat_id": -1234567890, "persona": "engineer"}
         },
+        "bots": [
+          {
+            "id": 8837490628,
+            "username": "example_staff_bot",
+            "name": "Example Bot under test",
+            "under_test": true,
+            "settle_profile": {
+              "cleanup_progress": false,
+              "quiet_window_seconds": 5,
+              "default_timeout_seconds": 600,
+              "status_patterns": ["^⏳", "^(💻|🔎|🔧|📖|⚙️|📝) \\w+:"]
+            }
+          }
+        ],
         "respond_to_unaddressed": true,
         "respond_to_dms": true,
         "dm_persona": "teammate"
@@ -69,7 +77,7 @@
         "enabled": false,
         "schedule": "08:30",
         "timezone": "America/Los_Angeles",
-        "target_groups": ["PM: My Project"],
+        "target_groups": ["Eng: My Project"],
         "angles": {
           "include": ["merges", "open-bugs", "upvote-queue"],
           "exclude": ["plan-only-commits", "lockfile-bumps"]

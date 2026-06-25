@@ -11,9 +11,12 @@ Every shape that can route an incoming bridge message to a session:
 | Identifier shape | Where it lives in `projects.json` | Example |
 |-----|-----|-----|
 | Telegram DM contact id | `dms.whitelist[].id` | `179144806` (Tom) |
-| Telegram group name | `projects.<key>.telegram.groups.<name>` | `"Dev: Valor"` |
+| Telegram group name | `projects.<key>.telegram.groups.<name>` | `"Eng: Valor"` |
 | Email contact (explicit address) | `projects.<key>.email.contacts[]` | `alice@example.com` |
 | Email domain (wildcard) | `projects.<key>.email.domains[]` | `psyoptimal.com` |
+| Registered bot peer id | `projects.<key>.telegram.bots[].id` | `8837490628` (Bruce) |
+
+Registered bot ids carry an extra rule on top of single-machine ownership: a bot id must **not** also appear in `dms.whitelist[].id` (mutual exclusion), or the bot would resolve a project on the spawn path and its no-`reply_to` replies would loop. See [Bot End-to-End Testing](bot-e2e-testing.md).
 
 For each shape, the validator verifies the identifier resolves to exactly one machine across the *entire* config — not just the per-machine subset. Misconfiguration is caught the same way on every machine, even if the conflicting projects are owned by different machines.
 
@@ -86,7 +89,7 @@ See [Subconscious Memory — Project Key Partitioning](subconscious-memory.md#pr
 ## Adding a new machine
 
 1. On the new machine, set `ComputerName` (System Settings → Sharing) to a name like `Valor the {Animal}`.
-2. In `~/Desktop/Valor/projects.json`, set `projects.<key>.machine = "Valor the {Animal}"` for each project this machine should own. iCloud propagates the change to every other machine within minutes.
+2. In `<vault>/projects.json` (where `<vault>` is your configured vault directory — see `VALOR_VAULT_DIR`; default `~/Desktop/Valor/`), set `projects.<key>.machine = "Valor the {Animal}"` for each project this machine should own. Propagate the change to every other machine using whatever sync mechanism your vault uses (iCloud for Desktop/Documents vaults, manual copy for `~/.valor/`, etc.).
 3. Run `/update` (or wait for the launchd cron). The update script validates `projects.json` before bouncing the bridge. On the new machine, the bridge starts owning the moved projects; on the old machine, the next update cycle drops them from `ACTIVE_PROJECTS` and the bridge stops responding to those groups/contacts.
 4. There is nothing to edit in `dms.whitelist`, `telegram.groups`, `email.contacts`, or `email.domains` — they all inherit from `projects.<key>.machine`.
 
@@ -111,3 +114,4 @@ In every case, the running bridge keeps serving until the operator fixes the con
 - [Remote Update](remote-update.md) — the update flow that runs the green-light gate
 - [Email Bridge](email-bridge.md) — sender → project routing
 - [Config Architecture](config-architecture.md) — config file layout and source-of-truth
+- [Reflections](reflections.md#repo-specific-reflections-single-machine-ownership) — repo-specific reflections (`project_key`) inherit this same one-owner-per-project boundary so repo audits don't file duplicate issues from N machines

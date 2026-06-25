@@ -37,7 +37,7 @@ When omitted, the `dev-session` agent definition's `model=None` inherits from th
 
 Most PATCH work is a targeted fix against a written checklist of findings — a fresh Sonnet session reads the review comments or test failures and applies the fix cleanly. PM dispatches this as a normal `/do-patch` stage with `model=sonnet`.
 
-Some PATCH work needs the original builder's context: accumulated reasoning, edge cases considered-and-dismissed, implementation rationale that lives only in the builder's transcript. For these, PM resumes the BUILD session instead of dispatching fresh. See [pm-dev-session-architecture.md](pm-dev-session-architecture.md) under "Dev Session Resume" for the mechanism.
+Some PATCH work needs the original builder's context: accumulated reasoning, edge cases considered-and-dismissed, implementation rationale that lives only in the builder's transcript. For these, the Eng session resumes the BUILD session instead of dispatching fresh. See [Eng Session Architecture](eng-session-architecture.md) for the mechanism.
 
 ### Resume difficulty signals
 
@@ -64,6 +64,12 @@ The decision is:
 - **BUILD completed, tests failed or review blocked, fix is isolated** → fresh PATCH (Sonnet)
 - **BUILD completed, tests failed or review blocked, fix needs builder context** → resume BUILD (Sonnet, original transcript)
 
+## Row 8 / Row 8b: Stale-Verdict Supersession
+
+A REVIEW verdict is stale (superseded) iff its `recorded_at` timestamp predates the latest `/do-patch` dispatch timestamp. When stale, row 8 (`_rule_review_has_findings`) returns False and row 8b (`_rule_patch_applied_after_review`) dispatches `/do-pr-review` for re-review instead of re-dispatching `/do-patch`.
+
+This prevents the PM from repeatedly patching against findings that were already addressed by a prior patch cycle. The staleness check is implemented as `_review_verdict_is_stale(stage_states)` in `agent/sdlc_router.py` (issue #1641). All edge cases (missing `recorded_at`, no prior `/do-patch`, parse failure) fail safe to "not stale."
+
 ## Key Principles
 
 1. **Findings are never silently ignored.** They are either fixed or annotated with inline code comments explaining why they were left as-is.
@@ -89,5 +95,5 @@ This creates a paper trail so the next reviewer does not re-flag the same issue.
 
 ## Related
 
-- [Chat/Dev Session Architecture](pm-dev-session-architecture.md) -- how PM session and Dev session interact
+- [Eng Session Architecture](eng-session-architecture.md) -- how Eng sessions handle both orchestration and execution
 - Issue [#544](https://github.com/tomcounsell/ai/issues/544) -- tracking issue

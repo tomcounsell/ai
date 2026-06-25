@@ -35,7 +35,7 @@ Extracted the empty output guard into a pure function `should_guard_empty_output
 
 When the guard triggers, the empty output is delivered to the user with a "(empty output)" placeholder instead of being classified as STATUS_UPDATE and auto-continued.
 
-**Tests:** `TestEmptyOutputAnomalyDetection` in `tests/test_auto_continue.py` (5 unit tests calling `should_guard_empty_output` directly + 1 async test for `classify_output` behavior) and `TestEmptyOutputLoopTermination` in `tests/test_enqueue_continuation.py`.
+**Tests:** `TestEmptyOutputAnomalyDetection` in `tests/test_auto_continue.py` (5 unit tests calling `should_guard_empty_output` directly) and `TestEmptyOutputLoopTermination` in `tests/test_enqueue_continuation.py`. (`classify_output` was removed from the drafter in drafter_passthrough_validation; the async test for that behavior was deleted with it.)
 
 ### Gap 3: Routing Decision Extraction (agent/agent_session_queue.py)
 

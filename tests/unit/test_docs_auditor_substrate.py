@@ -542,3 +542,201 @@ class TestDraftModeAbsent:
         # Also check the source file to be sure
         src = Path(docs_auditor.__file__).read_text()
         assert "DRAFT_MODE" not in src
+
+
+# ---------------------------------------------------------------------------
+# TestDeletedTargetFiltering — placeholder / fenced / deletion-heading suppression
+# ---------------------------------------------------------------------------
+
+
+def _mk_finding(content: str, repo: Path) -> list[dict]:
+    """Run the detector against a doc with the given content."""
+    return docs_auditor._detect_deleted_target_issues(Path("docs/features/x.md"), content, repo)
+
+
+class TestDeletedTargetFiltering:
+    def test_is_placeholder_path_stand_ins(self):
+        assert docs_auditor._is_placeholder_path("foo/bar.py") is True
+        assert docs_auditor._is_placeholder_path("agent/docs_handler/foo.py") is True
+        assert docs_auditor._is_placeholder_path("pkg/example.py") is True
+        assert docs_auditor._is_placeholder_path("a/thing.py") is True  # single-letter dir
+
+    def test_is_placeholder_path_real_paths(self):
+        assert docs_auditor._is_placeholder_path("reflections/docs_auditor.py") is False
+        assert docs_auditor._is_placeholder_path("agent/output_router.py") is False
+
+    def test_is_placeholder_path_empty_and_single_segment(self):
+        assert docs_auditor._is_placeholder_path("") is False
+        assert (
+            docs_auditor._is_placeholder_path("foo.py") is False
+        )  # no slash, not reached normally
+
+    def test_placeholder_paths_suppressed(self, repo: Path):
+        content = (
+            "## Examples\n"
+            "An illustrative path like `foo/bar.py` should not be flagged.\n"
+            "Neither should `agent/docs_handler/foo.py` (path-matching example).\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_fenced_block_paths_suppressed(self, repo: Path):
+        content = "Intro prose.\n```\nsee deleted/gone_module.py for context\n```\nOutro.\n"
+        assert _mk_finding(content, repo) == []
+
+    def test_deletion_heading_paths_suppressed(self, repo: Path):
+        content = (
+            "## Migration from Ollama Intent Classification\n\n"
+            "The `intent/__init__.py` module is gone.\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_deprecated_heading_suppressed(self, repo: Path):
+        content = "### Deprecated\n\nWe used to import `old/legacy_thing.py` here.\n"
+        assert _mk_finding(content, repo) == []
+
+    def test_deletion_prose_cue_suppressed(self, repo: Path):
+        content = (
+            "## Architecture\n\n"
+            "The `some/removed_module.py` is no longer in the codebase as of the refactor.\n"
+        )
+        assert _mk_finding(content, repo) == []
+
+    def test_genuine_dead_reference_not_suppressed(self, repo: Path):
+        # Normal prose, normal heading, inline code, path does not exist on disk.
+        content = (
+            "## Architecture\n\n"
+            "The handler lives in `agent/totally_made_up_handler_xyz.py` and runs the loop.\n"
+        )
+        with patch.object(docs_auditor, "_git_log_follow_renames", return_value=[]):
+            findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+        assert "agent/totally_made_up_handler_xyz.py" in findings[0]["title"]
+        assert findings[0]["category"] == "deleted-target"
+
+    def test_existing_path_not_flagged(self, repo: Path):
+        # A path that exists on disk is skipped even if it survives the filters.
+        (repo / "agent").mkdir()
+        (repo / "agent" / "real_module.py").write_text("x = 1\n")
+        content = "## Architecture\n\nSee `agent/real_module.py`.\n"
+        assert _mk_finding(content, repo) == []
+
+    def test_empty_content_returns_empty(self, repo: Path):
+        assert _mk_finding("", repo) == []
+
+    def test_inline_code_not_blanket_suppressed(self, repo: Path):
+        # Inline single-backtick code is the normal way real refs are written —
+        # it must NOT be suppressed merely for being inline code.
+        content = "The module `agent/inline_ref_xyz.py` is referenced inline in prose.\n"
+        with patch.object(docs_auditor, "_git_log_follow_renames", return_value=[]):
+            findings = _mk_finding(content, repo)
+        assert len(findings) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestCrossMachineDedup — live-tracker gate + Redis fast-path
+# ---------------------------------------------------------------------------
+
+
+def _gh_list_result(stdout: str, returncode: int = 0):
+    return subprocess.CompletedProcess(args=["gh"], returncode=returncode, stdout=stdout, stderr="")
+
+
+class TestCrossMachineDedup:
+    def test_open_issue_exists_exact_match(self, repo: Path):
+        title = "Doc references deleted target: a/b.py (in docs/x.md)"
+        out = f'[{{"number": 5, "title": "{title}"}}]'
+        with patch("subprocess.run", return_value=_gh_list_result(out)):
+            assert docs_auditor._open_issue_exists(title, repo) is True
+
+    def test_open_issue_exists_whitespace_normalized(self, repo: Path):
+        title = "Doc references deleted target: a/b.py (in docs/x.md)"
+        # Tracker title has collapsed/extra whitespace — still an exact match.
+        tracker_title = "Doc references deleted   target: a/b.py (in docs/x.md)"
+        out = f'[{{"number": 5, "title": "{tracker_title}"}}]'
+        with patch("subprocess.run", return_value=_gh_list_result(out)):
+            assert docs_auditor._open_issue_exists(title, repo) is True
+
+    def test_open_issue_exists_no_match(self, repo: Path):
+        title = "Doc references deleted target: a/b.py (in docs/x.md)"
+        out = '[{"number": 5, "title": "Some unrelated issue"}]'
+        with patch("subprocess.run", return_value=_gh_list_result(out)):
+            assert docs_auditor._open_issue_exists(title, repo) is False
+
+    def test_open_issue_exists_empty_list(self, repo: Path):
+        with patch("subprocess.run", return_value=_gh_list_result("[]")):
+            assert docs_auditor._open_issue_exists("anything", repo) is False
+
+    def test_open_issue_exists_nonzero_rc_fails_open(self, repo: Path, caplog):
+        with patch("subprocess.run", return_value=_gh_list_result("", returncode=1)):
+            assert docs_auditor._open_issue_exists("t", repo) is False
+        assert any("dedup" in r.message.lower() for r in caplog.records)
+
+    def test_open_issue_exists_malformed_json_fails_open(self, repo: Path, caplog):
+        with patch("subprocess.run", return_value=_gh_list_result("not json{{")):
+            assert docs_auditor._open_issue_exists("t", repo) is False
+        assert any("dedup" in r.message.lower() for r in caplog.records)
+
+    def test_open_issue_exists_subprocess_raises_fails_open(self, repo: Path, caplog):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 20)):
+            assert docs_auditor._open_issue_exists("t", repo) is False
+        assert any("dedup" in r.message.lower() for r in caplog.records)
+
+    def test_open_match_skips_filing(self, repo: Path, patch_redis):
+        patch_redis.exists.return_value = False
+        finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
+        with (
+            patch.object(docs_auditor, "_open_issue_exists", return_value=True),
+            patch("subprocess.run") as run,
+        ):
+            filed = docs_auditor._file_issue_if_new(finding, repo)
+        assert filed is False
+        # gh issue create must NOT have been called.
+        assert run.call_count == 0
+        # The local fast-path key is recorded so later runs skip the tracker query.
+        patch_redis.set.assert_called_once()
+
+    def test_no_open_match_files(self, repo: Path, patch_redis):
+        patch_redis.exists.return_value = False
+        finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
+        with (
+            patch.object(docs_auditor, "_open_issue_exists", return_value=False),
+            patch("subprocess.run", return_value=_gh_list_result("https://gh/issues/9")) as run,
+        ):
+            filed = docs_auditor._file_issue_if_new(finding, repo)
+        assert filed is True
+        # gh issue create invoked exactly once (a scutil call for the machine
+        # stamp in the issue body may also run — assert on the create call, not
+        # the raw subprocess count).
+        create_calls = [c for c in run.call_args_list if c.args[0][:3] == ["gh", "issue", "create"]]
+        assert len(create_calls) == 1
+        create_cmd = create_calls[0].args[0]
+        assert create_cmd[:3] == ["gh", "issue", "create"]
+
+    def test_redis_fast_path_skips_tracker_query(self, repo: Path, patch_redis):
+        # If the local Redis key already exists, the tracker query is skipped.
+        patch_redis.exists.return_value = True
+        finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
+        with patch.object(docs_auditor, "_open_issue_exists") as gate:
+            filed = docs_auditor._file_issue_if_new(finding, repo)
+        assert filed is False
+        gate.assert_not_called()
+
+    def test_tracker_failure_falls_back_to_filing(self, repo: Path, patch_redis, caplog):
+        # Simulate gh issue list failing inside _open_issue_exists (fail-open ->
+        # _open_issue_exists returns False) so filing proceeds via gh create.
+        patch_redis.exists.return_value = False
+        finding = {"title": "Doc references deleted target: a/b.py (in docs/x.md)", "body": "b"}
+
+        def fake_run(cmd, *a, **k):
+            if cmd[:3] == ["gh", "issue", "list"]:
+                return _gh_list_result("", returncode=1)  # tracker query fails
+            return _gh_list_result("https://gh/issues/9")  # create succeeds
+
+        with patch("subprocess.run", side_effect=fake_run):
+            filed = docs_auditor._file_issue_if_new(finding, repo)
+        assert filed is True
+        # The fail-open warning was logged.
+        assert any("dedup" in r.message.lower() for r in caplog.records)
+
+    def test_empty_title_returns_false(self, repo: Path, patch_redis):
+        assert docs_auditor._file_issue_if_new({"title": "", "body": "b"}, repo) is False

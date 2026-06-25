@@ -305,6 +305,37 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Corrupted session cleanup failed (non-fatal): {e}")
 
+    # Step 2b: Clean class-set orphans for AgentSession and Memory (#1459)
+    # repair_indexes() in step 2 only covers $IndexF (field/status indexes).
+    # TTL expiry removes hashes without removing class-set members, which causes
+    # continuous Sentry noise. clean_indexes() uses SSCAN (production-safe).
+    try:
+        from models.agent_session import AgentSession
+        from models.memory import Memory
+
+        for model_cls, label in ((AgentSession, "AgentSession"), (Memory, "Memory")):
+            try:
+                removed = model_cls.clean_indexes()
+                if removed:
+                    logger.info(
+                        f"clean_indexes {label}: removed {removed} orphan class-set entries"
+                    )
+            except Exception as ci_err:
+                logger.warning(f"clean_indexes {label} failed (non-fatal): {ci_err}")
+    except Exception as e:
+        logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
+
+    # Step 2c: Heal future-dated updated_at values written before fix #1645.
+    # Clamps any session whose updated_at is in the future (caused by popoto
+    # auto_now minting naive local time on non-UTC hosts). Idempotent.
+    try:
+        from models.agent_session import AgentSession as _AgentSession
+
+        count = _AgentSession._heal_future_updated_at()
+        logger.info(f"_heal_future_updated_at: healed {count} records")
+    except Exception as e:
+        logger.warning(f"_heal_future_updated_at non-fatal: {e}")
+
     # Step 3: Recover any sessions that were running when the previous process died
     try:
         recovered = _recover_interrupted_agent_sessions_startup()
@@ -320,6 +351,58 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             logger.info(f"Killed {orphans_killed} orphaned Claude Code subprocess(es)")
     except Exception as e:
         logger.warning(f"Orphaned process cleanup failed (non-fatal): {e}")
+
+    # Step 4b: Kill orphaned granite PTY children from prior runs.
+    # The PTYPool records spawned PM/Dev PIDs to data/granite_pty_pids.json so
+    # a worker-process restart can still kill orphan PTYs (plan #1572, Risk 1
+    # / OPS-3). PID-targeted kill avoids pkill -f matching an operator's
+    # personal interactive `claude` session on a different project.
+    try:
+        from agent.granite_container.pty_pool import _kill_orphaned_pty_pids
+
+        killed_pids = _kill_orphaned_pty_pids()
+        if killed_pids:
+            logger.info(f"Killed {killed_pids} orphaned granite PTY subprocess(es)")
+    except Exception as e:
+        logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
+
+    # Step 4b.5: Verify the granite classifier model is present and responsive.
+    # Granite is the routing brain of the PTY container — every PM/Dev turn is
+    # routed by an ollama call against it. Without granite the worker would come
+    # up and silently mis-route every session, so this is a HARD startup
+    # precondition (the granite PTY path is all-or-nothing; there is no runtime
+    # fallback). Every restart path funnels through here — /update's inline
+    # restart, the cron deferred restart-flag → SIGTERM → launchd respawn
+    # (agent_session_queue._trigger_restart), and manual worker-restart — so
+    # gating at startup covers them all, not just the interactive /update path.
+    # Pulls once on miss; exits non-zero if granite still can't be made
+    # available (launchd respawns after ThrottleInterval, self-healing once
+    # granite becomes reachable).
+    from agent.granite_container.granite_classifier import ensure_granite_model
+
+    granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)
+    if not granite_ok:
+        logger.critical(
+            "Granite classifier unavailable: %s. The PTY container cannot route "
+            "sessions without it — exiting. Fix with 'ollama pull granite4.1:3b'.",
+            granite_detail,
+        )
+        sys.exit(1)
+    logger.info("Granite classifier ready: %s", granite_detail)
+
+    # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
+    # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
+    # ``claude --permission-mode bypassPermissions`` pairs. Sessions
+    # acquire/release pairs via async context manager; over-cap sessions
+    # wait in the Redis queue.
+    try:
+        from agent.granite_container.pty_pool import initialize_pty_pool
+
+        _pty_pool = initialize_pty_pool()
+        await _pty_pool.initialize()
+        logger.info(f"Granite PTY pool initialized: pool_size={_pty_pool.pool_size}")
+    except Exception as e:
+        logger.warning(f"Granite PTY pool initialization failed (non-fatal): {e}")
 
     # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
@@ -520,6 +603,22 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         except asyncio.CancelledError:
             pass
 
+    # Drain the granite PTY pool's in-flight respawn tasks (POOL-1).
+    # The pool's per-slot `event` is only set after `_spawn_slot`
+    # completes; if the worker exits before a respawn finishes, the
+    # slot is left in `respawning` permanently and the next worker
+    # process's `_load_persisted_pids` will not see the in-flight
+    # spawn. We drain the asyncio.Tasks here so respawns either
+    # complete or are visibly cancelled.
+    try:
+        from agent.granite_container.pty_pool import get_pty_pool
+
+        _pool = get_pty_pool()
+        _pool.shutdown()
+        await _pool.drain_respawns()
+    except Exception as e:
+        logger.warning(f"Granite PTY pool drain failed (non-fatal): {e}")
+
     logger.info("Worker shutdown complete")
 
 
@@ -538,16 +637,23 @@ def main() -> None:
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
 
-    # Validate agent definition files exist on disk. Missing files are not
-    # fatal — the SDK falls back gracefully — but we surface warnings early
-    # so operators can fix them before users hit degraded prompts. The
-    # worker is the actual session execution engine (per CLAUDE.md), so this
-    # check must fire here in addition to the bridge startup hook.
+    # Validate agent definition files are usable on disk. Missing, malformed,
+    # or unreadable files are not fatal — the SDK falls back gracefully — but
+    # we surface warnings early so operators can fix them before users hit
+    # degraded prompts. The worker is the actual session execution engine
+    # (per CLAUDE.md), so this check must fire here in addition to the bridge
+    # startup hook. `_parse_agent_markdown` already logs a precise per-path
+    # warning, so we emit a concise startup summary here instead of a
+    # misleading "Missing" line for files that may actually be malformed.
     from agent.agent_definitions import validate_agent_files
 
-    missing_agent_files = validate_agent_files()
-    for missing_path in missing_agent_files:
-        logger.warning("Missing agent definition file: %s", missing_path)
+    problematic_agent_files = validate_agent_files()
+    if problematic_agent_files:
+        logger.warning(
+            "Unusable agent definition files detected at startup (%d): %s",
+            len(problematic_agent_files),
+            problematic_agent_files,
+        )
 
     projects = _load_projects(args.project)
 

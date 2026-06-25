@@ -68,7 +68,7 @@ def _make_pm_session(session_id: str = "pm-session-worker-bypass"):
     """
     return SimpleNamespace(
         session_id=session_id,
-        session_type="pm",
+        session_type="eng",
         session_mode="pm",
     )
 
@@ -107,7 +107,6 @@ async def test_long_output_gets_drafted_and_full_text_attached(tmp_path):
     fake_draft = MessageDraft(
         text=short_draft,
         full_output_file=full_output_path,
-        was_drafted=True,
         artifacts={},
     )
 

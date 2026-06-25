@@ -46,10 +46,12 @@ reflections:
 | `callable` | string | Dotted Python path (for function type) |
 | `command` | string | Natural-language prompt for PM session (for agent type) |
 | `enabled` | bool | Whether this reflection is active (default: true) |
+| `project_key` | string | Optional repo-specific gate. Only the machine that owns this project in `projects.json` runs the reflection. See [Repo-Specific Reflections](#repo-specific-reflections-single-machine-ownership). |
 | `output_sink` | string | Where to deliver completion summaries: `log_only` (default), `dashboard_only`, `memory:<importance>`, or `telegram:<chat>`. See [Output Sinks](#output-sinks). |
 | `auto_delete_after_run` | bool | One-shot reflections (`at:` schedule) — record self-cleans on success. Default: `false`. |
 | `retry_policy` | dict | Optional override of `{max_retries, backoff_seconds, max_consecutive_failures_before_pause}`. See [Failure Tracking](#failure-tracking). |
 | `timeout` | int | Optional per-reflection timeout in seconds. Defaults: 1800 (30 min) for function, 3600 (60 min) for agent |
+| `params` | dict | Optional arbitrary kwargs forwarded to the callable when it declares a `params` keyword argument. The scheduler uses `inspect.signature` to detect whether the callable accepts `params`; if not, it is called without it. Use for feature flags and per-reflection tunables (e.g., `stall_advisory_telegram_enabled: false`). |
 
 **Convention:** Reflections are addressed by `name` (this YAML field) and dispatched by `callable` (dotted path). Numbered-step references (`step_X`) are historical and should not be reintroduced into source, comments, or docs.
 
@@ -85,6 +87,52 @@ On live machines, `config/reflections.yaml` is a symlink to `~/Desktop/Valor/ref
 The symlink is created by `sync_reflections_yaml()` in `scripts/update/env_sync.py` during
 each update run. This ensures the scheduler always reads the vault version.
 
+Under launchd (`VALOR_LAUNCHD=1`), the worker instead reads a **real copy** at
+`config/reflections.yaml` that `install_worker.sh` writes from the vault (macOS TCC blocks
+launchd agents from reading `~/Desktop`). That copy step is where repo-specific ownership is
+applied — see below.
+
+### Repo-Specific Reflections (Single-Machine Ownership)
+
+The registry is **one iCloud-synced file shared verbatim across every machine**. Reflections
+that audit a single repo — chiefly the `audits` group, which file GitHub issues against
+`tomcounsell/ai` — would therefore run on all N machines and each file its own copy of every
+finding. This is what produced the recurring `documentation`-label duplicate flood (and the
+same hazard applies to every other issue-filing audit).
+
+The fix extends [single-machine ownership](single-machine-ownership.md) to reflections, and
+applies it at **update time, not run time**:
+
+1. A reflection declares `project_key: <key>` in the shared registry (e.g. `project_key: valor`).
+2. `install_worker.sh`, right after copying the vault `reflections.yaml` into the launchd-safe
+   `config/reflections.yaml`, runs `python -m tools.reflection_machine_filter`. For each entry
+   with a `project_key`, if `projects.<key>.machine` (from `projects.json`) is **not** this
+   machine, it forces `enabled: false` in the local copy.
+3. The scheduler needs **zero runtime ownership logic** — it already skips `enabled: false`
+   entries (`load_registry`), and it never reads `projects.json` on the launchd hot path (where
+   TCC would hang on the iCloud copy).
+
+Ownership semantics (`tools/reflection_machine_filter.py`):
+
+| Condition | Result |
+|-----------|--------|
+| `project_key` unset | Unscoped — runs on every machine (unchanged) |
+| owner machine == this machine | Left enabled (authored state preserved) |
+| owner machine != this machine | Forced `enabled: false` in the local copy |
+| `project_key` not in `projects.json` | Fail-open (left as-is) with a warning — a typo never silently disables an audit everywhere |
+
+The filter only **disables**; it never re-enables (so an owned-but-authored-`enabled: false`
+reflection like a paused `docs-auditor` stays off). It refuses to write through a symlink, so a
+manual run against the symlinked `config/reflections.yaml` can never corrupt the shared vault —
+it only ever rewrites the real per-machine copy that `install_worker.sh` produces.
+
+> **Note on `docs-auditor` filing:** issue-filing is **rotation-only**. The `audit()` substrate
+> files advisory issues (deleted-target, stub-doc) only under `scope_mode="rotation"` (Caller A,
+> the daily reflection). The `/do-docs` SDLC stage (Caller B, `scope_mode="pr-changed-files"`)
+> runs `audit()` on every PR but performs auto-fixes only — it does **not** file issues, since a
+> deleted-target reference is unfixable and re-detecting it per-PR re-files duplicates. Combined
+> with `project_key`-gating, repo audits file issues from exactly one machine, on rotation only.
+
 ### Registered Reflections
 
 **Infrastructure / health:**
@@ -107,12 +155,12 @@ each update run. This ensures the scheduler always reads the vault version.
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `tech-debt-scan` | `reflections.maintenance.run_legacy_code_scan` | Scan for TODO comments and `deprecated` typing imports |
-| `redis-ttl-cleanup` | `reflections.maintenance.run_redis_ttl_cleanup` | Prune expired records across all Redis models |
-| `redis-quality-audit` | `reflections.maintenance.run_redis_data_quality` | Audit data quality: unsummarized links, dead channels, error patterns |
-| `merged-branch-cleanup` | `reflections.maintenance.run_branch_plan_cleanup` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
-| `disk-space-check` | `reflections.maintenance.run_disk_space_check` | Check free disk space; warn if below 10 GB |
-| `analytics-rollup` | `reflections.maintenance.run_analytics_rollup` | Aggregate daily analytics; purge old records |
+| `tech-debt-scan` | `reflections.audits.tech_debt_scan.run` | Scan for TODO comments and `deprecated` typing imports |
+| `redis-ttl-cleanup` | `reflections.housekeeping.redis_ttl_cleanup.run` | Prune expired records across all Redis models |
+| `redis-quality-audit` | `reflections.audits.redis_quality_audit.run` | Audit data quality: unsummarized links, dead channels, error patterns |
+| `merged-branch-cleanup` | `reflections.housekeeping.merged_branch_cleanup.run` | Delete merged branches; audit docs/plans/ for stale/orphaned plans **(disabled — calls gh CLI)** |
+| `disk-space-check` | `reflections.housekeeping.disk_space_check.run` | Check free disk space; warn if below 10 GB |
+| `analytics-rollup` | `reflections.housekeeping.analytics_rollup.run` | Aggregate daily analytics; purge old records |
 
 **Auditing:**
 
@@ -120,32 +168,31 @@ each update run. This ensures the scheduler always reads the vault version.
 |------|----------|-------------|
 | `docs-auditor` | `reflections.docs_auditor.run_docs_auditor` | Unified docs auditor: rotates least-recently-audited primary doc, applies auto-fixes, opens `docs-audit/*` PR (see [Docs Auditor](docs-auditor.md)) |
 | `do-docs-branch-sweeper` | `reflections.docs_auditor.run_docs_branch_sweeper` | Delete stale `docs-audit/*` branches >7d with no PR; close open `docs-audit/*` PRs >14d |
-| `skills-audit` | `reflections.auditing.run_skills_audit` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
-| `hooks-audit` | `reflections.auditing.run_hooks_audit` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
-| `pr-review-audit` | `reflections.auditing.run_pr_review_audit` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
+| `skills-audit` | `reflections.audits.skills_audit.run` | Validate all SKILL.md files (see [Skills Audit](do-skills-audit.md)) |
+| `hooks-audit` | `reflections.audits.hooks_audit.run` | Audit Claude Code hooks and settings (see [Hooks Best Practices](hooks-best-practices.md)) |
+| `pr-review-audit` | `reflections.audits.pr_review_audit.run` | Scan merged PRs for unaddressed review findings; file GitHub issues **(disabled — calls gh CLI)** |
 
 **Task management:**
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `task-backlog-check` | `reflections.task_management.run_task_management` | Check open bug issues per project and local TODO files **(disabled — calls gh CLI)** |
-| `principal-staleness` | `reflections.task_management.run_principal_staleness` | Check if config/PRINCIPAL.md is stale (>90 days) |
+| `task-backlog-check` | `reflections.audits.task_backlog_check.run` | Check open bug issues per project and local TODO files **(disabled — calls gh CLI)** |
+| `principal-staleness` | `reflections.audits.principal_staleness.run` | Check if config/PRINCIPAL.md is stale (>90 days) |
 
 **Pipelines:**
 
 | Name | Callable | Description |
 |------|----------|-------------|
 | `session-intelligence` | `reflections.session_intelligence.run` | Session Analysis → LLM Reflection → Bug Issue Filing **(disabled — calls gh CLI and spawns agent)** |
-| `behavioral-learning` | `reflections.behavioral_learning.run` | Episode Cycle-Close → Pattern Crystallization |
 | `pm-briefings` | `reflections.pm_briefings.run` | Slot-driven PM briefings dispatcher. Each project declares slots (`morning`, `daily_log`, `log_audit`) in `projects.json`. See [pm-briefings.md](pm-briefings.md). |
 
 **Memory management:**
 
 | Name | Callable | Description |
 |------|----------|-------------|
-| `memory-decay-prune` | `reflections.memory_management.run_memory_decay_prune` | Delete below-threshold memories with zero access (dry-run default) |
-| `memory-quality-audit` | `reflections.memory_management.run_memory_quality_audit` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
-| `embedding-orphan-sweep` | `reflections.memory_management.run_embedding_orphan_sweep` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
+| `memory-decay-prune` | `reflections.memory.memory_decay_prune.run` | Delete below-threshold memories with zero access (dry-run default) |
+| `memory-quality-audit` | `reflections.memory.memory_quality_audit.run` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
+| `embedding-orphan-sweep` | `reflections.memory.embedding_orphan_sweep.run` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
 
 ### Daily PM-facing slots (consolidated)
 
@@ -251,7 +298,7 @@ Per-run rows carry a tiered TTL keyed off the parent's frequency (7d for `every:
 
 ### Output Sinks
 
-`output_sink` controls where a reflection's per-run summary lands. The runtime delivery hook (`agent/reflection_output.py`) is shipped on a rolling basis — the field is honored by every sink kind that has shipped, and unshipped sinks degrade to `log_only` until their delivery path lands.
+`output_sink` controls where a reflection's per-run summary lands. The field is defined on `models/reflection.py` (`output_sink`, default `log_only`) and honored by every sink kind that has shipped; unshipped sinks degrade to `log_only` until their delivery path lands.
 
 | Sink | Behavior | Status |
 |------|----------|--------|
@@ -323,18 +370,32 @@ All daily maintenance work is implemented as standalone async callables in the `
 
 **Critical constraint**: Reflection callables are invoked from inside the asyncio event loop. Any `subprocess.run()` or other blocking I/O call must be wrapped with `await asyncio.to_thread(subprocess.run, ...)` or `loop.run_in_executor()`. A bare `subprocess.run()` inside an `async def` blocks the event loop, freezing the reflection scheduler and preventing worker heartbeat writes — which causes the worker watchdog to kill the process.
 
-The package modules:
+The package is organized into group directories, with one file per reflection. Each file exposes a single `run()` async entry point plus a teaching docstring describing the reflection's purpose, cadence, failure modes, and related reflections.
+
+**Group directories:**
+
+| Directory | Files | Description |
+|-----------|-------|-------------|
+| `reflections/agents/` | `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` | Session health and Anthropic circuit management (relocated from `agent/sustainability.py`) |
+| `reflections/housekeeping/` | `redis_ttl_cleanup.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` | Routine maintenance: expiry, branch cleanup, disk, analytics |
+| `reflections/audits/` | `tech_debt_scan.py`, `redis_quality_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`, `task_backlog_check.py`, `principal_staleness.py` | Code quality, data quality, and task tracking audits |
+| `reflections/memory/` | `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py` | Memory lifecycle: pruning, quality audit, orphan sweep |
+
+**Shared helpers:**
 
 | Module | Description |
 |--------|-------------|
-| `reflections.utils` | Shared helpers: `load_local_projects()`, `is_ignored()`, `load_ignore_entries()`, `has_existing_github_work()`, `run_llm_reflection()` |
-| `reflections.maintenance` | 6 maintenance callables (TTL cleanup, data quality, branch/plan cleanup, etc.) |
-| `reflections.auditing` | 5 auditing callables (docs audit, skills audit, hooks audit, PR review audit, branch sweeper) |
-| `reflections.task_management` | 2 task management callables (task check, principal staleness) |
+| `reflections/utilities.py` | Shared helpers: `load_local_projects()`, `run_per_project_audit()`, `run_llm_reflection()`, `is_ignored()`, `load_ignore_entries()`, `has_existing_github_work()`, `is_high_confidence()`, `extract_structured_errors()`, `PROJECT_ROOT`, `CORRECTION_PATTERNS` |
+
+**Unchanged modules (not part of this refactor):**
+
+| Module | Description |
+|--------|-------------|
 | `reflections.session_intelligence` | Pipeline: session analysis → LLM reflection → bug issue filing |
-| `reflections.behavioral_learning` | Pipeline: episode cycle-close → pattern crystallization |
 | `reflections.pm_briefings` | Slot-driven dispatcher (`pm-briefings` registry entry): `morning`, `daily_log`, `log_audit` per (project × slot) — see [pm-briefings.md](pm-briefings.md) |
-| `reflections.memory_management` | 3 memory management callables (decay prune, quality audit, knowledge reindex) |
+| `reflections.docs_auditor` | Unified docs auditor substrate (see [Docs Auditor](docs-auditor.md)) |
+
+> **Registry compatibility:** The old bundle module names (`reflections.maintenance`, `reflections.auditing`, `reflections.task_management`, `reflections.memory_management`) remain as thin re-export shims. Each re-exports the relocated reflections under their original `run_*` names so `config/reflections.yaml`'s historical dotted callable paths still resolve without a vault edit. `agent/sustainability.py` is likewise a re-export shim for the 5 agent reflections (keeping `send_hibernation_notification`, `_get_project_key`, and `_get_redis` defined in place as they are used by `agent/agent_session_queue.py`).
 
 ## State & Persistence
 
@@ -420,15 +481,20 @@ Queries Redis for recent sessions and computes quality metrics.
 - **AgentSession** — turn count, tool call count, log file path, session tags
 - **BridgeEvent** — error events correlated to sessions
 
-### Thrash Ratio
+The runner caps analysis at the 20 most interesting sessions (sorted by turn count).
 
-Measures how much agent effort was wasted:
-
-```
-failure_ratio = max(0.0, 1.0 - (turn_count / tool_call_count))
-```
-
-Sessions above `THRASH_RATIO_THRESHOLD = 0.5` (50% failure rate) are flagged for LLM reflection. The runner caps analysis at the 20 most interesting sessions (sorted by turn count).
+> **Removed: thrash-ratio detection (#1414).** A prior heuristic flagged
+> sessions as "thrashing" when `1 - (turn_count / tool_call_count) > 0.5`.
+> Because `turn_count` is *total assistant turns* (not *successful* turns),
+> any session averaging more than ~2 tool calls per turn tripped the
+> threshold — roughly 50% of healthy, completed SDLC runs. The detector was
+> removed entirely rather than left emitting false positives that auto-filed
+> duplicate bug issues. Neither candidate replacement signal (repeated
+> identical tool calls, repeated tool errors) is cheaply derivable from the
+> available data: `AgentSession` exposes only scalar aggregates, and the
+> transcript format records tool inputs/results as truncated summary strings
+> with no structured args or `is_error` flag. A missing detector is strictly
+> better than one with a 50% false-positive rate.
 
 ### Correction Detection
 
@@ -441,7 +507,7 @@ Scans session transcripts for patterns indicating the human corrected the agent:
 | Stop and redirect | "stop... instead" |
 | Repeated instruction | "I said..." |
 
-These regex patterns are defined in `CORRECTION_PATTERNS` in `reflections/utils.py`.
+These regex patterns are defined in `CORRECTION_PATTERNS` in `reflections/utilities.py`.
 
 ## LLM Reflection (part of `session_intelligence` pipeline)
 
@@ -466,17 +532,25 @@ When a reflection is categorized as `code_bug` and meets the confidence threshol
 
 ### Confidence Criteria
 
-An issue is filed when a reflection meets **2 of 3** criteria:
+An issue is filed only when a reflection is a **code bug AND** carries at least
+one supporting signal (`is_high_confidence()` in `reflections/utilities.py`):
 
-| Criterion | Condition |
-|-----------|----------|
-| Category | `category == "code_bug"` |
-| Prevention | `prevention` field is non-empty |
-| Pattern length | `pattern` field is at least 10 characters |
+| Criterion | Condition | Role |
+|-----------|-----------|------|
+| Category | `category == "code_bug"` | **Required** — hard gate |
+| Prevention | `prevention` field is non-empty | Supporting (either suffices) |
+| Pattern length | `pattern` field is at least 10 characters | Supporting (either suffices) |
+
+This tightened the prior **2-of-3** rule (#1414). Under 2-of-3, a non-code-bug
+reflection (e.g. `category="poor_planning"`) could clear the gate on prevention
++ pattern length alone — which is how #1414, an agent-behaviour claim rather
+than a code defect, reached "high-confidence" and auto-filed itself. The gate
+now hard-requires `code_bug`, so only genuine code defects reach the auto-fix
+path.
 
 ### Ignore Log
 
-The ignore log (Redis `ReflectionIgnore` model) suppresses issue creation for specific patterns for 14 days. Use `reflections.utils.is_ignored()` with `load_ignore_entries()` to check patterns.
+The ignore log (Redis `ReflectionIgnore` model) suppresses issue creation for specific patterns for 14 days. Use `reflections.utilities.is_ignored()` with `load_ignore_entries()` to check patterns.
 
 ### Safety Properties
 
@@ -516,7 +590,7 @@ Each project entry in `~/Desktop/Valor/projects.json`:
 
 ### Per-Project Audit Iteration
 
-Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. (Documentation/feature-doc audits were consolidated into the `docs-auditor` substrate — see [Docs Auditor](docs-auditor.md).) The shared helper `reflections.utils.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
+Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run once per project on the current machine, aggregating findings into a single run record with a per-project breakdown. (Documentation/feature-doc audits were consolidated into the `docs-auditor` substrate — see [Docs Auditor](docs-auditor.md).) The shared helper `reflections.utilities.run_per_project_audit(audit_one, *, skip_if=None, name)` handles the iteration:
 
 1. Loads `load_local_projects()` (filtered to repos present on disk)
 2. For each project, evaluates `skip_if(repo_root)` first; silently skipped projects are recorded with `status="skipped"` and excluded from `findings`
@@ -529,7 +603,7 @@ Three audit reflections (`tech-debt-scan`, `skills-audit`, `hooks-audit`) run on
 | Audit | Skipped when |
 |-------|--------------|
 | `tech-debt-scan` | Never — always runs |
-| `skills-audit` | `.claude/skills/do-skills-audit/scripts/audit_skills.py` absent |
+| `skills-audit` | `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` absent |
 | `hooks-audit` | Both `logs/hooks.log` and `.claude/settings.json` absent |
 
 **Timeout budgets** (per-project iteration linearly scales wall-clock; YAML overrides in `~/Desktop/Valor/reflections.yaml` sized for an N=20-project worst case):
@@ -607,9 +681,9 @@ Prunes zero-access memories below the weak-forgetting threshold:
 4-layer always-apply audit (see [`docs/features/subconscious-memory.md`](./subconscious-memory.md#memory-health-audit) for full design):
 
 - **Layer 0** — baseline zero-access (>30d) + low-confidence (<0.2) flags. Read-only; no issues filed.
-- **Layer 1** — deterministic supersede via `_looks_like_refusal` predicate. Sets `superseded_by="cleanup-junk-extraction"` on `extraction-*` records matching refusal/JSON-shrapnel patterns. Capped at `MAX_LAYER1_SUPERSEDES_PER_RUN=50` (operator-tunable via `MEMORY_AUDIT_LAYER1_CAP`). Subsumes the retired `scripts/cleanup_memory_extraction_junk.py` one-shot.
+- **Layer 1** — deterministic supersede via `_looks_like_refusal` predicate. Sets `superseded_by="cleanup-junk-extraction"` on `extraction-*` records matching refusal/JSON-shrapnel patterns. Capped at `MAX_LAYER1_SUPERSEDES_PER_RUN=50` (operator-tunable via `MEMORY_AUDIT_LAYER1_CAP`).
 - **Layer 2** — heuristic anomaly detection (no model). Four signals: `category-default-skew`, `importance-1.0-skew`, `agent-id-cluster`, `html-escape-rate`. Cross-threshold signals become candidates.
-- **Layer 3** — Gemma classification (`gemma4:e2b`, fail-soft). Samples up to 20 last-24h records; 30s wallclock budget; 10s `GEMMA_CALL_TIMEOUT_SEC` per call. Verdicts grouped by anomaly_signal; signals with ≥3 matches become candidates. Fails soft if Ollama is unavailable.
+- **Layer 3** — granite classification (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`, fail-soft). Samples up to 20 last-24h records; 30s wallclock budget; 10s `GEMMA_CALL_TIMEOUT_SEC` per call. Verdicts grouped by anomaly_signal; signals with ≥3 matches become candidates. Fails soft if Ollama is unavailable.
 - **Issue surfacing** — Layer-2/3 candidates → `gh issue create --label memory --label investigation`, deduped via title-prefix search. Layer 0/1 never file issues.
 
 ### `embedding-orphan-sweep`
@@ -652,14 +726,17 @@ The reflection scheduler starts automatically as part of the standalone worker p
 | `agent/reflection_scheduler.py` | Unified scheduler: registry loader, schedule evaluator, executor |
 | `config/reflections.yaml` | Declarative registry symlink → `~/Desktop/Valor/reflections.yaml` |
 | `reflections/__init__.py` | Package: all callables return `{"status", "findings", "summary"}` |
-| `reflections/utils.py` | Shared helpers: `load_local_projects()`, `is_ignored()`, `run_llm_reflection()`, `extract_structured_errors()` |
-| `reflections/maintenance.py` | 6 maintenance callables |
-| `reflections/auditing.py` | 5 auditing callables + PR review audit helpers (`run_log_review` retired in #1292) |
-| `reflections/task_management.py` | 2 task management callables |
+| `reflections/utilities.py` | Shared helpers: `load_local_projects()`, `is_ignored()`, `run_llm_reflection()`, `extract_structured_errors()`, `CORRECTION_PATTERNS` |
+| `reflections/agents/` | 5 agent/session health reflections (one file each): `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` |
+| `reflections/housekeeping/` | 4 housekeeping reflections (one file each): `redis_ttl_cleanup.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` |
+| `reflections/audits/` | 7 audit reflections (one file each): `tech_debt_scan.py`, `redis_quality_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`, `task_backlog_check.py`, `principal_staleness.py` |
+| `reflections/memory/` | 3 memory reflections (one file each): `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py` |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
-| `reflections/behavioral_learning.py` | Episode cycle-close → pattern crystallization pipeline |
 | `reflections/pm_briefings/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
-| `reflections/memory_management.py` | 3 memory management callables |
+| `reflections/maintenance.py` | Re-export shim (registry compat): re-exports housekeeping + audit callables under original `run_*` names |
+| `reflections/auditing.py` | Re-export shim (registry compat): re-exports audit callables under original `run_*` names |
+| `reflections/task_management.py` | Re-export shim (registry compat): re-exports task audit callables under original `run_*` names |
+| `reflections/memory_management.py` | Re-export shim (registry compat): re-exports memory callables under original `run_*` names |
 | `models/reflection.py` | Reflection state model (per-reflection Redis tracking) |
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
 | `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |

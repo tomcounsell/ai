@@ -233,16 +233,16 @@ content...
 .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 10px; }
 .cols-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 10px; }
 
-/* Callout — neutral/info (blue left accent) */
+/* Callout — neutral/info. Full border, NOT a left accent bar (see THEME_DETECTION "Avoid AI-Slop Tells") */
 .stat {
-  background: #eef2ff; border-left: 4px solid #2563a8;
-  padding: 12px 20px; margin: 10px 0;
+  background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 6px;
+  padding: 14px 20px; margin: 10px 0;
   font-size: 0.96em; font-weight: 600; color: #1a3a6b; line-height: 1.5;
 }
 
-/* Warning / risk callout (amber left accent) */
+/* Warning / risk callout. Full border, not a left accent bar. */
 .warn {
-  background: #fef3c7; border-left: 4px solid #f59e0b;
+  background: #fef3c7; border: 1px solid #fcd97a; border-radius: 6px;
   padding: 10px 18px; margin: 10px 0;
   font-size: 0.88em; color: #92400e; line-height: 1.5;
 }
@@ -256,6 +256,8 @@ content...
 ```
 
 Use `.cols` / `.cols-3` to break a slide that would otherwise be a dense list into scannable side-by-side sections. Use `.stat` for governing metrics and key facts. Use `.warn` for risks and blockers. Use `.path-card` inside `.cols-3` for A/B/C decision options.
+
+**Callouts use a full border, never a single colored left-edge stripe** (`border-left: 4px solid …` with one rounded side). That stripe is the top "AI slop" tell — see the "Avoid AI-Slop Tells" section in `THEME_DETECTION.md`.
 
 ### Step 8: Self-review pass (before export)
 
@@ -311,7 +313,49 @@ Tell the user:
 2. Slide count and estimated talk time (~30 seconds per slide)
 3. How to edit (it's just markdown) and re-export
 
+## Narrated deck video (`--video` mode)
+
+`/do-presentation <topic> --video` produces a **narrated MP4** of the deck: each slide held on screen for the length of its spoken narration, voiceover muxed in, exported as a single `deck.mp4` next to the deck.
+
+**Pipeline:**
+
+1. **Author the deck with per-slide narration blocks** (schema below) — the Marp markdown is written exactly as in the static flow, plus one narration comment per slide carrying the speaker text.
+2. **Marp exports one PNG per slide**: `npx --yes @marp-team/marp-cli "<source>.md" --images png --allow-local-files` (the same Marp invocation as static export, with `--images png`). Filenames are zero-padded sequence suffixes (`deck.001.png`, ...) so document order is preserved.
+3. **`valor-tts` synthesizes one clip per narrated slide**: each slide's narration text becomes one OGG/Opus clip. Each clip's measured `duration` is that slide's on-screen hold time.
+4. **ffmpeg muxes** the PNGs and audio clips into `deck.mp4` (concat demuxer, per-image duration list, `-c:v libx264 -pix_fmt yuv420p`, audio re-encoded to AAC).
+
+**Implementation surface:** the `valor-deck-video` CLI owns the full pipeline (Marp PNG export → per-slide synthesis → ffmpeg mux). The skill orchestrates by invoking it:
+
+```bash
+valor-deck-video "<source>.md"
+```
+
+The skill does not re-implement the compositing; it authors the deck (with narration blocks) and shells out to `valor-deck-video`.
+
+### Narration schema
+
+Each slide carries its narration in a per-slide HTML comment block in the Marp markdown:
+
+```markdown
+<!-- narration: Revenue grew 25% this quarter, driven by the new onboarding flow. -->
+```
+
+- **One `<!-- narration: ... -->` block per slide.** Place it anywhere within that slide's content (between the `---` slide separators).
+- **Marp ignores HTML comments in rendered output**, so adding narration blocks leaves static PDF/HTML/PPTX export completely unaffected — the same source produces both the static deck and the video.
+- **Empty or missing narration** → the slide holds for a configurable default duration (`DECK_VIDEO_DEFAULT_HOLD_SECS`, provisional `4.0s`, env-overridable) with silence, rather than being dropped. A slide is never skipped just because it has no narration.
+
+## Narration / voiceover
+
+There are two narration paths, and they use different surfaces:
+
+- **Manual narration (standalone voiceover track):** if the user wants a spoken voiceover or narration track as its own audio file, **defer to `/do-voice-recording`** — it's the canonical text-to-speech step (portable `valor-tts` resolution, voice catalog, prosody rules). Feed it the per-slide speaker notes. Do not hand-roll synthesis for this path.
+- **Automated `--video` pipeline (approved exception):** the `valor-deck-video` CLI is an **approved direct consumer of `valor-tts`**. It calls `valor-tts` per slide because it needs the structured per-clip `duration` that `valor-tts` returns and the conversational `/do-voice-recording` skill does not. This is a deliberate carve-out from the "defer to `/do-voice-recording`" rule, which continues to govern the manual narration path above.
+
+Both paths **reuse the existing `valor-tts` surface** — there is no second TTS tool. ("Single TTS surface" here means one tool, `valor-tts`; `valor-tts` itself already has a Kokoro-local primary with an OpenAI tts-1 cloud fallback, so a single surface does not mean a single backend.)
+
 ## Version history
+- v1.4.0 (2026-06-22): Added `--video` mode — narrated MP4 export via the new `valor-deck-video` CLI (deck + per-slide `<!-- narration: ... -->` blocks → Marp PNG-per-slide → `valor-tts` per-clip synthesis → ffmpeg mux into `deck.mp4`). Documented the narration schema and amended the "Narration / voiceover" section to carve out `valor-deck-video` as an approved direct `valor-tts` consumer for the automated pipeline, while the manual narration path still defers to `/do-voice-recording`. Empty narration holds a slide for `DECK_VIDEO_DEFAULT_HOLD_SECS` (provisional 4.0s) with silence.
+- v1.3.0 (2026-05-31): Anti-slop hardening + audience-first title slide. Removed `border-left` accent-bar styling from the `.stat`/`.warn`/`blockquote` templates (THEME_DETECTION + SKILL) — the single biggest "AI-generated" tell — and added the "Avoid AI-Slop Tells" section to THEME_DETECTION.md. Added "The title slide: audience first" convention to CONTENT_GUIDE.md (client attribution on top, real name+photo at the bottom, deck title in the middle, via a full-height space-between flex column). Driven by a real client deck session.
 - v1.2.0 (2026-05-07): Added client-facing Why→How→What structure guidance (Step 3), self-review critique pass via subagent (Step 8), utility CSS classes in theme defaults (Step 7), "Client-Facing Decks" section in CONTENT_GUIDE.md. Driven by real session: first-pass deck opened with V0.5 scope before establishing client context; dense slides caught only after user review — both preventable with the review pass.
 - v1.1.0 (2026-04-13): Added Step 5 (brand logo collection via Simple Icons + Google Favicons), renumbered subsequent steps
 - v1.0.0 (2026-04-10): Initial — research, structure, theme detection, Marp export

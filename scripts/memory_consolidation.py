@@ -337,7 +337,7 @@ def _flag_contradiction(action: dict, record_map: dict) -> None:
             f"Memory contradiction detected:\nIDs: {ids}\nReason: {rationale}\nMemories: {contents}"
         )
         subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", telegram_msg],
+            ["valor-telegram", "send", "--chat", "Eng: Valor", telegram_msg],
             check=True,
             capture_output=True,
             timeout=10,

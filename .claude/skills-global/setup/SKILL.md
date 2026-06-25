@@ -137,7 +137,24 @@ rm -f .env
 ln -s "$VALOR_VAULT_DIR/.env" .env
 ```
 
-After Step 0 completes, `$VALOR_VAULT_DIR` is exported for this shell, persisted in the vault `.env`, and the repo `.env` symlink points at the chosen location. All later steps use `${VALOR_VAULT_DIR}` instead of `~/Desktop/Valor`.
+After Step 0 completes, `$VALOR_VAULT_DIR` is exported for this shell, persisted in the vault `.env`, and the repo `.env` symlink points at the chosen location. All later steps use `${VALOR_VAULT_DIR}` instead of a hardcoded vault path.
+
+### 0.6 Bootstrap cross-machine shell env loader
+
+Cross-machine secrets and shell config live in the iCloud-synced vault (legacy default `~/Desktop/Valor/`). `~/.zshenv` itself does NOT sync (it's in `$HOME`), so each new machine needs a one-line bootstrap that sources the vault loader. The update script self-heals this on every run via `scripts/update/zshenv_sync.py`, but on a fresh machine the easiest path is to run that module directly before the first `/update`:
+
+```bash
+cd ~/src/ai
+.venv/bin/python -c "from scripts.update.zshenv_sync import sync_zshenv; r = sync_zshenv(); print(r)"
+```
+
+That:
+- Seeds the vault's `zshenv.sh` with a default loader if missing (only the very first machine ever does this — subsequent machines inherit the file via iCloud).
+- Appends a `[ -f <vault>/zshenv.sh ] && source ...` guard to `~/.zshenv` if missing.
+
+After it runs, open a fresh shell and confirm a shared secret is loaded (e.g., `echo "${SENTRY_PERSONAL_TOKEN:+set}"` — should print `set` if the vault `.env` defines it). If the vault hasn't synced yet, the guard line is still safe (it's `[ -f ]`-gated) and will activate as soon as iCloud lands the file.
+
+If you need to add new cross-machine shell config later (PATH tweaks shared across all Valor machines, shell functions, etc.), edit the vault's `zshenv.sh` directly — it syncs everywhere automatically. Keep host-specific config in the local `~/.zshenv` or `~/.zshrc`.
 
 ## Step 1: Install uv Package Manager
 
@@ -308,7 +325,7 @@ sentry-cli login
 
 # Or set token directly in ${VALOR_VAULT_DIR}/.env
 # SENTRY_PERSONAL_TOKEN=sntrys_...
-# The SDK automatically injects this as SENTRY_AUTH_TOKEN for PM sessions
+# The SDK automatically injects this as SENTRY_AUTH_TOKEN for Eng (and Teammate) sessions
 ```
 
 The token is stored in `${VALOR_VAULT_DIR}/.env` as `SENTRY_PERSONAL_TOKEN` and auto-injected into agent sessions by `sdk_client.py`.
@@ -332,7 +349,7 @@ Edit `${VALOR_VAULT_DIR}/projects.json` for this machine's projects.
 2. **Every project MUST have `machine`** -- the exact `ComputerName` of the single machine that owns it (`scutil --get ComputerName`). This is the source of truth for ownership; whitelists, groups, and email patterns all inherit from it. Two projects on different machines must never share a Telegram group, email contact, or DM whitelist contact id — see [Single-Machine Ownership](../../../docs/features/single-machine-ownership.md).
 3. **Always include the full `defaults` section** -- copy it from the example if missing
 4. **DO NOT set `respond_to_all: false`** -- the default is `true`, which is correct. Omit the field entirely from project-level telegram config.
-5. **Keep project telegram config minimal** -- usually just `"groups": {"Dev: ProjectName": {"persona": "developer"}}` is sufficient
+5. **Keep project telegram config minimal** -- usually just `"groups": {"Eng: ProjectName": {"persona": "engineer"}}` is sufficient
 6. **Verify paths exist on disk** -- run `ls` on each `working_directory` to confirm
 
 **No per-contact ownership edits.** When adding this machine, you do not edit `dms.whitelist`, individual `telegram.groups` entries, or `email.contacts/domains` to "exclude" other machines. Just set each project's `machine` field once. The validator (`bridge/config_validation.py`) and the update gate (`scripts/update/run.py` Step 4.6) will enforce that no contact is owned by two machines.
@@ -347,7 +364,7 @@ Example minimal project entry:
       "working_directory": "~/src/myproject",
       "telegram": {
         "groups": {
-          "Dev: My Project": {"persona": "developer"}
+          "Eng: My Project": {"persona": "engineer"}
         }
       },
       "github": {
@@ -379,18 +396,18 @@ Example minimal project entry:
 
 ### Persona overlays
 
-Persona overlay files live in `${VALOR_VAULT_DIR}/personas/` (default vault: `~/Desktop/Valor/personas/`). The loader (`agent.sdk_client.load_persona_prompt`) prefers the private overlay when present and falls back to the in-repo template (`config/personas/<persona>.md`) otherwise. Seeding the private overlays from the in-repo defaults at setup time gives the agent identical behavior on every fresh machine without waiting for cross-machine sync.
+Persona overlay files live in `${VALOR_VAULT_DIR}/personas/`. The loader (`agent.sdk_client.load_persona_prompt`) prefers the private overlay when present and falls back to the in-repo template (`config/personas/<persona>.md`) otherwise. Seeding the private overlays from the in-repo defaults at setup time gives the agent identical behavior on every fresh machine without waiting for cross-machine sync.
 
-The PM and developer personas have in-repo templates that are version-controlled and PR-reviewable:
-- `config/personas/project-manager.md` — PM pipeline gate rules (CRITIQUE mandatory, REVIEW mandatory, multi-issue fan-out)
-- `config/personas/developer.md` — Developer SDLC-owner playbook (Mode 3 parallel orchestrator, `merge_authorized` bypass)
+The engineer and customer-service personas have in-repo templates that are version-controlled and PR-reviewable:
+- `config/personas/engineer.md` — Engineer SDLC-owner playbook (CRITIQUE/REVIEW gates, Mode 3 parallel orchestrator, `merge_authorized` bypass)
+- `config/personas/customer-service.md` — Customer-service overlay for `customer-service`-persona sessions
 
 Seed them into the vault if not already present (do NOT overwrite — existing overlays may carry per-machine customizations):
 
 ```bash
 mkdir -p "${VALOR_VAULT_DIR}/personas"
 
-for persona in project-manager developer; do
+for persona in engineer customer-service; do
   src="config/personas/${persona}.md"
   dst="${VALOR_VAULT_DIR}/personas/${persona}.md"
   if [ ! -f "$dst" ]; then
@@ -402,16 +419,16 @@ for persona in project-manager developer; do
 done
 ```
 
-The `teammate.md` overlay is still operator-customized (not seeded by setup); if missing, the in-repo `config/personas/teammate.md` would be the fallback but that file is intentionally gitignored, so a teammate-only machine must author its own overlay.
+The `teammate` persona has no in-repo template — there is no `config/personas/teammate.md`. A teammate overlay is purely operator-authored under `${VALOR_VAULT_DIR}/personas/teammate.md`; if absent, the loader has no fallback for that persona, so a teammate-using machine must author its own overlay.
 
 If the machine is already running and you want to inspect drift between the in-repo template and the private overlay:
 
 ```bash
-diff config/personas/project-manager.md "${VALOR_VAULT_DIR}/personas/project-manager.md"
-diff config/personas/developer.md "${VALOR_VAULT_DIR}/personas/developer.md"
+diff config/personas/engineer.md "${VALOR_VAULT_DIR}/personas/engineer.md"
+diff config/personas/customer-service.md "${VALOR_VAULT_DIR}/personas/customer-service.md"
 ```
 
-The persona loader emits a WARNING log line if a known load-bearing substring is missing from the private overlay (e.g., `Mode 3` for the developer overlay, `CRITIQUE` for the PM overlay). Watch `logs/bridge.log` after the first session for these warnings — they signal that the private overlay has rolled back and should be re-synced.
+The persona loader emits a WARNING log line if a known load-bearing substring is missing from the private engineer overlay (e.g., `CRITIQUE` for the pipeline gate, `Mode 3` for the parallel orchestrator, `merge_authorized` for the stale-baseline bypass). The `/update` script also runs an engineer-overlay drift check (`scripts/update/persona_drift.py`, Step 4.10). Watch `logs/bridge.log` after the first session for these warnings — they signal that the private overlay has rolled back and should be re-synced.
 
 ### Cross-machine reuse
 
@@ -546,6 +563,51 @@ After install, the user must grant **two** permissions in System Settings:
 These permissions cannot be granted programmatically.
 
 On **no**: skip everything. Don't write the sentinel; `/update` will leave bcu alone.
+
+## Step 8.6: Generation Model Selection (RAM-based)
+
+Free-text generation (memory titles, the test AI judge, knowledge-doc
+summarization) runs on a larger `gemma4:31b` model. Classification (bridge
+routing, memory-audit, email triage) runs on the resident `granite4.1:3b` and
+needs no choice here. Pick the generation variant from this machine's RAM:
+
+- **RAM ≥ `MIN_LOCAL_GEN_RAM_GB` (48 GB)** → local Apple-Silicon MLX variant
+  `gemma4:31b-mlx` (the ~18-20 GB MLX 32B coexists with granite + nomic-embed + OS).
+- **RAM < 48 GB** → Ollama Cloud variant `gemma4:31b-cloud` (a lightweight hosted
+  pointer that fits any machine, including a 16 GB host).
+
+Write the choice to `~/.zshenv` — **machine-local**, NOT the vault
+`${VALOR_VAULT_DIR}/.env` (an iCloud-synced vault `.env` would propagate one
+machine's variant to every other machine and break per-machine semantics). The
+write is grep-before-append idempotent:
+
+```bash
+RAM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
+if [ "$RAM_GB" -ge 48 ]; then
+  GEN_MODEL="gemma4:31b-mlx"
+else
+  GEN_MODEL="gemma4:31b-cloud"
+fi
+LINE="export MODELS__OLLAMA_GENERATION_MODEL=$GEN_MODEL"
+grep -qxF "$LINE" ~/.zshenv 2>/dev/null || echo "$LINE" >> ~/.zshenv
+echo "Generation model: $GEN_MODEL (RAM=${RAM_GB}GB)"
+```
+
+Then ensure the chosen tag (the RAM guard inside `ensure_generation_model()`
+re-checks and degrades a misconfigured mlx tag to a soft warning — it never pulls
+18 GB on a small host):
+
+```bash
+python -c "from config.models import ensure_generation_model; ok,d=ensure_generation_model('$GEN_MODEL'); print(('OK' if ok else 'WARN'), d)"
+```
+
+**Cloud-signin warning:** when `GEN_MODEL` ends in `:cloud`, the machine must be
+signed in to Ollama Cloud (`ollama list` shows a `:cloud` entry). If not, warn the
+user to run `ollama signin` — generation is fail-soft, so this does not block setup.
+
+The launchd worker does not read the shell, so `scripts/install_worker.sh` parses
+`MODELS__*` lines from `~/.zshenv` and injects them into the plist
+`EnvironmentVariables` block — no extra action needed here.
 
 ## Step 9: Start the Bridge
 

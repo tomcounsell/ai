@@ -1,39 +1,43 @@
 #!/usr/bin/env python3
 """Polymorphic send_message CLI — medium-agnostic message delivery.
 
-Introduced by the message-drafter refactor (plan #1035 Part E). Replaces the
-string-menu review gate with a prepopulated tool_call that the agent invokes
-to deliver its response.
+Routes the agent's tool-call deliveries through the SAME canonical handler
+(``agent.output_handler.TelegramRelayOutputHandler.send``) that the silent
+worker path uses. The handler hoists the drafter to a single call site above
+its transport branch, so both telegram and email writes inherit the full
+``drafter → redundancy filter → read-the-room → narration fallback → outbox``
+pipeline. The tool is a thin wrapper: it does the linkify pass, runs the
+promise gate, looks up the AgentSession, and delegates everything else.
 
-The tool routes by ``session.extra_context.transport``:
-- telegram (default): writes a payload to the Redis outbox (same shape as
-  tools/send_telegram.py). The bridge relay picks it up and delivers.
-- email: writes an ``email:outbox:{session_id}`` payload handled by the
-  EmailOutputHandler (future extension point; today the handler sends
-  directly from the worker, so email delivery simply calls the handler).
+This closes the long-standing gap where ``tools/send_message.py`` wrote raw
+payloads straight to the Redis outbox and bypassed every safety net the
+worker path enjoys (see ``docs/features/agent-message-delivery.md`` and
+issue #1369).
 
 Usage:
     python tools/send_message.py "your draft text"
     python tools/send_message.py "caption" --file path/to/attachment.png
-    python tools/send_message.py --react excited
     python tools/send_message.py --stdin    # read text from stdin
 
 Environment variables (injected by sdk_client.py):
-    VALOR_SESSION_ID      - Required; session ID for routing
-    TELEGRAM_CHAT_ID      - Set for Telegram-triggered sessions
-    TELEGRAM_REPLY_TO     - Set for Telegram replies
-    EMAIL_REPLY_TO        - Set for email-triggered sessions (sender address)
-    VALOR_TRANSPORT       - Explicit override; otherwise inferred from chat_id/email
-
-This tool is polymorphic — one verb, one implementation, transport chosen at
-call time. Future Slack/SMS support adds a branch here without any new tool
-for the agent to learn.
+    VALOR_SESSION_ID                Required; session ID for routing
+    TELEGRAM_CHAT_ID                Set for Telegram-triggered sessions
+    TELEGRAM_REPLY_TO               Set for Telegram replies
+    EMAIL_REPLY_TO                  Set for email-triggered sessions (sender address)
+    VALOR_TRANSPORT                 Explicit transport override (``telegram`` or
+                                    ``email``, case-insensitive). Otherwise inferred
+                                    from chat_id/email vars.
+    ALLOW_LEGACY_RPUSH_FALLBACK     Diagnostic only — when set to ``1``, a missing
+                                    AgentSession row falls back to the legacy raw
+                                    rpush path. Default unset → fail closed.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -41,12 +45,15 @@ import time
 TELEGRAM_MAX_LENGTH = 4096
 TELEGRAM_MAX_ALBUM_SIZE = 10
 
+logger = logging.getLogger(__name__)
+
 
 def _resolve_transport() -> str:
     """Pick the transport based on env vars.
 
     Priority:
-    1. VALOR_TRANSPORT explicit override
+    1. VALOR_TRANSPORT explicit override (``telegram`` or ``email``,
+       case-insensitive)
     2. EMAIL_REPLY_TO set -> email
     3. TELEGRAM_CHAT_ID set -> telegram
     4. Default: telegram
@@ -68,8 +75,102 @@ def _get_redis():
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
+def _lookup_session(session_id: str):
+    """Reconstitute the AgentSession from Popoto.
+
+    Returns the session row, or ``None`` when the row is missing (caller
+    decides between fail-closed exit and the env-gated legacy rpush path).
+    Re-raises non-row-not-found Popoto/Redis errors so the harness sees them.
+    """
+    from models.agent_session import AgentSession
+
+    return AgentSession.query.filter(session_id=session_id).first()
+
+
+def _legacy_telegram_rpush(
+    text: str,
+    file_paths: list[str] | None,
+    *,
+    chat_id: str,
+    reply_to: str | None,
+    session_id: str,
+) -> None:
+    """Last-resort raw rpush to ``telegram:outbox:{session_id}``.
+
+    Only reachable when ``ALLOW_LEGACY_RPUSH_FALLBACK=1`` is set AND the
+    AgentSession lookup returned ``None``. Logs a warning so the bypass is
+    not silent.
+    """
+    logger.warning(
+        "ALLOW_LEGACY_RPUSH_FALLBACK active; writing raw payload to "
+        "telegram:outbox:%s without drafter/RTR/redundancy filtering",
+        session_id,
+    )
+    payload = {
+        "chat_id": chat_id,
+        "reply_to": int(reply_to) if reply_to else None,
+        "text": text,
+        "session_id": session_id,
+        "timestamp": time.time(),
+    }
+    if file_paths:
+        payload["file_paths"] = file_paths
+    queue_key = f"telegram:outbox:{session_id}"
+    try:
+        r = _get_redis()
+        r.rpush(queue_key, json.dumps(payload))
+        r.expire(queue_key, 3600)
+    except Exception as e:
+        print(f"Error: Redis write failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    _files_suffix = f", {len(file_paths)} files" if file_paths else ""
+    print(f"Queued ({len(text)} chars{_files_suffix}) [legacy]")
+
+
+def _legacy_email_rpush(text: str, *, recipient: str, session_id: str) -> None:
+    """Last-resort raw rpush to ``email:outbox:{session_id}``.
+
+    Counterpart to ``_legacy_telegram_rpush`` for the email transport. Same
+    semantics: only reachable under ``ALLOW_LEGACY_RPUSH_FALLBACK=1`` with a
+    missing AgentSession row.
+    """
+    logger.warning(
+        "ALLOW_LEGACY_RPUSH_FALLBACK active; writing raw email payload to "
+        "email:outbox:%s without drafter filtering",
+        session_id,
+    )
+    in_reply_to = os.environ.get("EMAIL_IN_REPLY_TO") or None
+    subject = os.environ.get("EMAIL_SUBJECT") or "(no subject)"
+    payload = {
+        "session_id": session_id,
+        "to": recipient,
+        "subject": subject,
+        "body": text,
+        "attachments": [],
+        "in_reply_to": in_reply_to,
+        "references": in_reply_to,
+        "from_addr": os.environ.get("SMTP_USER", ""),
+        "timestamp": time.time(),
+    }
+    queue_key = f"email:outbox:{session_id}"
+    try:
+        r = _get_redis()
+        r.rpush(queue_key, json.dumps(payload))
+        r.expire(queue_key, 3600)
+    except Exception as e:
+        print(f"Error: Redis write failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Queued email ({len(text)} chars) [legacy]")
+
+
 def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
-    """Route to the Redis outbox for Telegram delivery (same shape as send_telegram.py)."""
+    """Route through ``TelegramRelayOutputHandler.send`` for Telegram delivery.
+
+    The handler runs the canonical pipeline (drafter → redundancy filter →
+    RTR → narration fallback → outbox rpush). This tool retains responsibility
+    for the upstream concerns the handler does not own: env var validation,
+    file existence checks, linkify, and the promise gate.
+    """
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     reply_to = os.environ.get("TELEGRAM_REPLY_TO")
     session_id = os.environ.get("VALOR_SESSION_ID")
@@ -117,27 +218,58 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
             pass
 
     # Promise gate — see docs/features/promise-gate.md (polymorphic transport).
+    # Runs BEFORE the handler so we short-circuit before the drafter Haiku call
+    # and before the Popoto session lookup when the agent owes a promise.
     from bridge.promise_gate import cli_check_or_exit
 
     cli_check_or_exit(text, transport="polymorphic", session_id=session_id)
 
-    payload = {
-        "chat_id": chat_id,
-        "reply_to": int(reply_to) if reply_to else None,
-        "text": text,
-        "session_id": session_id,
-        "timestamp": time.time(),
-    }
-    if file_paths:
-        payload["file_paths"] = file_paths
-
-    queue_key = f"telegram:outbox:{session_id}"
+    # Reconstitute the AgentSession so the handler can read transport,
+    # extra_context, and recent_sent_drafts. Fail-closed default; the legacy
+    # raw-rpush path is opt-in via env flag for short-lived diagnostic use.
     try:
-        r = _get_redis()
-        r.rpush(queue_key, json.dumps(payload))
-        r.expire(queue_key, 3600)
+        session = _lookup_session(session_id)
     except Exception as e:
-        print(f"Error: Redis write failed: {e}", file=sys.stderr)
+        print(
+            f"Error: AgentSession lookup failed (Popoto/Redis error): {e}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if session is None:
+        if os.environ.get("ALLOW_LEGACY_RPUSH_FALLBACK") == "1":
+            _legacy_telegram_rpush(
+                text,
+                file_paths,
+                chat_id=chat_id,
+                reply_to=reply_to,
+                session_id=session_id,
+            )
+            return
+        print(
+            f"Error: AgentSession {session_id!r} not found; refusing to bypass "
+            "the canonical handler. Set ALLOW_LEGACY_RPUSH_FALLBACK=1 for "
+            "diagnostic raw rpush.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    from agent.output_handler import TelegramRelayOutputHandler
+
+    handler = TelegramRelayOutputHandler()
+    reply_to_int = int(reply_to) if reply_to else 0
+    try:
+        asyncio.run(
+            handler.send(
+                chat_id,
+                text,
+                reply_to_int,
+                session=session,
+                file_paths=file_paths,
+            )
+        )
+    except Exception as e:
+        print(f"Error: handler.send failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     print(
@@ -145,20 +277,14 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
     )
 
 
-def _send_via_email(text: str) -> None:
-    """Route to the email outbox for SMTP delivery via ``bridge/email_relay.py``.
+def _send_via_email(text: str, file_paths: list[str] | None = None) -> None:
+    """Route through the SAME ``TelegramRelayOutputHandler.send`` for email.
 
-    Writes the unified outbox payload shape (see ``bridge/email_relay.py``
-    docstring) consumed by the relay. The relay accepts legacy ``text`` as a
-    synonym for ``body`` for one transitional release, but this writer always
-    emits ``body`` so the transitional path is unused.
-
-    Required env:
-        VALOR_SESSION_ID: session ID that originated this send.
-        EMAIL_REPLY_TO:   recipient address (sender of the original inbound).
-        EMAIL_SUBJECT:    optional; defaults to "(no subject)".
-        EMAIL_IN_REPLY_TO: optional RFC-2822 Message-ID for threading.
-        SMTP_USER:        optional from-address override (relay defaults to SMTP_USER).
+    Despite the type name, this method is the single canonical queue-side
+    entrypoint for both transports. The handler's internal email branch
+    builds the email-shaped outbox payload (reply-all ``to`` list, subject,
+    threading headers). The CLI deliberately does NOT import the synchronous
+    SMTP handler — that is the wrong layer for a queue-only writer.
     """
     session_id = os.environ.get("VALOR_SESSION_ID")
     reply_to_addr = os.environ.get("EMAIL_REPLY_TO")
@@ -169,33 +295,73 @@ def _send_via_email(text: str) -> None:
         print("Error: EMAIL_REPLY_TO not set.", file=sys.stderr)
         sys.exit(1)
 
-    in_reply_to = os.environ.get("EMAIL_IN_REPLY_TO") or None
-    subject = os.environ.get("EMAIL_SUBJECT") or "(no subject)"
-
-    # Promise gate — see docs/features/promise-gate.md
+    # Promise gate runs first — short-circuits before any handler/Popoto cost.
     from bridge.promise_gate import cli_check_or_exit
 
     cli_check_or_exit(text, transport="email", session_id=session_id)
 
-    payload = {
-        "session_id": session_id,
-        "to": reply_to_addr,
-        "subject": subject,
-        "body": text,
-        "attachments": [],
-        "in_reply_to": in_reply_to,
-        "references": in_reply_to,
-        "from_addr": os.environ.get("SMTP_USER", ""),
-        "timestamp": time.time(),
-    }
-    queue_key = f"email:outbox:{session_id}"
     try:
-        r = _get_redis()
-        r.rpush(queue_key, json.dumps(payload))
-        r.expire(queue_key, 3600)
+        session = _lookup_session(session_id)
     except Exception as e:
-        print(f"Error: Redis write failed: {e}", file=sys.stderr)
+        print(
+            f"Error: AgentSession lookup failed (Popoto/Redis error): {e}",
+            file=sys.stderr,
+        )
         sys.exit(1)
+
+    if session is None:
+        if os.environ.get("ALLOW_LEGACY_RPUSH_FALLBACK") == "1":
+            _legacy_email_rpush(text, recipient=reply_to_addr, session_id=session_id)
+            return
+        print(
+            f"Error: AgentSession {session_id!r} not found; refusing to bypass "
+            "the canonical handler. Set ALLOW_LEGACY_RPUSH_FALLBACK=1 for "
+            "diagnostic raw rpush.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Defensive: if the bridge spawned this session before EMAIL_SUBJECT /
+    # EMAIL_IN_REPLY_TO were canonicalised onto extra_context, stamp them now
+    # so the handler's email branch can read them uniformly.
+    try:
+        extra = getattr(session, "extra_context", None)
+        if isinstance(extra, dict):
+            dirty = False
+            if "email_subject" not in extra and os.environ.get("EMAIL_SUBJECT"):
+                extra["email_subject"] = os.environ["EMAIL_SUBJECT"]
+                dirty = True
+            if "email_message_id" not in extra and os.environ.get("EMAIL_IN_REPLY_TO"):
+                extra["email_message_id"] = os.environ["EMAIL_IN_REPLY_TO"]
+                dirty = True
+            if dirty:
+                session.extra_context = extra
+                try:
+                    session.save(update_fields=["extra_context"])
+                except Exception:
+                    # Non-fatal: stamping is a defensive backfill, not a
+                    # prerequisite for delivery.
+                    pass
+    except Exception:
+        pass
+
+    from agent.output_handler import TelegramRelayOutputHandler
+
+    handler = TelegramRelayOutputHandler()
+    try:
+        asyncio.run(
+            handler.send(
+                reply_to_addr,
+                text,
+                0,
+                session=session,
+                file_paths=file_paths,
+            )
+        )
+    except Exception as e:
+        print(f"Error: handler.send failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
     print(f"Queued email ({len(text)} chars)")
 
 
@@ -205,12 +371,7 @@ def send_message(text: str, file_paths: list[str] | None = None) -> None:
     if transport == "telegram":
         _send_via_telegram(text, file_paths)
     elif transport == "email":
-        if file_paths:
-            print(
-                "Warning: --file ignored for email transport (not supported)",
-                file=sys.stderr,
-            )
-        _send_via_email(text)
+        _send_via_email(text, file_paths=file_paths)
     else:
         print(f"Error: unsupported transport '{transport}'", file=sys.stderr)
         sys.exit(1)

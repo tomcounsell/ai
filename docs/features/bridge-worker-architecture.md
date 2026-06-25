@@ -78,7 +78,7 @@ Defined in `agent/output_handler.py`. Implements the `OutputHandler` protocol.
 | Redis key (telegram) | `telegram:outbox:{session_id}` |
 | Redis key (email) | `email:outbox:{session_id}` (when `extra_context.transport == "email"`) |
 | Telegram payload | `{"chat_id", "reply_to", "text", "session_id", "timestamp"}` -- same as `tools/send_telegram.py` |
-| Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- matches `tools/send_message.py::_send_via_email` and the `email_relay.py` contract (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_from` from `session.extra_context` to populate `subject`, `in_reply_to`, and `to`. |
+| Email payload | `{"session_id", "to", "subject", "body", "in_reply_to", "references", "from_addr", "attachments", "timestamp"}` -- the unified shape consumed by `bridge/email_relay.py` (see [Email Bridge](email-bridge.md) "Send path"). The handler reads `email_subject`, `email_message_id`, `email_to_addrs`, `email_cc_addrs` from `session.extra_context` to populate `subject`, `in_reply_to`, and the reply-all `to` list. `tools/send_message.py::_send_via_email` delegates to this handler rather than emitting its own payload (issue #1369). |
 | TTL | 3600 seconds (1 hour) |
 | Redis operation | `RPUSH` (append to list) + `EXPIRE` |
 | Error handling | Caught and logged; never propagates to caller |
@@ -110,6 +110,11 @@ When a project does have an explicit `EmailOutputHandler` registered (via `regis
 6. Run `ReflectionScheduler` for background maintenance tasks
 7. Run `KnowledgeWatcher` for work-vault file change monitoring
 8. Run message catchup scan and reconciler on startup
+9. Write bridge liveness signals to Redis for the external watchdog (see [Bridge Self-Healing](bridge-self-healing.md#3a-update-loop-wedged-detector-issue-1712)):
+   - `bridge:last_update_received` — written by the `NewMessage` handler before dedup; staleness while `bridge:last_probe_ok` is fresh indicates the Telethon update loop has wedged
+   - `bridge:last_probe_ok` — written by the reconciler after each successful `get_dialogs()` call; distinguishes a wedged update loop from a full TCP/API disconnect
+
+The mechanical catchup (`bridge/catchup.py`) and reconciler (`bridge/reconciler.py`) cover **ingestion gaps** — messages that never got a session enqueued. They cannot recover **response failures** (session enqueued, hung/killed, no reply) because the `DedupRecord` entry already exists. The [Agent-Judgment Catchup](agent-judgment-catchup.md) is the response-failure complement: it reads the actual chat thread (including Valor's own `out` replies), uses an LLM judge to classify unanswered messages, and enqueues recovery sessions. It runs out-of-band via `valor-catchup` and as the final best-effort step of `/update`.
 
 The bridge does **not**:
 - Call `_ensure_worker()`, `_recover_interrupted_agent_sessions_startup()`, `_agent_session_health_loop()`, `_session_notify_listener()`, `_cleanup_orphaned_claude_processes()`, `_reap_orphan_session_processes()`, or `register_worker_pid()`
@@ -124,7 +129,7 @@ The worker's startup sequence is deterministic:
 | Step | Function | Purpose |
 |------|----------|---------|
 | 1 | `AgentSession.rebuild_indexes()` | Repair stale/corrupt Redis index entries |
-| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. |
+| 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. Also prunes JSONL telemetry files under `logs/session_telemetry/` older than 14 days (see [Session Telemetry](session-telemetry.md)). |
 | 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
 | 3.5 | `register_worker_pid()` | Write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper's skip-set excludes this worker (issue #1271 self-suicide guard) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Backward-compat shim — delegates to `_reap_orphan_session_processes()`. The hourly `agent-session-cleanup` reflection now covers the same OS-table scan, so startup is no longer the only call site (issue #1271). |
@@ -142,6 +147,17 @@ Telegram media (photos, voice, audio, documents) requires both Telethon RPC (dow
 - **Worker** reads `TelegramMessage.media_local_path` from the persisted record (no Telethon import in `worker/`) and calls `bridge.media.process_downloaded_media(path, media_type)` for the AI half. The worker also handles every "skipped" branch (download failed, file unreadable, no record) and emits a single `[enrichment] Summary: media=...` log line per session.
 
 Full contract and field-level reference live in [media-enrichment.md](media-enrichment.md). The sibling reply-chain branch in `bridge/enrichment.py` still requires a Telethon client and is silently skipped in the worker until a follow-up issue lands; that is **not** considered fixed by sdlc-1297.
+
+### Media Intake Resilience (issue #1330)
+
+The sdlc-1297 contract assumes (a) `TelegramMessage.query.get(stored_msg_id)` always returns the record the bridge just created, and (b) `_download_media_with_retry` returns either a path or a populated error string. Both assumptions can fail transiently — a Popoto stale-index condition can return `None` from `query.get`, and the size-aware retry wrapper can return `(None, None)` ("no_path" outcome) when `client.download_media` reports success but the file is missing post-download. Either case left the file orphaned on disk and the agent seeing only the `[media]` placeholder.
+
+Defense in depth lives in two layers:
+
+- **Bridge persist (loud failure)**: After `query.get(stored_msg_id)`, a single bounded re-query covers transient stale-index reads; if both calls return `None`, the bridge logs a `WARNING` with `stored_msg_id`, `chat_id`, `message_id`, `local_path`, and `download_error` and proceeds. Separately, if the download wrapper returned `(_local_path=None, _download_error=None)` while `message.media` is truthy, a second `WARNING` records the no-path-no-error condition. Neither path is silent anymore. The bridge deliberately does **not** call `query.keys(clean=True)` here — index-mutating calls on the hot intake path are too expensive; the worker-side fallback below is the durable safety net.
+- **Worker self-heal**: In `bridge/enrichment.py`, when `has_media=True` AND `media_local_path` is unset AND `media_download_error` is also unset, the worker globs `bridge.media.MEDIA_DIR` for `*_{message_id}.*` (the filename pattern is fully determined by `bridge/media.py::download_media`). On exactly one match it adopts the file with an `INFO` log (`self-heal: recovered orphan media file ...`) and runs AI enrichment as if `media_local_path` had been persisted. Zero matches or multiple matches fall through to the existing "older record?" `WARNING` so ambiguity surfaces rather than silently misroutes.
+
+**Explicit non-goal**: this work does not fix the upstream Popoto stale-index root cause. That is tracked under #617 / #860 — orphan-index hygiene is its own ongoing reflection. sdlc-1330 makes intake resilient to that condition; the root cause is unaffected.
 
 ### Execution Harness Routing
 
@@ -170,35 +186,28 @@ get_response_via_harness(prior_uuid=..., session_id=..., full_context_message=..
     v
 complete_transcript(session_id, status=final_status)
     |   -- synchronous call: calls finalize_session() → _finalize_parent_sync() inline
-    |   -- transitions PM parent: running → waiting_for_children → completed
-    |   -- ORDERING INVARIANT: must complete before _handle_dev_session_completion runs
-    |
-    v
-_handle_dev_session_completion()  [dev sessions only, called AFTER complete_transcript]
-    |-- PipelineStateMachine.classify_outcome()
-    |-- complete_stage() or fail_stage()
-    |-- post_stage_comment() -> GitHub issue
-    |-- steer_session(parent_pm_session)
-    |-- re-check: if PM terminal at re-check → _create_continuation_pm()
-    |   (steer was accepted but PM finalized before it could process the message)
-    |-- Path B fallback: if agent_session=None, uses session.parent_agent_session_id
-    |   to look up parent and create continuation PM (no silent skip)
+    |   -- for a child session, transitions the parent: running →
+    |      waiting_for_children → completed/failed once all children are terminal
+    |   -- telemetry: turn_end/token_usage events tapped in sdk_client.py; status_transition
+    |      event emitted by finalize_session(); JSONL written to logs/session_telemetry/
+    |      (see Session Telemetry)
 ```
 
-**Dev session completion ordering** (fix for issue #987): `complete_transcript()` is called first (synchronously invoking `_finalize_parent_sync()` to transition the PM parent to its terminal status), then `_handle_dev_session_completion()` runs. This ordering ensures the re-check guard inside `_handle_dev_session_completion` reads the PM's post-finalization status correctly. If the PM is already terminal at re-check time, a continuation PM is created immediately. Calling `_handle_dev_session_completion` before `complete_transcript()` causes a race: the steer is accepted, then `_finalize_parent_sync` runs and orphans the steering message (the PM is terminal and will never consume it).
+**Child-to-parent completion**: when a session has a `parent_agent_session_id`, `complete_transcript()` → `finalize_session()` synchronously calls `_finalize_parent_sync()` (in `models/session_lifecycle.py`). That function moves the parent into `waiting_for_children`, then — once every child is terminal — transitions it to `completed` (all children succeeded) or `failed` (any child failed). It is idempotent and a no-op if the parent is already terminal. If the completion-turn runner is in flight for the parent (the `pipeline_complete_pending:{parent_id}` Redis lock is held), `_finalize_parent_sync` defers the success-path transition to that runner so the final summary is delivered exactly once (issue #1058). There is no separate post-completion SDLC handler — eng, teammate, and granite sessions all finalize through this single path.
 
-PM and teammate sessions skip the post-completion SDLC handler. See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
+See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
 
 At runtime, the worker processes sessions via `_worker_loop(worker_key)` until the queue is empty, then waits for new enqueue events.
 
 ### Persona Overlay Resolution (harness `--append-system-prompt`)
 
-`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for each session. The order is:
+> **Granite PTY sessions (all bridge-originated sessions) bypass this path entirely.** As of issue #1692, granite sessions receive their persona via prime commands (`.claude/commands/granite/prime-*-role.md`) run at PTY startup — no `--append-system-prompt` is set. The description below applies only to the `claude -p` headless path (non-bridge sessions).
 
-1. `session_type=PM` → `project-manager` overlay (loaded via `load_pm_system_prompt`)
-2. `transport=email` or `project["email"]["persona"]` set → that persona, with `teammate` as fallback when the requested overlay file is missing
+`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for non-granite sessions. The order is:
+
+1. `transport=email` or `project["email"]["persona"]` set → that persona overlay (e.g. `customer-service`), with `teammate` as fallback when the requested overlay file is missing
+2. `session_type=ENG` → `engineer` overlay (loaded via `load_eng_system_prompt`)
 3. `session_type=TEAMMATE` (Telegram DM/teammate) → `teammate` overlay
-4. Otherwise (dev sessions) → no overlay; the harness keeps the default Claude Code protocol
 
 The resolution emits a single canonical INFO line BEFORE any disk read so absence-vs-fallback is visible in `logs/worker.log` without triangulating against the downstream "Persona overlay loaded" or "Appending N-char system prompt" lines:
 
@@ -273,13 +282,13 @@ Workers are keyed by `worker_key` — a computed property on `AgentSession` that
 | `dev` | no | any (main repo) | `project_key` | Serialized per project |
 | `teammate` | N/A | N/A | `chat_id` | Always parallel-safe |
 
-**PM routing note:** Slugged PM sessions use an allowlist (`_PM_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when a PM session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
+**Eng routing note:** Slugged eng sessions use an allowlist (`_ENG_WORKTREE_STAGES = {"BUILD", "TEST", "PATCH", "REVIEW", "DOCS"}`) to determine when slug-based routing is safe. Stages not in this allowlist — including PLAN, ISSUE, CRITIQUE, MERGE, unknown/future stages — fall back to `project_key` so they serialize on the main checkout. Unknown stages fail closed (serialize) rather than accidentally parallelizing on an unaudited stage. The lazy `_ensure_worker` call in `session_pickup.py`'s project-keyed pop handles the routing gap: when an eng session advances to a worktree stage and the project-keyed filter rejects it, the correct slug-keyed worker is started automatically.
 
 ### Why `chat_id` Is Not the Isolation Key
 
 `chat_id` is a communication topology concept — it tells you which Telegram thread a message came from. But isolation depends on whether sessions share mutable state (the git working tree). Two PM sessions from different threads both write to the same `main` branch at PLAN stage; they must serialize regardless of their `chat_id`.
 
-Similarly, `chat_id` is insufficient for dev sessions — two dev sessions for different work items in the same chat (e.g., two `valor_session create --role dev` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated dev sessions: each slug has its own worktree and branch.
+Similarly, `chat_id` is insufficient for eng sessions — two eng sessions for different work items in the same chat (e.g., two `valor_session create --role eng` calls defaulting to `chat_id=0`) would serialize even though they share no state. Slug is the correct routing key for worktree-isolated eng sessions: each slug has its own worktree and branch.
 
 ### Three Worker Loop Archetypes
 
@@ -421,11 +430,12 @@ When the worker process is killed mid-execution, the `asyncio.CancelledError` ha
 
 ### Local session recovery is `session_type`-aware (#1092)
 
-A session whose `session_id` starts with `local` was spawned from a local Claude Code CLI rather than the Telegram bridge. Startup recovery handles these by `session_type`:
+A session whose `session_id` starts with `local` was spawned from a local Claude Code CLI rather than the Telegram bridge. Startup recovery handles these by `session_type` (the gate is `session_type == SessionType.ENG` at `agent/session_health.py:546`):
 
-- **Local dev sessions** (`session_type == DEV`) are re-queued to `pending` just like bridge sessions. Dev sessions are worker-owned (spawned by the PM via `valor-session create --role dev`) with no human competitor holding the same `claude_session_uuid`. Completion flows through `_handle_dev_session_completion`, which steers the parent PM and never invokes a user-facing send callback — so the worker does not need to be able to deliver output to a chat. This lets long-running PM-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines.
-- **Local PM and Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
-- **Pre-migration records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here.
+- **Local eng sessions** (`session_type == ENG`) are re-queued to `pending` just like bridge sessions. These are worker-owned child sessions spawned by a parent eng session via `valor-session create --role eng`, so no human CLI is competing for the same `claude_session_uuid`. The worker can safely resume the transcript on next pickup. This lets long-running eng-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines. When the recovered child finalizes, parent finalization flows through `finalize_session` → `_finalize_parent_sync` (in `models/session_lifecycle.py`), which transitions the parent through `waiting_for_children` to `completed`/`failed` once all children are terminal — no user-facing send callback is involved on this path.
+- **Local Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
+- **Local Granite sessions** (`session_type == GRANITE`) are abandoned. These are created by the standalone `valor-granite-loop` CLI (not the worker), so the worker must never re-execute them. The `local-` prefix ensures they reach this abandon path rather than the bridge re-queue path. A CLI run that is still in flight when the worker restarts will have its session finalized `abandoned`; the CLI's own `reject_from_terminal=False` except-block guard makes a subsequent CLI finalize a safe no-op.
+- **Pre-migration records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here (the gate uses explicit equality with `SessionType.ENG`).
 
 ### Summary
 
@@ -433,9 +443,28 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 |--------------------------|--------------|
 | `pending` | Left untouched; new worker picks it up naturally |
 | `running` (bridge) | Stays `running`; new worker startup re-queues it to `pending` |
-| `running` (local `dev`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
-| `running` (local `pm`/`teammate`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
+| `running` (local `eng`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
+| `running` (local `teammate`/`granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
+
+### Own-progress fields are heartbeat-gated (#1614)
+
+The no-progress detector in `_has_progress` (`agent/session_health.py`) includes a set of "own-progress" fields — `turn_count`, `log_path`, and `claude_session_uuid` — that serve as evidence that a session authenticated with the SDK and began work. These fields are sticky once set and are only evaluated when `sdk_ever_output` is False (the per-turn fields `last_tool_use_at` / `last_turn_at` have never been written).
+
+**Confirmed Branch 2 failure mode (#1614):** The worker process remained alive (`worker_alive=True` on every health tick). The harness subprocess had exited or hung without producing SDK output, and the executor's heartbeat loop had silently stopped. But `claude_session_uuid` — written at SDK authentication time — was set. Because the own-progress check was ungated, it returned `True` unconditionally, blocking the branch-2 recovery path indefinitely.
+
+**Fix:** the own-progress fields are now gated on `last_heartbeat_at` freshness using `NO_OUTPUT_BUDGET_SECONDS` (1800s). The gate logic:
+
+- If `last_heartbeat_at` is within the last 1800s, own-progress fields are honoured as before.
+- If `last_heartbeat_at` is absent or older than 1800s, the own-progress fields are skipped entirely and the session falls through to `_tier2_reprieve_signal` for Tier-2 evaluation.
+
+This preserves the intended behaviour for sessions that are actively running (the heartbeat loop keeps `last_heartbeat_at` fresh) while allowing recovery of zombie sessions whose executor loop exited without finalizing the session.
+
+**Gate window constraint:** the gate uses `NO_OUTPUT_BUDGET_SECONDS` (1800s), not the tighter `HEARTBEAT_FRESHNESS_WINDOW` (90s). This ensures the own-progress gate does not expire before sub-check B's no-output budget does — a session that is legitimately starting up and has `sdk_ever_output=False` must not be killed by the own-progress expiry before the normal startup budget would have triggered recovery.
+
+**Telemetry:** recoveries where `claude_session_uuid` is set but `sdk_ever_output` is False increment the `{project_key}:session-health:recoveries:zombie_uuid_no_output` Redis counter and emit a `[session-health] zombie_uuid_no_output recovery` log line.
+
+For the full no-progress detector design see [Agent Session Health Monitor](agent-session-health-monitor.md#detection).
 
 ## Redis Communication Contract
 
@@ -605,6 +634,7 @@ launchd's `ThrottleInterval` (configured at 10 seconds in `com.valor.worker.plis
 - After `asyncio.run(_run_worker(...))` returns, `main()` checks the flag and calls `sys.exit(1)` if it is set.
 - SIGINT (developer Ctrl-C) leaves the flag unset and exits 0 — a voluntary stop during development should not be penalized with a forced restart.
 - `stop_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (the modern macOS API) to remove the worker from the launchd domain, consistent with `scripts/install_worker.sh`.
+- `start_worker()` in `scripts/valor-service.sh` uses `launchctl bootout` (defensive, to clear any partial registration) followed by `launchctl bootstrap gui/<uid> <plist>` (issue #1407). This matches `stop_worker()` and `scripts/install_worker.sh`. Earlier code used `launchctl load`, which registered the service in a domain invisible to `gui/<uid>/` queries — this broke `KeepAlive` respawn and made the watchdog's recovery chain return rc=113. Bootstrap-based registration is the only path that keeps `KeepAlive` and `launchctl kickstart` working together.
 
 **Result:** Worker killed via SIGTERM restarts within 15 seconds (10s `ThrottleInterval` + margin) rather than the ~10-minute default.
 
@@ -624,6 +654,48 @@ Expected output:
 <PID>  0  com.valor.worker
 <PID>  0  com.valor.bridge-watchdog
 ```
+
+## Telegram Relay Defect Fixes (issue #1749)
+
+Four defects in `bridge/telegram_relay.py` and `bridge/dead_letters.py` were patched together because they share the same retry/dead-letter code path.
+
+### 1. File-send idempotency (`_file_sent` flag)
+
+When a message payload contains both a file and follow-up text, the relay sends them in two separate Telethon calls. If the file send succeeded but the process crashed before the text send completed, a naive retry would re-send the file, producing a duplicate attachment in the chat.
+
+After a successful file send, the relay now writes `message["_file_sent"] = True` and `message["_file_msg_id"] = msg_id` directly onto the in-memory payload dict before proceeding to the text step. If the message is re-queued (because the text step failed), those keys survive serialisation into Redis. On the next dequeue, `_send_queued_message` checks `message.get("_file_sent")` and skips the `send_file` call, reusing the recorded `_file_msg_id`. This is the direct analogue of the `#1205` text-dedup guard applied to the file branch.
+
+### 2. Oversized-text guard for file+text messages (`_maybe_send_oversized_text_as_file`)
+
+The existing oversized-text detection (converting a >4096-char response to a `.txt` attachment) was only reachable from the text-only branch. The file+text branch called `send_message` directly on the follow-up text without length checking, so the guard was unreachable whenever a file was also present.
+
+A shared helper `_maybe_send_oversized_text_as_file` was extracted. It accepts `(telegram_client, chat_id, text, reply_to, session_id)`, checks `len(text) > 4096`, converts to a temp `.txt` attachment if needed, and returns the resulting `msg_id` or `None` (no action taken). Both the file+text branch and the text-only branch now call this helper before their respective terminal sends (`send_file` → `send_message` vs. `send_markdown`). Each call site keeps its own terminal send for the normal-length case; the helper never sends normal-length text itself.
+
+### 3. Group/supergroup-safe dead-letter (two guards narrowed in lockstep)
+
+Group and supergroup Telegram chat IDs are legitimately negative integers. The previous guard `chat_id_int <= 0` rejected all negative IDs, silently discarding failed delivery records for group chats rather than persisting them to the dead-letter queue. The guard also appeared in the `replay_dead_letters` function in `bridge/dead_letters.py`, where it cleaned up any records already stored with negative `chat_id` values — so narrowing only the persist-side guard in `telegram_relay.py` would have been a no-op: the replay side would silently delete those records on next bridge startup.
+
+Both guards were narrowed to `chat_id_int == 0` in lockstep:
+
+- `_dead_letter_message` in `bridge/telegram_relay.py` (the persist side)
+- `replay_dead_letters` in `bridge/dead_letters.py` (the replay side)
+
+Only `chat_id=0` (an invalid Telegram peer that causes `PeerIdInvalidError` in a loop) is now excluded. Negative IDs are accepted and replayed normally.
+
+### 4. Send-path FloodWait handling
+
+`FloodWaitError` raised by Telethon during a relay send was previously uncaught inside `process_outbox`, propagating up to the outer `except Exception` handler and causing the message to be re-queued with a burned `_relay_attempts` counter. After three such failures the message was dead-lettered even though no actual delivery problem existed — the API was simply enforcing a rate limit.
+
+`process_outbox` now catches `FloodWaitError` as a first-class case in the dispatch loop. On receipt it:
+
+1. Sleeps `min(flood_err.seconds + RELAY_FLOOD_WAIT_BUFFER_SECS, RELAY_FLOOD_WAIT_MAX_SLEEP_SECS)`.
+2. Increments `message["_flood_waits"]` (a separate counter, distinct from `_relay_attempts`).
+3. Re-queues the message via `RPUSH` without touching `_relay_attempts`, carrying `_file_sent` if it was already set.
+4. Dead-letters only after `RELAY_FLOOD_WAIT_MAX` consecutive flood events.
+
+The three env-overridable constants (`RELAY_FLOOD_WAIT_BUFFER_SECS`, `RELAY_FLOOD_WAIT_MAX_SLEEP_SECS`, `RELAY_FLOOD_WAIT_MAX`) are marked provisional — tune from production telemetry.
+
+This handler is distinct from the `FloodWaitError` handler in `telegram_bridge.py`'s connect loop. The connect-loop handler also calls `_write_flood_backoff` to throttle reconnects; the relay send-path handler deliberately omits that side-effect because the relay is not re-establishing a connection.
 
 ## Background: Prior Separation Efforts
 

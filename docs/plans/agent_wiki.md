@@ -62,7 +62,7 @@ revision_applied: true
 ### spike-2: Reflections package structure post-PR-967
 - **Assumption**: "scripts/reflections.py is the integration point for wiki lint"
 - **Method**: code-read
-- **Finding**: `scripts/reflections.py` was deleted by PR #967. The `reflections/` package now contains standalone async callables (`maintenance.py`, `session_intelligence.py`, `memory_management.py`, `behavioral_learning.py`, `auditing.py`, `daily_report.py`, `task_management.py`). Wiki lint must be added as `reflections/wiki_lint.py` and registered in the YAML scheduler config.
+- **Finding**: `scripts/reflections.py` was deleted by PR #967. The `reflections/` package now contains standalone async callables (`maintenance.py`, `session_intelligence.py`, `memory_management.py`, `auditing.py`, `daily_report.py`, `task_management.py`). (`behavioral_learning.py` was deleted in #1362.) Wiki lint must be added as `reflections/wiki_lint.py` and registered in the YAML scheduler config.
 - **Confidence**: high
 - **Impact on plan**: Wiki lint task targets `reflections/wiki_lint.py` instead of `scripts/reflections.py`.
 

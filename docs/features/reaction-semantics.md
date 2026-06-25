@@ -20,6 +20,12 @@ All constants are canonically defined in `agent/constants.py` (re-exported from 
 
 ## Key Design Decisions
 
+### Receipt-Time Reactions Reflect Agent Action Intent
+
+When a Telegram message arrives, the bridge sets an initial 👀 reaction (eyes), then updates it to an action-intent emoji after classification. The intent is a first-person statement from the bot: "here is what I am about to do."
+
+The emoji is chosen from `ACTION_EMOJI_MAP` in `tools/emoji_embedding.py`, keyed by `work_type` (bug/feature/chore/sdlc). A bug report gets 👨‍💻 or 👀 (investigating). A task gets 🫡 or 👍 (will do). Unclassified messages fall back to 👀 (general). This replaces the previous content-sentiment approach that mirrored the user's mood back at them and was vulnerable to offensive emoji matches.
+
 ### Success vs. Complete
 
 The distinction between `REACTION_SUCCESS` and `REACTION_COMPLETE` is critical:
@@ -38,7 +44,11 @@ Telegram only accepts a specific subset of emoji as reactions. Common emoji that
 - Hourglass: Not a valid Telegram reaction
 - Arrows: Not a valid Telegram reaction
 
-The full list of 75+ validated working reactions is maintained in `VALIDATED_REACTIONS` in `bridge/response.py`.
+The full list of validated working reactions is maintained in `VALIDATED_REACTIONS` in `bridge/response.py`.
+
+### Blocked Reactions (policy)
+
+Some emoji are *valid* Telegram reactions but are deliberately excluded from selection on policy grounds. The middle finger 🖕 is one such case — Telegram accepts it, but reacting to a user's message with it is offensive. It is removed from both `VALIDATED_REACTIONS` and the `EMOJI_LABELS` selection set, and additionally guarded by `BLOCKED_REACTION_EMOJIS` in `tools/emoji_embedding.py`, which `find_best_emoji()` filters at selection time. The blocklist is defensive against stale on-disk embedding caches (`data/emoji_embeddings.json`) that may still contain the emoji — see [Emoji Embedding Reactions](emoji-embedding-reactions.md#components).
 
 ## Auto-Continue Integration
 
@@ -93,7 +103,7 @@ Three paths to silent text loss have been identified and guarded:
 | File | Role |
 |------|------|
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` constants |
-| `bridge/response.py` | Re-exports reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
+| `bridge/response.py` | Re-exports reaction constants, `filter_tool_logs`, `set_reaction`, `VALIDATED_REACTIONS` (`OutputType` enum was removed in drafter_passthrough_validation) |
 | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
 | `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |

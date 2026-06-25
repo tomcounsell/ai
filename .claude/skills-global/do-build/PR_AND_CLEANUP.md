@@ -104,7 +104,7 @@ After pushing and creating the PR, return to the repo root and clean up the work
 
 ```bash
 # Return to repo root BEFORE cleanup (prevents CWD death)
-cd ~/src/ai
+cd "${AI_REPO_ROOT:-$HOME/src/ai}"
 
 python -c "
 from pathlib import Path
@@ -124,7 +124,7 @@ After the PR is merged (auto-merge for eligible PRs, or human-initiated via `gh 
 
 ```bash
 # Return to repo root BEFORE cleanup
-cd ~/src/ai
+cd "${AI_REPO_ROOT:-$HOME/src/ai}"
 
 python scripts/post_merge_cleanup.py {slug}
 ```
@@ -135,6 +135,11 @@ This calls `cleanup_after_merge()` from `agent/worktree_manager.py`, which:
 3. Deletes the local `session/{slug}` branch
 
 Without this step, `gh pr merge --delete-branch` fails to delete the local branch because git refuses to delete a branch referenced by an active worktree.
+
+**Exit codes** (issue #1357):
+- `0` — clean (worktree and branch removed)
+- `1` — generic error (git failure, unexpected exception)
+- `2` — **busy guard fired**: a non-terminal `AgentSession` still references the worktree as `working_dir`. The offending session id is printed to stderr. See [`docs/sdlc/merge-troubleshooting.md`](../../../docs/sdlc/merge-troubleshooting.md#worktree-cleanup-blocked-issue-1357) for the recovery workflow.
 
 ## Step 7.6: Documentation Cascade
 

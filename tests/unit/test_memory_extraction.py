@@ -672,7 +672,7 @@ class TestRefusalPatternsNarrowness:
 
         assert (
             _looks_like_refusal(
-                "AgentSession.session_type='dev' triggers worktree creation "
+                "AgentSession.session_type='eng' triggers worktree creation "
                 "via worktree_manager.py during enqueue."
             )
             is False

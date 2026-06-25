@@ -6,7 +6,7 @@ Guidance for Claude Code when working with this repository.
 
 ## Google Workspace CLI (`gws`)
 
-Available at `~/src/node_modules/.bin/gws`. Pre-authenticated.
+On PATH after `npm install -g @googleworkspace/cli` (installed automatically on every machine by `/update`). **Not pre-authenticated** — first use requires a one-time human OAuth step: `gws auth setup` then `gws auth login`. If `gws` is present but unauthenticated, fall through to the next tool in the ladder (Gmail/Calendar/Drive MCP, then BYOB) rather than stalling.
 
 Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
 
@@ -91,19 +91,23 @@ officecli close report.docx   # Save and release
 Use `valor-telegram` to read messages from any chat. It checks Redis first, then falls back to the Telegram API automatically. Sending routes through the Redis relay (requires bridge to be running).
 
 ```bash
-valor-telegram read --chat "Dev: Valor" --limit 10
+valor-telegram read --chat "Eng: Valor" --limit 10
 valor-telegram read --chat "Tom" --search "deployment"
-valor-telegram read --chat "Dev: Valor" --since "1 hour ago"
+valor-telegram read --chat "Eng: Valor" --since "1 hour ago"
 valor-telegram read --chat-id -1001234567 --limit 10       # numeric bypass
 valor-telegram read --user tom --limit 10                  # DM whitelist bypass
 valor-telegram read --project psyoptimal --limit 20        # union all chats with this project_key
 valor-telegram chats --search "psy"                        # discover by fragment
 valor-telegram chats --project psyoptimal                  # list every chat tagged with the project
-valor-telegram send --chat "Dev: Valor" "Hello world"
+valor-telegram send --chat "Eng: Valor" "Hello world"
 valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
 valor-telegram send --chat "Tom" --file ./screenshot.png "Caption"
-valor-telegram send --chat "Dev: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
+valor-telegram send --chat "Eng: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
+valor-telegram send --chat 8837490628 --await-reply "deploy status?"      # E2E probe a registered bot; returns its settled reply
+valor-telegram send --chat 8837490628 --await-reply --json --timeout 900 "..."  # structured transcript for assertions
 ```
+
+`--await-reply` is only valid against a bot registered under `projects.<key>.telegram.bots[]`; it blocks until the bot's streamed reply settles (silence-based, edit-aware, two timers) and prints the settled prose (or `--json` transcript). A registered bot's inbound messages are recorded to history but never spawn a session (deterministic loop-guard) — see [`docs/features/bot-e2e-testing.md`](docs/features/bot-e2e-testing.md).
 
 `--chat`, `--chat-id`, `--user`, and `--project` on `read` are mutually exclusive. Every successful single-chat read prints a freshness header `[chat_name · chat_id=N · last activity: T]` before the messages; cross-chat `--project` reads print `[project=KEY · N chats: name1, name2, ... · last activity: T]` and tag each line with `[chat_name]` so you can see which chat each message came from — trust those headers over your intuition about which chat you asked for. `--project --json` enriches each message dict with `chat_id` and `chat_name`. If a `--chat` name is ambiguous, the **default** is to pick the most recently active candidate, log a warning listing all candidates to stderr, and proceed (exit 0); pass `--strict` to opt into a non-zero exit with a stderr candidate list instead (see [`docs/features/telegram-messaging.md`](docs/features/telegram-messaging.md) for the disambiguation and project-stitching UX).
 
@@ -118,10 +122,14 @@ valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
 valor-email send --to alice@example.com --to bob@example.com "Message to both"
 valor-email send --to alice@example.com --file ./report.pdf "See attached"
 valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
+valor-email draft --to alice@example.com --subject "Q4 Report" --file ./report.pdf "Please review."
+valor-email draft --to alice@example.com --reply-to "<abc@host>" --file ./reply.pdf "In reply."
 valor-email threads
 ```
 
 `--to` accepts multiple flags (repeat per recipient) and comma-separated values. To reply to a specific message, first run `valor-email read --json` and copy the `message_id` field — pass it verbatim to `--reply-to` (angle brackets optional; the CLI normalizes). Sends confirm with a queue notice; if delivery seems stuck, check `./scripts/valor-service.sh email-status` (extends to read the relay heartbeat under `email:relay:last_poll_ts`).
+
+`valor-email draft` creates a **real Gmail draft** (visible in the Drafts folder) with optional file attachments for human review before sending. Files up to 25 MiB are attached inline; larger files are uploaded to Google Drive and linked. Requires `gws auth login` on the machine; falls back to an actionable error if unauthenticated. See `docs/features/email-bridge.md` for details.
 
 ## Quick Commands
 
@@ -144,10 +152,12 @@ valor-email threads
 | `./scripts/valor-service.sh email-dead-letter replay --all` | Replay all dead-lettered emails |
 | `./scripts/install_email_bridge.sh` | Install launchd plist for boot-time email bridge (machine-gated, idempotent; opt-in) |
 | `tail -f logs/bridge.log` | Stream bridge logs |
-| `pytest tests/` | Run all tests (parallel by default — `-n auto --dist=loadfile` from `pyproject.toml`) |
+| `pytest tests/` | Run all tests (parallel by default — `-n auto --dist=loadfile` from `pyproject.toml`). **Prefer `scripts/pytest-clean.sh` over bare `pytest`** — the wrapper reaps xdist workers on exit; without it, interrupted runs leave orphan workers consuming memory (see xdist reaper note in `pyproject.toml`). |
 | `pytest tests/unit/` | Run unit tests only (~40s parallel) |
 | `pytest tests/unit/ -n0` | Force serial unit run (e.g. for debugging) |
 | `pytest tests/integration/` | Run integration tests only (~125s parallel) |
+| `scripts/pytest-clean.sh <pytest-args>` | Run pytest with automatic xdist worker reaping (drop-in for `pytest`) |
+| `scripts/reap-xdist.sh` | Kill any orphan xdist workers on the system (one-shot reaper, idempotent) |
 | `pytest -m sdlc` | Run tests for a specific feature (see `tests/README.md`) |
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
@@ -164,7 +174,7 @@ valor-email threads
 | `python scripts/autoexperiment.py --target summarizer --dry-run` | Dry-run autoexperiment on the message drafter (target name is historical) |
 | `python scripts/autoexperiment.py --list-targets` | List autoexperiment targets |
 | `./scripts/install_autoexperiment.sh` | Install autoexperiment nightly schedule |
-| `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule |
+| `./scripts/install_nightly_tests.sh` | Install nightly regression test launchd schedule (bridge-role gated; auto-installed by `/update` on bridge machines, self-skips + removes stale plist elsewhere) |
 | `python scripts/nightly_regression_tests.py --dry-run` | Preview nightly test run without Telegram |
 | `tail -f logs/nightly_tests.log` | Stream nightly test logs |
 | `tail -f logs/nightly_tests_error.log` | Stream nightly test error log (startup crashes) |
@@ -186,10 +196,12 @@ valor-email threads
 | `python -m tools.valor_session steer --id <ID> --message "..."` | Inject a steering message into a running session |
 | `python -m tools.valor_session kill --id <ID>` | Kill a session |
 | `python -m tools.valor_session kill --all` | Kill all running sessions |
-| `python -m tools.valor_session create --role pm --message "..."` | Create and enqueue a new session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
-| `python -m tools.valor_session create --role dev --slug {slug} --message "..."` | Create session with worktree isolation under the project's declared repo. Warns to stderr if no worker is running. |
+| `python -m tools.valor_session create --role eng --message "..."` | Create and enqueue a new Eng session. `project_key` determines the repo via `projects.json`; there is no working-directory override flag. Precedence: `--project-key` > `--parent` inheritance > cwd match (raises on no match). Warns to stderr if no worker is running. |
 | `python -m tools.valor_session resume --id <ID> --message "..."` | Resume a completed, killed, or failed session (hard-PATCH path; accepts session_id or agent_session_id) |
 | `python -m tools.valor_session release --pr <N>` | Clear retain_for_resume after PR merge/close |
+| `python -m tools.valor_session telemetry --id <ID>` | Show session telemetry timeline (turn events, token usage, status transitions) |
+| `valor-session crash-signatures` | Show crash signatures in the library (project-scoped) |
+| `valor-session crash-policy list` | Show derived auto-resume policy entries |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
@@ -213,6 +225,7 @@ valor-email threads
 | `valor-tts --text "Hello." --output /tmp/out.ogg` | Synthesize text to OGG/Opus (Kokoro local primary, OpenAI tts-1 fallback). See `docs/features/tts.md`. |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --voice af_bella` | Synthesize with a specific voice (catalog in `tools/tts/README.md`) |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --force-cloud` | Force the cloud (OpenAI tts-1) backend even if Kokoro is available |
+| `valor-deck-video deck.md` | Render a narrated MP4 of a Marp deck (per-slide `<!-- narration: ... -->`, voiceover via valor-tts, slides held for each clip's duration). See `docs/features/narrated-deck-video.md`. |
 | `valor-ingest <path-or-url>` | Convert a PDF/DOCX/PPTX/XLSX/HTML/image/YouTube URL into a `.md` sidecar the knowledge indexer picks up (see `docs/features/markitdown-ingestion.md`) |
 | `valor-ingest --scan ~/work-vault/` | Backfill every convertible binary file in the vault recursively (audio formats deliberately excluded) |
 | `valor-computer list_apps` | List all visible macOS apps (requires bcu opt-in via `/setup`; macOS-only — exits 78 on other OSes) |
@@ -276,7 +289,7 @@ for s in stale: s.delete()
 - Always aggregate results before reporting
 
 ### 9. SDLC PIPELINE
-- A PM-role AgentSession orchestrates; a Dev-role AgentSession executes
+- An Eng-role AgentSession handles both orchestration and execution
 - Bridge uses nudge loop for output routing (no SDLC awareness in bridge)
 - `/sdlc` is a **single-stage router**: it assesses state, invokes ONE sub-skill, and returns
 - NEVER write code, run tests, or create plans directly -- always delegate through sub-skills
@@ -298,7 +311,7 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: SDLC (triggered by work request)
-- The PM session steers the pipeline, invoking `/sdlc` skills as needed
+- The Eng session steers the pipeline, invoking `/sdlc` skills as needed
 - `/sdlc` assesses current state, invokes ONE sub-skill, and returns
 - Stages: Plan -> Critique -> Build -> Test -> Patch -> Review -> Patch -> Docs -> Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
@@ -312,9 +325,9 @@ The standard flow from conversation to shipped feature:
 - If there is no question -- just a status update -- the message drafter auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- **SDLC sessions**: the PM session steers pipeline progression between stages
-- **The PM session** orchestrates the Dev session's work; all messages route through the PM session
-- Auto-continue caps are set to 50 as safety backstops (the PM session manages actual routing)
+- **SDLC sessions**: the Eng session handles pipeline progression
+- **The Eng session** handles both orchestration and execution; all messages route through the Eng session
+- Auto-continue caps are set to 50 as safety backstops (the Eng session manages actual routing)
 - The auto-continue counter resets when the human sends a new message
 
 ### Session Continuity
@@ -332,20 +345,18 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
 Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → recovery → register_worker_pid (self-suicide guard)
                                            → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
-                                           → Executes PM session (AgentSession session_type=pm, read-only)
-                                               → PM creates Dev session via valor_session CLI
-                                                   → Worker executes Dev session via CLI harness (claude -p → Claude API)
-                                                   → _handle_dev_session_completion() → steers PM
+                                           → Executes Eng session (AgentSession session_type=eng)
+                                               → Eng session handles SDLC work via granite PTY container (interactive claude TUI, PTYPool-bounded)
+                                                 (BridgeAdapter → Container.run; bridge-originated sessions; see docs/features/granite-pty-production.md)
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → TelegramRelayOutputHandler writes to Redis outbox
                                            → FileOutputHandler fallback for non-Telegram / dev environments
 ```
 See `docs/features/bridge-worker-architecture.md` for the full bridge/worker separation design.
 
-**Session Types** (see `docs/features/pm-dev-session-architecture.md`):
-- **PM Session** (`session_type="pm"`) - Orchestrates work, PM persona, read-only
-- **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona
-- **Dev Session** (`session_type="dev"`) - Does coding work, Dev persona, full permissions
+**Session Types** (see `docs/features/eng-session-architecture.md`):
+- **Eng Session** (`session_type="eng"`) - Handles both SDLC work and conversational responses, full permissions, engineer persona
+- **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona. Bash is open, audit-logged with `[teammate-audit]`. Writes restricted in code to `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta files, and `~/work-vault/`; source-code writes get a redirect to spawn an Eng session. See [`docs/features/teammate-session-permissions.md`](docs/features/teammate-session-permissions.md).
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
 - **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 
@@ -362,13 +373,33 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - **Memory consolidation** (`memory-dedup` nightly reflection): Haiku-based semantic dedup merges near-duplicate records, sets `superseded_by` on originals (never deleted), filters superseded records from recall. Dry-run default — see `docs/features/subconscious-memory.md#memory-consolidation`
 
 **Key Directories:**
+- `.claude/skills-global/` - **Global skills** — synced to every machine (see below)
+- `.claude/skills/` - **Project-only skills** — work only in this repo's context, NOT synced
 - `.claude/commands/` - Slash command skills
-- `.claude/agents/` - Subagent definitions (builder, validator, code-reviewer; dev-session removed — dev sessions created via valor_session CLI)
+- `.claude/agents/` - Subagent definitions (builder, validator, code-reviewer; eng sessions created via valor_session CLI)
 - `bridge/` - Telegram integration, nudge loop
 - `worker/` - Standalone worker service (`python -m worker`)
 - `agent/` - Session queue, SDK client, output router (`output_router.py`), output handler protocol, constants
 - `tools/` - Local Python tools
 - `config/` - Configuration files
+
+## Global vs. Project-Only Skills
+
+This repo is the canonical source for skills that ship to **every machine**. There are two skill directories, and the distinction matters:
+
+| Directory | Scope | Synced? |
+|-----------|-------|---------|
+| `.claude/skills-global/` | **Global / general-purpose skills** | ✅ Hardlinked to `~/.claude/skills/` on every machine by `/update` |
+| `.claude/skills/` | **Project-only skills** — tightly coupled to this repo's infra (Telegram bridge, macOS Messages, system logs) | ❌ Never synced; only work in this repo's context |
+
+**Terminology:** When someone says "make this a **global skill**" or "**general-purpose skill**," they mean: *put it in `.claude/skills-global/` so the `/update` wiring propagates it to `~/.claude/skills/` on every machine.* It does NOT mean editing a `CLAUDE.md` note. A skill is "known to every machine" precisely when it lives in `skills-global/`.
+
+**The sync wiring** lives in `scripts/update/hardlinks.py`:
+- `sync_claude_dirs()` hardlinks every skill dir under `.claude/skills-global/` into `~/.claude/skills/`. Adding a directory with a `SKILL.md` there is all that's required — no registration step.
+- `PROJECT_ONLY_SKILLS` and the project-only `.claude/skills/` set are explicitly excluded from the sync.
+- `RENAMED_REMOVALS` removes stale user-level copies when a skill is renamed or moved between the two dirs. **When you move a skill between `skills/` and `skills-global/`, add a `RENAMED_REMOVALS` entry** so the old hardlink is cleaned up on every machine.
+
+Example: `/do-debrief` (the TTS composite that wraps `valor-tts`) lives in `.claude/skills-global/do-debrief/` — that's why every machine already knows it. The client-facing CMA skills `/imagine-agent` and `/build-agent` follow the same pattern. A skill that only ever runs against the local bridge (e.g. `telegram`, `checking-system-logs`) stays in `.claude/skills/`.
 
 ## Testing Philosophy
 
@@ -434,6 +465,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 - **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
 - **Crash tracker**: Logs start/crash events to Redis via `monitoring/crash_tracker.py` with git commit correlation
 - **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
+- **Update-loop wedged detector** (#1712): detects when the bridge is process-alive but Telethon's `NewMessage` handler has silently stopped firing — auto-restarts with `catch_up=True` for lossless backfill
 
 **Check watchdog**: `python monitoring/bridge_watchdog.py --check-only`
 **View crashes**: `python -c "from monitoring.crash_tracker import get_recent_crashes; print(get_recent_crashes(3600))"`
@@ -559,6 +591,7 @@ No existing tests affected — this is a greenfield feature with no prior test c
 | `docs/features/README.md` | Feature index — look up how things work |
 | `docs/sdlc/` | Per-stage repo-specific addenda — read by SDLC skills at runtime |
 | `tests/README.md` | Test suite index — feature markers, blind spots, contribution guide |
+| `docs/conventions/knowledge-base-section.md` | KB-section convention every project's `CLAUDE.md`/`README.md` should follow |
 
 ## GitHub Issue Labels
 
@@ -576,6 +609,24 @@ Use these labels consistently when creating or editing issues:
 
 Do NOT use a `feature` label — it adds no signal.
 
-## Business Context
+## Knowledge Base (KB)
 
-For business context, project notes, and assets see the work vault: `~/src/work-vault/AI Valor Engels System/`
+This project's knowledge has two sources. Pull from both before answering substantive questions.
+
+**1. Vault (curated docs, iCloud-synced)**
+- Location: `~/work-vault/AI Valor Engels System/`
+- Index: see that directory's `README.md` for the file index
+- Source of truth for business context, project notes, decisions, and assets
+- Ingest binaries into the indexer with `valor-ingest <path>` (creates `.md` sidecars; `--scan` for backfill)
+
+**2. Memory system (Redis, agent-learned observations)**
+- Project key: `valor` (partitions memories for this project — see `config/projects.json`)
+- Search: `python -m tools.memory_search search "<query>" --project valor`
+- Save: `python -m tools.memory_search save "<content>" --project valor`
+- Status: `python -m tools.memory_search status --project valor`
+- MCP recall: `mcp__memory__memory_search`, `mcp__memory__memory_get`
+- See `docs/features/subconscious-memory.md` for ingestion, scoring, and consolidation
+
+Curated vault = what humans wrote. Memory = what the agent learned (corrections, decisions, patterns, surprises). Both partition by project — don't leak cross-project context.
+
+This is a convention every project should follow — see [`docs/conventions/knowledge-base-section.md`](docs/conventions/knowledge-base-section.md).

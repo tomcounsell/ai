@@ -208,6 +208,43 @@ specific cost ceiling becomes operationally necessary.
 - `tests/integration/test_pm_long_run_no_kill.py` — acceptance test for
   a 4+ hour PM with active tool use and no result event.
 
+## State-layer detection (`sdlc-progress-check`)
+
+The Tier 1 / Tier 2 detectors above watch the **process** layer — they catch wedged PM sessions while the session is technically still running. They do NOT detect a pipeline whose PM session has already gone terminal but whose PR is still open and idle. That state-layer gap is closed by a separate reflection: `sdlc-progress-check` (`reflections/sdlc_progress.py`, registered in `config/reflections.yaml` at a 30-minute interval).
+
+The reflection iterates every local project and applies a **5-gate stall heuristic** to each open PR:
+
+1. **SDLC branch** — head ref matches `session/sdlc-<N>` (other branches are out of scope).
+2. **Not draft** — draft PRs are intentionally paused and excluded.
+3. **Issue open** — `gh issue view <N> --json state` returns `OPEN`. Closed issues mean the work has landed elsewhere.
+4. **Last commit age ≥ `SDLC_STALL_THRESHOLD_HOURS`** (default 4h). Resolved via `git log -1 --format=%H\ %ct origin/session/sdlc-<N>` so the orchestrator doesn't need the branch checked out.
+5. **No non-terminal `AgentSession` for the slug** — checked via `AgentSession.query.filter(slug=...)` and `NON_TERMINAL_STATUSES` from `models.session_lifecycle`. If ANY session for the slug is `running`, `pending`, `dormant`, `paused`, `paused_circuit`, or `waiting_for_children`, the alert is suppressed.
+
+When all five gates pass, the reflection sends a single Telegram alert to `Dev: Valor` and writes a Redis dedup key `sdlc:stall:alert:<slug>:<last-commit-sha>` with TTL `SDLC_STALL_COOLDOWN_HOURS` (default 6h). The dedup is keyed on the **last-commit SHA**, not just the slug — a new commit clears the cooldown so a re-stall after partial activity is still surfaced.
+
+### Failure tolerance
+
+Every external boundary (gh CLI, git, `valor-telegram`, Redis, Popoto query) is wrapped in a narrow try/except that **logs a warning and continues**. Stricter failure semantics:
+
+- **Redis unavailable for the dedup write** — the alert is **suppressed** (not sent). Better to under-alert during a Redis flap than to spam during one.
+- **`AgentSession` query fails** — the active-session gate returns `None`, treated as "unknown", and the alert is suppressed. The 4-hour threshold gives plenty of time for the next reflection tick to retry.
+- **Branch not present locally** — silently skipped (debug-logged). Common during transient worktree state.
+
+### Tunables
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `SDLC_STALL_THRESHOLD_HOURS` | `4` | Minimum age of last commit before a stall is reportable. |
+| `SDLC_STALL_COOLDOWN_HOURS` | `6` | Dedup window for the same `(slug, last-commit-sha)` pair. |
+
+Disable the whole reflection by setting `enabled: false` on the `sdlc-progress-check` entry in `~/Desktop/Valor/reflections.yaml`.
+
+### What this is NOT
+
+- **Not auto-recovery.** v1 is notification-only. The reflection never creates, resumes, or restarts a PM session. Recovery is a human decision after seeing the alert.
+- **Not a replacement for the Tier 1/Tier 2 detectors above.** The process-layer detectors run every 5 minutes and watch live sessions. The state-layer reflection runs every 30 minutes and watches dead pipelines.
+- **Not draft-PR or non-SDLC-branch aware.** Drafts and ad-hoc branches (`session/<other-slug>`) are intentionally excluded — they have different lifecycles.
+
 ## See Also
 
 - [`docs/features/agent-session-health-monitor.md`](agent-session-health-monitor.md) — the simplified `_has_progress` + `_tier2_reprieve_signal` detector.

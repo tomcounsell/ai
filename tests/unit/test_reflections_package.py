@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # --- Shared helpers ---
 
 
@@ -46,7 +48,7 @@ def assert_valid_result(result: dict, expected_status: str = "ok") -> None:
 
 
 # ============================================================
-# reflections.utils
+# reflections.utilities
 # ============================================================
 
 
@@ -55,7 +57,7 @@ class TestReflectionsUtils:
 
     def test_load_local_projects_returns_list(self, tmp_path):
         """load_local_projects() returns a list (possibly empty)."""
-        from reflections.utils import load_local_projects
+        from reflections.utilities import load_local_projects
 
         config = {"projects": {"test": {"working_directory": str(tmp_path)}}}
         import json
@@ -67,7 +69,7 @@ class TestReflectionsUtils:
             return str(config_file) if k == "PROJECTS_CONFIG_PATH" else d
 
         with (
-            patch("reflections.utils.AI_ROOT", tmp_path),
+            patch("reflections.utilities.AI_ROOT", tmp_path),
             patch("os.environ.get", side_effect=_env_get),
         ):
             projects = load_local_projects()
@@ -75,41 +77,57 @@ class TestReflectionsUtils:
 
     def test_is_ignored_match(self):
         """is_ignored() returns True when pattern matches an ignore entry."""
-        from reflections.utils import is_ignored
+        from reflections.utilities import is_ignored
 
         entries = [{"pattern": "redis connection", "ignored_until": "", "reason": ""}]
         assert is_ignored("redis connection timeout", entries) is True
 
     def test_is_ignored_no_match(self):
         """is_ignored() returns False when pattern doesn't match."""
-        from reflections.utils import is_ignored
+        from reflections.utilities import is_ignored
 
         entries = [{"pattern": "redis connection", "ignored_until": "", "reason": ""}]
         assert is_ignored("unrelated bug pattern", entries) is False
 
-    def test_is_high_confidence_true(self):
-        """is_high_confidence() returns True for code_bug with pattern and prevention."""
-        from reflections.utils import is_high_confidence
+    @pytest.mark.parametrize(
+        "reflection,expected",
+        [
+            # code_bug with both supporting signals -> True
+            (
+                {"category": "code_bug", "pattern": "x" * 20, "prevention": "fix it"},
+                True,
+            ),
+            # code_bug with prevention only (empty pattern) -> True (plan success criterion)
+            ({"category": "code_bug", "prevention": "x", "pattern": ""}, True),
+            # code_bug with long pattern only (no prevention) -> True
+            ({"category": "code_bug", "pattern": "x" * 10, "prevention": ""}, True),
+            # code_bug pattern exactly 9 chars and no prevention -> False (neither signal)
+            ({"category": "code_bug", "pattern": "x" * 9, "prevention": "   "}, False),
+            # poor_planning with both supporting signals -> False (the #1414 failing case)
+            (
+                {"category": "poor_planning", "prevention": "x", "pattern": "x" * 20},
+                False,
+            ),
+            # process_gap with rich text -> still False (non-code-bug excluded)
+            (
+                {"category": "process_gap", "prevention": "do better", "pattern": "x" * 50},
+                False,
+            ),
+            # missing category -> False
+            ({"prevention": "x", "pattern": "x" * 20}, False),
+        ],
+    )
+    def test_is_high_confidence_gate(self, reflection, expected):
+        """Gate requires category == 'code_bug' AND (prevention OR pattern>=10)."""
+        from reflections.utilities import is_high_confidence
 
-        r = {
-            "category": "code_bug",
-            "pattern": "this is a long enough pattern",
-            "prevention": "fix it",
-        }
-        assert is_high_confidence(r) is True
-
-    def test_is_high_confidence_false(self):
-        """is_high_confidence() returns False when fewer than 2 criteria met."""
-        from reflections.utils import is_high_confidence
-
-        r = {"category": "misunderstanding", "pattern": "short", "prevention": ""}
-        assert is_high_confidence(r) is False
+        assert is_high_confidence(reflection) is expected
 
     def test_load_ignore_entries_empty_redis(self):
         """load_ignore_entries() returns empty list when model unavailable."""
-        from reflections.utils import load_ignore_entries
+        from reflections.utilities import load_ignore_entries
 
-        with patch("reflections.utils.logger"):
+        with patch("reflections.utilities.logger"):
             with patch("models.reflections.ReflectionIgnore") as mock_ri:
                 mock_ri.get_active.side_effect = Exception("redis down")
                 result = load_ignore_entries()
@@ -130,7 +148,7 @@ class TestMaintenanceCallables:
 
         with (
             patch(
-                "reflections.utils.load_local_projects",
+                "reflections.utilities.load_local_projects",
                 return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
             ),
             patch("subprocess.run") as mock_run,
@@ -148,7 +166,7 @@ class TestMaintenanceCallables:
 
         with (
             patch(
-                "reflections.utils.load_local_projects",
+                "reflections.utilities.load_local_projects",
                 return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
             ),
             patch("subprocess.run") as mock_run,
@@ -262,7 +280,7 @@ class TestAuditingCallables:
 
         # tmp_path has no .claude/skills/.../audit_skills.py — skip_if hits, no findings
         with patch(
-            "reflections.utils.load_local_projects",
+            "reflections.utilities.load_local_projects",
             return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
         ):
             result = run_async(run_skills_audit())
@@ -275,7 +293,7 @@ class TestAuditingCallables:
         from reflections.auditing import run_hooks_audit
 
         with patch(
-            "reflections.utils.load_local_projects",
+            "reflections.utilities.load_local_projects",
             return_value=[{"slug": "ai", "working_directory": str(tmp_path)}],
         ):
             result = run_async(run_hooks_audit())
@@ -317,7 +335,7 @@ class TestAuditingCallables:
         from reflections.auditing import run_pr_review_audit
 
         with (
-            patch("reflections.auditing.load_local_projects", return_value=[]),
+            patch("reflections.audits.pr_review_audit.load_local_projects", return_value=[]),
             patch("models.reflections.PRReviewAudit") as mock_pra,
         ):
             mock_pra.last_successful_run.return_value = None
@@ -337,7 +355,7 @@ class TestTaskManagementCallables:
         """run_task_management() returns valid dict with no projects."""
         from reflections.task_management import run_task_management
 
-        with patch("reflections.task_management.load_local_projects", return_value=[]):
+        with patch("reflections.audits.task_backlog_check.load_local_projects", return_value=[]):
             result = run_async(run_task_management())
         assert_valid_result(result)
 
@@ -345,7 +363,7 @@ class TestTaskManagementCallables:
         """run_principal_staleness() flags missing PRINCIPAL.md."""
         from reflections.task_management import run_principal_staleness
 
-        with patch("reflections.task_management.PROJECT_ROOT", tmp_path):
+        with patch("reflections.audits.principal_staleness.PROJECT_ROOT", tmp_path):
             result = run_async(run_principal_staleness())
         assert_valid_result(result)
         assert "does not exist" in result["summary"]
@@ -359,7 +377,7 @@ class TestTaskManagementCallables:
         principal = config_dir / "PRINCIPAL.md"
         principal.write_text("# Principal\n\nStrategic context.")
 
-        with patch("reflections.task_management.PROJECT_ROOT", tmp_path):
+        with patch("reflections.audits.principal_staleness.PROJECT_ROOT", tmp_path):
             result = run_async(run_principal_staleness())
         assert_valid_result(result)
         assert result["findings"] == []  # Fresh file, no warning
@@ -406,24 +424,11 @@ class TestSessionIntelligenceCallable:
         assert_valid_result(result)
 
 
-# ============================================================
-# reflections.behavioral_learning
-# ============================================================
-
-
-class TestBehavioralLearningCallable:
-    """Smoke tests for reflections/behavioral_learning.py."""
-
-    def test_run_skips_when_cyclic_episode_missing(self):
-        """run() returns skipped result when models.cyclic_episode is unavailable."""
-        import sys
-
-        from reflections.behavioral_learning import run
-
-        with patch.dict(sys.modules, {"models.cyclic_episode": None}):
-            result = run_async(run())
-        assert_valid_result(result)
-        assert "skipped" in result["summary"]
+# reflections.behavioral_learning was deleted in issue #1362; the trajectory
+# feature is deferred pending the upstream Popoto TrajectoryMemory recipe
+# (tomcounsell/popoto#389) and the AgentSession instrumentation
+# (tool_sequence, friction_events) is intentionally not shipping until the
+# recipe lands.
 
 
 # reflections.daily_report was deleted in issue #1292; the daily-log slot

@@ -60,6 +60,10 @@ class StatusConflictError(Exception):
 # Terminal statuses -- sessions in these states are "done"
 TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "abandoned", "cancelled"})
 
+# Statuses from which a session can be resumed (TERMINAL_STATUSES minus "cancelled").
+# "cancelled" is an intentional human stop and must never be auto-resumed.
+RESUMABLE_STATUSES: frozenset[str] = frozenset({"completed", "killed", "failed", "abandoned"})
+
 # Non-terminal statuses -- sessions in these states are still active or paused
 NON_TERMINAL_STATUSES = frozenset(
     {
@@ -223,6 +227,7 @@ def finalize_session(
     skip_checkpoint: bool = False,
     skip_parent: bool = False,
     reject_from_terminal: bool = True,
+    emit_telemetry: bool = True,
 ) -> None:
     """Finalize a session with a terminal status.
 
@@ -283,6 +288,49 @@ def finalize_session(
             f"({', '.join(sorted(TERMINAL_STATUSES))}), got {status!r}. "
             f"Use transition_status() for non-terminal transitions."
         )
+
+    # Additive telemetry tap — no behavior change
+    if emit_telemetry:
+        try:
+            from agent.session_telemetry import record_telemetry_event
+
+            _sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+            record_telemetry_event(
+                _sid,
+                {
+                    "type": "status_transition",
+                    "from": getattr(session, "status", None),
+                    "to": status,
+                    "reason": reason or "",
+                    "kill": None,
+                },
+            )
+            # Terminal transition: reap the session's in-memory telemetry state.
+            # This is the last telemetry event a session ever emits, so it is the
+            # correct hook to evict per-session locks/counters/handles and prevent
+            # the maps from growing unbounded over the worker's lifetime.
+            from agent.session_telemetry import (
+                finalize_session as _finalize_telemetry,
+            )
+
+            _finalize_telemetry(_sid)
+        except Exception:
+            pass
+
+    # AC4 Seat A: reset the self-draft attempt counter on every terminal finalize,
+    # unconditionally (regardless of emit_telemetry).  Health-checker callers pass
+    # emit_telemetry=False, so a reset inside the emit_telemetry block would be
+    # skipped on exactly the failed/abandoned paths that need cleanup.  Placing
+    # the reset here covers completed (happy path) and all health-checker terminals.
+    # Best-effort: a Redis failure never blocks the terminal transition.
+    try:
+        _ac4_sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+        if _ac4_sid:
+            from agent.steering import reset_self_draft_attempts as _reset_attempts
+
+            _reset_attempts(_ac4_sid)
+    except Exception:
+        pass
 
     # Idempotency: if already in this terminal state, skip side effects
     current_status = getattr(session, "status", None)
@@ -456,6 +504,7 @@ def transition_status(
     reason: str = "",
     *,
     reject_from_terminal: bool = True,
+    emit_telemetry: bool = True,
 ) -> None:
     """Transition a session to a non-terminal status.
 
@@ -504,6 +553,25 @@ def transition_status(
 
     if new_status not in NON_TERMINAL_STATUSES:
         raise ValueError(f"Unknown status {new_status!r}. Known: {', '.join(sorted(ALL_STATUSES))}")
+
+    # Additive telemetry tap — no behavior change
+    if emit_telemetry:
+        try:
+            from agent.session_telemetry import record_telemetry_event
+
+            _sid = getattr(session, "session_id", None) or getattr(session, "id", None)
+            record_telemetry_event(
+                _sid,
+                {
+                    "type": "status_transition",
+                    "from": getattr(session, "status", None),
+                    "to": new_status,
+                    "reason": reason or "",
+                    "kill": None,
+                },
+            )
+        except Exception:
+            pass
 
     # Guard: reject transitions from terminal statuses unless explicitly allowed
     current_status = getattr(session, "status", None)

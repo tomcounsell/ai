@@ -16,8 +16,15 @@ Two recovery paths:
      L1 (count == 1): log and wait one tick — give launchd a chance.
      L2 (count >= 2): `launchctl kickstart -k gui/<uid>/com.valor.worker`,
                       then verify a PID returns within 10s.
-     L3 (L2 verify failed): `launchctl enable` + kickstart + verify (handles
-                            sticky-disable from `worker-disable`).
+     L2.5 (issue #1407): if L2 failed with rc=113 / "Could not find service"
+                         AND the worker plist exists on disk, run
+                         `launchctl bootstrap gui/<uid> <plist>` to re-register
+                         the service in the gui domain, then retry kickstart.
+                         Handles the regression where `start_worker()` used the
+                         legacy `launchctl load` path and left the service
+                         invisible to `gui/<uid>/` queries.
+     L3 (L2/L2.5 verify failed): `launchctl enable` + kickstart + verify
+                                 (handles sticky-disable from `worker-disable`).
      L4 (L3 verify failed, count >= 3): write `worker:watchdog:critical:{host}`
                                         Redis key + log CRITICAL.
 
@@ -60,6 +67,13 @@ LOG_FILE = PROJECT_DIR / "logs" / "worker_watchdog.log"
 # launchd service label (mirrors scripts/install_worker.sh)
 SERVICE_LABEL_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
 WORKER_LAUNCHD_LABEL = f"{SERVICE_LABEL_PREFIX}.worker"
+
+# Plist path (mirrors scripts/valor-service.sh:55-56 and scripts/install_worker.sh).
+# Used by L2.5 bootstrap-recovery to re-register the worker service in
+# `gui/<uid>/` when `launchctl kickstart` fails with rc=113 / "Could not find
+# service". If this constant ever drifts from the install scripts, the L2.5
+# branch becomes a no-op (plist-existence gate falls through to L3).
+WORKER_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{WORKER_LAUNCHD_LABEL}.plist"
 
 # Verification poll budget
 VERIFY_GRACE_SECONDS = 10
@@ -266,8 +280,15 @@ def _is_operator_disabled() -> bool:
         return False
 
 
-def _kickstart_worker() -> bool:
-    """Run `launchctl kickstart -k <target>`. Returns True on returncode 0."""
+def _kickstart_worker_detailed() -> tuple[bool, int, str]:
+    """Run `launchctl kickstart -k <target>` and return (ok, returncode, stderr).
+
+    Exposes returncode and stderr so callers can distinguish rc=113 / "Could not
+    find service" (which means the service is not registered in the gui domain
+    and should trigger L2.5 bootstrap-recovery) from other failures.
+
+    On timeout or unexpected exception, returns (False, -1, error_message).
+    """
     target = _service_target()
     try:
         result = subprocess.run(
@@ -278,18 +299,65 @@ def _kickstart_worker() -> bool:
         )
         if result.returncode == 0:
             logger.info("launchctl kickstart succeeded for %s", target)
-            return True
+            return True, 0, ""
+        stderr = result.stderr.strip()
         logger.error(
             "launchctl kickstart failed (rc=%s, stderr=%s)",
+            result.returncode,
+            stderr,
+        )
+        return False, result.returncode, stderr
+    except subprocess.TimeoutExpired:
+        logger.error("launchctl kickstart timed out for %s", target)
+        return False, -1, "timeout"
+    except Exception as e:
+        logger.error("launchctl kickstart raised: %s", e)
+        return False, -1, str(e)
+
+
+def _kickstart_worker() -> bool:
+    """Thin wrapper over `_kickstart_worker_detailed` for callers that only need ok/fail."""
+    ok, _rc, _stderr = _kickstart_worker_detailed()
+    return ok
+
+
+def _bootstrap_worker() -> bool:
+    """Run `launchctl bootstrap gui/<uid> <plist>` to register the worker service.
+
+    Used by L2.5 recovery (issue #1407) to heal the case where the service is
+    not registered in the gui domain — typically because a prior `start_worker`
+    invocation used the legacy `launchctl load` path. Returns True on
+    returncode 0.
+
+    Caller MUST gate this on `WORKER_PLIST_PATH.exists()` so the watchdog
+    never spuriously bootstraps a nonexistent service (e.g., uninstalled host).
+    """
+    target_domain = f"gui/{os.getuid()}"
+    try:
+        result = subprocess.run(
+            ["launchctl", "bootstrap", target_domain, str(WORKER_PLIST_PATH)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            logger.info(
+                "launchctl bootstrap succeeded for %s (plist=%s)",
+                target_domain,
+                WORKER_PLIST_PATH,
+            )
+            return True
+        logger.error(
+            "launchctl bootstrap failed (rc=%s, stderr=%s)",
             result.returncode,
             result.stderr.strip(),
         )
         return False
     except subprocess.TimeoutExpired:
-        logger.error("launchctl kickstart timed out for %s", target)
+        logger.error("launchctl bootstrap timed out for %s", target_domain)
         return False
     except Exception as e:
-        logger.error("launchctl kickstart raised: %s", e)
+        logger.error("launchctl bootstrap raised: %s", e)
         return False
 
 
@@ -364,12 +432,39 @@ def _handle_missing_worker() -> None:
 
     # L2: kickstart + verify
     logger.warning("Worker missing for %s ticks — running launchctl kickstart -k", count)
-    if _kickstart_worker():
+    kickstart_ok, kickstart_rc, kickstart_stderr = _kickstart_worker_detailed()
+    if kickstart_ok:
         pid = _verify_worker_alive()
         if pid is not None:
             logger.info("Worker revived via kickstart (PID=%s) — clearing counter", pid)
             _clear_down_ticks()
             return
+
+    # L2.5 (issue #1407): rc=113 / "Could not find service" means the service
+    # is not registered in the gui domain — typically because a prior
+    # `start_worker` used the legacy `launchctl load` path. Self-heal by
+    # bootstrapping the plist and retrying kickstart. Gated on plist-existence
+    # so an uninstalled host falls through cleanly to L3.
+    bootstrap_attempted = False
+    if (
+        not kickstart_ok
+        and (kickstart_rc == 113 or "Could not find service" in kickstart_stderr)
+        and WORKER_PLIST_PATH.exists()
+    ):
+        logger.warning(
+            "Kickstart returned rc=%s (%s) — attempting L2.5 bootstrap recovery",
+            kickstart_rc,
+            kickstart_stderr,
+        )
+        bootstrap_attempted = True
+        if _bootstrap_worker() and _kickstart_worker():
+            pid = _verify_worker_alive()
+            if pid is not None:
+                logger.info(
+                    "Worker revived via bootstrap+kickstart (PID=%s) — clearing counter", pid
+                )
+                _clear_down_ticks()
+                return
 
     # L3: enable + kickstart + verify (handles sticky-disable)
     logger.warning("Kickstart did not bring worker back — trying launchctl enable + kickstart")
@@ -383,7 +478,10 @@ def _handle_missing_worker() -> None:
     # L4: critical
     if count >= 3:
         host = socket.gethostname()
-        reason = f"kickstart+enable both failed after {count} ticks"
+        if bootstrap_attempted:
+            reason = f"bootstrap+kickstart+enable all failed after {count} ticks"
+        else:
+            reason = f"kickstart+enable both failed after {count} ticks"
         logger.critical(
             "WORKER WATCHDOG CRITICAL on %s: %s — manual intervention required",
             host,

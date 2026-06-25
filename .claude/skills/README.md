@@ -12,6 +12,7 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 | do-patch | 204 | User + Model | - | Targeted fix for failing tests or review blockers |
 | do-plan | 202 | User + Model | - | Create or update feature plan documents |
 | do-pr-review | 218 | User + Model | fork | Review PRs with code analysis and screenshots |
+| do-sdlc | 143 | User + Model | fork | Local pipeline supervisor — loops the /sdlc router via stage subagents (opus/sonnet per stage) until merge/blocked |
 | do-test | 247 | User + Model | - | Run the test suite with intelligent dispatch |
 | frontend-design | 134 | User + Model | - | Create production-grade frontend interfaces |
 | google-workspace | 249 | Model only | - | Gmail, Calendar, Docs, Sheets, Drive, Chat |

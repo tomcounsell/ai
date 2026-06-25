@@ -32,29 +32,47 @@ from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
-# Minimum age (in seconds) before a sdlc-local session is considered a zombie
-# orphan. Sessions younger than this are not listed or killed — they may still be
-# executing their first turn or writing their first heartbeat.
+# Idle window (in seconds) before a sdlc-local session is considered a zombie
+# orphan. A session is only reaped when it has had no activity (no heartbeat AND
+# no stage_states write refreshing updated_at) for this long. Sessions active
+# within this window are exempt — including live worker-less CLI pipelines that
+# never write last_heartbeat_at but do refresh updated_at on every stage
+# advance (#1676).
 ORPHAN_AGE_SECONDS = 600
 
 
 def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
     """Ensure a local AgentSession exists for the given issue number.
 
-    Resolution order:
-    1. **Env-var short-circuit**: If VALOR_SESSION_ID or AGENT_SESSION_ID is set
-       in the environment and resolves to a live PM session with non-terminal
-       status, return it without creating anything. Bridge-initiated sessions
-       hit this path and the call is a true no-op.
+    Resolution order (env-vs-issue reconciliation — concern C1, #1671/#1672):
+    1. **Env-var short-circuit WITH issue-ownership check**: If VALOR_SESSION_ID
+       or AGENT_SESSION_ID is set and resolves to a live (non-terminal) PM
+       session, reconcile it against the requested issue number:
+         - If that env session already **owns the issue** (its ``issue_url``
+           endswith ``/issues/{issue_number}``), return it without creating
+           anything — this is the legitimate bridge case (#1147 dedup), a true
+           no-op, no ``find_session_by_issue`` detour.
+         - If the env session exists but does **not** own the issue, consult
+           :func:`find_session_by_issue` and prefer an existing issue-scoped
+           session (e.g. ``sdlc-local-{N}``) over the divergent env session.
+           This is the #1671 case: a forked subagent inherited a parent's
+           ``VALOR_SESSION_ID`` that points at a different issue's session.
     2. **Issue-based lookup**: Scan PM sessions for a matching issue_url or
        message_text (case-insensitive word-boundary regex).
     3. **Create**: Fall through to creating a new sdlc-local-{N} session.
 
-    The short-circuit falls through to the legacy path when:
+    The env short-circuit is *not* a blind reorder: it is kept only when the env
+    session owns the issue, so the bridge dedup contract (#1147) holds and no
+    duplicate is ever created for the bridge case. When no env session exists,
+    the fall-through (issue lookup → create) is unchanged.
+
+    The short-circuit falls through to the legacy/issue path when:
     - The env var is unset or empty
     - The env-resolved session does not exist in Redis (stale env)
     - The env-resolved session is not a PM session (e.g., a Dev session)
     - The env-resolved session is in a terminal status (completed, killed, etc.)
+    - The env-resolved session is live but does NOT own the requested issue
+      (reconciliation prefers the issue-scoped session)
 
     Args:
         issue_number: GitHub issue number.
@@ -80,7 +98,7 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                 if resolved is not None:
                     # Gate on PM session type so PM stage_states never land on
                     # a Dev/Teammate session during cross-role debugging.
-                    if getattr(resolved, "session_type", None) == "pm":
+                    if getattr(resolved, "session_type", None) == "eng":
                         # Gate on non-terminal status (AD1): if the bridge session
                         # finalized between env injection and this call, fall
                         # through so we do not write stage state to a dead record.
@@ -88,7 +106,28 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
 
                         status = getattr(resolved, "status", None)
                         if status not in TERMINAL_STATUSES:
-                            return {"session_id": env_session_id, "created": False}
+                            # Reconciliation (C1, #1671): keep the env session
+                            # only when it OWNS the requested issue. Guard
+                            # issue_url against non-string values (a MagicMock
+                            # default or None would otherwise truthily match).
+                            env_issue_url = getattr(resolved, "issue_url", None) or ""
+                            if env_issue_url.endswith(f"/issues/{issue_number}"):
+                                # Legitimate bridge case — true no-op, no detour.
+                                return {"session_id": env_session_id, "created": False}
+                            # Env session is live but does NOT own this issue.
+                            # Prefer an existing issue-scoped session if one
+                            # exists; otherwise fall through to the issue
+                            # lookup / create path below.
+                            from tools._sdlc_utils import find_session_by_issue
+
+                            owned = find_session_by_issue(issue_number)
+                            if owned is not None:
+                                owned_id = getattr(owned, "session_id", None)
+                                if owned_id:
+                                    return {"session_id": owned_id, "created": False}
+                            # No issue-scoped session yet — fall through to the
+                            # legacy issue lookup + create path. (Do NOT return
+                            # the divergent env session.)
             except Exception as e:
                 logger.debug(f"sdlc_session_ensure: env short-circuit failed: {e}")
                 # Fall through to the legacy path on any error.
@@ -119,6 +158,18 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if issue_url:
             kwargs["issue_url"] = issue_url
 
+        # Fix A (issue #1741): populate the originating intent so the PM prime has a real
+        # goal anchor. Without this, message_text=None propagates to the executor and the
+        # granite PM is primed with "MESSAGE: None" — silently producing no-op [/complete].
+        # This must be a plain natural-language instruction referencing issue #N so the PM
+        # can read the issue body for the goal. Steering messages are course-corrections
+        # toward this goal, never redefinitions of it.
+        kwargs["message_text"] = (
+            f"Run the full SDLC pipeline for issue #{issue_number}. "
+            f"Read the issue body for the work to be done"
+            + (f" ({issue_url})." if issue_url else ".")
+        )
+
         from tools.valor_session import (
             _resolve_project_working_directory,
             resolve_project_key,
@@ -136,7 +187,7 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             session_id=local_session_id,
             project_key=project_key,
             working_dir=str(repo_root),
-            session_type="pm",
+            session_type="eng",
             **kwargs,
         )
 
@@ -163,15 +214,54 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         return {}
 
 
+def _last_activity_at(session):
+    """Return the most recent liveness timestamp for a session, or None.
+
+    A CLI-driven (worker-less) ``sdlc-local-*`` pipeline never writes
+    ``last_heartbeat_at`` — that field is stamped only by the worker's session
+    executor. But every dispatch/verdict/meta write a live local pipeline makes
+    goes through ``tools.stage_states_helpers.update_stage_states``, which calls
+    ``session.save()`` and stamps ``updated_at`` (see
+    ``AgentSession.save`` → ``utc_now()``). So ``updated_at`` IS a liveness
+    signal the local pipeline produces naturally.
+
+    Precedence (most→least authoritative as a "last activity" proxy):
+    ``updated_at`` → ``started_at`` → ``created_at``. The fallbacks cover
+    sessions that were created but have not yet written stage_states (no
+    ``updated_at`` stamp) — they remain reapable on the ``created_at`` clock,
+    preserving the original genuinely-dead-orphan semantics.
+    """
+    for attr in ("updated_at", "started_at", "created_at"):
+        ts = getattr(session, attr, None)
+        if ts is not None:
+            return ts
+    return None
+
+
 def _iter_orphan_sessions():
     """Yield zombie sdlc-local PM sessions suitable for --kill-orphans.
 
     A session is considered a zombie orphan when ALL of these hold:
-    - ``session_type == "pm"``
+    - ``session_type == "eng"``
     - ``status == "running"``
     - ``session_id`` starts with ``"sdlc-local-"``
     - ``last_heartbeat_at`` is None (never received a worker turn)
-    - ``created_at`` is older than ``ORPHAN_AGE_SECONDS`` (default 10 minutes)
+    - **last activity** is older than ``ORPHAN_AGE_SECONDS`` (default 10 min),
+      where last activity = ``updated_at`` (falling back to ``started_at``,
+      then ``created_at``).
+
+    The last-activity check (rather than a bare ``created_at`` check) is what
+    keeps a LIVE worker-less pipeline alive (#1676). On a skills-only machine
+    there is no worker to write ``last_heartbeat_at``, so a healthy CLI-driven
+    ``/do-sdlc`` run matched the old (heartbeat-None AND old-created_at) zombie
+    criteria by construction after 10 minutes — and ``--kill-orphans`` would
+    then ``finalize(killed)`` it mid-run, destroying its ``stage_states`` (the
+    durable dispatch trail and verdicts the router depends on). Because every
+    stage_states write refreshes ``updated_at`` via ``session.save()``, a
+    pipeline that advanced a stage within the last ``ORPHAN_AGE_SECONDS`` is now
+    exempt regardless of whether a worker heartbeat exists. Only a session that
+    is BOTH heartbeat-less AND has not advanced any stage for the full window is
+    treated as genuinely dead.
 
     Sessions whose ``session_id`` does not start with ``"sdlc-local-"`` are
     NEVER yielded — bridge sessions and other running PM sessions are out of
@@ -185,25 +275,25 @@ def _iter_orphan_sessions():
     now = datetime.now(UTC)
 
     try:
-        pm_running = list(AgentSession.query.filter(session_type="pm", status="running"))
+        eng_running = list(AgentSession.query.filter(session_type="eng", status="running"))
     except Exception as e:
         logger.debug(f"_iter_orphan_sessions: query failed: {e}")
         return
 
-    for s in pm_running:
+    for s in eng_running:
         sid = getattr(s, "session_id", None) or ""
         if not sid.startswith("sdlc-local-"):
             continue
         if getattr(s, "last_heartbeat_at", None) is not None:
             continue
-        created = getattr(s, "created_at", None)
-        if created is None:
+        last_activity = _last_activity_at(s)
+        if last_activity is None:
             continue
         try:
-            age_seconds = (now - created).total_seconds()
+            idle_seconds = (now - last_activity).total_seconds()
         except Exception:
             continue
-        if age_seconds >= ORPHAN_AGE_SECONDS:
+        if idle_seconds >= ORPHAN_AGE_SECONDS:
             yield s
 
 

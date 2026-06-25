@@ -165,7 +165,7 @@ class TestG7ThroughDecideNextDispatch:
     """Integration-style tests driving G7 through the full router."""
 
     def test_lock_set_critique_just_ran_routes_to_plan_via_g7(self):
-        """G7 routes to /do-plan when lock is set and critique just ran (via guard, not dispatch table).
+        """G7 routes to /do-plan when lock is set and critique just ran (via guard, not table).
 
         Uses READY TO BUILD (with concerns) verdict so G1 doesn't fire first.
         G1 only fires on NEEDS REVISION / MAJOR REWORK; G7 fires on any
@@ -237,3 +237,173 @@ class TestG7ThroughDecideNextDispatch:
         # With pr_number set and REVIEW pending, router should route to /do-pr-review
         assert isinstance(result, Dispatch)
         assert result.skill != SKILL_DO_PLAN  # G7 did not fire
+
+
+# ---------------------------------------------------------------------------
+# Cross-repo UNKNOWN merge-state — distinguishable Blocked reason
+# ---------------------------------------------------------------------------
+
+
+def _no_rule_matches_states() -> dict:
+    """Return stage_states where pr_number is relevant but no dispatch rule fires.
+
+    Scenario: REVIEW is completed with APPROVED verdict, DOCS is completed,
+    but BUILD and TEST are still pending. Rule 10 (_rule_ready_to_merge)
+    requires BUILD+TEST completed, so it won't fire. Rule 9
+    (_rule_review_approved_docs_not_done) requires DOCS NOT completed, so it
+    won't fire either. No other rule matches with pr_number set and
+    REVIEW="completed". This forces primary=None in decide_next_dispatch,
+    so the UNKNOWN merge-state Blocked branch is reachable.
+    """
+    return {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "CRITIQUE": "completed",
+        "BUILD": "pending",
+        "TEST": "pending",
+        "REVIEW": "completed",
+        "DOCS": "completed",
+        "MERGE": "pending",
+    }
+
+
+class TestUnknownMergeStateBlocked:
+    """PR with UNKNOWN/None merge state emits a distinguishable Blocked reason.
+
+    These tests exercise the branch at the end of decide_next_dispatch that
+    fires when primary=None AND pr_number is set AND pr_merge_state is
+    None/"UNKNOWN". The state fixture _no_rule_matches_states() creates a
+    configuration where every dispatch rule fails to match, so the fallback
+    Blocked path is reached.
+    """
+
+    def test_blocked_unknown_is_distinguishable(self):
+        """PR with UNKNOWN merge state emits distinguishable reason with PR#, UNKNOWN, and repo."""
+        states = _no_rule_matches_states()
+        meta = _base_meta(
+            pr_number=42,
+            pr_merge_state="UNKNOWN",
+            _resolved_target_repo="tomcounsell/popoto",
+            latest_critique_verdict="READY TO BUILD",
+            latest_review_verdict="APPROVED",
+            ci_all_passing=True,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Blocked)
+        assert "42" in result.reason
+        assert "UNKNOWN" in result.reason
+        assert "tomcounsell/popoto" in result.reason
+
+    def test_blocked_none_merge_state_is_distinguishable(self):
+        """PR with None merge state (gh lookup failed) emits distinguishable reason."""
+        states = _no_rule_matches_states()
+        meta = _base_meta(
+            pr_number=77,
+            pr_merge_state=None,
+            _resolved_target_repo="tomcounsell/popoto",
+            latest_critique_verdict="READY TO BUILD",
+            latest_review_verdict="APPROVED",
+            ci_all_passing=None,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Blocked)
+        assert "77" in result.reason
+        assert "None" in result.reason
+
+    def test_dirty_state_does_not_emit_unknown_message(self):
+        """PR with DIRTY merge state does NOT emit UNKNOWN-specific message."""
+        states = _no_rule_matches_states()
+        meta = _base_meta(
+            pr_number=42,
+            pr_merge_state="DIRTY",
+            _resolved_target_repo="tomcounsell/popoto",
+            latest_critique_verdict="READY TO BUILD",
+            latest_review_verdict="APPROVED",
+            ci_all_passing=True,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        # DIRTY is a real state — should NOT trigger the UNKNOWN-specific Blocked message
+        if isinstance(result, Blocked):
+            assert "could not resolve mergeability" not in result.reason
+
+    def test_no_pr_number_no_unknown_blocked(self):
+        """Without a pr_number, the UNKNOWN branch never fires."""
+        # Use base_states (no PR in context) to avoid any pr-specific rule firing
+        states = _base_states()
+        meta = _base_meta(
+            pr_number=None,
+            pr_merge_state=None,
+            latest_critique_verdict="READY TO BUILD",
+        )
+        result = decide_next_dispatch(states, meta, {})
+        # No PR number → UNKNOWN branch must not fire
+        if isinstance(result, Blocked):
+            assert "could not resolve mergeability" not in result.reason
+
+    def test_blocked_unknown_no_resolved_repo_shows_placeholder(self):
+        """When _resolved_target_repo is absent, placeholder appears in reason."""
+        states = _no_rule_matches_states()
+        meta = _base_meta(
+            pr_number=55,
+            pr_merge_state="UNKNOWN",
+            latest_critique_verdict="READY TO BUILD",
+            latest_review_verdict="APPROVED",
+            ci_all_passing=True,
+            # _resolved_target_repo deliberately absent
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Blocked)
+        assert "55" in result.reason
+        assert "UNKNOWN" in result.reason
+        # Placeholder should appear since no repo was resolved
+        assert "none" in result.reason.lower() or "cwd" in result.reason.lower()
+
+
+# ---------------------------------------------------------------------------
+# G5 artifact-hash cache — defers once build has produced a PR (#1710)
+# ---------------------------------------------------------------------------
+
+
+class TestG5DefersAfterBuild:
+    """G5 must not re-dispatch /do-build once BUILD is done or a PR exists.
+
+    Regression for the #1710 pipeline: a cached READY TO BUILD verdict on an
+    unchanged plan hash caused G5 to fire /do-build forever after the PR was
+    already open, never letting the downstream PR-stage rows (review/docs/merge)
+    run.
+    """
+
+    def _g5_inputs(self, **state_overrides):
+        from agent.sdlc_router import guard_g5_artifact_hash_cache
+
+        states = _base_states(
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD (WITH CONCERNS)",
+                    "artifact_hash": "sha256:abc",
+                }
+            },
+            **state_overrides,
+        )
+        context = {"current_plan_hash": "sha256:abc"}
+        return guard_g5_artifact_hash_cache, states, context
+
+    def test_dispatches_build_before_pr(self):
+        """With no PR and BUILD pending, G5 routes straight to /do-build."""
+        g5, states, context = self._g5_inputs(BUILD="pending")
+        meta = _base_meta(pr_number=None)
+        result = g5(states, meta, context)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_BUILD
+
+    def test_defers_when_pr_open(self):
+        """With a PR open, G5 returns None so PR-stage rows take over."""
+        g5, states, context = self._g5_inputs(BUILD="pending")
+        meta = _base_meta(pr_number=1717)
+        assert g5(states, meta, context) is None
+
+    def test_defers_when_build_completed(self):
+        """With BUILD completed, G5 returns None even before a PR is recorded."""
+        g5, states, context = self._g5_inputs(BUILD="completed")
+        meta = _base_meta(pr_number=None)
+        assert g5(states, meta, context) is None

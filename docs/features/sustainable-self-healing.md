@@ -46,6 +46,13 @@ Scans failed/abandoned sessions from the last 4 hours. Groups them by error fing
 - **Redis key:** `{project_key}:sustainability:seen_fingerprints` (TTL 7 days)
 - **Skips:** during active API outage (`queue_paused` set)
 
+**Error fingerprint derivation (`_compute_fingerprint`):** The fingerprint message component is resolved from three sources in priority order:
+1. `extra_context` error keys (`error_message`, `http_status`, `status_code`, `exception_type`, `error_type`, `failed_reason`)
+2. Top-level `session.failed_reason` attribute
+3. Latest `session_events` lifecycle reason — the substring after the first `": "` in the most recent `event_type == "lifecycle"` entry's `text` field (formatted `"{old}→{new}: {reason}"` by `finalize_session`)
+
+This ensures that sessions finalized via `finalize_session(..., reason=...)` (the primary failure path) produce distinct fingerprints per distinct reason, rather than collapsing into the degenerate `"unknown:"` cluster (`06f5940a02173ba1`) when `extra_context` error keys are absent. The `"unknown:"` hash is preserved as a final fallback for sessions with no error context anywhere.
+
 ### 5. Daily Health Digest (`sustainability_digest` / `system-health-digest`)
 
 Enqueues a dev-role AgentSession that generates and sends a daily Telegram health summary to the `Dev: Valor` chat. The digest includes circuit state, throttle level, session counts, and active failure cluster count.
@@ -79,7 +86,17 @@ A new non-terminal status `paused_circuit` was added to `models/session_lifecycl
 
 ## Registered Reflections
 
-In `config/reflections.yaml`:
+In `config/reflections.yaml`. The `agent.sustainability.*` callable paths shown below still resolve via the compatibility shim in `agent/sustainability.py`. The canonical source for each reflection now lives one-file-each under `reflections/agents/`:
+
+| Registry callable | Canonical source |
+|-------------------|-----------------|
+| `agent.sustainability.circuit_health_gate` | `reflections/agents/circuit_health_gate.py::run` |
+| `agent.sustainability.session_count_throttle` | `reflections/agents/session_count_throttle.py::run` |
+| `agent.sustainability.failure_loop_detector` | `reflections/agents/failure_loop_detector.py::run` |
+| `agent.sustainability.session_recovery_drip` | `reflections/agents/session_recovery_drip.py::run` |
+| `agent.sustainability.sustainability_digest` | `reflections/agents/system_health_digest.py::run` |
+
+`send_hibernation_notification`, `_get_project_key`, and `_get_redis` remain defined in `agent/sustainability.py` (non-reflection helpers used by `agent/agent_session_queue.py`).
 
 ```yaml
 - name: circuit-health-gate
@@ -132,6 +149,12 @@ python scripts/reflections.py  # runs all registered reflections
 
 **Run a specific reflection:**
 ```python
+# Canonical path (preferred):
+import asyncio
+from reflections.agents.circuit_health_gate import run
+asyncio.run(run())
+
+# Compat shim path (also works):
 from agent.sustainability import circuit_health_gate
 circuit_health_gate()
 ```

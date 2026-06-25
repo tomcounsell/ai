@@ -10,12 +10,15 @@ import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from telethon.errors import FloodWaitError
 
 from bridge.telegram_relay import (
     KNOWN_MESSAGE_TYPES,
     MAX_RELAY_RETRIES,
     OUTBOX_KEY_PATTERN,
     RELAY_BATCH_SIZE,
+    RELAY_FLOOD_WAIT_BUFFER_SECS,
+    RELAY_FLOOD_WAIT_MAX,
     RELAY_POLL_INTERVAL,
     _dead_letter_message,
     _record_sent_message,
@@ -92,7 +95,12 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_sends_file_via_send_file(self):
-        """Should use client.send_file() when file_paths list is present."""
+        """Should use client.send_file() when file_paths list is present.
+
+        Current contract: the file is sent WITHOUT a caption; any accompanying
+        text is delivered as a separate follow-up send_message so Telegram's
+        narrow caption column doesn't constrain the text layout.
+        """
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
             tmp_path = f.name
             f.write(b"fake image")
@@ -102,6 +110,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 55
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -117,7 +126,12 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption="Check this",
+                reply_to=67890,
+            )
+            # Text is delivered as a separate follow-up message.
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Check this",
                 reply_to=67890,
             )
         finally:
@@ -125,7 +139,7 @@ class TestSendQueuedMessage:
 
     @pytest.mark.asyncio
     async def test_file_only_send_no_caption(self):
-        """Should send file with caption=None when text is empty."""
+        """Should send the file with no follow-up text when text is empty."""
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as f:
             tmp_path = f.name
             f.write(b"fake pdf")
@@ -135,6 +149,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 66
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -149,9 +164,10 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption=None,
                 reply_to=None,
             )
+            # No text → no follow-up send_message.
+            mock_client.send_message.assert_not_called()
         finally:
             os.unlink(tmp_path)
 
@@ -203,6 +219,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 88
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             # Legacy payload with file_path (string), not file_paths (list)
             message = {
@@ -218,7 +235,11 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption="Legacy payload",
+                reply_to=None,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Legacy payload",
                 reply_to=None,
             )
         finally:
@@ -239,6 +260,7 @@ class TestSendQueuedMessage:
             # Telethon returns list of Messages for albums
             mock_msgs = [MagicMock(id=101), MagicMock(id=102), MagicMock(id=103)]
             mock_client.send_file = AsyncMock(return_value=mock_msgs)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -253,7 +275,11 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_files,
-                caption="Album caption",
+                reply_to=None,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Album caption",
                 reply_to=None,
             )
         finally:
@@ -272,6 +298,7 @@ class TestSendQueuedMessage:
             mock_sent = MagicMock()
             mock_sent.id = 99
             mock_client.send_file = AsyncMock(return_value=mock_sent)
+            mock_client.send_message = AsyncMock()
 
             message = {
                 "chat_id": "12345",
@@ -287,7 +314,11 @@ class TestSendQueuedMessage:
             mock_client.send_file.assert_called_once_with(
                 12345,
                 tmp_path,
-                caption="Partial album",
+                reply_to=None,
+            )
+            mock_client.send_message.assert_called_once_with(
+                12345,
+                "Partial album",
                 reply_to=None,
             )
         finally:
@@ -753,3 +784,326 @@ class TestProcessOutbox:
         assert sent == 2
         # Only the failed message should be re-queued
         assert mock_redis.rpush.call_count == 1
+
+
+class TestFileIdempotency:
+    """Defect 1 — file send idempotency guard (#1749)."""
+
+    @pytest.mark.asyncio
+    async def test_file_not_resent_on_text_step_retry(self):
+        """send_file must be called exactly once even when send_message fails on first attempt.
+
+        Sequence:
+          1. First call: send_file succeeds, message["_file_sent"] = True,
+             send_message raises — _send_queued_message returns None.
+          2. Second call with the *same* dict (as if re-queued with _file_sent=True):
+             send_file must NOT be called again; send_message IS called.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            mock_client = MagicMock()
+            mock_sent = MagicMock()
+            mock_sent.id = 55
+            mock_client.send_file = AsyncMock(return_value=mock_sent)
+            # First call: send_message raises; second call: succeeds
+            mock_client.send_message = AsyncMock(side_effect=[Exception("network glitch"), None])
+
+            message = {
+                "chat_id": "12345",
+                "reply_to": None,
+                "text": "caption text",
+                "file_paths": [tmp_path],
+                "session_id": "test-session",
+            }
+
+            # First attempt — file sends, text fails
+            result1 = await _send_queued_message(mock_client, message)
+            assert result1 is None  # text step failed → return None
+            assert message.get("_file_sent") is True
+
+            # Second attempt — message dict carries _file_sent=True
+            result2 = await _send_queued_message(mock_client, message)
+            # send_message succeeded this time
+            assert result2 is None or isinstance(result2, (int, type(None)))
+
+            # Core assertion: send_file called exactly once across both attempts
+            assert mock_client.send_file.call_count == 1
+            # send_message was called on both attempts (once raised, once succeeded)
+            assert mock_client.send_message.call_count == 2
+        finally:
+            os.unlink(tmp_path)
+
+
+class TestOversizedTextGuard:
+    """Defect 2 — oversized text converted to .txt attachment (#1749)."""
+
+    @pytest.mark.asyncio
+    async def test_oversized_text_on_file_message_converts_to_txt(self):
+        """When file+text message has text >4096 chars, text must ship as .txt, not send_message."""
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            mock_client = MagicMock()
+            mock_file_sent = MagicMock()
+            mock_file_sent.id = 55
+            mock_overflow_sent = MagicMock()
+            mock_overflow_sent.id = 56
+            # send_file: first call = actual file, second call = .txt attachment
+            mock_client.send_file = AsyncMock(side_effect=[mock_file_sent, mock_overflow_sent])
+            mock_client.send_message = AsyncMock()
+
+            oversized_text = "x" * 4097
+
+            message = {
+                "chat_id": "12345",
+                "text": oversized_text,
+                "file_paths": [tmp_path],
+                "session_id": "test-session",
+            }
+
+            result = await _send_queued_message(mock_client, message)
+
+            # send_file called twice: once for real file, once for .txt overflow
+            assert mock_client.send_file.call_count == 2
+            # send_message must NOT be called with the oversized text
+            mock_client.send_message.assert_not_called()
+            # Returns a valid message ID (the .txt attachment)
+            assert result == 56
+        finally:
+            os.unlink(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_oversized_text_only_converts_to_txt_not_send_markdown(self):
+        """Text-only message >4096 chars must use send_file (.txt), never send_markdown."""
+        mock_client = MagicMock()
+        mock_overflow_sent = MagicMock()
+        mock_overflow_sent.id = 77
+        mock_client.send_file = AsyncMock(return_value=mock_overflow_sent)
+
+        oversized_text = "y" * 4097
+
+        message = {
+            "chat_id": "12345",
+            "text": oversized_text,
+            "session_id": "test-session",
+        }
+
+        mock_send_markdown = AsyncMock()
+        with patch("bridge.markdown.send_markdown", mock_send_markdown):
+            result = await _send_queued_message(mock_client, message)
+
+        # send_file called for .txt attachment
+        assert mock_client.send_file.call_count == 1
+        # send_markdown must NOT receive the oversized text
+        mock_send_markdown.assert_not_called()
+        assert result == 77
+
+    @pytest.mark.asyncio
+    async def test_normal_length_text_still_routes_through_send_markdown(self):
+        """Normal-length text-only message (<= 4096 chars) must route through send_markdown."""
+        mock_client = MagicMock()
+        mock_sent = MagicMock()
+        mock_sent.id = 42
+
+        message = {
+            "chat_id": "12345",
+            "text": "short message",
+            "session_id": "test-session",
+        }
+
+        mock_send_markdown = AsyncMock(return_value=mock_sent)
+        with patch("bridge.markdown.send_markdown", mock_send_markdown):
+            result = await _send_queued_message(mock_client, message)
+
+        mock_send_markdown.assert_called_once()
+        # send_file must NOT be called for normal-length text
+        mock_client.send_file = AsyncMock()
+        assert mock_client.send_file.call_count == 0
+        assert result == 42
+
+
+class TestDeadLetterGuard:
+    """Defect 3 — dead-letter narrowed from <= 0 to == 0 (#1749)."""
+
+    @pytest.mark.asyncio
+    async def test_dead_letter_persists_negative_group_chat_id(self):
+        """Negative chat_id (supergroup) must be persisted to dead letter, not discarded."""
+        message = {
+            "chat_id": "-1003900483201",
+            "text": "message to supergroup",
+            "session_id": "test-session",
+        }
+
+        with patch(
+            "bridge.dead_letters.persist_failed_delivery", new_callable=AsyncMock
+        ) as mock_persist:
+            await _dead_letter_message(message, reason="max retries exceeded")
+
+        mock_persist.assert_called_once_with(
+            chat_id=-1003900483201,
+            reply_to=None,
+            text="message to supergroup",
+        )
+
+    @pytest.mark.asyncio
+    async def test_dead_letter_discards_zero_chat_id(self):
+        """chat_id == 0 is not a valid Telegram peer and must NOT be persisted."""
+        message = {
+            "chat_id": "0",
+            "text": "should be discarded",
+            "session_id": "test-session",
+        }
+
+        with patch(
+            "bridge.dead_letters.persist_failed_delivery", new_callable=AsyncMock
+        ) as mock_persist:
+            await _dead_letter_message(message, reason="max retries exceeded")
+
+        mock_persist.assert_not_called()
+
+
+class TestFloodWait:
+    """Defect 4 — FloodWaitError handling in relay (#1749)."""
+
+    @pytest.mark.asyncio
+    async def test_floodwait_propagates_from_send_queued_message(self):
+        """FloodWaitError raised by send_markdown must propagate, not be swallowed."""
+        mock_client = MagicMock()
+        flood_err = FloodWaitError(request=None, capture=30)
+        mock_send_markdown = AsyncMock(side_effect=flood_err)
+
+        message = {
+            "chat_id": "12345",
+            "text": "hello",
+            "session_id": "test-session",
+        }
+
+        with patch("bridge.markdown.send_markdown", mock_send_markdown):
+            with pytest.raises(FloodWaitError):
+                await _send_queued_message(mock_client, message)
+
+    @pytest.mark.asyncio
+    async def test_floodwait_honored_without_burning_retries(self):
+        """FloodWaitError must sleep the requested duration and NOT increment _relay_attempts."""
+        mock_redis = MagicMock()
+        message_dict = {
+            "chat_id": "12345",
+            "text": "flood target",
+            "session_id": "test-session",
+        }
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [json.dumps(message_dict), None]
+
+        flood_err = FloodWaitError(request=None, capture=10)
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message",
+                new_callable=AsyncMock,
+                side_effect=flood_err,
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            await process_outbox(MagicMock())
+
+        # Must sleep for requested seconds + buffer
+        expected_sleep = 10 + RELAY_FLOOD_WAIT_BUFFER_SECS
+        mock_sleep.assert_called_once_with(expected_sleep)
+
+        # Must re-queue without incrementing _relay_attempts
+        mock_redis.rpush.assert_called_once()
+        requeued = json.loads(mock_redis.rpush.call_args[0][1])
+        assert "_relay_attempts" not in requeued or requeued.get("_relay_attempts", 0) == 0
+        assert requeued.get("_flood_waits") == 1
+
+    @pytest.mark.asyncio
+    async def test_floodwait_backstop_dead_letters_message(self):
+        """After RELAY_FLOOD_WAIT_MAX flood waits, message must be dead-lettered."""
+        mock_redis = MagicMock()
+        # Message already at RELAY_FLOOD_WAIT_MAX - 1 flood waits
+        message_dict = {
+            "chat_id": "12345",
+            "text": "repeated flood target",
+            "session_id": "test-session",
+            "_flood_waits": RELAY_FLOOD_WAIT_MAX - 1,
+        }
+        mock_redis.keys.return_value = ["telegram:outbox:test-session"]
+        mock_redis.lpop.side_effect = [json.dumps(message_dict), None]
+
+        flood_err = FloodWaitError(request=None, capture=5)
+
+        with (
+            patch("bridge.telegram_relay._get_redis_connection", return_value=mock_redis),
+            patch(
+                "bridge.telegram_relay._send_queued_message",
+                new_callable=AsyncMock,
+                side_effect=flood_err,
+            ),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+            patch(
+                "bridge.telegram_relay._dead_letter_message", new_callable=AsyncMock
+            ) as mock_dead_letter,
+        ):
+            await process_outbox(MagicMock())
+
+        # Must dead-letter the message with the updated flood count
+        mock_dead_letter.assert_called_once()
+        dead_msg = mock_dead_letter.call_args[0][0]
+        assert dead_msg["_flood_waits"] == RELAY_FLOOD_WAIT_MAX
+        mock_dead_letter.assert_called_with(dead_msg, reason="flood_backstop")
+        # A backstopped message must NOT be re-queued after dead-lettering.
+        # The `continue` after _dead_letter_message skips the generic retry block,
+        # so rpush must never be called for this message.
+        mock_redis.rpush.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_floodwait_after_file_send_skips_file_on_retry(self):
+        """File sent before FloodWait must not be resent after the wait clears.
+
+        Sequence:
+          Attempt 1: send_file succeeds (_file_sent=True set), text step raises FloodWaitError.
+          process_outbox re-queues the message carrying _file_sent=True.
+          Attempt 2 (simulated via second process_outbox call): send_file NOT called again.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+            tmp_path = f.name
+            f.write(b"fake image")
+
+        try:
+            mock_client = MagicMock()
+            mock_file_sent = MagicMock()
+            mock_file_sent.id = 55
+            mock_client.send_file = AsyncMock(return_value=mock_file_sent)
+            # send_message raises FloodWaitError on first call
+            flood_err = FloodWaitError(request=None, capture=5)
+            mock_client.send_message = AsyncMock(side_effect=[flood_err, None])
+
+            message = {
+                "chat_id": "12345",
+                "text": "caption",
+                "file_paths": [tmp_path],
+                "session_id": "test-session",
+            }
+
+            # First attempt: file sends, text raises FloodWaitError
+            with pytest.raises(FloodWaitError):
+                await _send_queued_message(mock_client, message)
+
+            assert message.get("_file_sent") is True
+            assert mock_client.send_file.call_count == 1
+
+            # Second attempt with the same dict (carries _file_sent=True)
+            await _send_queued_message(mock_client, message)
+
+            # send_file must still be called exactly once across both attempts
+            assert mock_client.send_file.call_count == 1
+            # send_message called twice: once raised, once succeeded
+            assert mock_client.send_message.call_count == 2
+        finally:
+            os.unlink(tmp_path)

@@ -72,6 +72,16 @@ def main():
         except Exception:
             pass  # Silent failure -- never block prompt submission
 
+    # Capture TUI interaction patterns (slash commands, mid-run steering) for
+    # subconscious-memory recall (#1540, Pillar 3 of epic #1536). Fail-silent.
+    if session_id:
+        try:
+            from agent.tui_interaction_capture import capture_prompt_event
+
+            capture_prompt_event(session_id, prompt, cwd=cwd)
+        except Exception:
+            pass  # Silent failure -- never block prompt submission
+
     # Create AgentSession for local CLI session (one per session, idempotent)
     try:
         if session_id:
@@ -223,6 +233,18 @@ def main():
                 # parent_agent_session_id. When absent (non-child sessions), create_local()
                 # behaves identically to before.
                 parent_agent_session_id = os.environ.get("VALOR_PARENT_SESSION_ID")
+
+                # Stopgap (#1633): do not create NEW parent-linked child records.
+                # The granite PTY container owns the PM/Dev split; parent-linked
+                # children risk pool-slot starvation. Skip record creation
+                # entirely (no Redis write) -- the subprocess itself still runs,
+                # and the attach path above keeps EXISTING child sessions
+                # working. Escape hatch: VALOR_ALLOW_CHILD_SESSIONS=1.
+                if parent_agent_session_id:
+                    from models.child_session_gate import child_sessions_allowed
+
+                    if not child_sessions_allowed():
+                        return
 
                 agent_session = AgentSession.create_local(
                     session_id=local_session_id,

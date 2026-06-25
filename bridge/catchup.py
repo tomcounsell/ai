@@ -8,6 +8,9 @@ any messages that should have triggered a response.
 import logging
 from datetime import UTC, datetime, timedelta
 
+from bridge.routing import persona_to_session_type, resolve_persona
+from config.enums import SessionType
+
 logger = logging.getLogger(__name__)
 
 # How far back to look for missed messages (default: 1 hour)
@@ -99,6 +102,40 @@ async def scan_for_missed_messages(
         # the event handler's event.chat_id format.
         chat_id = dialog.id
 
+        # Per-chat cutoff (issue #1408): the global `cutoff` is derived from
+        # `last_connected`, which advances on every 5-minute heartbeat. A message
+        # sent inside the connection window but silently dropped by Telethon falls
+        # BEFORE that cutoff on restart and would be excluded. The per-chat
+        # last-processed cursor records the last message we actually dispatched
+        # for this chat; if it predates the global cutoff, we use it (minus a
+        # 60-second safety margin) so the scan reaches back to the real gap.
+        #
+        # We take min(global_cutoff, candidate): "look back AT LEAST as far as the
+        # global cutoff, and further if the cursor is older." Never max() — that
+        # could miss a message that arrived after the last cursor update but before
+        # the crash. The 24-hour cap (above) still bounds total lookback.
+        from bridge.dedup import get_last_processed
+
+        per_chat_cutoff = cutoff
+        try:
+            last_proc = await get_last_processed(chat_id)
+            if last_proc is not None:
+                _last_msg_id, last_proc_dt = last_proc
+                candidate = last_proc_dt - timedelta(seconds=60)
+                per_chat_cutoff = min(cutoff, candidate)
+                if per_chat_cutoff < cutoff:
+                    logger.info(
+                        f"[catchup] {chat_title}: per-chat cutoff {per_chat_cutoff.isoformat()} "
+                        f"predates global cutoff {cutoff.isoformat()} "
+                        f"(last dispatched {last_proc_dt.isoformat()}) — extending lookback"
+                    )
+        except Exception as e:
+            # Defensive: a cursor read failure must not break the per-group scan.
+            logger.warning(
+                f"[catchup] {chat_title}: get_last_processed failed ({e}); "
+                f"falling back to global cutoff"
+            )
+
         logger.info(f"[catchup] Scanning {chat_title} for missed messages...")
 
         try:
@@ -110,12 +147,12 @@ async def scan_for_missed_messages(
 
             logger.info(
                 f"[catchup] {chat_title}: Fetched {len(messages)} messages, "
-                f"scanning for messages after {cutoff.isoformat()}"
+                f"scanning for messages after {per_chat_cutoff.isoformat()}"
             )
 
             for message in messages:
                 # Skip if too old
-                if message.date < cutoff:
+                if message.date < per_chat_cutoff:
                     logger.debug(
                         f"[catchup] {chat_title}: msg {message.id} too old "
                         f"({message.date.isoformat()}) - stopping scan"
@@ -198,6 +235,25 @@ async def scan_for_missed_messages(
                 # Build session ID for this message
                 session_id = f"tg_{project_key}_{chat_id}_{message.id}"
 
+                # Resolve persona here for parity with the live handler
+                # (bridge/telegram_bridge.py). Without this, the scanner would
+                # let session_type default to eng and a teammate-configured chat
+                # would wrongly run as an eng PM<->Dev loop. The try/except is
+                # NARROW (per-message): a persona failure falls back to the eng
+                # default and continues the scan rather than aborting the chat.
+                try:
+                    persona = resolve_persona(project, chat_title, is_dm=False)
+                    session_type = persona_to_session_type(persona)
+                except Exception as e:
+                    logger.warning(
+                        "[catchup] persona resolution failed for chat %s (%s); "
+                        "defaulting to eng: %s",
+                        chat_id,
+                        chat_title,
+                        e,
+                    )
+                    session_type = SessionType.ENG
+
                 await enqueue_agent_session_fn(
                     project_key=project_key,
                     session_id=session_id,
@@ -209,12 +265,16 @@ async def scan_for_missed_messages(
                     chat_title=chat_title,
                     priority="low",  # Lower priority than real-time messages
                     sender_id=sender_id,
+                    session_type=session_type,
+                    project_config=project,
                 )
 
-                # Record in Redis dedup to prevent re-enqueue on next scan
-                from bridge.dedup import record_message_processed
+                # Record in Redis dedup to prevent re-enqueue on next scan,
+                # and advance the per-chat last-processed cursor (issue #1408).
+                from bridge.dedup import record_last_processed, record_message_processed
 
                 await record_message_processed(chat_id, message.id)
+                await record_last_processed(chat_id, message.id, message.date)
                 queued += 1
 
         except Exception as e:

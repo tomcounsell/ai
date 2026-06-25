@@ -29,6 +29,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tools.machine_identity import display_machine_name
+
 logger = logging.getLogger("reflections.docs_auditor")
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -62,6 +64,7 @@ REDIS_SWEEPER_RUNNING_KEY = "docs_audit:sweeper:running"
 REDIS_LAST_COMPLETED_TS_KEY = "docs_audit:last_completed_run_ts"
 REDIS_LAST_COMPLETED_SUMMARY_KEY = "docs_audit:last_completed_run_summary"
 REDIS_ISSUE_DEDUP_PREFIX = "docs_audit:issues_filed"
+REDIS_DAILY_PR_KEY = "docs_audit:prs_today"  # capped at 1 PR per calendar day
 
 # Vault docs are picked at half the rate of repo docs by default (read-mostly).
 DEFAULT_VAULT_WEIGHT = 0.5
@@ -486,11 +489,139 @@ def _apply_fixes_to_file(path: Path, repo_root: Path, fixes: list[tuple[str, str
 # ---------------------------------------------------------------------------
 
 
+# Path components that are obvious illustrative stand-ins, not real module names.
+_PLACEHOLDER_PATH_COMPONENTS = frozenset(
+    {"foo", "bar", "baz", "qux", "quux", "example", "your-module", "mymodule", "sample"}
+)
+
+# Heading keywords whose presence means the doc is deliberately recording a deletion.
+_DELETION_HEADING_KEYWORDS = ("migration", "removed", "deleted", "deprecated")
+
+# Prose cues that a nearby line is documenting a deletion rather than a live reference.
+_DELETION_PROSE_CUES = (
+    "deleted module",
+    "no longer in the codebase",
+    "no longer exists",
+    "previously in",
+    "formerly",
+)
+
+
+def _is_placeholder_path(path: str) -> bool:
+    """Return True if a path is an illustrative placeholder, not a real module path.
+
+    A path is a placeholder when any of its components is a well-known stand-in
+    (``foo``, ``bar``, ``example`` ...) or a single lowercase letter directory.
+    Empty or single-segment paths return False (the detector regex guarantees a
+    ``dir/file.py`` shape, so this only guards malformed/odd input).
+    """
+    if not path or "/" not in path:
+        return False
+    components = path.split("/")
+    for i, component in enumerate(components):
+        # For the final component, compare the file stem (strip the .py suffix)
+        # so ``agent/docs_handler/foo.py`` is caught on its ``foo`` stem.
+        is_last = i == len(components) - 1
+        candidate = component[:-3] if is_last and component.endswith(".py") else component
+        lowered = candidate.lower()
+        if lowered in _PLACEHOLDER_PATH_COMPONENTS:
+            return True
+        # A single lowercase letter directory (e.g. ``a/foo.py``) is illustrative.
+        if len(candidate) == 1 and candidate.isalpha() and candidate.islower():
+            return True
+    return False
+
+
+def _build_line_context(content: str) -> tuple[list[bool], list[str]]:
+    """Single-scan precompute of per-line context for deletion-aware filtering.
+
+    Returns ``(in_fence, heading_for_line)`` where:
+    - ``in_fence[i]`` is True if line ``i`` sits inside a fenced ``` code block.
+    - ``heading_for_line[i]`` is the text of the nearest preceding Markdown
+      heading for line ``i`` (lowercased), or ``""`` if none precedes it.
+
+    No I/O; pure string scan over ``content``.
+    """
+    lines = content.splitlines()
+    in_fence: list[bool] = []
+    heading_for_line: list[str] = []
+    fence_open = False
+    current_heading = ""
+    for line in lines:
+        stripped = line.lstrip()
+        is_fence_marker = stripped.startswith("```")
+        # A fence marker line is itself part of the block boundary; treat the
+        # marker line as inside the fence so matches on it are suppressed too.
+        if is_fence_marker:
+            in_fence.append(True)
+            fence_open = not fence_open
+        else:
+            in_fence.append(fence_open)
+        # Track nearest preceding heading only outside fenced blocks.
+        if not fence_open and not is_fence_marker and stripped.startswith("#"):
+            current_heading = stripped.lstrip("#").strip().lower()
+        heading_for_line.append(current_heading)
+    return in_fence, heading_for_line
+
+
+def _is_documented_deletion(
+    line_idx: int, lines: list[str], in_fence: list[bool], heading_for_line: list[str]
+) -> bool:
+    """Return True if a match at ``line_idx`` is an illustrative or documented deletion.
+
+    Three conservative cues (any one suppresses the finding):
+    1. The match falls inside a fenced code block (illustrative example).
+    2. The nearest preceding heading names a deletion (migration/removed/
+       deleted/deprecated).
+    3. The match's line or an immediately adjacent line carries a deletion-prose
+       cue ("deleted module", "no longer exists", ...).
+
+    Inline single-backtick code is NOT suppressed — that is how genuine
+    references are written.
+    """
+    if line_idx < len(in_fence) and in_fence[line_idx]:
+        return True
+    if line_idx < len(heading_for_line):
+        heading = heading_for_line[line_idx]
+        if any(kw in heading for kw in _DELETION_HEADING_KEYWORDS):
+            return True
+    for adj in (line_idx - 1, line_idx, line_idx + 1):
+        if 0 <= adj < len(lines):
+            lowered = lines[adj].lower()
+            if any(cue in lowered for cue in _DELETION_PROSE_CUES):
+                return True
+    return False
+
+
 def _detect_deleted_target_issues(doc_path: Path, content: str, repo_root: Path) -> list[dict]:
-    """File issues for references to deleted (non-renamed) targets."""
+    """File issues for references to deleted (non-renamed) targets.
+
+    Suppresses three classes of false positive before emitting a finding:
+    placeholder/example paths (``foo/bar.py``), paths inside fenced illustrative
+    code blocks, and paths under a deletion-recording heading or deletion prose.
+    Every suppressed match is logged at DEBUG so operators can audit the filter.
+    """
     findings: list[dict] = []
+    lines = content.splitlines()
+    in_fence, heading_for_line = _build_line_context(content)
     for m in re.finditer(r"`((?:[\w.-]+/)+[\w.-]+\.py)`", content):
         path = m.group(1)
+        if _is_placeholder_path(path):
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for placeholder path %s in %s",
+                path,
+                doc_path,
+            )
+            continue
+        line_idx = content.count("\n", 0, m.start())
+        if _is_documented_deletion(line_idx, lines, in_fence, heading_for_line):
+            logger.debug(
+                "docs_auditor: suppressed deleted-target finding for %s in %s "
+                "(fenced block or documented deletion)",
+                path,
+                doc_path,
+            )
+            continue
         if (repo_root / path).exists():
             continue
         renames = _git_log_follow_renames(path, repo_root)
@@ -566,8 +697,95 @@ def refresh_docs_in_memory(touched_paths: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_title(title: str) -> str:
+    """Collapse internal whitespace and strip — for exact title comparison."""
+    return " ".join(title.split())
+
+
+def _filing_machine_name() -> str:
+    """Human-facing name of the machine filing the issue, for multi-machine triage.
+
+    Matches the ``machine`` field used by the single-machine-ownership system
+    (macOS ComputerName via ``scutil``), falling back to the OS hostname. This
+    is stamped into every issue body so duplicates fanned across hosts — or a
+    host still running this reflection after it was disabled in the synced
+    config — name themselves instead of being anonymous.
+
+    Delegates to :func:`tools.machine_identity.display_machine_name`, the shared
+    helper that owns the ComputerName→hostname→"unknown" fallback chain.
+    """
+    return display_machine_name()
+
+
+def _open_issue_exists(title: str, repo_root: Path) -> bool:
+    """Return True if an open `documentation` issue already has this exact title.
+
+    This is the authoritative cross-machine dedup gate: local Redis dedup keys
+    are per-machine and invisible across hosts, so two machines would otherwise
+    file the same finding. Queries the live tracker via
+    ``gh issue list --search`` (REST-backed full-text search) and confirms with
+    an exact normalized-title comparison in Python (the title already encodes
+    both the path and the doc, making it a natural composite key).
+
+    Fails open: on any `gh` failure, non-zero exit, or malformed output, log a
+    WARNING and return False so a genuine finding is never silently dropped —
+    the worst case is the duplicate this gate was meant to prevent, which the
+    Redis fast-path still suppresses on the next run.
+    """
+    normalized_query = _normalize_title(title)
+    try:
+        result = subprocess.run(
+            [
+                "gh",
+                "issue",
+                "list",
+                "--state",
+                "open",
+                "--label",
+                "documentation",
+                "--search",
+                title,
+                "--json",
+                "number,title",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "docs_auditor: gh issue list (dedup) failed for '%s' (rc=%d): %s "
+                "— falling back to Redis-only dedup",
+                title,
+                result.returncode,
+                result.stderr.strip()[:200],
+            )
+            return False
+        issues = json.loads(result.stdout or "[]")
+        for issue in issues:
+            if _normalize_title(issue.get("title", "")) == normalized_query:
+                return True
+        return False
+    except Exception as e:
+        logger.warning(
+            "docs_auditor: gh issue list (dedup) errored for '%s': %s "
+            "— falling back to Redis-only dedup",
+            title,
+            e,
+        )
+        return False
+
+
 def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
-    """File a GitHub issue via gh CLI, deduped by title hash. Returns True if filed."""
+    """File a GitHub issue via gh CLI, deduped by title. Returns True if filed.
+
+    Two-tier dedup: a local Redis fast-path (per-machine cache) gates the
+    expensive live-tracker query, and `_open_issue_exists` is the authoritative
+    cross-machine gate. Local Redis alone is insufficient because each machine
+    keeps its own Redis, so the same finding would be filed once per machine.
+    """
     title = finding.get("title", "").strip()
     if not title:
         return False
@@ -576,11 +794,30 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
     redis_client = None
     try:
         redis_client = _get_redis()
-        # Pre-check existence without writing — only commit dedup key after gh succeeds.
+        # Fast-path: if this machine already filed it, skip the tracker query entirely.
         if redis_client.exists(dedup_key):
             return False  # already filed
     except Exception:
         redis_client = None  # If Redis is unavailable, attempt to file without dedup
+
+    # Authoritative cross-machine gate: another machine may have already filed this.
+    if _open_issue_exists(title, repo_root):
+        # Record the local fast-path key so subsequent runs skip the tracker query.
+        if redis_client is not None:
+            try:
+                redis_client.set(dedup_key, "1", ex=86400 * 30)
+            except (
+                Exception
+            ):  # swallow-ok: best-effort cache write; tracker already confirmed dedup
+                pass
+        return False
+
+    # Stamp the filing machine into the body (not the title — title is the dedup
+    # key and must stay stable). Lets duplicates fanned across hosts, or a host
+    # still running this reflection after it was disabled in synced config, name
+    # themselves for triage.
+    body = finding.get("body", "")
+    body = f"{body}\n\n---\n*Filed by docs-auditor reflection on `{_filing_machine_name()}`.*"
 
     try:
         result = subprocess.run(
@@ -591,7 +828,7 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
                 "--title",
                 title,
                 "--body",
-                finding.get("body", ""),
+                body,
                 "--label",
                 "documentation",
             ],
@@ -611,7 +848,7 @@ def _file_issue_if_new(finding: dict, repo_root: Path) -> bool:
         if redis_client is not None:
             try:
                 redis_client.set(dedup_key, "1", ex=86400 * 30)
-            except Exception:
+            except Exception:  # swallow-ok: best-effort cache write after successful issue create
                 pass
         return True
     except Exception as e:
@@ -628,7 +865,7 @@ def _send_telegram_notification(message: str) -> None:
     """Best-effort Telegram notification. Swallows all subprocess failures."""
     try:
         subprocess.run(
-            ["valor-telegram", "send", "--chat", "Dev: Valor", message],
+            ["valor-telegram", "send", "--chat", "Eng: Valor", message],
             capture_output=True,
             text=True,
             timeout=10,
@@ -733,19 +970,38 @@ def audit(
                 total_fixes += applied
                 touched.append(str(path))
 
-        # File-as-issue detectors (advisory)
-        issue_findings.extend(_detect_deleted_target_issues(path, content, root))
-        stub = _detect_stub_doc(path, content)
-        if stub is not None:
-            issue_findings.append(stub)
+        # File-as-issue detectors (advisory). Editorial, not auto-fixable — a
+        # deleted-target reference has no rename to correct to. These are
+        # rotation-only: Caller B (/do-docs, scope=pr-changed-files) runs on
+        # every PR's docs stage, so filing advisory issues there re-files the
+        # same unfixable findings per-PR (and re-files any that were closed
+        # without fixing the doc, since the dedup gate only sees open issues),
+        # which is the documentation-label duplicate flood. Auto-fix detectors
+        # above still run per-PR; only issue-filing is gated to rotation.
+        if scope_mode == "rotation":
+            issue_findings.extend(_detect_deleted_target_issues(path, content, root))
+            stub = _detect_stub_doc(path, content)
+            if stub is not None:
+                issue_findings.append(stub)
 
     # Orphan plans (repo-wide, run once)
     if scope_mode == "rotation":
         issue_findings.extend(_detect_orphan_plan_issues(root))
 
-    # File issues (deduped); only when applying
-    if apply_mode == "apply":
+    # File issues (deduped); only when applying in rotation scope.
+    # Hard per-run cap prevents flood: rotation allows up to 5.
+    per_run_cap = 5 if scope_mode == "rotation" else 3
+    if apply_mode == "apply" and scope_mode == "rotation":
         for finding in issue_findings:
+            if issues_filed >= per_run_cap:
+                logger.warning(
+                    "docs_auditor: per-run cap (%d) reached for scope=%s — "
+                    "%d finding(s) suppressed; re-run to file remaining",
+                    per_run_cap,
+                    scope_mode,
+                    len(issue_findings) - issues_filed,
+                )
+                break
             if _file_issue_if_new(finding, root):
                 issues_filed += 1
 
@@ -872,11 +1128,69 @@ def _git_diff_quiet(repo_root: Path) -> bool:
         return False
 
 
+def _has_open_pr_for_slug(slug: str, repo_root: Path) -> bool:
+    """Return True if any open PR already targets a docs-audit branch for this slug."""
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--json", "headRefName"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(repo_root),
+        )
+        if result.returncode != 0:
+            return False
+        prs = json.loads(result.stdout or "[]")
+        prefix = f"docs-audit/{slug}-"
+        return any(p.get("headRefName", "").startswith(prefix) for p in prs)
+    except Exception as e:
+        logger.warning(f"docs_auditor: open-PR check failed: {e}")
+        return False
+
+
+def _daily_pr_cap_reached(repo_root: Path) -> bool:
+    """Return True if a docs-audit PR was already created today (calendar day, UTC)."""
+    try:
+        r = _get_redis()
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        key = f"{REDIS_DAILY_PR_KEY}:{today}"
+        return bool(r.exists(key))
+    except Exception as e:
+        logger.warning(f"docs_auditor: daily PR cap check failed: {e}")
+        return False
+
+
+def _record_daily_pr(repo_root: Path) -> None:
+    """Mark that a PR was created today so the daily cap is enforced."""
+    try:
+        r = _get_redis()
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        key = f"{REDIS_DAILY_PR_KEY}:{today}"
+        r.set(key, "1", ex=86400 * 2)  # expires after 2 days
+    except Exception as e:
+        logger.warning(f"docs_auditor: daily PR cap record failed: {e}")
+
+
 def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
-    """Create timestamped branch, push, open PR. Returns PR URL or None on failure."""
+    """Create timestamped branch, push, open PR. Returns PR URL or None on failure.
+
+    Always returns the repo to the main branch afterward, even on error.
+    Skips PR creation if an open PR for the same slug already exists or if
+    the daily cap (1 PR per calendar day) has been reached.
+    """
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     branch = f"docs-audit/{slug}-{ts}"
     try:
+        # Guard: daily cap
+        if _daily_pr_cap_reached(repo_root):
+            logger.info("docs_auditor: daily PR cap reached, skipping PR creation")
+            return None
+
+        # Guard: open PR already exists for this slug
+        if _has_open_pr_for_slug(slug, repo_root):
+            logger.info(f"docs_auditor: open PR already exists for {slug}, skipping")
+            return None
+
         subprocess.run(
             ["git", "checkout", "-b", branch],
             capture_output=True,
@@ -925,13 +1239,24 @@ def _push_branch_and_pr(slug: str, repo_root: Path) -> str | None:
             check=False,
         )
         url = (pr_result.stdout or "").strip().splitlines()[-1] if pr_result.stdout else None
-        return url if url and url.startswith("http") else None
+        if url and url.startswith("http"):
+            _record_daily_pr(repo_root)
+            return url
+        return None
     except subprocess.CalledProcessError as e:
         logger.warning(f"docs_auditor: branch/push/PR failed: {e}")
         return None
     except Exception as e:
         logger.warning(f"docs_auditor: branch/push/PR error: {e}")
         return None
+    finally:
+        # Always return to main so the next run starts from a clean base.
+        subprocess.run(
+            ["git", "checkout", "main"],
+            capture_output=True,
+            timeout=10,
+            cwd=str(repo_root),
+        )
 
 
 def _write_liveness(slug: str, status: str, pr_url: str | None, files_touched: int) -> None:
@@ -1102,11 +1427,77 @@ def run_docs_auditor() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _pr_is_auto_merge_eligible(pr_number: int) -> bool:
+    """Return True if a docs-audit PR meets the conservative auto-merge bar.
+
+    Heuristics (all must pass):
+    - Only ``docs/`` files changed (no code, no config)
+    - ≤ 5 files changed
+    - ≤ 50 net lines changed (additions + deletions)
+    - No reviews, review requests, or comments
+    - PR is between 1 and 7 days old (not brand-new, not stale)
+    """
+    try:
+        meta_res = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--json",
+                "files,reviews,reviewRequests,comments,createdAt,additions,deletions",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(PROJECT_ROOT),
+        )
+        if meta_res.returncode != 0:
+            return False
+        meta = json.loads(meta_res.stdout or "{}")
+
+        # No reviewer activity
+        if meta.get("reviews") or meta.get("reviewRequests") or meta.get("comments"):
+            return False
+
+        # File count and path guard
+        files = meta.get("files", [])
+        if not files or len(files) > 5:
+            return False
+        for f in files:
+            path = f.get("path", "")
+            if not (path.startswith("docs/") or path in ("README.md", "CLAUDE.md")):
+                return False
+
+        # Diff size guard
+        net_lines = meta.get("additions", 0) + meta.get("deletions", 0)
+        if net_lines > 50:
+            return False
+
+        # Age guard: 1–7 days
+        created_raw = meta.get("createdAt", "")
+        if not created_raw:
+            return False
+        age_days = (
+            datetime.now(UTC) - datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        ).days
+        if age_days < 1 or age_days > 7:
+            return False
+
+        return True
+    except Exception as e:
+        logger.warning(f"docs_auditor: auto-merge eligibility check failed for #{pr_number}: {e}")
+        return False
+
+
 def run_docs_branch_sweeper() -> dict:
     """Sweep stale ``docs-audit/*`` branches and PRs.
 
     Conservative: only touches ``docs-audit/*`` branches, never any other
     prefix and never branches with reviewer activity.
+
+    Also auto-merges PRs that pass the conservative eligibility check (docs-only,
+    small diff, no reviewer activity, 1–7 days old).
     """
     if not _acquire_lock(REDIS_SWEEPER_RUNNING_KEY, SWEEPER_LOCK_TTL_SECONDS):
         return {
@@ -1118,6 +1509,7 @@ def run_docs_branch_sweeper() -> dict:
     findings: list[str] = []
     branches_deleted = 0
     prs_closed = 0
+    prs_merged = 0
 
     try:
         # List remote branches under docs-audit/
@@ -1170,6 +1562,36 @@ def run_docs_branch_sweeper() -> dict:
                 continue
 
             now = datetime.now(UTC)
+
+            # Branches with all PRs already closed/merged: delete if branch is old enough
+            open_prs = [p for p in prs if p.get("state", "").upper() == "OPEN"]
+            closed_prs = [p for p in prs if p.get("state", "").upper() != "OPEN"]
+            if prs and not open_prs:
+                # All PRs closed — delete branch if oldest closed PR is stale
+                newest_close = max((p.get("createdAt", "") for p in closed_prs), default="")
+                if newest_close:
+                    try:
+                        age_days = (
+                            now - datetime.fromisoformat(newest_close.replace("Z", "+00:00"))
+                        ).days
+                        if age_days >= STALE_BRANCH_AGE_DAYS:
+                            subprocess.run(
+                                ["git", "push", "origin", "--delete", branch],
+                                capture_output=True,
+                                timeout=20,
+                                cwd=str(PROJECT_ROOT),
+                                check=False,
+                            )
+                            branches_deleted += 1
+                            findings.append(
+                                f"Deleted branch with closed PR: {branch} ({age_days}d)"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"sweeper: closed-PR branch cleanup failed for {branch}: {e}"
+                        )
+                continue
+
             if not prs:
                 # No PR ever; check branch age via creation time of the latest commit
                 try:
@@ -1198,7 +1620,7 @@ def run_docs_branch_sweeper() -> dict:
                     logger.warning(f"sweeper: branch-age check failed for {branch}: {e}")
                 continue
 
-            for pr in prs:
+            for pr in open_prs:
                 state = pr.get("state", "").upper()
                 if state not in ("OPEN",):
                     continue
@@ -1211,8 +1633,35 @@ def run_docs_branch_sweeper() -> dict:
                     ).days
                 except Exception:
                     continue
+                pr_num = pr.get("number")
+                if not pr_num:
+                    continue
+
+                # Auto-merge eligible PRs before stale-close check
+                if _pr_is_auto_merge_eligible(pr_num):
+                    try:
+                        merge_res = subprocess.run(
+                            ["gh", "pr", "merge", str(pr_num), "--squash", "--delete-branch"],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            cwd=str(PROJECT_ROOT),
+                            check=False,
+                        )
+                        if merge_res.returncode == 0:
+                            prs_merged += 1
+                            findings.append(
+                                f"Auto-merged PR #{pr_num} (branch={branch}, {age_days}d)"
+                            )
+                            continue
+                        else:
+                            logger.warning(
+                                f"sweeper: auto-merge failed for #{pr_num}: {merge_res.stderr}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"sweeper: auto-merge error for #{pr_num}: {e}")
+
                 if age_days >= STALE_PR_AGE_DAYS:
-                    pr_num = pr.get("number")
                     try:
                         subprocess.run(
                             ["gh", "pr", "close", "--delete-branch", str(pr_num)],
@@ -1227,7 +1676,8 @@ def run_docs_branch_sweeper() -> dict:
                         logger.warning(f"sweeper: gh pr close failed for #{pr_num}: {e}")
 
         summary = (
-            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, {prs_closed} PRs closed"
+            f"do-docs-branch-sweeper: {branches_deleted} branches deleted, "
+            f"{prs_closed} PRs closed, {prs_merged} PRs auto-merged"
         )
         logger.info(summary)
         return {"status": "ok", "findings": findings, "summary": summary}

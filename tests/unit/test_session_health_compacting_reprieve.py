@@ -38,7 +38,7 @@ def _make_session(project_key: str, last_compaction_ts: float | None) -> AgentSe
     s = AgentSession(
         project_key=project_key,
         chat_id="test-chat",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="seed",
         sender_name="tester",
         agent_session_id=f"sid-{int(time.time() * 1000)}",

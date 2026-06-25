@@ -12,14 +12,26 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 
-from bridge.dedup import is_duplicate_message, record_message_processed
+from bridge.dedup import (
+    is_duplicate_message,
+    record_last_processed,
+    record_message_processed,
+)
+from bridge.routing import persona_to_session_type, resolve_persona
+from bridge.silent_stream import SilentStreamState, check_silent_chat
+from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 RECONCILE_INTERVAL_SECONDS = 180  # 3 minutes
-RECONCILE_LOOKBACK_MINUTES = 10  # Look back 10 minutes
-RECONCILE_MESSAGE_LIMIT = 20  # Messages per group per scan
+# 30-minute lookback covers the worst-case multi-restart scenario (issue #1408)
+# where the worker was down across several restarts and a message would age out
+# of the old 10-minute window before the first effective reconciler scan.
+RECONCILE_LOOKBACK_MINUTES = 30
+# 30-message limit keeps the 30-minute window covered in busy chats; still a
+# single get_messages() API call regardless of limit (within the 100-msg cap).
+RECONCILE_MESSAGE_LIMIT = 30
 
 
 async def reconciler_loop(
@@ -28,11 +40,17 @@ async def reconciler_loop(
     should_respond_fn,
     enqueue_agent_session_fn,
     find_project_fn,
+    silent_stream_state: SilentStreamState | None = None,
 ):
     """Run periodic reconciliation to detect missed messages.
 
     Scans monitored groups for messages that bypassed the event handler.
     Gates all re-dispatches through dedup to prevent duplicate processing.
+
+    When ``silent_stream_state`` is provided, the silent-gap observability check
+    (issue #1408) rides this same dialog pass — reusing the dialogs already
+    fetched here rather than running its own loop with a redundant
+    ``get_dialogs()`` call.
     """
     logger.info(
         "[reconciler] Started (interval=%ds, lookback=%dm, limit=%d)",
@@ -50,6 +68,7 @@ async def reconciler_loop(
                 should_respond_fn=should_respond_fn,
                 enqueue_agent_session_fn=enqueue_agent_session_fn,
                 find_project_fn=find_project_fn,
+                silent_stream_state=silent_stream_state,
             )
             if recovered > 0:
                 logger.warning("[reconciler] Recovered %d missed message(s)", recovered)
@@ -65,10 +84,16 @@ async def reconcile_once(
     should_respond_fn,
     enqueue_agent_session_fn,
     find_project_fn,
+    silent_stream_state: SilentStreamState | None = None,
 ) -> int:
     """Run a single reconciliation scan across all monitored groups.
 
     Returns the number of missed messages recovered and enqueued.
+
+    When ``silent_stream_state`` is provided, the silent-gap observability check
+    (issue #1408) runs for each monitored dialog using the dialogs already
+    fetched here — no separate ``get_dialogs()`` call. The check is purely
+    observability (logs a WARNING) and never affects the recovery count.
     """
     if not monitored_groups:
         logger.debug("[reconciler] No monitored groups, skipping scan")
@@ -80,6 +105,13 @@ async def reconcile_once(
 
     dialogs = await client.get_dialogs()
 
+    # Record successful API probe for the stale-stream detector.
+    # get_dialogs() success proves the Telethon TCP/API layer is alive.
+    # Best-effort: never raises.
+    from bridge.liveness import record_probe_ok
+
+    record_probe_ok()
+
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
         if not chat_title:
@@ -89,6 +121,24 @@ async def reconcile_once(
             continue
 
         project = find_project_fn(chat_title)
+
+        # Silent-gap observability (issue #1408): ride this dialog pass instead
+        # of a separate loop. Best-effort — a failure here must never break the
+        # recovery scan. Runs even when the chat has no project config (the
+        # per-chat check applies its own respond_to_unaddressed gate).
+        if silent_stream_state is not None:
+            try:
+                await check_silent_chat(
+                    chat_id=dialog.id,
+                    chat_title=chat_title,
+                    project=project,
+                    state=silent_stream_state,
+                )
+            except Exception as e:
+                logger.error(
+                    "[silent-stream] check failed for %s: %s", chat_title, e, exc_info=True
+                )
+
         if not project:
             logger.debug("[reconciler] No project config for %s, skipping", chat_title)
             continue
@@ -167,6 +217,25 @@ async def reconcile_once(
                     text[:80],
                 )
 
+                # Resolve persona here for parity with the live handler
+                # (bridge/telegram_bridge.py). Without this, the scanner would
+                # let session_type default to eng and a teammate-configured chat
+                # would wrongly run as an eng PM<->Dev loop. The try/except is
+                # NARROW (per-message): a persona failure falls back to the eng
+                # default and continues the scan rather than aborting the chat.
+                try:
+                    persona = resolve_persona(project, chat_title, is_dm=False)
+                    session_type = persona_to_session_type(persona)
+                except Exception as e:
+                    logger.warning(
+                        "[reconciler] persona resolution failed for chat %s (%s); "
+                        "defaulting to eng: %s",
+                        chat_id,
+                        chat_title,
+                        e,
+                    )
+                    session_type = SessionType.ENG
+
                 await enqueue_agent_session_fn(
                     project_key=project_key,
                     session_id=session_id,
@@ -178,9 +247,12 @@ async def reconcile_once(
                     chat_title=chat_title,
                     priority="low",
                     sender_id=sender_id,
+                    session_type=session_type,
+                    project_config=project,
                 )
 
                 await record_message_processed(chat_id, message.id)
+                await record_last_processed(chat_id, message.id, message.date)
                 recovered += 1
 
         except Exception as e:

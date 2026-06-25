@@ -1,10 +1,10 @@
-# PM Routing: Collaboration and Other Classifier Buckets
+# Routing: Collaboration and Other Classifier Buckets
 
-Extends the PM routing system from a binary classification to a four-way classification at both the bridge and intent classifier levels, enabling the PM to handle direct tasks without spawning a full SDLC dev-session.
+Extends the routing system from a binary classification to a four-way classification at both the bridge and intent classifier levels, enabling the eng session to handle direct tasks without running the full SDLC pipeline.
 
 ## Problem
 
-Previously, the bridge classifier only distinguished "sdlc" and "question", and the intent classifier only distinguished "teammate" and "work". Tasks the PM could handle directly (saving to knowledge base, drafting issues, writing docs) were funneled into the full SDLC pipeline, wasting time on work that should take under a minute.
+Previously, the bridge classifier only distinguished "sdlc" and "question", and the intent classifier only distinguished "teammate" and "work". Tasks the eng session could handle directly (saving to knowledge base, drafting issues, writing docs) were funneled into the full SDLC pipeline, wasting time on work that should take under a minute.
 
 ## Design
 
@@ -23,10 +23,10 @@ Previously, the bridge classifier only distinguished "sdlc" and "question", and 
 - `is_direct_action` convenience property (True for collaboration or other)
 - `is_teammate` retains the 0.90 confidence threshold
 - `is_work` returns True only when intent is literally "work"
-- Default for unparseable/low-confidence: "work" (fail-safe to dev-session)
+- Default for unparseable/low-confidence: "work" (fail-safe to the SDLC pipeline)
 - Identical inputs are served from a persistent JSON cache (TTL 2h) -- see [JSON Cache Layer](json-cache-layer.md)
 
-### Three-Way PM Dispatch
+### Three-Way Dispatch
 
 `agent/sdk_client.py` dispatch logic:
 
@@ -36,10 +36,10 @@ if _teammate_mode:
 elif _collaboration_mode:
     # Direct-action instructions (handle with available tools)
 else:
-    # SDLC orchestration (spawn dev-session)
+    # SDLC orchestration (run the pipeline, fanning out to child eng sessions)
 ```
 
-**Config-driven PM groups** check the bridge-level classification for `COLLABORATION` or `OTHER`, since they bypass the intent classifier.
+**Config-driven eng groups** check the bridge-level classification for `COLLABORATION` or `OTHER`, since they bypass the intent classifier.
 
 **Unconfigured groups** use the intent classifier result (`is_direct_action`, which covers both collaboration and other).
 
@@ -53,14 +53,14 @@ else:
 
 ## Collaboration Mode Instructions
 
-When a PM session enters collaboration mode, it receives direct-action instructions listing available tools (Bash, GitHub CLI, Google Workspace, memory search, Office CLI, session management) with an explicit fallback: "If you determine this task requires code changes, route through the full SDLC pipeline — create a GitHub issue if one doesn't exist, then run SDLC. Never implement code directly."
+When an eng session enters collaboration mode, it receives direct-action instructions listing available tools (Bash, GitHub CLI, Google Workspace, memory search, Office CLI, session management) with an explicit fallback: "If you determine this task requires code changes, route through the full SDLC pipeline — create a GitHub issue if one doesn't exist, then run SDLC."
 
 ## Safety
 
-- Bridge classifier default: "If in doubt, classify as collaboration" (cheaper when wrong -- PM tries directly in seconds vs 60-min dev-session timeout)
+- Bridge classifier default: "If in doubt, classify as collaboration" (cheaper when wrong -- the eng session tries directly in seconds vs the full SDLC pipeline)
 - Intent classifier fail-safe: "work" for unparseable/error responses (conservative)
 - Double classification (bridge + intent) provides two chances to catch misroutes
-- PM guard still prevents PM sessions from entering Teammate mode
+- Session guard still prevents eng sessions from entering Teammate mode
 - `is_sdlc` property on AgentSession unchanged -- explicit SDLC references (issue/PR numbers) always fast-path to SDLC
 
 ## Files Changed
@@ -69,7 +69,7 @@ When a PM session enters collaboration mode, it receives direct-action instructi
 - `bridge/routing.py` -- Four-outcome prompt, collaboration default, first-token exact match parsing
 - `agent/intent_classifier.py` -- Four-outcome prompt (teammate/collaboration/other/work), `is_collaboration`, `is_other`, `is_direct_action` properties, narrowed `is_work`
 - `agent/sdk_client.py` -- `_collaboration_mode` flag, three-way dispatch, `is_direct_action` check
-- `config/personas/project-manager.md` -- Available Tools section
+- `config/personas/engineer.md` -- Available Tools section
 
 ## Related
 

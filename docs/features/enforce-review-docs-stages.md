@@ -28,7 +28,7 @@ The `/do-docs` skill writes `status: docs_complete` to the plan document's front
 
 - [Pipeline Graph](pipeline-graph.md) — defines the stage transition edges
 - [Goal Gates](goal-gates.md) — deterministic gate check functions
-- [Chat Dev Session Architecture](pm-dev-session-architecture.md) — PM/Dev session routing model that replaced the Observer
+- [Eng Session Architecture](eng-session-architecture.md) — PM/Dev session routing model that replaced the Observer
 
 ## Tracking
 

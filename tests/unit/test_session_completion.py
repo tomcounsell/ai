@@ -82,7 +82,7 @@ def test_drafter_calls_omit_system_prompt_via_ast():
     )
 
 
-@pytest.mark.parametrize("call_lineno_anchor", [935, 997])
+@pytest.mark.parametrize("call_lineno_anchor", [756, 818])
 def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     """Sanity: the documented drafter call lines still resolve to a harness call.
 
@@ -96,8 +96,10 @@ def test_drafter_call_sites_at_expected_lines(call_lineno_anchor):
     suppression block + three new helpers
     (``_build_completion_baseline``, ``_await_outbox_drained``,
     ``_judge_completion_novelty``) were added before
-    ``_deliver_pipeline_completion``. Current anchors: 935 (Pass 1) /
-    997 (Pass 2).
+    ``_deliver_pipeline_completion``; shifted again in task-1 of
+    merge_pm_dev_into_eng_role when ``_create_continuation_pm`` and
+    ``_handle_dev_session_completion`` were deleted (~176 lines removed).
+    Current anchors: 756 (Pass 1) / 818 (Pass 2).
 
     A future refactor that moves these calls is fine as long as the AST
     guard above stays green, but this test pins the documented anchors so

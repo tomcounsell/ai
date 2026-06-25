@@ -20,11 +20,11 @@ IMAP inbox (valor@yuda.me)
 
 | File | Role |
 |------|------|
-| `bridge/email_bridge.py` | IMAP polling loop, email parsing (`parse_email_message` returns `from_addr`, `to_addrs`, `cc_addrs`, `subject`, `body`, `message_id`, `in_reply_to`), sender filtering, `EmailOutputHandler` (reply-all by default), history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
+| `bridge/email_bridge.py` | IMAP polling loop, email parsing (`parse_email_message` returns `from_addr`, `to_addrs`, `cc_addrs`, `subject`, `body`, `message_id`, `in_reply_to`, `attachments`, `attachments_truncated`), inbound attachment extraction + persistence (`_extract_attachment_metadata`, `_persist_attachments`, `_mirror_attachments_to_vault`), sender filtering, `EmailOutputHandler` (reply-all by default), history cache write-through (`_record_history`, `_record_thread`), module-level `_build_reply_mime` with attachment support |
 | `bridge/email_relay.py` | Async drain of `email:outbox:*` payloads via SMTP; atomic LPOP + requeue-with-counter + DLQ after `MAX_EMAIL_RELAY_RETRIES`; heartbeat key `email:relay:last_poll_ts` for liveness probing. Runs inside `run_email_bridge()` via `asyncio.gather`. |
 | `bridge/email_dead_letter.py` | Dead letter queue for failed SMTP sends |
 | `bridge/routing.py` | `find_project_for_email()`, `build_email_to_project_map()`, `get_known_email_search_terms()` |
-| `tools/valor_email.py` | CLI entry point (`valor-email read / send / threads`) |
+| `tools/valor_email.py` | CLI entry point (`valor-email read / send / draft / threads`) |
 | `tools/email_history/` | Pure-Redis readers for the history cache (`get_recent_emails`, `search_history`, `list_threads`) |
 | `agent/agent_session_queue.py` | Transport-keyed callbacks via `register_callbacks(transport=...)` and `_resolve_callbacks()`; `extra_context_overrides` parameter |
 
@@ -57,6 +57,21 @@ The IMAP poller never fetches messages from unknown senders. Before each poll cy
 **Single-machine ownership.** Each `email.contacts` entry and each `email.domains` wildcard must resolve to exactly one machine across the full config — enforced by the validator (`bridge/config_validation.py::validate_email_routing`) and gated by the update script. The cross-shape check also fails the gate when one machine owns an explicit address (`alice@psy.com`) while a different machine owns the matching domain wildcard (`psy.com`); without it, both bridges would race on the same incoming email. See [Single-Machine Ownership](single-machine-ownership.md).
 
 Within a machine, messages that match are marked `SEEN` immediately on fetch (before parsing) to prevent duplicate processing on concurrent polls on the same machine.
+
+### Dynamic Customer Resolver (Optional)
+
+Projects can declare a `customer_resolver` hook in `projects.json` to replace
+static allow-list routing with dynamic customer identity resolution. When
+configured, the bridge calls the resolver for every inbound email; the resolver
+returns a `customer_id` string (known customer) or `None` (drop). Sessions for
+known customers use the `customer-service` persona and carry `customer_id` in
+`extra_context` and as a `CUSTOMER_ID` subprocess environment variable.
+
+On resolver failure the message stays `\Seen`, a `valor-retry` Gmail label is
+applied for future retry, and `resolver:failures:{project_key}` is incremented.
+
+See [Customer Resolver](customer-resolver.md) for the full config schema,
+resolver interface contract, caching semantics, and monitoring guide.
 
 ### Transport-Keyed Callbacks
 
@@ -103,24 +118,30 @@ Without **either** path, a session with `transport=email` would still write to `
 
 ### Persona resolution for email-spawned sessions
 
-Email-spawned sessions resolve their persona on the harness path in `agent/session_executor.py`, not in `agent/sdk_client.py::_resolve_persona` (the SDK path is dead code — `docs/plans/cli_harness_full_migration.md`). The resolution order at the harness call site is:
+As of issue #1692, persona is delivered to the granite PTY container via prime
+commands (`.claude/commands/granite/prime-*-role.md`), not via
+`--append-system-prompt`. The `compose_system_prompt` / `load_persona_prompt`
+path has been retired from the granite execution path.
 
-1. `_session_type == SessionType.PM` → load `project-manager` overlay (source = `session_type=pm`)
-2. `extra_context["transport"] == "email"` **or** `project["email"]["persona"]` is set:
-   - If `project["email"]["persona"]` is set → load that overlay with `teammate` as fallback (source = `project.email.persona`)
-   - Otherwise → load `teammate` overlay (source = `email-default`)
-3. `_session_type == SessionType.TEAMMATE` → load `teammate` overlay (source = `session_type=teammate`)
-4. Otherwise → no overlay (source = `none`); the harness runs in default Claude Code voice
+**Email sessions in the granite container:**
 
-The resolved name is logged BEFORE any file I/O via:
+- Email-spawned sessions become `SessionType.TEAMMATE` sessions.
+- The granite container primes the PM with `/granite:prime-teammate-role` (if
+  `session_type == TEAMMATE`) or `/granite:prime-pm-role` (if `ENG`).
+- The `_resolve_compose_args` resolver in `session_executor.py` is preserved to
+  derive the `(persona, access_level)` tuple from `project.email.persona`; this
+  will be used for prime-command selection in a future issue.
+- A log line is still emitted BEFORE any file I/O:
+  ```
+  agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name> (source=prime-command; no system-prompt injection)
+  ```
 
-```
-agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: <name|<none>> (source=<source>)
-```
-
-When `project.email.persona` is set but neither the requested overlay nor the fallback can be loaded, the worker emits an `ERROR [persona-load-failed]` line so the operator knows the harness will reply in the default voice. The `email:outbox:` payload is still queued — review it before SMTP relay.
-
-The mapping mirrors `bridge/email_bridge.py::_process_inbound_email` (which uses `project["email"]["persona"]` to derive `session_type`), keeping production inbound email and the `test-cuttlefish-*` skills (which inject `transport=email` into an in-memory project dict) on the same code path.
+**If you set `project.email.persona` in projects.json:** The resolver reads it and
+logs the resolved name, but the prime command selection is currently fixed to
+`prime-teammate-role` for all TEAMMATE sessions. A future issue will wire
+`project.email.persona` to select a per-project prime command (e.g. a
+`prime-customer-service` command). Email sessions will not land persona-less —
+`prime-teammate-role` is the safe fallback.
 
 ## Configuration
 
@@ -189,6 +210,10 @@ IMAP_PORT=993
 IMAP_USER=valor@yuda.me
 IMAP_PASSWORD=<gmail-app-password>
 IMAP_MAX_BATCH=20        # max unseen messages fetched per poll cycle (default: 20)
+
+# Inbound attachments (optional — sane defaults; see "Incoming attachments")
+EMAIL_ATTACHMENT_MAX_TOTAL_BYTES=26214400   # cumulative cap per email (default: 25 MiB)
+EMAIL_ATTACHMENT_MAX_PARTS=50               # max attachment parts decoded per email
 
 # SMTP (outbound)
 SMTP_HOST=smtp.gmail.com
@@ -274,7 +299,9 @@ Or via the service script:
 
 ## Design Decisions
 
-**stdlib only.** `imaplib`, `smtplib`, and `email` from the Python standard library — no third-party dependencies. This keeps the email bridge installable anywhere Python runs.
+**gws adoption decision (issue #1775).** `gws` (Google Workspace CLI) is adopted only for the **agent/operator-invoked outbound draft path** (`valor-email draft`). Inbound email stays on the IMAP walk (`imaplib`, stdlib only). Routing inbound through `gws` was considered and rejected: it would duplicate the IMAP poll loop, fight the Redis history cache, and is impossible headless (gws requires interactive OAuth that the bridge process cannot perform). The outbound draft path is invoked by the agent/operator (Bash tool), so it runs in a context where `gws auth login` can have been done once interactively. See "Auth requirement" under "Draft with attachment" above.
+
+**stdlib only (inbound + SMTP outbound).** `imaplib`, `smtplib`, and `email` from the Python standard library — no third-party dependencies for the bridge itself. This keeps the email bridge installable anywhere Python runs.
 
 **Single inbox, sender-based routing.** All projects share one inbox (`valor@yuda.me`). The sender address determines which project the message is routed to — either by exact contact match or by domain wildcard. This avoids per-project mailboxes while keeping routing deterministic.
 
@@ -298,11 +325,12 @@ valor-email read --search "deployment" --since "2 hours ago"
 valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
 valor-email send --to alice@example.com --to bob@example.com "CC both"
 valor-email send --to alice@example.com --file ./report.pdf "See attached"
+valor-email send --to alice@example.com --file ./a.pdf --file ./b.csv "Two files"
 valor-email send --to alice@example.com --reply-to "<abc@host>" "Body"
 valor-email threads
 ```
 
-`--to` accepts multiple flags (repeat for each recipient) and comma-separated values (`--to "alice@example.com,bob@example.com"`). All three subcommands accept `--json` for machine-readable output.
+`--to` accepts multiple flags (repeat for each recipient) and comma-separated values (`--to "alice@example.com,bob@example.com"`). `--file` is **repeatable** — pass it once per file to attach multiple files (`--file a.pdf --file b.csv`); each path is validated for existence and readability before enqueue, and the first invalid path fails the send. All three subcommands accept `--json` for machine-readable output.
 
 ### Read path
 
@@ -313,6 +341,72 @@ valor-email threads
 - `--search "term"` — case-insensitive substring match over subject + body.
 
 On cache miss (e.g. daemon hasn't populated the cache yet), the CLI opens a **read-only** IMAP session filtered by known senders (from `get_known_email_search_terms()`) so cross-machine SEEN semantics are preserved and no messages are leaked from another project's policy boundary.
+
+### Incoming attachments
+
+When an inbound email carries attachments, the bridge extracts, persists, and surfaces them so the agent processing the email can open the files — mirroring the Telegram inbound-media pattern (filesystem for bytes, Redis for metadata/paths only).
+
+**Pipeline (`bridge/email_bridge.py`):**
+
+1. **Pure extraction** — `parse_email_message()` calls `_extract_attachment_metadata(msg)`, which walks the MIME tree and returns a metadata dict per attachment part: `{filename, content_type, size, path}` (plus a transient in-memory payload). This step is **side-effect-free** — it never writes to disk, so the read-only `valor-email read` IMAP fallback (which also calls `parse_email_message`) never persists anything (`path` stays `null` on that path).
+2. **Persistence** — the IMAP poll loop (`_email_inbox_loop`) calls `_persist_attachments(parsed)` **only on the poll path**. Bytes are written to `data/media/email-attachments/{message_id_hash}/{sanitized_filename}`. The subdir is keyed by a SHA-256 of the Message-ID; when the Message-ID is empty it falls back to `from_addr:subject:timestamp` so attachments from different Message-ID-less emails never collide. Same-name files within one email are disambiguated with an index suffix (`image.png`, `image_1.png`).
+3. **Vault mirror** — each persisted file is fire-and-forget copied into `~/work-vault/email-attachments/` (target name `{date}_{sender}_{msgid}_{filename}`) so the KnowledgeWatcher indexes it. Every failure is logged and never fatal — a broken vault dir does not prevent disk persistence or session enqueue.
+4. **History + read output** — `_record_history()` stores the attachment **metadata only** (never bytes) in the per-message JSON blob; `valor-email read --json` surfaces the `attachments` array per message. Blobs written before this feature hydrate as `attachments: []` (back-compat).
+5. **Session context** — `_process_inbound_email()` sets `extra_context["email_attachments"]` to the list of readable stored paths + metadata, so the agent sees the files in its prompt context and can open them.
+
+**Empty-body emails** that carry attachments are processed, not dropped (the empty-body guard is relaxed when attachments are present — a file with no text is a legitimate message).
+
+**Guardrails:**
+- **Filename sanitization** — every filename is reduced to its basename and restricted to `[A-Za-z0-9._-]`; `..`, absolute paths, and traversal sequences collapse to a safe name (with an `attachment_{i}{ext}` fallback). The `{message_id_hash}` subdir contains the result regardless.
+- **Size cap** — `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES` (default 25 MiB) bounds the cumulative decoded bytes per email. The cap short-circuits the decode loop (an oversized part is rejected from its *encoded* length before being base64-decoded into RAM), so a multipart bomb never forces a full decode. Once exceeded, remaining parts are skipped and the message is marked `attachments_truncated: true`.
+- **Parts cap** — `EMAIL_ATTACHMENT_MAX_PARTS` (default 50) caps the number of attachment parts decoded per email as a cheap bomb guard.
+- **Malformed parts** — each part is wrapped in its own try/except: one undecodable part is logged and skipped, never aborting the rest. When a part is skipped (whether from an exception or the cap), `attachments_truncated` is set to `true` so the truncation is observable.
+
+### Attachment-wedge guard
+
+If the email body references attachments (contains phrases like "attached", "attachment", "enclosed", "find attached") but **no files were recoverable** (empty `email_attachments` list) **or only some were recovered** (cap hit, malformed parts — `attachments_truncated: true`), the bridge sets additional keys in `extra_context` before enqueuing the session:
+
+```python
+extra_context["attachments_unrecoverable"] = True     # always set when guard fires
+extra_context["attachments_truncated"] = True/False    # True = partial recovery (cap hit)
+extra_context["attachments_recovered_count"] = M       # how many files did arrive
+extra_context["attachments_referenced"] = True         # body contains attachment-reference phrases
+```
+
+**Policy: inform, not block.** The session is always enqueued — the email is preserved and the agent uses the context to respond gracefully (e.g. "your attachments didn't arrive; please resend") rather than wedging silently with no output. The alternative (hard-block / auto-reply) was rejected as too aggressive — a body that says "attached" colloquially but carries no real attachment would be dropped entirely.
+
+The agent distinguishes:
+- `attachments_unrecoverable=True`, `attachments_recovered_count=0` — zero files arrived; ask sender to resend.
+- `attachments_unrecoverable=True`, `attachments_truncated=True`, `recovered_count=M` — M files arrived but more were referenced; partial recovery, ask for the missing files.
+
+Security: the injected context is a static template (integer counts, boolean flags) — no untrusted body text is echoed. Full pre-execution inspection is tracked under issue #1630.
+
+No on-disk reaper ships with this feature — retention matches the existing Telegram `data/media/` behavior (accepted residual; the vault copy is the durable, indexed record).
+
+### Draft with attachment (`valor-email draft`)
+
+Creates a **real Gmail draft** (visible in the Drafts folder, never sent automatically) with optional file attachments. This is the correct path for the draft-first outbound composition rule — when Valor composes an email with an attachment for human review before sending.
+
+```bash
+valor-email draft --to alice@example.com --subject "Q4 Report" --file ./report.pdf "Please review."
+valor-email draft --to alice@example.com --to bob@example.com --subject "Analysis" --file ./analysis.docx "See attached."
+valor-email draft --to alice@example.com --reply-to "<abc@host>" --file ./reply.pdf "In reply."
+valor-email draft --to alice@example.com --subject "Slides" --file ./deck.pptx --json
+```
+
+**Size routing:**
+- Files whose combined size is ≤ `EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES` (default: 25 MiB, env-overridable) are attached inline to the MIME body.
+- Files above the threshold are uploaded to Google Drive first (`gws drive files create --upload`) and a `webViewLink` is appended to the draft body. Upload-first ordering ensures no draft is created that references a file that failed to upload; on draft-create failure after a successful Drive upload, best-effort cleanup is attempted (`gws drive files delete`) and any orphaned `fileId` is named in the error.
+
+**Implementation:**
+- Uses `gws gmail users drafts create` with a locally-built RFC822 MIME message (`message.raw` = base64url-encoded bytes).
+- The MIME body is built by the single shared `_build_reply_mime()` builder (same builder used by `EmailOutputHandler` and the relay) — there is no second MIME encoder in the codebase.
+- `force_reply_prefix=False` when `--reply-to` is absent (fresh drafts do not get a spurious "Re:" subject prefix); `force_reply_prefix=True` when replying.
+- Passes through the same promise-gate (`cli_check_or_exit`) as `valor-email send` — draft composition is outbound and subject to the same audit surface.
+
+**Auth requirement:** `gws` must be authenticated on the machine running the command (`gws auth login`). If unauthenticated, the command exits non-zero with an actionable error naming the remedy and suggesting `valor-email send --file` as the no-auth alternative for immediate sends.
+
+**Separate constant:** `EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES` is intentionally separate from the inbound `EMAIL_ATTACHMENT_MAX_TOTAL_BYTES`. The inbound constant is a security/DoS knob (how many untrusted bytes to decode into RAM); the outbound constant is Gmail's product limit. Tying them would cause a security-driven reduction of the inbound cap to silently redirect outbound attachments to Drive — a wrong coupling.
 
 ### Send path — always via the relay
 
@@ -332,7 +426,7 @@ Sends write the **unified outbox payload** to `email:outbox:{session_id}` with a
 }
 ```
 
-The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` emits the same shape so the relay has a single contract to drain. The `"to"` field is canonically `list[str]`; the relay's `_normalize_payload()` also accepts a single comma-separated string and splits it into `list[str]`.
+The `session_id` format (`cli-{secs}-{pid}-{token_hex(4)}`) gives 32 bits of per-call randomness so concurrent invocations in the same second collide effectively never. `tools/send_message.py::_send_via_email` reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send`, which then writes through `_send_via_email_outbox` — so the outbox payload shape is emitted from the handler, not the tool. The relay has a single contract to drain. The `"to"` field is canonically `list[str]`; the relay's `_normalize_payload()` also accepts a single comma-separated string and splits it into `list[str]`.
 
 The relay (`bridge/email_relay.py`) polls `email:outbox:*` every 100 ms. For each key it performs atomic `LPOP`, builds the MIME message via `_build_reply_mime()` (switching to `MIMEMultipart` when attachments are present), and dispatches over SMTP in `asyncio.to_thread`. On failure it increments `_relay_attempts`, `RPUSH`es back, and DLQs via `bridge.email_dead_letter.write_dead_letter()` after `MAX_EMAIL_RELAY_RETRIES` (default 3) attempts. The relay writes `email:relay:last_poll_ts` once per cycle (5-minute TTL) for operator liveness probes.
 

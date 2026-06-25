@@ -25,7 +25,9 @@ from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
     env_sync,
+    gh_auth,
     git,
+    gws_auth,
     hardlinks,
     hooks,
     kokoro,
@@ -34,12 +36,14 @@ from scripts.update import (  # noqa: E402
     migrations,
     npm_tools,
     officecli,
+    persona_drift,
     readme_check,
     reflections_yaml,
     rodney,
     sentry_cli,
     service,
     verify,
+    zshenv_sync,
 )
 
 
@@ -126,6 +130,7 @@ class UpdateResult:
     hardlink_result: hardlinks.HardlinkSyncResult | None = None
     env_sync_result: env_sync.EnvSyncResult | None = None
     reflections_sync_result: env_sync.ReflectionsSyncResult | None = None
+    zshenv_sync_result: zshenv_sync.ZshenvSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
     reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
@@ -134,6 +139,7 @@ class UpdateResult:
     npm_tools_result: npm_tools.NpmToolsResult | None = None
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
+    ffmpeg_result: kokoro.FfmpegResult | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -319,6 +325,90 @@ def _cleanup_duplicate_sessions(project_dir: Path) -> int:
     return killed
 
 
+# Tight per-invocation timeout for the best-effort valor-catchup final step.
+# valor-catchup reads recent threads + runs an LLM judge per owned chat; the
+# CLI itself already exits 0 on partial failure, but a hung Telethon connect or
+# a stalled LLM call must NEVER stall /update. This ceiling bounds the worst
+# case and is enforced via subprocess timeout (the subprocess is killed on
+# expiry and the TimeoutExpired is swallowed).
+CATCHUP_STEP_TIMEOUT_SECONDS = 90
+
+
+def run_catchup_step(
+    project_dir: Path,
+    log_fn=log,
+    timeout: int = CATCHUP_STEP_TIMEOUT_SECONDS,
+) -> None:
+    """Best-effort final ``/update`` step: invoke ``valor-catchup`` if healthy.
+
+    Runs strictly LAST in ``run_update`` (after all service-management and
+    health checks). Gated on BOTH the bridge AND the worker reporting
+    ``running`` — if either is down, the step logs a skip and returns without
+    invoking anything.
+
+    When the gate passes, ``valor-catchup`` is invoked as a SUBPROCESS (clean
+    isolation, killable on timeout) with a tight per-invocation ``timeout``.
+    The invocation is wrapped in a best-effort try/except: any failure,
+    non-zero exit, or timeout is logged and swallowed. ``/update`` completion
+    is wholly independent of ``valor-catchup``'s outcome — this function never
+    raises and returns ``None`` regardless of what happens.
+
+    Args:
+        project_dir: Project root (passed through to the status checks).
+        log_fn: Logging callback (defaults to the module ``log``); injectable
+            so unit tests can capture emitted lines.
+        timeout: Per-invocation subprocess timeout in seconds.
+    """
+    import subprocess
+
+    try:
+        bridge_status = service.get_service_status(project_dir)
+        worker_status = service.get_worker_status(project_dir)
+    except Exception as exc:
+        # Even the health gate must never raise out of this step.
+        log_fn(f"catchup: skipped — health-gate check failed ({exc})")
+        return
+
+    if not (bridge_status.running and worker_status.running):
+        which = []
+        if not bridge_status.running:
+            which.append("bridge")
+        if not worker_status.running:
+            which.append("worker")
+        log_fn(
+            f"catchup: skipped — {', '.join(which)} not running "
+            "(agent-judgment catchup requires both bridge and worker)"
+        )
+        return
+
+    log_fn("catchup: running valor-catchup (best-effort, agent-judgment recovery)...")
+    try:
+        proc = subprocess.run(
+            ["valor-catchup"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode == 0:
+            log_fn("catchup: valor-catchup completed")
+        else:
+            # valor-catchup exits 0 even on partial failure, so a non-zero exit
+            # means the CLI itself failed to start/parse. Log and continue.
+            log_fn(
+                f"catchup: valor-catchup exited {proc.returncode} "
+                f"(swallowed): {proc.stderr.strip() or 'no stderr'}"
+            )
+    except subprocess.TimeoutExpired:
+        log_fn(
+            f"catchup: valor-catchup timed out after {timeout}s (swallowed — "
+            "/update completion is unaffected)"
+        )
+    except Exception as exc:
+        log_fn(f"catchup: valor-catchup invocation failed (swallowed): {exc}")
+    # Returns None unconditionally — outcome cannot influence UpdateResult.
+
+
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     """Run update with given configuration."""
     result = UpdateResult()
@@ -418,6 +508,50 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if refl_r.error:
         log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
         result.warnings.append(f"reflections.yaml symlink: {refl_r.error}")
+
+    # Step 1.67: Bootstrap cross-machine zshenv loader.
+    # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
+    # sources it. Idempotent — most runs are no-ops. Critical on fresh machines
+    # so shared secrets (GITHUB_PAT_*, etc.) land in every shell.
+    log("Verifying ~/.zshenv → vault loader...", v)
+    result.zshenv_sync_result = zshenv_sync.sync_zshenv()
+    zr = result.zshenv_sync_result
+    if zr.vault_seeded:
+        log("Seeded ~/Desktop/Valor/zshenv.sh (vault loader)", v, always=True)
+    if zr.guard_added:
+        log("Added Valor source guard to ~/.zshenv", v, always=True)
+    if zr.error:
+        log(f"WARN: zshenv sync: {zr.error}", v, always=True)
+        result.warnings.append(f"zshenv sync: {zr.error}")
+
+    # Step 1.68: Configure gh CLI with GITHUB_PAT_YUDAME.
+    # Ensures all machines use the correct primary GitHub token consistently.
+    # Idempotent — safe to run on every update tick.
+    log("Configuring gh CLI auth...", v)
+    gh_auth_result = gh_auth.configure_gh_auth(project_dir)
+    if gh_auth_result.action == "configured":
+        log("gh auth: configured with GITHUB_PAT_YUDAME", v, always=True)
+    elif gh_auth_result.action == "skipped":
+        log(f"gh auth: skipped — {gh_auth_result.detail}", v)
+    elif not gh_auth_result.success:
+        log(f"WARN: gh auth: {gh_auth_result.error}", v, always=True)
+        result.warnings.append(f"gh auth: {gh_auth_result.error}")
+
+    # Step 1.69: Check Google Workspace CLI (`gws`) auth state.
+    # Detection only — the OAuth consent flow is human-gated and browser-based,
+    # so we surface an actionable step rather than auto-running it (cron-safe).
+    log("Checking gws auth...", v)
+    gws_auth_result = gws_auth.configure_gws_auth(project_dir)
+    if gws_auth_result.action == "already_ok":
+        log(f"gws auth: {gws_auth_result.detail}", v)
+    elif gws_auth_result.action == "skipped":
+        log(f"gws auth: skipped — {gws_auth_result.detail}", v)
+    elif gws_auth_result.action == "needs_auth":
+        log(f"WARN: gws auth: {gws_auth_result.detail}", v, always=True)
+        result.warnings.append(f"gws auth: {gws_auth_result.detail}")
+    elif not gws_auth_result.success:
+        log(f"WARN: gws auth: {gws_auth_result.error}", v, always=True)
+        result.warnings.append(f"gws auth: {gws_auth_result.error}")
 
     # Step 1.7: Audit skill hooks for dangerous patterns
     log("Auditing skill hooks...", v)
@@ -736,72 +870,58 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: Kokoro download: {kr.error}", v)
         result.warnings.append(f"Kokoro: {kr.error}")
 
-    # Step 4: Ollama model (full mode only)
+    # Step 3.12: ffmpeg — Kokoro encodes WAV -> OGG/Opus via ffmpeg. Without
+    # it on PATH the local TTS backend reports unavailable and voice synthesis
+    # silently falls back to the paid OpenAI tts-1 path. Non-fatal: a warning,
+    # since cloud TTS still works.
+    log("Checking ffmpeg (Kokoro encode dependency)...", v)
+    result.ffmpeg_result = kokoro.ensure_ffmpeg()
+    fr = result.ffmpeg_result
+    if fr.success:
+        if fr.action == "present":
+            log(f"ffmpeg OK ({fr.path})", v)
+        else:
+            log(f"ffmpeg installed ({fr.path})", v, always=True)
+    else:
+        log(f"WARN: ffmpeg: {fr.error}", v)
+        result.warnings.append(f"ffmpeg: {fr.error}")
+
+    # Step 4: Ollama generation model (full mode only).
+    # Ensures the configured ollama_generation_model. For a :cloud tag this is a
+    # near-no-op reachability/signin check (no heavy local pull); for an -mlx tag
+    # it is the RAM-guarded probe→pull-once path inside ensure_generation_model().
+    # The granite *classifier* is covered separately by Step 4.75. The superseded
+    # gemma4:e2b rm is deferred to AFTER Step 4.75 and gated on the granite
+    # smoke-test + spike-1 parity marker (see Step 4.76).
     if config.do_ollama:
-        from config.models import OLLAMA_LOCAL_MODEL, OLLAMA_SUPERSEDED_MODELS
+        from config.models import ensure_generation_model
+        from config.settings import settings as _settings
 
-        log("Checking Ollama model...", v)
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", OLLAMA_LOCAL_MODEL)
-        ollama_check = verify.check_ollama(ollama_model)
+        log("Checking Ollama generation model...", v)
+        ollama_model = _settings.models.ollama_generation_model
+        gen_ok, gen_detail = ensure_generation_model(ollama_model)
+        if gen_ok:
+            log(f"Generation model OK ({ollama_model}): {gen_detail}", v)
+        else:
+            log(f"WARN: generation model {ollama_model}: {gen_detail}", v, always=True)
+            result.warnings.append(f"generation model {ollama_model}: {gen_detail}")
+        # Cloud-signin precondition: a cloud tag needs the host signed in.
+        # Ollama persists signin via SSH keypair at ~/.ollama/id_ed25519 —
+        # there is no ":cloud" model entry in `ollama list`.
+        from config.models import _is_cloud_tag
 
-        if not ollama_check.available:
-            if ollama_check.error and "Not installed" not in ollama_check.error:
-                log(f"Pulling Ollama model {ollama_model}...", v)
-                if verify.pull_ollama_model(ollama_model):
-                    log(f"Ollama model {ollama_model} pulled", v)
-                else:
-                    result.warnings.append(f"Failed to pull Ollama model {ollama_model}")
-            else:
-                log("Ollama not installed, skipping", v)
+        if _is_cloud_tag(ollama_model):
+            import pathlib as _pathlib
 
-        # Smoke test: verify the model can generate a response
-        if ollama_check.available or verify.check_ollama(ollama_model).available:
-            log(f"Smoke testing {ollama_model}...", v)
-            try:
-                import subprocess
-
-                smoke_result = subprocess.run(
-                    ["ollama", "run", ollama_model, "hi"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
+            _key = _pathlib.Path.home() / ".ollama" / "id_ed25519"
+            if not _key.exists():
+                msg = (
+                    "Ollama Cloud not signed in (no ~/.ollama/id_ed25519) — "
+                    f"generation model {ollama_model} will be unreachable. "
+                    "Run: ollama signin"
                 )
-                if smoke_result.returncode == 0 and smoke_result.stdout.strip():
-                    log(f"Smoke test passed for {ollama_model}", v)
-                else:
-                    result.warnings.append(
-                        f"Smoke test failed for {ollama_model}: "
-                        f"{smoke_result.stderr.strip() or 'empty response'}"
-                    )
-            except subprocess.TimeoutExpired:
-                result.warnings.append(f"Smoke test timed out for {ollama_model}")
-            except Exception as e:
-                result.warnings.append(f"Smoke test error for {ollama_model}: {e}")
-
-        # Cleanup superseded models (best-effort, never fail the update)
-        if ollama_check.available or verify.check_ollama(ollama_model).available:
-            log("Cleaning up superseded Ollama models...", v)
-            for old_model in OLLAMA_SUPERSEDED_MODELS:
-                try:
-                    import subprocess
-
-                    rm_result = subprocess.run(
-                        ["ollama", "rm", old_model],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    if rm_result.returncode == 0:
-                        log(f"  Removed {old_model}", v, always=True)
-                    else:
-                        # Model may not exist, that is fine
-                        stderr = rm_result.stderr.strip()
-                        if "not found" in stderr.lower():
-                            log(f"  {old_model} not present, skipping", v)
-                        else:
-                            log(f"  WARN: Failed to remove {old_model}: {stderr}", v)
-                except Exception as e:
-                    log(f"  WARN: Failed to remove {old_model}: {e}", v)
+                log(f"WARN: {msg}", v, always=True)
+                result.warnings.append(msg)
 
     # Step 4.5: Machine identity verification
     log("Verifying machine identity...", v)
@@ -887,6 +1007,138 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
             config = replace(config, do_service_restart=False)
 
+    # Step 4.75: Verify granite4.1:3b is present and responsive — green-light gate.
+    # The granite classifier is the routing brain of the PTY container; every
+    # AgentSession dispatch goes through it. If the model is absent or
+    # unresponsive, the worker's PTY pool initialises but every session
+    # silently mis-routes. Pull the model automatically if Ollama is running
+    # but the model is missing; fail the update (suppress restart) if the
+    # smoke test can't get a response within 30s.
+    granite_smoke_passed = False
+    if config.do_service_restart:
+        granite_model = "granite4.1:3b"
+        log("Checking granite classifier model...", v)
+        granite_check = verify.check_ollama(granite_model)
+        if not granite_check.available:
+            if granite_check.error and "Not installed" not in granite_check.error:
+                # Ollama is running but model is missing — pull it.
+                log(
+                    f"  Pulling {granite_model} (required for PTY routing)...",
+                    v,
+                    always=True,
+                )
+                if verify.pull_ollama_model(granite_model):
+                    log(f"  {granite_model} pulled", v, always=True)
+                    granite_check = verify.check_ollama(granite_model)
+                else:
+                    log(
+                        f"FAIL: Could not pull {granite_model} — skipping service restart\n"
+                        f"  Run: ollama pull {granite_model}",
+                        v,
+                        always=True,
+                    )
+                    result.warnings.append(
+                        f"granite classifier missing; service restart skipped: "
+                        f"run 'ollama pull {granite_model}'"
+                    )
+                    config = replace(config, do_service_restart=False)
+            else:
+                log(
+                    f"FAIL: Ollama not installed — {granite_model} unavailable,"
+                    " skipping service restart",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "granite classifier unavailable (Ollama not installed); service restart skipped"
+                )
+                config = replace(config, do_service_restart=False)
+
+        if granite_check.available:
+            log(f"  Smoke testing {granite_model}...", v)
+            try:
+                import subprocess as _sp
+
+                _smoke = _sp.run(
+                    ["ollama", "run", granite_model, "respond with the single word: ready"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if _smoke.returncode == 0 and _smoke.stdout.strip():
+                    log(f"  {granite_model} smoke test passed", v)
+                    granite_smoke_passed = True
+                else:
+                    log(
+                        f"FAIL: {granite_model} smoke test returned no output"
+                        " — skipping service restart",
+                        v,
+                        always=True,
+                    )
+                    result.warnings.append(
+                        f"granite classifier smoke test failed; service restart skipped: "
+                        f"{_smoke.stderr.strip() or 'empty response'}"
+                    )
+                    config = replace(config, do_service_restart=False)
+            except _sp.TimeoutExpired:
+                log(
+                    f"FAIL: {granite_model} smoke test timed out — skipping service restart",
+                    v,
+                    always=True,
+                )
+                result.warnings.append(
+                    "granite classifier smoke test timed out; service restart skipped"
+                )
+                config = replace(config, do_service_restart=False)
+            except Exception as _e:
+                result.warnings.append(f"granite classifier smoke test error: {_e}")
+                config = replace(config, do_service_restart=False)
+
+    # Step 4.76: Retire superseded Ollama models (relocated AFTER the granite
+    # smoke-test). The gemma4:e2b rm is irreversible per-machine, so it is gated
+    # on BOTH (a) the granite smoke-test having passed earlier in THIS run
+    # (granite_smoke_passed — read the boolean, never `rm`'s exit code, which is
+    # 0 even when the model is already absent), AND (b) the spike-1 parity marker
+    # `data/spike1_parity_ok` (shadow-mode, a valid poor-parity response, needs
+    # gemma resident — never delete it out from under shadow-mode). If either is
+    # missing, the machine keeps its superseded models until both conditions hold.
+    if config.do_ollama:
+        from config.models import OLLAMA_SUPERSEDED_MODELS
+
+        spike1_parity_ok = (project_dir / "data" / "spike1_parity_ok").exists()
+        if granite_smoke_passed and spike1_parity_ok:
+            log("Cleaning up superseded Ollama models...", v)
+            for old_model in OLLAMA_SUPERSEDED_MODELS:
+                try:
+                    import subprocess as _sp_rm
+
+                    rm_result = _sp_rm.run(
+                        ["ollama", "rm", old_model],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if rm_result.returncode == 0:
+                        log(f"  Removed {old_model}", v, always=True)
+                    else:
+                        stderr = rm_result.stderr.strip()
+                        if "not found" in stderr.lower():
+                            log(f"  {old_model} not present, skipping", v)
+                        else:
+                            log(f"  WARN: Failed to remove {old_model}: {stderr}", v)
+                except Exception as e:
+                    log(f"  WARN: Failed to remove {old_model}: {e}", v)
+        else:
+            reason = []
+            if not granite_smoke_passed:
+                reason.append("granite smoke-test not passed this run")
+            if not spike1_parity_ok:
+                reason.append("spike-1 parity marker absent")
+            log(
+                f"Skipping superseded-model cleanup ({'; '.join(reason)})",
+                v,
+            )
+
     # Step 4.8: Verify memory MCP registration in ~/.claude.json (idempotent).
     # Self-heals drift, fresh-machine setup, and manual edits. Runs in all
     # modes; --verify is read-only (LOCK_SH, no write), --full/--cron repair
@@ -933,6 +1185,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             # --verify mode: report drift but do not warn aggressively
             result.warnings.append(f"BYOB MCP drift: {mcp_byob_result.message}")
+
+    # Step 4.10: Check PM persona overlay drift between in-repo template and private vault.
+    # Surface only — never auto-merges. Fails gracefully if vault file absent (fresh machine).
+    # All logic lives in scripts/update/persona_drift.py so unit tests exercise the real code.
+    log("Checking PM persona overlay drift...", v)
+    _persona_warnings = persona_drift.check_pm_persona_drift(project_dir)
+    if _persona_warnings:
+        for _w in _persona_warnings:
+            log(f"  {_w}", v)
+            result.warnings.append(_w)
+    else:
+        log("  PM persona overlay: in sync (or files absent)", v)
 
     # Step 4.95: Check that each active project repo has a '## Running' README section.
     # Warn only — never blocks the update. Guides devs to document startup commands
@@ -1115,6 +1379,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                                 result.success = False
             else:
                 result.warnings.append("Worker plist install failed")
+
+        # Install nightly-tests launchd service on bridge machines.
+        # The install script self-gates on has_bridge_role() — it skips
+        # gracefully and removes stale plists on non-bridge machines.
+        if has_bridge:
+            if service.install_nightly_tests(project_dir):
+                log("Nightly tests service installed/verified", v)
+            else:
+                log("WARN: Nightly tests service install failed or not supported", v, always=True)
+                result.warnings.append("Nightly tests service install failed")
+        else:
+            log("Nightly tests: skipped (no projects assigned to this machine)", v)
 
         # Ensure email bridge is running if this machine has projects AND IMAP is configured.
         # If the machine has no projects, stop any stray email bridge process.
@@ -1393,6 +1669,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log(f"  {server}", v)
         else:
             log("No MCP servers configured", v)
+
+    # Step 9 (strictly last): best-effort agent-judgment catchup.
+    #
+    # Runs AFTER every service-management and health check above so the
+    # bridge+worker health gate reflects this run's final state. Invokes
+    # valor-catchup as a subprocess only when BOTH bridge and worker report
+    # running; failure/timeout is logged and swallowed — /update completion is
+    # wholly independent of valor-catchup's outcome (issue #1709). Gated on
+    # do_service_restart so verify-only and follower-skip runs (which don't
+    # bring services up) never trigger recovery enqueues.
+    if config.do_service_restart:
+        run_catchup_step(project_dir, log_fn=lambda m: log(m, v))
 
     # Final summary
     if v:

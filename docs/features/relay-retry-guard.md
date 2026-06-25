@@ -23,6 +23,10 @@ The `_dead_letter_message()` helper routes exhausted messages based on type:
 - **Text messages** (type=None): persisted to `bridge/dead_letters.py` via `persist_failed_delivery()` for later replay
 - **Reactions and custom emoji messages**: logged at WARNING level and discarded (ephemeral, not worth replaying)
 
+#### Group/supergroup-safe guard
+
+Both the persist side (`_dead_letter_message` in `telegram_relay.py`) and the replay side (`replay_dead_letters` in `dead_letters.py`) guard against invalid peers by checking `chat_id_int == 0`. Group and supergroup chat IDs are legitimately negative integers (e.g. `-1003900483201`); only `chat_id == 0` is an invalid Telegram peer that causes `PeerIdInvalidError` in a loop. The two guards must stay in lockstep — narrowing only one side is a no-op because a negative-chat_id record persisted by the relay side will be deleted by the replay side on the next bridge startup.
+
 #### `cleanup_file` honoring at DLQ placement
 
 When the payload carries `cleanup_file: True` (set by `valor-telegram send
@@ -37,19 +41,40 @@ deletion by the producer would race the retry loop and trip the
 errors so cleanup never raises. See [TTS](tts.md#temp-file-ownership-the-load-bearing-detail)
 for the full rationale.
 
+### FloodWait Handling
+
+`FloodWaitError` raised by Telethon during a relay send is caught as a first-class case in `process_outbox`, separate from the bounded-retry path:
+
+1. Sleeps `min(flood_err.seconds + RELAY_FLOOD_WAIT_BUFFER_SECS, RELAY_FLOOD_WAIT_MAX_SLEEP_SECS)`.
+2. Increments `message["_flood_waits"]` (a separate counter, not `_relay_attempts`).
+3. Re-queues via `RPUSH` without touching `_relay_attempts`.
+4. Dead-letters with reason `flood_backstop` after `RELAY_FLOOD_WAIT_MAX` consecutive flood events.
+
+This keeps flood events out of the retry budget. Each inner send helper also re-raises `FloodWaitError` before any broad `except Exception` block so it propagates correctly to the process-outbox handler.
+
+This is the send-path flood handler; the connect-loop flood handler in `telegram_bridge.py` is distinct and also calls `_write_flood_backoff` to throttle reconnects — the relay handler deliberately omits that side-effect.
+
 ### Unified Failure Handling
 
 All three message type paths (reaction, custom_emoji_message, default text) use the same bounded-retry logic. Handler dispatch is wrapped in try/except so unexpected exceptions feed into the retry path rather than crashing or falling through.
 
 ## Configuration
 
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `MAX_RELAY_RETRIES` | 3 | Maximum delivery attempts before dead-lettering |
-| `KNOWN_MESSAGE_TYPES` | `{None, "reaction", "custom_emoji_message"}` | Accepted message types |
+| Constant | Default | Env override | Description |
+|----------|---------|--------------|-------------|
+| `MAX_RELAY_RETRIES` | 3 | `MAX_RELAY_RETRIES` | Maximum delivery attempts before dead-lettering |
+| `KNOWN_MESSAGE_TYPES` | `{None, "reaction", "custom_emoji_message"}` | — | Accepted message types |
+| `RELAY_FLOOD_WAIT_BUFFER_SECS` | 5 | `RELAY_FLOOD_WAIT_BUFFER_SECS` | Seconds added to Telegram's requested wait before resuming |
+| `RELAY_FLOOD_WAIT_MAX_SLEEP_SECS` | 300 | `RELAY_FLOOD_WAIT_MAX_SLEEP_SECS` | Hard ceiling on a single flood-wait sleep |
+| `RELAY_FLOOD_WAIT_MAX` | 10 | `RELAY_FLOOD_WAIT_MAX` | Consecutive flood events before dead-lettering with reason `flood_backstop` |
 
 ## Files
 
-- `bridge/telegram_relay.py` -- all implementation changes
-- `bridge/dead_letters.py` -- called by dead-letter routing (no changes)
+- `bridge/telegram_relay.py` -- all relay implementation
+- `bridge/dead_letters.py` -- `persist_failed_delivery`, `replay_dead_letters`; the replay-side guard must stay in lockstep with the persist-side guard in `telegram_relay.py`
 - `tests/unit/test_bridge_relay.py` -- unit tests covering all retry/dead-letter paths
+- `tests/unit/test_dead_letters.py` -- unit tests for dead-letter persist and replay
+
+## See Also
+
+- [Bridge Worker Architecture](bridge-worker-architecture.md) — full detail on the four relay defects patched in issue #1749: file-send idempotency, oversized-text guard for file+text messages, group/supergroup-safe dead-letter (lockstep guards), and send-path FloodWait handling.

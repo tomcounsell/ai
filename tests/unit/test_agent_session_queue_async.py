@@ -215,3 +215,74 @@ class TestEnqueueContinuationAsyncWrapping:
                         # transition_status should be called directly
                         # (no update_session wrapper — saves a Redis re-read)
                         mock_transition.assert_called_once()
+
+
+class TestEnqueueSessionTypeOmissionWarning:
+    """enqueue_agent_session warns when both session_type and project_config are omitted.
+
+    Finding 2 safety net: a scanner that dropped persona resolution silently
+    defaults a teammate-configured chat to an eng PM<->Dev loop. The greppable
+    warning surfaces that call shape without changing the eng default.
+    """
+
+    def _run_enqueue(self, **overrides):
+        from agent.agent_session_queue import enqueue_agent_session
+
+        kwargs = dict(
+            project_key="testproj",
+            session_id="s1",
+            working_dir="/tmp/test",
+            message_text="hello",
+            sender_name="Alice",
+            chat_id="100",
+            telegram_message_id=1,
+        )
+        kwargs.update(overrides)
+
+        with (
+            patch(
+                "agent.agent_session_queue._push_agent_session",
+                new_callable=AsyncMock,
+                return_value=1,
+            ) as push,
+            patch("agent.agent_session_queue._ensure_worker"),
+        ):
+            asyncio.run(enqueue_agent_session(**kwargs))
+        return push
+
+    def test_warns_when_both_omitted(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            push = self._run_enqueue()
+        assert any(
+            "[enqueue] session_type omitted AND project_config omitted" in r.getMessage()
+            for r in caplog.records
+        )
+        # Effective default is still eng.
+        from config.enums import SessionType
+
+        assert push.call_args[1]["session_type"] == SessionType.ENG
+
+    def test_no_warning_when_project_config_passed(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            self._run_enqueue(project_config={"_key": "testproj"})
+        assert not any(
+            "[enqueue] session_type omitted AND project_config omitted" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_no_warning_when_session_type_passed(self, caplog):
+        import logging
+
+        from config.enums import SessionType
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            push = self._run_enqueue(session_type=SessionType.ENG)
+        assert not any(
+            "[enqueue] session_type omitted AND project_config omitted" in r.getMessage()
+            for r in caplog.records
+        )
+        assert push.call_args[1]["session_type"] == SessionType.ENG

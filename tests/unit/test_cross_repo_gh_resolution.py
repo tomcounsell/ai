@@ -84,10 +84,10 @@ class TestBuildHarnessTurnInputGhRepo:
             message="SDLC issue 193",
             session_id="test-session-1",
             sender_name="Tom",
-            chat_title="Dev: Popoto",
+            chat_title="Eng: Popoto",
             project=self.POPOTO_PROJECT,
             task_list_id=None,
-            session_type="dev",
+            session_type="eng",
             sender_id=123,
             classification="sdlc",
             is_cross_repo=True,
@@ -104,10 +104,10 @@ class TestBuildHarnessTurnInputGhRepo:
             message="SDLC issue 42",
             session_id="test-session-2",
             sender_name="Valor",
-            chat_title="Dev: Valor",
+            chat_title="Eng: Valor",
             project=self.AI_PROJECT,
             task_list_id=None,
-            session_type="dev",
+            session_type="eng",
             sender_id=456,
             classification="sdlc",
             is_cross_repo=False,
@@ -124,10 +124,10 @@ class TestBuildHarnessTurnInputGhRepo:
             message="What is popoto?",
             session_id="test-session-3",
             sender_name="Tom",
-            chat_title="Dev: Popoto",
+            chat_title="Eng: Popoto",
             project=self.POPOTO_PROJECT,
             task_list_id=None,
-            session_type="dev",
+            session_type="eng",
             sender_id=123,
             classification="question",
             is_cross_repo=True,
@@ -136,26 +136,21 @@ class TestBuildHarnessTurnInputGhRepo:
         assert "GITHUB:" not in result
 
     @pytest.mark.asyncio
-    async def test_pm_mode_does_not_set_github_header(self):
-        """PM mode projects should never set GITHUB header."""
-        pm_project = {
-            **self.POPOTO_PROJECT,
-            "mode": "pm",
-        }
-
+    async def test_non_cross_repo_does_not_set_github_header(self):
+        """Non-cross-repo projects (is_cross_repo=False) should never set GITHUB header."""
         from agent.sdk_client import build_harness_turn_input
 
         result = await build_harness_turn_input(
             message="SDLC issue 193",
             session_id="test-session-4",
             sender_name="Tom",
-            chat_title="Dev: Popoto",
-            project=pm_project,
+            chat_title="Eng: Valor",
+            project=self.AI_PROJECT,
             task_list_id=None,
-            session_type="dev",
+            session_type="eng",
             sender_id=123,
             classification="sdlc",
-            is_cross_repo=True,
+            is_cross_repo=False,
         )
 
         assert "GITHUB:" not in result
@@ -169,10 +164,10 @@ class TestBuildHarnessTurnInputGhRepo:
             message="SDLC issue 1",
             session_id="test-session-5",
             sender_name="Tom",
-            chat_title="Dev: NoGithub",
+            chat_title="Eng: NoGithub",
             project=self.NO_GITHUB_PROJECT,
             task_list_id=None,
-            session_type="dev",
+            session_type="eng",
             sender_id=789,
             classification="sdlc",
             is_cross_repo=True,
@@ -190,10 +185,10 @@ class TestBuildHarnessTurnInputGhRepo:
             message="SDLC issue 193",
             session_id="test-session-6",
             sender_name="Tom",
-            chat_title="Dev: Popoto",
+            chat_title="Eng: Popoto",
             project=self.POPOTO_PROJECT,
             task_list_id=None,
-            session_type="dev",
+            session_type="eng",
             sender_id=123,
             classification="sdlc",
             is_cross_repo=True,
@@ -254,7 +249,7 @@ class TestBuildHarnessTurnInputSkipPrefix:
             chat_title="Test Chat",
             project={"name": "test", "mode": "dev"},
             task_list_id="task-123",
-            session_type="dev",
+            session_type="eng",
             sender_id=12345,
             skip_prefix=True,
         )
@@ -272,7 +267,7 @@ class TestBuildHarnessTurnInputSkipPrefix:
             chat_title="Test Chat",
             project={"name": "test", "mode": "dev"},
             task_list_id="task-123",
-            session_type="dev",
+            session_type="eng",
             sender_id=12345,
         )
         assert "SESSION_ID:" in result

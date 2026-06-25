@@ -3,10 +3,10 @@
 Session management CLI for AgentSession — create, steer, monitor, and kill sessions.
 
 Usage:
-    valor-session create --role pm --chat-id 123 --message "Plan issue #735"
-    valor-session create --role dev --message "Fix the bug" --parent abc123
-    valor-session create --role dev --model sonnet --message "Build feature X" --parent abc123
-    valor-session create --role pm --message "..." --project-key valor
+    valor-session create --role eng --chat-id 123 --message "Plan issue #735"
+    valor-session create --role eng --message "Fix the bug" --parent abc123
+    valor-session create --role eng --model sonnet --message "Build feature X" --parent abc123
+    valor-session create --role eng --message "..." --project-key valor
     valor-session resume --id abc123 --message "Fix: add missing validation"
     valor-session release --pr 900
     valor-session steer --id abc123 --message "Stop after critique stage"
@@ -16,7 +16,7 @@ Usage:
     valor-session children --id abc123
     valor-session list
     valor-session list --status running
-    valor-session list --role pm
+    valor-session list --role eng
     valor-session kill --id abc123
     valor-session kill --all
 
@@ -42,12 +42,38 @@ session lifecycle without requiring bridge access.
 """
 
 import argparse
+import dataclasses
 import json
+import logging
 import re
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Bounded read-path retry for class-set lookups (issue #1720)
+# ---------------------------------------------------------------------------
+# popoto's rebuild_indexes() deletes the class set ($Class:AgentSession) and
+# re-adds members in batch_size=1000 pipeline batches.  A concurrent
+# query.filter(session_id=...) reads smembers($Class:AgentSession) and filters
+# in memory; during the delete→re-add window it observes an empty or partial
+# class set and returns no result for a live session.
+#
+# Measured (spike-1, 150 sessions): rebuild_indexes() takes ~600ms; p99
+# class-set-empty window = 651ms.  Retry cap: 5 attempts × 200ms = 1000ms
+# total, which covers the measured p99 with ~35% margin.
+#
+# Both reader sites (_find_session in this file and _find_session_by_id in
+# sdlc_stage_query.py) share the same design: re-read on empty, return
+# immediately on found, fall through to the existing absent-session fallback
+# (get_by_id / None) after the cap.  Hot-path sites (worker recovery, steering
+# delivery) are deliberately excluded — retry stays at operator/dispatch paths.
+_CLASS_SET_RETRY_ATTEMPTS = 5
+_CLASS_SET_RETRY_BACKOFF_S = 0.20  # seconds between attempts
 
 # Issue reference matcher (#1109): "issue #N" or "issue N" (case-insensitive).
 # Bounded lookbehind via (?:^|\W) so we don't false-positive on "tissue123".
@@ -103,27 +129,85 @@ def _load_env() -> None:
         pass
 
 
-_WORKER_HEARTBEAT_FILE = _repo_root / "data" / "last_worker_connected"
+from agent.constants import WORKER_DOWN_THRESHOLD_S  # noqa: E402
 
-from agent.constants import HEARTBEAT_STALENESS_THRESHOLD_S  # noqa: E402
+
+def _resolve_heartbeat_path(repo_root: Path | None = None) -> Path:
+    """Resolve the worker heartbeat file path, worktree-aware.
+
+    The worker only ever writes ``data/last_worker_connected`` under the MAIN
+    checkout. When this CLI runs from a git worktree (``.worktrees/{slug}/``),
+    a ``__file__``-relative path points at the worktree's own ``data/`` dir,
+    which the worker never touches — producing a false "worker down" verdict.
+
+    Resolution: ``git -C <repo_root> rev-parse --path-format=absolute
+    --git-common-dir`` yields the main checkout's ``.git`` dir (flag order
+    matters — ``--path-format=absolute`` must precede ``--git-common-dir``).
+    The heartbeat lives at ``<common_dir>.parent / data / last_worker_connected``.
+
+    Relative git output is resolved against ``repo_root`` (never the process
+    cwd). Any subprocess failure — non-zero exit, missing git binary, timeout,
+    any exception — falls back to the ``__file__``-relative path. Never raises
+    (#980 never-raise contract).
+    """
+    anchor = repo_root if repo_root is not None else Path(__file__).parent.parent
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", str(anchor), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output = proc.stdout.strip()
+        if proc.returncode == 0 and output:
+            common = Path(output)
+            abs_common = common if common.is_absolute() else (anchor / common).resolve()
+            return abs_common.parent / "data" / "last_worker_connected"
+    except Exception:
+        pass
+    return anchor / "data" / "last_worker_connected"
 
 
 def _check_worker_health() -> tuple[bool, int | None]:
     """Check worker health by reading the heartbeat file modification time.
 
-    Returns (healthy, age_s) where:
-      - healthy is True if the heartbeat was updated within the last 360 seconds
-      - age_s is the integer age in seconds, or None if the file is missing or unreadable
+    The heartbeat path comes from :func:`_resolve_heartbeat_path`, which uses
+    ``git rev-parse --path-format=absolute --git-common-dir`` so worktree
+    checkouts read the main checkout's ``data/last_worker_connected`` (the
+    only copy the worker writes).
 
-    Never raises — all OSError and unexpected exceptions are caught silently.
-    Missing file == unhealthy (worker has never run on this machine).
+    Threshold is ``WORKER_DOWN_THRESHOLD_S`` (600s) — 2x the worker's 300s
+    heartbeat write cadence (``agent/session_health.py`` health loop), giving
+    a full missed write cycle of margin before declaring the worker down.
+
+    Returns (healthy, age_s) where:
+      - healthy is True if heartbeat age < WORKER_DOWN_THRESHOLD_S
+      - age_s is the integer age in seconds, clamped to >= 0 (future-dated
+        mtimes from clock skew / iCloud report 0 == healthy), or None if the
+        file is missing or unreadable
+
+    Never raises — the #980 never-raise contract holds end to end; any
+    exception (including git failures inside the resolver) yields a fallback
+    path or (False, None). Missing file == down (worker has never run here).
     """
     try:
-        mtime = _WORKER_HEARTBEAT_FILE.stat().st_mtime
-        age_s = int(time.time() - mtime)
-        return (age_s < HEARTBEAT_STALENESS_THRESHOLD_S, age_s)
+        mtime = _resolve_heartbeat_path().stat().st_mtime
+        age_s = max(0, int(time.time() - mtime))
+        return (age_s < WORKER_DOWN_THRESHOLD_S, age_s)
     except Exception:
         return (False, None)
+
+
+def _worker_down_message(age_s: int | None) -> str:
+    """Shared warning template for the worker-down state (create + status)."""
+    age_str = f"{age_s}s" if age_s is not None else "no file"
+    return (
+        f"WARNING: no recent worker heartbeat on this machine ({age_str}) — "
+        "session will stay pending until a worker is started "
+        "(run: ./scripts/valor-service.sh worker-start)"
+    )
 
 
 class ProjectsConfigUnavailableError(RuntimeError):
@@ -308,11 +392,11 @@ def cmd_create(args: argparse.Namespace) -> int:
     ``.worktrees/{slug}/`` suffix). Callers who need a different repo pass a
     different ``--project-key``.
 
-    Slug requirement: both ``--role pm`` (issue #1109) and ``--role dev``
-    (issue #1272) require a slug — either via ``--slug <slug>`` or by
-    including ``issue #N`` in the message so the slug auto-derives to
-    ``sdlc-N``. Slugless invocations exit 1 with a stderr error. This
-    prevents the session from inheriting the worker's current branch state
+    Slug requirement: ``--role eng`` (issues #1109, #1272) requires a slug —
+    either via ``--slug <slug>`` or by including ``issue #N`` in the message
+    so the slug auto-derives to ``sdlc-N``. Slugless invocations exit 1 with
+    a stderr error. This prevents the session from inheriting the worker's
+    current branch state
     and ensures dev sessions get worktree isolation.
     """
     _load_env()
@@ -325,11 +409,10 @@ def cmd_create(args: argparse.Namespace) -> int:
         from config.enums import SessionType
 
         _role_to_session_type = {
-            "pm": SessionType.PM,
-            "dev": SessionType.DEV,
+            "eng": SessionType.ENG,
             "teammate": SessionType.TEAMMATE,
         }
-        role = args.role or "pm"
+        role = args.role or "eng"
         if role not in _role_to_session_type:
             raise ValueError(
                 f"Unknown --role value: {role!r}. Allowed values: {sorted(_role_to_session_type)}"
@@ -354,6 +437,29 @@ def cmd_create(args: argparse.Namespace) -> int:
         parent_id = getattr(args, "parent", None)
         model = getattr(args, "model", None)
 
+        # ------------------------------------------------------------------
+        # Stopgap (#1633): refuse NEW parent-attached session creation.
+        # The granite PTY container owns the PM/Dev split; parent-linked
+        # child sessions double-consume bounded pool slots. Fires before
+        # any filesystem or Redis work (slug derivation, worktree
+        # provisioning, enqueue) so the refused path has zero side effects.
+        # ------------------------------------------------------------------
+        if parent_id:
+            from models.child_session_gate import (
+                BYPASS_WARNING,
+                CHILD_SESSIONS_DISABLED_MESSAGE,
+                child_sessions_allowed,
+                child_sessions_disabled_json,
+            )
+
+            if not child_sessions_allowed():
+                if getattr(args, "json", False):
+                    print(json.dumps(child_sessions_disabled_json(), indent=2))
+                else:
+                    print(f"Error: {CHILD_SESSIONS_DISABLED_MESSAGE}", file=sys.stderr)
+                return 2
+            print(BYPASS_WARNING, file=sys.stderr)
+
         # Derive a session_id from timestamp + role
         ts_suffix = str(int(utc_now().timestamp() * 1000))
         session_id = f"{chat_id}_{ts_suffix}"
@@ -367,13 +473,15 @@ def cmd_create(args: argparse.Namespace) -> int:
         # a project root or touching the filesystem.
         # ------------------------------------------------------------------
         slug = getattr(args, "slug", None)
-        # Issue #1272: dev sessions also require a slug. The previous behavior
-        # accepted slugless ``--role dev`` and let the worker fall back to the
-        # main checkout — the residual hole that #887 left open. Apply the
-        # same auto-derive-or-reject path that PM uses; a synthetic slug is
-        # still allocated downstream by the worker if a slugless dev session
-        # somehow reaches the executor (future programmatic spawn site).
-        if not slug and role in ("pm", "dev"):
+        # Issue #1272: eng sessions also require a slug. An earlier behavior
+        # accepted slugless non-teammate roles and let the worker fall back to
+        # the main checkout — the residual hole that #887 left open. The
+        # argparse layer now rejects ``dev``/``pm`` outright, so the only
+        # non-teammate role reaching here is ``eng``; apply the
+        # auto-derive-or-reject path, and a synthetic slug is still allocated
+        # downstream by the worker if a slugless eng session somehow reaches
+        # the executor (future programmatic spawn site).
+        if not slug and role != "teammate":
             derived = _derive_slug_from_message(message)
             if derived:
                 slug = derived
@@ -383,7 +491,7 @@ def cmd_create(args: argparse.Namespace) -> int:
                 )
             else:
                 print(
-                    "Error: PM and dev sessions must be created with --slug <slug> "
+                    "Error: Eng sessions must be created with --slug <slug> "
                     "or include 'issue #N' in the message so a worktree can be "
                     "provisioned. Without a slug the session would inherit the "
                     "worker's current branch state (see issues #1109, #1272).",
@@ -464,8 +572,9 @@ def cmd_create(args: argparse.Namespace) -> int:
 
         result = asyncio.run(_create())
 
-        # Check worker health after enqueue — warn if no active worker
+        # Check worker health after enqueue — warn if no recent heartbeat
         worker_healthy, worker_age_s = _check_worker_health()
+        worker_state = "ok" if worker_healthy else "down"
 
         if args.json:
             print(
@@ -476,6 +585,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                         "project_key": project_key,
                         "model": model,
                         "worker_healthy": worker_healthy,
+                        "worker_state": worker_state,
+                        "worker_heartbeat_age_s": worker_age_s,
                     },
                     indent=2,
                 )
@@ -488,12 +599,8 @@ def cmd_create(args: argparse.Namespace) -> int:
                 print(f"  Model:       {model}")
             print(f"  Message: {message[:80]}")
             print(f"  Chat ID: {chat_id}")
-            if not worker_healthy:
-                print(
-                    "WARNING: no active worker detected — session will stay pending until a "
-                    "worker is started (run: ./scripts/valor-service.sh worker-start)",
-                    file=sys.stderr,
-                )
+            if worker_state == "down":
+                print(_worker_down_message(worker_age_s), file=sys.stderr)
         return 0
 
     except Exception as e:
@@ -527,21 +634,127 @@ def _find_session(id_arg: str) -> "AgentSession | None":  # noqa: F821
     ``AgentSession.query.filter(session_id=<uuid>)`` before the ``get_by_id``
     fallback fires. At operator-initiated CLI invocation rates (a handful per
     day) this is imperceptible. See issue #1061.
+
+    Bounded retry (issue #1720): popoto's rebuild_indexes() transiently empties
+    the class set ($Class:AgentSession); a concurrent query.filter(session_id=...)
+    reads the class set and returns empty for a live session during that window.
+    We retry up to _CLASS_SET_RETRY_ATTEMPTS times with _CLASS_SET_RETRY_BACKOFF_S
+    between attempts (total cap sized to exceed spike-1's measured p99 = 651ms),
+    then fall through to get_by_id as before.
     """
     from models.agent_session import AgentSession
 
-    sessions = list(AgentSession.query.filter(session_id=id_arg))
-    if sessions:
-        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
-        return sessions[0]
+    for attempt in range(_CLASS_SET_RETRY_ATTEMPTS):
+        sessions = list(AgentSession.query.filter(session_id=id_arg))
+        if sessions:
+            sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+            return sessions[0]
+        if attempt < _CLASS_SET_RETRY_ATTEMPTS - 1:
+            logger.debug(
+                "query.filter(session_id=%r) returned empty on attempt %d/%d"
+                " — class-set may be mid-rebuild, retrying in %.0fms",
+                id_arg,
+                attempt + 1,
+                _CLASS_SET_RETRY_ATTEMPTS,
+                _CLASS_SET_RETRY_BACKOFF_S * 1000,
+            )
+            time.sleep(_CLASS_SET_RETRY_BACKOFF_S)
     return AgentSession.get_by_id(id_arg)
 
 
-def cmd_resume(args: argparse.Namespace) -> int:
-    """Resume a completed/killed/failed session by re-enqueuing it with a new message.
+@dataclasses.dataclass
+class ResumeResult:
+    """Result of a resume_session call."""
 
-    Validates the session is in ``completed``, ``killed``, or ``failed``
-    status and has a stored ``claude_session_uuid``. Transitions the session
+    success: bool
+    session_id: str
+    error: str | None = None
+    model: str | None = None
+    claude_session_uuid: str | None = None
+
+
+def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResult":
+    """Programmatic core for resuming a terminal session.
+
+    Shared by cmd_resume (CLI) and the auto-resume reflection.
+
+    - Validates session is in RESUMABLE_STATUSES (not cancelled, not running/pending)
+    - Validates session has a claude_session_uuid
+    - Stages steering message BEFORE transition (eliminates race window)
+    - Atomically transitions to pending via transition_status(..., reject_from_terminal=False)
+
+    Returns a ResumeResult. Never raises — caller checks result.success.
+    """
+    from models.session_lifecycle import RESUMABLE_STATUSES, transition_status
+
+    _load_env()
+    session_id = getattr(session, "session_id", str(session))
+    current_status = getattr(session, "status", None)
+
+    if current_status == "pending":
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=f"Session {session_id} is already pending",
+        )
+    if current_status == "running":
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=f"Session {session_id} is currently running",
+        )
+    if current_status not in RESUMABLE_STATUSES:
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=(
+                f"Session {session_id} has status '{current_status}'. "
+                f"Only {sorted(RESUMABLE_STATUSES)} can be resumed."
+            ),
+        )
+    if getattr(session, "claude_session_uuid", None) is None:
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=(
+                "cannot resume: no transcript UUID stored "
+                "(session was killed before first turn completed)"
+            ),
+        )
+
+    # Stage steering message BEFORE transitioning to pending so the worker
+    # always sees it — eliminates the two-write race (transition then save).
+    existing_steering = list(session.queued_steering_messages or [])
+    existing_steering.append(message)
+    session.queued_steering_messages = existing_steering
+    session.save()
+
+    # Transition to pending (atomic — fails if another process raced us).
+    # Steering message is already persisted above, so no race window.
+    try:
+        transition_status(
+            session, "pending", reason=f"resume ({source})", reject_from_terminal=False
+        )
+    except Exception as e:
+        return ResumeResult(
+            success=False,
+            session_id=session_id,
+            error=f"Could not transition to pending: {e}",
+        )
+
+    return ResumeResult(
+        success=True,
+        session_id=session_id,
+        model=getattr(session, "model", None),
+        claude_session_uuid=getattr(session, "claude_session_uuid", None),
+    )
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Resume a completed/killed/failed/abandoned session by re-enqueuing it with a new message.
+
+    Validates the session is in RESUMABLE_STATUSES (completed, killed, failed, or
+    abandoned) and has a stored ``claude_session_uuid``. Transitions the session
     back to ``pending`` and appends the new message to the steering queue so
     the worker delivers it as the first message in the resumed conversation.
 
@@ -550,12 +763,12 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
     ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID) --
     see :py:func:`_find_session`. Support for ``killed`` / ``failed`` was added
-    in issue #1061 so operators can recover from manual kills or worker crashes
-    without losing prior context.
+    in issue #1061; ``abandoned`` was added in issue #1539 so the auto-resume
+    reflection and operators can recover abandoned sessions without losing context.
     """
     _load_env()
     try:
-        from models.session_lifecycle import transition_status
+        from models.session_lifecycle import RESUMABLE_STATUSES
 
         session_id = args.id
         new_message = args.message
@@ -566,6 +779,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
             return 1
 
         current_status = getattr(session, "status", None)
+
+        # Fast-path checks for non-terminal active states (separate from RESUMABLE_STATUSES
+        # check for clear user-facing error messages)
         if current_status == "pending":
             print(
                 f"Error: Session {session_id} is already pending — cannot resume.",
@@ -578,47 +794,24 @@ def cmd_resume(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        if current_status not in ("completed", "killed", "failed"):
-            print(
-                f"Error: Session {session_id} has status '{current_status}'. "
-                "Only completed/killed/failed sessions can be resumed.",
-                file=sys.stderr,
-            )
+
+        result = resume_session(session, new_message, source="valor-session resume")
+
+        if not result.success:
+            # Map the resume_session error back to operator-facing output.
+            # For status rejections, keep the legacy wording pattern.
+            if current_status not in RESUMABLE_STATUSES:
+                print(
+                    f"Error: Session {session_id} has status '{current_status}'. "
+                    "Only completed/killed/failed/abandoned sessions can be resumed.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"Error: {result.error}", file=sys.stderr)
             return 1
 
-        # A session with no stored transcript UUID cannot be resumed -- there
-        # is no Claude Code transcript to replay. This happens when a session
-        # is killed before its first turn completes.
-        if getattr(session, "claude_session_uuid", None) is None:
-            print(
-                "Error: cannot resume: no transcript UUID stored "
-                "(session was killed before first turn completed)",
-                file=sys.stderr,
-            )
-            return 1
-
-        # Stage steering message BEFORE transitioning to pending so the worker
-        # always sees it — eliminates the two-write race (transition then save).
-        existing_steering = list(session.queued_steering_messages or [])
-        existing_steering.append(new_message)
-        session.queued_steering_messages = existing_steering
-        session.save()
-
-        # Transition to pending (atomic — fails if another process raced us).
-        # Steering message is already persisted above, so no race window.
-        try:
-            transition_status(
-                session, "pending", reason="valor-session resume", reject_from_terminal=False
-            )
-        except Exception as e:
-            print(
-                f"Error: Could not transition session {session_id} to pending: {e}",
-                file=sys.stderr,
-            )
-            return 1
-
-        model = getattr(session, "model", None)
-        uuid = getattr(session, "claude_session_uuid", None)
+        model = result.model
+        uuid = result.claude_session_uuid
 
         if args.json:
             print(
@@ -699,10 +892,14 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
         full_message = getattr(args, "full_message", False)
 
-        # Check worker health when session is pending
+        # Check worker health when session is pending (compute gate avoids the
+        # git subprocess on every status call; non-pending emits null fields)
         worker_healthy: bool | None = None
+        worker_age_s: int | None = None
+        worker_state: str | None = None
         if session.status == "pending":
-            worker_healthy, _ = _check_worker_health()
+            worker_healthy, worker_age_s = _check_worker_health()
+            worker_state = "ok" if worker_healthy else "down"
 
         if args.json:
             data = {
@@ -727,13 +924,16 @@ def cmd_status(args: argparse.Namespace) -> int:
             }
             if worker_healthy is not None:
                 data["worker_healthy"] = worker_healthy
+            # Unconditionally present — null when the session is not pending
+            data["worker_state"] = worker_state
+            data["worker_heartbeat_age_s"] = worker_age_s
             print(json.dumps(data, indent=2, default=str))
             return 0
 
         print(f"Session: {session.session_id}")
         print(f"  Status:        {session.status}")
-        if worker_healthy is False:
-            print("  WARNING: No active worker — session may wait indefinitely.", file=sys.stderr)
+        if worker_state == "down":
+            print(f"  {_worker_down_message(worker_age_s)}", file=sys.stderr)
         stype = getattr(session, "session_type", "—")
         print(f"  Type:          {stype}")
         print(f"  Auto-continue: {session.auto_continue_count}")
@@ -1184,6 +1384,290 @@ def cmd_release(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_telemetry(args) -> int:
+    """Show recorded telemetry events for a session."""
+    import json as _json
+
+    from agent.session_telemetry import read_session_timeline
+
+    session_id = args.id
+    events = read_session_timeline(session_id)
+
+    if not events:
+        print(f"No telemetry recorded for {session_id}")
+        return 0
+
+    if args.tail:
+        events = events[-args.tail :]
+
+    if args.json:
+        for ev in events:
+            print(_json.dumps(ev))
+        return 0
+
+    # Human-readable timeline
+    for ev in events:
+        ts = ev.get("ts", "")
+        etype = ev.get("type", "unknown")
+
+        if etype == "token_usage":
+            usage = ev.get("usage", {})
+            total_cost = ev.get("total_cost_usd", 0.0) or 0.0
+            summary = (
+                f"in={usage.get('input_tokens', 0)} "
+                f"out={usage.get('output_tokens', 0)} "
+                f"cost=${total_cost:.4f}"
+            )
+        elif etype == "status_transition":
+            from_s = ev.get("from", "?")
+            to_s = ev.get("to", "?")
+            reason = ev.get("reason", "") or ""
+            summary = f"{from_s} -> {to_s} ({reason[:50]})"
+        elif etype == "idle_gap":
+            gap = ev.get("gap_seconds", 0)
+            summary = f"{gap}s idle"
+        elif etype == "telemetry_truncated":
+            summary = "*** TRUNCATED ***"
+        elif etype == "tool_use":
+            name = ev.get("name", "?")
+            duration = ev.get("duration_seconds")
+            summary = f"{name}" + (f" ({duration:.2f}s)" if duration is not None else "")
+        else:
+            summary = ""
+
+        print(f"{ts}  {etype:<22}  {summary}")
+
+    return 0
+
+
+def _default_project_key() -> str:
+    """Return the default project key from identity.json or PROJECT_KEY env var."""
+    import os
+
+    env_key = os.environ.get("PROJECT_KEY", "")
+    if env_key:
+        return env_key
+    try:
+        identity_path = _repo_root / "config" / "identity.json"
+        with open(identity_path) as f:
+            data = json.load(f)
+        return data.get("project_key", "valor")
+    except Exception:
+        return "valor"
+
+
+def _crash_sig_strategy_stats(sig: object) -> tuple[str | None, int, int]:
+    """Extract (strategy, attempts, recovered) from a CrashSignature record.
+
+    Reads the real nested ``outcome_tallies_json`` via the model's
+    ``_load_tallies()`` helper. The tally shape is
+    ``{strategy_name: {"attempts": N, "recovered": N, "failed": N}}`` — NOT a
+    flat dict. Picks the first recorded strategy (the v1 library records a
+    single concrete strategy, ``"auto_resume"``).
+
+    Returns ``(None, 0, 0)`` when no outcomes have been recorded.
+    """
+    loader = getattr(sig, "_load_tallies", None)
+    tallies = loader() if callable(loader) else {}
+    if not isinstance(tallies, dict) or not tallies:
+        return None, 0, 0
+    # Pick the first strategy with a dict bucket (per-strategy nested shape).
+    for name, bucket in tallies.items():
+        if isinstance(bucket, dict):
+            attempts = int(bucket.get("attempts") or 0)
+            recovered = int(bucket.get("recovered") or 0)
+            return name, attempts, recovered
+    return None, 0, 0
+
+
+def cmd_crash_signatures(args: argparse.Namespace) -> int:
+    """Show crash signatures in the library for a project.
+
+    Reads all CrashSignature records for the given project and renders them
+    in a human-readable or JSON format, showing each signature's human-readable
+    form, resumability, occurrence count, and outcome statistics.
+    """
+    _load_env()
+    try:
+        from models.crash_signature import CrashSignature
+    except ImportError:
+        print("Error: crash_signature library not available.", file=sys.stderr)
+        return 1
+
+    try:
+        project = getattr(args, "project", None) or _default_project_key()
+        min_occ = getattr(args, "min_occurrences", 1) or 1
+        min_ratio = getattr(args, "min_success_ratio", 0.7) or 0.7
+
+        signatures = CrashSignature.all_for_project(project)
+        if min_occ > 1:
+            signatures = [s for s in signatures if s.occurrence_count_int >= min_occ]
+
+        if args.json:
+            data = []
+            for s in signatures:
+                strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+                confidence = s.policy_confidence(strategy) if strategy else 0.0
+                auto_eligible = s.is_auto_eligible(
+                    strategy=strategy or "auto_resume",
+                    min_occurrences=min_occ,
+                    min_success_ratio=min_ratio,
+                )
+                data.append(
+                    {
+                        "signature_hash": s.signature_hash,
+                        "human_form": s.human_form,
+                        "signature_class": getattr(s, "signature_class", None),
+                        "resumable": s.is_resumable,
+                        "escalated": s.is_escalated,
+                        "occurrence_count": s.occurrence_count_int,
+                        "project_key": project,
+                        "strategy": strategy,
+                        "attempts": attempts,
+                        "recovered": recovered,
+                        "policy_confidence": round(confidence, 4),
+                        "auto_eligible": auto_eligible,
+                    }
+                )
+            print(json.dumps(data, indent=2))
+            return 0
+
+        if not signatures:
+            print("No crash signatures recorded yet.")
+            return 0
+
+        print(f"Crash Signatures (project: {project})")
+        for s in signatures:
+            hash_short = (s.signature_hash or "")[:8]
+            human = s.human_form or "(unknown)"
+            resumable = s.is_resumable
+            escalated = s.is_escalated
+            occ = s.occurrence_count_int
+            strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+            confidence = (s.policy_confidence(strategy) * 100) if strategy else 0.0
+            auto_eligible = s.is_auto_eligible(
+                strategy=strategy or "auto_resume",
+                min_occurrences=min_occ,
+                min_success_ratio=min_ratio,
+            )
+
+            print(f"  [{hash_short}] {human}")
+            resumable_str = "yes" if resumable else "NO"
+            auto_str = "yes" if auto_eligible else "no"
+            print(f"    occurrences: {occ}  resumable: {resumable_str}  auto-eligible: {auto_str}")
+            if resumable and attempts > 0:
+                strat_str = f"strategy={strategy}" if strategy else "strategy=?"
+                print(
+                    f"    outcomes: {strat_str}  attempts={attempts}  recovered={recovered}"
+                    f"  confidence={confidence:.1f}%"
+                )
+            elif escalated:
+                print("    escalated: yes")
+            print()
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_crash_policy(args: argparse.Namespace) -> int:
+    """Show derived auto-resume policy entries for a project.
+
+    Reads CrashSignature records and displays the policy: which signatures are
+    auto-eligible for resume, their strategies, and confidence levels. Useful
+    for understanding what the auto-resume system will do for each crash pattern.
+    """
+    _load_env()
+    try:
+        from models.crash_signature import CrashSignature
+    except ImportError:
+        print("Error: crash_signature library not available.", file=sys.stderr)
+        return 1
+
+    try:
+        project = getattr(args, "project", None) or _default_project_key()
+        min_occ = getattr(args, "min_occurrences", 3) or 3
+        min_ratio = getattr(args, "min_success_ratio", 0.7) or 0.7
+
+        signatures = CrashSignature.all_for_project(project)
+
+        if args.json:
+            data = []
+            for s in signatures:
+                strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+                confidence = s.policy_confidence(strategy) if strategy else 0.0
+                occ = s.occurrence_count_int
+                auto_eligible = s.is_auto_eligible(
+                    strategy=strategy or "auto_resume",
+                    min_occurrences=min_occ,
+                    min_success_ratio=min_ratio,
+                )
+                data.append(
+                    {
+                        "signature_hash": s.signature_hash,
+                        "human_form": s.human_form,
+                        "resumable": s.is_resumable,
+                        "occurrence_count": occ,
+                        "confidence": round(confidence, 4),
+                        "recovered": recovered,
+                        "attempts": attempts,
+                        "strategy": strategy,
+                        "auto_eligible": auto_eligible,
+                        "escalated": s.is_escalated,
+                    }
+                )
+            print(json.dumps(data, indent=2))
+            return 0
+
+        if not signatures:
+            print("No auto-resume policy entries — library is cold (no signatures yet).")
+            return 0
+
+        print(f"Auto-Resume Policy (project: {project})")
+        for s in signatures:
+            resumable = s.is_resumable
+            escalated = s.is_escalated
+            occ = s.occurrence_count_int
+            strategy, attempts, recovered = _crash_sig_strategy_stats(s)
+            confidence_pct = (s.policy_confidence(strategy) * 100) if strategy else 0.0
+            auto_eligible = s.is_auto_eligible(
+                strategy=strategy or "auto_resume",
+                min_occurrences=min_occ,
+                min_success_ratio=min_ratio,
+            )
+            hash_short = (s.signature_hash or "")[:8]
+
+            if not resumable:
+                esc_str = f" ({occ} escalated)" if escalated else ""
+                print(f"  No entries for NON_RESUMABLE signatures{esc_str}.")
+                continue
+
+            print(f"  Signature: {s.human_form or '(unknown)'}")
+            print(f"    Hash: {hash_short}")
+            if strategy:
+                print(f"    Strategy: {strategy}")
+            print(f"    Confidence: {confidence_pct:.1f}%  ({recovered}/{attempts} recovered)")
+            if auto_eligible:
+                elig_str = (
+                    f"YES (occurrences={occ} >= {min_occ},"
+                    f" confidence={confidence_pct:.1f}% >= {min_ratio * 100:.1f}%)"
+                )
+            elif occ < min_occ:
+                elig_str = f"NO (occurrences={occ} < {min_occ})"
+            else:
+                elig_str = f"NO (confidence={confidence_pct:.1f}% < {min_ratio * 100:.1f}%)"
+            print(f"    Auto-eligible: {elig_str}")
+            print()
+
+        return 0
+
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -1199,9 +1683,9 @@ def main() -> int:
     create_parser.add_argument(
         "--role",
         "-r",
-        default="pm",
-        choices=["pm", "dev", "teammate"],
-        help="Session role/type (default: pm)",
+        default="eng",
+        choices=["eng", "teammate"],
+        help="Session role/type (default: eng)",
     )
     create_parser.add_argument(
         "--message", "-m", required=True, help="Initial message for the session"
@@ -1331,10 +1815,79 @@ def main() -> int:
     )
     release_parser.add_argument("--json", action="store_true", help="Output JSON")
 
+    # telemetry subcommand
+    telemetry_parser = subparsers.add_parser(
+        "telemetry", help="Show recorded telemetry events for a session"
+    )
+    telemetry_parser.add_argument("--id", required=True, help="Session ID to show telemetry for")
+    telemetry_parser.add_argument(
+        "--json", action="store_true", help="Emit raw JSON events (one per line)"
+    )
+    telemetry_parser.add_argument(
+        "--tail", type=int, metavar="N", help="Show only the last N events"
+    )
+
+    # crash-signatures subcommand
+    crash_sig_parser = subparsers.add_parser(
+        "crash-signatures",
+        help="Show all crash signatures in the library for a project",
+    )
+    crash_sig_parser.add_argument(
+        "--project",
+        help="Project key (default: from identity.json or $PROJECT_KEY env var)",
+    )
+    crash_sig_parser.add_argument(
+        "--min-occurrences",
+        dest="min_occurrences",
+        type=int,
+        default=1,
+        help="Only show signatures with at least this many occurrences (default: 1)",
+    )
+    crash_sig_parser.add_argument("--json", action="store_true", help="Output JSON")
+
+    # crash-policy subcommand (with nested sub-action)
+    crash_policy_parser = subparsers.add_parser(
+        "crash-policy",
+        help="Show derived auto-resume policy for a project",
+    )
+    crash_policy_subparsers = crash_policy_parser.add_subparsers(
+        dest="crash_policy_action", help="Action"
+    )
+    policy_list_parser = crash_policy_subparsers.add_parser(
+        "list", help="List auto-resume policy entries"
+    )
+    policy_list_parser.add_argument(
+        "--project",
+        help="Project key (default: from identity.json or $PROJECT_KEY env var)",
+    )
+    policy_list_parser.add_argument(
+        "--min-occurrences",
+        dest="min_occurrences",
+        type=int,
+        default=3,
+        help="Occurrences threshold for auto-eligibility (default: 3)",
+    )
+    policy_list_parser.add_argument(
+        "--min-success-ratio",
+        dest="min_success_ratio",
+        type=float,
+        default=0.7,
+        help="Success ratio threshold for auto-eligibility (default: 0.7)",
+    )
+    policy_list_parser.add_argument("--json", action="store_true", help="Output JSON")
+
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
+        return 1
+
+    # crash-policy dispatches to sub-action
+    if args.command == "crash-policy":
+        action = getattr(args, "crash_policy_action", None)
+        if action == "list":
+            return cmd_crash_policy(args)
+        crash_policy_parser.print_help()
         return 1
 
     dispatch = {
@@ -1348,6 +1901,8 @@ def main() -> int:
         "release": cmd_release,
         "inspect": cmd_inspect,
         "children": cmd_children,
+        "telemetry": cmd_telemetry,
+        "crash-signatures": cmd_crash_signatures,
     }
 
     return dispatch[args.command](args)

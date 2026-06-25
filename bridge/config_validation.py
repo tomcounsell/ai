@@ -204,16 +204,178 @@ def validate_email_routing(config: dict) -> None:
         )
 
 
+def validate_telegram_bots(config: dict) -> None:
+    """Validate the registered-bot registry (``telegram.bots[]``, issue #1574).
+
+    The bot registry is the home of the deterministic loop-guard: a registered
+    bot peer is recorded to history but never spawns a session. Two invariants
+    must hold or the guard's safety is undermined:
+
+    1. **Single-machine ownership.** A given bot id must resolve to exactly one
+       machine, like every other bridge-contact identifier. Two machines both
+       recording (and awaiting on) the same bot is ambiguous.
+
+    2. **Mutual exclusion** with ``dms.whitelist[].id``. If a bot id ALSO appears
+       in the DM whitelist, ``find_project_for_dm`` would resolve a project for
+       it on the spawn path and its no-reply_to replies would spawn runaway
+       sessions — exactly the loop this feature prevents. (Telegram groups are
+       declared by name, not numeric id, so there is no id-level overlap to
+       check there; the spawn risk is the DM-whitelist path.)
+
+    Each entry must be a dict with an integer ``id`` and live under a project
+    that declares a ``machine``.
+
+    Raises:
+        ConfigValidationError: if any rule is violated.
+    """
+    projects = config.get("projects", {})
+    bot_to_machines: dict[int, set[str]] = {}
+    bot_to_projects: dict[int, list[str]] = {}
+    errors: list[str] = []
+
+    for proj_key, proj_cfg in projects.items():
+        if not isinstance(proj_cfg, dict):
+            continue
+        machine = proj_cfg.get("machine")
+        bots = (proj_cfg.get("telegram") or {}).get("bots") or []
+        if bots and not machine:
+            errors.append(f"project '{proj_key}' declares telegram.bots but has no 'machine' field")
+            continue
+        for entry in bots:
+            if not isinstance(entry, dict) or "id" not in entry:
+                errors.append(f"project '{proj_key}' telegram.bots entry missing 'id': {entry!r}")
+                continue
+            try:
+                bot_id = int(entry["id"])
+            except (TypeError, ValueError):
+                errors.append(
+                    f"project '{proj_key}' telegram.bots entry has non-integer id: "
+                    f"{entry.get('id')!r}"
+                )
+                continue
+            bot_to_machines.setdefault(bot_id, set()).add(machine)
+            bot_to_projects.setdefault(bot_id, []).append(proj_key)
+
+    for bot_id, machines in bot_to_machines.items():
+        if len(machines) > 1:
+            errors.append(
+                f"bot id={bot_id} maps to multiple machines {sorted(machines)} "
+                f"via projects: {bot_to_projects[bot_id]}"
+            )
+
+    # Mutual exclusion: a registered bot id must not also be a DM-whitelist id.
+    whitelist_ids: set[int] = set()
+    for entry in config.get("dms", {}).get("whitelist", []):
+        if isinstance(entry, dict) and "id" in entry:
+            try:
+                whitelist_ids.add(int(entry["id"]))
+            except (TypeError, ValueError):
+                continue
+    for bot_id in bot_to_machines:
+        if bot_id in whitelist_ids:
+            errors.append(
+                f"bot id={bot_id} also appears in dms.whitelist — a registered bot "
+                f"must never resolve a project on the spawn path (loop hazard #1574)"
+            )
+
+    if errors:
+        raise ConfigValidationError(
+            "projects.json telegram.bots failed validation:\n  - " + "\n  - ".join(errors)
+        )
+
+
+def _iter_registered_bot_ids(config: dict) -> list[tuple[int, str]]:
+    """Yield ``(bot_id, project_key)`` for every well-formed registered bot.
+
+    Skips structurally-invalid entries (missing/non-integer id) — those are the
+    job of :func:`validate_telegram_bots`. This helper only enumerates the ids
+    that the live-flag probe should resolve.
+    """
+    out: list[tuple[int, str]] = []
+    for proj_key, proj_cfg in config.get("projects", {}).items():
+        if not isinstance(proj_cfg, dict):
+            continue
+        for entry in (proj_cfg.get("telegram") or {}).get("bots") or []:
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            try:
+                out.append((int(entry["id"]), proj_key))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+async def validate_bot_live_flags(config: dict, resolver) -> None:
+    """Validate each registered bot id against the live Telegram ``User.bot`` flag.
+
+    Acceptance criterion 4 of issue #1574 ("the bot registry validates each entry
+    against the live ``User.bot`` flag and surfaces mismatches"). The deterministic
+    loop-guard suppresses *every* inbound message from a registered bot id. If a
+    swapped token or typo'd id points at a **human** account, that human's messages
+    would be silently dropped — so we probe the live flag and fail loud.
+
+    The probe is decoupled from a live Telethon client via an injectable
+    ``resolver``: a coroutine ``resolver(bot_id: int) -> object`` returning the
+    resolved Telegram entity (anything exposing a ``.bot`` attribute, as the bridge
+    already reads via ``getattr(sender, "bot", False)``). Production passes a
+    closure over ``client.get_entity``; tests pass a fake. This keeps the function
+    runnable on machines with no Telegram session — the resolver is the only live
+    dependency.
+
+    Each registered bot id must resolve to an entity whose ``.bot`` flag is truthy.
+    A non-bot (human) account, a missing/false ``.bot`` attribute, or a resolver
+    that raises is collected as a mismatch; all mismatches are reported together.
+
+    Args:
+        config: The full projects.json config dict.
+        resolver: ``async def resolver(bot_id: int) -> entity``. May raise to
+            signal an unresolvable id.
+
+    Raises:
+        ConfigValidationError: if any registered bot id is not a live bot.
+    """
+    errors: list[str] = []
+    seen: set[int] = set()
+    for bot_id, proj_key in _iter_registered_bot_ids(config):
+        if bot_id in seen:
+            continue
+        seen.add(bot_id)
+        try:
+            entity = await resolver(bot_id)
+        except Exception as e:  # noqa: BLE001 — any resolver failure is a mismatch
+            errors.append(
+                f"bot id={bot_id} (project '{proj_key}') failed to resolve against Telegram: {e!r}"
+            )
+            continue
+        if not bool(getattr(entity, "bot", False)):
+            errors.append(
+                f"bot id={bot_id} (project '{proj_key}') resolves to a NON-bot "
+                f"(User.bot is false) — a swapped token or typo'd id pointing at a "
+                f"human account would silently suppress that human's messages"
+            )
+
+    if errors:
+        raise ConfigValidationError(
+            "projects.json telegram.bots failed live User.bot validation:\n  - "
+            + "\n  - ".join(errors)
+        )
+
+
 def validate_projects_config(config: dict) -> None:
     """Run the full bridge-contact ownership validation suite.
 
     Aggregates errors from every shape (DM whitelist, Telegram groups,
-    email routing) into a single ConfigValidationError so the operator
-    sees every problem at once instead of fixing them one round-trip at
-    a time.
+    email routing, bot registry) into a single ConfigValidationError so the
+    operator sees every problem at once instead of fixing them one round-trip
+    at a time.
     """
     errors: list[str] = []
-    for fn in (validate_dm_whitelist, validate_telegram_groups, validate_email_routing):
+    for fn in (
+        validate_dm_whitelist,
+        validate_telegram_groups,
+        validate_email_routing,
+        validate_telegram_bots,
+    ):
         try:
             fn(config)
         except ConfigValidationError as e:

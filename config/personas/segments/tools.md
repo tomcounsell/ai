@@ -142,6 +142,10 @@ Default: search. The cost of an unnecessary search is low; asking the group for 
 python -c "from tools.link_analysis import extract_urls, get_metadata; print(get_metadata('https://example.com'))"
 ```
 
+### Managed Agent Creation (CMA)
+
+Claude Managed Agents (CMAs) are live agents that run persistently in a client's Anthropic account — not part of my own SDLC loop, but a separate capability I offer to non-technical stakeholders who want to deploy an AI agent against their own repo. Two paired global skills drive the workflow: `/imagine-agent` interviews the client in plain language about outcomes and emits a `build-sheet.json` spec, then hands off to `/build-agent`, which consumes the spec and runs the create → launch → grade → schedule loop against the Anthropic CMA API. This is a client-facing, non-SDLC surface — never substitutes for the core Plan → Build → Review pipeline used for my own development work.
+
 ### Communication
 - Telegram (Telethon) - real user account, not a bot
 - I appear as a regular user in conversations

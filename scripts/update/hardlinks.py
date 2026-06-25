@@ -27,6 +27,38 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("commands", "do-pr-review.md"),
     ("commands", "update.md"),
     ("commands", "sdlc.md"),
+    # Retired skills — consolidated into new-skill
+    ("skills", "add-feature"),
+    ("skills", "new-valor-skill"),
+    # Retired skills — moved to reflections
+    ("skills", "daily-integration-audit"),
+    # Retired skills — superseded by byob MCP + bowser subagent
+    ("skills", "bowser"),
+    # Moved from skills-global to project-only .claude/skills/
+    ("skills", "linkedin"),
+    ("skills", "linkedin-messaging"),
+    ("skills", "officecli"),
+    ("skills", "x-com"),
+    # Moved from global commands to project-only .claude/commands/
+    ("commands", "kill.md"),
+    # Moved from skills-global to project-only .claude/skills/
+    ("skills", "update"),
+    # Old command files superseded by same-named skills (removed to prevent duplicates)
+    ("commands", "add-feature.md"),
+    ("commands", "audit-models.md"),
+    ("commands", "audit-next-tool.md"),
+    ("commands", "do-merge.md"),
+    ("commands", "prepare_app.md"),
+    ("commands", "prime.md"),
+    ("commands", "pthread.md"),
+    ("commands", "queue-status.md"),
+    ("commands", "setup.md"),
+    # Project-only skills removed from user-level (only work in this repo's context)
+    ("skills", "checking-system-logs"),
+    ("skills", "reading-sms-messages"),
+    ("skills", "telegram"),
+    # Renamed: tts -> do-voice-recording (canonical TTS step the other skills defer to)
+    ("skills", "tts"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
@@ -37,7 +69,6 @@ PROJECT_ONLY_SKILLS: set[str] = {
     "telegram",
     "reading-sms-messages",
     "checking-system-logs",
-    "google-workspace",
 }
 
 # Standalone executable scripts hardlinked into ~/.local/bin so they're available
@@ -214,15 +245,26 @@ def _sync_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> No
 
 
 def _sync_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> None:
-    """Sync command .md files."""
+    """Sync command .md files, including namespaced subdirectories.
+
+    Commands live either at the top level (``foo.md`` -> ``/foo``) or in a
+    namespace subdirectory (``granite/prime-pm-role.md`` ->
+    ``/granite:prime-pm-role``). The granite PTY container runs claude in
+    OTHER repos' worktrees, so its namespaced prime commands MUST sync to
+    ``~/.claude/commands/granite/`` to be resolvable there — a top-level-only
+    glob left every granite session hanging on "Unknown command:
+    /granite:prime-pm-role" (PR #1694 moved persona delivery from
+    --append-system-prompt to these prime slash commands). Recurse with
+    rglob and preserve the relative subdir so the namespace is kept intact.
+    """
     if not src_dir.is_dir():
         return
 
     dst_dir.mkdir(parents=True, exist_ok=True)
 
-    for cmd_file in sorted(src_dir.glob("*.md")):
-        dst_file = dst_dir / cmd_file.name
-        _ensure_hardlink(cmd_file, dst_file, dst_dir, result)
+    for cmd_file in sorted(src_dir.rglob("*.md")):
+        dst_file = dst_dir / cmd_file.relative_to(src_dir)
+        _ensure_hardlink(cmd_file, dst_file, dst_file.parent, result)
 
 
 def _ensure_hardlink(src: Path, dst: Path, dst_parent: Path, result: HardlinkSyncResult) -> None:
@@ -302,17 +344,18 @@ def _cleanup_stale_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncRe
     if not dst_dir.is_dir():
         return
 
-    # Collect inodes of all current source commands
+    # Collect inodes of all current source commands (recursing into
+    # namespace subdirs so granite/*.md are recognized as live sources).
     src_inodes: set[int] = set()
     if src_dir.is_dir():
-        for src_file in sorted(src_dir.glob("*.md")):
+        for src_file in sorted(src_dir.rglob("*.md")):
             try:
                 src_inodes.add(os.stat(src_file).st_ino)
             except OSError:
                 continue
 
-    for dst_file in sorted(dst_dir.glob("*.md")):
-        src_file = src_dir / dst_file.name
+    for dst_file in sorted(dst_dir.rglob("*.md")):
+        src_file = src_dir / dst_file.relative_to(dst_dir)
         if src_file.exists():
             continue  # Still has a source — not stale
 

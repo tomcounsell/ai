@@ -204,7 +204,7 @@ PLAN_PATH="docs/plans/${SLUG}.md"
 TICK_SUFFIX=""
 
 if [ -n "$CRITERION_ADDRESSED" ] && [ "$CRITERION_ADDRESSED" != "null" ]; then
-  if python -m tools.plan_checkbox_writer tick "$PLAN_PATH" --criterion "$CRITERION_ADDRESSED"; then
+  if "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer tick "$PLAN_PATH" --criterion "$CRITERION_ADDRESSED"; then
     TICK_SUFFIX=" — addresses \"$CRITERION_ADDRESSED\""
   else
     # Helper failure (MATCH_AMBIGUOUS / MATCH_NOT_FOUND / others) is NON-FATAL.

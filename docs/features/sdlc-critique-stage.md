@@ -20,9 +20,11 @@ When a plan completes, the Observer routes to CRITIQUE instead of BUILD. The `/d
 
 2. **Structural checks** (Step 2): Automated validation of required sections, task integrity, dependency chains, file path existence, and cross-reference consistency.
 
-3. **War room critics** (Step 3): Seven parallel critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor) analyze the plan from different perspectives, each returning 0-3 severity-rated findings. The Consistency Auditor (added in #1042) specifically checks for contradictions between sections — spike findings vs. task steps, No-Gos vs. Solution, success criteria vs. Technical Approach.
+3. **War room critics** (Step 3): Seven parallel critics (Skeptic, Operator, Archaeologist, Adversary, Simplifier, User, Consistency Auditor) analyze the plan from different perspectives, each returning 0-3 severity-rated findings. The Consistency Auditor (added in #1042) specifically checks for contradictions between sections — spike findings vs. task steps, No-Gos vs. Solution, success criteria vs. Technical Approach. Each critic writes findings to a per-critic result file (`{critic_name}.result.md`) ending with a two-line terminal completion fence (`<<<CRITIQUE-RESULT-COMPLETE>>>` / `STATUS: COMPLETED`).
 
-4. **Aggregation** (Steps 4-5): Findings are deduplicated, sorted by severity, and a verdict is issued.
+3.5. **Roster membership gate** (Step 3.5, added in #1690): Before aggregation, the `critique-roster-check` CLI tool verifies that every critic named in the frozen `_roster.json` manifest has delivered a complete result file. If any critics are missing, only the missing critics are re-dispatched (foreground, up to `MAX_CRITIC_REDISPATCH` cap). If the roster is still incomplete after the cap, the skill records a `MAJOR REWORK (CRITIQUE INCOMPLETE)` verdict rather than aggregating partial results.
+
+4. **Aggregation** (Steps 4-5): After the roster gate confirms all critics are present, findings are deduplicated, sorted by severity, and a verdict is issued.
 
 ## Finding Format
 
@@ -50,6 +52,7 @@ The **Implementation Note** field is enforced structurally: any CONCERN or BLOCK
 | READY TO BUILD (with concerns) | CONCERN findings exist (no BLOCKERs) | Trigger revision pass via `/do-plan` before BUILD |
 | NEEDS REVISION | BLOCKER findings exist | Route back to PLAN with blocker findings |
 | MAJOR REWORK | Fundamental issues found | Escalate to human (ambiguous outcome) |
+| MAJOR REWORK (CRITIQUE INCOMPLETE) | Roster still incomplete after re-dispatch cap | Escalate to human; run dir preserved as forensic evidence |
 
 ## Concern-Triggered Revision Pass
 
@@ -87,24 +90,26 @@ The `do-plan` skill adds a **Phase 2.6 Propagation Check** after all tasks are w
 | `agent/pipeline_state.py` | CRITIQUE in ALL_STAGES, classify_outcome patterns, critique_cycle_count |
 | `models/agent_session.py` | CRITIQUE in SDLC_STAGES |
 | `agent/build_pipeline.py` | "critique" in STAGES list |
-| `.claude/skills/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check |
-| `.claude/skills/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template; seven critic personas including Consistency Auditor (#1042) and serialization-boundary item in Skeptic |
+| `.claude/skills-global/do-plan-critique/SKILL.md` | Finding format, Implementation Note field, Outcome Contract, structural check, artifact-based roster barrier (#1690) |
+| `.claude/skills-global/do-plan-critique/CRITICS.md` | SOURCE_FILES block in critic prompt template; seven critic personas including Consistency Auditor (#1042) and serialization-boundary item in Skeptic |
+| `tools/critique_roster_check.py` | `critique-roster-check` CLI helper — reads `_roster.json`, verifies terminal fences, exits 0 with JSON gate decision when full roster is complete (#1690) |
 | `.claude/skills/sdlc/SKILL.md` | Row 4a/4b/4c dispatch split, concern-triggered revision path |
 | `.claude/skills/do-plan/SKILL.md` | Phase 2.6 Propagation Check |
 | `.claude/skills/do-plan/PLAN_TEMPLATE.md` | Critique Results table with Implementation Note column |
-| `config/personas/project-manager.md` | Hard gate rule: CRITIQUE mandatory after PLAN (in-repo fallback) |
+| `config/personas/engineer.md` | Hard gate rule: CRITIQUE mandatory after PLAN — Rule 1 (in-repo fallback) |
 | `agent/sdk_client.py` line 1611 | Stage list injection includes CRITIQUE: `<PLAN\|CRITIQUE\|BUILD\|...>` |
 
 ## Gate Enforcement
 
 The CRITIQUE gate is enforced at two levels so it cannot be silently bypassed:
 
-1. **PM persona** (`config/personas/project-manager.md`): Hard rule text in the PM system prompt
-   states explicitly that there is no path from PLAN to BUILD without CRITIQUE. Loaded as the
-   in-repo fallback when `~/Desktop/Valor/personas/project-manager.md` is absent (dev machines).
-   The private overlay should include these same rules.
+1. **Engineer persona** (`config/personas/engineer.md`): Rule 1 ("CRITIQUE is Mandatory
+   After PLAN") in the engineer system prompt states explicitly that there is no path from
+   PLAN to BUILD without CRITIQUE. Loaded as the in-repo fallback when
+   `~/Desktop/Valor/personas/engineer.md` is absent (dev machines). The private vault overlay
+   should include these same rules.
 
-2. **Python stage list** (`agent/sdk_client.py` line 1611): The PM dispatch injection string
+2. **Python stage list** (`agent/sdk_client.py` line 1611): The stage dispatch injection string
    lists valid stages as `<PLAN|CRITIQUE|BUILD|TEST|PATCH|REVIEW|DOCS>`. CRITIQUE is structurally
    present in the canonical sequence at the Python level — no persona text can omit it.
 
@@ -113,7 +118,7 @@ The CRITIQUE gate is enforced at two levels so it cannot be silently bypassed:
 The `classify_outcome("CRITIQUE", ...)` method in `PipelineStateMachine` recognizes:
 - "ready to build" in output tail -> `"success"` (routes to Row 4a, 4b, or 4c based on concern count and revision_applied flag)
 - "needs revision" in output tail -> `"fail"`
-- "major rework" in output tail -> `"ambiguous"` (escalate)
+- "major rework" in output tail -> `"ambiguous"` (escalate; includes both `MAJOR REWORK` for fundamental issues and `MAJOR REWORK (CRITIQUE INCOMPLETE)` when the roster barrier cap is exhausted)
 
 ## Related Issues
 
@@ -122,3 +127,4 @@ The `classify_outcome("CRITIQUE", ...)` method in `PipelineStateMachine` recogni
 - Issue #472: Add CRITIQUE stage to SDLC pipeline between PLAN and BUILD
 - Issue #802: Enforce CRITIQUE and REVIEW gates in PM persona
 - Issue #779: SDLC Skill Gaps — Propagation Check, Shallow Critique Findings, No Revision Pass
+- Issue #1690: Artifact-based roster barrier — replace prose-await with filesystem-verifiable `critique-roster-check` gate

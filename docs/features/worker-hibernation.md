@@ -72,7 +72,12 @@ Issues #773 and #839 originally added separate modules, but were merged into `ag
 
 ## Reflections
 
-Both reflections are registered in `config/reflections.yaml` and implemented in `agent/sustainability.py`:
+Both reflections are registered in `config/reflections.yaml`. The callable paths below are the historical registry entries, which still resolve via the `agent/sustainability.py` compatibility shim. The canonical source now lives one-file-per-reflection under `reflections/agents/`:
+
+| Registry callable | Canonical source |
+|-------------------|-----------------|
+| `agent.sustainability.circuit_health_gate` | `reflections/agents/circuit_health_gate.py::run` |
+| `agent.sustainability.session_recovery_drip` | `reflections/agents/session_recovery_drip.py::run` |
 
 ```yaml
 - name: circuit-health-gate
@@ -92,7 +97,9 @@ On hibernation entry and on wake, a lightweight `teammate` session is enqueued t
 
 ## Implementation
 
-- `agent/sustainability.py` — `circuit_health_gate()`, `session_recovery_drip()`, `send_hibernation_notification()`
+- `reflections/agents/circuit_health_gate.py` — `run()` (canonical source; `agent/sustainability.py` re-exports for registry compat)
+- `reflections/agents/session_recovery_drip.py` — `run()` (canonical source; `agent/sustainability.py` re-exports for registry compat)
+- `agent/sustainability.py` — compatibility shim re-exporting the 5 agent reflections; `send_hibernation_notification()` still lives here (used by `agent/agent_session_queue.py`)
 - `agent/agent_session_queue.py` — `_pop_agent_session()` hibernation guard, `_worker_loop()` catch block update
 - `models/session_lifecycle.py` — `"paused"` added to `NON_TERMINAL_STATUSES`
 - `config/reflections.yaml` — `circuit-health-gate` and `session-recovery-drip` reflection entries
@@ -103,8 +110,8 @@ On hibernation entry and on wake, a lightweight `teammate` session is enqueued t
 # Check paused status is registered
 python -c "from models.session_lifecycle import NON_TERMINAL_STATUSES; assert 'paused' in NON_TERMINAL_STATUSES"
 
-# Check module imports cleanly
-python -c "from agent.sustainability import circuit_health_gate, session_recovery_drip, send_hibernation_notification"
+# Check module imports cleanly (both canonical and compat shim paths work)
+python -c "from reflections.agents.circuit_health_gate import run as circuit_health_gate; from reflections.agents.session_recovery_drip import run as session_recovery_drip; from agent.sustainability import send_hibernation_notification"
 
 # Check reflections are registered
 python -c "from agent.reflection_scheduler import load_registry; r=load_registry(); names=[e.name for e in r]; assert 'circuit-health-gate' in names; assert 'session-recovery-drip' in names"

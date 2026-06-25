@@ -39,7 +39,7 @@ Fetches Anthropic's official skill documentation and compares against our templa
 
 ### Reflections Integration
 
-Registered as the `skills-audit` reflection (`reflections.auditing.run_skills_audit`). The wrapper iterates `load_local_projects()` and invokes each project's local copy of `.claude/skills/do-skills-audit/scripts/audit_skills.py` via `--no-sync --json` mode. Projects without that script are skipped silently. Each project's FAIL findings are prefixed with `[{slug}]` and aggregated into a single run record with a per-project breakdown — see [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration).
+Registered as the `skills-audit` reflection (`reflections.audits.skills_audit.run`). The wrapper iterates `load_local_projects()` and invokes each project's local copy of `.claude/skills/do-skills-audit/scripts/audit_skills.py` via `--no-sync --json` mode. Projects without that script are skipped silently. Each project's FAIL findings are prefixed with `[{slug}]` and aggregated into a single run record with a per-project breakdown — see [reflections.md → Per-Project Audit Iteration](reflections.md#per-project-audit-iteration).
 
 ## Usage
 
@@ -75,3 +75,42 @@ python .claude/skills/do-skills-audit/scripts/audit_skills.py --json
 - `.claude/skills/do-skills-audit/scripts/sync_best_practices.py` - Best practices sync
 - `tests/unit/test_skills_audit.py` - 53 unit tests
 - `data/best_practices_cache.json` - Cached Anthropic docs (auto-generated)
+
+## Reflection Issue Filing
+
+The `skills-audit` reflection (`reflections.audits.skills_audit.run`, registered in `config/reflections.yaml`) runs the audit nightly across every local project. As of issue #1395 Phase 2, it also **files a GitHub issue** for each FAIL finding that persists across two consecutive runs, so structural problems can no longer accumulate silently in reflection telemetry.
+
+### Streak gate
+
+A FAIL finding does **not** file an issue on first sight. Instead the helper `_file_skills_audit_issue_if_streaked` increments a Redis streak counter keyed by `SHA-256(project_slug/skill_name/rule_id)[:16]` (message text is intentionally excluded from the hash so rewording does not break dedup). Only after the counter reaches `2` is an issue filed. This filters out single-run transient regressions in `audit_skills.py` itself.
+
+| Run | Streak | Action |
+|---|---|---|
+| 1 | 1 | counter incremented, no issue |
+| 2 | 2 | **issue filed**, dedup key set (30d TTL) |
+| 3 - 30 | (any) | dedup key blocks re-fire |
+| Issue closed manually | — | streak counter resets naturally when the rule passes; dedup key still expires after 30 days |
+
+### Labels and identity
+
+Issues are filed against the **project's own repository** (resolved via `gh repo view --json nameWithOwner`, cached once per project per run), not the AI repo. Labels: `skills` and `bug`. Title format: `skills-audit FAIL: <skill-name> (rule <N>)`.
+
+### Failure tolerance
+
+- **`gh issue create` fails** → the dedup key is NOT set, so the next run retries. No state poisoning.
+- **Redis unavailable** → the helper returns `False` and skips filing; the audit's structural telemetry continues uninterrupted.
+- **Filing lock contention** (`SET NX EX 60`) → a second concurrent reflection tick observing the same finding backs off without re-incrementing the streak.
+- **100 distinct FAIL findings in a single run** (e.g. a regression in `audit_skills.py`) → all streak=1, zero issues filed.
+
+### Manual operator escape hatch
+
+To silence a noisy finding without fixing the underlying rule:
+- Close the auto-filed issue. The dedup key keeps it from re-filing for 30 days.
+- If the rule itself is wrong, fix `audit_skills.py` — the FAIL stops appearing, the streak resets, no further issues file.
+- To force a clean slate before the 30-day window expires, delete the matching `skills_audit:issues_filed:<hash>` key in Redis manually.
+
+### What this is NOT
+
+- **Not a `--file-issues` flag** on `audit_skills.py` itself. The streak gate is a reflection-cadence concept that does not make sense for one-off CLI invocations. The script remains side-effect-free.
+- **Not WARN-finding filing.** Only FAIL findings file issues. WARNs are surfaced in reflection telemetry only.
+- **Not auto-closing.** Issues stay open until a human closes them. The reflection has no opinion about when a finding has been "fixed".

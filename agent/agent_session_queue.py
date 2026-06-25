@@ -46,10 +46,8 @@ from agent.output_router import (
 from agent.session_completion import (  # noqa: F401
     _CONTINUATION_PM_MAX_DEPTH,
     _complete_agent_session,
-    _create_continuation_pm,
     _diagnose_missing_session,
     _extract_issue_number,
-    _handle_dev_session_completion,
     _transition_parent,
 )
 
@@ -136,6 +134,12 @@ from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for enqueue_agent_session(session_type=...) so we can distinguish a
+# caller that explicitly passed SessionType.ENG (intentional eng) from one that
+# omitted the kwarg entirely (likely dropped persona resolution). The effective
+# default remains SessionType.ENG.
+_SESSION_TYPE_UNSET = object()
+
 # 4-tier priority ranking: lower number = higher priority
 PRIORITY_RANK = {"urgent": 0, "high": 1, "normal": 2, "low": 3}
 
@@ -220,7 +224,7 @@ async def _push_agent_session(
     scheduled_at: datetime | float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = SessionType.ENG,
     scheduling_depth: int = 0,  # ignored, now derived
     depends_on: list[str] | None = None,  # ignored, removed
     project_config: dict | None = None,
@@ -249,6 +253,21 @@ async def _push_agent_session(
             (issue #1256, Decision 2). Default False keeps the existing
             non-serialized scheduling behavior for ordinary sessions.
     """
+    # Stopgap (#1633): refuse NEW parent-attached session creation at the
+    # queue chokepoint. Covers every enqueue caller and fires before any
+    # Redis write (including the mark-superseded pass below). Existing
+    # child sessions (resume/steer/kill/waiting_for_children) are untouched.
+    if parent_agent_session_id:
+        from models.child_session_gate import (
+            BYPASS_WARNING,
+            ChildSessionsDisabledError,
+            child_sessions_allowed,
+        )
+
+        if not child_sessions_allowed():
+            raise ChildSessionsDisabledError()
+        logger.warning(BYPASS_WARNING)
+
     # Convert float timestamps to datetime (backward compat)
     if isinstance(scheduled_at, int | float):
         scheduled_at = datetime.fromtimestamp(scheduled_at, tz=UTC)
@@ -367,7 +386,7 @@ async def _push_agent_session(
         # Compute worker_key inline from the same inputs as AgentSession.worker_key
         if session_type == SessionType.TEAMMATE:
             _wk = chat_id or project_key
-        elif session_type == SessionType.PM:
+        elif session_type == SessionType.ENG:
             _wk = project_key
         elif slug:
             _wk = slug
@@ -1067,7 +1086,7 @@ async def enqueue_agent_session(
     scheduled_at: float | None = None,
     parent_agent_session_id: str | None = None,
     telegram_message_key: str | None = None,
-    session_type: str = SessionType.PM,
+    session_type: str = _SESSION_TYPE_UNSET,  # type: ignore[assignment]
     scheduling_depth: int = 0,  # ignored, now derived
     project_config: dict | None = None,
     extra_context_overrides: dict | None = None,
@@ -1094,6 +1113,19 @@ async def enqueue_agent_session(
     Returns queue depth after push.
     """
     from tools.field_utils import log_large_field
+
+    # Greppable warning when a caller omits BOTH session_type and project_config:
+    # this is the signature of a scanner that dropped persona resolution and would
+    # silently default a teammate-configured chat to an eng PM<->Dev loop. The
+    # effective default stays SessionType.ENG; intentional eng callers that pass
+    # session_type=SessionType.ENG explicitly do not trip this.
+    if session_type is _SESSION_TYPE_UNSET and project_config is None:
+        logger.warning(
+            "[enqueue] session_type omitted AND project_config omitted; "
+            "defaulting to eng — caller may have dropped persona resolution"
+        )
+    if session_type is _SESSION_TYPE_UNSET:
+        session_type = SessionType.ENG
 
     log_large_field("message_text", message_text)
     if revival_context:
@@ -1128,7 +1160,7 @@ async def enqueue_agent_session(
     # Compute worker_key from the same inputs the property uses, without re-querying Redis
     if session_type == SessionType.TEAMMATE:
         wk = chat_id or project_key
-    elif session_type == SessionType.PM:
+    elif session_type == SessionType.ENG:
         wk = project_key
     elif slug:
         wk = slug

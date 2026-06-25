@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from config.models import OLLAMA_CLASSIFIER_MODEL
 from scripts.update.service import is_bridge_running
 
 # Ensure PATH includes common tool locations (launchd has minimal PATH)
@@ -181,6 +182,55 @@ def check_python_alias() -> ToolCheck:
         return ToolCheck(name="python", available=False, error=f"python --version failed: {e}")
 
 
+def check_valor_alias_shadow(zshrc_path: Path | None = None) -> ToolCheck:
+    """Warn when a stale `alias valor=...` in ~/.zshrc shadows .venv/bin/valor.
+
+    An old `alias valor="cd ... && ./scripts/telegram_run.sh"` predates the
+    venv `valor` entry point; the script it pointed at is gone, so typing
+    `valor` in an interactive shell errors instead of running the binary.
+
+    Warn-only by design (issue #1619): machines are heterogeneous and we
+    never auto-edit user rc files, so this check must never block /update.
+    No subprocess, no interactive shell — reads the rc file directly so it
+    stays deterministic under launchd.
+    """
+    path = zshrc_path if zshrc_path is not None else Path.home() / ".zshrc"
+
+    try:
+        content = path.read_text()
+    except FileNotFoundError:
+        return ToolCheck(
+            name="valor-alias",
+            available=True,
+            version="skipped (~/.zshrc not found)",
+        )
+    except (PermissionError, OSError):
+        return ToolCheck(
+            name="valor-alias",
+            available=True,
+            version="skipped (~/.zshrc unreadable)",
+        )
+
+    # `\s*=` must immediately follow `valor` so valor-session= etc. never match.
+    alias_re = re.compile(r"^\s*alias\s+valor\s*=")
+    for lineno, line in enumerate(content.splitlines(), start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        if alias_re.search(line):
+            return ToolCheck(
+                name="valor-alias",
+                available=False,
+                error=(
+                    f"stale `valor` alias shadows .venv/bin/valor — "
+                    f"~/.zshrc line {lineno}: {line.strip()} | "
+                    f"Fix: delete line {lineno} from ~/.zshrc, "
+                    f"then run: source ~/.zshrc"
+                ),
+            )
+
+    return ToolCheck(name="valor-alias", available=True, version="no shadowing alias")
+
+
 def check_system_tools() -> list[ToolCheck]:
     """Check system-level tools."""
     tools = [
@@ -196,6 +246,17 @@ def check_system_tools() -> list[ToolCheck]:
 
     if shutil.which("sentry-cli"):
         results.append(check_command("sentry-cli", "--version"))
+    # gws (Google Workspace CLI) is optional — only surface when installed.
+    # It needs a separate OAuth flow that install alone cannot satisfy, so a
+    # pre-install warning would be noise on machines that never use Workspace.
+    if shutil.which("gws"):
+        results.append(check_command("gws", "--version"))
+    # pi (Pi coding agent) is optional — only required on machines that use
+    # [/dev:pi] builder routing in granite sessions. Warn if absent but do
+    # not hard-gate the bridge/worker — bare [/dev]/[/dev:claude] keeps
+    # working without pi. Install: npm install -g @mariozechner/pi-coding-agent
+    if shutil.which("pi"):
+        results.append(check_command("pi", "--version"))
     return results
 
 
@@ -307,10 +368,35 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
         )
     )
 
+    # valor — the agent-session wrapper CLI (PR #1612). Same venv-bin
+    # check as valor-email: the entry point only exists after `uv sync`
+    # re-installs the project, so a stale venv is the common failure.
+    venv_valor = project_dir / ".venv" / "bin" / "valor"
+    valor_found = False
+    valor_err = None
+    if venv_valor.exists():
+        try:
+            result = run_cmd([str(venv_valor), "--help"], timeout=10)
+            valor_found = result.returncode == 0
+            if not valor_found:
+                valor_err = result.stderr.strip() or None
+        except Exception as e:
+            valor_err = str(e)
+    else:
+        valor_err = "Not in .venv/bin (run `uv sync` or `pip install -e .`)"
+
+    results.append(
+        ToolCheck(
+            name="valor",
+            available=valor_found,
+            error=valor_err if not valor_found else None,
+        )
+    )
+
     return results
 
 
-def check_ollama(model: str = "gemma4:e2b") -> ToolCheck:
+def check_ollama(model: str = OLLAMA_CLASSIFIER_MODEL) -> ToolCheck:
     """Check if Ollama is available and has the required model."""
     if not shutil.which("ollama"):
         return ToolCheck(name="ollama", available=False, error="Not installed")
@@ -333,7 +419,7 @@ def check_ollama(model: str = "gemma4:e2b") -> ToolCheck:
         return ToolCheck(name="ollama", available=False, error=str(e))
 
 
-def pull_ollama_model(model: str = "gemma4:e2b") -> bool:
+def pull_ollama_model(model: str = OLLAMA_CLASSIFIER_MODEL) -> bool:
     """Pull an Ollama model. Returns True if successful."""
     if not shutil.which("ollama"):
         return False
@@ -969,9 +1055,12 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools.append(check_telegram_session(project_dir))
     result.valor_tools.append(check_google_token(project_dir))
     result.valor_tools.append(check_env_completeness(project_dir))
+    result.valor_tools.append(check_valor_alias_shadow())
 
     if check_ollama_model:
-        ollama_model = os.getenv("OLLAMA_SUMMARIZER_MODEL", "gemma4:e2b")
+        from config.settings import settings as _settings
+
+        ollama_model = _settings.models.ollama_generation_model
         result.ollama = check_ollama(ollama_model)
 
     result.sdk_auth = check_sdk_auth(project_dir)

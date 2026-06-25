@@ -88,8 +88,7 @@ Agent Types (by capability)
 │   ├── builder.md — General implementation
 │   ├── designer.md — UI/UX
 │   ├── data-architect.md — Schema/migration
-│   ├── agent-architect.md — Agent design
-│   └── dev-session.md — Full SDLC stage execution
+│   └── agent-architect.md — Agent design
 ├── Validators (read-only)
 │   ├── validator.md — Acceptance verification
 │   ├── code-reviewer.md — Code quality
@@ -417,7 +416,7 @@ Reflections no longer run via launchd; the scheduler is embedded in the worker (
 
 **Code example — reflections maintenance:**
 
-Reflections are declared in `config/reflections.yaml` (a vault-symlinked registry). Each entry maps to a callable in the `reflections/` package (e.g., `reflections.maintenance.run_redis_ttl_cleanup`). The `ReflectionScheduler` in `agent/reflection_scheduler.py` — run as an asyncio task inside the standalone worker — enqueues due reflections at their declared intervals. There is no direct CLI invocation.
+Reflections are declared in `config/reflections.yaml` (a vault-symlinked registry). Each entry maps to a callable in the `reflections/` package (e.g., `reflections.housekeeping.redis_ttl_cleanup.run`). The `ReflectionScheduler` in `agent/reflection_scheduler.py` — run as an asyncio task inside the standalone worker — enqueues due reflections at their declared intervals. There is no direct CLI invocation.
 
 **Remote triggers (via /schedule skill):**
 ```bash

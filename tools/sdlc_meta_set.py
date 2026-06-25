@@ -9,6 +9,12 @@ Whitelisted keys and their types:
                                   revision commit. Consumed by guard G7 in sdlc_router.
   plan_hash_at_build_start  str — git commit hash of the plan doc at build start.
                                   Recorded by do-build Step 7; verified at Step 21.
+  pr_number               int  — PR number for an out-of-band PR the issue body
+                                  never referenced. Consumed by _compute_meta as
+                                  the primary pr_number resolution source so the
+                                  router can route the PR to REVIEW/MERGE without
+                                  a manual `/sdlc PR <n>`. Must be a positive int;
+                                  non-positive/non-numeric values exit 2.
 
 Unknown keys are rejected with exit 2 — the whitelist is intentional and must be
 explicit so stale meta keys don't accumulate silently.
@@ -40,8 +46,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
+
+from tools._sdlc_utils import find_session
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +57,7 @@ logger = logging.getLogger(__name__)
 _KEY_REGISTRY: dict[str, tuple[str, type]] = {
     "plan_revising": ("_plan_revising", bool),
     "plan_hash_at_build_start": ("_plan_hash_at_build_start", str),
+    "pr_number": ("_pr_number", int),
 }
 
 _BOOL_TRUE_VALUES = frozenset(["true", "1", "yes", "on"])
@@ -69,6 +77,17 @@ def _coerce_bool(value: str) -> bool:
     )
 
 
+def _coerce_int(value: str) -> int:
+    """Coerce a string to a positive int. Raises ValueError on non-numeric / non-positive."""
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Cannot coerce {value!r} to int.")
+    if coerced <= 0:
+        raise ValueError(f"Value {coerced!r} must be a positive integer.")
+    return coerced
+
+
 def _coerce_value(key: str, raw_value: str):
     """Coerce a raw string value to the expected type for the given key.
 
@@ -77,54 +96,12 @@ def _coerce_value(key: str, raw_value: str):
     _, target_type = _KEY_REGISTRY[key]
     if target_type is bool:
         return _coerce_bool(raw_value)
+    if target_type is int:
+        return _coerce_int(raw_value)
     if target_type is str:
         return str(raw_value)
     # Future types would go here
     return raw_value
-
-
-def _find_session(session_id: str | None, issue_number: int | None = None):
-    """Find a PM AgentSession by explicit ID, env vars, or issue number.
-
-    Resolution order:
-    1. --session-id argument (if provided)
-    2. VALOR_SESSION_ID env var
-    3. AGENT_SESSION_ID env var
-    4. --issue-number argument (primary path for local Claude Code sessions)
-
-    Returns the session object or None.
-    """
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if not resolved_id:
-        if issue_number is not None:
-            try:
-                from tools._sdlc_utils import find_session_by_issue
-
-                session = find_session_by_issue(issue_number)
-                if session:
-                    return session
-            except Exception as e:
-                logger.debug(f"sdlc_meta_set: issue-number lookup failed: {e}")
-        logger.debug("sdlc_meta_set: no session ID available (no arg, no env vars, no issue)")
-        return None
-
-    try:
-        from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=resolved_id))
-        if not sessions:
-            logger.debug(f"sdlc_meta_set: no session found for ID {resolved_id!r}")
-            return None
-        # Prefer PM sessions (they own stage_states)
-        for s in sessions:
-            if getattr(s, "session_type", None) == "pm":
-                return s
-        return sessions[0]
-    except Exception as e:
-        logger.debug(f"sdlc_meta_set: _find_session failed: {e}")
-        return None
 
 
 def write_meta(
@@ -154,7 +131,7 @@ def write_meta(
         logger.debug(f"sdlc_meta_set: value coercion failed for key {key!r}: {e}")
         return {}
 
-    session = _find_session(session_id, issue_number=issue_number)
+    session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
         return {}
 
@@ -226,6 +203,16 @@ def main() -> None:
             f"Whitelisted keys: {sorted(_KEY_REGISTRY.keys())}",
             file=sys.stderr,
         )
+        print("{}")
+        sys.exit(2)
+
+    # Invalid value for a known key → exit 2 (invalid argument). This catches
+    # e.g. a non-positive / non-numeric pr_number before any session lookup so
+    # garbage is never written.
+    try:
+        _coerce_value(args.key, args.value)
+    except ValueError as e:
+        print(f"sdlc_meta_set: invalid value for key {args.key!r}: {e}", file=sys.stderr)
         print("{}")
         sys.exit(2)
 

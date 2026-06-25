@@ -16,6 +16,10 @@ INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# Scope is enforced by the calendar_config.json allowlist below: every local
+# Claude Code session in a calendar-mapped project is tracked, regardless of
+# whether it's a planned Dev session or an ad-hoc interactive session.
+
 # Skip bare slash commands (no extra prompt = no real work)
 # e.g. "/update" skips, but "/do-build implement auth" tracks
 if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then

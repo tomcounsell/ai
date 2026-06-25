@@ -104,7 +104,7 @@ References where "Valor" is a **brand/product name** for the tooling itself — 
 | `scripts/auto-revert.sh` | `valor-service.sh` reference |
 | `scripts/calendar_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
 | `scripts/calendar_prompt_hook.sh` | `EXCLUDED_PROJECTS="valor"`, `valor-calendar` |
-| `scripts/update/verify.py` | `valor-calendar` path checks |
+| `scripts/update/verify.py` | `valor-calendar` path checks; `check_valor_alias_shadow` warns on a stale `alias valor=` in `~/.zshrc` shadowing `.venv/bin/valor` |
 | `scripts/update/run.py` | `com.valor.reflections.plist` (removed service) |
 | `scripts/update/__init__.py` | `"Modular update system for Valor"` |
 | `scripts/telegram_login.py` | `valor-service.sh` reference |

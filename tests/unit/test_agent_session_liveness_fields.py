@@ -28,7 +28,7 @@ def _make_session(suffix: str) -> AgentSession:
     return AgentSession(
         project_key=f"test-liveness-fields-{suffix}",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id=f"liveness-fields-{suffix}",

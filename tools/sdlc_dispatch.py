@@ -121,7 +121,14 @@ def get_dispatch_history(session) -> list:
 
 
 def _cli_record(args) -> dict:
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
+    # ensure=True (B1, #1671): the dispatch record path joins the other three
+    # write subcommands so a cold-start `dispatch record --issue-number N`
+    # creates/uses the issue-scoped sdlc-local-N session rather than env-
+    # resolving to an inherited session or silently no-opping. The dispatch
+    # trail then has the same issue-scoped home the router reads. `get`/`reset`
+    # stay non-ensuring — `get` is read-only and `reset` must not fabricate a
+    # session.
+    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
     if session is None:
         logger.debug("sdlc_dispatch record: no session resolved — no-op")
         return {}
@@ -140,6 +147,45 @@ def _cli_get(args) -> list:
     if session is None:
         return []
     return get_dispatch_history(session)
+
+
+def reset_dispatch_history(session) -> bool:
+    """Clear ``_sdlc_dispatches`` on a session via the safe write helper.
+
+    The explicit operator escape hatch for G4 (D5): when the oscillation
+    guard has latched on a genuinely stale recorded history that the
+    self-clearing live-snapshot reset cannot reach, this wipes the streak.
+
+    Returns ``True`` if the write succeeded, ``False`` otherwise.
+    """
+    if session is None:
+        return False
+
+    try:
+        from tools.stage_states_helpers import update_stage_states
+    except Exception as e:
+        logger.debug(f"sdlc_dispatch: reset import failed: {e}")
+        return False
+
+    def _apply(states: dict) -> dict:
+        states["_sdlc_dispatches"] = []
+        return states
+
+    try:
+        return update_stage_states(session, _apply)
+    except Exception as e:
+        logger.debug(f"sdlc_dispatch: reset update_stage_states failed: {e}")
+        return False
+
+
+def _cli_reset(args) -> dict:
+    session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
+    if session is None:
+        logger.debug("sdlc_dispatch reset: no session resolved — no-op")
+        return {"ok": False, "history_length": 0}
+    ok = reset_dispatch_history(session)
+    history = get_dispatch_history(session)
+    return {"ok": ok, "history_length": len(history)}
 
 
 def main() -> None:
@@ -167,6 +213,16 @@ def main() -> None:
     gt.add_argument("--session-id", dest="session_id", default=None)
     gt.add_argument("--issue-number", dest="issue_number", type=int, default=None)
     gt.set_defaults(func=_cli_get)
+
+    rs = subparsers.add_parser(
+        "reset",
+        help=(
+            "Clear the dispatch history (operator escape hatch for a latched G4 oscillation guard)."
+        ),
+    )
+    rs.add_argument("--session-id", dest="session_id", default=None)
+    rs.add_argument("--issue-number", dest="issue_number", type=int, default=None)
+    rs.set_defaults(func=_cli_reset)
 
     args = parser.parse_args()
 

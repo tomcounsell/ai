@@ -56,7 +56,7 @@ class TestMemoryDecayPrune:
 
     def test_dry_run_default(self):
         """Default mode is dry_run=True — no deletions, log findings."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         # Create a candidate memory: low importance, zero access, old
         old_time = time.time() - (40 * 86400)  # 40 days ago
@@ -81,7 +81,7 @@ class TestMemoryDecayPrune:
 
     def test_apply_mode_deletes_candidates(self):
         """MEMORY_DECAY_PRUNE_APPLY=true causes actual deletion."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         old_time = time.time() - (40 * 86400)
         mock_memory = MagicMock()
@@ -104,7 +104,12 @@ class TestMemoryDecayPrune:
 
     def test_cap_at_50_deletions(self):
         """Caps at MAX_PRUNE_PER_RUN (50) deletions even if more candidates exist."""
-        from reflections.memory_management import MAX_PRUNE_PER_RUN, run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import (
+            MAX_PRUNE_PER_RUN,
+        )
+        from reflections.memory.memory_decay_prune import (
+            run as run_memory_decay_prune,
+        )
 
         old_time = time.time() - (40 * 86400)
 
@@ -133,7 +138,7 @@ class TestMemoryDecayPrune:
 
     def test_empty_queryset(self):
         """Handles empty Memory queryset without error."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         with patch("models.memory.Memory") as mock_model:
             mock_model.query.all.return_value = []
@@ -143,7 +148,7 @@ class TestMemoryDecayPrune:
 
     def test_skips_high_importance_memories(self):
         """Memories with importance >= 7.0 are exempt from pruning."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         old_time = time.time() - (40 * 86400)
         important_memory = MagicMock()
@@ -165,7 +170,7 @@ class TestMemoryDecayPrune:
 
     def test_skips_memories_with_access(self):
         """Memories with access_count > 0 are exempt from pruning."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         old_time = time.time() - (40 * 86400)
         accessed_memory = MagicMock()
@@ -187,7 +192,7 @@ class TestMemoryDecayPrune:
 
     def test_handles_delete_failure_gracefully(self):
         """Continues pruning other memories if one delete() fails."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         old_time = time.time() - (40 * 86400)
 
@@ -218,7 +223,7 @@ class TestMemoryDecayPrune:
 
     def test_redis_unavailable_returns_error(self):
         """Returns error dict when Redis is unavailable."""
-        from reflections.memory_management import run_memory_decay_prune
+        from reflections.memory.memory_decay_prune import run as run_memory_decay_prune
 
         with patch("models.memory.Memory") as mock_model:
             mock_model.query.all.side_effect = Exception("redis unavailable")
@@ -273,7 +278,7 @@ class TestMemoryHealthAuditLayer0:
 
     def test_empty_queryset(self):
         """Handles empty Memory queryset without error."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         with patch("models.memory.Memory") as mock_model:
             mock_model.query.all.return_value = []
@@ -284,7 +289,7 @@ class TestMemoryHealthAuditLayer0:
 
     def test_zero_access_flag(self):
         """Flags memories with zero access after 30 days."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         old_time = time.time() - (40 * 86400)
         # Use non-extraction agent_id so Layer 1 doesn't touch it
@@ -308,7 +313,7 @@ class TestMemoryHealthAuditLayer0:
 
     def test_low_confidence_flag(self):
         """Flags memories with very low confidence."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         new_time = time.time() - (1 * 86400)  # 1 day old (won't be flagged for zero-access)
         low_conf_memory = _make_memory(
@@ -330,7 +335,7 @@ class TestMemoryHealthAuditLayer0:
 
     def test_skips_superseded_memories(self):
         """Skips memories that are already superseded for Layer 0 flagging."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         old_time = time.time() - (40 * 86400)
         superseded = _make_memory(
@@ -353,7 +358,7 @@ class TestMemoryHealthAuditLayer0:
 
     def test_redis_unavailable_returns_error(self):
         """Returns error dict when Redis is unavailable."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         with patch("models.memory.Memory") as mock_model:
             mock_model.query.all.side_effect = Exception("redis unavailable")
@@ -370,10 +375,12 @@ class TestMemoryHealthAuditLayer1:
 
     def test_supersedes_refusal_records_happy_path(self):
         """Refusal-content extraction-* records get superseded_by set."""
-        from reflections.memory_management import (
+        from reflections.memory.memory_quality_audit import (
             CLEANUP_RATIONALE,
             CLEANUP_SUPERSEDED_BY,
-            run_memory_quality_audit,
+        )
+        from reflections.memory.memory_quality_audit import (
+            run as run_memory_quality_audit,
         )
 
         junk = _make_memory(
@@ -385,7 +392,7 @@ class TestMemoryHealthAuditLayer1:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
@@ -400,7 +407,7 @@ class TestMemoryHealthAuditLayer1:
 
     def test_blast_radius_gate_non_extraction_untouched(self):
         """Records whose agent_id is not 'extraction-*' are never superseded by Layer 1."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # All have refusal content, but only the extraction-* one should be superseded.
         human = _make_memory(
@@ -427,7 +434,7 @@ class TestMemoryHealthAuditLayer1:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
@@ -442,9 +449,11 @@ class TestMemoryHealthAuditLayer1:
 
     def test_caps_at_50_per_run(self):
         """Even with 100+ junk records, no more than MAX_LAYER1_SUPERSEDES_PER_RUN are written."""
-        from reflections.memory_management import (
+        from reflections.memory.memory_quality_audit import (
             MAX_LAYER1_SUPERSEDES_PER_RUN,
-            run_memory_quality_audit,
+        )
+        from reflections.memory.memory_quality_audit import (
+            run as run_memory_quality_audit,
         )
 
         junks = [
@@ -459,7 +468,7 @@ class TestMemoryHealthAuditLayer1:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
@@ -472,7 +481,7 @@ class TestMemoryHealthAuditLayer1:
 
     def test_skips_already_superseded_records(self):
         """Already-superseded records are not re-superseded (idempotency)."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         already = _make_memory(
             memory_id="mem_already",
@@ -484,7 +493,7 @@ class TestMemoryHealthAuditLayer1:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
@@ -496,7 +505,7 @@ class TestMemoryHealthAuditLayer1:
 
     def test_sets_exact_superseded_by_value_and_rationale(self):
         """Pin the exact constants — drift would silently break the cleanup convention."""
-        from reflections.memory_management import (
+        from reflections.memory.memory_quality_audit import (
             CLEANUP_RATIONALE,
             CLEANUP_SUPERSEDED_BY,
         )
@@ -506,7 +515,7 @@ class TestMemoryHealthAuditLayer1:
 
     def test_per_record_save_failure_does_not_abort_layer(self):
         """One save() raising must not prevent later records from being processed."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         bad = _make_memory(
             memory_id="mem_bad",
@@ -524,7 +533,7 @@ class TestMemoryHealthAuditLayer1:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
@@ -544,7 +553,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_default_category_skew_above_threshold_files_issue(self):
         """When >70% of last-7d extraction-* records have no category, file an issue."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # 10 records, 8 with no category, 2 with categorized — 80% > 70% threshold
         records = []
@@ -570,7 +579,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -583,7 +592,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_importance_1_skew_files_issue(self):
         """When >85% of last-7d records have importance==1.0, file an issue."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = []
         # 9 at importance=1.0, 1 at importance=4.0 — 90% > 85% threshold
@@ -610,7 +619,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -623,7 +632,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_agent_id_clustering_above_threshold_files_issue(self):
         """When a single agent_id produces >10 junk records superseded *this run*, file an issue."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # 12 refusal-content records all from same agent_id — Layer 1 will supersede them all,
         # then Layer 2 detects the cluster.
@@ -639,7 +648,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -653,7 +662,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_agent_id_cluster_idempotent_on_backlog(self):
         """Records superseded in prior runs do NOT re-trigger the signal."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # All from same agent_id, but already superseded by prior runs.
         # Layer 1 will not supersede them again, so just_superseded_agent_ids is empty.
@@ -670,7 +679,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -688,7 +697,7 @@ class TestMemoryHealthAuditLayer2:
         """Sample memory_ids reported for an agent-id-cluster signal must be
         filtered to that cluster's agent_id, not drawn from the global pool of
         records superseded in this run (resolves review nit on PR #1252)."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # Two distinct agent_ids both cross the cluster threshold (>10).
         # Aggregate the call_args for each cluster signal and verify each
@@ -713,7 +722,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -745,7 +754,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_html_escape_rate_jump_files_issue(self):
         """When HTML escapes appear in >10% AND WoW jump >2x, file an issue."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         now = time.time()
         records = []
@@ -785,7 +794,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -798,7 +807,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_only_counts_extraction_records(self):
         """Layer 2 signals must ignore non-extraction-* records."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # 10 human-save records with no category — should NOT trigger category-default-skew.
         records = [
@@ -815,7 +824,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -828,7 +837,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_below_threshold_files_no_issue(self):
         """When all signals stay under threshold, no issue is filed."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # Healthy corpus: 10 records, 4 no-category (40% < 70%), varied importance.
         records = []
@@ -856,7 +865,7 @@ class TestMemoryHealthAuditLayer2:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
         ):
@@ -869,7 +878,7 @@ class TestMemoryHealthAuditLayer2:
 
     def test_has_no_category_predicate_handles_both_shapes(self):
         """_has_no_category covers metadata={}, missing key, empty string, and 'default' literal."""
-        from reflections.memory_management import _has_no_category
+        from reflections.memory.memory_quality_audit import _has_no_category
 
         # Line-based fallback path: metadata={}
         assert _has_no_category({}) is True
@@ -896,7 +905,7 @@ class TestMemoryHealthAuditLayer3:
 
     def test_ollama_unavailable_fails_soft(self):
         """When ollama.chat raises ConnectionRefusedError, audit completes layers 0+1+2 cleanly."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
             _make_memory(
@@ -913,12 +922,12 @@ class TestMemoryHealthAuditLayer3:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 side_effect=raise_connection_refused,
             ),
         ):
@@ -931,7 +940,7 @@ class TestMemoryHealthAuditLayer3:
 
     def test_ollama_classifies_junk_files_issue(self):
         """When >=3 records share an anomaly_signal, an issue is filed for that signal."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # Use importance=4.0 + categorized to avoid Layer 2 importance-1.0-skew firing.
         records = [
@@ -948,11 +957,11 @@ class TestMemoryHealthAuditLayer3:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value={
                     "is_junk": True,
                     "anomaly_signal": "json-key-as-content",
@@ -969,7 +978,7 @@ class TestMemoryHealthAuditLayer3:
 
     def test_ollama_classifies_clean_no_issue(self):
         """When all gemma verdicts say is_junk=False, no Layer 3 issue is filed."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
             _make_memory(
@@ -986,11 +995,11 @@ class TestMemoryHealthAuditLayer3:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 side_effect=verdicts,
             ),
         ):
@@ -1004,7 +1013,7 @@ class TestMemoryHealthAuditLayer3:
 
     def test_layer3_skipped_in_summary_when_ollama_down(self):
         """Findings list mentions layer-3 skipped when ollama is unavailable for all calls."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
             _make_memory(
@@ -1019,12 +1028,12 @@ class TestMemoryHealthAuditLayer3:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value=None,  # all calls fail
             ),
         ):
@@ -1036,7 +1045,7 @@ class TestMemoryHealthAuditLayer3:
 
     def test_wallclock_budget_exceeded_aborts_remaining(self):
         """A slow gemma call past the wallclock budget skips remaining records."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
             _make_memory(
@@ -1061,15 +1070,18 @@ class TestMemoryHealthAuditLayer3:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value={"is_junk": False, "anomaly_signal": None, "why": "ok"},
             ),
-            patch("reflections.memory_management._time.monotonic", side_effect=fake_monotonic),
+            patch(
+                "reflections.memory.memory_quality_audit._time.monotonic",
+                side_effect=fake_monotonic,
+            ),
         ):
             mock_model.query.all.return_value = records
             result = run_async(run_memory_quality_audit())
@@ -1083,7 +1095,7 @@ class TestMemoryHealthAuditLayer3:
 
     def test_per_call_timeout_treated_as_unavailable(self):
         """A gemma call returning None via TimeoutError is counted as unavailable."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
             _make_memory(
@@ -1099,12 +1111,12 @@ class TestMemoryHealthAuditLayer3:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
                 return_value=False,
             ),
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value=None,
             ),
         ):
@@ -1136,10 +1148,10 @@ class TestDuplicateIssueDetection:
 
     def test_skips_filing_when_open_issue_exists_for_same_signal(self):
         """Existing open issue with matching title prefix → skip filing."""
-        from reflections.memory_management import _file_anomaly_issue
+        from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         with patch(
-            "reflections.memory_management._find_open_audit_issue",
+            "reflections.memory.memory_quality_audit._find_open_audit_issue",
             new_callable=AsyncMock,
             return_value=42,
         ):
@@ -1157,17 +1169,17 @@ class TestDuplicateIssueDetection:
 
     def test_files_new_issue_when_no_open_dup(self):
         """When _find_open_audit_issue returns None, _file_anomaly_issue invokes gh create."""
-        from reflections.memory_management import _file_anomaly_issue
+        from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         fake_proc = _make_fake_subproc(returncode=0)
         with (
             patch(
-                "reflections.memory_management._find_open_audit_issue",
+                "reflections.memory.memory_quality_audit._find_open_audit_issue",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
             patch(
-                "reflections.memory_management.asyncio.create_subprocess_exec",
+                "reflections.memory.memory_quality_audit.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 return_value=fake_proc,
             ) as mock_exec,
@@ -1195,10 +1207,10 @@ class TestDuplicateIssueDetection:
 
     def test_gh_search_failure_suppresses_filing_for_run(self):
         """When _find_open_audit_issue returns -1 (gh failed), _file_anomaly_issue skips."""
-        from reflections.memory_management import _file_anomaly_issue
+        from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         with patch(
-            "reflections.memory_management._find_open_audit_issue",
+            "reflections.memory.memory_quality_audit._find_open_audit_issue",
             new_callable=AsyncMock,
             return_value=-1,
         ):
@@ -1216,16 +1228,16 @@ class TestDuplicateIssueDetection:
 
     def test_gh_create_failure_does_not_crash_audit(self):
         """When gh issue create raises, _file_anomaly_issue returns False (does not raise)."""
-        from reflections.memory_management import _file_anomaly_issue
+        from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         with (
             patch(
-                "reflections.memory_management._find_open_audit_issue",
+                "reflections.memory.memory_quality_audit._find_open_audit_issue",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
             patch(
-                "reflections.memory_management.asyncio.create_subprocess_exec",
+                "reflections.memory.memory_quality_audit.asyncio.create_subprocess_exec",
                 new_callable=AsyncMock,
                 side_effect=Exception("gh CLI broke"),
             ),
@@ -1248,11 +1260,11 @@ class TestDuplicateIssueDetection:
         Labels are descriptive but not part of the dup key — an operator who
         relabels (or strips labels from) an open issue must not cause re-filing.
         """
-        from reflections.memory_management import _find_open_audit_issue
+        from reflections.memory.memory_quality_audit import _find_open_audit_issue
 
         fake_proc = _make_fake_subproc(stdout=b"[]", returncode=0)
         with patch(
-            "reflections.memory_management.asyncio.create_subprocess_exec",
+            "reflections.memory.memory_quality_audit.asyncio.create_subprocess_exec",
             new_callable=AsyncMock,
             return_value=fake_proc,
         ) as mock_exec:
@@ -1278,7 +1290,7 @@ class TestAuditQuiescence:
 
     def test_clean_corpus_healthy_extractor_zero_findings(self):
         """Clean corpus + healthy extractor reports zero supersedes/anomalies/issues."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         # Healthy: extraction-* records with categories, varied importance, recent.
         records = [
@@ -1295,11 +1307,11 @@ class TestAuditQuiescence:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value={"is_junk": False, "anomaly_signal": None, "why": "clean"},
             ),
         ):
@@ -1317,7 +1329,7 @@ class TestAuditQuiescence:
 
     def test_returns_well_formed_result_dict(self):
         """Audit always returns {status, findings, summary} regardless of corpus state."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         with patch("models.memory.Memory") as mock_model:
             mock_model.query.all.return_value = []
@@ -1329,7 +1341,7 @@ class TestAuditQuiescence:
 
     def test_layer1_supersedes_never_trigger_issue(self):
         """No matter how many records Layer 1 supersedes, no Layer-1 issue is filed."""
-        from reflections.memory_management import run_memory_quality_audit
+        from reflections.memory.memory_quality_audit import run as run_memory_quality_audit
 
         records = [
             _make_memory(
@@ -1344,11 +1356,11 @@ class TestAuditQuiescence:
         with (
             patch("models.memory.Memory") as mock_model,
             patch(
-                "reflections.memory_management._file_anomaly_issue",
+                "reflections.memory.memory_quality_audit._file_anomaly_issue",
                 new_callable=AsyncMock,
             ) as mock_file,
             patch(
-                "reflections.memory_management._gemma_classify",
+                "reflections.memory.memory_quality_audit._gemma_classify",
                 return_value=None,  # Layer 3 unavailable, so no Layer-3 issues
             ),
         ):
@@ -1368,7 +1380,7 @@ class TestAuditQuiescence:
 
 def test_run_memory_quality_audit_imports_looks_like_refusal_directly():
     """Lock in the cross-module dependency: reflections imports _looks_like_refusal directly."""
-    import reflections.memory_management as mm
+    import reflections.memory.memory_quality_audit as mm
     from agent.memory_extraction import _looks_like_refusal
 
     # Module-level import, not just a function-local reuse.
@@ -1400,8 +1412,8 @@ class TestPublicSeam:
         )
 
     def test_reflections_imports_public_name(self):
-        """reflections.memory_management imports extract_json_payload from the public seam."""
-        import reflections.memory_management as mm
+        """memory_quality_audit imports extract_json_payload from the public seam."""
+        import reflections.memory.memory_quality_audit as mm
         from agent.memory_extraction import extract_json_payload
 
         assert mm.extract_json_payload is extract_json_payload
@@ -1416,31 +1428,31 @@ class TestLayer1EscapeHatch:
     """Tests _resolve_layer1_cap() env-var resolver."""
 
     def test_unset_returns_default(self, monkeypatch):
-        from reflections.memory_management import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
+        from reflections.memory.memory_quality_audit import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
 
         monkeypatch.delenv("MEMORY_AUDIT_LAYER1_CAP", raising=False)
         assert _resolve_layer1_cap() == DEFAULT_LAYER1_CAP == 50
 
     def test_zero_returns_none_uncapped(self, monkeypatch):
-        from reflections.memory_management import _resolve_layer1_cap
+        from reflections.memory.memory_quality_audit import _resolve_layer1_cap
 
         monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "0")
         assert _resolve_layer1_cap() is None
 
     def test_positive_int_overrides(self, monkeypatch):
-        from reflections.memory_management import _resolve_layer1_cap
+        from reflections.memory.memory_quality_audit import _resolve_layer1_cap
 
         monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "200")
         assert _resolve_layer1_cap() == 200
 
     def test_garbage_falls_back_to_default(self, monkeypatch):
-        from reflections.memory_management import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
+        from reflections.memory.memory_quality_audit import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
 
         monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "not-an-int")
         assert _resolve_layer1_cap() == DEFAULT_LAYER1_CAP
 
     def test_negative_falls_back_to_default(self, monkeypatch):
-        from reflections.memory_management import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
+        from reflections.memory.memory_quality_audit import DEFAULT_LAYER1_CAP, _resolve_layer1_cap
 
         monkeypatch.setenv("MEMORY_AUDIT_LAYER1_CAP", "-5")
         assert _resolve_layer1_cap() == DEFAULT_LAYER1_CAP
@@ -1463,7 +1475,7 @@ class TestEmbeddingOrphanSweep:
         does not. We use ``spec=[]`` to construct a fake EmbeddingField that
         explicitly does not expose that attribute (mirroring the 1.5.x API
         surface)."""
-        from reflections.memory_management import run_embedding_orphan_sweep
+        from reflections.memory.embedding_orphan_sweep import run as run_embedding_orphan_sweep
 
         # spec=[] — empty allowlist of attributes; hasattr() returns False
         # for sweep_stale_tempfiles, mimicking the popoto 1.5.x stub surface.
@@ -1488,7 +1500,7 @@ class TestEmbeddingOrphanSweep:
         # Dry-run path: must NOT invoke garbage_collect or sweep_stale_tempfiles.
         from popoto.fields.embedding_field import EmbeddingField
 
-        from reflections.memory_management import run_embedding_orphan_sweep
+        from reflections.memory.embedding_orphan_sweep import run as run_embedding_orphan_sweep
 
         with (
             patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "false"}),
@@ -1512,7 +1524,7 @@ class TestEmbeddingOrphanSweep:
         """Apply mode invokes garbage_collect AND sweep_stale_tempfiles."""
         from popoto.fields.embedding_field import EmbeddingField
 
-        from reflections.memory_management import run_embedding_orphan_sweep
+        from reflections.memory.embedding_orphan_sweep import run as run_embedding_orphan_sweep
 
         with (
             patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "true"}),
@@ -1533,7 +1545,7 @@ class TestEmbeddingOrphanSweep:
         """A failure inside garbage_collect must NOT crash the reflection."""
         from popoto.fields.embedding_field import EmbeddingField
 
-        from reflections.memory_management import run_embedding_orphan_sweep
+        from reflections.memory.embedding_orphan_sweep import run as run_embedding_orphan_sweep
 
         with (
             patch.dict("os.environ", {"EMBEDDING_ORPHAN_SWEEP_APPLY": "true"}),

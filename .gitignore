@@ -452,15 +452,17 @@ agents/*/logs/
 data/doc_embeddings.json
 
 # Persona overlay files (private, live in ~/Desktop/Valor/personas/)
-# Note: config/personas/project-manager.md AND config/personas/developer.md are
-# tracked — they are the in-repo fallbacks. PM holds the pipeline gate rules
-# (CRITIQUE mandatory, REVIEW mandatory). Developer holds the SDLC-owner
-# playbook (Mode 3 parallel orchestrator, merge_authorized bypass).
-config/personas/teammate.md
+# Note: config/personas/engineer.md is tracked as the in-repo fallback for
+# non-granite Eng sessions. config/personas/teammate.md is now also tracked
+# (issue #1692) — the granite path delivers teammate persona via prime commands,
+# but the in-repo copy gives non-granite sessions a fallback overlay.
 
 # Git worktrees for session isolation
 .worktrees/
 .claude/worktrees/
+
+# Ephemeral war-room critique run artifacts (do-plan-critique roster barrier, #1690)
+.critique-runs/
 
 # Happy path test evidence (screenshots, runtime artifacts)
 tests/happy-paths/evidence/
@@ -470,3 +472,4 @@ PROGRESS.md
 
 # Playwright CLI session snapshots
 .playwright-cli/
+.claude/scheduled_tasks.lock

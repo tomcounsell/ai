@@ -19,17 +19,43 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from agent.reflection_schedule import parse_every_duration
 from agent.reflection_scheduler import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_FUNCTION_TIMEOUT,
     ReflectionEntry,
     ReflectionScheduler,
     _get_memory_rss,
+    _resolve_callable,
+    _resolve_registry_path,
+    execute_function_reflection,
     is_reflection_due,
     is_reflection_running,
     load_registry,
     run_reflection,
 )
+
+
+def _registry_path() -> Path:
+    """Resolve the live reflections registry the way the scheduler does.
+
+    The in-repo ``config/reflections.yaml`` is only present after install
+    (install_worker.sh copies it from the iCloud-synced vault). Tests must use
+    the same vault-first resolver the scheduler uses so they read the real file
+    regardless of where it currently lives.
+    """
+    return _resolve_registry_path()
+
+
+def _entry_interval_seconds(entry: dict) -> int:
+    """Parse an entry's schedule into seconds.
+
+    The registry schema declares schedules as ``every: 300s`` (unified grammar),
+    not a bare ``interval: 300`` integer. This parses the ``every`` duration
+    string into an integer number of seconds.
+    """
+    return parse_every_duration(str(entry["every"]).strip())
+
 
 # === Registry Loading Tests ===
 
@@ -41,7 +67,7 @@ class TestRegistryLoading:
         """Registry file exists and parses valid entries (some may be disabled)."""
         import yaml
 
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         assert registry_path.exists(), "Registry file should exist"
         with open(registry_path) as f:
             data = yaml.safe_load(f)
@@ -58,16 +84,17 @@ class TestRegistryLoading:
         """The pm-briefings entry (issue #1197) parses with the expected fields."""
         import yaml
 
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         entries = {r["name"]: r for r in data["reflections"]}
         assert "pm-briefings" in entries, (
-            "pm-briefings entry missing from config/reflections.yaml -- "
+            "pm-briefings entry missing from the reflections registry -- "
             "the feature is dead code without it (Blocker 1 from PR #1237 review)"
         )
         entry = entries["pm-briefings"]
-        assert entry["interval"] == 300
+        # Schema declares schedules as `every: 300s`, parsed to 300 seconds.
+        assert _entry_interval_seconds(entry) == 300
         assert entry["timeout"] == 1500
         assert entry["execution_type"] == "function"
         assert entry["callable"] == "reflections.pm_briefings.run"
@@ -313,6 +340,46 @@ class TestScheduleEvaluation:
         state.ran_at = now - 300
         assert is_reflection_due(entry, state, now) is True
 
+    def test_blank_record_with_recent_history_not_due(self, monkeypatch):
+        """Burst-fire guard: a blank every: record (ran_at lost during an
+        index-rebuild race) must NOT re-fire when ReflectionRun history shows a
+        recent run. Regression for the daily-digest burst-fire bug."""
+        import agent.reflection_scheduler as sched
+
+        now = time.time()
+        entry = ReflectionEntry(
+            name="system-health-digest",
+            description="",
+            schedule="every: 86400s",  # daily
+            priority="low",
+            execution_type="agent",
+            command="send digest",
+        )
+        state = MagicMock()
+        state.ran_at = None  # lost during the rebuild window
+        # History says it actually ran 1h ago — well within the daily interval.
+        monkeypatch.setattr(sched, "_latest_run_timestamp", lambda name: now - 3600)
+        assert is_reflection_due(entry, state, now) is False
+
+    def test_blank_record_without_history_is_due(self, monkeypatch):
+        """A genuinely never-run every: record (no ran_at, no history) stays due —
+        the guard must not suppress first-ever runs."""
+        import agent.reflection_scheduler as sched
+
+        now = time.time()
+        entry = ReflectionEntry(
+            name="system-health-digest",
+            description="",
+            schedule="every: 86400s",
+            priority="low",
+            execution_type="agent",
+            command="send digest",
+        )
+        state = MagicMock()
+        state.ran_at = None
+        monkeypatch.setattr(sched, "_latest_run_timestamp", lambda name: None)
+        assert is_reflection_due(entry, state, now) is True
+
 
 # === Skip-if-Running Tests ===
 
@@ -475,26 +542,54 @@ class TestRegistryIntegrity:
 
     def test_registry_yaml_valid(self):
         """Registry file is valid YAML."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
-        assert registry_path.exists(), "config/reflections.yaml must exist"
+        registry_path = _registry_path()
+        assert registry_path.exists(), "reflections registry must exist"
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         assert "reflections" in data
 
     def test_all_entries_have_required_fields(self):
-        """All registry entries have name, interval, priority, execution_type."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        """All registry entries have name, every, priority, execution_type."""
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         for entry in data["reflections"]:
             assert "name" in entry, f"Entry missing name: {entry}"
-            assert "interval" in entry, f"Entry {entry.get('name')} missing interval"
+            # Schema uses `every: Ns` (unified grammar), not a bare `interval`.
+            assert "every" in entry, f"Entry {entry.get('name')} missing every"
             assert "priority" in entry, f"Entry {entry.get('name')} missing priority"
             assert "execution_type" in entry, f"Entry {entry.get('name')} missing execution_type"
 
+    def test_all_callables_resolve(self):
+        """Every function-type entry's `callable:` dotted path must resolve.
+
+        Guards the one-file-per-reflection refactor (#1028): the registry
+        references historical dotted paths (e.g. ``reflections.maintenance.run_*``,
+        ``agent.sustainability.*``) that now resolve through re-export shims to the
+        relocated per-reflection modules. A typo in any shim re-export, or a moved
+        module that forgot its shim, fails loudly here instead of silently halting
+        a reflection in production. Covers disabled entries too — a disabled
+        reflection's callable must still be importable.
+        """
+        registry_path = _registry_path()
+        with open(registry_path) as f:
+            data = yaml.safe_load(f)
+        failures = []
+        for entry in data["reflections"]:
+            if entry.get("execution_type") != "function":
+                continue
+            dotted = entry.get("callable")
+            assert dotted, f"function entry {entry.get('name')} missing callable"
+            try:
+                fn = _resolve_callable(dotted)
+                assert callable(fn), f"{dotted} resolved to a non-callable"
+            except Exception as exc:  # noqa: BLE001 — collect all, report together
+                failures.append(f"{entry.get('name')}: {dotted} -> {exc!r}")
+        assert not failures, "Unresolvable reflection callables:\n" + "\n".join(failures)
+
     def test_health_check_is_high_priority(self):
         """Health check must be high priority."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
@@ -503,15 +598,15 @@ class TestRegistryIntegrity:
 
     def test_health_check_interval_5_minutes(self):
         """Health check interval should be 300 seconds (5 minutes)."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         health_entries = [e for e in data["reflections"] if e["name"] == "session-liveness-check"]
-        assert health_entries[0]["interval"] == 300
+        assert _entry_interval_seconds(health_entries[0]) == 300
 
     def test_no_duplicate_names(self):
         """All reflection names should be unique."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = [e["name"] for e in data["reflections"]]
@@ -519,7 +614,7 @@ class TestRegistryIntegrity:
 
     def test_expected_reflections_present(self):
         """All expected reflections are declared in the registry."""
-        registry_path = Path(__file__).parent.parent.parent / "config" / "reflections.yaml"
+        registry_path = _registry_path()
         with open(registry_path) as f:
             data = yaml.safe_load(f)
         names = {e["name"] for e in data["reflections"]}
@@ -819,3 +914,87 @@ class TestEnqueueAgentReflectionTypedErrors:
         warnings_logged = [str(c) for c in mock_logger.warning.call_args_list]
         assert any("could not resolve project_key" in w for w in warnings_logged)
         assert captured["project_key"] == "env-fallback-key"
+
+
+class TestExecuteFunctionReflectionParams:
+    """Verify that params in ReflectionEntry are threaded through to the callable.
+
+    This covers the dead-config fix: the `params:` block in reflections.yaml was
+    parsed but never forwarded because ReflectionEntry had no params field and
+    execute_function_reflection always called func() with no args.
+    """
+
+    def _make_entry(self, callable_path: str, params: dict | None = None) -> ReflectionEntry:
+        return ReflectionEntry(
+            name="test-reflection",
+            description="test",
+            priority="low",
+            execution_type="function",
+            schedule="every: 3600s",
+            callable=callable_path,
+            params=params or {},
+        )
+
+    def test_params_forwarded_to_callable_that_accepts_params(self):
+        """Params are passed as kwargs when the callable declares `params`."""
+        received: dict = {}
+
+        def fake_func(params: dict | None = None) -> None:
+            received["params"] = params
+
+        entry = self._make_entry(
+            "some.module.fake_func", params={"stall_advisory_telegram_enabled": True}
+        )
+
+        with patch("agent.reflection_scheduler._resolve_callable", return_value=fake_func):
+            asyncio.run(execute_function_reflection(entry))
+
+        assert received["params"] == {"stall_advisory_telegram_enabled": True}
+
+    def test_zero_arg_callable_receives_no_params(self):
+        """Zero-arg callables continue to be called without arguments (backward compat)."""
+        call_count = {"n": 0}
+
+        def zero_arg_func() -> None:
+            call_count["n"] += 1
+
+        entry = self._make_entry("some.module.zero_arg_func", params={"ignored": True})
+
+        with patch("agent.reflection_scheduler._resolve_callable", return_value=zero_arg_func):
+            asyncio.run(execute_function_reflection(entry))
+
+        assert call_count["n"] == 1
+
+    def test_params_field_default_is_empty_dict(self):
+        """ReflectionEntry.params defaults to an empty dict when not supplied."""
+        entry = ReflectionEntry(
+            name="no-params",
+            description="test",
+            priority="low",
+            execution_type="function",
+            schedule="every: 3600s",
+            callable="some.module.func",
+        )
+        assert entry.params == {}
+
+    def test_load_registry_populates_params_from_yaml(self, tmp_path):
+        """load_registry threads `params:` from YAML into ReflectionEntry.params."""
+        yaml_content = """
+reflections:
+  - name: stall-advisory
+    description: test
+    priority: low
+    execution_type: function
+    every: 3600s
+    callable: reflections.stall_advisory.run_stall_advisory
+    enabled: true
+    params:
+      stall_advisory_telegram_enabled: true
+"""
+        registry_file = tmp_path / "reflections.yaml"
+        registry_file.write_text(yaml_content)
+
+        entries = load_registry(path=registry_file)
+
+        assert len(entries) == 1
+        assert entries[0].params == {"stall_advisory_telegram_enabled": True}

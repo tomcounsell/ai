@@ -276,10 +276,3 @@ class TestSkillMarkdownParity:
             "Verdict/dispatch invocations must NOT silence failures — drop "
             "2>/dev/null and || true:\n" + "\n".join(f"  {p}:{n}: {ln}" for p, n, ln in offenders)
         )
-
-    def test_pm_bash_allowlist_includes_sdlc_tool(self):
-        """PM session must be allowed to call sdlc-tool."""
-        src = (REPO_ROOT / "agent" / "hooks" / "pre_tool_use.py").read_text()
-        assert '"sdlc-tool stage-query"' in src
-        assert '"sdlc-tool verdict"' in src
-        assert '"sdlc-tool dispatch"' in src

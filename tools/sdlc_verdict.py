@@ -56,6 +56,14 @@ parent (via ``agent.sdlc_review_consensus.compute_consensus``) and makes ONE
 aggregate before recording. See
 ``docs/plans/multi-judge-consensus-gates.md``.
 
+Ownership gate (issue #1735): when ``--issue-number N`` is explicitly passed to
+the CLI ``record`` subcommand, the resolved session is verified to own issue N
+via ``session_owns_issue()`` in ``tools._sdlc_utils``. If the check fails (the
+resolved session belongs to a different issue — the artifact-divert residual
+case), the CLI exits 1 with a stderr diagnostic and writes nothing. The gate
+does not fire when ``--issue-number`` is omitted (bridge PM sessions using env-
+var resolution are unaffected).
+
 Graceful failure: every function returns ``{}`` on error. Missing Redis, bad
 input, malformed sessions, malformed ``judges`` payload — none of these crash
 the caller, and a malformed payload never produces a partial write. Skills
@@ -64,9 +72,14 @@ from finishing.
 
 Artifact hash semantics (CRITIQUE only):
   - Normalize line endings to ``\\n`` (cross-platform safety).
-  - Hash the FULL UTF-8-encoded plan file bytes, including YAML frontmatter.
-    Frontmatter edits (e.g. ``revision_applied: true``) are meaningful plan
-    changes that MUST bust the cache.
+  - G5 comparisons use ``compute_plan_body_hash`` which strips ONLY the
+    ``revision_applied:`` frontmatter line before hashing. This means that
+    the SDLC router's cache guard is NOT busted when a critique skill writes
+    ``revision_applied: true`` after applying its own NEEDS REVISION feedback.
+    All other frontmatter keys (e.g. ``status:``, ``type:``) still bust the
+    G5 cache; only ``revision_applied:`` is exempt.
+  - ``compute_plan_hash`` (the full-bytes variant, including ``revision_applied:``)
+    is retained for callers that explicitly want the complete file fingerprint.
   - Do NOT normalize whitespace within prose. A reviewer who reflows a
     paragraph is editing the plan; the critique should re-run.
 """
@@ -83,11 +96,19 @@ from pathlib import Path
 
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
+from tools._sdlc_utils import normalize_verdict
+from tools._sdlc_utils import session_owns_issue as _session_owns_issue
 
 logger = logging.getLogger(__name__)
 
 # Valid stages this module will write verdicts for.
 _VERDICT_STAGES = frozenset(["CRITIQUE", "REVIEW"])
+
+
+class OwnershipError(Exception):
+    """Raised when --issue-number N is passed but the resolved session does not
+    own issue N. Prevents a silent artifact divert to the wrong session.
+    """
 
 
 def compute_plan_hash(plan_path: Path | str) -> str | None:
@@ -116,10 +137,78 @@ def compute_plan_hash(plan_path: Path | str) -> str | None:
     return f"sha256:{digest}"
 
 
+def compute_plan_body_hash(plan_path: Path | str) -> str | None:
+    """Compute the sha256 of a plan file with ``revision_applied:`` stripped.
+
+    Returns ``"sha256:<hex>"`` on success, None on failure.
+
+    This is the hash used by G5 (``guard_g5_artifact_hash_cache``) so that
+    writing ``revision_applied: true`` after a NEEDS REVISION round-trip does
+    NOT bust the critique-verdict cache. Only the ``revision_applied:`` key is
+    stripped — all other frontmatter keys (e.g. ``status:``, ``type:``) still
+    influence the hash and will bust the G5 cache.
+
+    The hash covers:
+      - The UTF-8 encoded bytes of the file after removing the
+        ``revision_applied:`` line from the YAML frontmatter block.
+      - After CRLF/CR -> LF normalization (same as ``compute_plan_hash``).
+
+    Edge cases:
+      - No frontmatter: hash the whole file unchanged.
+      - Malformed/unterminated frontmatter (no closing ``---``): hash the
+        whole file unchanged (conservative degradation).
+      - ``revision_applied:`` absent: hash equals ``compute_plan_hash`` result.
+      - ``revision_applied: false`` and ``revision_applied:`` absent produce
+        the same hash (both hash a body without the key).
+    """
+    import re
+
+    try:
+        path = Path(plan_path)
+        raw = path.read_bytes()
+    except Exception as e:
+        logger.debug(f"sdlc_verdict: compute_plan_body_hash read failed: {e}")
+        return None
+
+    # Normalize line endings: CRLF -> LF, then stray CR -> LF
+    normalized = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    text = normalized.decode("utf-8", errors="replace")
+
+    # Attempt to strip revision_applied: from the frontmatter block.
+    # Frontmatter is delimited by leading "---\n" ... "---\n" (or "---\n" at EOF).
+    if text.startswith("---\n"):
+        closing = text.find("\n---\n", 4)
+        if closing == -1:
+            # Unterminated frontmatter: degrade to hashing whole file.
+            pass
+        else:
+            # Found closing delimiter. Strip the revision_applied: line only.
+            fm_end = closing + len("\n---\n")
+            frontmatter_block = text[4:closing]  # content between the two ---
+            body = text[fm_end:]
+
+            # Remove the revision_applied: line (any truthy/falsy value).
+            stripped_fm = re.sub(
+                r"^revision_applied:\s*\S+\s*$", "", frontmatter_block, flags=re.MULTILINE
+            )
+            # Rebuild; remove a stray blank line if the whole key was removed.
+            stripped_fm = re.sub(r"\n{2,}", "\n", stripped_fm).strip("\n")
+
+            if stripped_fm:
+                text = f"---\n{stripped_fm}\n---\n{body}"
+            else:
+                # Frontmatter was only revision_applied: — drop the whole block.
+                text = body
+
+    normalized_bytes = text.encode("utf-8")
+    digest = hashlib.sha256(normalized_bytes).hexdigest()
+    return f"sha256:{digest}"
+
+
 def _compute_artifact_hash(stage: str, issue_number: int | None) -> str | None:
     """Compute the artifact hash for a stage.
 
-    CRITIQUE → sha256 of the plan file.
+    CRITIQUE → sha256 of the plan file body (revision_applied-stripped).
     REVIEW   → None (REVIEW non-determinism is handled by G4, not G5).
     """
     if stage != "CRITIQUE":
@@ -129,7 +218,7 @@ def _compute_artifact_hash(stage: str, issue_number: int | None) -> str | None:
     plan_path = _find_plan_path(issue_number)
     if plan_path is None:
         return None
-    return compute_plan_hash(plan_path)
+    return compute_plan_body_hash(plan_path)
 
 
 # Required keys on each per-judge dict passed via the ``judges`` kwarg.
@@ -231,6 +320,13 @@ def record_verdict(
         logger.debug("sdlc_verdict: malformed judges payload — refusing partial write")
         return {}
 
+    # Normalize the verdict to canonical space-separated uppercase form (#1638).
+    # This is the single write boundary — all stored verdicts are canonical.
+    raw_verdict = verdict
+    verdict = normalize_verdict(verdict)
+    if verdict != raw_verdict:
+        logger.debug(f"sdlc_verdict: normalized verdict {raw_verdict!r} -> {verdict!r}")
+
     recorded_at = (now or datetime.now(UTC)).isoformat()
     artifact_hash = _compute_artifact_hash(stage, issue_number)
 
@@ -313,9 +409,17 @@ def get_verdict(session, stage: str) -> dict:
 
 
 def _cli_record(args) -> dict:
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
+    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
     if session is None:
         return {}
+    # Ownership guard: when --issue-number N is passed, the resolved session must
+    # own issue N or we refuse the write to prevent a silent artifact divert.
+    if args.issue_number is not None and not _session_owns_issue(session, args.issue_number):
+        session_id_val = getattr(session, "session_id", "<unknown>")
+        raise OwnershipError(
+            f"Recorder ownership guard: session '{session_id_val}' does not own"
+            f" issue #{args.issue_number}; refusing write to prevent divert"
+        )
     judges = None
     consensus = None
     if getattr(args, "judges_json", None):

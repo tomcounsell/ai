@@ -2,10 +2,78 @@
 Shared test fixtures for Valor AI tests.
 """
 
+import atexit
+import os
+import subprocess
 import sys
+import time
 from unittest.mock import MagicMock
 
 import pytest
+
+
+# ---------------------------------------------------------------------------
+# Production-Redis (db=0) flush guard
+# ---------------------------------------------------------------------------
+# A flushdb() against db=0 -- or any flushall() -- wipes the production dataset
+# (memories, Telegram history, chats, knowledge docs). The redis_test_db
+# fixture below isolates Popoto to a per-worker test db (db>=1), but test code
+# that constructs its OWN redis client bypasses that isolation: bare
+# redis.Redis() and redis.Redis.from_url(".../0") both default to db=0. On
+# 2026-06-03 exactly this footgun flushed production. We monkeypatch
+# flushdb/flushall on the sync and async Redis classes at conftest import time
+# (before collection) so any attempt to flush db=0 -- or call flushall, which
+# wipes EVERY db -- raises instead of destroying data. This patch lives in
+# conftest.py, so it only affects pytest runs; production code is untouched.
+def _install_redis_db0_flush_guard() -> None:
+    try:
+        import redis
+        import redis.asyncio as aioredis
+    except Exception:
+        return
+
+    def _db_of(client) -> int:
+        try:
+            return int(client.connection_pool.connection_kwargs.get("db", 0) or 0)
+        except Exception:
+            # If we cannot determine the db, assume the dangerous one (db=0).
+            return 0
+
+    def _make_guarded_flushdb(orig):
+        def _guarded_flushdb(self, *args, **kwargs):
+            if _db_of(self) == 0:
+                raise RuntimeError(
+                    "Refusing flushdb() on Redis db=0 (production) during tests. "
+                    "Use the autouse redis_test_db fixture, or build clients on the "
+                    "per-worker test db (see redis_url / tests/conftest.py). "
+                    "This guard exists because a db=0 flush wiped production on 2026-06-03."
+                )
+            return orig(self, *args, **kwargs)
+
+        _guarded_flushdb._db0_guarded = True
+        return _guarded_flushdb
+
+    def _make_guarded_flushall(orig):
+        def _guarded_flushall(self, *args, **kwargs):
+            raise RuntimeError(
+                "Refusing flushall() during tests -- it wipes ALL Redis dbs, including "
+                "production db=0. Flush the per-worker test db with flushdb() instead. "
+                "See tests/conftest.py."
+            )
+
+        _guarded_flushall._db0_guarded = True
+        return _guarded_flushall
+
+    for mod in (redis, aioredis):
+        cls = mod.Redis
+        if not getattr(cls.flushdb, "_db0_guarded", False):
+            cls.flushdb = _make_guarded_flushdb(cls.flushdb)
+        if not getattr(cls.flushall, "_db0_guarded", False):
+            cls.flushall = _make_guarded_flushall(cls.flushall)
+
+
+_install_redis_db0_flush_guard()
+
 
 # ---------------------------------------------------------------------------
 # Centralized claude_agent_sdk mock
@@ -397,12 +465,32 @@ def sample_config():
             "valor": {
                 "name": "Valor AI",
                 "description": "AI coworker system",
+                "machine": "TestMachine",
                 "telegram": {
                     "groups": ["Dev: Valor"],
                     "respond_to_all": False,
                     "respond_to_mentions": True,
                     "respond_to_dms": True,
                     "mention_triggers": ["@valor", "valor", "hey valor"],
+                    # Registered bot peer (issue #1574): recorded to history,
+                    # never spawns a session; home of the settle_profile.
+                    "bots": [
+                        {
+                            "id": 8837490628,
+                            "username": "cyndra_staff_bot",
+                            "name": "Bruce @ Internal Staff",
+                            "under_test": True,
+                            "settle_profile": {
+                                "cleanup_progress": False,
+                                "quiet_window_seconds": 5,
+                                "default_timeout_seconds": 600,
+                                "status_patterns": [
+                                    "^⏳",
+                                    "^(💻|🔎|🔧|📖|⚙️|📝) \\w+:",
+                                ],
+                            },
+                        }
+                    ],
                 },
                 "github": {"org": "tomcounsell", "repo": "ai"},
                 "context": {
@@ -479,3 +567,90 @@ def django_project(sample_config):
     project = sample_config["projects"]["django-project-template"].copy()
     project["_key"] = "django-project-template"
     return project
+
+
+# ---------------------------------------------------------------------------
+# xdist worker reaper
+# ---------------------------------------------------------------------------
+# pytest-xdist workers run via
+#   `python -c "import sys; exec(eval(sys.stdin.readline()))"`
+# which installs no signal handlers. If the parent pytest process dies
+# (timeouts, agent tooling interrupting, a keyboard interrupt racing
+# with teardown) the workers get reparented to init and stay alive
+# consuming memory. On a 10-CPU box each leaked worker is ~15-25MB of
+# RAM, and one crash loop can leave 60+ zombies.
+#
+# The shell-level `scripts/pytest-clean.sh` covers the happy path. The
+# controller-level reaper below covers the case where the controller
+# itself exits without the wrapper's trap firing (e.g. SIGKILL of the
+# wrapper, or a pytest crash).
+#
+# IMPORTANT: this reaper runs on the CONTROLLER (xdist master), not in
+# the workers. It kills workers by matching the standard xdist worker
+# argv regex.
+XDIST_WORKER_RE = r"exec\(eval\(sys\.stdin\.readline\(\)\)\)"
+
+
+def _reap_xdist_workers() -> None:
+    """Find and kill any xdist worker processes we can see.
+
+    Uses `pgrep` so we don't need psutil. Idempotent. Catches every
+    exception so a reap failure never blocks pytest teardown.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", XDIST_WORKER_RE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return
+
+    pids = [p for p in result.stdout.split() if p.isdigit()]
+    if not pids:
+        return
+
+    for pid in pids:
+        try:
+            os.kill(int(pid), 15)  # SIGTERM
+        except (OSError, ValueError):
+            pass
+    time.sleep(0.5)
+    for pid in pids:
+        try:
+            os.kill(int(pid), 9)  # SIGKILL survivors
+        except (OSError, ValueError):
+            pass
+
+
+def pytest_unconfigure(config):
+    """Run the reap on pytest's normal teardown path.
+
+    Only the controller runs this hook; workers have `workerinput`
+    set on their config. The wrap in a try/except keeps the reap
+    out of the way on non-xdist runs and on import failures.
+    """
+    try:
+        import xdist  # noqa: F401
+    except ImportError:
+        return
+    if getattr(config, "workerinput", None):
+        # We are a worker; workers have no business reaping siblings.
+        return
+    _reap_xdist_workers()
+
+
+# atexit covers the case where pytest's unconfigure hook didn't fire
+# (e.g. the controller segfaulted, or the test runner killed the
+# process group). atexit runs on the normal Python interpreter exit
+# path, which is the strongest hook we can install at module load
+# time.
+#
+# Gated on PYTEST_XDIST_WORKER being unset so the worker processes
+# (which also import this conftest via xdist's path resolution) don't
+# re-register. The controller sets this env var to the worker name
+# (e.g. "gw0") once it forks; before that, it's unset, so this code
+# only runs in the controller and in non-xdist runs.
+if "PYTEST_XDIST_WORKER" not in os.environ:
+    atexit.register(_reap_xdist_workers)

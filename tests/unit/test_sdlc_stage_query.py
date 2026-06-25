@@ -158,7 +158,7 @@ class TestFindSessionByIssue:
 
         mock_session = MagicMock()
         mock_session.issue_url = "https://github.com/tomcounsell/ai/issues/704"
-        mock_session.session_type = "pm"
+        mock_session.session_type = "eng"
 
         mock_as = MagicMock()
         mock_as.query.filter.return_value = [mock_session]
@@ -182,6 +182,30 @@ class TestFindSessionByIssue:
 
         assert result is None
 
+    def test_read_converges_with_write_under_divergent_env(self, monkeypatch):
+        """#1671/#1672: the read path resolves the same issue-scoped session a
+        writer (with a divergent VALOR_SESSION_ID) targeted. The read path is
+        env-independent — it goes straight through find_session_by_issue — so a
+        divergent env var set on the reader has no effect."""
+        from tools.sdlc_stage_query import _find_session_by_issue
+
+        # A divergent env var must NOT affect the read resolution.
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-divergent")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        issue_session = MagicMock()
+        issue_session.issue_url = "https://github.com/tomcounsell/ai/issues/1672"
+        issue_session.session_type = "eng"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [issue_session]
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = _find_session_by_issue(1672)
+
+        # The read resolves the issue session regardless of the env var.
+        assert result is issue_session
+
     def test_handles_redis_exception_gracefully(self):
         from tools.sdlc_stage_query import _find_session_by_issue
 
@@ -197,35 +221,35 @@ class TestFindSessionByIssue:
 class TestFindSessionById:
     """Tests for _find_session_by_id."""
 
-    def test_prefers_pm_session(self):
+    def test_prefers_eng_session(self):
         from tools.sdlc_stage_query import _find_session_by_id
 
-        pm_session = MagicMock()
-        pm_session.session_type = "pm"
-        dev_session = MagicMock()
-        dev_session.session_type = "dev"
+        eng_session = MagicMock()
+        eng_session.session_type = "eng"
+        teammate_session = MagicMock()
+        teammate_session.session_type = "teammate"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = [dev_session, pm_session]
+        mock_as.query.filter.return_value = [teammate_session, eng_session]
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("test-session")
 
-        assert result == pm_session
+        assert result == eng_session
 
-    def test_returns_first_session_when_no_pm(self):
+    def test_returns_first_session_when_no_eng(self):
         from tools.sdlc_stage_query import _find_session_by_id
 
-        dev_session = MagicMock()
-        dev_session.session_type = "dev"
+        teammate_session = MagicMock()
+        teammate_session.session_type = "teammate"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = [dev_session]
+        mock_as.query.filter.return_value = [teammate_session]
 
         with patch("models.agent_session.AgentSession", mock_as):
             result = _find_session_by_id("test-session")
 
-        assert result == dev_session
+        assert result == teammate_session
 
     def test_returns_none_for_empty_results(self):
         from tools.sdlc_stage_query import _find_session_by_id
@@ -237,6 +261,43 @@ class TestFindSessionById:
             result = _find_session_by_id("nonexistent")
 
         assert result is None
+
+
+class TestLookupPrNumber:
+    """D4: _lookup_pr_number issue-search primary + branch-head fallback."""
+
+    def test_issue_search_primary_path(self):
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        with patch("tools.sdlc_stage_query._gh_pr_list", return_value=55) as gh:
+            assert _lookup_pr_number(145, slug="some_slug") == 55
+        # First call is the issue-number search.
+        first_args = gh.call_args_list[0].args[0]
+        assert "--search" in first_args and "#145" in first_args
+
+    def test_branch_head_fallback_when_issue_search_empty(self):
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        # Issue search returns None, branch-head returns 88.
+        with patch("tools.sdlc_stage_query._gh_pr_list", side_effect=[None, 88]) as gh:
+            assert _lookup_pr_number(145, slug="my_slug") == 88
+        branch_args = gh.call_args_list[1].args[0]
+        assert "--head" in branch_args and "session/my_slug" in branch_args
+
+    def test_no_slug_no_branch_fallback(self):
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        # Only the issue search runs (returns None); no branch-head attempt.
+        with patch("tools.sdlc_stage_query._gh_pr_list", side_effect=[None]) as gh:
+            assert _lookup_pr_number(145, slug=None) is None
+        assert gh.call_count == 1
+
+    def test_gh_failure_returns_none(self):
+        from tools.sdlc_stage_query import _gh_pr_list
+
+        # subprocess raises -> None, never propagates.
+        with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("boom")):
+            assert _gh_pr_list(["--head", "session/x"]) is None
 
 
 class TestCLIOutput:
@@ -305,6 +366,69 @@ class TestEnrichedPayload:
         assert result["_meta"]["latest_critique_verdict"] == "NEEDS REVISION"
         assert result["_meta"]["latest_review_verdict"] == "APPROVED"
         assert result["_meta"]["pr_number"] == 42
+
+    def test_stages_exposes_router_underscore_keys(self):
+        """Enriched ``stages`` must carry ``_verdicts``/``_sdlc_dispatches``.
+
+        The router's staleness rules (``_critique_verdict_is_stale`` →
+        row 2b, ``_latest_dispatch_at``) read these underscore keys directly
+        off the ``stage_states`` arg. If ``query_enriched`` filters them out,
+        a revised plan with a stale NEEDS REVISION verdict can never route to
+        re-critique and dead-ends on ``/do-plan`` until G4 oscillation fires.
+        """
+        from tools.sdlc_stage_query import query_enriched
+
+        dispatches = [{"skill": "/do-plan", "at": "2026-06-16T05:27:16+00:00"}]
+        verdicts = {
+            "CRITIQUE": {
+                "verdict": "NEEDS REVISION",
+                "recorded_at": "2026-06-16T05:16:03+00:00",
+                "artifact_hash": "sha256:abc",
+            }
+        }
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "in_progress",
+                "_verdicts": verdicts,
+                "_sdlc_dispatches": dispatches,
+            }
+        )
+        mock_session.pr_number = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert result["stages"]["_verdicts"] == verdicts
+        assert result["stages"]["_sdlc_dispatches"] == dispatches
+        # And the router's staleness helper must see the verdict as stale.
+        from agent.sdlc_router import _critique_verdict_is_stale
+
+        assert _critique_verdict_is_stale(result["stages"]) is True
+
+    def test_pr_number_resolved_from_meta_key(self):
+        """D4: _compute_meta resolves pr_number from the _pr_number meta key."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps(
+            {"ISSUE": "completed", "PLAN": "completed", "_pr_number": 777}
+        )
+        mock_session.pr_number = None  # no session attribute
+        mock_session.slug = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            # gh lookup must NOT be needed — the meta key wins.
+            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None) as lookup:
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["pr_number"] == 777
+        lookup.assert_not_called()
 
     def test_defaults_when_session_missing(self):
         from tools.sdlc_stage_query import query_enriched
@@ -581,3 +705,130 @@ class TestFetchPrMergeState:
             result = _fetch_pr_merge_state(264)
 
         assert result == (None, None)
+
+    def test_fetch_pr_merge_state_threads_repo(self):
+        """When repo= is passed, gh pr view includes --repo <slug>."""
+        import json as _json
+
+        from tools.sdlc_stage_query import _fetch_pr_merge_state
+
+        gh_output = _json.dumps({"mergeStateStatus": "CLEAN", "statusCheckRollup": []})
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = gh_output
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=mock_proc) as mock_run:
+            result = _fetch_pr_merge_state(42, repo="tomcounsell/popoto")
+        cmd = mock_run.call_args[0][0]
+        assert "--repo" in cmd
+        assert "tomcounsell/popoto" in cmd
+        assert result[0] == "CLEAN"
+
+
+class TestResolveTargetRepo:
+    """Tests for _resolve_target_repo in tools._sdlc_utils."""
+
+    def test_gh_repo_env_short_circuits(self, monkeypatch):
+        """GH_REPO set → return it directly, subprocess never called."""
+        monkeypatch.setenv("GH_REPO", "tomcounsell/popoto")
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        with patch("subprocess.run") as mock_run:
+            from tools._sdlc_utils import _resolve_target_repo
+
+            result = _resolve_target_repo()
+        assert result == "tomcounsell/popoto"
+        mock_run.assert_not_called()
+
+    def test_sdlc_target_repo_used_as_cwd_not_slug(self, monkeypatch):
+        """SDLC_TARGET_REPO is a filesystem PATH used as cwd, never as --repo slug."""
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setenv("SDLC_TARGET_REPO", "/some/path")
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "tomcounsell/popoto\n"
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc) as mock_run:
+            from tools._sdlc_utils import _resolve_target_repo
+
+            result = _resolve_target_repo()
+        # Returned value is the slug from stdout
+        assert result == "tomcounsell/popoto"
+        # subprocess called with cwd="/some/path", NOT with "--repo /some/path"
+        call_kwargs = mock_run.call_args
+        cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+        assert cwd == "/some/path"
+        # "/some/path" must NOT appear as a --repo value
+        cmd = call_kwargs[0][0]
+        assert "--repo" not in cmd or "/some/path" not in cmd
+
+    def test_neither_env_uses_git_toplevel_as_cwd(self, monkeypatch):
+        """Both envs unset → git toplevel used as cwd for gh repo view."""
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.delenv("SDLC_TARGET_REPO", raising=False)
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "tomcounsell/ai\n"
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc) as mock_run:
+            with patch("tools._sdlc_utils._git_toplevel", return_value="/users/tom/src/ai"):
+                from tools._sdlc_utils import _resolve_target_repo
+
+                result = _resolve_target_repo()
+        assert result == "tomcounsell/ai"
+        call_kwargs = mock_run.call_args
+        cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+        assert cwd == "/users/tom/src/ai"
+
+    def test_returns_none_on_gh_failure_with_warning(self, monkeypatch, caplog):
+        """gh repo view failure → returns None, emits logger.warning."""
+        import logging
+
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setenv("SDLC_TARGET_REPO", "/some/path")
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.stdout = ""
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc):
+            with caplog.at_level(logging.WARNING):
+                from tools._sdlc_utils import _resolve_target_repo
+
+                result = _resolve_target_repo()
+        assert result is None
+        assert any(r.levelno >= logging.WARNING for r in caplog.records)
+
+    def test_empty_sdlc_target_falls_through_to_git_toplevel(self, monkeypatch):
+        """SDLC_TARGET_REPO='' (empty) falls through to _git_toplevel, never cwd=''."""
+        monkeypatch.delenv("GH_REPO", raising=False)
+        monkeypatch.setenv("SDLC_TARGET_REPO", "")
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "tomcounsell/ai\n"
+        with patch("tools._sdlc_utils.subprocess.run", return_value=mock_proc) as mock_run:
+            with patch("tools._sdlc_utils._git_toplevel", return_value="/users/tom/src/ai"):
+                from tools._sdlc_utils import _resolve_target_repo
+
+                result = _resolve_target_repo()
+        # subprocess called with cwd from git_toplevel, not cwd=""
+        call_kwargs = mock_run.call_args
+        cwd = call_kwargs.kwargs.get("cwd") or call_kwargs[1].get("cwd")
+        assert cwd != ""
+        assert result == "tomcounsell/ai"
+
+    def test_compute_meta_resolves_repo_once(self, monkeypatch):
+        """_resolve_target_repo called exactly once per _compute_meta invocation."""
+        call_count = []
+
+        def fake_resolve():
+            call_count.append(1)
+            return "tomcounsell/ai"
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", side_effect=fake_resolve):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                        from tools.sdlc_stage_query import _compute_meta
+
+                        mock_session = MagicMock()
+                        mock_session.pr_number = None
+                        mock_session.slug = None
+                        _compute_meta({}, mock_session, None)
+        assert len(call_count) == 1, (
+            f"_resolve_target_repo called {len(call_count)} times, expected 1"
+        )

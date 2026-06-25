@@ -22,11 +22,8 @@ context arrives — most recent save reflects latest understanding.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
-import urllib.error
-import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -41,66 +38,19 @@ _MAX_TITLE_CHARS = 200  # Generous bound; the prompt asks for ~12 words.
 
 
 def _resolve_ollama_config() -> tuple[str, str, float]:
-    """Return (base_url, model, timeout_s).
+    """Return (base_url, model, timeout_s). Delegates to ollama_client."""
+    from tools import ollama_client
 
-    Reads from settings if available; falls back to hardcoded defaults so
-    this module is importable in environments where settings can't load
-    (test fixtures, fresh-shell MCP smoke checks).
-    """
-    base_url = "http://localhost:11434"
-    timeout_s = 5.0
-    try:
-        from config.settings import settings
-
-        base_url = settings.models.ollama_host
-        timeout_s = settings.models.memory_title_timeout_s
-    except Exception:
-        pass
-
-    try:
-        from config.models import OLLAMA_LOCAL_MODEL
-
-        model = OLLAMA_LOCAL_MODEL
-    except Exception:
-        model = "gemma4:e2b"
-
-    return base_url, model, timeout_s
+    return ollama_client.resolve_config()
 
 
 def _post_ollama_generate(base_url: str, model: str, prompt: str, timeout_s: float) -> str | None:
-    """POST to Ollama /api/generate and return the response string.
+    """Delegate to ollama_client.generate(). Returns None on any failure."""
+    from tools import ollama_client
 
-    Returns None on any failure (connection, timeout, bad JSON, missing
-    field). Never raises.
-    """
-    payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
-    url = f"{base_url.rstrip('/')}/api/generate"
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return ollama_client.generate(
+        prompt, model=model, timeout_s=timeout_s, base_url=base_url, caller="title_generator"
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        logger.debug(f"[title_generator] Ollama unreachable/timeout: {e}")
-        return None
-    except Exception as e:  # noqa: BLE001 — fail-silent by contract
-        logger.debug(f"[title_generator] Ollama call failed: {e}")
-        return None
-
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        logger.debug("[title_generator] Ollama returned non-JSON")
-        return None
-
-    response = data.get("response")
-    if not isinstance(response, str):
-        return None
-    return response
 
 
 def _normalize_title(raw: str) -> str:
@@ -126,6 +76,33 @@ def _do_generate(memory_id: str, content: str) -> None:
         return
 
     base_url, model, timeout_s = _resolve_ollama_config()
+
+    # Defensive <private> strip — generation is now cloud by default, so a future
+    # caller that forgets strip_private would exfiltrate raw private content off
+    # the machine, asynchronously and invisibly. Strip BEFORE the content[:1000]
+    # truncation: an opener inside the first 1000 chars whose close falls beyond
+    # char 1000 would otherwise survive a post-truncation strip into the prompt.
+    from agent.private_tag import strip_private
+
+    original = content
+    content = strip_private(content)
+    if content != original:
+        logger.warning("title_generator: unstripped private tag — stripped defensively")
+    # Unmatched-opener guard: strip_private leaves a lone <private> (no close) as
+    # literal text. Aborting prevents egressing the opener + trailing secret.
+    if "<private>" in content:
+        logger.warning("title_generator: unmatched <private> opener — aborting")
+        return
+
+    # Typed signal: if the configured generation model is unavailable, skip
+    # persistence entirely rather than persist an empty/garbage title.
+    from config.models import ensure_generation_model
+
+    gen_ok, _gen_detail = ensure_generation_model(model)
+    if not gen_ok:
+        logger.debug("[title_generator] generation model unavailable: %s", _gen_detail)
+        return
+
     prompt = _TITLE_PROMPT_TEMPLATE.format(content=content[:1000])
 
     raw = _post_ollama_generate(base_url, model, prompt, timeout_s)

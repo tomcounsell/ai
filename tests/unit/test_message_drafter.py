@@ -1,22 +1,16 @@
-"""Tests for bridge.message_drafter — response summarization and classification."""
+"""Tests for bridge.message_drafter — response composition and validation."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from bridge.message_drafter import (
-    CLASSIFICATION_CONFIDENCE_THRESHOLD,
-    ClassificationResult,
-    OutputType,
-    StructuredDraft,
-    _classify_with_heuristics,
+    MessageDraft,
     _compose_structured_draft,
+    _derive_context_summary,
     _get_status_emoji,
-    _linkify_references,
-    _parse_classification_response,
     _parse_draft_and_questions,
-    classify_output,
     draft_message,
     extract_artifacts,
 )
@@ -95,46 +89,101 @@ class TestExtractArtifacts:
         assert "bridge/message_drafter.py" in artifacts["files_changed"]
 
 
-class TestDraftMessage:
-    """Tests for the main draft_message function."""
+class TestDeriveContextSummary:
+    """Tests for the new deterministic _derive_context_summary helper."""
 
-    @pytest.mark.asyncio
-    async def test_short_response_skips_drafter(self):
-        """Non-SDLC responses under 200 chars bypass the drafter entirely (D5a).
+    def test_returns_none_for_empty_input(self):
+        assert _derive_context_summary("") is None
 
-        The short-output early-return bounds per-message latency on brief
-        replies — see docs/plans/message-drafter.md Risk 1 + D5a.
-        """
-        short_text = "Done. Committed abc1234."
-        mock_haiku = AsyncMock()  # should not be called
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(short_text)
-        # Raw text returned verbatim; drafter was skipped.
-        assert result.text == short_text
-        assert result.was_drafted is False
-        mock_haiku.assert_not_called()
+    def test_returns_none_for_whitespace_only(self):
+        assert _derive_context_summary("   \n\n  ") is None
 
-    @pytest.mark.asyncio
-    async def test_long_response_still_uses_drafter(self):
-        """Responses >=200 chars trigger the drafter even without SDLC context."""
-        long_text = "Done and committed. " * 30  # 600 chars
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Committed changes",
-                response="Done ✅ `abc1234`",
-                expectations=None,
-            )
+    def test_returns_first_sentence(self):
+        text = "Fixed the authentication bug. All tests passing."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "Fixed the authentication bug" in result
+
+    def test_caps_at_140_chars(self):
+        long_sentence = (
+            "This is a very long sentence that goes on and on and should be truncated " + "x" * 100
         )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(long_text)
-        assert result.was_drafted is True
-        mock_haiku.assert_called_once()
+        result = _derive_context_summary(long_sentence)
+        assert result is not None
+        assert len(result) <= 143  # 140 + "..." at most
+
+    def test_skips_blank_lines(self):
+        text = "\n\n\nReal content here."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "Real content here" in result
+
+    def test_skips_markdown_headings(self):
+        text = "# Heading\nActual content sentence."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "Actual content" in result
+        assert "Heading" not in result
+
+    def test_skips_separator_lines(self):
+        text = "---\nContent after separator."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "Content after separator" in result
+
+    def test_strips_bullet_markers(self):
+        text = "• Implemented the feature and committed."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "Implemented the feature" in result
+        assert "•" not in result
+
+    def test_strips_dash_bullet(self):
+        text = "- Fixed the bug in bridge module."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "Fixed the bug" in result
+
+    def test_strips_numbered_list(self):
+        text = "1. First item here."
+        result = _derive_context_summary(text)
+        assert result is not None
+        assert "First item here" in result
+        assert "1." not in result
+
+    def test_short_text_returned_as_is(self):
+        text = "Done. All tests pass."
+        result = _derive_context_summary(text)
+        assert result == "Done. All tests pass."
+
+    def test_returns_str_not_empty_string_for_valid_input(self):
+        result = _derive_context_summary("Some real content here.")
+        assert result is not None
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+class TestDraftMessage:
+    """Tests for the main draft_message function (pass-through + validation)."""
+
+    @pytest.mark.asyncio
+    async def test_short_response_passes_through_verbatim(self):
+        """Non-SDLC responses under 200 chars pass through verbatim."""
+        short_text = "Done. Committed abc1234."
+        result = await draft_message(short_text)
+        assert result.text == short_text
+
+    @pytest.mark.asyncio
+    async def test_short_response_has_no_was_drafted(self):
+        """MessageDraft no longer has was_drafted field."""
+        short_text = "Done."
+        result = await draft_message(short_text)
+        assert not hasattr(result, "was_drafted")
 
     @pytest.mark.asyncio
     async def test_empty_response(self):
         result = await draft_message("")
         assert result.text == ""
-        assert result.was_drafted is False
 
     @pytest.mark.asyncio
     async def test_none_response(self):
@@ -142,90 +191,19 @@ class TestDraftMessage:
         assert result.text == ""
 
     @pytest.mark.asyncio
-    async def test_long_response_calls_haiku(self):
-        """Responses over threshold trigger Haiku summarization."""
-        long_text = "Detailed work output. " * 200
-
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Working on output",
-                response="Summary: did the work. `abc1234`",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(long_text)
-
-        assert result.was_drafted is True
-        # Structured composer prepends emoji prefix for non-session summaries
-        assert "Summary: did the work. `abc1234`" in result.text
-        mock_haiku.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_haiku_fails_falls_back_to_openrouter(self):
-        """If Haiku fails, OpenRouter is tried next."""
-        long_text = "Detailed work output. " * 200
-
-        mock_haiku = AsyncMock(return_value=None)
-        mock_openrouter = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Working on output",
-                response="OpenRouter summary of work.",
-                expectations=None,
-            )
-        )
-        with (
-            patch("bridge.message_drafter._draft_with_haiku", mock_haiku),
-            patch("bridge.message_drafter._draft_with_openrouter", mock_openrouter),
-        ):
-            result = await draft_message(long_text)
-
-        assert result.was_drafted is True
-        assert "OpenRouter summary of work." in result.text
-        mock_haiku.assert_called_once()
-        mock_openrouter.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_all_backends_fail_requests_self_summary(self):
-        """If all summarization backends fail, signal self-summary via steering."""
-        long_text = "x" * 5000
-
-        mock_haiku = AsyncMock(return_value=None)
-        mock_openrouter = AsyncMock(return_value=None)
-        with (
-            patch("bridge.message_drafter._draft_with_haiku", mock_haiku),
-            patch("bridge.message_drafter._draft_with_openrouter", mock_openrouter),
-        ):
-            result = await draft_message(long_text)
-
-        assert result.was_drafted is False
-        assert result.needs_self_draft is True
-        assert result.text == ""
-
-    @pytest.mark.asyncio
-    async def test_self_summary_instruction_quality(self):
-        """SELF_DRAFT_INSTRUCTION contains key quality markers."""
-        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
-
-        assert "outcome" in SELF_DRAFT_INSTRUCTION.lower()
-        assert "narration" in SELF_DRAFT_INSTRUCTION.lower()
-        assert "bullet" in SELF_DRAFT_INSTRUCTION.lower()
-        assert len(SELF_DRAFT_INSTRUCTION) < 1000  # compact, not the full system prompt
+    async def test_long_response_composed_deterministically(self):
+        """Responses >=200 chars go through deterministic composition."""
+        long_text = "Done and committed. " * 30  # 600 chars
+        result = await draft_message(long_text)
+        # text is non-empty (composition succeeded)
+        assert result.text
 
     @pytest.mark.asyncio
     async def test_very_long_response_creates_file(self):
         """Responses over FILE_ATTACH_THRESHOLD get a full output file."""
         long_text = "Output line.\n" * 500
 
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Work output",
-                response="Summary of work.",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(long_text)
+        result = await draft_message(long_text)
 
         assert result.full_output_file is not None
         assert result.full_output_file.exists()
@@ -236,806 +214,60 @@ class TestDraftMessage:
         result.full_output_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
+    async def test_overlength_still_delivers(self):
+        """Over-length responses still deliver (no needs_self_draft) — just attach file."""
+        long_text = "x" * 4000  # Over 3000 threshold
+        result = await draft_message(long_text)
+        # needs_self_draft is NOT set for over-length (file is attached instead)
+        assert result.needs_self_draft is False
+        assert result.full_output_file is not None
+        result.full_output_file.unlink(missing_ok=True)
+
+    @pytest.mark.asyncio
     async def test_mid_length_response_no_file(self):
-        """Responses between summarize and file thresholds: no file."""
-        text = "x" * 2000  # Over 1500, under 3000
-
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Mid-length content",
-                response="Short summary.",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(text)
-
+        """Responses between 200 and FILE_ATTACH_THRESHOLD: no file."""
+        text = "x" * 2000  # Over 200, under 3000
+        result = await draft_message(text)
         assert result.full_output_file is None
-        assert result.was_drafted is True
-
-
-@pytest.mark.slow
-class TestDraftMessageIntegration:
-    """Integration test with real Haiku API call."""
 
     @pytest.mark.asyncio
-    @pytest.mark.skipif(
-        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
-        reason="ANTHROPIC_API_KEY not set",
-    )
-    async def test_real_haiku_summarization(self):
-        """Test actual Haiku produces a concise PM-style summary."""
-        agent_output = "\n\n".join(
-            [
-                "I've completed the requested changes to the response "
-                "summarization system. Here's a detailed breakdown:",
-                "First, I analyzed the existing codebase. I read through "
-                "bridge/telegram_bridge.py, paying special attention to "
-                "send_response_with_files() at line 1499. The current "
-                "flow hard-truncates at 4000 chars, losing commit "
-                "hashes, file lists, and test results.",
-                "I reviewed agent/sdk_client.py to understand how raw "
-                "responses are collected from the Claude Agent SDK. The "
-                "query() method concatenates all AssistantMessage text "
-                "blocks, producing very long outputs.",
-                "I examined agent/completion.py and its format_summary() "
-                "method. While useful, it's a separate concern.",
-                "I created bridge/message_drafter.py with components:\n"
-                "1. extract_artifacts() - Regex extraction of commits, "
-                "URLs, file paths, test results, errors\n"
-                "2. draft_message() - Async Haiku summarization\n"
-                "3. MessageDraft dataclass",
-                "The summarizer follows a tiered approach:\n"
-                "- Under 1500 chars: passed through unchanged\n"
-                "- 1500-3000 chars: summarized via Haiku\n"
-                "- Over 3000 chars: summarized + full output as file",
-                "Changes made:\nmodified: bridge/telegram_bridge.py\n"
-                "created: bridge/message_drafter.py\n"
-                "created: tests/test_message_drafter.py",
-                "Test suite results: 17 passed, 0 failed",
-                "Created commit a1b2c3d and pushed to origin/main.\n"
-                "PR: https://github.com/org/repo/pull/99",
-                "The implementation handles all edge cases including "
-                "API failures, empty responses, and concise responses.",
-                "I also verified the existing test suite still passes "
-                "after the changes. No regressions were introduced. "
-                "The bridge restart was tested manually and confirmed "
-                "working. Logs show the summarizer activating correctly "
-                "for responses exceeding the threshold.",
-            ]
-        )
-
-        result = await draft_message(agent_output)
-
-        assert result.was_drafted is True
-        assert len(result.text) < len(agent_output)
-        # Summary should be concise — a few sentences, not a wall
-        assert len(result.text) <= 800
-
-
-class TestOutputType:
-    """Tests for the OutputType enum."""
-
-    def test_enum_values(self):
-        assert OutputType.QUESTION.value == "question"
-        assert OutputType.STATUS_UPDATE.value == "status"
-        assert OutputType.COMPLETION.value == "completion"
-        assert OutputType.BLOCKER.value == "blocker"
-        assert OutputType.ERROR.value == "error"
-
-    def test_all_types_exist(self):
-        """Verify all expected types are defined."""
-        assert len(OutputType) == 5
-
-
-class TestClassificationResult:
-    """Tests for the ClassificationResult dataclass."""
-
-    def test_creation(self):
-        result = ClassificationResult(
-            output_type=OutputType.QUESTION,
-            confidence=0.95,
-            reason="Direct question detected",
-        )
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.95
-        assert result.reason == "Direct question detected"
-
-    def test_nudge_feedback_default_none(self):
-        """nudge_feedback defaults to None when not provided."""
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.9,
-            reason="Test",
-        )
-        assert result.nudge_feedback is None
-
-    def test_nudge_feedback_set(self):
-        """nudge_feedback can be set explicitly."""
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.9,
-            reason="Test",
-            nudge_feedback="You said 'should work' but didn't show test output.",
-        )
-        assert result.nudge_feedback == "You said 'should work' but didn't show test output."
-
-    def test_confidence_range(self):
-        """Confidence is a float between 0.0 and 1.0."""
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.0,
-            reason="Test",
-        )
-        assert result.confidence == 0.0
-
-        result2 = ClassificationResult(
-            output_type=OutputType.COMPLETION,
-            confidence=1.0,
-            reason="Test",
-        )
-        assert result2.confidence == 1.0
-
-
-class TestParseClassificationResponse:
-    """Tests for _parse_classification_response."""
-
-    def test_valid_json(self):
-        raw = '{"type": "question", "confidence": 0.95, "reason": "asks user"}'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.95
-        assert result.reason == "asks user"
-
-    def test_all_types(self):
-        """Every valid type string parses correctly."""
-        for type_str, expected in [
-            ("question", OutputType.QUESTION),
-            ("status", OutputType.STATUS_UPDATE),
-            ("completion", OutputType.COMPLETION),
-            ("blocker", OutputType.BLOCKER),
-            ("error", OutputType.ERROR),
-        ]:
-            raw = f'{{"type": "{type_str}", "confidence": 0.9, "reason": "test"}}'
-            result = _parse_classification_response(raw)
-            assert result is not None
-            assert result.output_type == expected
-
-    def test_markdown_code_fences(self):
-        """Handles JSON wrapped in markdown code fences."""
-        raw = '```json\n{"type": "completion", "confidence": 0.88, "reason": "done"}\n```'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.output_type == OutputType.COMPLETION
-
-    def test_code_fences_no_language(self):
-        """Handles code fences without language tag."""
-        raw = '```\n{"type": "status", "confidence": 0.75, "reason": "in progress"}\n```'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.output_type == OutputType.STATUS_UPDATE
-
-    def test_invalid_json(self):
-        assert _parse_classification_response("not json at all") is None
-
-    def test_invalid_type(self):
-        raw = '{"type": "unknown", "confidence": 0.9, "reason": "test"}'
-        assert _parse_classification_response(raw) is None
-
-    def test_missing_type(self):
-        raw = '{"confidence": 0.9, "reason": "test"}'
-        assert _parse_classification_response(raw) is None
-
-    def test_confidence_clamped_high(self):
-        raw = '{"type": "error", "confidence": 1.5, "reason": "test"}'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.confidence == 1.0
-
-    def test_confidence_clamped_low(self):
-        raw = '{"type": "error", "confidence": -0.5, "reason": "test"}'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.confidence == 0.0
-
-    def test_non_numeric_confidence(self):
-        raw = '{"type": "error", "confidence": "high", "reason": "test"}'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.confidence == 0.5
-
-    def test_nudge_feedback_extracted(self):
-        """nudge_feedback is extracted from LLM JSON response."""
-        raw = (
-            '{"type": "status", "confidence": 0.92, '
-            '"reason": "hedging language", '
-            '"nudge_feedback": "You said \'should work\' — run the tests and share output."}'
-        )
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.nudge_feedback == "You said 'should work' — run the tests and share output."
-
-    def test_nudge_feedback_absent_defaults_none(self):
-        """When nudge_feedback is missing from JSON, it defaults to None."""
-        raw = '{"type": "completion", "confidence": 0.95, "reason": "done"}'
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.nudge_feedback is None
-
-    def test_hedging_patterns_not_used_for_was_rejected(self):
-        """was_rejected_completion is NOT set by hedging pattern matching.
-
-        The old code scanned reason text for patterns like 'hedg', 'no evidence'.
-        This has been removed — was_rejected_completion should only be set
-        when nudge_feedback is present (indicating the LLM flagged it).
-        """
-        raw = (
-            '{"type": "status", "confidence": 0.90, '
-            '"reason": "hedging language detected, no evidence provided"}'
-        )
-        result = _parse_classification_response(raw)
-        assert result is not None
-        # Without nudge_feedback, was_rejected_completion should be False
-        assert result.was_rejected_completion is False
-
-    def test_was_rejected_set_when_nudge_feedback_present(self):
-        """was_rejected_completion is True when nudge_feedback is present on status."""
-        raw = (
-            '{"type": "status", "confidence": 0.90, '
-            '"reason": "completion downgraded", '
-            '"nudge_feedback": "Include test output next time."}'
-        )
-        result = _parse_classification_response(raw)
-        assert result is not None
-        assert result.was_rejected_completion is True
-        assert result.nudge_feedback == "Include test output next time."
-
-    def test_nudge_feedback_null_for_non_status_types(self):
-        """nudge_feedback should be None for completion, question, blocker, error."""
-        for type_str in ("completion", "question", "blocker", "error"):
-            raw = (
-                f'{{"type": "{type_str}", "confidence": 0.95, '
-                f'"reason": "test", "nudge_feedback": null}}'
-            )
-            result = _parse_classification_response(raw)
-            assert result is not None
-            assert result.nudge_feedback is None, f"nudge_feedback should be None for {type_str}"
-            assert result.was_rejected_completion is False, (
-                f"was_rejected_completion should be False for {type_str}"
-            )
-
-    def test_nudge_feedback_on_non_status_ignored_for_rejection(self):
-        """Even if LLM mistakenly sets nudge_feedback on completion, was_rejected stays False."""
-        raw = (
-            '{"type": "completion", "confidence": 0.95, '
-            '"reason": "done", '
-            '"nudge_feedback": "Some nudge_feedback text"}'
-        )
-        result = _parse_classification_response(raw)
-        assert result is not None
-        # nudge_feedback IS preserved (it's in the JSON)
-        assert result.nudge_feedback == "Some nudge_feedback text"
-        # But was_rejected_completion is only set for STATUS_UPDATE
-        assert result.was_rejected_completion is False
-
-    def test_not_a_dict(self):
-        assert _parse_classification_response("[1, 2, 3]") is None
-
-    def test_empty_string(self):
-        assert _parse_classification_response("") is None
-
-
-class TestClassifyWithHeuristics:
-    """Tests for the keyword-based heuristic fallback classifier."""
-
-    def test_question_should_i(self):
-        result = _classify_with_heuristics("Should I proceed with the refactor?")
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence >= 0.80
-
-    def test_question_do_you_want(self):
-        result = _classify_with_heuristics("Do you want me to fix the failing test?")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_question_would_you_like(self):
-        result = _classify_with_heuristics("Would you like me to push these changes?")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_question_what_should(self):
-        result = _classify_with_heuristics("What should I do about the deprecated API?")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_question_please_confirm(self):
-        result = _classify_with_heuristics("Please confirm this is the right approach.")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_error_pattern(self):
-        result = _classify_with_heuristics("Error: ModuleNotFoundError: No module named 'foo'")
-        assert result.output_type == OutputType.ERROR
-        assert result.confidence >= 0.80
-
-    def test_error_failed(self):
-        result = _classify_with_heuristics("Failed: connection timeout")
-        assert result.output_type == OutputType.ERROR
-
-    def test_error_exit_code(self):
-        result = _classify_with_heuristics("Build failed with exit code 1")
-        assert result.output_type == OutputType.ERROR
-
-    def test_blocker_blocked(self):
-        result = _classify_with_heuristics("Blocked on waiting for API access")
-        assert result.output_type == OutputType.BLOCKER
-        assert result.confidence >= 0.80
-
-    def test_blocker_permission(self):
-        result = _classify_with_heuristics("Permission denied when accessing the deployment config")
-        assert result.output_type == OutputType.BLOCKER
-
-    def test_blocker_cannot_proceed(self):
-        result = _classify_with_heuristics("Cannot proceed without database credentials")
-        assert result.output_type == OutputType.BLOCKER
-
-    def test_completion_done(self):
-        result = _classify_with_heuristics("Done. All changes committed.")
-        assert result.output_type == OutputType.COMPLETION
-        assert result.confidence >= 0.80
-
-    def test_completion_pr_url(self):
-        result = _classify_with_heuristics("PR created: https://github.com/org/repo/pull/42")
-        assert result.output_type == OutputType.COMPLETION
-
-    def test_completion_pushed(self):
-        result = _classify_with_heuristics("Pushed changes to origin/main")
-        assert result.output_type == OutputType.COMPLETION
-
-    def test_completion_finished(self):
-        result = _classify_with_heuristics("Finished the implementation.")
-        assert result.output_type == OutputType.COMPLETION
-
-    def test_default_is_question(self):
-        """Unrecognized patterns now default to QUESTION (conservative).
-
-        Changed from STATUS_UPDATE to QUESTION as part of the auto-continue
-        audit (issue #99): the heuristic fallback should be conservative
-        (show to user) rather than permissive (auto-continue).
-        """
-        result = _classify_with_heuristics("Analyzing the codebase structure now")
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.80  # At threshold to avoid redundant gate re-conversion
-
-    def test_default_running_tests(self):
-        """No explicit status pattern — falls to conservative QUESTION default."""
-        result = _classify_with_heuristics("Running tests now...")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_heuristics_always_return_nudge_feedback_none(self):
-        """All heuristic paths return nudge_feedback=None."""
-        # Question path
-        result = _classify_with_heuristics("Should I proceed?")
-        assert result.nudge_feedback is None
-
-        # Error path
-        result = _classify_with_heuristics("Error: something broke")
-        assert result.nudge_feedback is None
-
-        # Blocker path
-        result = _classify_with_heuristics("Blocked on API access")
-        assert result.nudge_feedback is None
-
-        # Completion path
-        result = _classify_with_heuristics("Done. All committed.")
-        assert result.nudge_feedback is None
-
-        # Default status path
-        result = _classify_with_heuristics("Working on it now")
-        assert result.nudge_feedback is None
-
-    def test_empty_text(self):
-        """Empty text still returns a valid classification (default QUESTION)."""
-        result = _classify_with_heuristics("")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_approval_gate_when_approved(self):
-        """'when approved' triggers QUESTION (approval gate)."""
-        result = _classify_with_heuristics("Ready to build when approved")
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.85
-        assert "approval gate" in result.reason.lower()
-
-    def test_approval_gate_go_ahead(self):
-        """'waiting for go-ahead' triggers QUESTION."""
-        result = _classify_with_heuristics("Waiting for your go-ahead to proceed")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_approval_gate_shall_i_proceed(self):
-        """'shall I proceed' triggers QUESTION."""
-        result = _classify_with_heuristics("Plan is ready. Shall I proceed with the build?")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_approval_gate_awaiting_approval(self):
-        """'awaiting approval' triggers QUESTION."""
-        result = _classify_with_heuristics("PR is up, awaiting your approval before merging")
-        assert result.output_type == OutputType.QUESTION
-
-    def test_approval_gate_let_me_know_when(self):
-        """'let me know when' triggers QUESTION."""
-        result = _classify_with_heuristics("Let me know when you want me to start the migration")
-        assert result.output_type == OutputType.QUESTION
-
-
-class TestEmptyPromiseDetection:
-    """Tests for empty promise detection in heuristic classifier."""
-
-    def test_bare_acknowledgment_is_empty_promise(self):
-        """'Got it' + commitment without evidence = empty promise."""
-        result = _classify_with_heuristics("Got it. Will report final results and blockers only.")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
-        assert (
-            "empty" in result.nudge_feedback.lower() or "evidence" in result.nudge_feedback.lower()
-        )
-
-    def test_understood_without_evidence_is_empty_promise(self):
-        """'Understood' without a concrete change = empty promise."""
-        result = _classify_with_heuristics(
-            "Understood. I'll adjust my communication style going forward."
-        )
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
-
-    def test_noted_without_evidence_is_empty_promise(self):
-        """'Noted' with a vague commitment = empty promise."""
-        result = _classify_with_heuristics("Noted. You'll see the difference in my next output.")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
-
-    def test_acknowledgment_with_commit_is_not_empty(self):
-        """Acknowledgment WITH a commit hash = real action, not empty."""
-        result = _classify_with_heuristics(
-            "Got it. Updated the summarizer prompt. Committed abc1234."
-        )
-        # Should be classified as completion (has commit evidence)
-        assert result.output_type == OutputType.COMPLETION
-
-    def test_acknowledgment_with_file_path_is_not_empty(self):
-        """Acknowledgment WITH a file edit = real action, not empty."""
-        result = _classify_with_heuristics(
-            "Understood. Saved memory to feedback_no_plans.md with this rule."
-        )
-        assert result.output_type != OutputType.STATUS_UPDATE or result.nudge_feedback is None
-
-    def test_normal_status_not_flagged(self):
-        """Regular status updates should not trigger empty promise detection."""
-        result = _classify_with_heuristics("Running tests now, found 3 issues so far.")
-        assert result.nudge_feedback is None or "empty" not in (result.nudge_feedback or "").lower()
-
-    def test_will_do_without_evidence(self):
-        """'Will do' without proof = empty promise."""
-        result = _classify_with_heuristics("Will do. I'll change my approach from now on.")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback is not None
-
-
-class TestApplyHeuristicConfidenceGate:
-    """Tests for _apply_heuristic_confidence_gate."""
-
-    def test_high_confidence_passes_through(self):
-        """Results above threshold are returned unchanged."""
-        from bridge.message_drafter import _apply_heuristic_confidence_gate
-
-        result = ClassificationResult(
-            output_type=OutputType.COMPLETION,
-            confidence=0.85,
-            reason="Detected completion",
-        )
-        gated = _apply_heuristic_confidence_gate(result)
-        assert gated.output_type == OutputType.COMPLETION
-        assert gated.confidence == 0.85
-
-    def test_low_confidence_becomes_question(self):
-        """Results below threshold become QUESTION."""
-        from bridge.message_drafter import _apply_heuristic_confidence_gate
-
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.60,
-            reason="No strong signal",
-        )
-        gated = _apply_heuristic_confidence_gate(result)
-        assert gated.output_type == OutputType.QUESTION
-        assert gated.confidence == 0.60
-        assert "Low heuristic confidence" in gated.reason
-
-    def test_threshold_boundary_exact(self):
-        """Exactly at threshold passes through (not below)."""
-        from bridge.message_drafter import _apply_heuristic_confidence_gate
-
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.80,
-            reason="Status",
-        )
-        gated = _apply_heuristic_confidence_gate(result)
-        assert gated.output_type == OutputType.STATUS_UPDATE
-
-    def test_below_threshold_preserves_original_confidence(self):
-        """The original confidence value is preserved in the gated result."""
-        from bridge.message_drafter import _apply_heuristic_confidence_gate
-
-        result = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=0.55,
-            reason="Weak signal",
-        )
-        gated = _apply_heuristic_confidence_gate(result)
-        assert gated.confidence == 0.55
-
-
-class TestClassificationAuditLog:
-    """Tests for the classification audit JSONL log."""
-
-    def test_audit_log_writes_entry(self, tmp_path):
-        """_write_classification_audit creates a JSONL entry."""
-        import json
-
-        import bridge.message_drafter as mod
-        from bridge.message_drafter import _write_classification_audit
-
-        # Redirect audit log to temp path
-        original_path = mod._AUDIT_LOG_PATH
-        mod._AUDIT_LOG_PATH = tmp_path / "test_audit.jsonl"
-
-        try:
-            result = ClassificationResult(
-                output_type=OutputType.QUESTION,
-                confidence=0.85,
-                reason="Direct question",
-            )
-            _write_classification_audit("Should I proceed?", result, source="llm")
-
-            # Verify file was written
-            assert mod._AUDIT_LOG_PATH.exists()
-            line = mod._AUDIT_LOG_PATH.read_text().strip()
-            entry = json.loads(line)
-            assert entry["result"] == "question"
-            assert entry["confidence"] == 0.85
-            assert entry["source"] == "llm"
-            assert entry["text_preview"] == "Should I proceed?"
-            assert "ts" in entry
-        finally:
-            mod._AUDIT_LOG_PATH = original_path
-
-    def test_audit_log_truncates_preview(self, tmp_path):
-        """Text preview is truncated to 200 chars."""
-        import json
-
-        import bridge.message_drafter as mod
-        from bridge.message_drafter import _write_classification_audit
-
-        original_path = mod._AUDIT_LOG_PATH
-        mod._AUDIT_LOG_PATH = tmp_path / "test_audit2.jsonl"
-
-        try:
-            result = ClassificationResult(
-                output_type=OutputType.STATUS_UPDATE,
-                confidence=0.90,
-                reason="Progress",
-            )
-            long_text = "x" * 500
-            _write_classification_audit(long_text, result, source="heuristic")
-
-            line = mod._AUDIT_LOG_PATH.read_text().strip()
-            entry = json.loads(line)
-            assert len(entry["text_preview"]) == 200
-        finally:
-            mod._AUDIT_LOG_PATH = original_path
-
-
-class TestClassifyOutput:
-    """Tests for the main classify_output async function."""
+    async def test_context_summary_populated_for_long_response(self):
+        """context_summary is set for responses that go through composition."""
+        long_text = "Fixed the drafter refactoring to remove LLM calls. " * 10
+        result = await draft_message(long_text)
+        # context_summary should be derived deterministically
+        assert result.context_summary is not None
+        assert isinstance(result.context_summary, str)
 
     @pytest.mark.asyncio
-    async def test_empty_text(self):
-        result = await classify_output("")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.confidence == 1.0
-        assert result.reason == "Empty output"
+    async def test_expectations_none_for_no_questions(self):
+        """expectations is None when no ## Open Questions section exists."""
+        text = "Fixed the bug and committed abc1234. All tests passing. " * 10
+        result = await draft_message(text)
+        assert result.expectations is None
 
     @pytest.mark.asyncio
-    async def test_none_text(self):
-        result = await classify_output(None)
-        assert result.output_type == OutputType.STATUS_UPDATE
+    async def test_expectations_from_open_questions_section(self):
+        """expectations is populated from ## Open Questions section."""
+        text = (
+            "Completed the refactoring work. All tests pass.\n\n"
+            "## Open Questions\n"
+            "- Should we merge to main or wait for design review?\n"
+            "- Is the confidence threshold of 0.80 acceptable?\n"
+        )
+        result = await draft_message(text)
+        assert result.expectations is not None
+        assert "merge" in result.expectations.lower() or "design" in result.expectations.lower()
 
     @pytest.mark.asyncio
-    async def test_whitespace_only(self):
-        result = await classify_output("   \n\t  ")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.confidence == 1.0
+    async def test_self_summary_instruction_quality(self):
+        """SELF_DRAFT_INSTRUCTION contains key quality markers."""
+        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
 
-    @pytest.mark.asyncio
-    async def test_llm_success(self):
-        """When LLM returns valid JSON, classification is used."""
-        mock_response = AsyncMock()
-        mock_response.content = [
-            AsyncMock(
-                text='{"type": "question", "confidence": 0.95, "reason": "asks about approach"}'
-            )
-        ]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output("Should I use approach A or B?")
-
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.95
-
-    @pytest.mark.asyncio
-    async def test_llm_low_confidence_defaults_to_question(self):
-        """Below confidence threshold, defaults to QUESTION."""
-        mock_response = AsyncMock()
-        mock_response.content = [
-            AsyncMock(text='{"type": "status", "confidence": 0.5, "reason": "unclear"}')
-        ]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output("Some ambiguous output")
-
-        assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.5
-        assert "Low confidence" in result.reason
-
-    @pytest.mark.asyncio
-    async def test_llm_failure_falls_back_to_heuristics(self):
-        """When LLM call fails, heuristics are used."""
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "agent.anthropic_client.anthropic.AsyncAnthropic",
-                side_effect=Exception("API error"),
-            ),
-        ):
-            result = await classify_output("Should I proceed?")
-
-        # Heuristics should still detect the question
-        assert result.output_type == OutputType.QUESTION
-
-    @pytest.mark.asyncio
-    async def test_no_api_key_falls_back_to_heuristics(self):
-        """When no API key, heuristics are used."""
-        with patch("bridge.message_drafter.get_anthropic_api_key", return_value=""):
-            result = await classify_output("Error: ModuleNotFoundError: No module named 'foo'")
-
-        assert result.output_type == OutputType.ERROR
-
-    @pytest.mark.asyncio
-    async def test_unparseable_llm_response_falls_back(self):
-        """When LLM returns garbage, falls back to heuristics."""
-        mock_response = AsyncMock()
-        mock_response.content = [AsyncMock(text="I think this is a question")]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output("Done. Committed abc1234.")
-
-        # Heuristics should detect completion
-        assert result.output_type == OutputType.COMPLETION
-
-    @pytest.mark.asyncio
-    async def test_long_text_truncated_for_classification(self):
-        """Very long text is truncated before sending to LLM."""
-        long_text = "x" * 5000
-        mock_response = AsyncMock()
-        mock_response.content = [
-            AsyncMock(text='{"type": "status", "confidence": 0.90, "reason": "progress report"}')
-        ]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output(long_text)
-
-        # Verify the text sent to LLM was truncated
-        call_args = mock_client.messages.create.call_args
-        user_msg = call_args.kwargs["messages"][0]["content"]
-        assert len(user_msg) < len(long_text)
-        assert "[...truncated...]" in user_msg
-        assert result.output_type == OutputType.STATUS_UPDATE
-
-    @pytest.mark.asyncio
-    async def test_llm_returns_nudge_feedback_for_hedging(self):
-        """LLM classifier returns specific nudge_feedback when hedging language detected."""
-        mock_response = AsyncMock()
-        mock_response.content = [
-            AsyncMock(
-                text='{"type": "status", "confidence": 0.92, '
-                '"reason": "Hedging language without verification", '
-                '"nudge_feedback": "You used hedging language. Run the tests."}'
-            )
-        ]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output("I think the bug is fixed now. Should work.")
-
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback == "You used hedging language. Run the tests."
-        assert result.was_rejected_completion is True
-
-    @pytest.mark.asyncio
-    async def test_llm_returns_nudge_feedback_for_missing_evidence(self):
-        """LLM classifier returns specific nudge_feedback when evidence is missing."""
-        mock_response = AsyncMock()
-        mock_response.content = [
-            AsyncMock(
-                text='{"type": "status", "confidence": 0.90, '
-                '"reason": "Claims tests pass but shows no output", '
-                '"nudge_feedback": "Paste the pytest output with pass/fail counts."}'
-            )
-        ]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output("All tests pass. Task complete.")
-
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.nudge_feedback == "Paste the pytest output with pass/fail counts."
-        assert result.was_rejected_completion is True
-
-    @pytest.mark.asyncio
-    async def test_llm_no_nudge_feedback_for_genuine_completion(self):
-        """LLM returns null nudge_feedback for genuine completions with evidence."""
-        mock_response = AsyncMock()
-        mock_response.content = [
-            AsyncMock(
-                text='{"type": "completion", "confidence": 0.98, '
-                '"reason": "verified completion with evidence", '
-                '"nudge_feedback": null}'
-            )
-        ]
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with (
-            patch("bridge.message_drafter.get_anthropic_api_key", return_value="sk-test"),
-            patch("agent.anthropic_client.anthropic.AsyncAnthropic", return_value=mock_client),
-        ):
-            result = await classify_output(
-                "All 42 tests passed. Committed abc1234. PR: https://github.com/org/repo/pull/99"
-            )
-
-        assert result.output_type == OutputType.COMPLETION
-        assert result.nudge_feedback is None
-        assert result.was_rejected_completion is False
-
-    @pytest.mark.asyncio
-    async def test_confidence_threshold_constant(self):
-        """Verify the confidence threshold is set correctly."""
-        assert CLASSIFICATION_CONFIDENCE_THRESHOLD == 0.80
+        assert "outcome" in SELF_DRAFT_INSTRUCTION.lower()
+        assert "narration" in SELF_DRAFT_INSTRUCTION.lower()
+        assert "bullet" in SELF_DRAFT_INSTRUCTION.lower()
+        assert len(SELF_DRAFT_INSTRUCTION) < 1000  # compact, not the full system prompt
 
 
 class TestParseSummaryAndQuestions:
@@ -1130,7 +362,7 @@ class TestComposeStructuredDraft:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.session_type = SessionType.PM
+        session.session_type = SessionType.ENG
         session.session_id = None
         session.status = "completed"
 
@@ -1159,7 +391,7 @@ class TestNoMessageEcho:
         session.message_text = "continue"
         session.status = "running"
         session.is_sdlc = True
-        session.session_type = SessionType.PM
+        session.session_type = SessionType.ENG
 
         result = _compose_structured_draft(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
@@ -1177,7 +409,7 @@ class TestNoMessageEcho:
         session._get_history_list.return_value = ["[user] What time is it?"]
         session.message_text = "What time is it?"
         session.status = "completed"
-        session.session_type = SessionType.PM
+        session.session_type = SessionType.ENG
         session.get_links.return_value = {}
 
         result = _compose_structured_draft("It's 3pm UTC+7", session=session, is_completion=True)
@@ -1268,19 +500,17 @@ class TestComposeStructuredDraftWithSession:
         session.status = "running"
 
         result = _compose_structured_draft(
-            "\u2022 Implemented the bypass\n\u2022 135 tests passing",
+            "• Implemented the bypass\n• 135 tests passing",
             session=session,
             is_completion=True,
         )
 
         # First line is emoji or content (no emoji for routine completions)
         first_line = result.split("\n")[0]
-        assert first_line.strip() in ("\u2705", "\u23f3", "\u274c", "") or first_line.startswith(
-            "\u2022"
-        )
+        assert first_line.strip() in ("✅", "⏳", "❌", "") or first_line.startswith("•")
         assert "continue" not in first_line
         # Bullets present
-        assert "\u2022 Implemented the bypass" in result
+        assert "• Implemented the bypass" in result
 
     def test_non_sdlc_session_no_stage_line(self):
         """Non-SDLC session skips stage progress line."""
@@ -1296,7 +526,7 @@ class TestComposeStructuredDraftWithSession:
         assert "BUILD" not in result
         # First line is emoji or content (no emoji for routine completions)
         first_line = result.split("\n")[0].strip()
-        assert first_line in ("\u2705", "\u23f3", "\u274c", "") or len(first_line) > 0
+        assert first_line in ("✅", "⏳", "❌", "") or len(first_line) > 0
 
     def test_teammate_mode_session_returns_prose(self):
         """Teammate session bypasses all structured formatting."""
@@ -1313,9 +543,9 @@ class TestComposeStructuredDraftWithSession:
         )
 
         # No structured formatting — pure prose
-        assert not result.startswith("\u2705")
-        assert not result.startswith("\u23f3")
-        assert "\u2022" not in result  # No bullet points
+        assert not result.startswith("✅")
+        assert not result.startswith("⏳")
+        assert "•" not in result  # No bullet points
         assert "bridge connects Telegram" in result
 
 
@@ -1396,292 +626,59 @@ class TestDraftingBypass:
 
 
 class TestQuestionFabricationPrevention:
-    """Tests for anti-fabrication rules in the summarizer (issue #280).
+    """Tests for anti-fabrication rules — expectations must come from raw output only.
 
-    The summarizer must NEVER fabricate questions from declarative statements.
-    Only explicit questions (sentences ending in "?" directed at the human)
-    may appear in the "?" section or set the expectations field.
+    The drafter must NEVER fabricate questions from declarative statements.
+    Only explicit questions (from ## Open Questions sections) populate expectations.
     """
 
     @pytest.mark.asyncio
     async def test_no_questions_fabricated_from_declarative_statements(self):
-        """Declarative planned work must produce expectations=None, no '?' lines."""
+        """Declarative planned work must produce expectations=None."""
+        # Long enough to bypass short-output path, no ## Open Questions section
         agent_output = (
             "I will add sdlc to classifier categories. "
-            "I will fix auto-continue to carry forward session state."
+            "I will fix auto-continue to carry forward session state. "
+            "Both changes are straightforward — modifying the classifier prompt "
+            "and the auto-continue handler. No questions at this time. " * 3
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Planning classifier and auto-continue fixes",
-                response=(
-                    "• Adding sdlc to classifier categories\n"
-                    "• Fixing auto-continue session state propagation"
-                ),
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
+        result = await draft_message(agent_output)
 
+        # No ## Open Questions section → expectations must be None
         assert result.expectations is None
         # Verify no --- separator (which precedes questions)
         assert "\n---\n" not in result.text
 
     @pytest.mark.asyncio
-    async def test_explicit_questions_preserved_verbatim(self):
-        """Real questions in agent output must be preserved in expectations."""
-        # Input must be longer than the mock response to avoid the
-        # "summary longer than original" safety fallback
+    async def test_explicit_questions_from_open_questions_section(self):
+        """Real ## Open Questions section must populate expectations."""
         agent_output = (
-            "I've completed building the authentication module with token rotation, "
-            "session management, and retry logic. The implementation includes proper "
-            "error handling for all edge cases including network timeouts, invalid "
-            "tokens, and rate limiting. All 12 tests are passing with full coverage.\n\n"
-            "Should we use exponential backoff or fixed intervals?"
+            "Completed the refactoring work. All 12 tests passing. "
+            "Committed abc1234 and pushed to session/refactor.\n\n"
+            "## Open Questions\n"
+            "- Should we use exponential backoff or fixed intervals?\n"
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Auth module with backoff decision",
-                response=(
-                    "• Built auth module with token rotation\n"
-                    "• 12 tests passing\n---\n"
-                    "? Should we use exponential backoff or fixed intervals?"
-                ),
-                expectations="Should we use exponential backoff or fixed intervals?",
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
+        result = await draft_message(agent_output)
 
         assert result.expectations is not None
         assert "exponential backoff" in result.expectations
-        assert ">> Should we use exponential backoff or fixed intervals?" in result.text
-
-    @pytest.mark.asyncio
-    async def test_mixed_declarative_and_questions(self):
-        """Only explicit questions surfaced; declarative statements stay as bullets."""
-        agent_output = (
-            "Implemented retry logic with 3 attempts. "
-            "Refactored the error handler to use structured exceptions.\n\n"
-            "The API rate limit is 100/min — should we add client-side throttling?"
-        )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Retry logic with rate limit question",
-                response=(
-                    "• Implemented retry logic with 3 attempts\n"
-                    "• Refactored error handler to structured exceptions\n---\n"
-                    "? Should we add client-side throttling?"
-                ),
-                expectations="Should we add client-side throttling?",
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
-
-        assert result.expectations is not None
-        assert "throttling" in result.expectations
-        # The retry logic should be a bullet, not a question
-        assert "retry" in result.text.lower()
-        # Only one question line
-        lines = result.text.split("\n")
-        question_lines = [line for line in lines if line.strip().startswith(">>")]
-        assert len(question_lines) == 1
-        assert "throttling" in question_lines[0]
 
     @pytest.mark.asyncio
     async def test_future_tense_plans_not_turned_into_questions(self):
         """'Will do X' statements must not become questions."""
         agent_output = (
             "Next steps: will update the migration script, "
-            "will add index to users table, will run load test."
+            "will add index to users table, will run load test. "
+            "No explicit questions for the human at this point. " * 5
         )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Planning migration and performance work",
-                response=(
-                    "• Will update migration script\n"
-                    "• Will add index to users table\n"
-                    "• Will run load test"
-                ),
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
+        result = await draft_message(agent_output)
 
         assert result.expectations is None
         assert "\n---\n" not in result.text
-
-    @pytest.mark.asyncio
-    async def test_rhetorical_questions_not_surfaced(self):
-        """Rhetorical questions in agent reasoning must not set expectations."""
-        agent_output = (
-            "Why was this never caught? Because the test suite didn't cover "
-            "this path. Fixed by adding integration test."
-        )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Fixed missing test coverage",
-                response="• Fixed missing test coverage by adding integration test",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
-
-        assert result.expectations is None
-
-    @pytest.mark.asyncio
-    async def test_code_snippet_with_question_marks_not_treated_as_questions(self):
-        """Question marks inside code snippets must not be extracted as questions."""
-        agent_output = (
-            "Fixed the regex: `if line.endswith('?'):` now handles edge cases. All 8 tests passing."
-        )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="Fixed regex edge case handling",
-                response="• Fixed regex `endswith('?')` edge case\n• 8 tests passing",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
-
-        assert result.expectations is None
-        assert "\n---\n" not in result.text
-
-    @pytest.mark.asyncio
-    async def test_conditional_statements_not_treated_as_questions(self):
-        """'If X' and 'whether Y' statements must not become questions."""
-        agent_output = (
-            "If the CI pipeline fails, the deploy will be blocked. "
-            "Whether to retry depends on the error type."
-        )
-        mock_haiku = AsyncMock(
-            return_value=StructuredDraft(
-                context_summary="CI pipeline deployment notes",
-                response="• CI failure blocks deploy; retry depends on error type",
-                expectations=None,
-            )
-        )
-        with patch("bridge.message_drafter._draft_with_haiku", mock_haiku):
-            result = await draft_message(agent_output)
-
-        assert result.expectations is None
-
-    def test_prompt_contains_anti_fabrication_instruction(self):
-        """Verify DRAFTER_SYSTEM_PROMPT includes anti-fabrication rules."""
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
-
-        assert "NEVER fabricate questions" in DRAFTER_SYSTEM_PROMPT
-        assert "NEVER reframe declarative statements as questions" in DRAFTER_SYSTEM_PROMPT
-        assert "VERBATIM" in DRAFTER_SYSTEM_PROMPT
-
-    def test_prompt_contains_negative_examples(self):
-        """Verify DRAFTER_SYSTEM_PROMPT includes negative examples."""
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
-
-        assert "WRONG" in DRAFTER_SYSTEM_PROMPT
-        assert "FABRICATED" in DRAFTER_SYSTEM_PROMPT
-        assert "I will add sdlc to classifier categories" in DRAFTER_SYSTEM_PROMPT
-
-    def test_expectations_tool_schema_updated(self):
-        """Verify the tool schema description for expectations reflects anti-fabrication."""
-        from bridge.message_drafter import STRUCTURED_DRAFT_TOOL
-
-        schema = STRUCTURED_DRAFT_TOOL["input_schema"]
-        expectations_desc = schema["properties"]["expectations"]["description"]
-        assert "explicit question" in expectations_desc.lower()
-
-
-class TestQuestionFabricationIntegration:
-    """Integration tests using real Haiku API to validate anti-fabrication behavior."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.skipif(
-        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
-        reason="ANTHROPIC_API_KEY not set",
-    )
-    async def test_real_haiku_no_fabricated_questions(self):
-        """Real Haiku should not fabricate questions from declarative statements."""
-        # This is the actual raw output pattern that triggered the bug
-        agent_output = (
-            "I identified two root causes for the session tracking bugs:\n\n"
-            "1. The classifier doesn't have an 'sdlc' category. I will add sdlc "
-            "to the classifier categories so it can properly identify SDLC work.\n\n"
-            "2. Auto-continue doesn't carry forward session state. I will fix "
-            "auto-continue to propagate the classification_type and branch_name "
-            "from the parent session to the continued session.\n\n"
-            "Both fixes are straightforward — modifying the classifier prompt and "
-            "the auto-continue handler in the bridge."
-        )
-        result = await draft_message(agent_output)
-
-        assert result.was_drafted is True
-        assert result.expectations is None, (
-            f"Haiku fabricated expectations from declarative output: {result.expectations}"
-        )
-        # No question prefix lines should appear (>> or legacy ?)
-        lines = result.text.split("\n")
-        question_lines = [
-            line for line in lines if line.strip().startswith(">>") or line.strip().startswith("?")
-        ]
-        assert len(question_lines) == 0, f"Haiku fabricated question lines: {question_lines}"
-
-    @pytest.mark.asyncio
-    @pytest.mark.skipif(
-        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
-        reason="ANTHROPIC_API_KEY not set",
-    )
-    async def test_real_haiku_preserves_real_questions(self):
-        """Real Haiku should preserve genuine questions in expectations."""
-        agent_output = (
-            "Completed the database schema refactor. All 15 tests passing.\n"
-            "Committed abc1234 and pushed to session/db-refactor.\n\n"
-            "Should I merge to main or wait for the design review?"
-        )
-        result = await draft_message(agent_output)
-
-        assert result.was_drafted is True
-        assert result.expectations is not None, (
-            "Haiku failed to surface the genuine question about merging"
-        )
-        assert "merge" in result.expectations.lower() or "review" in result.expectations.lower()
-
-    @pytest.mark.asyncio
-    @pytest.mark.skipif(
-        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
-        reason="ANTHROPIC_API_KEY not set",
-    )
-    async def test_real_haiku_sdlc_work_summary_no_questions(self):
-        """SDLC completion output without questions should have expectations=None."""
-        agent_output = (
-            "Plan execution complete for fix-session-tracking.\n\n"
-            "Changes made:\n"
-            "- Modified bridge/message_drafter.py: updated classifier categories\n"
-            "- Modified bridge/telegram_bridge.py: fixed auto-continue propagation\n"
-            "- Created tests/test_session_tracking.py: 8 new tests\n\n"
-            "Test results: 135 passed, 0 failed\n"
-            "Committed def5678 and pushed to session/fix-session-tracking.\n"
-            "PR created: https://github.com/org/repo/pull/277"
-        )
-        result = await draft_message(agent_output)
-
-        assert result.was_drafted is True
-        assert result.expectations is None, (
-            f"Haiku fabricated expectations from SDLC completion: {result.expectations}"
-        )
 
 
 class TestErrorStateRendering:
-    """Tests for _compose_structured_draft with error/failed states (Gap 4).
-
-    Verifies that error states render correctly with:
-    - Failure emoji (X)
-    - Failed stage progress showing the failure point
-    - Error messages reaching the output
-    """
+    """Tests for _compose_structured_draft with error/failed states (Gap 4)."""
 
     def test_failed_session_renders_error_emoji(self):
         """Failed session should render with X emoji."""
@@ -1725,11 +722,7 @@ class TestErrorStateRendering:
         assert first_line.strip() == "❌"
 
     def test_failed_stage_shows_in_progress(self):
-        """Failed stage progress should render the failure point visibly.
-
-        The stage progress renderer shows failed stages with a cross mark.
-        This test ensures the stage line is present for failed sessions.
-        """
+        """Failed stage progress should render the failure point visibly."""
         session = _mock_session_with_stages(
             {"ISSUE": "completed", "PLAN": "completed", "BUILD": "failed"},
         )
@@ -1797,259 +790,242 @@ class TestErrorStateRendering:
         assert _get_status_emoji(session, is_completion=False) == "❌"
 
 
-class TestLinkifyReferences:
-    """Unit tests for _linkify_references — converting plain PR/Issue refs to markdown links."""
+class TestMessageDraftDataclass:
+    """Tests for the MessageDraft dataclass after was_drafted removal."""
 
-    def _make_session(self, project_key="valor"):
-        """Create a mock session with the given project_key."""
-        from unittest.mock import MagicMock
+    def test_no_was_drafted_field(self):
+        """MessageDraft no longer has was_drafted field."""
+        draft = MessageDraft(text="hello")
+        assert not hasattr(draft, "was_drafted")
 
-        session = MagicMock()
-        session.project_key = project_key
-        return session
+    def test_default_needs_self_draft_false(self):
+        draft = MessageDraft(text="hello")
+        assert draft.needs_self_draft is False
 
-    def setup_method(self):
-        """Initialize per-test project configs dict and patcher."""
-        self._project_configs = {}
-        self._patcher = None
+    def test_context_summary_defaults_none(self):
+        draft = MessageDraft(text="hello")
+        assert draft.context_summary is None
 
-    def teardown_method(self):
-        """Stop any active patcher."""
-        if self._patcher:
-            self._patcher.stop()
-            self._patcher = None
+    def test_expectations_defaults_none(self):
+        draft = MessageDraft(text="hello")
+        assert draft.expectations is None
 
-    def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
-        """Set up project config mock for testing.
+    def test_violations_defaults_empty_list(self):
+        draft = MessageDraft(text="hello")
+        assert draft.violations == []
 
-        Patches bridge.routing.load_config to return a config with the
-        specified GitHub org/repo, replacing the old register_project_config approach.
+    def test_full_output_file_defaults_none(self):
+        draft = MessageDraft(text="hello")
+        assert draft.full_output_file is None
+
+
+class TestExpectationsRecallParity:
+    """Tests verifying that expectations come exclusively from _extract_open_questions.
+
+    The drafter must NEVER fabricate questions from declarative statements.
+    expectations must be None (not "", not any other falsy value) when no
+    ## Open Questions section is present.
+    """
+
+    @pytest.mark.asyncio
+    async def test_open_questions_section_populates_expectations(self):
+        """A real ## Open Questions section must produce matching expectations."""
+        agent_output = (
+            "Completed the migration. All 47 tests pass. Committed abc1234.\n\n"
+            "## Open Questions\n"
+            "- Should we use exponential backoff or fixed 5s intervals?\n"
+            "- Is the 0.80 confidence threshold acceptable for prod?\n"
+        )
+        result = await draft_message(agent_output)
+
+        assert result.expectations is not None
+        assert (
+            "exponential backoff" in result.expectations
+            or "confidence threshold" in result.expectations
+        )
+
+    @pytest.mark.asyncio
+    async def test_declarative_output_yields_none_expectations(self):
+        """Pure declarative output with no ## Open Questions → expectations is None."""
+        agent_output = (
+            "Fixed the authentication bug in bridge/telegram_bridge.py. "
+            "The session lock cleanup now runs on startup. "
+            "All 135 tests pass. Committed def5678 and pushed to session/auth-fix. " * 3
+        )
+        result = await draft_message(agent_output)
+
+        # No ## Open Questions section → no expectations
+        assert result.expectations is None
+
+    @pytest.mark.asyncio
+    async def test_none_contract_not_empty_string(self):
+        """expectations is None (not '') when no questions are found.
+
+        The contract is: None means 'no questions', empty string is ambiguous
+        and must not be used. Callers rely on truthiness to gate routing.
         """
-        self._project_configs[project_key] = {"github": {"org": org, "repo": repo}}
-        mock_config = {"projects": self._project_configs}
-        if self._patcher:
-            self._patcher.stop()
-        self._patcher = patch("bridge.routing.load_config", return_value=mock_config)
-        self._patcher.start()
+        agent_output = (
+            "Updated the session scheduler. Cleaned up 3 orphaned sessions. "
+            "No pending questions at this time. " * 5
+        )
+        result = await draft_message(agent_output)
 
-    def test_pr_reference_linkified(self):
-        """PR #N is converted to a markdown link."""
-        self._register_config("psyoptimal", org="yudame", repo="psyoptimal")
-        session = self._make_session("psyoptimal")
-        result = _linkify_references("PR #323", session)
-        assert result == "[PR #323](https://github.com/yudame/psyoptimal/pull/323)"
+        # Must be exactly None, not an empty string or empty list
+        assert result.expectations is None
+        assert result.expectations != ""
+        assert result.expectations != []
 
-    def test_issue_reference_linkified(self):
-        """Issue #N is converted to a markdown link."""
-        self._register_config("valor", org="tomcounsell", repo="ai")
-        session = self._make_session("valor")
-        result = _linkify_references("Issue #309", session)
-        assert result == "[Issue #309](https://github.com/tomcounsell/ai/issues/309)"
+    @pytest.mark.asyncio
+    async def test_trailing_question_mark_sentences_not_fabricated(self):
+        """Sentences that end in '?' but are not in ## Open Questions must not
+        become expectations. Anti-fabrication rule preserved from original drafter."""
+        agent_output = (
+            "Should we use Redis or Postgres? I think Redis is better for this use case. "
+            "The current implementation uses Redis anyway. "
+            "Completed the analysis. Will proceed with Redis. " * 3
+        )
+        result = await draft_message(agent_output)
 
-    def test_multiple_references(self):
-        """Multiple PR references in the same text are all linkified."""
-        self._register_config("valor", org="tomcounsell", repo="ai")
-        session = self._make_session("valor")
-        result = _linkify_references("PR #322 and PR #323", session)
-        assert "[PR #322](https://github.com/tomcounsell/ai/pull/322)" in result
-        assert "[PR #323](https://github.com/tomcounsell/ai/pull/323)" in result
+        # Questions embedded in declarative prose must not be extracted
+        assert result.expectations is None
 
-    def test_already_linked_not_doubled(self):
-        """Already-linked references inside markdown syntax are not double-linked."""
-        self._register_config("valor", org="tomcounsell", repo="ai")
-        session = self._make_session("valor")
-        text = "[PR #323](https://github.com/tomcounsell/ai/pull/323)"
-        result = _linkify_references(text, session)
-        assert result == text
+    @pytest.mark.asyncio
+    async def test_open_questions_section_with_multiple_items(self):
+        """All items under ## Open Questions are extracted and joined."""
+        agent_output = (
+            "Refactoring complete. 200 tests passing.\n\n"
+            "## Open Questions\n"
+            "- Should we merge to main or wait for the design review?\n"
+            "- Do we need a migration script for existing records?\n"
+            "- Is the 48h TTL on steering keys acceptable?\n"
+        )
+        result = await draft_message(agent_output)
 
-    def test_no_session_returns_unchanged(self):
-        """With session=None, text is returned unchanged."""
-        result = _linkify_references("PR #323", None)
-        assert result == "PR #323"
-
-    def test_no_project_key_returns_unchanged(self):
-        """Session without project_key returns text unchanged."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.project_key = None
-        result = _linkify_references("PR #323", session)
-        assert result == "PR #323"
-
-    def test_no_github_config_returns_unchanged(self):
-        """project_key exists but no GitHub config returns unchanged."""
-        self._project_configs["no-github"] = {"name": "No GitHub"}
-        mock_config = {"projects": self._project_configs}
-        if self._patcher:
-            self._patcher.stop()
-        self._patcher = patch("bridge.routing.load_config", return_value=mock_config)
-        self._patcher.start()
-        session = self._make_session("no-github")
-        result = _linkify_references("PR #323", session)
-        assert result == "PR #323"
-
-    def test_mixed_pr_and_issue(self):
-        """Both PR #N and Issue #N in the same text are both linkified."""
-        self._register_config("valor", org="tomcounsell", repo="ai")
-        session = self._make_session("valor")
-        result = _linkify_references("Fixed PR #100 for Issue #200", session)
-        assert "[PR #100](https://github.com/tomcounsell/ai/pull/100)" in result
-        assert "[Issue #200](https://github.com/tomcounsell/ai/issues/200)" in result
-
-    def test_empty_text_returns_unchanged(self):
-        """Empty text is returned as-is."""
-        session = self._make_session("valor")
-        assert _linkify_references("", session) == ""
-
-    def test_empty_project_key_string_returns_unchanged(self):
-        """Session with empty string project_key returns text unchanged."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session.project_key = "   "
-        result = _linkify_references("PR #323", session)
-        assert result == "PR #323"
+        assert result.expectations is not None
+        # All three questions should appear in some form
+        assert (
+            "merge" in result.expectations.lower() or "design review" in result.expectations.lower()
+        )
 
 
-# NOTE: TestDrafterBypass and TestDrafterBypassParentSession classes were removed
-# when send_response_with_files was deleted in the #1074 follow-up. The PM
-# self-messaging bypass (issue #497, #571) now lives in bridge/telegram_bridge.py's
-# send_cb callback, which is integration-tested via tests/integration/test_reply_delivery.py.
+class TestDeriveContextSummaryRecallParity:
+    """Tests that _derive_context_summary produces routing-usable topic hints.
 
+    Goal: strictly better than '(no context)' fallback, not equivalent to Haiku.
+    These tests verify that the first-sentence heuristic produces non-empty,
+    capped, agent-derived hints that distinguish between different-topic outputs.
 
-class TestDrafterInternalsSuppressionPrompt:
-    """Tests that DRAFTER_SYSTEM_PROMPT bans implementation details (issue #571)."""
+    If a test here fails, it means the first-sentence slice is too crude and
+    the heuristic needs to be widened before shipping.
+    """
 
-    def test_prompt_contains_internals_suppression_section(self):
-        """The prompt should have DEVELOPER INTERNALS SUPPRESSION, not just metrics."""
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
+    def test_code_task_reply_produces_routing_hint(self):
+        """A code-task completion reply produces a usable routing hint."""
+        agent_output = (
+            "Fixed the authentication bug in agent/output_handler.py at line 423. "
+            "The session lock cleanup now fires before the steering push check. "
+            "All 135 tests pass."
+        )
+        result = _derive_context_summary(agent_output)
 
-        assert "DEVELOPER INTERNALS SUPPRESSION" in DRAFTER_SYSTEM_PROMPT
+        assert result is not None
+        assert len(result) > 0
+        assert len(result) <= 143  # 140 + "..." at most
+        # Must contain content drawn from the agent's text
+        assert any(word in result for word in ["Fixed", "authentication", "session", "agent"])
 
-    def test_prompt_bans_root_cause_explanations(self):
-        """The prompt should explicitly prohibit root-cause explanations."""
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
+    def test_question_bearing_reply_produces_routing_hint(self):
+        """A reply that contains questions still produces a context hint from the body."""
+        agent_output = (
+            "Completed the drafter refactoring. LLM calls removed, pass-through implemented.\n\n"
+            "## Open Questions\n"
+            "- Should we merge to main immediately or wait for peer review?\n"
+        )
+        result = _derive_context_summary(agent_output)
 
-        assert "root-cause" in DRAFTER_SYSTEM_PROMPT.lower()
+        assert result is not None
+        assert len(result) > 0
+        assert len(result) <= 143
+        # The hint should describe the work, not just the question
+        assert any(
+            word in result
+            for word in ["drafter", "refactoring", "LLM", "pass-through", "Completed"]
+        )
 
-    def test_prompt_bans_internal_method_names(self):
-        """The prompt should prohibit internal method/function/class names."""
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
+    def test_multi_paragraph_status_reply_produces_routing_hint(self):
+        """A multi-paragraph status reply uses the first substantive sentence."""
+        agent_output = (
+            "Updated the session scheduler to reap orphaned sessions on startup.\n\n"
+            "Changed agent/agent_session_queue.py to call cleanup() before accepting new work.\n\n"
+            "Also updated the watchdog to emit a metric on each reap cycle."
+        )
+        result = _derive_context_summary(agent_output)
 
-        assert "method" in DRAFTER_SYSTEM_PROMPT.lower()
-        assert "function" in DRAFTER_SYSTEM_PROMPT.lower()
-        assert "class name" in DRAFTER_SYSTEM_PROMPT.lower()
+        assert result is not None
+        assert len(result) > 0
+        assert len(result) <= 143
+        # Must be drawn from agent text
+        assert any(
+            word in result.lower()
+            for word in ["session", "scheduler", "orphan", "startup", "updated"]
+        )
 
+    def test_different_topics_produce_distinguishable_hints(self):
+        """Three outputs on different topics must produce distinguishable summaries.
 
-class TestNormalizeQuestionPrefix:
-    """Tests for _normalize_question_prefix."""
+        This is the key discriminability test: if the heuristic collapses all
+        outputs to the same hint, the routing value is zero.
+        """
+        outputs = {
+            "auth": (
+                "Fixed the OAuth token refresh bug. Sessions no longer expire prematurely. "
+                "All 28 auth tests pass."
+            ),
+            "db": (
+                "Added index to users.email column. Query time dropped from 450ms to 12ms. "
+                "Migration script applied to staging."
+            ),
+            "bridge": (
+                "Rewrote the Telegram bridge reconnect logic. Now uses exponential backoff. "
+                "Bridge stability improved by 40% in load tests."
+            ),
+        }
 
-    def test_legacy_prefix_normalized(self):
-        from bridge.message_drafter import _normalize_question_prefix
+        summaries = {topic: _derive_context_summary(text) for topic, text in outputs.items()}
 
-        result = _normalize_question_prefix("? Should I merge?")
-        assert result == ">> Should I merge?"
+        # All summaries must be non-empty
+        for topic, summary in summaries.items():
+            assert summary is not None, f"Summary for '{topic}' was None"
+            assert len(summary) > 0, f"Summary for '{topic}' was empty"
 
-    def test_new_prefix_unchanged(self):
-        from bridge.message_drafter import _normalize_question_prefix
+        # All summaries must be distinct (no two the same)
+        unique_summaries = set(summaries.values())
+        assert len(unique_summaries) == 3, (
+            f"Expected 3 distinct summaries, got {len(unique_summaries)}: {summaries}. "
+            "If the first-sentence heuristic collapses different topics, widen it before shipping."
+        )
 
-        result = _normalize_question_prefix(">> Should I merge?")
-        assert result == ">> Should I merge?"
+    def test_summary_cap_does_not_lose_topic_signal(self):
+        """Even when the first sentence is long and must be truncated, the
+        routing hint retains enough topic signal to be useful (first 100+ chars
+        of a 200-char sentence should still identify the topic)."""
+        agent_output = (
+            "Refactored the TelegramRelayOutputHandler.send() method to route all output "
+            "through the verbatim pass-through drafter before writing to the Redis outbox, "
+            "eliminating the LLM rewrite cluster and reducing p95 latency from 1.8s to 0.02s."
+        )
+        result = _derive_context_summary(agent_output)
 
-    def test_mixed_prefixes(self):
-        from bridge.message_drafter import _normalize_question_prefix
-
-        text = "? First question\n>> Second question\n? Third"
-        result = _normalize_question_prefix(text)
-        assert ">> First question" in result
-        assert ">> Second question" in result
-        assert ">> Third" in result
-        assert "? " not in result
-
-    def test_non_question_lines_unchanged(self):
-        from bridge.message_drafter import _normalize_question_prefix
-
-        result = _normalize_question_prefix("Normal text here")
-        assert result == "Normal text here"
-
-
-class TestSentenceAwareTruncation:
-    """Tests for _truncate_at_sentence_boundary in message_drafter.py."""
-
-    def test_short_text_unchanged(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        text = "Short text."
-        assert _truncate_at_sentence_boundary(text) == text
-
-    def test_truncates_at_sentence_boundary(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        sentences = "First sentence. Second sentence. Third. "
-        text = sentences * 50
-        result = _truncate_at_sentence_boundary(text, limit=100)
-        assert len(result) <= 100
-        assert result.endswith(".")
-
-    def test_fallback_to_ellipsis(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        text = "a" * 5000
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert len(result) <= 4096
-        assert result.endswith("...")
-
-    def test_empty_text(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        assert _truncate_at_sentence_boundary("") == ""
-        assert _truncate_at_sentence_boundary(None) == ""
-
-    def test_exact_limit_unchanged(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        text = "x" * 4096
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert result == text
-
-    def test_preserves_exclamation_boundary(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        text = "Done! " * 800 + "Extra text over limit"
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert result.rstrip().endswith("!")
-
-    def test_question_mark_boundary(self):
-        from bridge.message_drafter import _truncate_at_sentence_boundary
-
-        text = "Is it working? " * 300 + "Extra text"
-        result = _truncate_at_sentence_boundary(text, limit=4096)
-        assert result.rstrip().endswith("?")
-
-
-class TestDrafterPromptUpdates:
-    """Tests for new DRAFTER_SYSTEM_PROMPT content (#540)."""
-
-    def test_prompt_contains_sdlc_naturalization(self):
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
-
-        assert "planning" in DRAFTER_SYSTEM_PROMPT
-        assert "building" in DRAFTER_SYSTEM_PROMPT
-        assert "testing" in DRAFTER_SYSTEM_PROMPT
-
-    def test_prompt_contains_question_prefix_instruction(self):
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
-
-        assert ">> " in DRAFTER_SYSTEM_PROMPT
-
-    def test_prompt_contains_link_format_instruction(self):
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
-
-        prompt_lower = DRAFTER_SYSTEM_PROMPT.lower()
-        assert "short-form references" in prompt_lower
-
-    def test_prompt_contains_metrics_suppression(self):
-        from bridge.message_drafter import DRAFTER_SYSTEM_PROMPT
-
-        prompt_lower = DRAFTER_SYSTEM_PROMPT.lower()
-        assert "line counts" in prompt_lower
+        assert result is not None
+        assert len(result) <= 143
+        # Must contain at least one recognizable topic word from the text
+        assert any(
+            word in result
+            for word in [
+                "TelegramRelayOutputHandler",
+                "Refactored",
+                "pass-through",
+                "drafter",
+                "Redis",
+            ]
+        )

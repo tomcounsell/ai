@@ -337,12 +337,11 @@ def _evaluate_promise_heuristic(text: str) -> PromiseVerdict:
 
 
 def _detect_empty_promise(text_lower: str) -> bool:
-    """Backward-compat shim for ``bridge.message_drafter._classify_with_heuristics``.
+    """Return True if the text looks like an unfulfilled behavioral promise.
 
-    The original ``_detect_empty_promise`` returned ``True`` if the text
-    looked like a behavioral-change acknowledgment without evidence. The
-    new heuristic also covers forward-deferrals. Returns ``True`` if the
-    new heuristic returns BLOCK.
+    Evaluates the text against the promise-gate heuristic. Returns ``True``
+    if the result is BLOCK (forward-deferral or behavioral-change
+    acknowledgment without evidence), ``False`` otherwise.
     """
     verdict = _evaluate_promise_heuristic(text_lower)
     return verdict.action == "block"
@@ -399,14 +398,10 @@ def _write_promise_audit(
     session_id: str | None,
     source: str,
 ) -> None:
-    """Append a JSONL entry to the classification audit log.
-
-    Fork of ``bridge.message_drafter._write_classification_audit`` —
-    writes to the SAME file (``logs/classification_audit.jsonl``) for
-    unified observability, but with verdict-specific fields:
+    """Appends a JSONL entry to the classification audit log
+    (``logs/classification_audit.jsonl``) with verdict-specific fields:
     ``{ts, kind: "promise_gate", text_preview, action, reason, class_,
-    transport, session_id, source}``. The original
-    ``_write_classification_audit`` is unchanged.
+    transport, session_id, source}``.
     """
     try:
         from datetime import UTC, datetime
@@ -594,9 +589,9 @@ def evaluate_promise(
             and session_events emission (best-effort lookup via
             ``AgentSession.query.get``; no-op on synthetic IDs). Never
             used for state-driven gate judgment.
-        classifier_verdict: Optional ``ClassificationResult`` from
-            ``bridge.message_drafter.classify_output``. When provided,
-            short-circuits the LLM call (drafter path delegation).
+        classifier_verdict: Optional pre-computed classification result.
+            When provided, short-circuits the LLM call. Kept for backward
+            compatibility; the drafter no longer delegates here.
 
     Returns:
         ``PromiseVerdict``. Two-state action: ``"allow"`` or ``"block"``.

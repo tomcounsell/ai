@@ -87,6 +87,9 @@
                 {% if s.watchdog_unhealthy %}
                 <span class="badge badge-warning" title="{{ s.watchdog_unhealthy }}">!</span>
                 {% endif %}
+                {% if s.stall_advisory and s.stall_advisory != 'healthy' %}
+                <span class="stall-advisory stall-{{ s.stall_advisory }}" title="{{ s.stall_advisory_reason }}">{{ s.stall_advisory }}</span>
+                {% endif %}
             </div>
             {% if not terminal and s.last_evidence_at %}
                 {% set _age = s.last_evidence_at | freshness_age %}

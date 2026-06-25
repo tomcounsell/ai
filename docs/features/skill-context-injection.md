@@ -29,6 +29,7 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 - Missing fields produce no env var (not empty string, not `"None"`)
 - The function wraps all Redis access in try/except, returning an empty dict on failure
 - `SDLC_REPO` complements `GH_REPO`, it does not replace it
+- `SDLC_ISSUE_NUMBER` is injected from `AgentSession.issue_url` and is reliable for **read-only context** (e.g. fetching the issue body for context). For **recorder calls** (`sdlc-tool verdict record`, `stage-marker`), skills must resolve `ISSUE_NUMBER` from `$ARGUMENTS` or PR-body extraction as the primary source; `$SDLC_ISSUE_NUMBER` is a last-resort fallback only and must be guarded with a positive-integer check before use (#1731).
 
 **Implementation:** `_extract_sdlc_env_vars()` in `agent/sdk_client.py`, called from `_create_options()` after the existing `GH_REPO` injection block.
 
@@ -52,7 +53,7 @@ Context: SDLC_PR_NUMBER=220, SDLC_SLUG=my-feature, SDLC_PR_BRANCH=session/my-fea
 | `screenshot.md` | Mechanical | Start app, capture UI screenshots |
 | `post-review.md` | Mechanical | Format findings, post review to GitHub |
 
-Sub-skills are guidance documents in `.claude/skills/do-pr-review/sub-skills/`. The parent `SKILL.md` orchestrates them and passes context. Each sub-skill references `$SDLC_PR_NUMBER` instead of `{pr_number}`, with fallback instructions for when env vars are absent.
+Sub-skills are guidance documents in `.claude/skills-global/do-pr-review/sub-skills/`. The parent `SKILL.md` orchestrates them and passes context. Each sub-skill references `$SDLC_PR_NUMBER` instead of `{pr_number}`, with fallback instructions for when env vars are absent.
 
 ## Data Flow
 

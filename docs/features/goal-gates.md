@@ -70,5 +70,5 @@ Gate checks never raise exceptions. All subprocess and IO errors are caught and 
 
 - Issue: [#331](https://github.com/tomcounsell/ai/issues/331)
 - Plan: `docs/plans/goal_gates.md`
-- Chat Dev Session Architecture: `docs/features/pm-dev-session-architecture.md`
+- Eng Session Architecture: `docs/features/eng-session-architecture.md`
 - SDLC Enforcement: `docs/features/sdlc-enforcement.md`

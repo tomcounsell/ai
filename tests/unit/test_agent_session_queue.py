@@ -620,11 +620,11 @@ class TestHealthCheckNoProgressRecovery:
         session = _make_session(
             project_key=project_key,
             status="running",
-            session_type="dev",
+            session_type="eng",
             chat_id="some-chat-id",
             started_at=started_at,
         )
-        # Slugless dev → worker_key == project_key
+        # Slugless eng → worker_key == project_key
         session.slug = None
         session.agent_session_id = agent_session_id
         session.turn_count = turn_count
@@ -852,10 +852,10 @@ class TestHealthCheckNoProgressRecovery:
             result = await _pop_agent_session("valor", is_project_keyed=True)
 
         assert result is not None, (
-            "PM-associated project-keyed worker must pop the recovered dev session"
+            "PM-associated project-keyed worker must pop the recovered eng session"
         )
         assert result.agent_session_id == "ad2-regression-1"
-        assert result.session_type == "dev"
+        assert result.session_type == "eng"
 
     @pytest.mark.asyncio
     async def test_progress_written_between_check_and_transition_is_lost_but_session_retries(self):

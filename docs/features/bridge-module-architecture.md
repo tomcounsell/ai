@@ -10,6 +10,7 @@ The Telegram bridge (`bridge/telegram_bridge.py`) is organized into focused sub-
 | `bridge/response.py` | Message formatting, reactions (re-exports from `agent/constants.py`), file extraction, sending |
 | `bridge/catchup.py` | Abandoned session revival and re-enqueueing |
 | `bridge/reconciler.py` | Periodic scan for messages missed during live connection |
+| `bridge/agent_catchup.py` | Agent-judgment `/catchup` layer (`valor-catchup` CLI): reads the actual chat thread and uses an LLM judge to recover messages that were enqueued but produced no reply (response failures), complementing the mechanical ingestion-gap scanners. See [Agent-Judgment Catchup](agent-judgment-catchup.md). |
 | `bridge/dedup.py` | Per-chat message dedup storage (`DedupRecord`), `is_duplicate_message`, `record_message_processed` |
 | `bridge/dispatch.py` | Centralized dispatch wrapper: every live-handler ingestion site enqueues and records dedup through `dispatch_telegram_session` / `record_telegram_message_handled` |
 

@@ -47,7 +47,7 @@ def test_exit_returncode_field_defaults_to_zero():
     s = AgentSession(
         project_key="test-resilience-mode-4-fielddefault",
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="x-default-test",
@@ -77,7 +77,10 @@ def test_pre_bump_capture_ordering():
 
     from agent import session_health
 
-    src = inspect.getsource(session_health._agent_session_health_check)
+    # Logic moved from _agent_session_health_check into the shared helper
+    # _apply_recovery_transition by refactor #1270 (issue #1578). Inspect the
+    # helper where the OOM-defer ordering now lives.
+    src = inspect.getsource(session_health._apply_recovery_transition)
     # The pre-bump capture line must literally appear and must precede the
     # OOM-defer block. Both checks are textual but they pin the ordering
     # invariant against future refactors.
@@ -97,7 +100,10 @@ def test_oom_defer_condition_grep_present():
 
     from agent import session_health
 
-    src = inspect.getsource(session_health._agent_session_health_check)
+    # Logic moved from _agent_session_health_check into the shared helper
+    # _apply_recovery_transition by refactor #1270 (issue #1578). Inspect the
+    # helper where the OOM-defer ordering now lives.
+    src = inspect.getsource(session_health._apply_recovery_transition)
     assert 'exit_returncode", None) == -9' in src or "exit_returncode == -9" in src
     assert "pre_bump_attempts == 0" in src
     assert "_is_memory_tight()" in src
@@ -127,7 +133,7 @@ def test_pending_scan_skips_deferred(clean_sessions):
     deferred = AgentSession(
         project_key=clean_sessions,
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="sid-defer-future",
@@ -140,7 +146,7 @@ def test_pending_scan_skips_deferred(clean_sessions):
     not_deferred = AgentSession(
         project_key=clean_sessions,
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="sid-eligible",
@@ -209,7 +215,7 @@ def test_store_exit_returncode_persists_value(clean_sessions, monkeypatch):
     s = AgentSession(
         project_key=clean_sessions,
         chat_id="x",
-        session_type=SessionType.PM,
+        session_type=SessionType.ENG,
         message_text="x",
         sender_name="x",
         agent_session_id="sid-exit-rc",

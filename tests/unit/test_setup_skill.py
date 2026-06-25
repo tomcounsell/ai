@@ -94,7 +94,7 @@ def test_post_step_zero_sections_use_vault_var(section_label):
 @pytest.mark.parametrize(
     "skill_path",
     [
-        ".claude/skills-global/update/SKILL.md",
+        ".claude/skills/update/SKILL.md",
         ".claude/skills-global/do-deploy/SKILL.md",
         ".claude/skills-global/do-pr-review/SKILL.md",
         ".claude/agents/baseline-verifier.md",

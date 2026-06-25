@@ -37,6 +37,13 @@ _TERMINAL_EMOJI_CONFIG: dict[str, tuple[str, str]] = {
 # A threshold of 360s gives one full check-cycle grace period before declaring unhealthy.
 HEARTBEAT_STALENESS_THRESHOLD_S: int = 360
 
+# Worker-down threshold for CLI pre-flight checks (valor-session create/status,
+# agent_session_scheduler status). The worker writes its heartbeat every 300s;
+# 600s = 2x the write cadence, tolerating one fully missed write cycle before
+# declaring the worker down. The dashboard keeps the tighter 360s
+# HEARTBEAT_STALENESS_THRESHOLD_S above for its "ok" band.
+WORKER_DOWN_THRESHOLD_S: int = 600
+
 
 def _resolve_terminal_emoji(name: str, feeling: str, fallback_emoji: str) -> object:
     """Resolve a terminal reaction emoji, caching the result.

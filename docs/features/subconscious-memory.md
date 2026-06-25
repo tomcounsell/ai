@@ -158,6 +158,9 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 
 After a session completes, extraction is scheduled from `agent/session_executor.py` **after** `complete_transcript(...)` finalizes the session (hotfix #1055):
 
+> Granite PTY sessions participate in this extraction unchanged. The granite PTY container ([Granite PTY Container: Production Path](granite-pty-production.md)) is the session-execution substrate, not a separate completion path — `_schedule_post_session_extraction` fires for granite sessions exactly as for harness sessions, on the same `complete_transcript(...)` boundary.
+
+
 1. `_schedule_post_session_extraction(session_id, response_text)` registers a fire-and-forget `asyncio.create_task` in `_pending_extraction_tasks` (a `dict[str, asyncio.Task]` keyed by `session_id` for dedup). The scheduler is **synchronous** — it does not `await` — so the dev→PM nudge fires immediately, independent of extraction latency.
 2. Inside the task wrapper, `run_post_session_extraction()` runs extract_observations → detect_outcomes → cleanup in sequence.
 3. Haiku extracts novel observations as structured JSON (category, observation text, file_paths, tags), with a line-based fallback parser for robustness
@@ -192,7 +195,7 @@ Extraction is the only part of the memory system that runs on the worker event l
 
 - **Async-native Anthropic client, never sync.** All three Anthropic call sites in `agent/memory_extraction.py` (`extract_observations_async`, `extract_post_merge_learning`, `_judge_outcomes_llm`) use `async with anthropic.AsyncAnthropic(...) as client:` + `await client.messages.create(...)`. The sync `anthropic.Anthropic(...)` client is forbidden in this module — it blocked the worker for six hours in a production incident on a half-open TCP socket. A unit test grep-canary (`test_no_sync_anthropic_client_grep_canary`) guards against regressions.
 - **Double-timeout** on every Anthropic call: an SDK-level `timeout=_EXTRACTION_SDK_TIMEOUT` (30s) passed to `messages.create(...)` AND an outer `asyncio.wait_for(..., timeout=_EXTRACTION_HARD_TIMEOUT)` (35s, 5s buffer). The inner SDK timeout raises `anthropic.APITimeoutError` cleanly under normal slow-path behavior; the outer `asyncio.wait_for` hard-stops when the SDK timer does not fire (e.g., half-open sockets where no socket event ever arrives). Both constants live at module scope in `agent/memory_extraction.py`.
-- **Fire-and-forget ordering.** `_schedule_post_session_extraction(...)` is declared `def` (not `async def`) and is called synchronously in `_execute_agent_session` AFTER `complete_transcript(...)` runs on both the happy path and the #917 fallback, and BEFORE `await _handle_dev_session_completion(...)`. Any `await` on the scheduler would regress #987 and #1055 — a review-time invariant.
+- **Fire-and-forget ordering.** `_schedule_post_session_extraction(...)` is declared `def` (not `async def`) and is called synchronously in `_execute_agent_session` AFTER `complete_transcript(...)` runs on both the happy path and the #917 fallback. `complete_transcript(...)` itself runs `_finalize_parent_sync()` (`agent/session_completion.py`), which re-enqueues any waiting parent eng session, so the parent nudge is already on its way by the time the scheduler fires — the scheduler never blocks it. Any `await` on the scheduler would regress #987 and #1055 — a review-time invariant.
 - **Graceful shutdown drain.** `drain_pending_extractions(timeout=5.0)` is called from `worker/__main__.py` in the shutdown sequence, after the worker-task drain and before the health/notify/reflection task cancels. Pending tasks exceeding 5s are cancelled. Abrupt shutdown (SIGKILL) loses in-flight extractions; the 35s internal hard-timeout caps worst-case latency so the loss is bounded.
 
 **Loss tolerance:** Memory extraction is best-effort. A lost extraction on worker restart or Anthropic outage never crashes the agent, blocks a session, or surfaces to the user. Failures emit a `memory.extraction.error` analytics counter (tagged with `error_class`, `session_id`, `project_key`) so silent failures are visible on `/dashboard.json`. `CancelledError` is not counted — it is expected during graceful shutdown and carries no signal.
@@ -257,6 +260,14 @@ After a PR merges, `extract_post_merge_learning()` in `agent/memory_extraction.p
 The extraction prompt requests structured JSON output. If Haiku returns valid JSON, the observation, category, tags, and file_paths are parsed and passed as metadata to `Memory.safe_save()`. If Haiku returns non-JSON (plain text), the text is saved with a default metadata of `{"category": "decision"}`. This ensures all memory creation paths produce consistent metadata.
 
 The function is designed to be called from the SDLC merge stage or a post-merge script. It returns None gracefully if no meaningful takeaway is found or if the API call fails.
+
+### Flow 8: TUI Interaction Capture
+
+Issue [#1540](https://github.com/tomcounsell/ai/issues/1540) (Pillar 3 of epic #1536) adds a complementary write path that captures human-in-the-loop interaction patterns from local Claude Code sessions. At session end, `agent/tui_interaction_capture.py::summarize_and_store()` composes one compact natural-language pattern string covering the slash-command sequence, mid-run steering count and ordinal positions, and tool approval tally, then persists it as a single `pattern` Memory tagged `tui-interaction` with `agent_id="tui-{session_id}"` (namespaced separately from the Haiku content observations) and importance 1.0.
+
+This Memory is recallable via the standard `memory_search` / `memory_get` MCP path. The `tui-interaction` tag can be used as a filter. Bridge-driven sessions are out of scope because there is no human in the TUI for those sessions.
+
+See [TUI Interaction Capture](tui-interaction-capture.md) for the full design including gating rules, documented gaps (tool rejections, true ESC-interrupts), and the JSONL event types.
 
 ## Claude Code Integration
 
@@ -477,10 +488,10 @@ memory_search(query: str, category: str | None = None, tag: str | None = None, l
 `tools/memory_search/title_generator.generate_title_async(memory_id, content)` returns synchronously and spawns a daemon thread that calls Ollama out-of-band. The writer path never blocks. The thread:
 
 1. Reads `settings.models.ollama_host` and `settings.models.memory_title_timeout_s` (5s default).
-2. Uses `OLLAMA_LOCAL_MODEL` (currently `gemma4:e2b`) — there is no separate `MEMORY_TITLE_MODEL` setting; the title generator deliberately reuses the project's canonical local model.
-3. Prompts `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory:\n\n{content}"` (content truncated to 1000 chars).
+2. Uses `settings.models.ollama_generation_model` (default `gemma4:31b-cloud`; env `MODELS__OLLAMA_GENERATION_MODEL`) — there is no separate `MEMORY_TITLE_MODEL` setting; the title generator reads the per-machine generation model. A defensive `<private>`-strip runs inside `_do_generate` on the content before the HTTP call, regardless of whether the caller already stripped.
+3. Prompts `"Generate a single descriptive title (max 12 words, no quotes, no period) for this memory:\n\n{content}"` (content truncated to 1000 chars; the private strip runs before truncation so a `<private>` opener inside the first 1000 chars with its close beyond char 1000 is still removed).
 4. Normalizes the result (trims wrapping quotes, collapses whitespace, caps at 200 chars) and writes back via `record.save()`.
-5. Fails silently — Ollama unreachable / model not pulled → no title written → stub renders as `[category]` only on next recall.
+5. Fails silently — Ollama unreachable / model not pulled / cloud unavailable → no title written → stub renders as `[category]` only on next recall.
 
 **Wired at 7 writer call sites individually — no model-layer hook.** The cycle-3 architectural reversal in the plan rejected a `Memory.save()` override in favor of explicit `generate_title_async(...)` calls at each writer site. Sites:
 
@@ -515,7 +526,7 @@ PYTHONPATH is resolved per-machine via `git rev-parse --show-toplevel`. Concurre
 - Atomic write: `shutil.copy2` to `~/.claude.json.bak`, write to `.tmp`, `os.rename` (atomic on POSIX).
 - Idempotent: if the existing entry already matches all four fields (`type`/`command`/`args`/`env.PYTHONPATH`), the action returns `"ok"` without rewriting.
 
-Wired into `scripts/update/run.py` Step 4.8. Runs in `--full` and `--cron` (write modes that repair drift) and `--verify` (read-only — reports drift without writing). Every `/update` invocation rechecks the registration and fixes missing entries, drifted PYTHONPATH (after a repo move), and corrupt JSON. Step 4.8 also calls `mcp_memory.check_ollama_for_titles()` for an informational ping — non-fatal log line indicating whether `gemma4:e2b` is available for title generation.
+Wired into `scripts/update/run.py` Step 4.8. Runs in `--full` and `--cron` (write modes that repair drift) and `--verify` (read-only — reports drift without writing). Every `/update` invocation rechecks the registration and fixes missing entries, drifted PYTHONPATH (after a repo move), and corrupt JSON. Step 4.8 also calls `mcp_memory.check_ollama_for_titles()` for an informational ping — non-fatal log line indicating whether the configured generation model is available for title generation.
 
 ### Backfill for pre-existing records
 
@@ -614,7 +625,7 @@ Pruning of superseded records is delegated to the future `memory-decay-prune` re
 
 ### Memory Health Audit (3-layer reflection)
 
-The `memory-quality-audit` reflection (`reflections/memory_management.py::run_memory_quality_audit`, registered at `config/reflections.yaml:298`) runs on a daily cadence and performs three layers of work in a single invocation. It subsumes the prior one-shot `scripts/cleanup_memory_extraction_junk.py` and adds continuous detection of new memory-extraction misconfiguration symptoms (issue #1231).
+The `memory-quality-audit` reflection (`reflections/memory/memory_quality_audit.py::run`, registered at `config/reflections.yaml`) runs on a daily cadence and performs three layers of work in a single invocation. It performs continuous detection of memory-extraction misconfiguration symptoms (issue #1231).
 
 **Layer 0 — legacy zero-access + low-confidence flag (read-only).** Preserves the prior audit behavior verbatim: walks the full `Memory` corpus, flags records with `access_count == 0 AND age > 30d` and `confidence < 0.2`, appends summaries to `findings`. Files no issues. Operates on all memories (not just extractions) so it provides orthogonal observability for human-saved, post-merge, and Telegram memories.
 
@@ -631,7 +642,7 @@ The `memory-quality-audit` reflection (`reflections/memory_management.py::run_me
 
 Each cross-threshold signal becomes an "anomaly candidate" carrying observed/threshold values, 3-5 sample memory_ids, and an evidence string.
 
-**Layer 3 — Gemma classification (`gemma4:e2b`, fail-soft).** Samples up to 20 last-24h non-superseded `extraction-*` records and classifies them via a few-shot prompt at `temperature=0`. Wallclock-budgeted at 30s with a 10s `asyncio.wait_for` timeout per call (`GEMMA_CALL_TIMEOUT_SEC`; bumped from 5s — cold-start was too tight); runs sequentially in a dedicated single-thread `ThreadPoolExecutor` so the worker event loop stays unblocked. Verdicts grouped by `anomaly_signal`; signals with **≥ 3** matching records become candidates. Top-level `try/except` so any failure (Ollama daemon down, model missing, network error) cannot break the audit return contract — the audit completes layers 0+1+2 successfully without Layer 3.
+**Layer 3 — granite classification (`granite4.1:3b`, fail-soft).** Samples up to 20 last-24h non-superseded `extraction-*` records and classifies them via a few-shot structured-JSON prompt at `temperature=0`. Wallclock-budgeted at 30s with a 10s `asyncio.wait_for` timeout per call (`GEMMA_CALL_TIMEOUT_SEC`; bumped from 5s — cold-start was too tight); runs sequentially in a dedicated single-thread `ThreadPoolExecutor` so the worker event loop stays unblocked. Verdicts grouped by `anomaly_signal`; signals with **≥ 3** matching records become candidates. Top-level `try/except` so any failure (Ollama daemon down, model missing, network error) cannot break the audit return contract — the audit completes layers 0+1+2 successfully without Layer 3. Uses `OLLAMA_CLASSIFIER_MODEL` (`config/models.py`), which is the same `granite4.1:3b` already resident for PTY work — no extra memory load.
 
 **Issue surfacing.** For each Layer-2 or Layer-3 candidate (Layer 0 flags and Layer 1 supersedes never produce candidates), the audit calls `_file_anomaly_issue` which:
 
@@ -646,7 +657,7 @@ Both `_find_open_audit_issue` and `_file_anomaly_issue` use `asyncio.create_subp
 **Verification.**
 
 ```bash
-python -c "import asyncio; from reflections.memory_management import run_memory_quality_audit; print(asyncio.run(run_memory_quality_audit()))"
+python -c "import asyncio; from reflections.memory.memory_quality_audit import run; print(asyncio.run(run()))"
 ```
 
 Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N superseded, M anomalies, K issues filed"}`.
@@ -658,7 +669,7 @@ Returns `{"status": "ok", "findings": [...], "summary": "Memory health audit: N 
 | `models/memory.py` | Memory model (Level 3 popoto: decay, confidence, BM25, write filter, access tracker, bloom, DictField metadata, reference pointer, `title` StringField for stub injection) |
 | `config/memory_defaults.py` | Tuned Defaults overrides for popoto constants, RRF tuning, and dismissal tracking thresholds |
 | `mcp_servers/memory_server.py` | Stdio FastMCP server exposing `memory_get(memory_id)` and `memory_search(query, ...)`. Lazy imports for cold-start budget; `MCP_MEMORY_DRY_RUN=1` env enables fresh-shell smoke check. |
-| `tools/memory_search/title_generator.py` | `generate_title_async(memory_id, content)` — fire-and-forget Ollama call (uses `OLLAMA_LOCAL_MODEL`, 5s timeout) that writes `record.title` from a daemon thread. Fail-silent on Ollama down. |
+| `tools/memory_search/title_generator.py` | `generate_title_async(memory_id, content)` — fire-and-forget Ollama call (uses `settings.models.ollama_generation_model`, default `gemma4:31b-cloud`, 5s timeout) that writes `record.title` from a daemon thread. Defensive `<private>`-strip runs inside `_do_generate` before the HTTP call. Fail-silent on Ollama unavailable. |
 | `scripts/update/mcp_memory.py` | Idempotent `~/.claude.json` registration under `fcntl.flock` with atomic backup→tmp→rename. Wired into `scripts/update/run.py` Step 4.8 (write in `--full`/`--cron`, read-only in `--verify`). |
 | `scripts/backfill_memory_titles.py` | One-shot backfill for pre-existing records (idempotent — skips records with non-empty `title`). |
 | `agent/memory_hook.py` | PostToolUse thought injection with sliding window rate limiting, multi-query decomposition via `_cluster_keywords()` (Telegram agent path) |
@@ -749,7 +760,7 @@ Title-generation settings live on `settings.models` (in `config/settings.py`) ra
 | `models.ollama_host` | `http://localhost:11434` | `MODELS__OLLAMA_HOST` | Ollama base URL used by the memory title generator |
 | `models.memory_title_timeout_s` | `5.0` | `MODELS__MEMORY_TITLE_TIMEOUT_S` | HTTP timeout for the title-gen Ollama call. Title generation is fire-and-forget — exceeding the timeout logs at DEBUG and leaves `title` unchanged; stubs fall back to category-only rendering. |
 
-The model is `OLLAMA_LOCAL_MODEL` (`config/models.py`, currently `gemma4:e2b`) — there is no separate `MEMORY_TITLE_MODEL` setting.
+The model is `settings.models.ollama_generation_model` (default `gemma4:31b-cloud`, env `MODELS__OLLAMA_GENERATION_MODEL`) — there is no separate `MEMORY_TITLE_MODEL` setting.
 
 ## Project Key Partitioning
 

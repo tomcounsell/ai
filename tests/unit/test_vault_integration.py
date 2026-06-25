@@ -88,8 +88,7 @@ def test_routing_reads_vault_under_launchd_when_not_tcc_restricted(
 
     resolved = routing._resolve_config_path()
     assert resolved == projects_path, (
-        "non-TCC vault is readable under launchd; routing must use it directly, "
-        f"got {resolved}"
+        f"non-TCC vault is readable under launchd; routing must use it directly, got {resolved}"
     )
 
 
@@ -108,12 +107,12 @@ def test_routing_projects_config_path_override_wins(monkeypatch, tmp_path, allow
 
 
 # ---------------------------------------------------------------------------
-# reflections/utils.py
+# reflections/utilities.py
 # ---------------------------------------------------------------------------
 
 
 def test_reflections_utils_uses_vault_projects_path(monkeypatch, tmp_path, allow_ephemeral_vault):
-    """`reflections.utils.load_local_projects` reads from <vault>/projects.json."""
+    """`reflections.utilities.load_local_projects` reads from <vault>/projects.json."""
     monkeypatch.setenv("VALOR_VAULT_DIR", str(tmp_path))
     monkeypatch.delenv("PROJECTS_CONFIG_PATH", raising=False)
 
@@ -123,7 +122,7 @@ def test_reflections_utils_uses_vault_projects_path(monkeypatch, tmp_path, allow
         '{"projects": {"alpha": {"working_directory": "' + str(workdir) + '"}}}\n'
     )
 
-    from reflections import utils as reflections_utils
+    from reflections import utilities as reflections_utils
 
     projects = reflections_utils.load_local_projects()
     slugs = {p["slug"] for p in projects}

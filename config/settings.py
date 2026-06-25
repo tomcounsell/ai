@@ -462,20 +462,25 @@ class GoogleAuthSettings(BaseModel):
 class ModelSettings(BaseModel):
     """Local model configuration settings."""
 
-    ollama_vision_model: str = Field(
-        default="gemma4:e2b",
+    ollama_generation_model: str = Field(
+        default="gemma4:31b-cloud",
         description=(
-            "Ollama vision model for local image analysis (env: OLLAMA_VISION_MODEL). "
-            "Defaults to the same multimodal model as OLLAMA_LOCAL_MODEL so a single "
-            "Ollama pull serves both text and vision paths."
+            "Per-machine free-text generation model for memory titles and the "
+            "test AI judge (env: MODELS__OLLAMA_GENERATION_MODEL). Default is the "
+            "Ollama Cloud variant 'gemma4:31b-cloud' (a lightweight hosted pointer "
+            "that fits any machine). RAM-rich Apple-Silicon hosts may set "
+            "'gemma4:31b-mlx' to run generation locally. /setup selects the "
+            "variant from available RAM (written to ~/.zshenv, machine-local); "
+            "/update verifies it via ensure_generation_model(). Classification "
+            "uses OLLAMA_CLASSIFIER_MODEL (granite), not this setting."
         ),
     )
     ollama_host: str = Field(
         default="http://localhost:11434",
         description=(
-            "Base URL of the local Ollama HTTP API. Used by the memory title "
-            "generator for async title creation on memory save (env: "
-            "MODELS__OLLAMA_HOST). Default points at the standard Ollama port."
+            "Base URL of the local Ollama HTTP API. Serves the granite classifier "
+            "and the memory title generator's async title creation on memory save "
+            "(env: MODELS__OLLAMA_HOST). Default points at the standard Ollama port."
         ),
     )
     memory_title_timeout_s: float = Field(
@@ -518,6 +523,158 @@ class FeatureSettings(BaseModel):
             "per-minute request limits on a solo-dev account. Override via "
             "FEATURES__ANTHROPIC_CONCURRENCY env var (pydantic-settings nested "
             "delimiter). See issue #1111."
+        ),
+    )
+
+    # --- Crash auto-resume policy (issue #1539) ---
+    # Enable ONLY on the one designated auto-resume machine; off everywhere else
+    # (propose-only mode). Env: FEATURES__CRASH_AUTORESUME_ENABLED.
+    crash_autoresume_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable automatic session resume by the crash-recovery reflection. "
+            "Off by default — enable on exactly ONE designated machine. "
+            "All other machines run in propose-only mode (log, no action). "
+            "Env: FEATURES__CRASH_AUTORESUME_ENABLED. See issue #1539."
+        ),
+    )
+    crash_autoresume_max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "Per-session cap on automatic resume attempts. Once a session has been "
+            "auto-resumed this many times without recovering, it is left terminal "
+            "for human review. Env: FEATURES__CRASH_AUTORESUME_MAX_ATTEMPTS."
+        ),
+    )
+    crash_autoresume_run_budget: int = Field(
+        default=5,
+        ge=1,
+        le=50,
+        description=(
+            "Maximum number of sessions that can be auto-resumed in a single "
+            "reflection run. Guards against a misfiring policy causing a flood "
+            "of resumes. Env: FEATURES__CRASH_AUTORESUME_RUN_BUDGET."
+        ),
+    )
+    crash_autoresume_min_occurrences: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Minimum number of times a crash signature must be observed before "
+            "auto-resume is considered eligible for that pattern. Ensures the "
+            "policy has enough data to be statistically meaningful. "
+            "Env: FEATURES__CRASH_AUTORESUME_MIN_OCCURRENCES."
+        ),
+    )
+    crash_autoresume_min_success_ratio: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum recovery success ratio (recovered / attempts) required "
+            "before auto-resume is eligible for a crash pattern. "
+            "Env: FEATURES__CRASH_AUTORESUME_MIN_SUCCESS_RATIO."
+        ),
+    )
+
+    # --- Stall-recovery action-mode (issue #1768) ---
+    # Promotes the stall-advisory reflection from observe-only to an actor that
+    # kills demonstrably-wedged sessions and re-enqueues via valor-catchup.
+    # Off by default (dry-run); enabling is a reversible per-machine .env edit.
+    stall_recovery_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable the stall-advisory action-mode to kill wedged sessions and "
+            "re-enqueue their unanswered work via valor-catchup. Off by default "
+            "(dry-run/observe-only); enabling is a documented reversible "
+            "per-machine .env edit. "
+            "Env: FEATURES__STALL_RECOVERY_ENABLED. See issue #1768."
+        ),
+    )
+    stall_recovery_consecutive_observations: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "N consecutive stalled observations of the same session required "
+            "before a kill (at the 300s reflection cadence, 3 is roughly 15 "
+            "minutes). Provisional/tunable. "
+            "Env: FEATURES__STALL_RECOVERY_CONSECUTIVE_OBSERVATIONS."
+        ),
+    )
+    stall_recovery_run_budget: int = Field(
+        default=1,
+        ge=1,
+        le=20,
+        description=(
+            "K maximum sessions killed per reflection run (mirrors the "
+            "session-recovery-drip 1-per-tick shape). Provisional/tunable. "
+            "Env: FEATURES__STALL_RECOVERY_RUN_BUDGET."
+        ),
+    )
+    stall_recovery_per_session_budget: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description=(
+            "Per-session cap on kill attempts to prevent thrash on a session "
+            "that keeps re-wedging. Provisional/tunable. "
+            "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
+        ),
+    )
+
+
+class GraniteSettings(BaseModel):
+    """Granite PTY container configuration (plan #1572).
+
+    The granite container drives an interactive ``claude`` TUI session via
+    two persistent PTYs (PM + Dev) per session. The PTY pool caps
+    concurrent interactive pairs at ``pty_pool_size``; over-cap sessions
+    wait in the Redis queue. The pool size is intentionally SMALLER than
+    ``MAX_CONCURRENT_SESSIONS`` so the Redis queue absorbs over-cap
+    sessions, giving operators headroom to handle orphan-after-SIGKILL
+    without overcommitting memory.
+
+    Growth path: default 3 → 6 once health/observability and memory
+    management land. Each PTY pair is ~400 MB resident, so pool=3 with
+    MAX_CONCURRENT_SESSIONS=8 bounds worker memory at ~9.6 GB worst case.
+    See ``docs/features/granite-pty-production.md``.
+    """
+
+    pty_pool_size: int = Field(
+        default=3,
+        ge=1,
+        le=16,
+        description=(
+            "Hard maximum concurrent PM+Dev PTY pairs. Each pair is two "
+            "interactive ``claude`` processes (~200 MB each) driving the "
+            "granite container. The PTY pool is a singleton owned by the "
+            "worker process. Override via GRANITE__PTY_POOL_SIZE env var. "
+            "Plan #1572 / docs/features/granite-pty-production.md."
+        ),
+    )
+    pm_model: str = Field(
+        default="opus",
+        description=(
+            "Claude model alias for the PM TUI PTY. The PM/Dev sessions run "
+            "on the Claude subscription (OAuth, ANTHROPIC_API_KEY blanked), "
+            "exactly like the `claude --permission-mode bypassPermissions` "
+            "shortcut, with the model chosen at spawn time. Use UNPINNED "
+            "aliases (opus, sonnet, haiku) so the substrate tracks the latest "
+            "version. ollama models belong to the granite classifier only, "
+            "never the PTY substrate. Override via GRANITE__PM_MODEL."
+        ),
+    )
+    dev_model: str = Field(
+        default="opus",
+        description=(
+            "Claude model alias for the Dev TUI PTY. See ``pm_model``. The "
+            "Dev role now owns the full SDLC pipeline (issue #1692) and fans "
+            "out to Sonnet subagents for parallel work; opus is the default "
+            "for the Dev TUI itself. Override via GRANITE__DEV_MODEL."
         ),
     )
 
@@ -602,6 +759,42 @@ class Settings(BaseSettings):
         description="GitHub PAT for SDLC bot account used by /do-pr-review in pipeline context",
     )
 
+    # Cross-vendor review judge (issue #1626).
+    # Provisional/tunable — default off; enable on the review machine via vault .env.
+    sdlc_review_cross_vendor: bool = Field(
+        default=False,
+        description=(
+            "Enable cross-vendor (non-Claude) reviewer in /do-pr-review. "
+            "Default OFF. Enable via SDLC_REVIEW_CROSS_VENDOR=1."
+        ),
+    )
+    # Provisional model id — gpt-4o is the safe default.
+    # Override via SDLC_REVIEW_CROSS_VENDOR_MODEL env var.
+    sdlc_review_cross_vendor_model: str = Field(
+        default="gpt-4o",
+        description=(
+            "OpenAI model id for the cross-vendor judge. "
+            "Provisional — env-overridable via SDLC_REVIEW_CROSS_VENDOR_MODEL."
+        ),
+    )
+    # Provisional token cap — tunable based on cost tolerance.
+    sdlc_review_cross_vendor_max_diff_tokens: int = Field(
+        default=50000,
+        ge=1000,
+        description=(
+            "Max diff tokens for the cross-vendor judge. "
+            "Provisional/tunable. Env: SDLC_REVIEW_CROSS_VENDOR_MAX_DIFF_TOKENS."
+        ),
+    )
+    sdlc_review_cross_vendor_required: bool = Field(
+        default=False,
+        description=(
+            "Fail-closed: if True and cross-vendor judge skips, consensus returns "
+            "CHANGES REQUESTED. Default OFF (degrade-to-Claude-only). "
+            "Env: SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1."
+        ),
+    )
+
     # Component settings
     api: APISettings = Field(default_factory=APISettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
@@ -615,6 +808,7 @@ class Settings(BaseSettings):
     models: ModelSettings = Field(default_factory=ModelSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
+    granite: GraniteSettings = Field(default_factory=GraniteSettings)
 
     @field_validator("environment")
     @classmethod

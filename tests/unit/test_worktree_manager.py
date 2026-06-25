@@ -1,17 +1,22 @@
 """Unit tests for agent/worktree_manager.py — worktree lifecycle and cleanup."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent.worktree_manager import (
+    WorktreeBranchMismatchError,
     _cleanup_stale_worktree,
     _find_worktree_for_branch,
     _validate_slug,
     cleanup_after_merge,
     create_worktree,
     get_or_create_worktree,
+    remove_worktree,
+    verify_worktree_branch,
+    worktree_busy_check,
 )
 
 
@@ -133,20 +138,26 @@ class TestCleanupAfterMerge:
         assert result["already_clean"] is False
         assert "Failed to remove worktree" in result["errors"][0]
 
+    @patch("agent.worktree_manager.safe_delete_branch")
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
-    def test_branch_deletion_fails(self, mock_remove_wt, mock_branch_exists, mock_run):
+    def test_branch_deletion_fails(
+        self, mock_remove_wt, mock_branch_exists, mock_run, mock_safe_del
+    ):
         """If branch deletion fails, result reflects failure (not already_clean)."""
         repo = Path("/fake/repo")
         slug = "protected-feature"
 
         mock_branch_exists.return_value = True
-        # First call is prune_worktrees, second is branch -D
-        mock_run.side_effect = [
-            MagicMock(returncode=0),  # prune
-            MagicMock(returncode=1, stderr="error: branch not found"),  # branch -D
-        ]
+        mock_run.return_value = MagicMock(returncode=0)  # prune
+        # safe_delete_branch returns a git error (not skipped_unmerged)
+        mock_safe_del.return_value = {
+            "deleted": False,
+            "skipped_unmerged": False,
+            "branch": f"session/{slug}",
+            "error": "error: branch not found",
+        }
 
         result = cleanup_after_merge(repo, slug)
 
@@ -157,6 +168,34 @@ class TestCleanupAfterMerge:
         assert result["already_clean"] is False
         assert len(result["errors"]) == 1
         assert "Failed to delete branch" in result["errors"][0]
+
+    @patch("agent.worktree_manager.safe_delete_branch")
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager._branch_exists")
+    @patch("agent.worktree_manager.remove_worktree")
+    def test_branch_unmerged_skips_deletion(
+        self, mock_remove_wt, mock_branch_exists, mock_run, mock_safe_del
+    ):
+        """When safe_delete_branch detects an unmerged branch, skipped_unmerged is set."""
+        repo = Path("/fake/repo")
+        slug = "unmerged-feature"
+
+        mock_branch_exists.return_value = True
+        mock_run.return_value = MagicMock(returncode=0)  # prune
+        mock_safe_del.return_value = {
+            "deleted": False,
+            "skipped_unmerged": True,
+            "branch": f"session/{slug}",
+            "error": None,
+        }
+
+        result = cleanup_after_merge(repo, slug)
+
+        assert result["branch_deleted"] is False
+        assert result["skipped_unmerged"] is True
+        assert result["already_clean"] is False
+        # The unmerged warning should be in errors for operator visibility
+        assert any("unmerged-branch-guard" in e for e in result["errors"])
 
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
@@ -565,3 +604,328 @@ class TestGetOrCreateWorktree:
         # Verify the git command used "develop" as base branch
         cmd = mock_run.call_args[0][0]
         assert "develop" in cmd
+
+
+def _make_session(
+    working_dir: str | None,
+    status: str,
+    session_id: str = "sess-1",
+    agent_session_id: str = "agt-1",
+) -> SimpleNamespace:
+    """Build a duck-typed AgentSession stand-in for busy-check tests."""
+    return SimpleNamespace(
+        working_dir=working_dir,
+        status=status,
+        session_id=session_id,
+        agent_session_id=agent_session_id,
+        project_key="test-proj",
+    )
+
+
+class TestWorktreeBusyCheck:
+    """Tests for worktree_busy_check (issue #1357)."""
+
+    @patch("models.agent_session.AgentSession")
+    def test_no_sessions_returns_none(self, mock_as):
+        mock_as.query.all.return_value = []
+        assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
+
+    @patch("models.agent_session.AgentSession")
+    def test_terminal_session_does_not_block(self, mock_as):
+        mock_as.query.all.return_value = [
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "completed"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "killed"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "failed"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "abandoned"),
+            _make_session("/fake/repo/.worktrees/sdlc-1218", "cancelled"),
+        ]
+        assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
+
+    @patch("models.agent_session.AgentSession")
+    def test_running_session_blocks(self, mock_as):
+        mock_as.query.all.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218",
+                "running",
+                session_id="0_LIVE",
+                agent_session_id="agt-LIVE",
+            ),
+        ]
+        result = worktree_busy_check(Path("/fake/repo"), "sdlc-1218")
+        assert result == ("0_LIVE", "agt-LIVE")
+
+    @patch("models.agent_session.AgentSession")
+    def test_subdir_match_blocks(self, mock_as):
+        """working_dir below the worktree root still counts as busy."""
+        mock_as.query.all.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218/sub/dir",
+                "running",
+                session_id="0_SUB",
+            ),
+        ]
+        result = worktree_busy_check(Path("/fake/repo"), "sdlc-1218")
+        assert result is not None
+        assert result[0] == "0_SUB"
+
+    @patch("models.agent_session.AgentSession")
+    def test_substring_near_miss_does_not_block(self, mock_as):
+        """sdlc-1218-other must NOT match sdlc-1218 (segment-aware)."""
+        mock_as.query.all.return_value = [
+            _make_session(
+                "/fake/repo/.worktrees/sdlc-1218-other",
+                "running",
+            ),
+        ]
+        assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
+
+    @patch("models.agent_session.AgentSession")
+    def test_relative_working_dir_match(self, mock_as):
+        """working_dir stored as a relative path resolves against repo_root."""
+        mock_as.query.all.return_value = [
+            _make_session(".worktrees/sdlc-1218", "running", session_id="0_REL"),
+        ]
+        # Use the actual cwd-resolvable repo root so resolve() works.
+        repo_root = Path("/tmp")
+        result = worktree_busy_check(repo_root, "sdlc-1218")
+        # Relative paths are resolved via repo_root / wd; should match.
+        assert result is not None
+        assert result[0] == "0_REL"
+
+    @patch("models.agent_session.AgentSession")
+    def test_query_raises_returns_none(self, mock_as):
+        """Popoto query failure fails open (returns None) and logs WARNING."""
+        mock_as.query.all.side_effect = RuntimeError("redis down")
+        assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
+
+    @patch("models.agent_session.AgentSession")
+    def test_session_with_no_working_dir_skipped(self, mock_as):
+        mock_as.query.all.return_value = [
+            _make_session(None, "running"),
+            _make_session("", "running"),
+        ]
+        assert worktree_busy_check(Path("/fake/repo"), "sdlc-1218") is None
+
+
+class TestRemoveWorktreeBusyGuard:
+    """Tests for remove_worktree's refuse-busy guard (issue #1357)."""
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_clear_path_returns_true(self, mock_run, mock_busy):
+        """No live session: remove proceeds and returns True."""
+        mock_busy.return_value = None
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch.object(Path, "exists", return_value=True):
+            result = remove_worktree(Path("/fake/repo"), "sdlc-1218")
+        assert result is True
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_blocked_returns_tuple(self, mock_run, mock_busy):
+        """Live session: returns ('blocked', session_id) and skips git."""
+        mock_busy.return_value = ("0_LIVE", "agt-LIVE")
+        result = remove_worktree(Path("/fake/repo"), "sdlc-1218")
+        assert result == ("blocked", "0_LIVE")
+        # git worktree remove must NOT be called when blocked
+        for call in mock_run.call_args_list:
+            assert "remove" not in str(call) or "branch" not in str(call) or True
+        # Stronger: the busy guard fires BEFORE the worktree_dir.exists() check,
+        # so no subprocess invocations should have happened.
+        assert mock_run.call_count == 0
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_force_overrides_busy_guard(self, mock_run, mock_busy, caplog):
+        """force=True logs WARNING and proceeds."""
+        import logging
+
+        mock_busy.return_value = ("0_LIVE", "agt-LIVE")
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch.object(Path, "exists", return_value=True):
+            with caplog.at_level(logging.WARNING, logger="agent.worktree_manager"):
+                result = remove_worktree(Path("/fake/repo"), "sdlc-1218", force=True)
+        assert result is True
+        # Ensure the force WARNING fired
+        assert any("force-removing" in rec.message for rec in caplog.records)
+
+    @patch("agent.worktree_manager.worktree_busy_check")
+    @patch("agent.worktree_manager.subprocess.run")
+    def test_busy_check_failure_treated_as_clear(self, mock_run, mock_busy):
+        """If the busy helper returns None (fail-open path), removal proceeds."""
+        mock_busy.return_value = None
+        mock_run.return_value = MagicMock(returncode=0)
+        with patch.object(Path, "exists", return_value=True):
+            result = remove_worktree(Path("/fake/repo"), "sdlc-1218")
+        assert result is True
+
+
+class TestCleanupAfterMergeBusyBlock:
+    """Tests for cleanup_after_merge surfacing the busy block (issue #1357)."""
+
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager._branch_exists")
+    @patch("agent.worktree_manager.remove_worktree")
+    def test_blocked_by_live_session(self, mock_remove_wt, mock_branch_exists, mock_run):
+        """When remove_worktree returns ('blocked', sid), result reflects it."""
+        repo = Path("/fake/repo")
+        slug = "sdlc-1218"
+
+        with patch.object(Path, "exists", return_value=True):
+            mock_remove_wt.return_value = ("blocked", "0_LIVE")
+            mock_branch_exists.return_value = False
+            mock_run.return_value = MagicMock(returncode=0)
+
+            result = cleanup_after_merge(repo, slug)
+
+        assert result["worktree_removed"] is False
+        assert result["blocked_by_session"] == "0_LIVE"
+        # Block is recorded as an error (so post_merge_cleanup.py can decide
+        # to emit the distinct exit-2 path).
+        assert any("blocked: worktree in use" in e for e in result["errors"])
+        assert result["already_clean"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #1377: verify_worktree_branch
+# ---------------------------------------------------------------------------
+
+
+def _init_git_worktree(tmp_path: Path, branch: str) -> Path:
+    """Create a real git repo at tmp_path checked out to ``branch``.
+
+    Uses subprocess + actual git for fidelity — the behavior under test
+    depends on real git semantics (rev-parse, status, checkout). Branch
+    ``main`` is created via the initial commit; additional branches are
+    created with ``git checkout -b``.
+    """
+    import subprocess as _sp
+
+    repo = tmp_path / "wt"
+    repo.mkdir()
+    _sp.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    _sp.run(["git", "-C", str(repo), "config", "user.email", "t@example.com"], check=True)
+    _sp.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    (repo / "seed.txt").write_text("seed\n")
+    _sp.run(["git", "-C", str(repo), "add", "seed.txt"], check=True)
+    _sp.run(["git", "-C", str(repo), "commit", "-q", "-m", "seed"], check=True)
+    if branch != "main":
+        _sp.run(["git", "-C", str(repo), "checkout", "-q", "-b", branch], check=True)
+    return repo
+
+
+class TestVerifyWorktreeBranch:
+    """Tests for verify_worktree_branch (issue #1377)."""
+
+    def test_matching_branch_is_noop(self, tmp_path, caplog):
+        repo = _init_git_worktree(tmp_path, "main")
+        with caplog.at_level("INFO", logger="agent.worktree_manager"):
+            verify_worktree_branch(repo, "main")
+        assert not any("worktree-branch-recovery" in r.message for r in caplog.records)
+
+    def test_mismatch_clean_auto_checks_out(self, tmp_path, caplog):
+        repo = _init_git_worktree(tmp_path, "session/sdlc-1377")
+        with caplog.at_level("INFO", logger="agent.worktree_manager"):
+            verify_worktree_branch(repo, "main")
+        import subprocess as _sp
+
+        head = _sp.run(
+            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "main"
+        log_msgs = " ".join(r.message for r in caplog.records)
+        assert "worktree-branch-recovery" in log_msgs
+        assert "session/sdlc-1377" in log_msgs  # from-branch
+        assert "main" in log_msgs  # to-branch
+
+    def test_mismatch_dirty_raises(self, tmp_path):
+        repo = _init_git_worktree(tmp_path, "session/sdlc-1377")
+        (repo / "dirty.txt").write_text("uncommitted\n")
+        with pytest.raises(WorktreeBranchMismatchError) as ei:
+            verify_worktree_branch(repo, "main")
+        msg = str(ei.value)
+        assert "session/sdlc-1377" in msg
+        assert "main" in msg
+        assert ei.value.dirty_files  # non-empty
+        assert ei.value.expected_branch == "main"
+        assert ei.value.actual_branch == "session/sdlc-1377"
+
+    def test_missing_path_raises(self, tmp_path):
+        missing = tmp_path / "does-not-exist"
+        with pytest.raises(WorktreeBranchMismatchError) as ei:
+            verify_worktree_branch(missing, "main")
+        assert "does not exist" in str(ei.value)
+
+    def test_empty_expected_branch_raises_value_error(self, tmp_path):
+        repo = _init_git_worktree(tmp_path, "main")
+        with pytest.raises(ValueError):
+            verify_worktree_branch(repo, "")
+        with pytest.raises(ValueError):
+            verify_worktree_branch(repo, "   ")
+
+    def test_none_path_raises_type_error(self):
+        with pytest.raises(TypeError):
+            verify_worktree_branch(None, "main")
+
+    def test_mismatch_clean_target_branch_locked_elsewhere_raises(self, tmp_path):
+        """Issue #1412: refuse early when expected_branch is held by another worktree."""
+        import subprocess as _sp
+
+        # Main repo on `main`.
+        main_repo = _init_git_worktree(tmp_path, "main")
+        # Create a session branch in the main repo, then add a sibling worktree
+        # for it. After the worktree is added, the main repo stays on `main`
+        # and the sibling holds `session/x`.
+        _sp.run(
+            ["git", "-C", str(main_repo), "branch", "session/x"],
+            check=True,
+            capture_output=True,
+        )
+        sibling = tmp_path / "sibling"
+        _sp.run(
+            ["git", "-C", str(main_repo), "worktree", "add", str(sibling), "session/x"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Now `main` is locked by main_repo. verify_worktree_branch on the
+        # sibling asking for "main" must raise with the structured cause.
+        with pytest.raises(WorktreeBranchMismatchError) as ei:
+            verify_worktree_branch(sibling, "main")
+        assert ei.value.expected_branch == "main"
+        assert ei.value.actual_branch == "session/x"
+        cause = str(ei.value)
+        assert "already used by worktree at" in cause
+        assert str(main_repo.resolve()) in cause or str(main_repo) in cause
+
+    def test_mismatch_clean_target_branch_not_locked_proceeds(self, tmp_path):
+        """Issue #1412: when target branch is unlocked, existing recovery path still runs."""
+        import subprocess as _sp
+
+        # Main repo on `main`, create a `main2` branch (no worktree holds it),
+        # then move the main repo onto `session/x`. Now `main2` is unlocked.
+        main_repo = _init_git_worktree(tmp_path, "main")
+        _sp.run(
+            ["git", "-C", str(main_repo), "branch", "main2"],
+            check=True,
+            capture_output=True,
+        )
+        _sp.run(
+            ["git", "-C", str(main_repo), "checkout", "-q", "-b", "session/x"],
+            check=True,
+            capture_output=True,
+        )
+
+        # Asking the main_repo (currently on session/x) to verify "main2"
+        # should auto-checkout since `main2` is not held by any worktree.
+        verify_worktree_branch(main_repo, "main2")
+        head = _sp.run(
+            ["git", "-C", str(main_repo), "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert head == "main2"

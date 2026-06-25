@@ -33,7 +33,7 @@ def _make_session(project_key: str, issue_number: int | None = None):
 
         session = AgentSession()
         session.session_id = f"test-1302-{uuid.uuid4().hex[:8]}"
-        session.session_type = "pm"
+        session.session_type = "eng"
         session.project_key = project_key
         session.status = "active"
         if issue_number:
@@ -142,7 +142,7 @@ class TestPlanRevisingLockIntegration:
         assert result.row_id == "G7", f"Expected G7, got {result.row_id!r}"
 
         # Step 4: Simulate plan clearing the lock (write_meta with plan_revising=false).
-        with patch("tools.sdlc_meta_set._find_session", return_value=reloaded):
+        with patch("tools.sdlc_meta_set.find_session", return_value=reloaded):
             clear_result = write_meta(key="plan_revising", value="false")
 
         assert clear_result == {"key": "plan_revising", "value": False}, (
@@ -176,7 +176,7 @@ class TestPlanRevisingLockIntegration:
         project_key = f"{PROJECT_KEY_PREFIX}persist-{uuid.uuid4().hex[:6]}"
         session = _make_session(project_key)
 
-        with patch("tools.sdlc_meta_set._find_session", return_value=session):
+        with patch("tools.sdlc_meta_set.find_session", return_value=session):
             result = write_meta(key="plan_revising", value="true")
 
         assert result == {"key": "plan_revising", "value": True}
@@ -197,7 +197,7 @@ class TestPlanRevisingLockIntegration:
         session = _make_session(project_key)
         test_hash = "deadbeef1234567890"
 
-        with patch("tools.sdlc_meta_set._find_session", return_value=session):
+        with patch("tools.sdlc_meta_set.find_session", return_value=session):
             result = write_meta(key="plan_hash_at_build_start", value=test_hash)
 
         assert result == {"key": "plan_hash_at_build_start", "value": test_hash}

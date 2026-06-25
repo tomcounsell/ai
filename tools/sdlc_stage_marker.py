@@ -21,12 +21,41 @@ Environment variables (checked in order if --session-id not provided):
 When no session ID is available (local Claude Code sessions), use --issue-number
 to resolve the session by GitHub issue number.
 
+Degradation contract (D7 — loud failure, quiet absence):
+    A tri-state probe replaces the old binary present/absent check so a missing
+    orchestration substrate degrades to a *visible* marker instead of silently
+    lagging, while a session-less local invocation stays quiet:
+
+    - ABSENT — cannot import models.agent_session / Redis unreachable
+      (ImportError / redis.ConnectionError): emit a degraded marker
+      ({"status": "degraded", ...}) and exit 0. This is the non-`ai`-repo case.
+    - PRESENT_NO_SESSION — substrate imports and Redis is reachable, but no PM
+      session resolves: emit a degraded marker and exit 0 (QUIET). The marker
+      cannot tell a legitimate non-`ai` repo apart from an `ai` wiring bug, so
+      it must not be noisy.
+    - PRESENT_WRITE_FAILED — session resolved but start_stage/complete_stage
+      rejects or raises: print a clear stderr diagnostic and exit NON-ZERO.
+      Loud is reserved ONLY for this case. The idempotent already-completed
+      path stays exit 0.
+
+Ownership gate (issue #1735): when ``--issue-number N`` is explicitly provided,
+the resolved session is verified to own issue N via ``session_owns_issue()`` in
+``tools._sdlc_utils``. If the check fails (the resolved session belongs to a
+different issue — the artifact-divert residual case), the tool prints a stderr
+diagnostic and returns exit code 1 with no marker write. The gate does not fire
+when ``--issue-number`` is omitted (bridge PM sessions using env-var resolution
+are unaffected).
+
 Exit codes:
-    0 — always (errors print {} and exit 0, never crash the calling skill)
+    0 — success, degraded (substrate absent / no session), or idempotent no-op
+    1 — substrate present, session resolved, but the marker write genuinely
+        failed (the only loud case; includes ownership-guard rejection)
 
 Output:
-    {} on error (no session found, invalid stage, Redis down, etc.)
-    {"stage": "DOCS", "status": "completed"} on success
+    {"status": "degraded", "stage": ..., "reason": ...} when the substrate is
+        absent or no session resolves (exit 0)
+    {"stage": "DOCS", "status": "completed"} on success (exit 0)
+    {} + stderr diagnostic on genuine write failure (exit 1)
 """
 
 from __future__ import annotations
@@ -34,8 +63,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
+
+from tools._sdlc_utils import find_session, session_owns_issue
 
 logger = logging.getLogger(__name__)
 
@@ -47,56 +77,55 @@ _VALID_STAGES = frozenset(
 # Status values accepted by this tool (maps to state machine calls)
 _VALID_STATUSES = frozenset(["in_progress", "completed"])
 
+# Tri-state substrate probe outcomes (D7).
+SUBSTRATE_ABSENT = "ABSENT"
+SUBSTRATE_PRESENT = "PRESENT"
 
-def _find_session(session_id: str | None, issue_number: int | None = None):
-    """Find a PM AgentSession by explicit ID, env vars, or issue number.
 
-    Resolution order:
-    1. --session-id argument (if provided)
-    2. VALOR_SESSION_ID env var
-    3. AGENT_SESSION_ID env var
-    4. --issue-number argument (primary path for local Claude Code sessions)
+def probe_substrate() -> str:
+    """Probe whether the orchestration substrate (models + Redis) is reachable.
 
-    Returns the session object or None.
+    Returns ``SUBSTRATE_PRESENT`` when ``models.agent_session`` imports AND a
+    trivial Redis-backed query succeeds; ``SUBSTRATE_ABSENT`` on ImportError or
+    any connection error. Never raises.
+
+    This distinguishes the genuinely-absent substrate (a non-`ai` repo, where a
+    degraded marker is correct) from a present substrate that merely has no
+    matching PM session (handled separately by the caller).
     """
-    resolved_id = (
-        session_id or os.environ.get("VALOR_SESSION_ID") or os.environ.get("AGENT_SESSION_ID")
-    )
-    if not resolved_id:
-        # No session ID from args or env — try issue number as fallback
-        if issue_number is not None:
-            try:
-                from tools._sdlc_utils import find_session_by_issue
-
-                session = find_session_by_issue(issue_number)
-                if session:
-                    return session
-            except Exception as e:
-                logger.debug(f"sdlc_stage_marker: issue-number lookup failed: {e}")
-        logger.debug("sdlc_stage_marker: no session ID available (no arg, no env vars, no issue)")
-        return None
-
     try:
         from models.agent_session import AgentSession
-
-        sessions = list(AgentSession.query.filter(session_id=resolved_id))
-        if not sessions:
-            logger.debug(f"sdlc_stage_marker: no session found for ID {resolved_id!r}")
-            return None
-        # Prefer PM sessions (they own stage_states)
-        for s in sessions:
-            if getattr(s, "session_type", None) == "pm":
-                return s
-        return sessions[0]
     except Exception as e:
-        logger.debug(f"sdlc_stage_marker: _find_session failed: {e}")
-        return None
+        logger.debug(f"sdlc_stage_marker: substrate import failed: {e}")
+        return SUBSTRATE_ABSENT
+
+    try:
+        # A cheap reachability check that forces a Redis round-trip. ``count``
+        # is evaluated eagerly (unlike the lazy ``filter`` QueryBuilder), so a
+        # Redis connection error surfaces here rather than masquerading as
+        # "no session".
+        AgentSession.query.count(session_type="eng")
+    except Exception as e:
+        logger.debug(f"sdlc_stage_marker: substrate query failed (Redis unreachable?): {e}")
+        return SUBSTRATE_ABSENT
+
+    return SUBSTRATE_PRESENT
+
+
+def _degraded(stage: str, reason: str) -> dict:
+    """Build a visible degraded-mode marker payload (D7)."""
+    return {"status": "degraded", "stage": stage, "reason": reason}
 
 
 def write_marker(
     stage: str, status: str, session_id: str | None = None, issue_number: int | None = None
-) -> dict:
+) -> tuple[dict, int]:
     """Write a stage marker to the PipelineStateMachine.
+
+    When ``issue_number`` is passed, the resolved session must own that issue
+    (via ``session_owns_issue``). If it does not, the write is refused with
+    exit_code 1 and a stderr diagnostic — preventing a silent artifact divert
+    to the wrong session.
 
     Args:
         stage: Pipeline stage name (e.g., "DOCS", "REVIEW").
@@ -105,20 +134,44 @@ def write_marker(
         issue_number: Optional issue number for local session resolution.
 
     Returns:
-        Dict with stage/status on success, empty dict on any failure.
+        A ``(result, exit_code)`` tuple (D7 tri-state contract):
+        - success / degraded / idempotent no-op → exit_code 0
+        - genuine write failure (substrate present, session resolved) →
+          exit_code 1 (the only loud case)
+        - ownership guard refusal → exit_code 1 (write refused, stderr emitted)
     """
     if stage not in _VALID_STAGES:
         logger.debug(f"sdlc_stage_marker: invalid stage {stage!r}")
-        return {}
+        return {}, 0
 
     if status not in _VALID_STATUSES:
         logger.debug(f"sdlc_stage_marker: invalid status {status!r}")
-        return {}
+        return {}, 0
 
-    session = _find_session(session_id, issue_number=issue_number)
+    # Tri-state probe. ABSENT → degraded marker, exit 0 (the non-`ai`-repo case).
+    if probe_substrate() == SUBSTRATE_ABSENT:
+        return _degraded(stage, "state not persisted — substrate absent"), 0
+
+    # Substrate is present. A missing session is QUIET (a session-less local
+    # invocation, or a non-`ai` repo with no PM session) — degraded, exit 0.
+    # Writes opt into auto-ensure so a sessionless local invocation with issue
+    # context still gets a PM session to persist into (#1558).
+    session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
-        return {}
+        return _degraded(stage, "state not persisted — no PM session resolved"), 0
 
+    # Ownership guard: when issue_number is passed, the resolved session must own
+    # that issue or we refuse the write to prevent a silent artifact divert.
+    if issue_number is not None and not session_owns_issue(session, issue_number):
+        print(
+            f"[ERROR] Recorder ownership guard: resolved session does not own"
+            f" issue #{issue_number}; write refused to prevent artifact divert.",
+            file=sys.stderr,
+        )
+        return {"error": "ownership_divert"}, 1
+
+    # PRESENT_WRITE_FAILED is the ONLY loud case: the session resolved but the
+    # state-machine write rejects or raises.
     try:
         from agent.pipeline_state import PipelineStateMachine
 
@@ -128,26 +181,26 @@ def write_marker(
             try:
                 sm.start_stage(stage)
             except ValueError as e:
-                # Predecessor not completed — log and continue silently
-                # Skills should not crash when pipeline state is inconsistent
+                # Predecessor not completed — inconsistent pipeline state, not a
+                # substrate failure. Loud so the operator notices the misorder.
                 logger.debug(f"sdlc_stage_marker: start_stage({stage}) rejected: {e}")
-                return {}
+                return {}, 1
         elif status == "completed":
             # Ensure stage is in_progress before completing
             current = sm.states.get(stage, "pending")
             if current == "completed":
-                # Already completed — idempotent no-op
-                return {"stage": stage, "status": status}
+                # Already completed — idempotent no-op (exit 0)
+                return {"stage": stage, "status": status}, 0
             if current not in ("in_progress", "ready"):
                 # Force to in_progress first so complete_stage() accepts it
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
 
-        return {"stage": stage, "status": status}
+        return {"stage": stage, "status": status}, 0
 
     except Exception as e:
         logger.debug(f"sdlc_stage_marker: write_marker failed: {e}")
-        return {}
+        return {}, 1
 
 
 def main() -> None:
@@ -189,13 +242,40 @@ def main() -> None:
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
 
-    result = write_marker(
-        stage=args.stage.upper(),
+    stage = args.stage.upper()
+    result, exit_code = write_marker(
+        stage=stage,
         status=args.status,
         session_id=args.session_id,
         issue_number=args.issue_number,
     )
-    print(json.dumps(result))
+    # Strip internal sentinel keys before printing to stdout so JSON-parsing
+    # callers always receive a clean dict (no "error" sentinel leaks out).
+    stdout_result = {k: v for k, v in result.items() if k != "error"}
+    print(json.dumps(stdout_result))
+
+    if exit_code != 0:
+        if result.get("error") == "ownership_divert":
+            # Ownership guard already printed the diagnostic in write_marker;
+            # do not emit a second, contradictory "state-machine write rejected"
+            # message — no write was attempted on this path.
+            pass
+        else:
+            # PRESENT_WRITE_FAILED — the only loud case. A clear stderr diagnostic
+            # so a forked sub-skill / operator sees the genuine writeback failure
+            # instead of a silent no-op (mirrors sdlc_dispatch's loud-failure path).
+            print(
+                f"sdlc_stage_marker: FAILED to write {stage}={args.status} "
+                "(substrate present, session resolved, but the state-machine write "
+                "was rejected or raised). State NOT persisted.",
+                file=sys.stderr,
+            )
+    elif result.get("status") == "degraded":
+        # Visible degraded-mode marker (quiet on stderr, but the stdout JSON
+        # carries status: degraded so the PM/operator can see it).
+        logger.debug(f"sdlc_stage_marker: degraded — {result.get('reason')}")
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

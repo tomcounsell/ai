@@ -129,7 +129,7 @@ by `sdk_client.py` from the `AgentSession` (issue #420):
 | `$SDLC_PR_BRANCH` | PR head branch | `gh pr view --json headRefName` |
 | `$SDLC_SLUG` | Work item slug | Derive from branch name |
 | `$SDLC_PLAN_PATH` | Path to plan doc | Derive from slug |
-| `$SDLC_ISSUE_NUMBER` | Tracking issue | Extract from PR body |
+| `$SDLC_ISSUE_NUMBER` | Tracking issue (env hint) | **Last-resort only** for recorder calls — primary is PR-body `Closes #N` extraction (#1731) |
 | `$SDLC_REPO` | GitHub repo (org/name) | `$GH_REPO` |
 
 **Usage:** Prefer `$SDLC_PR_NUMBER` over `$PR_NUMBER` when available.
@@ -167,21 +167,35 @@ catches reviews that APPROVED a PR without the reviewer actually evaluating
 acceptance criteria; this preflight (#1112) catches reviews that APPROVED a PR
 that mechanically cannot merge.
 
-## Stage Marker
+## Stage Marker (with degraded-mode awareness)
 
-At the very start of this skill, write an in_progress marker:
-
-```bash
-sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number {issue_number} 2>/dev/null || true
-```
-
-After posting the review (Step 6), on approval (no blockers):
+At the very start of this skill, write an in_progress marker and inspect its
+output for degraded mode (mirroring the `do-docs` substrate-probe pattern).
+Do NOT blanket-suppress the output with `2>/dev/null || true` — a forked
+sub-skill must announce degraded mode rather than silently lagging state:
 
 ```bash
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER"
 ```
 
-Note: If blockers found, leave as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes.
+Note: `ISSUE_NUMBER` is resolved unconditionally in § 1 (PR Context Gathering) before this
+marker is written, so the variable is always a positive integer here (#1731).
+
+Parse the JSON output:
+- `{"stage": "REVIEW", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
+- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". The review itself depends only on `gh` and the diff, not the substrate, so proceed.
+- Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
+
+After posting the review (Step 6), on approval (no blockers), the REVIEW completion marker is written in the **"Record the verdict (mandatory)"** section, **co-located in the same block as the APPROVED verdict record** (#1642). Do NOT write the completion marker as a separate, earlier step — verdict-record and completion-marker are a single unit on the approval path so the REVIEW marker can never desync from an APPROVED verdict:
+
+```bash
+# Written immediately after `sdlc-tool verdict record ... --verdict "APPROVED"`:
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
+```
+
+Apply the same degraded-vs-loud interpretation to the completion marker.
+
+Note: If blockers/findings exist, record `CHANGES REQUESTED` and leave the marker as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes. The completion marker is written ONLY on the APPROVED path, and ONLY co-located with the APPROVED verdict record.
 
 ## Goal Alignment
 
@@ -215,6 +229,34 @@ SLUG="${SDLC_SLUG:-}"
 if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
   PLAN_PATH="docs/plans/${SLUG}.md"
 fi
+
+# Resolve ISSUE_NUMBER — unconditional clobber (never ${ISSUE_NUMBER:-…}).
+# IMPORTANT: $ARGUMENTS is the PR number for this skill, NOT the issue number.
+# Do NOT use $ARGUMENTS as ISSUE_NUMBER. Do NOT use $SDLC_ISSUE_NUMBER as
+# authoritative — a stale inherited env value is exactly the "latched onto
+# wrong issue" mechanism this skill must guard against (#1731).
+#
+# Resolution order (first non-empty positive integer wins):
+# 1. PR body extraction: Closes #N / Fixes #N / Resolves #N  (PRIMARY — always run)
+# 2. PR body: tracking: https://.../issues/N  (secondary PR-body fallback)
+# 3. $SDLC_ISSUE_NUMBER env var (LAST RESORT ONLY — guarded by positive-integer check)
+PR_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body' 2>/dev/null)
+ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiP '(?:closes|fixes|resolves)\s+#\K[0-9]+' | head -1)
+if [ -z "$ISSUE_NUMBER" ]; then
+  # Also try "tracking: https://.../issues/N" pattern
+  ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oP '(?<=issues/)[0-9]+' | head -1)
+fi
+if [ -z "$ISSUE_NUMBER" ] && [[ "$SDLC_ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+  ISSUE_NUMBER="$SDLC_ISSUE_NUMBER"
+fi
+
+# Assert ISSUE_NUMBER is a positive integer before any recorder call (#1731).
+# An unresolvable issue number must fail loudly so the supervisor sees an
+# actionable error rather than a silently diverted verdict on a wrong session.
+[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || {
+  echo "do-pr-review: could not resolve a positive-integer ISSUE_NUMBER from ARGUMENTS='${ARGUMENTS}', PR body, or SDLC_ISSUE_NUMBER. Pass the issue number as skill args or ensure the PR body contains 'Closes #N'." >&2
+  exit 1
+}
 ```
 
 **Run the mergeability preflight FIRST** (see `sub-skills/checkout.md` →
@@ -303,10 +345,33 @@ gh pr diff $PR_NUMBER --name-only
 ### 3. Screenshot Capture (if UI changes detected)
 
 **Determine if screenshots needed:**
-- Check diff for UI-related files: `*.html`, `*.jsx`, `*.tsx`, `*.vue`, `*.css`, `*.scss`, `*.py` (templates)
-- If no UI files changed, skip this step
 
-**If screenshots needed:**
+Check the changed file list for UI-related extensions and patterns:
+- `*.html`, `*.htm` — HTML templates
+- `*.jsx`, `*.tsx` — React components
+- `*.vue` — Vue single-file components
+- `*.css`, `*.scss`, `*.sass`, `*.less` — Stylesheets
+- `*.js`, `*.ts` — JavaScript/TypeScript (when the file is under a `ui/`, `frontend/`, `static/`, `assets/`, `templates/`, or `components/` directory)
+- Django/Jinja template files (`.html` under `templates/`)
+- Any file whose path contains `ui/`, `frontend/`, `static/`, `web/`, `assets/`, or `templates/`
+
+**Set the UI gate flag early:**
+
+```bash
+UI_FILES=$(gh pr diff $PR_NUMBER --name-only | grep -E '\.(html|htm|jsx|tsx|vue|css|scss|sass|less)$|/(ui|frontend|static|web|assets|templates)/' || true)
+UI_CHANGES_DETECTED=false
+SCREENSHOTS_CAPTURED=0
+
+if [ -n "$UI_FILES" ]; then
+  UI_CHANGES_DETECTED=true
+  echo "UI files changed — visual proof required before approval:"
+  echo "$UI_FILES"
+fi
+```
+
+**If no UI files changed:** skip this step entirely. The screenshot gate is a no-op — `SCREENSHOTS_CAPTURED=0` is fine and approval is not blocked.
+
+**If UI files changed (`UI_CHANGES_DETECTED=true`):**
 
 ```bash
 # Prepare screenshot directory
@@ -318,12 +383,32 @@ mkdir -p generated_images/pr-$PR_NUMBER
 #   mcp__byob__browser_navigate(url="http://localhost:8000", waitUntil="networkidle")
 #   mcp__byob__browser_read(url="http://localhost:8000", reuseTab=true, screens=1)
 #   mcp__byob__browser_screenshot(tabId=<tab>, savePath="generated_images/pr-$PR_NUMBER/01_main_view.png")
+
+# After each successful screenshot, increment the counter:
+# SCREENSHOTS_CAPTURED=$((SCREENSHOTS_CAPTURED + 1))
 ```
 
 **Screenshot naming convention:**
 - `01_main_view.png` - Primary affected view
 - `02_feature_demo.png` - New feature in action
 - `03_edge_case.png` - Edge case or error state
+
+**Visual proof gate (evaluated after this step, before posting any approval):**
+
+If `UI_CHANGES_DETECTED=true` AND `SCREENSHOTS_CAPTURED=0`, the review MUST NOT approve.
+Set a gate failure flag:
+
+```bash
+VISUAL_PROOF_GATE_FAILED=false
+if [ "$UI_CHANGES_DETECTED" = "true" ] && [ "$SCREENSHOTS_CAPTURED" -eq 0 ]; then
+  VISUAL_PROOF_GATE_FAILED=true
+  echo "VISUAL PROOF GATE FAILED: UI files were changed but no screenshots were captured."
+  echo "This PR cannot be approved without visual proof of the UI changes."
+  echo "Posting 'Request Changes' verdict with a note to capture screenshots."
+fi
+```
+
+This flag is consumed in Step 6: if `VISUAL_PROOF_GATE_FAILED=true`, override any otherwise-clean verdict to `CHANGES_REQUESTED` and add a **blocker** finding documenting the missing visual proof. The blocker text should name the specific UI files that changed and explain that at least one screenshot is required before this PR can be approved.
 
 ### 4. Plan Validation (if plan exists)
 
@@ -333,7 +418,17 @@ For each requirement/acceptance criterion in the plan:
 1. Locate the corresponding implementation in the PR diff
 2. Verify behavior matches the plan specification
 3. Check that edge cases mentioned in the plan are handled
-4. Verify any "No-Gos" from the plan are respected
+4. Verify any "No-Gos" from the plan are respected. For every `[DESTRUCTIVE]` or
+   `[SEPARATE-SLUG]` No-Go (assertable No-Gos — those describing a forbidden code-level
+   outcome), confirm that a corresponding `## Verification` anti-criterion row exists.
+   If a clearly assertable No-Go has no inverse Verification row, flag it as a
+   non-blocking advisory item (not a hard gate — anti-criteria are opt-in per author).
+   `[EXTERNAL]` and `[ORDERED]` No-Gos are genuinely advisory; no anti-criterion row
+   is required for them. Also confirm that the PR description contains the **pasted
+   red-state FAIL output** for each authored anti-criterion (evidence that the author
+   exercised the row against a deliberately-violating input before trusting it). A
+   missing red-state paste is a non-blocking advisory; the binding gate is the green
+   Step 4.5 Verification run.
 5. If the plan has an Agent Integration section, verify integration points exist in the codebase (e.g., grep for expected tool calls, imports, or MCP references)
 
 ### 4.5. Verification Checks (if plan has ## Verification table)
@@ -418,6 +513,26 @@ Include any findings as a "Legacy Cruft" subsection in the review output.
 Cruft findings are advisory, not blockers. See `.claude/agents/cruft-auditor.md`.
 
 ### 6. Post Review
+
+**Visual proof gate check (before posting):**
+
+If `VISUAL_PROOF_GATE_FAILED=true` (set in Step 3), inject a blocker finding
+regardless of the code-review verdict:
+
+```
+**File:** `(PR diff — UI files without visual proof)`
+**Code:** `(see UI_FILES list from Step 3)`
+**Issue:** UI changes detected but no BYOB screenshots were captured. Visual
+proof is required before this PR can be approved. At least one screenshot of
+the affected UI must be included in the review.
+**Severity:** blocker
+**Fix:** Start the app, navigate to the affected page(s) via BYOB MCP, capture
+at least one screenshot with mcp__byob__browser_screenshot, and re-run the
+review.
+```
+
+This blocker is real and counts toward the verdict: the review MUST post as
+`CHANGES_REQUESTED`, not `APPROVED`, regardless of other findings.
 
 All review-posting logic lives in `sub-skills/post-review.md §3`. That
 sub-skill is the **single source of truth** for the review-post decision tree.
@@ -613,6 +728,81 @@ independent operator kill switches.
 `judges_run` (count) and `consensus_disagreement` (bool, true when any pair
 of judges disagreed). Operators can grep these from session state.
 
+### Cross-vendor judge (opt-in)
+
+After collecting all Claude judge dicts and BEFORE calling `compute_consensus`,
+optionally invoke a cross-vendor (non-Claude) LLM judge to get an independent
+opinion. This is an operator opt-in gate — default OFF.
+
+**Env vars:**
+- `SDLC_REVIEW_CROSS_VENDOR` — set to `1` to enable. Default: `0` (off).
+- `SDLC_REVIEW_CROSS_VENDOR_REQUIRED` — set to `1` to treat a skip as a
+  blocker (fail-closed). Default: `0` (skip is non-fatal).
+
+**Shape gate:** the cross-vendor judge ONLY fires when `shape == "feature"`.
+Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`) are
+NEVER sent to the cross-vendor judge regardless of env vars — the cost is not
+justified and the shapes carry minimal review signal.
+
+**Orchestration (insert after Claude judge dicts are collected):**
+
+```bash
+CROSS_VENDOR_ENABLED="${SDLC_REVIEW_CROSS_VENDOR:-0}"
+CROSS_VENDOR_REQUIRED="${SDLC_REVIEW_CROSS_VENDOR_REQUIRED:-0}"
+CROSS_VENDOR_SKIP_REASON=""
+
+if [ "$CROSS_VENDOR_ENABLED" = "1" ] && [ "$SHAPE" = "feature" ]; then
+  echo "cross-vendor judge: invoking for PR $PR_NUMBER (shape=feature)"
+  CV_RAW=$(python -m tools.cross_vendor_judge --pr "$PR_NUMBER" 2>/dev/null)
+  CV_STATUS=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
+  if [ "$CV_STATUS" = "ok" ]; then
+    # Append the cross-vendor judge dict to the judges list before consensus
+    CV_JUDGE=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['judge']))")
+    # (Implementation: append CV_JUDGE to the in-memory judges list / JSON array)
+    # Post per-judge comment — same pattern as Claude judges, different heading prefix
+    gh pr comment "$PR_NUMBER" --body "## Review (Judge cross-vendor):
+$(echo "$CV_RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['judge'].get('reasoning_summary',''))")
+
+**Verdict:** $(echo "$CV_RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['judge'].get('verdict',''))")"
+  elif [ "$CV_STATUS" = "skipped" ]; then
+    CROSS_VENDOR_SKIP_REASON=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
+    echo "cross-vendor judge: skipped — $CROSS_VENDOR_SKIP_REASON"
+    if [ "$CROSS_VENDOR_REQUIRED" = "1" ]; then
+      # Fail-closed: inject a synthetic CHANGES REQUESTED dict so any-blocker-wins triggers
+      SYNTHETIC_JUDGE='{"judge_id":"cross-vendor","verdict":"CHANGES_REQUESTED","blockers":1,"tech_debt":0,"nits":0,"reasoning_summary":"Cross-vendor judge unavailable — required by SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1."}'
+      # (Implementation: append SYNTHETIC_JUDGE to the in-memory judges list)
+    fi
+  else
+    echo "cross-vendor judge: error parsing response (status=$CV_STATUS) — skipping"
+    CROSS_VENDOR_SKIP_REASON="parse error: status=$CV_STATUS"
+  fi
+else
+  echo "cross-vendor judge: disabled (gate=off or shape=$SHAPE)"
+fi
+```
+
+**Aggregate comment note:** if the cross-vendor judge was skipped (`CV_STATUS = "skipped"`
+or gate was off), include a visible note in the aggregate summary comment:
+
+```
+Note: cross-vendor judge skipped — {CROSS_VENDOR_SKIP_REASON}
+```
+
+Omit the note entirely when the cross-vendor judge ran successfully and its
+dict was appended to the judges list.
+
+**Invocation fallback:** prefer `python -m tools.cross_vendor_judge --pr N`
+(always available in the repo Python environment). The `valor-cross-vendor-judge
+--pr N` entry point is equivalent if the CLI is on PATH — either form is
+acceptable, but `python -m tools.cross_vendor_judge` is the more reliable
+choice in skill context where PATH may not include project scripts.
+
+**Invariants:**
+- NEVER append a `"skipped"` envelope to the judges list — only `"ok"` judge dicts go in
+- NEVER modify the `compute_consensus(judges, rule="any-blocker-wins")` call signature
+- NEVER modify the `record_verdict` call — the cross-vendor judge dict flows through the same judges list, not a separate path
+- A failed cross-vendor invocation (non-zero exit, parse error) is treated as a skip — never crashes the review
+
 ### Record the verdict (mandatory)
 
 After emitting the OUTCOME block, record the review verdict on the PM session so the SDLC router's Legal Dispatch Guards (G3, G4) can consume it:
@@ -620,34 +810,40 @@ After emitting the OUTCOME block, record the review verdict on the PM session so
 ```bash
 # Single-judge (legacy / SDLC_REVIEW_JUDGES=none / docs-only / preflight):
 # For APPROVED reviews (OUTCOME status=success):
+# #1642: the verdict record AND the REVIEW completion marker are ONE mandatory,
+# self-contained unit on the approval path — never record APPROVED without
+# immediately writing the completion marker, or the marker desyncs from the
+# verdict and router row 9 (/do-docs) stalls on REVIEW != completed.
+# ISSUE_NUMBER is unconditionally resolved and validated in § 1 (#1731).
 sdlc-tool verdict record --stage REVIEW \
-  --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number $ISSUE_NUMBER
+  --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
 
 # For reviews with findings (OUTCOME status=partial or fail):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
-  --issue-number $ISSUE_NUMBER
+  --issue-number "$ISSUE_NUMBER"
 
 # For preflight short-circuit (branch cannot merge):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 \
-  --issue-number $ISSUE_NUMBER
+  --issue-number "$ISSUE_NUMBER"
 
 # For preflight short-circuit (PR not open):
 sdlc-tool verdict record --stage REVIEW \
   --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 \
-  --issue-number $ISSUE_NUMBER
+  --issue-number "$ISSUE_NUMBER"
 
 # Multi-judge: pass --judges-json and --consensus-json after computing
 # consensus via agent.sdlc_review_consensus.compute_consensus. ONE record
 # call writes both the scalar AND the side-fields (single-writer invariant).
 sdlc-tool verdict record --stage REVIEW \
   --verdict "$VERDICT" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
-  --issue-number $ISSUE_NUMBER \
+  --issue-number "$ISSUE_NUMBER" \
   --judges-json "$JUDGES_JSON" --consensus-json "$CONSENSUS_JSON"
 ```
 
-The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. If `$ISSUE_NUMBER` is unknown, omit the `--issue-number` flag and the recorder will resolve via `VALOR_SESSION_ID` / `AGENT_SESSION_ID`.
+The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. **Always pass `--issue-number "$ISSUE_NUMBER"` (quoted)** — it is the authoritative session selector, guaranteeing the verdict lands on the session the router reads for that issue. `ISSUE_NUMBER` is unconditionally resolved in § 1 (PR Context Gathering): `$ARGUMENTS` first, then PR-body extraction (`Closes #N`/`Fixes #N`), then `$SDLC_ISSUE_NUMBER` as a last-resort hint. `$SDLC_ISSUE_NUMBER` is never authoritative on its own — a stale inherited value is the exact divert mechanism this skill guards against (#1731/#1671/#1672).
 
 ## Hard Rules
 
@@ -658,6 +854,7 @@ The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator 
 5. **Pipeline-driven reviews use bot identity when configured (opt-in per machine).** When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set, the review subprocess MUST use `GH_TOKEN=$SDLC_AGENT_GH_TOKEN`. When the token is unset or empty, post under the operator credential — this is the standard posture on machines that are not the dedicated bot host.
 6. **The `<!-- SDLC-AGENT-REVIEW v1 -->` marker MUST appear** in every review body when `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set. The marker is omitted when posting under the operator credential.
 7. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
+8. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one BYOB screenshot before posting an approval. If screenshots were not captured (BYOB unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. This rule exists because visual bugs in frontend changes are invisible to static analysis — see issue #1380.
 
 ## Best Practices
 

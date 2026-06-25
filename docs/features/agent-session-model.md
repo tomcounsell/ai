@@ -1,6 +1,6 @@
 # AgentSession Model
 
-Unified Redis model tracking agent work from enqueue through completion. Replaces both `AgentSession` (queue) and `SessionLog` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
+Unified Redis model tracking agent work from enqueue through completion. Replaces both `AgentSession` (queue) and `AgentSession` (transcript) with a single `AgentSession` model in `models/agent_session.py`.
 
 ## Status Lifecycle
 
@@ -16,7 +16,7 @@ See [Session Lifecycle](session-lifecycle.md) for the full 13-state reference (8
 
 **Identity:** `id` (AutoKeyField), `session_id`, `session_type` (KeyField), `project_key` (KeyField), `chat_id` (KeyField), `status` (IndexedField). `agent_session_id` is a backward-compatible property alias for `id`.
 
-**Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField, auto_now), `completed_at` (DatetimeField), `auto_continue_count`
+**Queue-phase:** `priority`, `scheduled_at` (DatetimeField), `created_at` (SortedField, datetime), `started_at` (DatetimeField), `updated_at` (DatetimeField — UTC-stamped by `save()` override; see #1645), `completed_at` (DatetimeField), `auto_continue_count`
 
 **Telegram origin (consolidated):** `initial_telegram_message` (DictField) — contains `sender_name`, `sender_id`, `message_text`, `telegram_message_id`, `chat_title`. Replaces the previous six separate fields. Property accessors (`sender_name`, `sender_id`, `message_text`) read from this dict for backward compatibility.
 
@@ -26,7 +26,7 @@ See [Session Lifecycle](session-lifecycle.md) for the full 13-state reference (8
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
 
-**Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `role` (DataField — "pm", "dev", or null), `slug` (KeyField — derives branch, plan path, worktree; indexed so the slug-keyed worker-pop filter can find slugged dev sessions — see [Bridge/Worker Architecture §Three Worker Loop Archetypes](bridge-worker-architecture.md#three-worker-loop-archetypes))
+**Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `slug` (KeyField — derives branch, plan path, worktree; indexed so the slug-keyed worker-pop filter can find slugged eng sessions — see [Bridge/Worker Architecture §Three Worker Loop Archetypes](bridge-worker-architecture.md#three-worker-loop-archetypes)). The session role is carried by the `session_type` discriminator (`"eng"`/`"teammate"`/`"granite"`), not a separate `role` field.
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float/int timestamps are auto-converted via `__setattr__`.
 
@@ -222,7 +222,7 @@ degradation rather than a hard error.
 ### How It Flows
 
 1. PM or human calls
-   `python -m tools.valor_session create --role dev --slug {slug} --model sonnet --message "..."`.
+   `python -m tools.valor_session create --role eng --slug {slug} --model sonnet --message "..."`.
 2. `tools/valor_session.py::cmd_create` constructs the AgentSession via
    `enqueue_agent_session(model="sonnet")`; the value is persisted on the
    Redis record.
@@ -279,15 +279,15 @@ a quality + reliability gate. It runs independently of the session cascade:
   `completion_runner:degraded_fallback:daily:<YYYYMMDD>` (7-day TTL) so
   operators can detect outage spikes.
 
-### PM Stage Dispatch Table
+### Stage→Model Dispatch Table
 
-The PM persona's Stage→Model Dispatch Table
-(`config/personas/project-manager.md`) assigns Sonnet to
-BUILD/TEST/PATCH/DOCS and Opus to PLAN/CRITIQUE/REVIEW. The PM explicitly
-passes `--model sonnet` (or `--model opus`) when spawning Dev sessions,
-which sets `session.model` on the Dev's AgentSession record and wins the
-cascade. This is the canonical way to vary models per stage — stage
-routing lives in PM persona prose, NOT in settings.
+The engineer persona's Stage→Model Dispatch Table
+(`config/personas/engineer.md`) assigns Sonnet to BUILD/TEST/PATCH/DOCS and
+Opus to PLAN/CRITIQUE/REVIEW. The parent eng session explicitly passes
+`--model sonnet` (or `--model opus`) when spawning child sessions, which sets
+`session.model` on the child's AgentSession record and wins the cascade. This
+is the canonical way to vary models per stage — stage routing lives in the
+engineer persona prose, NOT in settings.
 
 See [pm-sdlc-decision-rules.md](pm-sdlc-decision-rules.md) for the full
 stage table.
@@ -302,14 +302,24 @@ dormant on the worker path.
 ## BUILD Session Retention (`retain_for_resume`)
 
 `retain_for_resume` (`Field(default=False)`) marks a completed BUILD session as exempt from scheduler
-cleanup so the PM can resume it later via `python -m tools.valor_session resume`.
+cleanup so the parent eng session can resume it later via `python -m tools.valor_session resume`.
 
 **Lifecycle:**
-1. BUILD dev session completes → `_handle_dev_session_completion()` sets `retain_for_resume=True`.
+1. The flag would be set on a completed BUILD child session to mark it for retention.
+   **No code currently sets `retain_for_resume=True`.** The old setter,
+   `_handle_dev_session_completion()`, was deleted in the PM+Dev → unified
+   `eng` session merge, and no replacement setter was wired in. As of that
+   merge the field is only ever read or cleared — see the flag below.
 2. `tools/agent_session_scheduler.py cleanup` skips sessions where `retain_for_resume=True` and `status="completed"`.
    A log message is emitted each time a session is skipped so operators can audit retention.
-3. PR merges/closes → PM calls `python -m tools.valor_session release --pr <N>` to clear the flag.
+3. PR merges/closes → the eng session calls `python -m tools.valor_session release --pr <N>` to clear the flag
+   (`tools/valor_session.py` sets `retain_for_resume = False`).
 4. `AgentSession.Meta.ttl = 2592000` (30 days) is the hard backstop — sessions expire even if the release hook never fires.
+
+**Current effective behavior:** with no setter, every completed BUILD session
+defaults to `False` and is eligible for scheduler cleanup (bounded by the TTL).
+The release path and the cleanup-skip guard remain in place for when a setter
+is reintroduced, but the retain-on-completion behavior is presently inert.
 
 **Default for pre-existing sessions:** `False` (backward-compatible — old BUILD sessions are not retained and will be
 cleaned up by the TTL when they next touch Redis).
@@ -319,7 +329,7 @@ cleaned up by the TTL when they next touch Redis).
 - `_normalize_kwargs()` maps old field names to their new consolidated equivalents: `message_text`, `sender_name`, `sender_id`, `telegram_message_id`, `chat_title` -> `initial_telegram_message`; `revival_context`, `classification_type`, `classification_confidence` -> `extra_context`; `work_item_slug` -> `slug`; `last_activity` -> `updated_at`; `scheduled_after` -> `scheduled_at`; `history` -> `session_events`
 - `__setattr__` auto-converts float timestamps to `datetime` for DatetimeField fields
 - Property accessors provide read access to old field names (`sender_name`, `message_text`, etc.) for backward compatibility
-- `models/session_log.py` exports `SessionLog = AgentSession` (shim)
+- `models/agent_session.py` exports `AgentSession = AgentSession` (shim)
 - No Redis data migration needed for new sessions; existing sessions can be migrated with `scripts/migrate_datetime_fields.py`
 
 ## Migration

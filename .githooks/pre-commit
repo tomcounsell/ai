@@ -21,12 +21,22 @@ else
     PYTHON="python3"
 fi
 
-# ── Phase 0.5: Session-branch worktree guard (#1288) ───────────────────
-# Block commits on `session/{slug}` branches that are not happening from
-# inside the owning `.worktrees/{slug}/` worktree. Worker-side enforcement
-# (#887) covers AgentSession spawns; this guard covers manual `git commit`
-# from the main checkout or any other working tree. Detached HEAD is a
-# no-op; non-session branches (main, hotfix, etc.) are unaffected.
+# ── Phase 0.5: Session-branch worktree guard (#1288, #1620) ────────────
+# Guards commits on `session/{slug}` branches. The guard is self-detecting
+# (option (a), allow-when-no-worktree — decided in #1620):
+#
+#   * If an owning `.worktrees/{slug}/` worktree EXISTS on disk, commits for
+#     that slug must happen from inside it — committing from any other working
+#     tree (e.g. the main checkout) is BLOCKED, so the worktree's in-progress
+#     work cannot be contaminated by a stray commit on the same branch.
+#   * If NO such worktree exists, the current checkout is the sole workspace
+#     for this slug — there is nothing to contaminate — so the commit is
+#     ALLOWED with an informational note on stderr.
+#
+# Worker-side enforcement (#887) covers AgentSession spawns; this guard covers
+# manual `git commit` from the main checkout or any other working tree.
+# Detached HEAD is a no-op; non-session branches (main, hotfix, etc.) are
+# unaffected.
 BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "")
 if [[ "$BRANCH" == session/* ]]; then
     SLUG="${BRANCH#session/}"
@@ -41,19 +51,32 @@ if [[ "$BRANCH" == session/* ]]; then
     fi
     EXPECTED_SUFFIX=".worktrees/${SLUG}"
     if [[ "$TOPLEVEL" != *"$EXPECTED_SUFFIX" ]]; then
-        echo ""
-        echo "COMMIT BLOCKED: branch session/${SLUG} must be committed from inside .worktrees/${SLUG}/." >&2
-        echo "Current working tree: ${TOPLEVEL}" >&2
-        echo "Expected:             <repo_root>/.worktrees/${SLUG}/" >&2
-        echo "" >&2
-        echo "This is the #1288 guard. To proceed correctly:" >&2
-        echo "  cd <repo_root>/.worktrees/${SLUG}" >&2
-        echo "  git commit ..." >&2
-        echo "" >&2
-        echo "If the worktree doesn't exist, create it:" >&2
-        echo "  python -c \"from agent.worktree_manager import get_or_create_worktree; from pathlib import Path; print(get_or_create_worktree(Path('.'), '${SLUG}'))\"" >&2
-        echo ""
-        exit 1
+        WORKTREE_DIR="${TOPLEVEL}/.worktrees/${SLUG}"
+        if [ ! -d "$WORKTREE_DIR" ]; then
+            # Option (a), allow-when-no-worktree (#1620): no owning worktree
+            # exists, so the current checkout is the sole workspace for this
+            # slug. There is nothing to contaminate — allow the commit.
+            echo "" >&2
+            echo "NOTE (#1288 guard, option a): branch session/${SLUG} committed from the main checkout." >&2
+            echo "No worktree exists at ${WORKTREE_DIR} — the main checkout is the only workspace for this slug." >&2
+            echo "Allowing the commit (nothing to contaminate). See #1620." >&2
+            echo "" >&2
+            # fall through — allow the commit to continue past Phase 0.5
+        else
+            echo ""
+            echo "COMMIT BLOCKED: branch session/${SLUG} must be committed from inside .worktrees/${SLUG}/." >&2
+            echo "Current working tree: ${TOPLEVEL}" >&2
+            echo "Expected:             <repo_root>/.worktrees/${SLUG}/" >&2
+            echo "" >&2
+            echo "This is the #1288 guard. To proceed correctly:" >&2
+            echo "  cd <repo_root>/.worktrees/${SLUG}" >&2
+            echo "  git commit ..." >&2
+            echo "" >&2
+            echo "The owning worktree exists at:" >&2
+            echo "  ${WORKTREE_DIR}" >&2
+            echo ""
+            exit 1
+        fi
     fi
 fi
 

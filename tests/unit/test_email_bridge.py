@@ -5,12 +5,14 @@ the standard library. SMTP is mocked via unittest.mock.patch to avoid network
 calls.
 """
 
+import email.message
 import email.mime.multipart
 import email.mime.text
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import bridge.email_bridge as eb
 from bridge.email_bridge import (
     HISTORY_MSG_KEY,
     HISTORY_SET_KEY,
@@ -20,9 +22,12 @@ from bridge.email_bridge import (
     _build_reply_mime,
     _decode_header_value,
     _extract_address,
+    _persist_attachments,
     _poll_imap,
+    _public_attachment,
     _record_history,
     _record_thread,
+    _sanitize_attachment_filename,
     parse_email_message,
 )
 
@@ -163,6 +168,295 @@ class TestParseEmailMessage:
 
         assert result is not None
         assert result["from_addr"] == "upper@example.com"
+
+
+# ---------------------------------------------------------------------------
+# Inbound attachment extraction + persistence
+# ---------------------------------------------------------------------------
+
+
+def _make_email_with_attachments(
+    from_addr: str = "tom@yuda.me",
+    subject: str = "Files attached",
+    body: str | None = "Take a look at these.",
+    message_id: str = "<att-001@example.com>",
+    attachments: list[tuple[str, str, str, bytes]] | None = None,
+) -> bytes:
+    """Build a raw multipart email carrying attachments.
+
+    ``attachments`` is a list of ``(filename, maintype, subtype, data)`` tuples.
+    A ``None`` filename produces an attachment part with no filename header.
+    """
+    msg = email.message.EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = "valor@example.com"
+    msg["Subject"] = subject
+    if message_id:
+        msg["Message-ID"] = message_id
+    if body is not None:
+        msg.set_content(body)
+    for filename, maintype, subtype, data in attachments or []:
+        kwargs = {"maintype": maintype, "subtype": subtype}
+        if filename is not None:
+            kwargs["filename"] = filename
+        msg.add_attachment(data, **kwargs)
+    return msg.as_bytes()
+
+
+@pytest.fixture
+def attachment_dirs(tmp_path, monkeypatch):
+    """Redirect attachment storage + vault mirror to tmp dirs (no repo pollution)."""
+    store = tmp_path / "data" / "media" / "email-attachments"
+    vault = tmp_path / "work-vault" / "email-attachments"
+    monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_DIR", store)
+    monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_VAULT_SUBDIR", vault)
+    return store, vault
+
+
+class TestAttachmentExtraction:
+    """_extract_attachment_metadata() / parse_email_message() attachment fields."""
+
+    def test_single_attachment_parsed(self):
+        raw = _make_email_with_attachments(
+            attachments=[("report.pdf", "application", "pdf", b"%PDF-1.4 data")]
+        )
+        result = parse_email_message(raw)
+        assert result is not None
+        assert len(result["attachments"]) == 1
+        att = result["attachments"][0]
+        assert att["filename"] == "report.pdf"
+        assert att["content_type"] == "application/pdf"
+        assert att["size"] == len(b"%PDF-1.4 data")
+        assert att["path"] is None  # not persisted by parse (critique C1)
+        assert result["attachments_truncated"] is False
+
+    def test_multiple_attachments_parsed(self):
+        raw = _make_email_with_attachments(
+            attachments=[
+                ("a.pdf", "application", "pdf", b"aaa"),
+                ("b.csv", "text", "csv", b"col1,col2"),
+            ]
+        )
+        result = parse_email_message(raw)
+        assert result is not None
+        names = [a["filename"] for a in result["attachments"]]
+        assert names == ["a.pdf", "b.csv"]
+
+    def test_empty_body_with_attachment_is_processed(self):
+        """An attachment-only email (no text body) must NOT be dropped."""
+        raw = _make_email_with_attachments(
+            body=None,
+            attachments=[("only.pdf", "application", "pdf", b"data")],
+        )
+        result = parse_email_message(raw)
+        assert result is not None
+        assert len(result["attachments"]) == 1
+
+    def test_empty_body_no_attachment_still_dropped(self):
+        """Empty body AND no attachments still returns None (guard intact)."""
+        msg = email.message.EmailMessage()
+        msg["From"] = "tom@yuda.me"
+        msg["Subject"] = "nothing"
+        msg["Message-ID"] = "<empty@x>"
+        msg.set_content("")
+        assert parse_email_message(msg.as_bytes()) is None
+
+    def test_filename_with_path_traversal_sanitized(self):
+        raw = _make_email_with_attachments(
+            attachments=[("../../etc/passwd", "text", "plain", b"x")]
+        )
+        result = parse_email_message(raw)
+        att = result["attachments"][0]
+        assert "/" not in att["filename"]
+        assert ".." not in att["filename"]
+        assert att["filename"] == "passwd"
+
+    def test_attachment_without_filename_falls_back(self):
+        raw = _make_email_with_attachments(
+            attachments=[(None, "application", "octet-stream", b"blob")]
+        )
+        result = parse_email_message(raw)
+        atts = result["attachments"]
+        assert len(atts) == 1
+        assert atts[0]["filename"].startswith("attachment_")
+
+    def test_size_cap_truncates(self, monkeypatch):
+        """Cumulative size over the cap skips later parts and marks truncated."""
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_MAX_TOTAL_BYTES", 10)
+        raw = _make_email_with_attachments(
+            attachments=[
+                ("small.bin", "application", "octet-stream", b"12345"),
+                ("big.bin", "application", "octet-stream", b"X" * 1000),
+            ]
+        )
+        result = parse_email_message(raw)
+        # First fits, second is over the cap → skipped, truncated flag set.
+        assert result["attachments_truncated"] is True
+        assert all(a["size"] <= 10 for a in result["attachments"])
+
+    def test_parts_cap_truncates(self, monkeypatch):
+        monkeypatch.setattr(eb, "EMAIL_ATTACHMENT_MAX_PARTS", 2)
+        raw = _make_email_with_attachments(
+            attachments=[
+                ("a.bin", "application", "octet-stream", b"a"),
+                ("b.bin", "application", "octet-stream", b"b"),
+                ("c.bin", "application", "octet-stream", b"c"),
+            ]
+        )
+        result = parse_email_message(raw)
+        assert len(result["attachments"]) == 2
+        assert result["attachments_truncated"] is True
+
+    def test_non_multipart_email_has_empty_attachments(self):
+        raw = _make_plain_email(body="just text")
+        result = parse_email_message(raw)
+        assert result["attachments"] == []
+        assert result["attachments_truncated"] is False
+
+    def test_public_attachment_strips_payload(self):
+        att = {
+            "filename": "x.pdf",
+            "content_type": "application/pdf",
+            "size": 3,
+            "path": None,
+            "_payload": b"abc",
+        }
+        pub = _public_attachment(att)
+        assert "_payload" not in pub
+        assert set(pub.keys()) == {"filename", "content_type", "size", "path"}
+
+
+class TestSanitizeFilename:
+    def test_strips_directories(self):
+        assert _sanitize_attachment_filename("/abs/path/x.pdf", 0, "application/pdf") == "x.pdf"
+
+    def test_collapses_unsafe_chars(self):
+        out = _sanitize_attachment_filename("my file (1).pdf", 0, "application/pdf")
+        assert out == "my_file_1_.pdf" or out.endswith(".pdf")
+        assert "/" not in out and " " not in out
+
+    def test_dotdot_falls_back(self):
+        out = _sanitize_attachment_filename("..", 3, "application/pdf")
+        assert out.startswith("attachment_3")
+
+
+class TestPersistAttachments:
+    """_persist_attachments() writes bytes to disk and mirrors to the vault."""
+
+    def test_persists_bytes_and_sets_path(self, attachment_dirs):
+        store, vault = attachment_dirs
+        raw = _make_email_with_attachments(
+            attachments=[("report.pdf", "application", "pdf", b"%PDF data")]
+        )
+        parsed = parse_email_message(raw)
+        _persist_attachments(parsed)
+        att = parsed["attachments"][0]
+        assert att["path"] is not None
+        from pathlib import Path
+
+        p = Path(att["path"])
+        assert p.exists()
+        assert p.read_bytes() == b"%PDF data"
+        assert "_payload" not in att  # transient bytes stripped
+        # Vault mirror copied the file too
+        assert any(vault.rglob("*report.pdf"))
+
+    def test_same_name_collision_disambiguated(self, attachment_dirs):
+        raw = _make_email_with_attachments(
+            attachments=[
+                ("image.png", "image", "png", b"first"),
+                ("image.png", "image", "png", b"second"),
+            ]
+        )
+        parsed = parse_email_message(raw)
+        _persist_attachments(parsed)
+        paths = [a["path"] for a in parsed["attachments"]]
+        assert len(set(paths)) == 2  # distinct files, no overwrite
+        from pathlib import Path
+
+        assert {Path(p).read_bytes() for p in paths} == {b"first", b"second"}
+
+    def test_empty_message_id_does_not_collide_cross_message(self, attachment_dirs):
+        """Two Message-ID-less emails persist into distinct subdirs (critique C3)."""
+        raw1 = _make_email_with_attachments(
+            from_addr="a@x.com",
+            subject="one",
+            message_id="",
+            attachments=[("f.pdf", "application", "pdf", b"one")],
+        )
+        raw2 = _make_email_with_attachments(
+            from_addr="b@x.com",
+            subject="two",
+            message_id="",
+            attachments=[("f.pdf", "application", "pdf", b"two")],
+        )
+        p1 = parse_email_message(raw1)
+        p2 = parse_email_message(raw2)
+        _persist_attachments(p1)
+        _persist_attachments(p2)
+        from pathlib import Path
+
+        path1, path2 = p1["attachments"][0]["path"], p2["attachments"][0]["path"]
+        assert Path(path1).parent != Path(path2).parent
+        assert Path(path1).read_bytes() == b"one"
+        assert Path(path2).read_bytes() == b"two"
+
+    def test_vault_mirror_failure_is_nonfatal(self, attachment_dirs, monkeypatch):
+        """A broken vault dir must not prevent disk persistence (failure-path)."""
+        store, vault = attachment_dirs
+
+        def boom(*a, **k):
+            raise OSError("vault unwritable")
+
+        monkeypatch.setattr(eb.shutil, "copy2", boom)
+        raw = _make_email_with_attachments(attachments=[("ok.pdf", "application", "pdf", b"data")])
+        parsed = parse_email_message(raw)
+        # Should not raise despite the copy2 failure.
+        _persist_attachments(parsed)
+        from pathlib import Path
+
+        assert Path(parsed["attachments"][0]["path"]).exists()
+
+
+class TestRecordHistoryAttachments:
+    """_record_history blob carries attachment metadata only — never bytes."""
+
+    def test_blob_includes_attachments_metadata(self, attachment_dirs):
+        import json
+
+        raw = _make_email_with_attachments(
+            attachments=[("doc.pdf", "application", "pdf", b"pdfbytes")]
+        )
+        parsed = parse_email_message(raw)
+        _persist_attachments(parsed)
+
+        captured = {}
+
+        class FakePipe:
+            def set(self, k, v, ex=None):
+                captured["blob"] = v
+
+            def zadd(self, *a, **k):
+                pass
+
+            def execute(self):
+                pass
+
+        class FakeRedis:
+            def pipeline(self):
+                return FakePipe()
+
+            def zcard(self, *a, **k):
+                return 1
+
+        with patch("bridge.email_bridge._get_redis", return_value=FakeRedis()):
+            _record_history(parsed)
+
+        blob = json.loads(captured["blob"])
+        assert blob["attachments"][0]["filename"] == "doc.pdf"
+        assert blob["attachments"][0]["size"] == len(b"pdfbytes")
+        assert "_payload" not in blob["attachments"][0]
+        assert blob["attachments_truncated"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -971,3 +1265,184 @@ class TestRecordThread:
         data = _json.loads(raw)
         assert data["message_count"] == 2
         assert set(data["participants"]) == {"alice@x", "bob@x"}
+
+
+# ---------------------------------------------------------------------------
+# Wedge guard: _body_references_attachments + extra_context tagging (#1775)
+# ---------------------------------------------------------------------------
+
+
+class TestBodyReferencesAttachments:
+    """Unit tests for the pure attachment-reference detector."""
+
+    from bridge.email_bridge import _body_references_attachments as _bra
+
+    def test_returns_false_for_none(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments(None) is False
+
+    def test_returns_false_for_empty(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("") is False
+
+    def test_detects_attached(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Please see the attached report.") is True
+
+    def test_detects_attachment(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("I'm sending the attachment now.") is True
+
+    def test_detects_enclosed(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Please find enclosed the contract.") is True
+
+    def test_detects_find_attached(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Find attached the invoice.") is True
+
+    def test_case_insensitive(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("PLEASE SEE ATTACHED.") is True
+
+    def test_no_false_positive_plain_body(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        assert _body_references_attachments("Let's schedule a meeting for Monday.") is False
+
+    def test_no_crash_on_odd_characters(self):
+        from bridge.email_bridge import _body_references_attachments
+
+        # Must not raise on unusual input
+        result = _body_references_attachments("\x00\xff\n\t" * 100)
+        assert isinstance(result, bool)
+
+
+class TestWedgeGuardExtraContext:
+    """Truth-table tests for the attachments_unrecoverable tagging in _process_inbound_email.
+
+    Each test drives the real _process_inbound_email() function (not a copy of its logic)
+    and inspects the extra_context_overrides passed to the mocked enqueue_agent_session.
+    Deleting the production wedge guard would fail these tests.
+    """
+
+    _PROJECT_KEY = "wedge-test-project"
+    _FROM_ADDR = "sender@example.com"
+
+    def _make_parsed(
+        self,
+        body: str = "Please see attached reports.",
+        attachments: list | None = None,
+        attachments_truncated: bool = False,
+    ) -> dict:
+        return {
+            "from_addr": self._FROM_ADDR,
+            "from_raw": f"Sender <{self._FROM_ADDR}>",
+            "to_addrs": ["valor@example.com"],
+            "cc_addrs": [],
+            "subject": "Reports",
+            "body": body,
+            "message_id": "<test@example.com>",
+            "in_reply_to": "",
+            "attachments": attachments if attachments is not None else [],
+            "attachments_truncated": attachments_truncated,
+            "timestamp": 1700000000.0,
+        }
+
+    def _project_config(self) -> dict:
+        return {
+            "_key": self._PROJECT_KEY,
+            "name": self._PROJECT_KEY,
+            "working_directory": "/tmp/wedge-test",
+            "email": {
+                "contacts": {
+                    self._FROM_ADDR: {"name": "Sender"},
+                }
+            },
+        }
+
+    def _projects_json(self) -> dict:
+        return {"projects": {self._PROJECT_KEY: self._project_config()}}
+
+    async def _run(self, parsed: dict, monkeypatch) -> dict:
+        """Route parsed dict through real _process_inbound_email; return extra_context_overrides."""
+        import bridge.routing as routing
+        from bridge.email_bridge import _process_inbound_email
+
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        try:
+            routing.EMAIL_TO_PROJECT[self._FROM_ADDR] = self._project_config()
+            if self._PROJECT_KEY not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(self._PROJECT_KEY)
+
+            mock_enqueue = AsyncMock()
+            import redis
+
+            test_r = redis.Redis(db=1, decode_responses=True)
+            with patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue):
+                with patch("bridge.email_bridge._get_redis", return_value=test_r):
+                    await _process_inbound_email(parsed, self._projects_json())
+            test_r.close()
+        finally:
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        assert mock_enqueue.called, "enqueue_agent_session should have been called"
+        return mock_enqueue.call_args.kwargs.get("extra_context_overrides", {})
+
+    @pytest.mark.asyncio
+    async def test_case_a_references_empty_list_tagged(self, monkeypatch):
+        """(a) body references attachments + empty list → tagged, recovered_count=0."""
+        parsed = self._make_parsed(attachments=[], attachments_truncated=False)
+        ctx = await self._run(parsed, monkeypatch)
+        assert ctx.get("attachments_unrecoverable") is True
+        assert ctx.get("attachments_recovered_count") == 0
+        assert ctx.get("attachments_truncated") is False
+        assert ctx.get("attachments_referenced") is True
+
+    @pytest.mark.asyncio
+    async def test_case_b_references_truncated_non_empty_tagged(self, monkeypatch):
+        """(b) body references attachments + non-empty + truncated=True → tagged."""
+        att = {
+            "filename": "r1.pdf",
+            "content_type": "application/pdf",
+            "size": 100,
+            "path": "/tmp/r1.pdf",
+        }
+        parsed = self._make_parsed(attachments=[att], attachments_truncated=True)
+        ctx = await self._run(parsed, monkeypatch)
+        assert ctx.get("attachments_unrecoverable") is True
+        assert ctx.get("attachments_truncated") is True
+        assert ctx.get("attachments_recovered_count") == 1
+        assert ctx.get("attachments_referenced") is True
+
+    @pytest.mark.asyncio
+    async def test_case_c_references_non_empty_not_truncated_not_tagged(self, monkeypatch):
+        """(c) body references attachments + non-empty + not truncated → no guard tag."""
+        att = {
+            "filename": "r1.pdf",
+            "content_type": "application/pdf",
+            "size": 100,
+            "path": "/tmp/r1.pdf",
+        }
+        parsed = self._make_parsed(attachments=[att], attachments_truncated=False)
+        ctx = await self._run(parsed, monkeypatch)
+        assert "attachments_unrecoverable" not in ctx
+
+    @pytest.mark.asyncio
+    async def test_case_d_no_reference_not_tagged(self, monkeypatch):
+        """(d) body has no attachment reference → not tagged, no false positive."""
+        parsed = self._make_parsed(
+            body="Let's schedule a call.", attachments=[], attachments_truncated=False
+        )
+        ctx = await self._run(parsed, monkeypatch)
+        assert "attachments_unrecoverable" not in ctx

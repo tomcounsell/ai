@@ -27,7 +27,7 @@ class TestWaitingForChildrenGuard:
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status="waiting_for_children",
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "deliver"
@@ -40,7 +40,7 @@ class TestWaitingForChildrenGuard:
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status="running",
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -53,7 +53,7 @@ class TestWaitingForChildrenGuard:
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status="active",
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -95,7 +95,7 @@ class TestWaitingForChildrenGuard:
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status="waiting_for_children",
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         # waiting_for_children guard fires before the PM+SDLC check
@@ -109,7 +109,7 @@ class TestWaitingForChildrenGuard:
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status="waiting_for_children",
-            session_type="pm",
+            session_type="eng",
             classification_type="collaboration",
         )
         assert action == "deliver"
@@ -123,7 +123,7 @@ class TestWaitingForChildrenGuard:
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
             session_status=session_status,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -161,7 +161,7 @@ class TestExistingRouting:
             stop_reason="end_turn",
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"
@@ -172,7 +172,7 @@ class TestExistingRouting:
             stop_reason="end_turn",
             auto_continue_count=0,
             max_nudge_count=MAX_NUDGE_COUNT,
-            session_type="pm",
+            session_type="eng",
             classification_type="sdlc",
         )
         assert action == "nudge_continue"

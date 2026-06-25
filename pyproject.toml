@@ -5,21 +5,21 @@ description = "Telegram bridge for Valor AI"
 requires-python = ">=3.11"
 dependencies = [
     "telethon==1.42.0", # CRITICAL — pin exact, upgrade via /update only
-    "anthropic==0.100.0", # CRITICAL — pin exact, upgrade via /update only
-    "claude-agent-sdk==0.1.80", # CRITICAL — pin exact, upgrade via /update only
+    "anthropic==0.112.0", # CRITICAL — pin exact, upgrade via /update only
+    "claude-agent-sdk==0.2.110", # CRITICAL — pin exact, upgrade via /update only
     "mcp>=1.8.0", # Required by claude-agent-sdk for ToolAnnotations (see issue #235)
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
     "requests>=2.31.0", # Required for Google API requests transport
     "ollama>=0.3.0", # Local LLM fallback for summarization
-    "yt-dlp>=2024.1.0", # YouTube audio download for transcription
+    "yt-dlp>=2026.6.9", # YouTube audio download for transcription
     "youtube-transcript-api>=0.6.0", # Caption-based YouTube transcription (no API key required)
-    "popoto>=1.6.1", # Redis ORM — agent memory primitives; v1.6.1 fixes lazy-load descriptor leak (closes #380 upstream / our #1099 + #1172)
+    "popoto>=1.7.1", # Redis ORM — agent memory primitives; v1.7.1 stamps auto_now/auto_now_add in UTC (#1653, popoto#421); v1.6.1 fixed lazy-load descriptor leak (#1099 + #1172)
     "google-auth-oauthlib>=1.2.0", # Google OAuth for Workspace APIs
     "google-auth-httplib2>=0.2.0", # Google Auth HTTP transport
     "google-api-python-client>=2.100.0", # Google API client
     "psutil>=5.9.0", # System resource monitoring for SDK diagnostics
-    "pypdf>=6.10.2",  # 6.10.0 patches CVE: XMP metadata RAM exhaustion
+    "pypdf>=6.13.3",  # 6.10.0 patches CVE: XMP metadata RAM exhaustion
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
@@ -33,6 +33,8 @@ dependencies = [
     "jinja2>=3.1.0", # Template engine for web UI
     "pillow>=10.0.0", # Screenshot downscaling to stay within Claude's 2000px image dimension limit
     "croniter>=2.0.0", # Cron expression parser for unified Reflection schedule grammar (#1273)
+    "pexpect>=4.9.0", # PTY driver for the granite operator interactive-TUI loop (#1546); imported at runtime by agent/granite_container/pty_driver.py
+    "ptyprocess>=0.7.0", # Low-level PTY spawn backing pexpect (#1546)
 ]
 
 [project.optional-dependencies]
@@ -71,7 +73,10 @@ tts = [
 ]
 
 [project.scripts]
+critique-roster-check = "tools.critique_roster_check:main"
+critique-resume-probe = "tools.critique_resume:main"
 valor-telegram = "tools.valor_telegram:main"
+valor-catchup = "bridge.agent_catchup:main"
 valor-email = "tools.valor_email:main"
 valor-calendar = "tools.valor_calendar:main"
 valor-image-gen = "tools.image_gen:main"
@@ -85,7 +90,11 @@ valor-youtube-search = "tools.youtube_search.cli:main"
 valor-youtube-transcribe = "tools.link_analysis.cli:main"
 valor-ingest = "tools.valor_ingest:main"
 valor-tts = "tools.tts.cli:main"
+valor-deck-video = "tools.deck_video.cli:main"
 valor-computer = "tools.computer.cli:main"
+valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"
+valor = "tools.valor_cli:main"
+valor-cross-vendor-judge = "tools.cross_vendor_judge:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -129,6 +138,16 @@ python_functions = ["test_*"]
 # caches, host lockfiles, a single GitHub issue) and would otherwise fail
 # under inter-test parallelism. Loadfile is the simplest scheduler that
 # fixes that while preserving inter-file parallelism.
+#
+# Worker reaping: xdist workers run via
+# `python -c "import sys;exec(eval(sys.stdin.readline()))"` which
+# installs no signal handlers. If the parent shell dies (timeout,
+# agent interrupt, Ctrl-C) the workers get reparented to init and
+# stay alive consuming memory. Agent-invoked pytest runs should use
+# `scripts/pytest-clean.sh` instead of bare `pytest`; it snapshots
+# worker PIDs and reaps them on EXIT/INT/TERM/HUP/PIPE. If a
+# non-wrapper pytest run leaves orphans, `scripts/reap-xdist.sh`
+# kills them in one shot.
 addopts = "--tb=short -p no:postgresql -n auto --dist=loadfile"
 asyncio_mode = "auto"
 markers = [
@@ -156,4 +175,5 @@ markers = [
     "models: Redis/Popoto model relationships and persistence",
     "webui: Web UI dashboards, routes, templates",
     "analytics: Unified analytics collection, query, and dashboard",
+    "granite_integration: Granite PTY container production wiring tests (skippable in fast CI)",
 ]
