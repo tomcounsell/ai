@@ -348,6 +348,14 @@ the operator does not want.
 > no-progress detector rather than a per-turn wall-clock timeout. See
 > [Never-Started Session Recovery](never_started_session_recovery.md) for the
 > full design.
+>
+> **Default-tier tool-timeout PTY gate (issue #1784):** for granite PTY sessions,
+> the per-tool timeout sub-loop's default-tier kill (`Bash`/`Skill`/`Task`, 300s
+> budget) is gated on `mid_run_quiescent_since` — a session whose PTY screen is
+> still painting is never killed, regardless of wall-clock age. The kill fires
+> when the screen has been quiescent for `>= MID_RUN_QUIESCENCE_SECS (180s)`.
+> Worst-case recovery bound: ~330s (300s budget + ~30s tick cadence). SDK sessions
+> (no PTY) are unaffected — they continue to use the flat 300s age-only kill.
 
 ## Observability
 

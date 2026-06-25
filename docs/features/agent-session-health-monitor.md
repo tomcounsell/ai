@@ -174,7 +174,7 @@ Constants in `agent/session_health.py` (re-exported from `agent_session_queue.py
 | `TOOL_TIMEOUT_MCP_SEC` | 120s | Budget for MCP-tier tools (`mcp__*`, env-tunable) |
 | `TOOL_TIMEOUT_DEFAULT_SEC` | 300s | Budget for default-tier tools (`Bash`, `Task`, ..., env-tunable) |
 | `NEVER_STARTED_CONFIRM_MARGIN_SECS` | 30s | Additional margin after `NEVER_STARTED_GRACE_SECS` before D0 recovery fires (env-tunable via `NEVER_STARTED_CONFIRM_MARGIN_SECS`; defined in `session_stall_classifier.py`, imported by `session_health.py`) — issue #1724 |
-| `MID_RUN_QUIESCENCE_SECS` | 180s | PTY-screen quiescence duration before stage-1 suspect log fires for mid-run wedge detection (env-tunable; observe-only — no recovery fired; stage-2 deferred) — issue #1724 |
+| `MID_RUN_QUIESCENCE_SECS` | 180s | PTY-screen quiescence duration threshold. Two consumers: (1) stage-1 mid-run wedge detector fires a warning log when `mid_run_quiescent_since >= this` (observe-only for the general mid-run class; stage-2 recovery deferred — issue #1724); (2) the default-tier tool-timeout PTY-liveness gate fires the kill when `mid_run_quiescent_since >= this` for granite PTY sessions past their 300s budget (#1784). `MID_RUN_QUIESCENCE_SECS <= 0` disables the #1784 gate and restores age-only kill for all sessions. |
 
 > **Retired by issue #1172:** `STDOUT_FRESHNESS_WINDOW`,
 > `FIRST_STDOUT_DEADLINE`, `AGENT_SESSION_TIMEOUT_DEFAULT`,
