@@ -19,6 +19,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -41,6 +42,36 @@ logger = logging.getLogger("worker")
 # Set to True when SIGTERM is received; causes main() to exit with code 1
 # so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
 _shutdown_via_signal = False
+
+# Heartbeat thread interval: how often the dedicated daemon thread writes
+# data/last_worker_connected. Env-tunable for conservative rollout.
+WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"))
+
+# Stop event for the heartbeat daemon thread — set on worker shutdown.
+_heartbeat_stop_event = threading.Event()
+
+
+def _heartbeat_thread_main() -> None:
+    """Dedicated daemon thread for worker heartbeat writes.
+
+    Runs independently of the asyncio event loop so PTY/thread-pool
+    saturation (incident 2026-06-23, issue #1767) cannot prevent heartbeat
+    writes. The loop wakes every WORKER_HEARTBEAT_INTERVAL seconds and
+    writes data/last_worker_connected via the existing _write_worker_heartbeat().
+
+    Ref: #1055 for the pattern of moving blocking calls off the hot path.
+    """
+    # Import deferred to after module-level code runs (avoids circular imports
+    # at the top of the file where agent packages are not yet on sys.path).
+    from agent.agent_session_queue import _write_worker_heartbeat  # noqa: PLC0415
+
+    logger.info("Heartbeat thread started (interval=%ds)", WORKER_HEARTBEAT_INTERVAL)
+    while not _heartbeat_stop_event.wait(timeout=WORKER_HEARTBEAT_INTERVAL):
+        try:
+            _write_worker_heartbeat()
+        except Exception as exc:
+            logger.warning("Heartbeat thread: write failed: %s", exc)
+    logger.info("Heartbeat thread stopped")
 
 
 class _UTCFormatter(logging.Formatter):
@@ -167,6 +198,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
         _session_notify_listener,
+        _sweep_dead_worker_sessions,
         _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
@@ -344,6 +376,18 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Session recovery failed (non-fatal): {e}")
 
+    # Step 3b: Sweep running sessions whose claude_pid is dead (issue #1767).
+    # _recover_interrupted_agent_sessions_startup re-queues all running→pending,
+    # but doesn't check if the PID is actually alive. This sweep finds sessions
+    # that remained running with a dead PID (hung-worker orphans) and marks them
+    # killed so catchup can re-enqueue the unanswered human messages.
+    try:
+        swept = _sweep_dead_worker_sessions()
+        if swept:
+            logger.info("Startup recovery: swept %d dead-worker running session(s) → killed", swept)
+    except Exception as e:
+        logger.warning(f"Dead-worker session sweep failed (non-fatal): {e}")
+
     # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
     try:
         orphans_killed = _cleanup_orphaned_claude_processes()
@@ -426,6 +470,18 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Write heartbeat immediately so dashboard shows green without waiting
     # for the first 5-minute health loop tick.
     _write_worker_heartbeat()
+
+    # Start dedicated heartbeat daemon thread (issue #1767).
+    # Runs outside the asyncio event loop so PTY/thread-pool saturation
+    # cannot starve heartbeat writes. daemon=True ensures it cannot outlive
+    # the worker process even on abnormal exit.
+    _heartbeat_stop_event.clear()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_thread_main,
+        name="worker-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
 
     # Start health monitor as background task
     health_task = asyncio.create_task(_agent_session_health_loop(), name="session-health-monitor")
@@ -572,6 +628,12 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         await drain_pending_extractions(timeout=5.0)
     except Exception as e:
         logger.warning(f"Extraction drain failed: {e}")
+
+    # Stop the dedicated heartbeat thread (issue #1767).
+    # Setting the event causes _heartbeat_thread_main's wait() to return
+    # immediately; the thread exits its loop and the join() completes quickly.
+    _heartbeat_stop_event.set()
+    heartbeat_thread.join(timeout=5)
 
     # Cancel health monitor
     health_task.cancel()

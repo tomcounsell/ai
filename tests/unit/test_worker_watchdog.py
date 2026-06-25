@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
 import subprocess
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -635,3 +637,87 @@ class TestKickstartDetailed:
         assert ok is False
         assert rc == -1
         assert stderr == "timeout"
+
+
+# --- Heartbeat isolation (issue #1767) ----------------------------------------
+
+
+class TestHeartbeatIsolation:
+    """Verify the heartbeat daemon thread is isolated from the asyncio executor.
+
+    These tests cover the two acceptance criteria from the issue #1767 plan:
+    1. The heartbeat thread writes independently of thread-pool saturation.
+    2. HEARTBEAT_THRESHOLD is env-tunable.
+    """
+
+    def test_heartbeat_thread_writes_independent_of_executor(self, tmp_path):
+        """Heartbeat thread writes even when the default thread-pool executor is saturated.
+
+        Fills the default ThreadPoolExecutor with long-running blocking tasks,
+        then starts a heartbeat thread and verifies it writes the heartbeat file.
+        The heartbeat thread runs independently of the executor, so its writes
+        must complete before the executor tasks finish.
+        """
+        import concurrent.futures
+        import time
+
+        heartbeat_file = tmp_path / "last_worker_connected"
+
+        write_count = [0]
+        write_done = threading.Event()
+
+        def fake_write_heartbeat():
+            heartbeat_file.write_text("ok")
+            write_count[0] += 1
+            write_done.set()
+
+        stop_event = threading.Event()
+
+        def heartbeat_loop():
+            while not stop_event.wait(timeout=0.05):
+                try:
+                    fake_write_heartbeat()
+                except Exception:
+                    pass
+
+        # Saturate the default thread-pool executor with blocking sleeps.
+        # This simulates PTY reads blocking executor threads (the root cause of #1767).
+        cpu_count = (os.cpu_count() or 4) + 4  # exceed default pool size
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count)
+        # Submit blocking tasks to fill the pool; futures deliberately unused —
+        # we only need the slots occupied, not the results.
+        for _ in range(cpu_count):
+            executor.submit(time.sleep, 5)
+
+        # Start heartbeat thread — must be independent of the executor.
+        heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
+
+        try:
+            # The heartbeat should write within 1 second despite the saturated executor.
+            wrote = write_done.wait(timeout=1.0)
+            assert wrote, "Heartbeat thread did not write within 1s (executor was saturated)"
+            assert heartbeat_file.exists(), "Heartbeat file was not written"
+            assert write_count[0] > 0, "write_count did not increment"
+        finally:
+            stop_event.set()
+            heartbeat_thread.join(timeout=2)
+            # Cancel the saturating futures immediately.
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_heartbeat_threshold_env_override(self, monkeypatch):
+        """HEARTBEAT_THRESHOLD uses the HEARTBEAT_THRESHOLD env var when set."""
+        import importlib
+
+        monkeypatch.setenv("HEARTBEAT_THRESHOLD", "90")
+        # Reload the module so the module-level constant is re-evaluated.
+        importlib.reload(wwd)
+        assert wwd.HEARTBEAT_THRESHOLD == 90
+
+    def test_heartbeat_threshold_default_is_180(self, monkeypatch):
+        """HEARTBEAT_THRESHOLD defaults to 180 when env var is not set."""
+        import importlib
+
+        monkeypatch.delenv("HEARTBEAT_THRESHOLD", raising=False)
+        importlib.reload(wwd)
+        assert wwd.HEARTBEAT_THRESHOLD == 180

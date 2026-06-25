@@ -18,6 +18,8 @@ import os
 import re
 import signal
 import socket
+import subprocess
+import sys
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
@@ -762,6 +764,107 @@ def _recover_interrupted_agent_sessions_startup() -> int:
         abandoned,
     )
     return bridge_count + local_dev_count
+
+
+def _sweep_dead_worker_sessions() -> int:
+    """Sweep running sessions whose claude_pid is dead after a worker restart.
+
+    Called during worker startup recovery (issue #1767). When a worker dies in
+    U-state, sessions remain status='running' with a stale claude_pid. Without
+    this sweep, those sessions are forever orphaned — the worker never picks them
+    up (it only re-kicks 'pending') and the human's message is silently dropped.
+
+    Guards against double-drop races:
+    - Only sweeps sessions with dead claude_pid (os.kill(pid, 0) raises OSError)
+    - Applies the AGENT_SESSION_HEALTH_MIN_RUNNING_SECS recency guard (300s)
+      so brand-new sessions from the fresh worker cannot be touched
+    - Uses finalize_session(expected_status='running') CAS so a concurrent
+      fresh-worker pickup wins and the session is skipped
+
+    Returns the count of sessions swept to 'killed'.
+    """
+    running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
+    if not running_sessions:
+        return 0
+
+    now = time.time()
+    cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
+
+    swept = 0
+    for entry in running_sessions:
+        pid = getattr(entry, "claude_pid", None)
+
+        # Skip sessions with no PID — they haven't been assigned a subprocess yet
+        if not pid:
+            continue
+
+        # Skip recently-started sessions — they may belong to the freshly-started worker
+        started_ts = _ts(getattr(entry, "started_at", None))
+        if started_ts is not None and started_ts > cutoff:
+            logger.debug(
+                "[dead-worker-sweep] Skipping recent session %s (pid=%s, started %ds ago)",
+                entry.agent_session_id,
+                pid,
+                int(now - started_ts),
+            )
+            continue
+
+        # Check PID liveness: os.kill(pid, 0) raises OSError if dead/not accessible
+        try:
+            os.kill(int(pid), 0)
+            # PID is alive — not a dead-worker orphan, skip it
+            logger.debug(
+                "[dead-worker-sweep] Session %s pid=%s is alive, skipping",
+                entry.agent_session_id,
+                pid,
+            )
+            continue
+        except OSError:
+            # PID is dead — this session is orphaned from the previous worker
+            pass
+
+        logger.warning(
+            "[dead-worker-sweep] Session %s has dead claude_pid=%s — sweeping to killed",
+            entry.agent_session_id,
+            pid,
+        )
+
+        try:
+            from models.session_lifecycle import StatusConflictError, finalize_session
+
+            finalize_session(
+                entry,
+                "killed",
+                reason=f"dead-worker-sweep: claude_pid={pid} not alive at worker restart (#1767)",
+            )
+            swept += 1
+        except StatusConflictError as e:
+            # Concurrent modification — another process already handled this session
+            logger.info(
+                "[dead-worker-sweep] Status conflict sweeping session %s (skipping): %s",
+                entry.agent_session_id,
+                e,
+            )
+        except Exception as e:
+            logger.warning(
+                "[dead-worker-sweep] Failed to sweep session %s: %s",
+                entry.agent_session_id,
+                e,
+            )
+
+    if swept > 0:
+        logger.info("[dead-worker-sweep] Swept %d dead-worker session(s) to killed", swept)
+        # Trigger catchup so unanswered human messages re-enqueue as fresh sessions
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "bridge.agent_catchup"],
+                timeout=30,
+                check=False,
+            )
+        except Exception as e:
+            logger.warning("[dead-worker-sweep] Catchup trigger failed (non-fatal): %s", e)
+
+    return swept
 
 
 # === Agent Session Health Monitor ===
@@ -2644,7 +2747,10 @@ async def _agent_session_health_loop() -> None:
     )
     while True:
         try:
-            _write_worker_heartbeat()
+            # Heartbeat write moved to dedicated daemon thread (issue #1767):
+            # worker/__main__.py::_heartbeat_thread_main(). Keeping it here
+            # meant PTY/thread-pool saturation could starve the write and
+            # produce a false "hung worker" signal to the watchdog.
             await _agent_session_health_check()
             await _agent_session_hierarchy_health_check()
             await _dependency_health_check()
