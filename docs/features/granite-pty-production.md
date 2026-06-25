@@ -356,6 +356,15 @@ the operator does not want.
 > when the screen has been quiescent for `>= MID_RUN_QUIESCENCE_SECS (180s)`.
 > Worst-case recovery bound: ~330s (300s budget + ~30s tick cadence). SDK sessions
 > (no PTY) are unaffected — they continue to use the flat 300s age-only kill.
+>
+> **Never-started PTY-liveness gate (issue #1792):** the sibling gate for the D0
+> never-started kill path. Prime liveness is judged on `last_pty_activity_at`
+> freshness (not `mid_run_quiescent_since`, which is always `None` during
+> priming). The kill is deferred when the PTY read loop is fresh and
+> `last_pty_activity_at` is within `NEVER_STARTED_PTY_LIVENESS_SECS` (default
+> 90s, env-overridable). See
+> [pm-session-liveness.md — PTY-liveness gates](pm-session-liveness.md#pty-liveness-gates-for-kill-paths)
+> for the full side-by-side comparison of both gates.
 
 ## Observability
 
