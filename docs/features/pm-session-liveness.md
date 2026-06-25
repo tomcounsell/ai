@@ -208,6 +208,87 @@ specific cost ceiling becomes operationally necessary.
 - `tests/integration/test_pm_long_run_no_kill.py` — acceptance test for
   a 4+ hour PM with active tool use and no result event.
 
+## PTY-liveness gates for kill paths
+
+Two kill paths have a PTY-liveness gate that defers recovery when the granite
+PTY is demonstrably active. They are parallel in purpose but use different PTY
+signals and have opposite return-value polarity. SDK/non-granite sessions are
+never affected — the helpers fall through to `False` when `last_pty_read_loop_at`
+is `None` (branch 2 of each helper).
+
+### Gate 1 — tool_timeout default-tier (issue #1784)
+
+**Location:** `agent/session_health.py`, tool-timeout kill-site
+
+**Helper:** `_pty_quiescent_long_enough(entry, now) -> bool`
+
+**PTY signal consulted:** `mid_run_quiescent_since` — a mid-run field set when
+the granite PTY screen stops repainting. It is `None` during priming (before
+any transcript entry exists) and while the screen is actively painting.
+
+**Polarity:** True = wedge-eligible / OK to kill, False = PTY still active /
+defer. This is the "OK to proceed with kill" predicate — a caller that wants to
+kill checks `if _pty_quiescent_long_enough(...)`.
+
+**Behavior:** The default-tier kill (for `Bash`/`Skill`/`Task` tools, 300s
+budget) is suppressed when `mid_run_quiescent_since` is `None` (PTY still
+painting) or when quiescence has not yet lasted `MID_RUN_QUIESCENCE_SECS`
+(180s, env-tunable). The kill fires only when the screen has been consistently
+static for ≥ 180s.
+
+**Counter:** `{project_key}:session-health:tool_timeouts:default_deferred`
+
+### Gate 2 — never-started D0 kill (issue #1792)
+
+**Location:** `agent/session_health.py`, D0 never-started kill-site (~line 3208)
+
+**Helper:** `_prime_pty_alive(entry, now) -> bool`
+
+**PTY signal consulted:** `last_pty_activity_at` — set whenever the PTY screen
+repaints. This field is available during priming (before any transcript entry
+exists), making it the correct signal for the never-started kill path where
+`mid_run_quiescent_since` is always `None`.
+
+**Polarity:** True = PTY alive / defer the kill, False = kill-eligible. This
+is the OPPOSITE of `_pty_quiescent_long_enough`. A caller defers when
+`_prime_pty_alive(...)` returns True.
+
+**Behavior:** When the D0 never-started grace window expires and the session
+still has no SDK progress, the kill is deferred if the granite PTY read loop
+is fresh (`last_pty_read_loop_at` within `HEARTBEAT_FRESHNESS_WINDOW` = 90s)
+AND the PTY screen has shown activity within `NEVER_STARTED_PTY_LIVENESS_SECS`
+(default 90s, override via `NEVER_STARTED_PTY_LIVENESS_SECS` env var). The
+kill proceeds if the read loop is stale, `last_pty_activity_at` is absent, or
+activity is older than the window. Setting `NEVER_STARTED_PTY_LIVENESS_SECS=0`
+disables deferral for all sessions (kill-switch, branch 1 of the helper).
+
+**Counter:** `{project_key}:session-health:never_started_pty_deferred`
+
+### Branch logic of `_prime_pty_alive`
+
+The helper evaluates four ordered branches; first match wins:
+
+| Branch | Condition | Returns |
+|--------|-----------|---------|
+| 1 (kill-switch) | `NEVER_STARTED_PTY_LIVENESS_SECS <= 0` | `False` (kill-eligible) |
+| 2 (non-PTY) | `last_pty_read_loop_at is None` | `False` (SDK sessions unaffected) |
+| 3 (stale read loop) | `last_pty_read_loop_at` older than 90s | `False` (dead loop cannot prove liveness) |
+| 4 (alive) | `last_pty_activity_at` within `NEVER_STARTED_PTY_LIVENESS_SECS` | `True` (defer) |
+
+The helper never raises — all unexpected exceptions return `False` (kill-eligible).
+
+### Side-by-side comparison
+
+| Aspect | `tool_timeout` gate (#1784) | `never_started` gate (#1792) |
+|--------|----------------------------|------------------------------|
+| Kill path | Default-tier tool timeout | D0 never-started grace exceeded |
+| Helper | `_pty_quiescent_long_enough` | `_prime_pty_alive` |
+| PTY signal | `mid_run_quiescent_since` | `last_pty_activity_at` |
+| Why that signal | Available mid-run; None means actively painting | Available during priming; `mid_run_quiescent_since` is always None at prime |
+| Return polarity | True = kill-eligible | True = defer (alive) |
+| Tuning env var | `MID_RUN_QUIESCENCE_SECS` (default 180s) | `NEVER_STARTED_PTY_LIVENESS_SECS` (default 90s) |
+| Deferred counter | `tool_timeouts:default_deferred` | `never_started_pty_deferred` |
+
 ## State-layer detection (`sdlc-progress-check`)
 
 The Tier 1 / Tier 2 detectors above watch the **process** layer — they catch wedged PM sessions while the session is technically still running. They do NOT detect a pipeline whose PM session has already gone terminal but whose PR is still open and idle. That state-layer gap is closed by a separate reflection: `sdlc-progress-check` (`reflections/sdlc_progress.py`, registered in `config/reflections.yaml` at a 30-minute interval).

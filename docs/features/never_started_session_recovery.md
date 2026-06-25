@@ -36,8 +36,13 @@ D0: _never_started_past_grace(entry) → True
     → re-read fresh (CAS race mitigation)
     → confirm predicate on fresh
     → incr {project_key}:session-health:tier1_falloff:never_started_grace_exceeded
+    → _prime_pty_alive(fresh_entry, now) → True?
+        → incr {project_key}:session-health:never_started_pty_deferred
+        → continue (defer: PTY is alive, priming still in progress)
     → _apply_recovery_transition(reason_kind="no_progress")
 ```
+
+**PTY-liveness gate (issue #1792):** Before calling `_apply_recovery_transition`, the D0 block checks `_prime_pty_alive(fresh_entry, now)`. If the granite PTY read loop is fresh and `last_pty_activity_at` is within `NEVER_STARTED_PTY_LIVENESS_SECS` (default 90s, env-overridable), the kill is deferred and the deferred counter is incremented. This prevents granite sessions from being killed during a slow-but-alive priming phase. SDK/non-granite sessions (where `last_pty_read_loop_at` is None) fall through branch 2 of the helper and are killed normally. Setting `NEVER_STARTED_PTY_LIVENESS_SECS=0` restores unconditional age-only killing. See [pm-session-liveness.md — PTY-liveness gates](pm-session-liveness.md#pty-liveness-gates-for-kill-paths) for the full gate design and side-by-side comparison with the tool_timeout sibling gate.
 
 The predicate `_never_started_past_grace` returns True when:
 1. `sdk_ever_output=False` (neither `last_tool_use_at` nor `last_turn_at` is set)
@@ -100,6 +105,7 @@ All fields are nullable and backward-compatible: sessions created before this fe
 |----------|---------|---------|-------------|
 | `NEVER_STARTED_GRACE_SECS` | 120 | `NEVER_STARTED_GRACE_SECS` | Base grace window before never-started detection fires |
 | `NEVER_STARTED_CONFIRM_MARGIN_SECS` | 30 | `NEVER_STARTED_CONFIRM_MARGIN_SECS` | Confirmation margin added on top of grace |
+| `NEVER_STARTED_PTY_LIVENESS_SECS` | 90 | `NEVER_STARTED_PTY_LIVENESS_SECS` | PTY-liveness window for the D0 gate: `last_pty_activity_at` must be within this window to defer the never-started kill. Setting to `≤ 0` disables deferral (restore age-only kill). Defined in `agent/session_stall_classifier.py`. |
 | `MID_RUN_QUIESCENCE_SECS` | 180 | `MID_RUN_QUIESCENCE_SECS` | PTY screen silence duration before stage-1 flags a suspect |
 
 All constants are marked **provisional/tunable** — the defaults are safety-chosen starting values.
@@ -121,7 +127,8 @@ Until then, a session flagged by stage-1 receives only a warning log entry.
 
 | Redis key | When incremented |
 |-----------|-----------------|
-| `{project_key}:session-health:tier1_falloff:never_started_grace_exceeded` | D0 block fires on a session past grace |
+| `{project_key}:session-health:tier1_falloff:never_started_grace_exceeded` | D0 block fires on a session past grace (incremented before the PTY-liveness gate; fires even for deferred sessions) |
+| `{project_key}:session-health:never_started_pty_deferred` | D0 block fires but `_prime_pty_alive` returns True — kill deferred, PTY still alive |
 
 ## Import Direction
 
