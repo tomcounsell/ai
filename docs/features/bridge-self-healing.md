@@ -737,10 +737,19 @@ Redis counters keyed by `<project_key>:session-health:`:
   timeout sub-loop (#1270, parallel 30s loop). Internal tier: lightweight
   built-ins (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`NotebookEdit`/`ToolSearch`,
   30s budget). MCP tier: any `mcp__*` tool (120s budget). Default tier:
-  everything else, including `Bash`/`Task`/`Skill` (300s budget). Each
-  tier budget is env-tunable via `TOOL_TIMEOUT_INTERNAL_SEC`,
-  `TOOL_TIMEOUT_MCP_SEC`, `TOOL_TIMEOUT_DEFAULT_SEC`. Sub-loop is gated by
-  `TOOL_TIMEOUT_TIERS_DISABLED` (parity with `DISABLE_PROGRESS_KILL`).
+  everything else, including `Bash`/`Task`/`Skill` (300s budget, gated on
+  PTY liveness for granite PTY sessions — see below). Each tier budget is
+  env-tunable via `TOOL_TIMEOUT_INTERNAL_SEC`, `TOOL_TIMEOUT_MCP_SEC`,
+  `TOOL_TIMEOUT_DEFAULT_SEC`. Sub-loop is gated by `TOOL_TIMEOUT_TIERS_DISABLED`
+  (parity with `DISABLE_PROGRESS_KILL`).
+* `tool_timeouts:default_deferred` — incremented whenever a granite PTY
+  session's default-tier kill is deferred because the PTY screen is still
+  painting (`mid_run_quiescent_since is None`). Added by issue #1784: for
+  granite PTY sessions, the flat 300s age-only kill is now gated on screen
+  quiescence so long-running SDLC tools (`Bash`/`Skill`/`Task`) are not
+  falsely killed while active. SDK/non-granite sessions are unaffected (age-only
+  kill preserved). Worst-case recovery bound: ~330s (300s budget + ~30s tick).
+  Kill switch: `MID_RUN_QUIESCENCE_SECS <= 0` restores age-only kill.
 
 **Distinguishing kill causes in dashboards:**
 - `tier1_flagged_total` high → heartbeat writers are dying (clock/event-loop issue) OR sessions are genuinely stuck

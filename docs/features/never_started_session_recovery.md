@@ -69,7 +69,9 @@ Three-state outcome:
 - **NOT SUSPECT**: loop is fresh AND screen recently painted → clear `mid_run_quiescent_since`
 - **SUSPECT**: loop is fresh AND screen frozen >= `MID_RUN_QUIESCENCE_SECS` → log warning
 
-Path B stage-1 ships as **detect-and-log only**: `_eval_mid_run_pty_stage1` identifies suspects and emits a warning log. No recovery action is taken. Stage-2 (off-loop classifier dispatch, `MID_RUN_RECOVERY_ACTIVE` flag, recovery wiring, counters, and dashboard surface) is planned as future work in a follow-up to #1724.
+Path B stage-1 ships as **detect-and-log only** for the mid-run quiescence recovery path: `_eval_mid_run_pty_stage1` identifies suspects and emits a warning log. No recovery action is taken directly by stage-1. Stage-2 (off-loop classifier dispatch, `MID_RUN_RECOVERY_ACTIVE` flag, recovery wiring, counters, and dashboard surface) is planned as future work in a follow-up to #1724.
+
+**Note — indirect kill via the tool-timeout sub-loop (issue #1784):** `mid_run_quiescent_since` is also consumed by the per-tool timeout sub-loop's default-tier gate (`_pty_quiescent_long_enough`). When a granite PTY session's default-tier tool (`Bash`, `Skill`, `Task`) exceeds its 300s budget, the sub-loop checks `mid_run_quiescent_since`: if the PTY is still painting (None or below threshold), the kill is deferred; if quiescent for `>= MID_RUN_QUIESCENCE_SECS (180s)`, the kill fires. This is a distinct recovery path from the stage-2 classifier dispatch planned above — it applies only to default-tier tool-wedge kills, not to the general mid-run wedge class.
 
 ## PTY Liveness Infrastructure
 

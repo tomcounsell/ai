@@ -26,12 +26,15 @@ import pytest
 
 import agent.session_health as session_health
 from agent.session_health import (
+    HEARTBEAT_FRESHNESS_WINDOW,
+    MID_RUN_QUIESCENCE_SECS,
     TOOL_TIMEOUT_DEFAULT_SEC,
     TOOL_TIMEOUT_INTERNAL_SEC,
     TOOL_TIMEOUT_MCP_SEC,
     _agent_session_tool_timeout_check,
     _check_tool_timeout,
     _classify_tool_tier,
+    _pty_quiescent_long_enough,
     _tool_tier_budget,
 )
 
@@ -169,8 +172,21 @@ def _fake_running_entry(
     age_seconds: float = TOOL_TIMEOUT_DEFAULT_SEC + 5,
     project_key: str = "test-tool-timeout",
     initial_count: int = 0,
+    # PTY-liveness fields (issue #1784). Default: SDK session (no PTY read loop).
+    last_pty_read_loop_at: datetime | None = None,
+    mid_run_quiescent_since: datetime | None = None,
 ):
-    """Build a fake session row that LOOKS wedged on a default-tier tool."""
+    """Build a fake session row that LOOKS wedged on a default-tier tool.
+
+    By default, ``last_pty_read_loop_at=None`` models an SDK/non-granite session —
+    the PTY-liveness gate (issue #1784) escapes immediately on branch 2 and the
+    age-only default-tier kill fires as before.
+
+    To model a granite PTY session:
+    - Set ``last_pty_read_loop_at`` to a recent datetime (within HEARTBEAT_FRESHNESS_WINDOW).
+    - Set ``mid_run_quiescent_since`` to None (PTY painting) or to a datetime old enough
+      to satisfy MID_RUN_QUIESCENCE_SECS (PTY quiescent long enough → kill eligible).
+    """
     last_at = datetime.now(tz=UTC) - timedelta(seconds=age_seconds)
     counters = {
         "tool_timeout_count_internal": 0,
@@ -200,6 +216,8 @@ def _fake_running_entry(
         response_delivered_at=None,
         started_at=datetime.now(tz=UTC) - timedelta(seconds=600),
         exit_returncode=0,
+        last_pty_read_loop_at=last_pty_read_loop_at,
+        mid_run_quiescent_since=mid_run_quiescent_since,
         save=_save,
         delete=lambda **_kw: None,
         _saves=saves,
@@ -301,6 +319,421 @@ async def test_subloop_recovers_wedged_session_default_tier(monkeypatch, clean_a
     assert _fake_transition.last_kwargs.get("reason_kind") == "tool_timeout"
     assert "tool-wedge" in _fake_transition.last_kwargs.get("reason", "")
     assert "Bash" in _fake_transition.last_kwargs.get("reason", "")
+
+
+# ---------------------------------------------------------------------------
+# PTY-liveness gate unit tests (issue #1784)
+# ---------------------------------------------------------------------------
+
+
+def _granite_entry(
+    *,
+    last_pty_read_loop_at_age_secs: float = 10,  # fresh by default
+    mid_run_quiescent_since_age_secs: float | None = None,
+):
+    """Build a minimal fake session row that looks like a granite PTY session."""
+    now = datetime.now(tz=UTC)
+    loop_at = now - timedelta(seconds=last_pty_read_loop_at_age_secs)
+    quiescent_since = (
+        now - timedelta(seconds=mid_run_quiescent_since_age_secs)
+        if mid_run_quiescent_since_age_secs is not None
+        else None
+    )
+    return SimpleNamespace(
+        last_pty_read_loop_at=loop_at,
+        mid_run_quiescent_since=quiescent_since,
+    )
+
+
+def test_pty_quiescent_long_enough_kill_switch_wins_first():
+    """Branch 1: MID_RUN_QUIESCENCE_SECS <= 0 restores age-only kill even when PTY fields set."""
+    entry = _granite_entry(mid_run_quiescent_since_age_secs=None)  # painting
+    now = datetime.now(tz=UTC)
+    # Patch the module-level constant to 0.
+    original = session_health.MID_RUN_QUIESCENCE_SECS
+    try:
+        session_health.MID_RUN_QUIESCENCE_SECS = 0
+        result = _pty_quiescent_long_enough(entry, now)
+    finally:
+        session_health.MID_RUN_QUIESCENCE_SECS = original
+    assert result is True, (
+        "Kill-switch (MID_RUN_QUIESCENCE_SECS=0) must return True even when PTY is "
+        "present and painting — age-only kill must be restored"
+    )
+
+
+def test_pty_quiescent_long_enough_sdk_escape():
+    """Branch 2: last_pty_read_loop_at=None (SDK session) → True (age-only kill preserved)."""
+    entry = SimpleNamespace(last_pty_read_loop_at=None, mid_run_quiescent_since=None)
+    now = datetime.now(tz=UTC)
+    assert _pty_quiescent_long_enough(entry, now) is True, (
+        "SDK session (no PTY read loop) must return True — age-only kill must be preserved"
+    )
+
+
+def test_pty_quiescent_long_enough_stale_loop_escape():
+    """Branch 2b: last_pty_read_loop_at is stale → True (dead read loop, treat as eligible)."""
+    stale_age = HEARTBEAT_FRESHNESS_WINDOW + 10
+    entry = _granite_entry(
+        last_pty_read_loop_at_age_secs=stale_age,
+        mid_run_quiescent_since_age_secs=None,  # PTY 'painting' per branch 3...
+    )
+    now = datetime.now(tz=UTC)
+    # Despite mid_run_quiescent_since=None (branch 3 would defer), the stale loop
+    # escape (branch 2b) must fire first and return True.
+    assert _pty_quiescent_long_enough(entry, now) is True, (
+        "Stale PTY read loop (> HEARTBEAT_FRESHNESS_WINDOW) must return True even when "
+        "mid_run_quiescent_since=None — a dead read loop must not indefinitely block the kill"
+    )
+
+
+def test_pty_quiescent_long_enough_painting_defers_kill():
+    """Branch 3: granite PTY present and fresh, mid_run_quiescent_since=None → False (defer)."""
+    entry = _granite_entry(
+        last_pty_read_loop_at_age_secs=5,  # fresh
+        mid_run_quiescent_since_age_secs=None,  # painting
+    )
+    now = datetime.now(tz=UTC)
+    assert _pty_quiescent_long_enough(entry, now) is False, (
+        "Granite PTY session that is currently painting (mid_run_quiescent_since=None) "
+        "must return False — the tool is alive, do NOT kill"
+    )
+
+
+def test_pty_quiescent_long_enough_quiescent_not_long_enough_defers():
+    """Branch 4: granite quiescent but < MID_RUN_QUIESCENCE_SECS → False (defer)."""
+    entry = _granite_entry(
+        last_pty_read_loop_at_age_secs=5,
+        mid_run_quiescent_since_age_secs=MID_RUN_QUIESCENCE_SECS - 10,  # not long enough
+    )
+    now = datetime.now(tz=UTC)
+    assert _pty_quiescent_long_enough(entry, now) is False, (
+        "Granite PTY quiescent but below MID_RUN_QUIESCENCE_SECS threshold must return False"
+    )
+
+
+def test_pty_quiescent_long_enough_quiescent_fires():
+    """Branch 4: granite quiescent >= MID_RUN_QUIESCENCE_SECS → True (kill eligible)."""
+    entry = _granite_entry(
+        last_pty_read_loop_at_age_secs=5,
+        mid_run_quiescent_since_age_secs=MID_RUN_QUIESCENCE_SECS + 10,  # long enough
+    )
+    now = datetime.now(tz=UTC)
+    assert _pty_quiescent_long_enough(entry, now) is True, (
+        "Granite PTY quiescent >= MID_RUN_QUIESCENCE_SECS must return True — wedge eligible"
+    )
+
+
+def test_pty_quiescent_long_enough_naive_datetime_handled():
+    """Branch 4: naive mid_run_quiescent_since (no tzinfo) is normalized to UTC, no crash."""
+    now = datetime.now(tz=UTC)
+    naive_quiescent = (now - timedelta(seconds=MID_RUN_QUIESCENCE_SECS + 10)).replace(tzinfo=None)
+    entry = SimpleNamespace(
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=5),
+        mid_run_quiescent_since=naive_quiescent,
+    )
+    result = _pty_quiescent_long_enough(entry, now)
+    assert result is True, "Naive datetime in mid_run_quiescent_since must be handled without crash"
+
+
+# ---------------------------------------------------------------------------
+# Sub-loop integration tests for the PTY-liveness gate (issue #1784)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subloop_sdk_default_tier_recovered_via_age_escape(
+    monkeypatch, clean_active_sessions
+):
+    """SDK/non-granite session (last_pty_read_loop_at=None) overdue on default-tier tool IS
+    recovered — the PTY-liveness gate does NOT disable the 300s kill for the SDK path.
+
+    This is the critique-blocker regression guard: without branch 2 of
+    _pty_quiescent_long_enough, SDK default tools would never be killed.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    # Default _fake_running_entry has last_pty_read_loop_at=None (SDK session).
+    entry = _fake_running_entry(tool_name="Bash", age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5)
+    assert entry.last_pty_read_loop_at is None, "Fixture must model an SDK session"
+
+    transition_called = []
+
+    async def _capture(*_a, **kwargs):
+        transition_called.append(kwargs)
+        return True
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _capture),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    assert len(transition_called) == 1, (
+        "SDK default-tier session overdue past 300s MUST be recovered "
+        "(PTY-liveness gate must not disable age-only kill for SDK path)"
+    )
+    assert transition_called[0].get("reason_kind") == "tool_timeout"
+
+
+@pytest.mark.asyncio
+async def test_subloop_granite_painting_default_tier_not_recovered(
+    monkeypatch, clean_active_sessions
+):
+    """Granite PTY session whose tool is overdue but PTY is still painting is NOT killed.
+
+    This is the core fix: a default-tier tool emitting PTY output past 300s must not
+    be recovered. (mid_run_quiescent_since=None → painting → defer kill.)
+
+    _eval_mid_run_pty_stage1 is patched to a no-op so it cannot alter
+    mid_run_quiescent_since on the fake entry between the fixture setup and the gate check.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    entry = _fake_running_entry(
+        tool_name="Bash",
+        age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5,
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=5),  # fresh loop
+        mid_run_quiescent_since=None,  # still painting
+    )
+
+    async def _should_not_be_called(*_a, **_kw):
+        raise AssertionError("recovery fired on a live-painting granite PTY session")
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _should_not_be_called),
+        # Patch out stage-1 so it cannot mutate mid_run_quiescent_since on the fake entry.
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *_a, **_kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    # The deferred-kill counter must have been incremented.
+    deferred_keys = [k for k in redis_calls if "default_deferred" in k]
+    assert deferred_keys, (
+        "tool_timeouts:default_deferred Redis counter must be incremented when "
+        "a live-painting granite PTY tool is deferred"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subloop_granite_quiescent_default_tier_recovered(monkeypatch, clean_active_sessions):
+    """Granite PTY session overdue AND quiescent >= MID_RUN_QUIESCENCE_SECS IS recovered.
+
+    _eval_mid_run_pty_stage1 is patched to a no-op so it cannot alter
+    mid_run_quiescent_since on the fake entry between the fixture setup and the gate check.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    _quiescent_age = MID_RUN_QUIESCENCE_SECS + 10
+    entry = _fake_running_entry(
+        tool_name="Bash",
+        age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5,
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=5),  # fresh loop
+        mid_run_quiescent_since=datetime.now(tz=UTC) - timedelta(seconds=_quiescent_age),
+    )
+
+    transition_called = []
+
+    async def _capture(*_a, **kwargs):
+        transition_called.append(kwargs)
+        return True
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _capture),
+        # Patch out stage-1 so it cannot mutate mid_run_quiescent_since on the fake entry.
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *_a, **_kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    assert len(transition_called) == 1, (
+        "Granite PTY session overdue AND quiescent >= MID_RUN_QUIESCENCE_SECS MUST be recovered"
+    )
+    assert transition_called[0].get("reason_kind") == "tool_timeout"
+    # The reason should include quiescence context.
+    reason = transition_called[0].get("reason", "")
+    assert "pty quiescent" in reason, (
+        f"Reason string for granite kill must include quiescence context; got: {reason!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subloop_gate_does_not_apply_to_internal_tier(monkeypatch, clean_active_sessions):
+    """Internal-tier tools keep age-only kill; PTY liveness gate does NOT apply.
+
+    Even on a granite PTY session that is 'painting', an overdue internal-tier tool
+    must still be killed — the liveness gate is default-tier only.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    # Use a granite PTY session that is painting — yet the internal-tier tool must still die.
+    entry = _fake_running_entry(
+        tool_name="Read",
+        age_seconds=TOOL_TIMEOUT_INTERNAL_SEC + 5,
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=5),  # fresh loop
+        mid_run_quiescent_since=None,  # painting
+    )
+
+    transition_called = []
+
+    async def _capture(*_a, **kwargs):
+        transition_called.append(kwargs)
+        return True
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _capture),
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *_a, **_kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    assert len(transition_called) == 1, (
+        "Internal-tier wedge on a granite PTY session must still fire — "
+        "the PTY-liveness gate must NOT apply to the internal tier"
+    )
+    assert transition_called[0].get("reason_kind") == "tool_timeout"
+
+
+@pytest.mark.asyncio
+async def test_subloop_gate_does_not_apply_to_mcp_tier(monkeypatch, clean_active_sessions):
+    """MCP-tier tools keep age-only kill; PTY liveness gate does NOT apply."""
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+    entry = _fake_running_entry(
+        tool_name="mcp__claude_ai_Gmail__create_draft",
+        age_seconds=TOOL_TIMEOUT_MCP_SEC + 5,
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=5),
+        mid_run_quiescent_since=None,  # painting
+    )
+
+    transition_called = []
+
+    async def _capture(*_a, **kwargs):
+        transition_called.append(kwargs)
+        return True
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _capture),
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *_a, **_kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    assert len(transition_called) == 1, (
+        "MCP-tier wedge on a granite PTY session must still fire — "
+        "the PTY-liveness gate must NOT apply to the mcp tier"
+    )
+
+
+@pytest.mark.asyncio
+async def test_subloop_race_abort_when_tool_resumes_painting(monkeypatch, clean_active_sessions):
+    """Race: tool resumes painting between iterator read and fresh re-read → abort recovery.
+
+    Iterator row: quiescent long enough → gate passes, would kill.
+    Fresh re-read: mid_run_quiescent_since cleared (PTY resumed painting) → gate defers.
+
+    _eval_mid_run_pty_stage1 is patched to a no-op so it cannot mutate
+    mid_run_quiescent_since on the fake stale entry.
+    """
+    monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
+
+    # Iterator row: overdue + quiescent long enough → gate says "kill eligible".
+    _quiescent_age = MID_RUN_QUIESCENCE_SECS + 10
+    stale = _fake_running_entry(
+        tool_name="Bash",
+        age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5,
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=5),
+        mid_run_quiescent_since=datetime.now(tz=UTC) - timedelta(seconds=_quiescent_age),
+    )
+    # Fresh re-read: PTY resumed painting — mid_run_quiescent_since cleared.
+    fresh = _fake_running_entry(
+        tool_name="Bash",
+        age_seconds=TOOL_TIMEOUT_DEFAULT_SEC + 5,
+        last_pty_read_loop_at=datetime.now(tz=UTC) - timedelta(seconds=2),
+        mid_run_quiescent_since=None,  # resumed painting
+    )
+
+    async def _should_not_be_called(*_a, **_kw):
+        raise AssertionError("recovery fired despite PTY resuming painting in the re-read")
+
+    redis_calls: list[str] = []
+
+    class _FakeRedis:
+        def incr(self, key):
+            redis_calls.append(key)
+            return 1
+
+    fake_redis_module = SimpleNamespace(POPOTO_REDIS_DB=_FakeRedis())
+
+    with (
+        patch.object(session_health.AgentSession.query, "filter", return_value=[stale]),
+        patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+        patch.object(session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: fresh)),
+        patch.dict("sys.modules", {"popoto.redis_db": fake_redis_module}),
+        patch.object(session_health, "_apply_recovery_transition", _should_not_be_called),
+        patch.object(session_health, "_eval_mid_run_pty_stage1", lambda *_a, **_kw: None),
+    ):
+        await _agent_session_tool_timeout_check()
+
+    # No kill counter should be bumped (aborted before that block).
+    assert stale.tool_timeout_count_default == 0
+    assert fresh.tool_timeout_count_default == 0
 
 
 @pytest.mark.asyncio

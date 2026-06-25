@@ -385,6 +385,83 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     return tier, reason
 
 
+def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
+    """Return True if a default-tier tool is wedge-eligible (OK to kill); False if alive.
+
+    This is the PTY-liveness gate for the default-tier kill decision (issue #1784).
+    Return value semantics: True = "wedge-eligible, proceed with kill"; False = "defer, PTY is
+    live or liveness is unknown for a granite session."
+
+    Branch order is load-bearing — the first matching branch wins:
+
+    1. Kill-switch escape (FIRST, before any field reads): ``MID_RUN_QUIESCENCE_SECS <= 0``
+       restores age-only default-tier kill for every session (granite and SDK alike).
+       Must be first so the kill-switch is never silently defeated by a None-field
+       short-circuit below it.
+
+    2. Non-PTY / SDK escape: ``last_pty_read_loop_at is None`` — this session has no
+       granite PTY read loop and never accumulates ``mid_run_quiescent_since``. The only
+       liveness signal available is age, so return True to keep the existing 300s
+       default-tier kill for the entire SDK path. Omitting this branch would cause SDK
+       default tools to fall through to branch 3 (``mid_run_quiescent_since is None →
+       False``) and never be killed — a regression blocker.
+
+    2b. Staleness escape: ``last_pty_read_loop_at`` is stale (> ``HEARTBEAT_FRESHNESS_WINDOW``
+       seconds old). When the PTY read loop has died, stage-1 ABSTAINs and
+       ``mid_run_quiescent_since`` is unreliable — returning True here prevents a session
+       whose read loop has crashed from escaping the kill via branch 3's "None → defer" path.
+
+    3. Painting / freshly-active PTY: ``mid_run_quiescent_since is None`` — the granite PTY
+       read loop exists and is fresh (branches 2/2b didn't fire) but the screen is currently
+       painting (stage-1 cleared ``mid_run_quiescent_since``, or it was never quiescent).
+       This is the "alive, defer the kill" case — the whole point of the fix.
+
+    4. Quiescent long enough: tz-normalize ``mid_run_quiescent_since`` and return
+       ``(now - it).total_seconds() >= MID_RUN_QUIESCENCE_SECS``. True once the granite
+       PTY has been quiescent past the window (mirrors the exact predicate stage-1 uses, so
+       there is a single definition of "quiescent long enough").
+    """
+    # Branch 1: kill-switch — age-only kill restored for all sessions.
+    if MID_RUN_QUIESCENCE_SECS <= 0:
+        return True
+
+    # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
+    last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+    if last_pty_read_loop_at is None:
+        return True
+
+    # Branch 2b: staleness escape — if the granite PTY read loop marker is itself stale
+    # (> HEARTBEAT_FRESHNESS_WINDOW seconds old), stage-1 ABSTAINs and
+    # mid_run_quiescent_since is unreliable. Treat as wedge-eligible so a session whose
+    # PTY read loop has died does not escape the kill via branch 3's "None → defer" path.
+    # This is a safety net only; the main health loop's heartbeat checks own recovery
+    # of granite sessions with a dead read loop (not this path).
+    if isinstance(last_pty_read_loop_at, datetime):
+        loop_at_aware = (
+            last_pty_read_loop_at
+            if last_pty_read_loop_at.tzinfo
+            else last_pty_read_loop_at.replace(tzinfo=UTC)
+        )
+        if (now - loop_at_aware).total_seconds() > HEARTBEAT_FRESHNESS_WINDOW:
+            return True
+
+    # Branch 3: granite PTY present but painting (or freshly active) — alive, defer kill.
+    mid_run_quiescent_since = getattr(entry, "mid_run_quiescent_since", None)
+    if mid_run_quiescent_since is None:
+        return False
+
+    # Branch 4: quiescent long enough? Normalize timezone then compare.
+    if not isinstance(mid_run_quiescent_since, datetime):
+        # Defensive: unexpected type — treat as painting to avoid a spurious kill.
+        return False
+    quiescent_aware = (
+        mid_run_quiescent_since
+        if mid_run_quiescent_since.tzinfo
+        else mid_run_quiescent_since.replace(tzinfo=UTC)
+    )
+    return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
+
+
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
 # ``(checked_at_monotonic, result)``. The cache amortizes psutil syscalls when
 # many sessions enter the recovery branch within the same health-check tick.
@@ -2851,6 +2928,36 @@ async def _agent_session_tool_timeout_check() -> None:
                 continue
             tier, reason = check
 
+            # PTY-liveness gate for default-tier tools on granite PTY sessions (#1784).
+            # Internal/mcp tiers keep the age-only predicate (they are short-lived tools
+            # that must not run for minutes). For the default tier, suppress the kill if
+            # the PTY is still painting — a screen still updating is never a wedge.
+            # SDK/non-granite sessions (last_pty_read_loop_at=None) always go through
+            # the age-only path (helper branch 2) so the 300s ceiling is preserved.
+            if tier == "default" and not _pty_quiescent_long_enough(entry, now):
+                logger.debug(
+                    "[session-health] tool-timeout default-tier deferred for %s "
+                    "(%s): PTY still active (mid_run_quiescent_since=%s, "
+                    "MID_RUN_QUIESCENCE_SECS=%s)",
+                    entry.agent_session_id,
+                    getattr(entry, "current_tool_name", "?"),
+                    getattr(entry, "mid_run_quiescent_since", None),
+                    MID_RUN_QUIESCENCE_SECS,
+                )
+                # Deferred-kill observability counter (critique Concern 2).
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _R_DEFER
+
+                    _R_DEFER.incr(
+                        f"{entry.project_key}:session-health:tool_timeouts:default_deferred"
+                    )
+                except Exception as _def_err:
+                    logger.debug(
+                        "[session-health] tool_timeouts:default_deferred incr failed: %s",
+                        _def_err,
+                    )
+                continue
+
             # Race mitigation (issue #1270 Risk 2): re-read both fields from a
             # fresh query before we transition. PostToolUse may have fired
             # between the iterator's read and this point. If the second read
@@ -2877,6 +2984,27 @@ async def _agent_session_tool_timeout_check() -> None:
                 )
                 continue
             tier, reason = recheck
+
+            # Re-evaluate the PTY-liveness gate on the fresh row (#1784 race path):
+            # if the tool resumed painting between the iterator read and the re-read,
+            # abort the recovery — we must not kill a session that just resumed output.
+            if tier == "default" and not _pty_quiescent_long_enough(fresh, now):
+                logger.debug(
+                    "[session-health] tool-timeout default-tier race abort for %s "
+                    "(%s): PTY resumed painting between read and re-read",
+                    fresh.agent_session_id,
+                    getattr(fresh, "current_tool_name", "?"),
+                )
+                continue
+
+            # Extend the default-tier reason string with quiescence context so logs
+            # explain why a live-but-past-deadline default tool was killed.
+            if tier == "default":
+                reason = (
+                    f"{reason}; pty quiescent >= {MID_RUN_QUIESCENCE_SECS}s"
+                    if getattr(fresh, "last_pty_read_loop_at", None) is not None
+                    else reason
+                )
 
             # Bump per-tier counter on the session row. Best-effort; failure
             # must not block the recovery transition (matches the
