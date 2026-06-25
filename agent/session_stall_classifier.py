@@ -93,6 +93,13 @@ GRANITE_WEDGED_READLOOP_FRESH_SECS: int = int(
     os.environ.get("GRANITE_WEDGED_READLOOP_FRESH_SECS", "90")
 )
 
+# PTY-liveness deferral window for the never-started kill path (issue #1792).
+# When a session has never produced SDK output but is past the grace window,
+# the D0 kill is deferred if the PTY shows recent activity within this window.
+# Default: 90s (mirrors HEARTBEAT_FRESHNESS_WINDOW) — env-overridable.
+# Set to 0 or negative to disable the deferral (kill-switch).
+NEVER_STARTED_PTY_LIVENESS_SECS: int = int(os.environ.get("NEVER_STARTED_PTY_LIVENESS_SECS", "90"))
+
 # ---------------------------------------------------------------------------
 # Terminal statuses (mirror models/session_lifecycle.py — no circular import)
 # ---------------------------------------------------------------------------
