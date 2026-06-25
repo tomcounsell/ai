@@ -2790,19 +2790,41 @@ async def main():
     # mismatch loudly. This is a warn-not-crash gate: a misconfigured bot entry
     # must not take down a running bridge, but it must be impossible to miss.
     if BOT_ID_TO_PROJECT:
-        from bridge.config_validation import ConfigValidationError, validate_bot_live_flags
+        from bridge.config_validation import validate_bot_live_flags
 
         async def _resolve_bot_entity(bot_id: int):
             return await client.get_entity(bot_id)
 
-        try:
-            await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+        quarantine_ids, detail = await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+
+        if quarantine_ids:
+            # Confirmed non-bot ids: pop them from the registry so the loop-guard
+            # no longer suppresses their messages. This relies on the dict-aliasing
+            # invariant: BOT_ID_TO_PROJECT was aliased to
+            # _routing_module.BOT_ID_TO_PROJECT at line ~652 above; both names point
+            # to the same object, so a pop here clears the routing copy too. Only
+            # CONFIRMED non-bot ids (resolver returned User.bot=False) are popped —
+            # probe failures (resolver raised) are conservatively left registered.
+            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", detail)
+            for bot_id in quarantine_ids:
+                BOT_ID_TO_PROJECT.pop(bot_id, None)
+            if not BOT_ID_TO_PROJECT:
+                logger.warning(
+                    "Bot registry empty after quarantine (%d id(s) removed) — "
+                    "no registered bots remain",
+                    len(quarantine_ids),
+                )
+        elif detail is not None:
+            # Probe failures only — could not confirm human or bot, nothing popped.
+            logger.warning(
+                "Bot live-flag probe inconclusive (could not confirm non-bot): %s",
+                detail,
+            )
+        else:
             logger.info(
                 "Registered bot live-flag validation passed (%d bot(s))",
                 len(BOT_ID_TO_PROJECT),
             )
-        except ConfigValidationError as e:
-            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", e)
 
     # Register session queue callbacks for each project
     from agent.agent_session_queue import cleanup_stale_branches

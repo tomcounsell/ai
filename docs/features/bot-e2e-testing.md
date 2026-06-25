@@ -68,6 +68,32 @@ restarting the bridge):
 
 See [single-machine-ownership.md](single-machine-ownership.md).
 
+### Live-flag quarantine (#1777)
+
+At bridge startup, `validate_bot_live_flags` in `bridge/config_validation.py` probes each
+registered bot id against the live Telegram `User.bot` flag. The outcome determines
+whether the id stays in `BOT_ID_TO_PROJECT` or is quietly removed:
+
+**Confirmed non-bot (`User.bot is False`)** — the resolver returned an entity and the flag
+is definitively false, meaning a typo'd id or swapped token is pointing at a human account.
+The bridge logs a loud ERROR (`REGISTERED BOT MISCONFIGURATION (#1574)`) and **quarantines**
+the id by popping it from `BOT_ID_TO_PROJECT`. Because `BOT_ID_TO_PROJECT` in
+`bridge/telegram_bridge.py` was aliased to `bridge/routing.py`'s copy at startup, a single
+`dict.pop()` clears the routing copy too — no separate call needed.
+
+The fail-safe direction is **toward human**: a quarantined id is removed from the registry,
+so the loop-guard no longer applies. That account's inbound messages are treated as human
+messages and may spawn a session normally.
+
+**Probe failure (resolver raised: timeout, rate-limit, lookup error)** — we could not confirm
+whether the id is a bot or a human. The conservative stance is to **leave the id registered**
+(keep suppressing as if it were a bot). A WARNING is logged instead of an ERROR. The next
+bridge restart re-probes; the id is not quarantined.
+
+**Config fix workflow**: if a bot id was misconfigured (typo'd id in `projects.json`), correct
+the id and restart the bridge. The restart re-probes all registered ids, and the corrected id
+is validated against `User.bot is True` — no quarantine, normal registration.
+
 ## The loop-guard (deterministic)
 
 Two independent layers prevent a registered bot from spawning a session:
@@ -168,6 +194,7 @@ opens a second Telethon client — the bridge holds the SQLite session lock.
 | Edit capture (`update_message_text`) | `tools/telegram_history/__init__.py` |
 | Edit-handler registered-bot branch | `bridge/telegram_bridge.py` |
 | Config validation (`validate_telegram_bots`) | `bridge/config_validation.py` |
+| Live-flag quarantine (`validate_bot_live_flags`) | `bridge/config_validation.py`, `bridge/telegram_bridge.py` |
 | Awaiter (settle algorithm) | `tools/valor_telegram_await.py` |
 | CLI flags (`--await-reply`/`--timeout`/`--json`) | `tools/valor_telegram.py` |
 
