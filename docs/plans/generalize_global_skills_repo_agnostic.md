@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-06-26
 tracking: https://github.com/tomcounsell/ai/issues/1783
 last_comment_id:
+revision_applied: true
 ---
 
 # Generalize all global skills to be fully repo-agnostic
@@ -154,7 +155,21 @@ No prerequisites — this work has no external dependencies. All operations are 
 - **Regression guard (`rule_13_coupling_signals`)**: A new rule in
   `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` that greps each
   `skills-global/` body for coupling signals and flags any that lack the uniform probe step.
-  This is the invariant that prevents regression (per "prevention over cleanup").
+  This is the invariant that prevents regression (per "prevention over cleanup"). **The rule
+  must emit severity `FAIL` (not `WARN`) for a genuine coupling violation** (critique concern
+  #1): `main()` returns a non-zero exit code only when `report.summary["fail"] > 0`, so a `WARN`
+  would never trip the red-state non-zero exit the Failure Path strategy depends on. `--no-sync`
+  already exists on the audit CLI; all Verification invocations of the audit MUST pass
+  `--no-sync` so the guard is deterministic and never reaches out to `sync_best_practices.py`.
+- **Prune dangling classification constants** (critique concern #3): `INFRA_SKILLS`
+  (`{update, setup, reclassify, new-skill, new-valor-skill, prime}`) and `FORK_SKILLS`
+  (`{do-build, do-pr-review, pthread, do-design-audit, sdlc}`) in `audit_skills.py` enumerate
+  skills *by `skills-global/` name*. The Bucket C move removes `setup`, `prime` (INFRA) and
+  `sdlc` (FORK) from `skills-global/`, so those entries become **dangling references** to skills
+  the audit will never iterate. Prune the moved names from each set. If pruning empties a set or
+  leaves its consuming rule (`rule_06_infra_classification` / `rule_08_fork_classification`)
+  with nothing to assert, remove the now-dead constant *and* its rule entirely (NO LEGACY CODE
+  TOLERANCE) — do not leave an inert frozenset.
 
 ### Flow
 
@@ -174,11 +189,19 @@ This (ai) repo runs /do-docs
   needs nuance). Rationale: lives under `.claude/` alongside the skills it modifies (not in
   `docs/`, which is feature documentation for humans); per-skill files keep each skill's probe
   trivially greppable (`.claude/skill-context/do-docs.md`); absent file is the lean default.
-  **Relationship to existing `docs/sdlc/`:** the 8 `docs/sdlc/do-X.md` addenda are SDLC-pipeline
-  *runtime* addenda (read mid-pipeline by the SDLC stages). They are NOT duplicated. For SDLC
-  skills, the `.claude/skill-context/{skill}.md` file is thin and *points to* `docs/sdlc/do-X.md`
-  for the pipeline-runtime detail, carrying only the skill-body-level coupling that isn't already
-  in docs/sdlc/. No churn to docs/sdlc/. (This boundary is the #1 Open Question for confirmation.)
+  **Relationship to existing `docs/sdlc/` — collapse the indirection, do NOT add a hop**
+  (critique concern #5): the 8 `docs/sdlc/do-X.md` addenda are already this repo's per-skill
+  context seam for the SDLC stages. The earlier draft proposed a *thin pointer* skill-context
+  file for each SDLC skill that merely re-points at `docs/sdlc/do-X.md` — that is a redundant
+  third hop (skill body → probe → `.claude/skill-context/do-X.md` → `docs/sdlc/do-X.md`) and is
+  removed from this plan. **Decision:** for the 8 SDLC skills, the probe step points *directly*
+  at `docs/sdlc/{skill}.md` — `docs/sdlc/` IS their skill-context seam. No
+  `.claude/skill-context/do-{sdlc-skill}.md` files are created, and `docs/sdlc/` is not migrated
+  or churned. `.claude/skill-context/{skill}.md` files are created ONLY for non-SDLC Bucket B
+  skills (media/comms and `do-docs`) that have no existing `docs/sdlc/` addendum. The canonical
+  probe sentence is parameterized on the context path so it reads `docs/sdlc/{skill}.md` for SDLC
+  skills and `.claude/skill-context/{skill}.md` otherwise, while staying a single greppable
+  template.
 - **Probe step wording** is identical across all skills (one canonical sentence) so
   `rule_13` can assert its presence mechanically.
 - **Bucket B leaning is mechanical but per-skill**: extract each skill's ai-repo specifics into
@@ -212,10 +235,26 @@ This (ai) repo runs /do-docs
   with no `.claude/skill-context/` dir (covered by the cross-repo integration check below).
 
 ### Error State Rendering
-- [ ] `audit_skills.py --json` must include `rule_13` findings in its output structure; verify
-  the JSON formatter renders the new rule's findings (test asserts the rule id appears).
-- [ ] A coupling violation must surface as a non-zero audit exit (or a FAIL finding) — test that
-  a deliberately-coupled skill body *without* the probe step trips `rule_13`.
+- [ ] `audit_skills.py --json --no-sync` must include `rule_13` findings in its output structure;
+  verify the JSON formatter renders the new rule's findings (test asserts the rule id appears).
+- [ ] A coupling violation must surface as a **non-zero audit exit** — test that a
+  deliberately-coupled skill body *without* the probe step trips `rule_13` with severity `FAIL`
+  (not `WARN`), and that `main()` consequently returns exit code 1. A `WARN` finding does NOT
+  flip the exit code (`main()` keys off `summary["fail"]`), so the test must assert both the
+  `FAIL` severity AND the non-zero process exit.
+
+### Empirical Foreign-Repo Runtime Verification (critique concern #6)
+The earlier draft only reasoned *mentally* about a leaned skill running in a plain repo. That is
+not proof. The build MUST produce an **empirical artifact**:
+- [ ] Create a throwaway git repo in a temp dir (`git init` in `$(mktemp -d)`) with NO
+  `.claude/skill-context/`, NO `docs/sdlc/`, and no ai-repo tooling on PATH.
+- [ ] Copy a leaned skill body (start with `do-docs`) into that repo's `~/.claude/skills/`
+  equivalent and exercise its probe step: confirm the probe resolves "context file absent ⇒
+  generic baseline" and that the generic doc-cascade path runs using only `git` (no `sdlc-tool`,
+  no `python -m tools.*`, no `valor-*`, no `reflections.*` invoked).
+- [ ] Capture the run transcript / command log as the proof artifact attached to the PR. The
+  acceptance bar is *executable*, per the "acceptance criteria must be executable" rule — flipping
+  this box requires the captured foreign-repo transcript, not a test count.
 
 ## Test Impact
 
@@ -298,18 +337,38 @@ postponed work:
 ## Update System
 
 The update system **does need changes**, specifically `scripts/update/hardlinks.py`:
-- Add the 5 Bucket C skills (`setup`, `prime`, `sdlc`, `do-sdlc`, `do-deploy`) to
-  `PROJECT_ONLY_SKILLS` so they are no longer synced to `~/.claude/skills/`.
+- Physically move each of the 5 Bucket C skill directories (`setup`, `prime`, `sdlc`, `do-sdlc`,
+  `do-deploy`) from `.claude/skills-global/` to `.claude/skills/`. This physical move is the
+  *primary* mechanism: `_sync_skills()` iterates `skills-global/` only, so a skill that no longer
+  lives there is never synced — full stop.
+- **Do NOT add the 5 Bucket C skills to `PROJECT_ONLY_SKILLS`** (critique concern #4). That set
+  is consulted *only* inside the `_sync_skills()` loop over `skills-global/` (the `if
+  skill_dir.name in PROJECT_ONLY_SKILLS: continue` guard at line ~225). Once a skill is physically
+  moved out of `skills-global/`, the loop never visits it, so a `PROJECT_ONLY_SKILLS` entry for it
+  is **inert dead config** — it guards a code path that can never fire for that name. Adding the 5
+  would be cargo-cult. The existing members (`telegram`, `reading-sms-messages`,
+  `checking-system-logs`) stay as-is (defense-in-depth for names that might *re-appear* in
+  `skills-global/`); we add nothing.
 - Add a `RENAMED_REMOVALS` entry (`("skills", "<name>")`) for each of the 5 moved skills so the
-  stale user-level hardlink is removed on every machine's next `/update`.
-- Physically move each of the 5 skill directories from `.claude/skills-global/` to
-  `.claude/skills/`.
+  stale user-level hardlink is removed on every machine's next `/update`. **This is the only
+  wiring change the move requires.**
+- **Harden `_cleanup_renamed()` with an inode guard** (critique concern #2). Today
+  `_cleanup_renamed()` blindly `shutil.rmtree`s `~/.claude/{kind}/{old_name}` whenever it exists
+  — unlike `_cleanup_stale_commands()`, which already gates removal on
+  `_is_hardlinked_to_project()`. After the Bucket C move, a foreign repo that *legitimately*
+  provides its own user-level `sdlc`/`setup`/`prime` skill (synced from *its* `skills-global/`)
+  would have that copy deleted by our blanket `RENAMED_REMOVALS` sweep. Fix: gate
+  `_cleanup_renamed()` removal so it only deletes the target when the target is **not** currently
+  hardlinked to a live source under any active project's `skills-global/` (reuse / generalize
+  `_is_hardlinked_to_project()`), i.e. only remove genuinely-orphaned stale hardlinks. This makes
+  `RENAMED_REMOVALS` safe under the single-machine, multi-repo reality.
 - The new `.claude/skill-context/` directory is repo-local and NOT synced (it's per-repo
   context, like `docs/sdlc/`) — confirm `sync_claude_dirs()` does not pick it up (it only syncs
   `skills-global/`, `commands/`, `hooks/`, so this is automatic, but assert it in a test).
 
 No new dependencies or config files beyond the convention directory. Migration for existing
-installations is handled entirely by the `RENAMED_REMOVALS` cleanup on next `/update`.
+installations is handled entirely by the `RENAMED_REMOVALS` cleanup (now inode-guarded) on next
+`/update`.
 
 ## Agent Integration
 
@@ -347,9 +406,19 @@ resolves post-move.
   `tools.*`/`valor-*` hard dependency in the body — and still produces full ai-repo behavior here
   via its skill-context file.
 - [ ] Bucket C (`setup`, `prime`, `sdlc`, `do-sdlc`, `do-deploy`) moved to `.claude/skills/` with
-  `PROJECT_ONLY_SKILLS` + `RENAMED_REMOVALS` updated; `skills-global/` count drops 50 → 45.
-- [ ] `rule_13_coupling_signals` exists in `audit_skills.py`, passes on the leaned tree, and
-  FAILS (red-state proof) against a deliberately-coupled body lacking the probe step.
+  `RENAMED_REMOVALS` updated (NOT `PROJECT_ONLY_SKILLS` — that would be inert, concern #4);
+  `skills-global/` count drops 50 → 45.
+- [ ] `_cleanup_renamed()` is inode-guarded (concern #2): a foreign repo's live same-named
+  user-level skill survives the `RENAMED_REMOVALS` sweep; only genuine orphans are removed.
+- [ ] `INFRA_SKILLS`/`FORK_SKILLS` no longer reference moved Bucket C skills (`setup`, `prime`,
+  `sdlc`) — pruned or removed entirely (concern #3); no dangling classification entries remain.
+- [ ] No redundant SDLC indirection (concern #5): SDLC skills' probe points directly at
+  `docs/sdlc/{skill}.md`; zero thin `.claude/skill-context/do-{sdlc-skill}.md` pointer files created.
+- [ ] `rule_13_coupling_signals` exists in `audit_skills.py`, emits severity `FAIL` for genuine
+  violations, passes (`--no-sync`) on the leaned tree, and returns exit code 1 (red-state proof)
+  against a deliberately-coupled body lacking the probe step (concern #1).
+- [ ] Empirical foreign-repo runtime proof (concern #6): a leaned skill demonstrably runs its
+  generic baseline in a fresh temp repo with no ai tooling; transcript attached to the PR.
 - [ ] `.claude/skill-context/` is confirmed NOT synced by `sync_claude_dirs()`.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -419,10 +488,15 @@ builder, validator, documentarian (Tier 1) suffice; no Tier 2 specialists needed
 - **Agent Type**: builder
 - **Parallel**: false
 - Confirm the convention location `.claude/skill-context/{skill}.md` and write
-  `.claude/skill-context/README.md` documenting it + the canonical probe sentence.
+  `.claude/skill-context/README.md` documenting it + the canonical probe sentence. The canonical
+  sentence is parameterized on the context path: SDLC skills point at `docs/sdlc/{skill}.md`,
+  non-SDLC skills at `.claude/skill-context/{skill}.md` (concern #5 — no thin pointer files for
+  SDLC skills).
 - Lean `do-docs/SKILL.md`: move ai specifics (`docs/features/` index, `sdlc-tool stage-marker`,
   `reflections.docs_auditor`, `tools.doc_impact_finder`, `config/identity.json`) into
   `.claude/skill-context/do-docs.md`; replace with generic doc-cascade body + probe step.
+  (`do-docs` has no `docs/sdlc/do-docs.md` runtime addendum overlap to worry about beyond the
+  pipeline-marker line, which moves into the context file.)
 - This is the template all Bucket B batches copy.
 
 ### 2. Bucket B — pipeline batch
@@ -434,9 +508,14 @@ builder, validator, documentarian (Tier 1) suffice; no Tier 2 specialists needed
 - **Agent Type**: builder
 - **Parallel**: true
 - For each of `do-build`, `do-plan`, `do-plan-critique`, `do-patch`, `do-issue`, `do-merge`,
-  `do-test`, `do-pr-review`: extract ai specifics into `.claude/skill-context/{skill}.md`
-  (pointing to `docs/sdlc/{skill}.md` where that content already lives), lean the body, add the
-  probe step. Use `do-docs` as the template.
+  `do-test`, `do-pr-review`: lean the body and add the probe step pointing **directly** at the
+  existing `docs/sdlc/{skill}.md` addendum — do NOT create a thin `.claude/skill-context/{skill}.md`
+  pointer file for these (concern #5, collapsed indirection). If a pipeline skill carries
+  ai-repo coupling that is *not* already captured in its `docs/sdlc/{skill}.md` addendum, append
+  that detail to the existing `docs/sdlc/{skill}.md` (no new file). `do-issue` has no
+  `docs/sdlc/do-issue.md` today — if it needs context, create `.claude/skill-context/do-issue.md`
+  (the non-SDLC-style path), since it is not one of the 8 pipeline-runtime addenda. Use `do-docs`
+  as the template.
 
 ### 3. Bucket B — media + comms batch
 - **Task ID**: build-bucketb-media
@@ -460,10 +539,22 @@ builder, validator, documentarian (Tier 1) suffice; no Tier 2 specialists needed
 - **Agent Type**: builder
 - **Parallel**: true
 - Move `setup`, `prime`, `sdlc`, `do-sdlc`, `do-deploy` to `.claude/skills/`.
-- Update `hardlinks.py`: add the 5 to `PROJECT_ONLY_SKILLS`; add 5 `RENAMED_REMOVALS` entries.
-- Add `rule_13_coupling_signals` to `audit_skills.py` + tests (red-state proof + green on leaned
-  tree). Update any existing test asserting a hardcoded skill count or `PROJECT_ONLY_SKILLS`
-  membership (per Test Impact).
+- Update `hardlinks.py`: add 5 `RENAMED_REMOVALS` entries. **Do NOT add the 5 to
+  `PROJECT_ONLY_SKILLS`** — that set is only consulted inside the `skills-global/` loop, so an
+  entry for a physically-moved skill is inert dead config (concern #4).
+- **Harden `_cleanup_renamed()` with an inode guard** (concern #2): gate the removal on the
+  target NOT being hardlinked to a live `skills-global/` source (reuse / generalize
+  `_is_hardlinked_to_project()`), so a foreign repo's legitimately-synced same-named skill is
+  never deleted. Add a unit test covering: (a) stale orphan hardlink → removed; (b) live
+  project-backed hardlink with the same name → preserved.
+- **Prune dangling classification constants** (concern #3): remove `setup`, `prime` from
+  `INFRA_SKILLS` and `sdlc` from `FORK_SKILLS` in `audit_skills.py`. If a set or its consuming
+  rule (`rule_06`/`rule_08`) is left with nothing meaningful to assert, delete the dead constant
+  and rule outright. Update/extend the audit's own tests accordingly.
+- Add `rule_13_coupling_signals` to `audit_skills.py` emitting severity **`FAIL`** for genuine
+  coupling violations (concern #1) + tests (red-state proof asserting exit code 1 via `--no-sync`
+  + green on leaned tree). Update any existing test asserting a hardcoded skill count or
+  `PROJECT_ONLY_SKILLS` membership (per Test Impact).
 
 ### 5. Behavior-parity + cross-repo validation
 - **Task ID**: validate-parity
@@ -471,9 +562,18 @@ builder, validator, documentarian (Tier 1) suffice; no Tier 2 specialists needed
 - **Assigned To**: parity-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Diff each leaned skill: confirm every removed ai-specific line now lives in its skill-context
-  file (no behavior lost, only relocated).
-- Run `rule_13` red (deliberately-coupled body) and green (leaned tree).
+- Diff each leaned skill: confirm every removed ai-specific line now lives in its context seam
+  (`.claude/skill-context/{skill}.md` for non-SDLC, or the existing `docs/sdlc/{skill}.md` for
+  pipeline skills — no behavior lost, only relocated; no thin pointer files created).
+- Run `rule_13` red (deliberately-coupled body, assert exit code 1 with `--no-sync`) and green
+  (leaned tree).
+- **Empirical foreign-repo runtime check** (concern #6): in a fresh `git init` temp repo with no
+  `.claude/skill-context/`, no `docs/sdlc/`, and ai tooling off PATH, exercise a leaned skill's
+  probe path and confirm it runs the generic baseline using only `git`. Capture the transcript as
+  the PR proof artifact.
+- Verify `_cleanup_renamed()` inode guard: assert a live project-backed same-named user-level
+  skill is preserved while a genuine orphan is removed.
+- Confirm `INFRA_SKILLS`/`FORK_SKILLS` no longer reference moved skills (or are removed).
 - Confirm `sync_claude_dirs()` does not sync `.claude/skill-context/`.
 - Smoke-test `/sdlc` in this repo to confirm Bucket C still loads post-move.
 
@@ -508,30 +608,34 @@ builder, validator, documentarian (Tier 1) suffice; no Tier 2 specialists needed
 | skill-context convention exists | `test -f .claude/skill-context/do-docs.md` | exit code 0 |
 | skill-context NOT synced | `grep -c 'skill-context' scripts/update/hardlinks.py` | match count == 0 |
 | rule_13 present | `grep -c 'rule_13_coupling_signals' .claude/skills-global/do-skills-audit/scripts/audit_skills.py` | output > 0 |
-| Coupling guard green (no unprobed coupled bodies) | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json` | exit code 0 |
+| Coupling guard green (no unprobed coupled bodies) | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json --no-sync` | exit code 0 |
 | RENAMED_REMOVALS updated for Bucket C | `grep -c '"skills", "do-sdlc"' scripts/update/hardlinks.py` | output > 0 |
+| Bucket C NOT cargo-culted into PROJECT_ONLY_SKILLS (concern #4) | `grep -E '"(setup\|prime\|sdlc\|do-sdlc\|do-deploy)"' scripts/update/hardlinks.py` (inspect: matches only in RENAMED_REMOVALS, none inside PROJECT_ONLY_SKILLS block) | no PROJECT_ONLY_SKILLS hits |
+| Dangling classification constants pruned (concern #3) | `grep -E 'setup\|prime' <(sed -n '/INFRA_SKILLS/,/})/p' .claude/skills-global/do-skills-audit/scripts/audit_skills.py); grep 'sdlc' <(sed -n '/FORK_SKILLS/,/})/p' .claude/skills-global/do-skills-audit/scripts/audit_skills.py)` | no matches (or constants removed) |
+| RENAMED_REMOVALS inode guard present (concern #2) | `grep -n '_is_hardlinked_to_project\|hardlink' scripts/update/hardlinks.py` (inspect `_cleanup_renamed` body) | guard call present in `_cleanup_renamed` |
+| Empirical foreign-repo proof captured (concern #6) | (manual) PR includes a foreign-repo run transcript of a leaned skill on generic baseline | transcript attached |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Verdict: **READY TO BUILD (WITH CONCERNS)** (opus war room, 2026-06-26). All 6 concerns embedded
+into the plan below; `revision_applied: true`.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Concern | Critique | Audit Verification command omits `--no-sync` (non-deterministic, hits `sync_best_practices.py`) and `rule_13` must emit `FAIL` not `WARN` or the red-state non-zero exit never fires (`main()` keys off `summary["fail"]`). | Key Elements (regression guard); Verification table; Failure Path → Error State Rendering; Task 4 | `--no-sync` already exists on the CLI; rule must use `FAIL` severity. |
+| Concern | Critique | `_cleanup_renamed()` blindly `rmtree`s the target — after the Bucket C move it would delete a foreign repo's legitimately-synced same-named user-level skill. Needs an inode guard like `_cleanup_stale_commands()`. | Update System; Task 4; Task 5; Success Criteria | Reuse/generalize `_is_hardlinked_to_project()`; remove only genuine orphans. |
+| Concern | Critique | `INFRA_SKILLS` (`setup`, `prime`) and `FORK_SKILLS` (`sdlc`) dangle after the Bucket C move — they enumerate skills no longer in `skills-global/`. | Key Elements (prune constants); Task 4; Verification; Success Criteria | Prune moved names; delete the constant + its rule entirely if left empty (no legacy code). |
+| Concern | Critique | Plan added the 5 Bucket C skills to `PROJECT_ONLY_SKILLS`, but that set is consulted only inside the `skills-global/` loop — a physically-moved skill never reaches it, so the additions are inert dead config. | Update System; Task 4; Verification; Success Criteria | Drop the additions; physical move + `RENAMED_REMOVALS` is the complete mechanism. |
+| Concern | Critique | Proposed thin `.claude/skill-context/do-X.md` pointer files for SDLC skills create a redundant third hop on top of the existing `docs/sdlc/do-X.md` addenda. | Technical Approach; Key Elements (worked example); Tasks 1, 2; Success Criteria | SDLC probe points directly at `docs/sdlc/{skill}.md`; no pointer files; non-SDLC skills keep `.claude/skill-context/`. |
+| Concern | Critique | Failure-path strategy only *mentally* reasons about a leaned skill in a plain repo — no empirical proof it runs without ai deps. | Failure Path → new "Empirical Foreign-Repo Runtime Verification"; Task 5; Verification; Success Criteria | Run a leaned skill in a fresh `git init` temp repo, capture transcript as PR artifact. |
 
----
+### Resolved design decisions (formerly Open Questions)
 
-## Open Questions
-
-1. **Convention location & docs/sdlc boundary (load-bearing).** This plan recommends
-   `.claude/skill-context/{skill-name}.md` (per-skill files under `.claude/`), with SDLC skills'
-   context files *pointing to* the existing `docs/sdlc/do-X.md` addenda rather than duplicating
-   them. Alternatives considered: a single `.claude/skill-context.md`; or generalizing
-   `docs/sdlc/` itself into `docs/skill-context/`. Confirm the recommended per-skill `.claude/`
-   location and the "point to docs/sdlc, don't migrate it" boundary before bulk edits begin.
-2. **Bucket C disposition (load-bearing).** This plan adopts the issue's recommendation: move
-   `setup`, `prime`, `sdlc`, `do-sdlc`, `do-deploy` to project-only `.claude/skills/`. Confirm
-   all 5 should move (vs. leaving any in `skills-global/` with a self-explaining no-op). In
-   particular, confirm `sdlc`/`do-sdlc` moving is acceptable given they support cross-repo
-   targets but always *run* from the ai repo's orchestrator.
-3. **Batch parallelism.** Builders 2/3/4 run in parallel on disjoint skill sets. Confirm whether
-   you want them in separate worktrees (`.worktrees/sdlc-1783-{b1,b2,c}/`) to avoid any edit
-   collision, or sequentially on one branch (slower but simpler review).
+1. **Convention location & `docs/sdlc/` boundary** — RESOLVED: per-skill `.claude/skill-context/{skill}.md`
+   for non-SDLC skills; SDLC skills use the existing `docs/sdlc/{skill}.md` directly (no thin
+   pointer files — see concern #5). `docs/sdlc/` is not migrated or churned.
+2. **Bucket C disposition** — RESOLVED: all 5 (`setup`, `prime`, `sdlc`, `do-sdlc`, `do-deploy`)
+   move to project-only `.claude/skills/`. They always *run* from the ai repo's orchestrator
+   (confirmed by the `SDLC_TARGET_REPO` cross-repo model), so project-only is correct.
+3. **Batch parallelism** — RESOLVED: Builders 2/3/4 run in separate worktrees
+   (`.worktrees/sdlc-1783-{b1,b2,c}/`) on disjoint skill sets to eliminate edit collision.
