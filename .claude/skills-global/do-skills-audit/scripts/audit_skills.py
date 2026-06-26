@@ -49,7 +49,9 @@ KNOWN_FIELDS = frozenset(
 )
 
 # Classification lists — which skills should have specific frontmatter flags.
-INFRA_SKILLS = frozenset({"update", "setup", "reclassify", "new-skill", "new-valor-skill", "prime"})
+# NOTE: setup/prime/sdlc moved to project-only .claude/skills/ (issue #1783, Bucket C),
+# so they are no longer iterated by this audit and were pruned from these sets.
+INFRA_SKILLS = frozenset({"update", "reclassify", "new-skill", "new-valor-skill"})
 BACKGROUND_SKILLS = frozenset(
     {
         # BYOB is exposed as MCP tools only (mcp__byob__browser_*) — there
@@ -62,7 +64,40 @@ BACKGROUND_SKILLS = frozenset(
         "google-workspace",
     }
 )
-FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit", "sdlc"})
+FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit"})
+
+# ---------------------------------------------------------------------------
+# Coupling-signal guard (issue #1783, rule_13)
+# ---------------------------------------------------------------------------
+# Tokens that mark a skill body as coupled to THIS repo's infrastructure. A
+# global skill in skills-global/ ships to every machine and runs in every repo,
+# so any of these tokens in the body means the skill leaks ai-repo specifics
+# unless it defers to the per-repo skill-context seam via the canonical probe
+# step. The set covers: the SDLC stage-marker CLI (sdlc-tool), this repo's
+# Python tool families (python -m tools.*, tools.doc_impact_finder, reflections.*),
+# the valor-* CLI wrappers, repo-specific doc paths (docs/features/, docs/plans/),
+# the identity config, and the slug-scoped branch convention (session/{slug}).
+COUPLING_SIGNALS: tuple[str, ...] = (
+    "sdlc-tool",
+    "reflections.",
+    "python -m tools.",
+    "tools.doc_impact_finder",
+    "valor-",
+    "docs/features/",
+    "docs/plans/",
+    "config/identity.json",
+    "session/{slug}",
+)
+
+# The canonical probe-step suffix (issue #1783). A leaned body that carries a
+# coupling signal MUST contain this exact invariant suffix, proving it defers to
+# the per-repo skill-context seam (docs/sdlc/{skill}.md for SDLC skills, or
+# .claude/skill-context/{skill}.md otherwise) instead of hard-coding the
+# behavior. rule_13 greps for this literal substring.
+PROBE_SUFFIX = (
+    "exists, read it and honor its declarations; "
+    "otherwise use the generic defaults described below."
+)
 
 TRIGGER_PHRASES = re.compile(
     r"(?i)\b(use when|triggered by|also use when|invoke when|"
@@ -309,6 +344,40 @@ def rule_12_argument_hint(skill_name: str, fm: dict, body: str) -> Finding:
     return Finding(skill_name, 12, "PASS", "Argument hint check passed")
 
 
+def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
+    """Global skill bodies with ai-repo coupling MUST defer to the skill-context seam.
+
+    A skill under skills-global/ ships to every machine and runs in every repo.
+    If its body contains any token from COUPLING_SIGNALS (sdlc-tool, valor-*,
+    python -m tools.*, reflections.*, repo-specific doc paths, etc.) it leaks
+    this repo's specifics into every repo — UNLESS it carries the canonical
+    probe step (PROBE_SUFFIX), which makes the body defer to the per-repo
+    skill-context seam (docs/sdlc/{skill}.md or .claude/skill-context/{skill}.md).
+
+    Emits severity FAIL (not WARN) for a genuine violation: main() returns a
+    non-zero exit code only when summary["fail"] > 0, so a WARN would never trip
+    the red-state exit this regression guard depends on. A clean or properly
+    probed body returns PASS. Deterministic on empty/garbage input — never raises.
+    """
+    body = body or ""
+    matched = [sig for sig in COUPLING_SIGNALS if sig in body]
+    if not matched:
+        return Finding(skill_name, 13, "PASS", "No ai-repo coupling signals in body")
+    if PROBE_SUFFIX in body:
+        return Finding(
+            skill_name,
+            13,
+            "PASS",
+            f"Coupling signals present but body defers via probe step ({', '.join(matched)})",
+        )
+    return Finding(
+        skill_name,
+        13,
+        "FAIL",
+        f"Coupling signals without skill-context probe step: {', '.join(matched)}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fix helpers
 # ---------------------------------------------------------------------------
@@ -390,6 +459,7 @@ def audit_skill(skill_path: Path, report: AuditReport, do_fix: bool = False) -> 
     report.add(rule_09_sub_file_links(dir_name, body, skill_dir))
     report.add(rule_11_known_fields(dir_name, fm))
     report.add(rule_12_argument_hint(dir_name, fm, body))
+    report.add(rule_13_coupling_signals(dir_name, body))
 
     desc = str(fm.get("description", ""))
     return {dir_name: desc} if desc else {}
