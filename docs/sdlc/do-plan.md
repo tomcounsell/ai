@@ -1,6 +1,53 @@
 # do-plan addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-plan/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## Substrate Tools & Commands (the generic body defers these here)
+
+The leaned body refers to these abstractly; here are the concrete invocations.
+
+**Stage markers.** Write `in_progress` at the very start, `completed` after the
+plan is committed and pushed (end of Phase 4):
+
+```bash
+sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage PLAN --status completed   --issue-number {issue_number} 2>/dev/null || true
+```
+
+**Cross-repo `gh` targeting.** `GH_REPO` is set automatically by `sdk_client.py`;
+`gh` respects it — no `--repo` flags needed.
+
+**Phase 0 recon-validation gate.** The ISSUE→PLAN gate runs:
+
+```bash
+python .claude/hooks/validators/validate_issue_recon.py ISSUE_NUMBER
+```
+
+If it fails, the issue needs a `## Recon Summary` via `/do-issue` Step 3.
+
+**Phase 0.7 memory store.** Save valuable research findings for reuse:
+
+```bash
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.memory_search save "Finding: [desc with source URL]" --importance 5.0 --source agent
+```
+
+**Phase 1 blast-radius tool.** Run the code-impact finder:
+
+```bash
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
+```
+
+**Plans / infra directories.** Plans live at `docs/plans/{slug}.md` (snake_case
+slug). Conditional INFRA docs accumulate at `docs/infra/{slug}.md` (never
+archived). Prerequisite checker: `python scripts/check_prerequisites.py docs/plans/{slug}.md`.
+
+**Plan-revising lock (Phase 4 clear).** On a revision pass, after setting
+`revision_applied: true` and pushing, clear the lock so the router can route to
+build:
+
+```bash
+sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} 2>/dev/null || true
+```
+
 ## Popoto Schema Migration Requirement
 
 When a plan involves changes to any Popoto model (models in `agent/`, `bridge/`, `tools/`, or anywhere using `popoto`):
