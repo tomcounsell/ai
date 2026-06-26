@@ -34,12 +34,17 @@ manual restart.
 
 **Desired outcome:**
 - The notify listener proves its own subscription (`PUBSUB NUMSUB >= 1`) after
-  subscribing and re-subscribes on failure, and a lightweight periodic check
-  restarts the listener if its subscription has silently dropped. A missed
-  subscription can no longer silently degrade session pickup.
+  subscribing and re-subscribes on failure (via its existing outer `while True`
+  loop / 5 s backoff). A no-op subscribe at boot can no longer silently degrade
+  session pickup — it is detected in-thread and re-attempted, owned entirely by
+  the listener's own thread (no cross-thread machinery).
 - `VALOR_WORKER_MODE=standalone` is explicit in the worker plist/installer, so
   operational inspection (`ps eww`) and any non-`main()` import path agree with
   the runtime behavior.
+- The residual "subscription silently drops *after* a previously-good subscribe"
+  risk is covered by the existing 300 s `_agent_session_health_check` backstop
+  (`agent/session_health.py:2552`), which already re-scans pending sessions and
+  nudges/starts workers. No new periodic probe is added.
 
 ## Freshness Check
 
@@ -76,7 +81,6 @@ manual restart.
 
 - **Issue #824**: *pub/sub notify listener loses session notifications due to inherited socket_timeout (regression from PR #784)* — closed 2026-04-08. Root cause: the global `POPOTO_REDIS_DB` pool's `socket_timeout=5` caused spurious "Timeout reading from socket" exceptions and a 10 s reconnect window that dropped notifications. Fixed by giving `_listen_in_thread` a dedicated connection with `socket_timeout=None`. **Directly relevant**: the same function we are hardening; the new NUMSUB check must reuse / not disturb that dedicated connection.
 - **Issue #831**: *worker_key computed property routes pm/dev/teammate sessions by actual isolation level* — establishes that wakeups are keyed by `worker_key`; the notify payload carries `worker_key`. Relevant to ensuring the self-heal restores the same channel.
-- **Issue #1767**: heartbeat moved to a dedicated daemon thread so event-loop saturation can't starve it. Pattern precedent: liveness-critical checks belong outside the saturable asyncio loop where feasible. Informs where the periodic NUMSUB check should live.
 
 ## Research
 
@@ -91,7 +95,7 @@ No external WebSearch performed — the work is purely internal (redis-py pub/su
 5. **Backstop**: independently, every 300 s `_agent_session_health_check` re-scans pending sessions and nudges/starts workers (`agent/session_health.py:2552`).
 6. **Output**: `_worker_loop` pops the session and executes it.
 
-The fix inserts a verification + re-subscribe step at hop 3, plus a periodic liveness check that re-runs hop 3 if `NUMSUB` falls to 0.
+The fix inserts a single verification + re-subscribe step at hop 3 (subscribe-time `NUMSUB >= 1` self-check, in the listener's own thread). The residual "subscription drops after a good subscribe" mode is left to hop 5 (the existing 300 s backstop) rather than a new periodic probe.
 
 ## Why Previous Fixes Failed
 
@@ -104,8 +108,8 @@ The fix inserts a verification + re-subscribe step at hop 3, plus a periodic liv
 ## Architectural Impact
 
 - **New dependencies**: none (uses redis-py's existing `pubsub_numsub` / a raw `PUBSUB NUMSUB`).
-- **Interface changes**: none public. Internal: `_session_notify_listener` / `_listen_in_thread` gain a post-subscribe verification step and publish their live pubsub handle to a `threading.Lock`-guarded module-level holder; a dedicated `daemon` probe thread is added in `worker/__main__.py`.
-- **Coupling**: stays within `agent/agent_session_queue.py` (subscribe-time verify + holder) and `worker/__main__.py` (daemon probe wiring + shutdown join). No change to `_notify_task_done`.
+- **Interface changes**: none public. Internal: `_listen_in_thread` gains a single post-subscribe verification step, executed entirely in the listener's own thread on its own connection. No module-level holder, no cross-thread machinery, no new threads.
+- **Coupling**: confined to `agent/agent_session_queue.py` (subscribe-time verify) plus the `com.valor.worker.plist` / `scripts/install_worker.sh` env-var addition. **No change to `worker/__main__.py` runtime wiring** and no change to `_notify_task_done`.
 - **Data ownership**: unchanged.
 - **Reversibility**: high — both changes are additive guards; reverting restores prior behavior.
 
@@ -130,64 +134,66 @@ The fix inserts a verification + re-subscribe step at hop 3, plus a periodic liv
 
 ### Key Elements
 
-- **Subscription self-verification (the confirmed-bug fix)**: after `pubsub.subscribe("valor:sessions:new")` in `_listen_in_thread`, confirm `PUBSUB NUMSUB valor:sessions:new >= 1` (counting this connection). If it reports 0, treat it as a failed subscribe: tear down (the existing `finally` unsubscribe/close ordering) and let the outer `while True` re-attempt. Log at WARNING with the observed count so the failure is visible. This alone closes premise #2 (the only *confirmed* defect): a no-op subscribe is detected immediately and re-attempted, so the fast pickup path can no longer silently degrade at boot.
-- **Periodic liveness probe — daemon thread, resurrection via unsubscribe (not task-cancel)**: a lightweight check runs on a `threading.Thread(daemon=True)` started in `worker/__main__.py` (per the #1767 precedent — liveness-critical checks live *outside* the saturable asyncio loop). Every ~60 s it opens a **dedicated short-lived Redis connection** (closed immediately after the read; `socket_connect_timeout≈2 s`) and runs `PUBSUB NUMSUB valor:sessions:new`. If the listener is supposed to be running but `NUMSUB == 0` (silent drop after a previously-good subscribe), it logs a WARNING and **triggers re-subscription of the listener — without restarting the asyncio task and without restarting the worker** — by calling `unsubscribe()` (fallback: `close()`) on the listener's *live* pubsub connection. That makes the blocked `pubsub.listen()` return → the existing `finally` puts `None` on the queue → the existing `while True` outer loop in `_session_notify_listener` re-subscribes on its next iteration. The asyncio `notify_task` never completes, so `_notify_task_done` is **not** involved and needs no change.
-- **Explicit `VALOR_WORKER_MODE=standalone`** in `com.valor.worker.plist` `EnvironmentVariables` and (belt-and-suspenders) asserted by `scripts/install_worker.sh`, so `ps eww` and any future non-`main()` import path agree with runtime. The existing `os.environ.setdefault` in `worker/__main__.py` stays (it already wins when the var is absent and is harmless when present).
+- **Subscription self-verification (the confirmed-bug fix — the entire code change)**: after `pubsub.subscribe("valor:sessions:new")` in `_listen_in_thread`, confirm `PUBSUB NUMSUB valor:sessions:new >= 1` (counting this connection) **on the listener's own `socket_timeout=None` connection, in the listener's own thread**. If it reports 0, treat it as a failed subscribe: log a WARNING with the observed count, then fall through the existing `finally` (unsubscribe/close ordering) and let the outer `while True` loop re-attempt after its existing 5 s backoff. This closes premise #2 (the only *confirmed* defect): a no-op subscribe at boot is detected immediately and re-attempted, so the fast pickup path can no longer silently degrade at startup. Because the check, the connection it reads, and the connection it re-subscribes are all owned by one thread, there is **no cross-thread hazard** — no `threading.Lock`, no module-level holder, no second thread.
+- **Explicit `VALOR_WORKER_MODE=standalone`** in `com.valor.worker.plist` `EnvironmentVariables` and (belt-and-suspenders) asserted by `scripts/install_worker.sh`, so `ps eww` and any future non-`main()` import path agree with runtime. **This is observability/defense-in-depth, not a behavior fix** — `worker/__main__.py:703` already runs `os.environ.setdefault("VALOR_WORKER_MODE", "standalone")` inside `main()` before the worker loop, so runtime is already standalone. The `setdefault` stays (it wins when the var is absent and is harmless when present).
 
-> **Why not cancel the asyncio task to restart?** (resolves the critique BLOCKER) `_notify_task_done` (`worker/__main__.py:554`) returns on `t.cancelled()` with no resurrection logic, so cancelling `notify_task` would leave the listener permanently dark. The correct seam already exists: `_session_notify_listener`'s outer `while True` (line 796) re-subscribes whenever the inner thread signals exit via `None` on the queue (line 870). The probe therefore signals the *inner thread* to return, never the outer task.
+> **Why no periodic NUMSUB probe?** (resolves the re-critique BLOCKERS + CONCERNS) An earlier revision added a periodic background probe that, on alive-but-`NUMSUB==0`, called `unsubscribe()` on the listener's *live* pubsub connection from a *separate* thread to force a re-subscribe. The re-critique found this both unsound and unnecessary:
+> 1. **B1 — `unsubscribe()` cannot unblock `listen()` here.** The listener's `for message in pubsub.listen():` loop `continue`-skips every non-`message` frame (`agent/agent_session_queue.py:832`). An `unsubscribe` produces an `unsubscribe` control frame, which is skipped — so `listen()` does **not** return and the intended re-subscribe never fires.
+> 2. **B2 — cross-thread mutation corrupts the connection.** redis-py `PubSub`/`Connection` objects are not thread-safe; issuing `unsubscribe()`/`close()` from the probe thread while the listener thread is mid-`listen()` races a write against a read on the same socket and can strand or corrupt the connection.
+> 3. **It heals a never-observed drift mode** (silent `NUMSUB→0` *after* a good subscribe) and **overlaps two existing safety nets** — the subscribe-time self-verify (boot-time no-op subscribe) and the 300 s health backstop (any later drop). Cutting it removes both blockers and all four concerns at once with zero loss of confirmed-bug coverage.
+>
+> The residual "subscription silently drops after a previously-good subscribe" risk is therefore left to the **existing 300 s `_agent_session_health_check` backstop** (`agent/session_health.py:2552`), which already re-scans `status="pending"` sessions and nudges/starts workers. A dedicated probe is not added.
 
-> **Why a dedicated probe connection?** (resolves the connection-hazard CONCERN) The listener's own connection uses `socket_timeout=None` and can itself block indefinitely on the very wedge the probe is trying to detect — a NUMSUB read on it would provide no safety guarantee. The probe must use a separate, short-lived, bounded-timeout connection for the *read*; it only touches the listener's live pubsub connection for the *unsubscribe signal*.
+> **#824 invariant preserved.** The subscribe-time NUMSUB read happens on the listener's existing dedicated `socket_timeout=None` connection — no new connection, no new timeout, nothing that could resurrect #824's dropped-notification behavior.
 
 ### Flow
 
-Worker boot → `main()` starts `notify_task` **and** a `daemon` NUMSUB-probe thread → `_listen_in_thread` subscribes → **verify NUMSUB ≥ 1 on the dedicated `socket_timeout=None` conn** → (if 0) WARNING + tear down → outer loop re-subscribes; (if ≥1) publish the live pubsub handle to a module-level holder and block on `listen()` → … meanwhile every ~60 s the daemon probe opens a short-lived bounded-timeout conn, reads `NUMSUB` → if listener-should-be-up but `NUMSUB == 0`: WARNING + `unsubscribe()` (fallback `close()`) on the held live pubsub → `listen()` returns → `finally` puts `None` → outer loop re-subscribes. No task cancel, no worker restart.
+Worker boot → `main()` starts the existing `notify_task` (no new threads) → `_listen_in_thread` subscribes → **verify `NUMSUB >= 1` on its own `socket_timeout=None` connection** → (if 0) WARNING + fall through the existing `finally` → outer `while True` re-subscribes after its existing 5 s backoff; (if ≥1) block on `listen()` as today. The residual post-subscribe drop mode is recovered by the existing 300 s health backstop, not by any new code.
 
 ### Technical Approach
 
-- **Subscribe-time check**: after `subscribe`, read the subscribe acknowledgment (or bounded-retry `conn.pubsub_numsub("valor:sessions:new")` — up to ~3 reads over ~300 ms to absorb registration latency) on the listener's own dedicated `socket_timeout=None` connection. On a confirmed 0, WARNING and fall through the existing `finally` so the outer loop re-subscribes.
-- **Expose the live pubsub handle**: store the active `pubsub` (and a generation/identity token) in a module-level holder guarded by a `threading.Lock` so the daemon probe can call `unsubscribe()`/`close()` on it cross-thread. Clear the holder in the `finally` teardown so the probe never signals a torn-down connection.
-- **Periodic probe placement**: a `threading.Thread(target=_notify_subscription_probe, daemon=True)` started near the `notify_task` creation in `worker/__main__.py` (~line 552), stopped via a `threading.Event` in the shutdown sequence (mirroring the `_heartbeat_stop_event`/`heartbeat_thread.join()` pattern at line 638). Each tick: open dedicated conn → `pubsub_numsub` → close → if `NUMSUB == 0` and the holder shows a live listener, WARNING + signal re-subscribe. A simple "re-subscribe in progress" guard (compare the holder's generation token across ticks) prevents a second signal while the first re-subscribe is settling.
-- **#824 invariant**: the listener's `listen()` connection keeps `socket_timeout=None`. The subscribe-time NUMSUB read happens on that same connection (no new timeout). The probe's NUMSUB read uses a *separate* short-lived connection with a bounded `socket_connect_timeout`; it is never used for `listen()`.
-- **Fail-silent-but-logged**: every probe Redis call is wrapped in try/except that logs WARNING and continues; a probe error must never crash the worker — the 300 s health backstop remains the final safety net.
+- **Subscribe-time check (the only code change in `agent/agent_session_queue.py`)**: after `subscribe`, read the subscribe acknowledgment (or bounded-retry `conn.pubsub_numsub("valor:sessions:new")` — up to ~3 reads over ~300 ms to absorb registration latency) on the listener's own dedicated `socket_timeout=None` connection. On a confirmed 0, log a WARNING with the observed count and fall through the existing `finally` so the outer loop re-subscribes after its 5 s backoff. All of this runs in `_listen_in_thread`'s own thread — no holder, no lock, no second thread.
+- **No `worker/__main__.py` change**: `notify_task` wiring and `_notify_task_done` are untouched. No probe thread is added and no shutdown-join is needed.
+- **#824 invariant**: the listener's `listen()` connection keeps `socket_timeout=None`. The subscribe-time NUMSUB read happens on that same connection (no new timeout, no new connection).
+- **Fail-silent-but-logged**: the NUMSUB read is wrapped in try/except that logs a WARNING and falls through to the existing teardown; a raised `pubsub_numsub` must never crash the listener thread — the existing thread-error path already re-enters the outer loop, and the 300 s health backstop remains the final safety net.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The new NUMSUB verification and daemon probe must wrap Redis calls in try/except that logs (WARNING) and continues — assert via a test that injects a raising `pubsub_numsub` and verifies the worker does not crash and a warning is logged.
+- [ ] The new NUMSUB verification must wrap the Redis call in try/except that logs (WARNING) and falls through to teardown — assert via a test that injects a raising `pubsub_numsub` and verifies the listener thread does not crash and a warning is logged.
 - [ ] Existing `except Exception` blocks in `_session_notify_listener` (thread-error path, line ~851) are unchanged; add a test asserting the restart-after-error path still fires.
-- [ ] The probe's cross-thread `unsubscribe()` raising must fall back to `close()` without crashing — test with a stubbed live pubsub whose `unsubscribe` raises.
 
 ### Empty/Invalid Input Handling
-- [ ] `PUBSUB NUMSUB` returning `0` (or an empty/malformed reply) must be treated as "not subscribed" and trigger re-subscribe — test with a stubbed connection reporting 0.
+- [ ] `PUBSUB NUMSUB` returning `0` (or an empty/malformed reply) must be treated as "not subscribed" and trigger re-subscribe via the existing teardown + outer-loop re-attempt — test with a stubbed connection reporting 0.
 - [ ] A `None`/missing channel reply must not raise — test the defensive parse.
-- [ ] A cleared/None holder (mid-teardown) must make the probe skip the tick, not raise — test the holder-empty branch.
 
 ### Error State Rendering
-- [ ] Not user-visible. Operator-visible signal: a WARNING log line on subscribe-verify failure AND a distinct WARNING emitted by the probe immediately before it signals re-subscription (so self-heal is visible in logs, addressing the operator NIT). Test asserts both log lines are emitted (caplog).
+- [ ] Not user-visible. Operator-visible signal: a WARNING log line on subscribe-verify failure carrying the observed NUMSUB count (so a no-op subscribe is visible in logs). Test asserts the log line is emitted (caplog).
 
 ## Test Impact
 
 - [ ] `tests/integration/test_session_notify.py::TestNotifyListenerSocketTimeout::test_notify_listener_uses_no_socket_timeout` — UPDATE: extend (do not break) to also assert the post-subscribe NUMSUB verification runs on the same `socket_timeout=None` connection; the #824 invariant must still hold.
-- [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE: add cases for the NUMSUB self-check (subscribe→NUMSUB≥1 happy path; NUMSUB==0 → re-subscribe; raising NUMSUB → logged, no crash) and the probe signal path (alive-but-NUMSUB==0 → live pubsub `unsubscribe()` called via the holder → outer loop re-subscribes; `unsubscribe()` raising → `close()` fallback). Existing tests in this file are not expected to change behavior.
-- [ ] `tests/unit/test_worker_persistent.py` — VERIFY (no change expected): these already patch `VALOR_WORKER_MODE=standalone`; confirm the explicit plist var doesn't alter their assumptions. If a test asserts the var is *unset by default*, UPDATE it to reflect the explicit-in-plist intent.
+- [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE: add cases for the NUMSUB self-check only (subscribe→NUMSUB≥1 happy path; NUMSUB==0 → falls through teardown so the outer loop re-subscribes; raising NUMSUB → logged, no crash, teardown still runs). **No probe/holder/cross-thread test cases** — the periodic probe was cut. Existing tests in this file are not expected to change behavior.
+- [ ] `tests/unit/test_worker_persistent.py` — VERIFY (no change expected): these already patch `VALOR_WORKER_MODE=standalone`; confirm the explicit plist var doesn't alter their assumptions. If a test asserts the var is *unset by default*, UPDATE it to reflect the explicit-in-plist intent. No new probe-thread wiring is added to `worker/__main__.py`, so no worker-startup test changes are required for the probe.
 
 No test is expected to be DELETED — all changes are additive guards.
 
 ## Rabbit Holes
 
+- **Re-adding a periodic background NUMSUB probe.** A prior revision tried this; the re-critique found it unsound (cross-thread `unsubscribe()` can't unblock the `continue`-skipping `listen()` loop, and cross-thread mutation corrupts the redis-py connection) and redundant with the subscribe-time self-verify + the 300 s backstop. **Do not reintroduce it.** Post-subscribe drift is the 300 s health backstop's job; if that proves insufficient in practice, redesign it as a thread-safe mechanism in a *separate* issue — do not bolt a cross-thread probe onto this listener.
 - **Rewriting the notify listener as a fully async redis pub/sub (`redis.asyncio`) consumer.** Tempting, but it would re-litigate the #824 socket-timeout fix and the thread/queue bridge. Out of scope — add a guard to the existing design, don't replace it.
 - **Chasing the "sat pending indefinitely" symptom into the health-check/worker-wedge path.** The 300 s backstop *should* recover stranded pending sessions; if it didn't, that's a separate defect (a wedged-but-alive worker), not the notify subscription. Do not expand this plan to fix a hypothesized wedge — file separately if reproduced.
 - **Tuning `AGENT_SESSION_HEALTH_MIN_RUNNING` / health interval.** Reducing the backstop latency is a different lever; leave it.
 
 ## Risks
 
-### Risk 1: NUMSUB probe races the subscribe registration
+### Risk 1: Subscribe-time NUMSUB read races the subscribe registration
 **Impact:** A NUMSUB read immediately after `subscribe()` could momentarily report 0 before Redis registers the subscriber, causing a spurious re-subscribe loop.
-**Mitigation:** Read the subscribe confirmation reply (redis-py returns a subscribe acknowledgment) before / instead of an immediate NUMSUB, or add a tiny bounded retry (e.g. up to 3 reads over ~300 ms) before declaring failure. The periodic probe uses a generous interval (~60 s) so it never races a fresh subscribe.
+**Mitigation:** Read the subscribe confirmation reply (redis-py returns a subscribe acknowledgment) before / instead of an immediate NUMSUB, or add a tiny bounded retry (e.g. up to 3 reads over ~300 ms) before declaring failure. The check runs once per subscribe, in the listener's own thread, so there is no concurrent reader to race.
 
-### Risk 2: Re-subscription drops in-flight notifications
-**Impact:** During a self-heal re-subscribe (unsubscribe → `listen()` returns → outer loop re-subscribes), a publish in the gap is lost. The asyncio task is *not* restarted, but the brief unsubscribed window still exists.
-**Mitigation:** Acceptable — the 300 s health backstop catches anything missed in the re-subscribe window, and re-subscribes are rare (only on detected NUMSUB==0 after a previously-good subscribe). The outer loop re-subscribes on its next iteration (sub-second).
+### Risk 2: Re-subscribe after a failed subscribe costs one backoff cycle
+**Impact:** When the subscribe-time check reports 0, the listener tears down and the outer `while True` loop re-subscribes only after its existing `await asyncio.sleep(5)` backoff (`agent/agent_session_queue.py:896`) — i.e. re-subscribe is **~5 s per attempt, not sub-second**. A burst of failed subscribes at boot could take a few 5 s cycles to settle.
+**Mitigation:** Acceptable and well within budget — even three failed cycles (~15 s) land comfortably under the 30 s end-to-end criterion and far under the 300 s health backstop. No tightening of the 5 s backoff is in scope; the contradiction with the earlier "sub-second" claim is resolved in favor of the real ~5 s figure.
 
 ### Risk 3: Regressing the #824 socket_timeout fix
 **Impact:** Reintroducing a `socket_timeout=5` connection for the NUMSUB check would resurrect dropped-notification behavior.
@@ -202,19 +208,7 @@ No test is expected to be DELETED — all changes are additive guards.
 **State prerequisite:** the dedicated connection is connected and the subscribe command acknowledged.
 **Mitigation:** consume the subscribe acknowledgment message first, or bounded-retry the NUMSUB read; only declare failure after the bounded window.
 
-### Race 2: periodic probe vs. re-subscription in progress
-**Location:** the daemon probe thread in `worker/__main__.py` and the module-level pubsub holder in `agent/agent_session_queue.py`.
-**Trigger:** the probe samples NUMSUB while a self-heal re-subscribe is mid-flight (inner thread has returned, the outer loop's fresh `subscribe` not yet acknowledged) and would observe a transient 0.
-**Data prerequisite:** a single in-flight re-subscribe must not trigger a second concurrent signal.
-**State prerequisite:** "re-subscribe in progress" must be observable to the probe.
-**Mitigation:** the holder carries a generation token bumped on each fresh subscribe and cleared in the `finally` teardown. The probe only signals when the holder shows a *live, unchanged* generation reporting `NUMSUB == 0`; it skips a tick when the holder is cleared (mid-teardown) or its generation changed since the prior tick (a re-subscribe it already initiated is settling).
-
-### Race 3: cross-thread unsubscribe on the live pubsub connection
-**Location:** the daemon probe calling `unsubscribe()`/`close()` on the holder's live pubsub while the listener thread blocks in `pubsub.listen()`.
-**Trigger:** redis-py `PubSub` objects are not fully thread-safe; an `unsubscribe()` write from the probe thread races the `listen()` read in the listener thread.
-**Data prerequisite:** the unsubscribe must reach the socket so `listen()` returns; a half-applied write must not corrupt the connection in a way that strands the listener.
-**State prerequisite:** the holder reference must point at the *current* live pubsub (not a torn-down one).
-**Mitigation:** the holder is guarded by a `threading.Lock`; the probe takes the lock, re-checks the generation token, then issues a single `unsubscribe()` (the documented way to break a blocked `listen()`), falling back to `close()` if `unsubscribe()` raises. Either way the listener thread's `finally` runs, puts `None`, and the outer loop rebuilds a fresh connection+pubsub — so even a corrupted connection is fully replaced, not reused.
+*(The periodic-probe races from the prior revision are removed — the probe was cut, so there is no longer a cross-thread reader/writer on the listener's connection. The subscribe-time check is single-threaded and owns its connection, eliminating the cross-thread hazard class entirely.)*
 
 ## No-Gos (Out of Scope)
 
@@ -232,22 +226,21 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-worker-architecture.md` — document the notify-listener self-healing (NUMSUB verification + periodic re-subscribe) and that `VALOR_WORKER_MODE=standalone` is now explicit in the worker plist, with a note that runtime mode was already standalone via `setdefault`.
-- [ ] If a worker-mode/notify section exists in `docs/features/README.md`, ensure the index entry reflects the self-heal behavior.
+- [ ] Update `docs/features/bridge-worker-architecture.md` — document the notify-listener subscribe-time self-verification (post-subscribe `NUMSUB >= 1` check + re-subscribe via the outer loop) and that `VALOR_WORKER_MODE=standalone` is now explicit in the worker plist, with a note that runtime mode was already standalone via `setdefault`. Note that post-subscribe drift is covered by the 300 s health backstop, not a dedicated probe.
+- [ ] If a worker-mode/notify section exists in `docs/features/README.md`, ensure the index entry reflects the self-verify behavior.
 
 ### Inline Documentation
-- [ ] Docstring update on `_session_notify_listener` / `_listen_in_thread` describing the NUMSUB self-check and the periodic probe contract.
+- [ ] Docstring update on `_listen_in_thread` describing the subscribe-time NUMSUB self-check (in-thread, on the listener's own connection) and that post-subscribe drift is left to the 300 s health backstop.
 - [ ] Comment in `com.valor.worker.plist` near the new env var explaining it mirrors the runtime `setdefault` for observability.
 
 ## Success Criteria
 
 - [ ] `com.valor.worker.plist` `EnvironmentVariables` contains `VALOR_WORKER_MODE=standalone`.
-- [ ] `_listen_in_thread` verifies `NUMSUB >= 1` after subscribe and re-subscribes (via the existing teardown + outer-loop re-attempt) when it reports 0, emitting a WARNING with the observed count.
-- [ ] A periodic liveness probe (daemon thread) **triggers re-subscription of the notify listener** when it is alive-but-`NUMSUB==0`, without restarting the asyncio `notify_task` and without restarting the worker process. The probe logs a WARNING immediately before signalling re-subscription.
-- [ ] The probe runs on a `threading.Thread(daemon=True)` (not an asyncio task inside the guarded loop) and reads NUMSUB on a dedicated short-lived bounded-timeout connection — never the listener's `socket_timeout=None` connection.
-- [ ] The #824 invariant holds: the listener's `listen()` connection still uses `socket_timeout=None` (asserted by the updated integration test).
-- [ ] New unit tests cover: NUMSUB≥1 happy path, NUMSUB==0 → re-subscribe, raising NUMSUB → logged + no crash, and the probe's signal path (alive-but-NUMSUB==0 → live pubsub `unsubscribe()` invoked → outer loop re-subscribes).
-- [ ] **Falsifiable end-to-end (the "indefinitely pending" symptom is gone):** after a simulated NUMSUB==0 at startup, an enqueued/pending session is picked up within **30 s** — i.e. via the subscribe-time self-verify path, well before the 300 s health backstop could fire. This distinguishes the new subscribe-time fix from the pre-existing backstop.
+- [ ] `_listen_in_thread` verifies `NUMSUB >= 1` after subscribe and, when it reports 0, logs a WARNING with the observed count and falls through the existing `finally` teardown so the outer `while True` loop re-subscribes (after its existing 5 s backoff).
+- [ ] **No new threads and no `worker/__main__.py` changes:** the self-verify is entirely in-thread on the listener's own connection. `grep -n 'daemon=True' worker/__main__.py` shows no notify-probe thread, and `_notify_task_done` is untouched.
+- [ ] The #824 invariant holds: the listener's `listen()` connection still uses `socket_timeout=None`, and the NUMSUB read uses that same connection (asserted by the updated integration test).
+- [ ] New unit tests cover exactly three cases: NUMSUB≥1 happy path; NUMSUB==0 → falls through teardown → outer loop re-subscribes (WARNING with count emitted); raising `pubsub_numsub` → logged + listener thread does not crash + teardown still runs. **No probe/holder/cross-thread test cases.**
+- [ ] **Falsifiable end-to-end (the "indefinitely pending" symptom is gone):** with the subscribe-time self-verify in place, a listener whose first `subscribe` is simulated to register `NUMSUB==0` detects the failure, re-subscribes via the outer loop, and a pending session enqueued at boot is picked up within **30 s** — well before the 300 s health backstop could fire. This validates the in-thread subscribe-time fix (not the removed probe and not the pre-existing backstop).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -257,7 +250,7 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 
 - **Builder (notify-selfheal)**
   - Name: notify-builder
-  - Role: Implement NUMSUB verification + periodic re-subscribe in the notify listener; add explicit plist env var
+  - Role: Implement the subscribe-time NUMSUB self-verification (in-thread) in the notify listener; add explicit plist env var. No periodic probe, no worker/__main__.py changes.
   - Agent Type: async-specialist
   - Resume: true
 
@@ -286,7 +279,7 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 - Add an explanatory comment; ensure `scripts/install_worker.sh` env-injection logic does not strip it (plist values take precedence over `.env`).
 - Note in install output that a worker reinstall is needed for `ps eww` to show it.
 
-### 2. Notify-listener subscription self-verification + self-heal
+### 2. Notify-listener subscribe-time self-verification (in-thread)
 - **Task ID**: build-notify-selfheal
 - **Depends On**: none
 - **Validates**: tests/unit/test_agent_session_queue_async.py, tests/integration/test_session_notify.py
@@ -294,10 +287,9 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 - **Assigned To**: notify-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- After `pubsub.subscribe("valor:sessions:new")` in `_listen_in_thread`, verify `NUMSUB >= 1` (consume the subscribe ack or bounded-retry NUMSUB on the dedicated `socket_timeout=None` connection); on 0, log WARNING and fall through the existing `finally` teardown so the outer `while True` loop re-subscribes.
-- Publish the live `pubsub` handle + a generation token to a `threading.Lock`-guarded module-level holder; clear it in the `finally` teardown.
-- Add a periodic liveness probe as a `threading.Thread(target=..., daemon=True)` started near the `notify_task` creation in `worker/__main__.py` (~line 552) and stopped via a `threading.Event` + `join()` in the shutdown sequence (mirror `_heartbeat_stop_event` at ~line 638). Each tick reads NUMSUB on a **dedicated short-lived connection** with bounded `socket_connect_timeout`; on alive-but-`NUMSUB==0` it logs WARNING then takes the holder lock and calls `unsubscribe()` (fallback `close()`) on the live pubsub to trigger re-subscription. Guard against double-signalling via the generation token. **Do NOT cancel `notify_task` and do NOT modify `_notify_task_done`.**
-- Keep all probe Redis calls fail-silent-but-logged.
+- After `pubsub.subscribe("valor:sessions:new")` in `_listen_in_thread`, verify `NUMSUB >= 1` (consume the subscribe ack or bounded-retry `pubsub_numsub` — up to ~3 reads over ~300 ms — on the listener's own dedicated `socket_timeout=None` connection); on a confirmed 0, log WARNING with the observed count and fall through the existing `finally` teardown so the outer `while True` loop re-subscribes after its existing 5 s backoff.
+- Wrap the NUMSUB read in try/except: a raised `pubsub_numsub` logs WARNING and falls through teardown — it must not crash the listener thread.
+- **Do NOT add a periodic probe, a module-level holder, a `threading.Lock`, or any new thread. Do NOT modify `worker/__main__.py` or `_notify_task_done`.** The entire change is confined to `_listen_in_thread` in `agent/agent_session_queue.py`.
 
 ### 3. Validation
 - **Task ID**: validate-notify-selfheal
@@ -329,8 +321,8 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 |-------|---------|----------|
 | Plist sets standalone mode | `grep -A1 VALOR_WORKER_MODE com.valor.worker.plist \| grep -c standalone` | output contains 1 |
 | NUMSUB self-check present | `grep -rn 'NUMSUB\|pubsub_numsub' agent/agent_session_queue.py` | exit code 0 |
-| Daemon probe thread present | `grep -rn 'daemon=True' worker/__main__.py` | matches the notify-probe thread |
-| Probe does NOT cancel notify_task for self-heal | `grep -n 'notify_task.cancel' worker/__main__.py` | only the shutdown cancel (line ~649), none in the probe |
+| No new notify-probe thread added | `git diff main -- worker/__main__.py` | empty (no `worker/__main__.py` change) |
+| No cross-thread holder/lock added for notify | `grep -rn 'pubsub.*holder\|_notify.*Lock' agent/agent_session_queue.py` | exit code 1 (no match) |
 | #824 invariant preserved | `grep -c 'socket_timeout=None' agent/agent_session_queue.py` | output > 0 |
 | Notify tests pass | `pytest tests/integration/test_session_notify.py tests/unit/test_agent_session_queue_async.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/agent_session_queue.py worker/__main__.py` | exit code 0 |
@@ -338,7 +330,21 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 
 ## Critique Results
 
+### Second critique pass (re-critique of the 1st revision) — RESOLVED by cutting the probe
+
+<!-- /do-plan-critique re-critique 2026-06-26T15:04Z. Verdict: NEEDS REVISION (2 blockers + 4 concerns) — ALL targeting the periodic NUMSUB probe (Solution element #2 of the 1st revision). 2nd revision applied 2026-06-26: the probe is CUT entirely, which resolves every finding at once. -->
+
+| Severity | Finding (all targeting the periodic probe) | Resolution (2nd revision) |
+|----------|--------------------------------------------|---------------------------|
+| BLOCKER (B1) | The probe's cross-thread `unsubscribe()` cannot unblock the listener's `pubsub.listen()`: the loop `continue`-skips every non-`message` frame (`agent/agent_session_queue.py:832`), so the `unsubscribe` control frame is skipped and `listen()` never returns → the intended re-subscribe never fires. | **RESOLVED — probe CUT.** No cross-thread `unsubscribe()` exists anymore. Re-subscribe is driven only by the in-thread subscribe-time self-verify falling through the existing teardown → outer loop. |
+| BLOCKER (B2) | Cross-thread mutation corrupts the connection: redis-py `PubSub`/`Connection` are not thread-safe; the probe thread's `unsubscribe()`/`close()` races the listener thread's `listen()` read on the same socket. | **RESOLVED — probe CUT.** The only NUMSUB read now happens in the listener's own thread on its own connection; no second thread touches it. |
+| CONCERN ×4 | (a) Probe heals a never-observed drift mode; (b) overlaps the subscribe-time self-verify; (c) overlaps the 300 s backstop; (d) added cross-thread complexity (holder + Lock + generation token + daemon thread + shutdown join). | **RESOLVED — probe CUT.** All four dissolve with removal. Post-subscribe drift is left to the existing 300 s `_agent_session_health_check` backstop; no new threads/holders/locks are introduced. |
+| Prose (C1) | "outer loop re-subscribes on its next iteration (sub-second)" contradicted the real `await asyncio.sleep(5)` backoff at `agent/agent_session_queue.py:896`. | **RESOLVED.** Risk 2 rewritten to state re-subscribe is **~5 s per attempt**; a few cycles still land under the 30 s E2E criterion. |
+
+### First critique pass (of the original plan) — RESOLVED by the 1st revision
+
 <!-- Populated by /do-plan-critique (war room) 2026-06-26 — FULL depth (3 critics). Verdict: NEEDS REVISION (1 blocker). Revision applied 2026-06-26 — all findings RESOLVED below. -->
+<!-- NOTE: the 1st-revision rows below describe the now-CUT periodic probe; they are retained as history. The probe they introduced was removed in the 2nd revision (see table above). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | History & Consistency (Consistency Auditor) | Success criterion "periodic probe restarts notify task on alive-but-NUMSUB==0 without worker restart" contradicts the approach: cancelling the asyncio task fires `_notify_task_done` which returns on `t.cancelled()` with no resurrection → listener silently goes dark. "Reuses _notify_task_done callback pattern" cannot deliver the criterion. | RESOLVED (revision) | Redesigned: the probe signals the *inner thread* to exit via `unsubscribe()`/`close()` on the live pubsub (exposed through a Lock-guarded module-level holder) → `pubsub.listen()` returns → existing `finally` puts `None` → the existing outer `while True` (line 796) re-subscribes. The asyncio `notify_task` is never cancelled and `_notify_task_done` is untouched. Criterion 3 reworded to "triggers re-subscription of the notify listener." See Solution → Key Elements (the two callout blocks). |
@@ -353,5 +359,5 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 ## Resolved Decisions (from critique revision)
 
 1. **The "indefinitely" symptom → file separately.** The 300 s `_agent_session_health_check` backstop already re-scans pending sessions, so an *indefinite* hang implies a distinct wedged-but-alive-worker defect rather than a dead notify listener. This plan hardens the notify subscription only; the wedge path is captured in No-Gos (`[SEPARATE-SLUG #1804]`) and will be filed as its own investigation issue if reproduced after this ships.
-2. **Scope.** The notify-listener subscribe-time self-verify is the *confirmed-bug* core of this work; the `VALOR_WORKER_MODE=standalone` plist entry is observability/defense-in-depth (runtime is already standalone via `setdefault`), and the periodic daemon probe is defense-in-depth for the unobserved silent-drop mode.
-3. **Periodic probe placement → dedicated daemon thread.** Implemented as a `threading.Thread(daemon=True)` (~60 s tick) per the #1767 precedent, *not* folded into the asyncio health loop (which would block the loop on a synchronous redis-py call) and *not* an asyncio task.
+2. **Scope.** The notify-listener subscribe-time self-verify is the *confirmed-bug* core of this work; the `VALOR_WORKER_MODE=standalone` plist entry is observability/defense-in-depth (runtime is already standalone via `setdefault`).
+3. **Periodic NUMSUB probe → CUT entirely (2nd revision).** The first revision's daemon-thread probe was found unsound and redundant by the re-critique: (B1) `unsubscribe()` cannot unblock the listener's `listen()` loop because non-`message` frames are `continue`-skipped; (B2) cross-thread mutation of the non-thread-safe redis-py `PubSub`/connection corrupts it; and it heals a never-observed drift mode while overlapping the subscribe-time self-verify and the 300 s backstop. Removing it eliminates both blockers and all four concerns at once. Post-subscribe drift is left to the existing 300 s health backstop. The subscribe-time self-verify (in-thread, owning-thread-safe) is the only code change to the listener.
