@@ -1,13 +1,14 @@
----
-name: valor-tool
-description: Reference for creating a Python tool in the Valor tools/ directory.
----
+# new-skill context — this repo (ai)
 
-# Creating a Valor Python Tool
+This repo adds a third artifact type to `/new-skill`'s generic skill+agent creation: a **project
+Python tool** registered as a `valor-*` CLI entry point. The conventions below are this repo's;
+the global skill body covers skill and agent creation generically.
+
+## Creating a project Python tool (Valor tools/)
 
 Python tools live in `tools/<tool_name>/` and are registered as CLI entry points.
 
-## Structure
+### Structure
 
 ```
 tools/<tool_name>/
@@ -19,7 +20,7 @@ tools/<tool_name>/
     └── test_<tool>.py
 ```
 
-## __init__.py pattern
+### `__init__.py` pattern
 
 ```python
 """
@@ -64,7 +65,7 @@ if __name__ == "__main__":
     main()
 ```
 
-## Register CLI
+### Register CLI
 
 Add to `[project.scripts]` in `pyproject.toml`:
 
@@ -74,13 +75,13 @@ valor-tool-name = "tools.tool_name:main"
 
 Then run: `uv pip install -e .`
 
-## Bridge integration
+### Bridge integration
 
-- Files are auto-detected by `extract_files_from_response()` in the bridge
-- For explicit file sending, use: `<<FILE:/path/to/file>>`
-- For AI models, import from `config/models.py`: `MODEL_FAST`, `MODEL_REASONING`, `MODEL_IMAGE_GEN`, `MODEL_VISION`
+- Files are auto-detected by `extract_files_from_response()` in the bridge.
+- For explicit file sending, use: `<<FILE:/path/to/file>>`.
+- For AI models, import from `config/models.py`: `MODEL_FAST`, `MODEL_REASONING`, `MODEL_IMAGE_GEN`, `MODEL_VISION`.
 
-## Document in CLAUDE.md
+### Document in CLAUDE.md
 
 Add to the Quick Commands table or appropriate tools section:
 
@@ -88,7 +89,7 @@ Add to the Quick Commands table or appropriate tools section:
 | `valor-tool-name arg1` | Brief description |
 ```
 
-## Checklist
+### Checklist
 
 - [ ] `tools/<name>/` created with `__init__.py` and `README.md`
 - [ ] Main function returns `{"result": ...}` or `{"error": ...}`
@@ -98,7 +99,7 @@ Add to the Quick Commands table or appropriate tools section:
 - [ ] `black` and `ruff` pass
 - [ ] Committed and pushed
 
-## Reference implementations
+### Reference implementations
 
 | Tool | Pattern |
 |------|---------|
@@ -106,3 +107,25 @@ Add to the Quick Commands table or appropriate tools section:
 | `tools/image_analysis/` | Vision + multi-mode |
 | `tools/sms_reader/` | System access, CLI subcommands |
 | `tools/telegram_history/` | Database query |
+
+## Global vs project-only skill scope (this repo)
+
+This repo is the canonical source for skills that ship to every machine. A new skill goes in one
+of two places:
+
+- `.claude/skills-global/<name>/` — a **global** skill, hardlinked into `~/.claude/skills/` on
+  every machine by `scripts/update/hardlinks.py::sync_claude_dirs`. Write its body as a generic,
+  repo-agnostic baseline and put any repo-specifics in `.claude/skill-context/<name>.md`.
+- `.claude/skills/<name>/` — a **project-only** skill that is tightly coupled to this repo's
+  infra and is never synced.
+
+Adding a directory with a `SKILL.md` under `skills-global/` is all that's required to sync it —
+no registration step. When moving a skill between the two dirs, add a `RENAMED_REMOVALS` entry in
+`hardlinks.py` so the stale user-level hardlink is cleaned up on every machine.
+
+## Anthropic reference docs (installed on every machine)
+
+The `do-skills-audit` skill bundles current Anthropic specs that ship with it via the same sync:
+
+- `~/.claude/skills/do-skills-audit/references/anthropic-skills-docs.txt` — field specs + substitution variables
+- `~/.claude/skills/do-skills-audit/references/anthropic-skill-creator.md` — a canonical skill example
