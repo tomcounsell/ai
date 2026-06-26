@@ -7,20 +7,11 @@ argument-hint: "<title or description>"
 
 # Create Issue (Quality Issue Creator)
 
-## Stage Marker
+## Repo Context Probe
 
-At the very start of this skill, write an in_progress marker:
+If `.claude/skill-context/do-issue.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-```bash
-sdlc-tool stage-marker --stage ISSUE --status in_progress --issue-number {issue_number} 2>/dev/null || true
-```
-
-After the issue is created (Step 7), write the completion marker:
-
-```bash
-sdlc-tool stage-marker --stage ISSUE --status completed --issue-number {issue_number} 2>/dev/null || true
-```
-
+The context file is where a repo layers its SDLC automation onto this generic baseline: a stage/status marker to write at the start and end, cross-repo `gh` targeting, the canonical doc locations to search for related context, and the plan-doc path convention the issue should reference downstream. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git` and `gh` — no repo-specific tooling required.
 
 Creates GitHub issues that are self-contained documents a stranger could understand. Every issue must teach the reader what they need to know — define terms, link sources, and state the problem from the reader's perspective.
 
@@ -43,7 +34,7 @@ This isn't optional politeness — it's functional. The `/do-plan` skill reads t
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+By default `gh` targets the repository of the current working directory. If the context file declares a cross-repo targeting mechanism (e.g. a `GH_REPO` env var), honor it so `gh` commands hit the intended repository.
 
 ## When to Use
 
@@ -71,8 +62,9 @@ gh issue list --state closed --search "KEYWORDS" --limit 5 --json number,title,u
 # Search for related merged PRs
 gh pr list --state merged --search "KEYWORDS" --limit 5 --json number,title,url
 
-# Check if relevant docs exist
-grep -rl "KEYWORD" docs/features/ docs/plans/ 2>/dev/null | head -5
+# Check if relevant docs exist (the context file may name canonical doc
+# locations; the generic default searches tracked docs)
+git grep -l "KEYWORD" -- '*.md' docs/ 2>/dev/null | head -5
 ```
 
 ### Step 3: Reconnaissance (Explore → Concerns → Fan-out → Synthesize)
@@ -103,7 +95,7 @@ Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 
 4. **Solution sketch** — Brief description of the approach. Not a full plan (that's `/do-plan`'s job), but enough that the planner knows the direction. **For architectural or structural problems where the root cause is still uncertain, write open questions here instead of approaches — do-plan will not challenge a concrete sketch, it will execute it.**
 
-5. **Downstream context** — Explicitly state what happens next: "This issue will be consumed by `/do-plan` to produce a plan document at `docs/plans/{slug}.md`."
+5. **Downstream context** — Explicitly state what happens next: "This issue will be consumed by `/do-plan` to produce a plan document." If the context file declares the repo's plan-doc path convention, name the concrete path.
 
 ### Step 5: Pre-Publish Checklist
 
