@@ -286,3 +286,116 @@ class TestEnqueueSessionTypeOmissionWarning:
             for r in caplog.records
         )
         assert push.call_args[1]["session_type"] == SessionType.ENG
+
+
+class TestNotifyListenerNusubSelfCheck:
+    """Unit tests for the NUMSUB subscribe-time self-check added in #1804.
+
+    These tests exercise the _listen_in_thread inner function via the
+    _session_notify_listener coroutine.  Redis and time.sleep are mocked so
+    the tests run in <100 ms.
+    """
+
+    def _make_mocks(self, numsub_return=None, numsub_raise=None):
+        """Build mock redis conn+pubsub and a mock POPOTO pool."""
+        mock_pubsub = MagicMock()
+        mock_pubsub.listen.return_value = iter([])  # empty; thread exits cleanly
+
+        mock_conn = MagicMock()
+        mock_conn.pubsub.return_value = mock_pubsub
+        if numsub_raise is not None:
+            mock_conn.pubsub_numsub.side_effect = numsub_raise
+        else:
+            mock_conn.pubsub_numsub.return_value = (
+                {"valor:sessions:new": numsub_return}
+                if numsub_return is not None
+                else {"valor:sessions:new": 1}
+            )
+
+        mock_popoto = MagicMock()
+        mock_popoto.connection_pool.connection_kwargs = {
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+        }
+        return mock_conn, mock_pubsub, mock_popoto
+
+    def _run_listener_briefly(self, mock_conn, mock_popoto):
+        """Run _session_notify_listener for a short time then cancel it."""
+        import json
+
+        import redis as _redis_module
+
+        from agent.agent_session_queue import _session_notify_listener
+
+        async def run():
+            with (
+                patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto),
+                patch("agent.agent_session_queue.json", wraps=json),
+                patch.object(_redis_module, "Redis", return_value=mock_conn),
+                patch("time.sleep"),  # no real delays in NUMSUB retry loop
+            ):
+                task = asyncio.create_task(_session_notify_listener())
+                await asyncio.sleep(0.2)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+
+    def test_numsub_ok_proceeds_to_listen(self):
+        """When NUMSUB >= 1, _listen_in_thread calls pubsub.listen()."""
+        mock_conn, mock_pubsub, mock_popoto = self._make_mocks(numsub_return=1)
+        self._run_listener_briefly(mock_conn, mock_popoto)
+        assert mock_conn.pubsub_numsub.called, (
+            "pubsub_numsub() was never called — NUMSUB self-check not applied"
+        )
+        assert mock_pubsub.listen.called, (
+            "pubsub.listen() was not called — listener should proceed when NUMSUB >= 1"
+        )
+
+    def test_numsub_zero_skips_listen_and_logs_warning(self, caplog):
+        """When NUMSUB == 0 after all retries, _listen_in_thread returns early.
+
+        pubsub.listen() must not be called; the outer while-True loop will
+        re-subscribe after the 5 s backoff.  A WARNING must be logged.
+        """
+        import logging
+
+        mock_conn, mock_pubsub, mock_popoto = self._make_mocks(numsub_return=0)
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            self._run_listener_briefly(mock_conn, mock_popoto)
+
+        assert not mock_pubsub.listen.called, (
+            "pubsub.listen() must NOT be called when NUMSUB == 0; "
+            "listener should return early and let the outer loop re-subscribe"
+        )
+        assert any("NUMSUB check reports 0" in r.getMessage() for r in caplog.records), (
+            "Expected WARNING mentioning 'NUMSUB check reports 0'"
+        )
+
+    def test_numsub_raises_no_crash_and_logs_warning(self, caplog):
+        """When pubsub_numsub() raises, the listener does not crash.
+
+        A WARNING must be logged, pubsub.listen() must not be called, and
+        teardown must still run (observable by the test completing without error).
+        """
+        import logging
+
+        mock_conn, mock_pubsub, mock_popoto = self._make_mocks(
+            numsub_raise=RuntimeError("redis gone")
+        )
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            self._run_listener_briefly(mock_conn, mock_popoto)
+
+        # Test completing without exception proves no crash.
+        assert not mock_pubsub.listen.called, (
+            "pubsub.listen() must NOT be called when NUMSUB raises"
+        )
+        assert any("NUMSUB check raised" in r.getMessage() for r in caplog.records), (
+            "Expected WARNING about the NUMSUB exception"
+        )
