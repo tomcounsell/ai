@@ -73,6 +73,7 @@ from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
     read_transcript_telemetry,
 )
+from agent.steering import pop_all_steering_messages
 
 logger = logging.getLogger(__name__)
 
