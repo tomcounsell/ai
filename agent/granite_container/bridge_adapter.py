@@ -515,6 +515,26 @@ class BridgeAdapter:
             # close + respawn lifecycle.
             pm._released_to_pool = True
             dev._released_to_pool = True
+            # Storage-agnostic steering-poll closure (mid-run steering, #1779).
+            # Container calls this once per steady-state turn; it drains the
+            # race-free Redis list (atomic LPOP) for this session and returns the
+            # message dicts. Fail-silent: any error yields [] and never crashes
+            # the run. Bound to the session_id resolved from the agent_session.
+            steering_session_id = str(getattr(self._agent_session, "session_id", "") or "")
+
+            def _poll_steering() -> list[dict]:
+                if not steering_session_id:
+                    return []
+                try:
+                    return pop_all_steering_messages(steering_session_id)
+                except Exception as e:
+                    logger.warning(
+                        "[granite-bridge-adapter] poll_steering drain failed for session %s: %s",
+                        steering_session_id,
+                        e,
+                    )
+                    return []
+
             container = Container(
                 user_message=user_message,
                 cwd=working_dir,
@@ -525,6 +545,7 @@ class BridgeAdapter:
                 pm_pty=pm,
                 dev_pty=dev,
                 session_type=self._session_type,
+                poll_steering=_poll_steering,
             )
             # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
             pm_path = _transcript_path_from_spec(working_dir, pm_session_id)

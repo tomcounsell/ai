@@ -271,6 +271,24 @@ OPERATOR_TERMINAL_MESSAGE = (
     "I wasn't able to produce a response to this — please rephrase or follow up."
 )
 
+# RESERVED harness suffix. `[/dev:steer]` parses to harness="steer" but is NOT
+# a real builder harness — `_get_builder` must NEVER receive it (only `claude`/
+# `None` and `pi` are real harnesses). The dev-routing branch intercepts this
+# suffix before `_get_builder` and writes the (token-stripped) payload straight
+# to the Dev PTY as a mid-task steer, then continues without blocking on Dev idle.
+STEER_HARNESS_SUFFIX = "steer"
+
+# One-line continuation ack written to the PM PTY immediately after a
+# [/dev:steer] Dev write, so PM produces its next turn rather than hanging on
+# an empty idle read (Risk 3 — PM only runs when Dev is idle; with nothing
+# written to PM after the steer it would idle-timeout into a spurious pm_hang).
+PM_DEV_STEER_ACK = "Steering delivered to Dev; continuing."
+
+# User-facing message delivered when an operator aborts a running session via a
+# steering message flagged is_abort. Delivered through on_user_payload BEFORE the
+# loop breaks (post-break output is dropped).
+STEER_ABORT_USER_MESSAGE = "Session stopped at your request."
+
 
 @dataclass
 class TurnRecord:
@@ -583,6 +601,7 @@ class Container:
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
         session_type: str | None = None,
+        poll_steering: Callable[[], list[dict]] | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -622,6 +641,18 @@ class Container:
         # all others → PM_PRIME_SLASH_CMD. Stored as a plain string (StrEnum is str-compatible
         # so SessionType.TEAMMATE == "teammate" is True; storing str avoids an import cycle).
         self._session_type = session_type
+        # Optional, storage-agnostic steering-poll callback (mid-run steering,
+        # issue #1779). Called once at the top of each steady-state turn; returns
+        # a list of pending steering message dicts, each with keys:
+        #   - "text"     (str):  the message body to inject into PM's PTY
+        #   - "sender"   (str):  who sent it (used in the [Steering from …] prefix)
+        #   - "is_abort" (bool): True signals a graceful operator-requested abort
+        # The Container NEVER imports Redis / agent.steering — the BridgeAdapter
+        # supplies the closure (it owns the Redis-list drain). Default None
+        # preserves every existing caller (CLI, tests) unchanged. Like _on_turn,
+        # the call site is fail-silent: a raising callback yields [] and never
+        # crashes the loop.
+        self._poll_steering = poll_steering
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -1328,6 +1359,73 @@ class Container:
                                 "PM buffer unchanged; falling through to fresh idle read"
                             )
 
+                    # Mid-run steering injection (Part 1, issue #1779). Drain any
+                    # pending steering messages and inject them into PM's PTY before
+                    # PM's next classification. The drain is fail-silent (a raising
+                    # callback must never crash the loop, mirroring _on_turn).
+                    drained: list[dict] = []
+                    if self._poll_steering is not None:
+                        try:
+                            drained = self._poll_steering() or []
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] poll_steering callback raised: %s", e
+                            )
+                            drained = []
+                    if drained:
+                        # An abort message takes precedence: deliver the fixed
+                        # user-facing string and break cleanly (steer_abort). The
+                        # delivery MUST precede the break — output emitted after the
+                        # break is dropped (Task 2b strict ordering contract).
+                        if any(m.get("is_abort") for m in drained):
+                            if self._on_user_payload is not None:
+                                try:
+                                    self._on_user_payload(STEER_ABORT_USER_MESSAGE)
+                                    result.user_facing_routed = True
+                                except Exception as e:
+                                    logger.warning(
+                                        "[granite-container] steer_abort delivery via "
+                                        "_on_user_payload failed: %s",
+                                        e,
+                                    )
+                            result.exit_reason = "steer_abort"
+                            result.exit_message = STEER_ABORT_USER_MESSAGE
+                            break
+
+                        # Non-abort steering: cycle PM to idle BEFORE writing so the
+                        # injection lands as a fresh user turn and does NOT interrupt
+                        # PM's in-flight tool execution (_cycle_idle waits for PM to
+                        # finish whatever it is doing). This ordering is the whole
+                        # guarantee of "steering does not corrupt PM's current turn".
+                        steer_idle, _, _, _ = self._cycle_idle(self._pm_pty)
+                        if not steer_idle:
+                            # PM is wedged. The messages were already atomically
+                            # LPOP'd from Redis, so they are lost — no re-queue
+                            # (that would re-introduce the cross-process race). Log
+                            # the loss so an operator can re-deliver via
+                            # `valor-session steer`.
+                            logger.warning(
+                                "pm_hang during steering injection — %d msg(s) lost: %r",
+                                len(drained),
+                                [m.get("text") for m in drained],
+                            )
+                            result.exit_reason = "pm_hang"
+                            result.exit_message = (
+                                f"PM did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s "
+                                "during steering injection"
+                            )
+                            break
+                        for m in drained:
+                            text = (m.get("text") or "").strip()
+                            if not text:
+                                # Skip empty/whitespace steering messages.
+                                continue
+                            sender = m.get("sender") or "operator"
+                            self._pm_pty.write(f"\n[Steering from {sender}]: {text}\n")
+                        # Fall through to the existing per-turn idle read below, which
+                        # (via the content-identity pm_baseline guard) captures PM's
+                        # NEW response to the steering and routes it normally.
+
                     # Snapshot the count of text-bearing PM assistant entries
                     # before the idle read so last_assistant_text can require a
                     # NEW text-bearing entry this cycle (content-identity guard).
@@ -1554,6 +1652,44 @@ class Container:
             )
             result.turns.append(turn_record)
             self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+            return RouteOutcome(should_break=False, exit_reason=None)
+
+        # [/dev:steer] mid-task steering (Part 2, issue #1779). The classifier
+        # parses [/dev:steer] into harness="steer" — a RESERVED suffix that is NOT
+        # a real builder harness. Intercept it here, before _get_builder (which
+        # must never receive "steer"), and write the (token-stripped) payload
+        # straight to the Dev PTY as a Dev turn WITHOUT blocking on Dev idle:
+        # write-and-continue semantics — Dev picks it up on its next read (Risk 2).
+        if getattr(classification, "harness", None) == STEER_HARNESS_SUFFIX:
+            # Defensive token-strip: the single-line form `[/dev:steer] fix X`
+            # fails the strict PREFIX_TOKEN_RE, falls to the fallback, and returns
+            # the WHOLE tail INCLUDING the literal token as payload. Writing that
+            # verbatim would poison Dev's instruction. The re.sub is a no-op for
+            # the strict (already token-free) path and removes the leaked token
+            # for the single-line fallback path.
+            clean = re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()
+            if not clean:
+                # Token-only [/dev:steer] is a no-op steer — nudge PM (composes
+                # with the empty-[/dev] guard above).
+                self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+                return RouteOutcome(should_break=False, exit_reason=None)
+            # Submit the steer as a Dev turn (no _get_builder, no Dev-idle wait).
+            self._dev_pty.write(clean + "\n")
+            # Write a one-line continuation ack to PM so it produces its next turn
+            # rather than hanging on an empty idle read (Risk 3).
+            self._pm_pty.write(PM_DEV_STEER_ACK)
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="dev_steer",
+                compliance_miss=classification.compliance_miss,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=len(clean),
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
             return RouteOutcome(should_break=False, exit_reason=None)
 
         # Resolve the builder harness for this turn.
