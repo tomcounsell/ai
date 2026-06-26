@@ -1,6 +1,45 @@
 # do-merge addendum — this repo only
 <!-- Do not duplicate content from the global merge skill (.claude/skills-global/do-merge/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## Stage/Verdict Substrate (the generic body defers these to here)
+
+This repo provides the `sdlc-tool` substrate. It maps onto the global skill's
+generic steps as follows:
+
+- **PR-number resolution (Variables).** When PR_ARG is empty, recover it from
+  pipeline state: `sdlc-tool stage-query --issue-number N` → `_meta.pr_number`.
+- **Step 0 stage marker.** Probe the substrate and write the in_progress marker:
+  ```bash
+  sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number}
+  ```
+  Parse the JSON: `{"status": "in_progress"}` → substrate present, proceed;
+  `{"status": "degraded", ...}` → announce "running in degraded mode (state not
+  persisted)" and proceed (the gate depends only on `gh`); non-zero exit →
+  report the stderr diagnostic and proceed.
+- **Step 2 recorded REVIEW verdict (authority over `gh reviewDecision`).** Read
+  the recorded verdict instead of GitHub's native decision:
+  ```bash
+  sdlc-tool verdict get --stage REVIEW --issue-number {issue_number}
+  ```
+  The verdict text must contain `APPROVED` (case-insensitive). A
+  `CHANGES REQUESTED` / `NEEDS REVISION` verdict, or no verdict at all, FAILS —
+  route back to `/do-pr-review` or `/do-patch`. In degraded mode the tool may
+  return no data; if approval cannot be confirmed, FAIL closed.
+- **Step 4 merge-authorization guard.** `gh pr merge` is blocked by the
+  merge-guard hook (`.claude/hooks/validators/validate_merge_guard.py`) unless an
+  authorization file exists. Create it immediately before the merge and delete it
+  immediately after (success or failure):
+  ```bash
+  touch data/merge_authorized_{PR}    # before `gh pr merge {PR} --squash`
+  rm -f data/merge_authorized_{PR}    # immediately after, every path
+  ```
+  A copy-pasted `touch data/merge_authorized_{PR}` without the full gate defeats
+  the entire mechanism.
+- **Step 5 completion marker.**
+  ```bash
+  sdlc-tool stage-marker --stage MERGE --status completed --issue-number {issue_number}
+  ```
+
 ## Documentation Gate
 
 Before merging, verify `docs/features/{slug}.md` exists if the plan specified one. This is a hard gate — missing feature docs block the merge.
