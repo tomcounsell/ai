@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-26
 tracking: https://github.com/tomcounsell/ai/issues/1779
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite PTY Mid-Run Steering (bridge→PM and PM→Dev injection)
@@ -254,25 +255,56 @@ the steer is folded into the next `[/dev]` handoff's idle wait.
   {text}\n`. Fall through to the existing per-turn idle read, which (via the content-identity
   `pm_baseline` guard) captures PM's NEW response to the steering and routes it.
 
-- **`[/dev:steer]` handling (Part 2).** `classify_pm_prefix` already yields
-  `destination="dev", harness="steer"` for `[/dev:steer]`. Define a module constant
-  `STEER_HARNESS_SUFFIX = "steer"` in `container.py` and, in `_route_pm_classification`'s dev
-  branch (after the empty-payload guard, before `_get_builder`), branch on `classification.harness
-  == STEER_HARNESS_SUFFIX`: write `dev_prompt + "\n"` to `self._dev_pty` (submits it as a Dev
-  turn), do NOT call `builder.run_turn` and do NOT cycle Dev idle, then write a one-line
-  continuation ack to the PM PTY (e.g. `PM_DEV_STEER_ACK`) so PM produces its next turn rather
-  than hanging on an empty idle read, append a `TurnRecord` with `classification="dev_steer"`,
-  and return `RouteOutcome(should_break=False)`. Empty `[/dev:steer]` payload nudges PM (reuse
-  the existing empty-`[/dev]` compliance-miss path). Document that `steer` is a **reserved
-  harness suffix** — `_get_builder` must never receive it (only `claude`/`None` and `pi` are
-  real harnesses).
+- **`[/dev:steer]` handling (Part 2).** `classify_pm_prefix` yields `destination="dev",
+  harness="steer"` for `[/dev:steer]` — BUT only the **strict** path (token alone on line 1,
+  payload on subsequent lines) returns a token-free `payload`. The **single-line** form
+  `[/dev:steer] fix the auth test` fails the anchored `PREFIX_TOKEN_RE` (`granite_classifier.py:119`,
+  `\s*$` requires nothing after `]`), falls to `PREFIX_TOKEN_FALLBACK_RE`, and returns
+  `payload=pm_tail.strip()` — **the whole tail INCLUDING the literal `[/dev:steer]` token** with
+  `compliance_miss=True` (verified at `granite_classifier.py:233-242`). Writing that payload
+  verbatim to Dev poisons Dev's instruction with the raw routing token (BLOCKER, critique 2026-06-26).
+  **Therefore the `dev_steer` branch MUST strip the token defensively before the Dev write,
+  regardless of which classifier path produced the payload:**
+  `clean = re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()`. This is a no-op for the
+  strict path (already token-free) and removes the leaked token for the fallback path.
+  Define a module constant `STEER_HARNESS_SUFFIX = "steer"` in `container.py` and, in
+  `_route_pm_classification`'s dev branch (after the empty-payload guard, before `_get_builder`),
+  branch on `classification.harness == STEER_HARNESS_SUFFIX`: compute `clean` (token-stripped); if
+  `clean` is empty, write `PM_COMPLIANCE_NUDGE` to the PM PTY and `return
+  RouteOutcome(should_break=False)` (composes with the existing empty-payload guard — a token-only
+  `[/dev:steer]` is a no-op steer); otherwise write `clean + "\n"` to `self._dev_pty` (submits it
+  as a Dev turn), do NOT call `builder.run_turn` and do NOT cycle Dev idle, then write a one-line
+  continuation ack to the PM PTY (`PM_DEV_STEER_ACK`) so PM produces its next turn rather than
+  hanging on an empty idle read, append a `TurnRecord` with `classification="dev_steer"`, and
+  return `RouteOutcome(should_break=False)`. Document that `steer` is a **reserved harness
+  suffix** — `_get_builder` must never receive it (only `claude`/`None` and `pi` are real
+  harnesses).
 
-- **Abort semantics.** `pop_all_steering_messages` returns each message's `is_abort` flag
-  (auto-detected from `ABORT_KEYWORDS`). When a drained message is an abort, the container
-  breaks the loop gracefully with `exit_reason="steer_abort"`; the wrap-up guard's eligible-exit
-  set is left unchanged (abort is a clean terminal, not a wrap-up trigger) — confirm the exit
-  is handled by `session_executor`'s clean-exit gate or add `steer_abort` to the appropriate
-  set during build.
+- **Abort semantics (explicit, two-part — BLOCKER, critique 2026-06-26).**
+  `pop_all_steering_messages` returns each message's `is_abort` flag (auto-detected from
+  `ABORT_KEYWORDS`). When a drained message is an abort, the user MUST still receive a user-facing
+  message — but `steer_abort` is NOT in the wrap-up trigger set `_wrapup_eligible_exits`
+  (`container.py:1404` — `{pm_complete, pm_user, pm_max_turns, pm_floor_delivered}`) and NOT in
+  `_CLEAN_GRANITE_EXIT_REASONS` (`session_executor.py:35` — `{pm_complete, pm_user,
+  pm_floor_delivered}`), so without an explicit fix no delivery fires and the run is reported as an
+  error. **The fix has a strict ordering contract that MUST be implemented as one task so two
+  builders cannot ship two behaviors:**
+  1. **Emit-before-break:** BEFORE setting `result.exit_reason = "steer_abort"` and breaking,
+     deliver a fixed user-facing string (e.g. `"Session stopped at your request."`) through the
+     session's existing `TelegramRelayOutputHandler` and set `result.user_facing_routed = True`.
+     Output emitted *after* the break is dropped, so the delivery MUST precede the break.
+  2. **Clean-exit classification:** add `"steer_abort"` to `_CLEAN_GRANITE_EXIT_REASONS`
+     (`session_executor.py:35`) so an operator-requested abort is reported as controlled
+     termination, not a `REACTION_ERROR`. Leave `_wrapup_eligible_exits` unchanged — the delivery
+     is done explicitly in step 1, so the wrap-up guard must NOT also fire (it would double-deliver).
+
+- **NIT — log dropped steering on PM hang.** Capture `drained = self._poll_steering()` into a local
+  before calling `_cycle_idle(self._pm_pty)`. If `_cycle_idle` returns `pm_idle=False` (PM wedged),
+  the drained messages have already been atomically LPOP'd from Redis and would be silently lost.
+  Before breaking with `pm_hang`, emit
+  `logger.warning("pm_hang during steering injection — %d msg(s) lost: %r", len(drained), [m.get("text") for m in drained])`.
+  No re-queue is attempted (re-queue would re-introduce a cross-process race); the warning lets an
+  operator re-deliver via `valor-session steer`.
 
 ## Failure Path Test Strategy
 
@@ -301,9 +333,16 @@ the steer is folded into the next `[/dev]` handoff's idle wait.
 
 ## Test Impact
 
-- [ ] `tests/unit/granite_container/test_granite_classifier.py` — UPDATE: add a case asserting
-  `[/dev:steer] fix the auth test` → `destination="dev", harness="steer", payload="fix the auth
-  test"`. Existing cases unchanged (the parse already supports it; this locks in the contract).
+- [ ] `tests/unit/granite_container/test_granite_classifier.py` — UPDATE: add TWO cases that lock
+  in the real (not assumed) classifier contract:
+  - **Strict (token alone on line 1):** input `"[/dev:steer]\nfix the auth test"` →
+    `destination="dev", harness="steer", payload="fix the auth test", compliance_miss=False`.
+  - **Single-line (fallback):** input `"[/dev:steer] fix the auth test"` →
+    `destination="dev", harness="steer", payload="[/dev:steer] fix the auth test",
+    compliance_miss=True` — documents that the fallback leaks the token into `payload`, which is
+    why the `dev_steer` branch strips it before the Dev write (see Technical Approach). The earlier
+    plan draft incorrectly assumed `payload="fix the auth test"` for the single-line form; that was
+    the BLOCKER. Existing classifier cases unchanged.
 - [ ] `tests/integration/test_granite_container_loop.py` — UPDATE (or add a sibling test file
   `tests/integration/test_granite_mid_run_steering.py`): add env-gated end-to-end cases for
   both steering paths without mocking PTY writes. Existing loop test is unaffected (additive).
@@ -446,12 +485,16 @@ The agent reaches the new capability through paths that already exist:
 - [ ] Steering injection does not interrupt PM's current tool execution — the container cycles PM
   to idle before writing; verified by the integration test observing PM completes its in-flight
   turn before the steering response.
-- [ ] PM can emit `[/dev:steer] <message>` and the container writes it to the Dev PTY immediately
-  without blocking on Dev idle — verified by an integration test asserting the run continues and
-  does not exit `pm_hang`/`dev_hang`.
-- [ ] `[/dev:steer]` parse contract locked by a unit test in `test_granite_classifier.py`.
-- [ ] `is_abort` steering message breaks the loop with `exit_reason="steer_abort"` and the human
-  still receives a user-facing message.
+- [ ] PM can emit `[/dev:steer] <message>` and the container writes the **token-stripped** message
+  to the Dev PTY immediately without blocking on Dev idle — verified by an integration test
+  asserting the literal `[/dev:steer]` token does NOT reach Dev and the run continues (no
+  `pm_hang`/`dev_hang`).
+- [ ] `[/dev:steer]` parse contract locked by BOTH strict and single-line unit cases in
+  `test_granite_classifier.py` (the single-line case documents that the fallback retains the token,
+  which the `dev_steer` branch strips).
+- [ ] `is_abort` steering message delivers `"Session stopped at your request."` to the human
+  BEFORE breaking with `exit_reason="steer_abort"`, and `steer_abort` is in
+  `_CLEAN_GRANITE_EXIT_REASONS` (controlled termination, not `REACTION_ERROR`).
 - [ ] Integration test exercises both paths without mocking PTY writes (env-gated; skips cleanly
   when `claude`/Ollama unreachable).
 - [ ] `docs/features/granite-pty-production.md` documents both steering paths.
@@ -506,13 +549,22 @@ The lead agent orchestrates; it does not build directly.
 - Add keyword-only `poll_steering: Callable[[], list[dict]] | None = None` to `Container.__init__`;
   store as `self._poll_steering`.
 - At the top of the `for turn in range(self.max_turns)` loop (`container.py:1313`), after the
-  stale-buffer guard and before `pm_baseline`, drain via `self._poll_steering()` (fail-silent).
-- Handle `is_abort` → break with `exit_reason="steer_abort"`. Otherwise cycle PM idle, write each
-  `\n[Steering from {sender}]: {text}\n`, fall through to the existing idle read.
+  stale-buffer guard and before `pm_baseline`, capture `drained = self._poll_steering()` into a
+  local (fail-silent — a raising callback returns `[]` and never crashes the loop).
+- Handle `is_abort` → delegate to the `build-abort-delivery` task's emit-before-break contract.
+  Otherwise cycle PM idle, write each `\n[Steering from {sender}]: {text}\n`, fall through to the
+  existing idle read.
+- **NIT — log dropped steering on PM hang:** if `_cycle_idle(PM)` returns `pm_idle=False` after a
+  non-empty `drained`, the messages are already LPOP'd from Redis and lost; emit
+  `logger.warning("pm_hang during steering injection — %d msg(s) lost: %r", len(drained), [m.get("text") for m in drained])`
+  before breaking with `pm_hang`. No re-queue.
 
-### 2. Add `[/dev:steer]` routing branch and reserved suffix
+### 2. Add `[/dev:steer]` routing branch and reserved suffix  [Priority: P2]
 - **Task ID**: build-dev-steer
 - **Depends On**: none
+- **Priority**: P2 — Scenario 1 (Task 1, bridge→PM) alone resolves the stated "messages silently
+  dropped" pain. Under appetite pressure, this is the cut-line: ship Scenario 1 first; Scenario 2
+  (`[/dev:steer]`) is the secondary deliverable.
 - **Validates**: tests/unit/granite_container/test_granite_classifier.py,
   tests/integration/test_granite_mid_run_steering.py (create)
 - **Assigned To**: container-builder
@@ -520,9 +572,28 @@ The lead agent orchestrates; it does not build directly.
 - **Parallel**: true
 - Define `STEER_HARNESS_SUFFIX = "steer"`; in `_route_pm_classification`'s dev branch (after the
   empty-payload guard, before `_get_builder`), branch on `classification.harness == STEER_HARNESS_SUFFIX`.
-- Write payload to Dev PTY (no idle wait), write `PM_DEV_STEER_ACK` to PM PTY, append
-  `TurnRecord(classification="dev_steer")`, return `should_break=False`.
-- Empty payload → reuse the empty-`[/dev]` compliance nudge.
+- **Strip the routing token first:** `clean = re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()`
+  (no-op for the strict classifier path; removes the leaked token for the single-line fallback path).
+- If `clean` is empty → write `PM_COMPLIANCE_NUDGE` to PM PTY, `return RouteOutcome(should_break=False)`.
+- Otherwise write `clean + "\n"` to Dev PTY (no idle wait), write `PM_DEV_STEER_ACK` to PM PTY,
+  append `TurnRecord(classification="dev_steer")`, return `should_break=False`.
+
+### 2b. Wire steer_abort clean delivery and exit classification
+- **Task ID**: build-abort-delivery
+- **Depends On**: build-poll-and-inject
+- **Validates**: tests/unit/ (abort delivery ordering), tests/unit/test_session_executor*.py
+- **Assigned To**: container-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- **Strict ordering (one task, one builder):** when a drained steering message has `is_abort=True`,
+  FIRST deliver the fixed user-facing string `"Session stopped at your request."` through the
+  session's `TelegramRelayOutputHandler` and set `result.user_facing_routed = True`, THEN set
+  `result.exit_reason = "steer_abort"` and break. Delivery MUST precede the break (post-break output
+  is dropped).
+- Add `"steer_abort"` to `_CLEAN_GRANITE_EXIT_REASONS` in `agent/session_executor.py:35` so the
+  abort is reported as controlled termination, not `REACTION_ERROR`.
+- Do NOT add `steer_abort` to `_wrapup_eligible_exits` — the delivery is explicit here, and the
+  wrap-up guard firing too would double-deliver.
 
 ### 3. Wire the BridgeAdapter poll_steering closure
 - **Task ID**: build-adapter-wiring
@@ -547,17 +618,24 @@ The lead agent orchestrates; it does not build directly.
 
 ### 5. Tests — classifier contract, fail paths, and integration
 - **Task ID**: build-tests
-- **Depends On**: build-poll-and-inject, build-dev-steer, build-adapter-wiring
+- **Depends On**: build-poll-and-inject, build-dev-steer, build-abort-delivery, build-adapter-wiring
 - **Validates**: tests/unit/granite_container/test_granite_classifier.py,
   tests/integration/test_granite_mid_run_steering.py
 - **Assigned To**: test-builder
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Classifier: `[/dev:steer]` parse contract.
+- Classifier: BOTH `[/dev:steer]` parse cases — strict (token alone → token-free payload,
+  `compliance_miss=False`) AND single-line (fallback → payload retains token, `compliance_miss=True`).
+- Token-strip: `dev_steer` branch with a single-line payload writes the token-stripped text to Dev
+  (assert the literal `[/dev:steer]` does NOT reach the Dev PTY); token-only payload → PM nudge, no
+  Dev write.
 - Fail paths: poll raises → `[]`; container callback raise → loop continues; empty `[/dev:steer]`
-  → nudge; `is_abort` → `steer_abort` exit with user-facing delivery.
+  → nudge.
+- Abort: `is_abort` → user-facing `"Session stopped at your request."` delivered BEFORE the break,
+  `exit_reason="steer_abort"`, and `is_clean_granite_exit("steer_abort")` is True (assert
+  `_CLEAN_GRANITE_EXIT_REASONS` membership).
 - Integration (env-gated, no PTY mocking): Part 1 push-to-Redis-mid-run → PM transcript shows
-  steering; Part 2 PM emits `[/dev:steer]` → Dev PTY receives text, run does not `pm_hang`.
+  steering; Part 2 PM emits `[/dev:steer]` → Dev PTY receives token-free text, run does not `pm_hang`.
 
 ### 6. Documentation
 - **Task ID**: document-feature
@@ -586,6 +664,8 @@ The lead agent orchestrates; it does not build directly.
 | Container consumes Redis list (not Popoto field) | `grep -n "pop_all_steering_messages" agent/granite_container/bridge_adapter.py` | output contains pop_all_steering_messages |
 | Adapter does NOT poll Popoto field for granite steering | `grep -c "pop_steering_messages(" agent/granite_container/bridge_adapter.py` | match count == 0 |
 | dev_steer routing present | `grep -n "dev_steer" agent/granite_container/container.py` | output contains dev_steer |
+| dev_steer strips routing token | `grep -n "dev:steer" agent/granite_container/container.py` | output shows the token-strip `re.sub` in the dev_steer branch |
+| steer_abort is a clean exit | `python -c "from agent.session_executor import _CLEAN_GRANITE_EXIT_REASONS as s; assert 'steer_abort' in s"` | exit code 0 |
 | PM prime documents [/dev:steer] | `grep -n "dev:steer" .claude/commands/granite/prime-pm-role.md` | output contains dev:steer |
 | Classifier contract test exists | `grep -rn "dev:steer" tests/unit/granite_container/test_granite_classifier.py` | output contains dev:steer |
 | Tests pass | `pytest tests/unit/granite_container/ tests/unit/test_steering.py -q` | exit code 0 |
@@ -594,26 +674,15 @@ The lead agent orchestrates; it does not build directly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+<!-- Populated by /do-plan-critique (war room) on 2026-06-26. Verdict: NEEDS REVISION. Revision applied 2026-06-26. -->
+| Severity | Critic | Finding | Status | Resolution |
+|----------|--------|---------|--------|------------|
+| BLOCKER | History & Consistency + Risk & Robustness | `[/dev:steer] <text>` on ONE line fails the strict `PREFIX_TOKEN_RE` (`granite_classifier.py:119`, anchored `\s*$`) → hits fallback → `payload` is the WHOLE tail INCLUDING the literal `[/dev:steer]` token, with `compliance_miss=True`. `_route_pm_classification` writes that payload verbatim to the Dev PTY, poisoning Dev's instruction with the raw token. The Test Impact assertion `payload="fix the auth test"` is therefore wrong. | RESOLVED | Verified against `granite_classifier.py:208-242`. Technical Approach `[/dev:steer] handling` now mandates a defensive token-strip `re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()` in the `dev_steer` branch (no-op for the strict path), with an empty-cleaned → `PM_COMPLIANCE_NUDGE` guard. Test Impact fixed to assert the REAL contract: strict → `payload="fix the auth test"`, single-line fallback → `payload` retains the token (`compliance_miss=True`). Task 2 + Task 5 + Verification + Success Criteria updated. |
+| BLOCKER | Risk & Robustness + Scope & Value + History & Consistency | `is_abort → steer_abort` + user-facing delivery is structurally unmet: `steer_abort` is in neither `_wrapup_eligible_exits` nor `_CLEAN_GRANITE_EXIT_REASONS`, so no delivery fires and it reports as an error. Plan only hedged "confirm or add during build." | RESOLVED | Verified: `_wrapup_eligible_exits` (`container.py:1404`) and `_CLEAN_GRANITE_EXIT_REASONS` (`session_executor.py:35`) both lack `steer_abort`. Promoted to explicit Task 2b with a strict ordering contract: (1) deliver `"Session stopped at your request."` via `TelegramRelayOutputHandler` + set `user_facing_routed=True` BEFORE break; (2) add `"steer_abort"` to `_CLEAN_GRANITE_EXIT_REASONS`; (3) do NOT touch `_wrapup_eligible_exits` (avoids double-delivery). Verification row asserts membership. |
+| NIT | Risk & Robustness (Operator) | Steering LPOP-drained from Redis BEFORE `_cycle_idle(PM)`. If PM is wedged (`pm_idle=False`), drained messages are silently lost with no log trace. | RESOLVED | Task 1 now captures `drained` into a local and emits `logger.warning("pm_hang during steering injection — %d msg(s) lost: %r", ...)` before breaking with `pm_hang`. No re-queue (would re-introduce the cross-process race). |
+| NIT | Scope & Value (User) | Two deliverables bundled without a priority order under Medium appetite. | RESOLVED | Task 2 (`build-dev-steer`) marked **P2** with an explicit cut-line note: Scenario 1 (Task 1, bridge→PM) alone resolves the "messages silently dropped" pain and ships first. |
 
----
-
-## Open Questions
-
-1. **Consume the Redis list or the Popoto field?** This plan recommends the atomic
-   `steering:{session_id}` Redis list (`pop_all_steering_messages`) over the issue's stated
-   `queued_steering_messages` ListField, to eliminate the cross-process read-modify-write race
-   (Risk 1). Both are populated by the existing dual-write, so this is purely a consumer choice.
-   Confirm this deviation from the issue sketch is acceptable.
-
-2. **`[/dev:steer]` semantics under strict alternation.** Because PM only runs between Dev turns,
-   `[/dev:steer]` is effectively "buffer a correction for Dev's next read," not "interrupt Dev
-   now" (Risk 2). Is the write-and-continue semantic sufficient for the intended use, or is true
-   mid-tool-call preemption a requirement (which would breach the no-re-architecture constraint)?
-
-3. **Steering provenance in the PM injection.** Should the injected block include the sender name
-   (`[Steering from Tom]: …`) verbatim, or a neutral `[Steering]: …`? The Redis payload carries
-   `sender`; using it gives PM useful context but couples the prompt to bridge-supplied display
-   names.
+**Open Questions resolution (rolled into the plan):**
+1. *Redis list vs. Popoto field* — settled in favor of the atomic Redis list (Risk 1, Technical Approach); this is the durable decision, not an open question.
+2. *`[/dev:steer]` semantics under alternation* — write-and-continue is the intended bounded behavior (Risk 2, Rabbit Holes); true preemption is explicitly out of scope.
+3. *Steering provenance* — include the sender name (`[Steering from {sender}]: …`); the Redis payload already carries `sender` and PM benefits from the context.
