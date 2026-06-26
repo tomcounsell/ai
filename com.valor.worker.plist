@@ -20,6 +20,11 @@
         <string>__HOME_DIR__</string>
         <key>VALOR_LAUNCHD</key>
         <string>1</string>
+        <key>VALOR_WORKER_MODE</key>
+        <string>standalone</string>
+        <!-- Mirrors runtime os.environ.setdefault("VALOR_WORKER_MODE","standalone") in
+             worker/__main__.py:703 for observability: 'ps eww' on the launchd process
+             now shows VALOR_WORKER_MODE=standalone without any code-path change. -->
     </dict>
     <key>RunAtLoad</key>
     <true/>

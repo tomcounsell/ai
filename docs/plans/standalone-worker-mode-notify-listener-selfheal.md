@@ -1,10 +1,11 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-06-26
 tracking: https://github.com/tomcounsell/ai/issues/1804
+pr: https://github.com/tomcounsell/ai/pull/1809
 last_comment_id: none
 revision_applied: true
 ---
@@ -212,7 +213,7 @@ No test is expected to be DELETED — all changes are additive guards.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #1804] The "pending session sat **indefinitely**" symptom: the existing 300 s health backstop should recover stranded pending sessions, so an indefinite hang implies a distinct wedged-but-alive-worker defect. This plan hardens the notify subscription only; if an indefinite hang is reproduced after this ships, it must be investigated as its own issue (tracked under this issue's discussion until then).
+- [#1808] The "pending session sat **indefinitely**" symptom: the existing 300 s health backstop should recover stranded pending sessions, so an indefinite hang implies a distinct wedged-but-alive-worker defect. This plan hardens the notify subscription only; if an indefinite hang is reproduced after this ships, investigate via #1808.
 - Nothing else deferred — the env-var change and the listener self-heal are both in scope for this plan.
 
 ## Update System
@@ -352,12 +353,12 @@ No agent integration required — this is a worker-internal change (Redis pub/su
 | CONCERN | Scope & Value (Simplifier) | The periodic probe targets an unconfirmed failure mode (alive-but-NUMSUB==0 after a successful subscribe — never observed) and overlaps both the subscribe-time self-verify (which fixes the confirmed bug) and the existing 300 s backstop. | RESOLVED (revision) | Decision: keep the probe (the issue's explicit desired outcome asks for periodic re-subscribe self-heal) but (a) the plan now states plainly that the **subscribe-time self-verify is the confirmed-bug fix** and the probe is defense-in-depth for the unobserved drift mode, and (b) the probe MUST use a dedicated short-lived bounded-timeout connection for the NUMSUB read — never the listener's `socket_timeout=None` pubsub connection (which can itself block on the wedge it detects). Added as a Solution callout block and a Success Criterion. |
 | NIT | Risk & Robustness (Operator) | Probe-triggered self-heal restarts are invisible in logs: `_notify_task_done` returns silently on the cancelled-task path, indistinguishable from clean shutdown. | RESOLVED (revision) | Probe logs a WARNING immediately before signalling re-subscription (e.g. `"Session notify self-heal: NUMSUB==0 with listener alive; re-subscribing"`). Added to Success Criteria, Error State Rendering test, and the probe task step. |
 | NIT | Scope & Value (User) | No falsifiable acceptance criterion proves the original "indefinitely pending" symptom is gone; current criteria are all internal. | RESOLVED (revision) | Added Success Criterion: after a simulated NUMSUB==0 startup, a pending session is picked up within 30 s (via the subscribe-time self-verify, before the 300 s backstop could fire). |
-| OPEN-Q | (plan Open Question #1) | Whether the "indefinitely pending" symptom is a separate wedged-but-alive-worker defect distinct from a dead notify listener. | RESOLVED (revision) | **File separately.** The 300 s `_agent_session_health_check` backstop (`agent/session_health.py:2552`) already re-scans pending sessions, so an *indefinite* hang implies a distinct wedged-worker defect, not the notify subscription. This plan hardens the notify subscription only; the wedge is captured in No-Gos as `[SEPARATE-SLUG #1804]` and will be filed as its own issue if reproduced after this ships. |
+| OPEN-Q | (plan Open Question #1) | Whether the "indefinitely pending" symptom is a separate wedged-but-alive-worker defect distinct from a dead notify listener. | RESOLVED (revision) | **Filed as #1808.** The 300 s `_agent_session_health_check` backstop (`agent/session_health.py:2552`) already re-scans pending sessions, so an *indefinite* hang implies a distinct wedged-worker defect, not the notify subscription. This plan hardens the notify subscription only; the wedge is tracked in #1808 for investigation if reproduced after this ships. |
 
 ---
 
 ## Resolved Decisions (from critique revision)
 
-1. **The "indefinitely" symptom → file separately.** The 300 s `_agent_session_health_check` backstop already re-scans pending sessions, so an *indefinite* hang implies a distinct wedged-but-alive-worker defect rather than a dead notify listener. This plan hardens the notify subscription only; the wedge path is captured in No-Gos (`[SEPARATE-SLUG #1804]`) and will be filed as its own investigation issue if reproduced after this ships.
+1. **The "indefinitely" symptom → filed as #1808.** The 300 s `_agent_session_health_check` backstop already re-scans pending sessions, so an *indefinite* hang implies a distinct wedged-but-alive-worker defect rather than a dead notify listener. This plan hardens the notify subscription only; the wedge path is tracked in No-Gos (`[#1808]`) for investigation if reproduced after this ships.
 2. **Scope.** The notify-listener subscribe-time self-verify is the *confirmed-bug* core of this work; the `VALOR_WORKER_MODE=standalone` plist entry is observability/defense-in-depth (runtime is already standalone via `setdefault`).
 3. **Periodic NUMSUB probe → CUT entirely (2nd revision).** The first revision's daemon-thread probe was found unsound and redundant by the re-critique: (B1) `unsubscribe()` cannot unblock the listener's `listen()` loop because non-`message` frames are `continue`-skipped; (B2) cross-thread mutation of the non-thread-safe redis-py `PubSub`/connection corrupts it; and it heals a never-observed drift mode while overlapping the subscribe-time self-verify and the 300 s backstop. Removing it eliminates both blockers and all four concerns at once. Post-subscribe drift is left to the existing 300 s health backstop. The subscribe-time self-verify (in-thread, owning-thread-safe) is the only code change to the listener.
