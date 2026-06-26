@@ -107,7 +107,7 @@ The following execution functions are called exclusively from `worker/__main__.p
 - `_ensure_worker(worker_key, is_project_keyed)` — spawns per-worker-key worker loops
 - `_recover_interrupted_agent_sessions_startup()` — startup session recovery
 - `_agent_session_health_loop()` — background health monitor (safety net: every 5 min)
-- `_session_notify_listener()` — pub/sub subscriber for immediate session pickup (~1s latency); creates a dedicated `redis.Redis` connection with `socket_timeout=None` to avoid the global pool's 5s timeout (issue #824)
+- `_session_notify_listener()` — pub/sub subscriber for immediate session pickup (~1s latency); creates a dedicated `redis.Redis` connection with `socket_timeout=None` to avoid the global pool's 5s timeout (issue #824); verifies `PUBSUB NUMSUB >= 1` after subscribe (up to 3 retries, ~300 ms) and returns early on persistent failure so the outer loop re-subscribes after its 5 s backoff (issue #1804)
 - `_cleanup_orphaned_claude_processes()` — startup shim that delegates to `_reap_orphan_session_processes()` (issue #1271)
 - `register_worker_pid()` — write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper never SIGKILLs a live worker
 - `AgentSession.rebuild_indexes()` — repair Redis index entries

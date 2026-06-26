@@ -1,5 +1,5 @@
 ---
-status: In Review
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
