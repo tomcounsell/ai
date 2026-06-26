@@ -32,7 +32,9 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user", "pm_floor_delivered"})
+_CLEAN_GRANITE_EXIT_REASONS = frozenset(
+    {"pm_complete", "pm_user", "pm_floor_delivered", "steer_abort"}
+)
 
 
 def _is_non_clean_granite_exit(agent_session) -> bool:
@@ -41,7 +43,9 @@ def _is_non_clean_granite_exit(agent_session) -> bool:
     None exit_reason = non-granite session or not yet set = clean (default behavior).
     Clean granite exits: pm_complete (normal end), pm_user (user message sent),
     pm_floor_delivered (wrap-up guard delivered PM's last assistant message directly
-    when the PM produced a real but prefix-less response — issue #1719).
+    when the PM produced a real but prefix-less response — issue #1719),
+    steer_abort (operator-requested abort via a steering message; the user-facing
+    "Session stopped at your request." is delivered before the loop breaks — #1779).
     Everything else (exception, pm_hang, dev_hang, startup_unresolved, pm_no_user_message,
     pm_max_turns) is non-clean → REACTION_ERROR.
 
