@@ -807,6 +807,13 @@ async def _session_notify_listener() -> None:
             a 10-second reconnect cycle that drops notifications published during
             the dead window.  We read host/port/db from the global pool's kwargs but
             override both timeout parameters explicitly to avoid inheriting them.
+
+            After subscribe, a bounded retry (up to 3 attempts, ~300 ms total) verifies
+            PUBSUB NUMSUB >= 1 on this thread's own connection.  On a confirmed 0, the
+            function returns early so the outer while-True loop re-subscribes after its
+            5 s backoff.  Post-subscribe drift (NUMSUB→0 after a previously-good
+            subscribe) is left to the existing 300 s health backstop in
+            agent/session_health.py.
             """
             import redis as _redis
             from popoto.redis_db import POPOTO_REDIS_DB
@@ -828,6 +835,49 @@ async def _session_notify_listener() -> None:
                 pubsub = conn.pubsub()
                 pubsub.subscribe("valor:sessions:new")
                 logger.info("Session notify listener subscribed to valor:sessions:new")
+                # Subscribe-time NUMSUB self-check (#1804): verify the subscription
+                # actually registered on the server.  Redis-py returns an ack frame
+                # immediately after subscribe(), but NUMSUB propagation can lag by one
+                # frame.  Retry up to 3 times (~300 ms total) before concluding the
+                # subscribe was a no-op.  All reads happen on this thread's own
+                # socket_timeout=None connection — no cross-thread hazard.
+                _numsub_ok = False
+                for _attempt in range(3):
+                    try:
+                        _numsub_result = conn.pubsub_numsub("valor:sessions:new")
+                        # pubsub_numsub returns a dict {channel: count} for redis-py >= 4
+                        # or a list of (channel, count) pairs for older versions.
+                        if isinstance(_numsub_result, dict):
+                            _count = _numsub_result.get("valor:sessions:new", 0)
+                        else:
+                            _count = next(
+                                (c for ch, c in _numsub_result if ch == "valor:sessions:new"),
+                                0,
+                            )
+                        if _count >= 1:
+                            _numsub_ok = True
+                            break
+                    except Exception as _numsub_err:
+                        logger.warning(
+                            "Session notify: NUMSUB check raised (attempt %d/3): %s — "
+                            "falling through to re-subscribe",
+                            _attempt + 1,
+                            _numsub_err,
+                        )
+                        break
+                    import time as _time
+
+                    _time.sleep(0.1)
+                if not _numsub_ok:
+                    logger.warning(
+                        "Session notify: NUMSUB check reports 0 subscribers after subscribe "
+                        "(attempt %d/3) — subscribe may not have registered; "
+                        "falling through teardown to re-subscribe",
+                        _attempt + 1,
+                    )
+                    # Fall through to the existing finally teardown; the outer while True
+                    # loop will re-subscribe after its 5s backoff.
+                    return
                 for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
