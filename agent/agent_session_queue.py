@@ -864,10 +864,9 @@ async def _session_notify_listener() -> None:
                             _attempt + 1,
                             _numsub_err,
                         )
-                        break
-                    import time as _time
-
-                    _time.sleep(0.1)
+                        return  # exit _listen_in_thread; finally teardown still runs
+                    if _attempt < 2:
+                        time.sleep(0.1)
                 if not _numsub_ok:
                     logger.warning(
                         "Session notify: NUMSUB check reports 0 subscribers after subscribe "

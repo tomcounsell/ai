@@ -376,6 +376,8 @@ class TestNotifyListenerNusubSelfCheck:
         assert any("NUMSUB check reports 0" in r.getMessage() for r in caplog.records), (
             "Expected WARNING mentioning 'NUMSUB check reports 0'"
         )
+        # Teardown (finally) must have run — unsubscribe() is called
+        mock_conn.pubsub.return_value.unsubscribe.assert_called()
 
     def test_numsub_raises_no_crash_and_logs_warning(self, caplog):
         """When pubsub_numsub() raises, the listener does not crash.
@@ -399,3 +401,5 @@ class TestNotifyListenerNusubSelfCheck:
         assert any("NUMSUB check raised" in r.getMessage() for r in caplog.records), (
             "Expected WARNING about the NUMSUB exception"
         )
+        # Teardown (finally) must have run — unsubscribe() is called
+        mock_conn.pubsub.return_value.unsubscribe.assert_called()
