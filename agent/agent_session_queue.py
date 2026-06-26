@@ -1248,6 +1248,8 @@ async def _worker_loop(
     In bridge mode (default): runs until queue is empty, then exits.
     """
     standalone = os.environ.get("VALOR_WORKER_MODE") == "standalone"
+    from models.session_lifecycle import StatusConflictError
+
     try:
         while True:
             # Check shutdown flag before starting new work
@@ -1265,6 +1267,23 @@ async def _worker_loop(
 
             try:
                 session = await _pop_agent_session(worker_key, is_project_keyed)
+            except StatusConflictError as e:
+                # A session was killed/transitioned out from under the pop — the
+                # race between _pop_agent_session reading status=pending and
+                # transition_status(→running) finding it terminal. Skip it and
+                # continue: this MUST NOT propagate, or the whole worker loop
+                # task dies and strands every other pending session for this
+                # worker_key until the next restart (issue #1803).
+                logger.warning(
+                    "[worker:%s] Pop hit StatusConflictError (session killed mid-pop), "
+                    "skipping and continuing: %s",
+                    worker_key,
+                    e,
+                )
+                if _semaphore_acquired:
+                    semaphore.release()
+                    _semaphore_acquired = False
+                continue
             except BaseException:
                 if _semaphore_acquired:
                     semaphore.release()
