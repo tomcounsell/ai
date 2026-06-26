@@ -8,6 +8,12 @@ argument-hint: "[test-path-or-filter]"
 
 You are the **test orchestrator**. You parse arguments, dispatch test runners (potentially in parallel), and aggregate results into a summary.
 
+## Repo Context Probe
+
+If `docs/sdlc/do-test.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its test specifics: tiers and pytest markers, the lint/format commands to run, a deterministic happy-path or scenario runner, the primary source directories the quality scans target, quality-gate thresholds, and which module parses the OUTCOME contract. When the file is absent (the common case in a foreign repo), this skill runs `pytest` against conventional `tests/` directories and uses `git`-based change detection — no repo-specific tooling required.
+
 ## Variables
 
 TEST_ARGS: $ARGUMENTS
@@ -38,13 +44,13 @@ Parse `TEST_ARGS` to determine what to run:
 | `performance` | Run `tests/performance/` + lint |
 | `tests/unit/test_bridge_logic.py` | Run that specific file + lint |
 | `--changed` | Detect changed files, map to test files, run those + lint |
-| `--no-lint` | Skip ruff/black checks (combinable with any above) |
+| `--no-lint` | Skip the repo's lint/format checks (combinable with any above) |
 | `unit --no-lint` | Run `tests/unit/` without lint |
 | `--changed --no-lint` | Changed-file tests without lint |
 | `--direct` | Force direct execution, skip parallel agent dispatch |
 | `unit --direct` | Run `tests/unit/` directly (combinable with any target) |
 | `frontend <url> "<scenario>"` | Run a browser-based UI test via `frontend-tester` subagent |
-| `happy-paths` | Run `python tools/happy_path_runner.py tests/happy-paths/scripts/` directly via bash. No subagent dispatch. |
+| `happy-paths` | Run the repo's deterministic happy-path runner directly via bash (declared in the context file). No subagent dispatch. Skip if no such runner is declared. |
 
 **Parsing rules:**
 1. Extract flags: `--changed`, `--no-lint`
@@ -109,11 +115,7 @@ pytest tests/unit/test_bridge_logic.py -v --tb=short
 pytest tests/unit/test_foo.py tests/tools/test_bar.py -v --tb=short
 ```
 
-If lint is enabled, run lint sequentially after tests:
-```bash
-python -m ruff check .
-black --check .
-```
+If lint is enabled, run the repo's lint/format checks sequentially after tests. The context file names the exact commands; the generic default is whatever the repo configures (commonly `ruff check .` and `ruff format --check .` when available). Skip lint cleanly if no linter is configured.
 
 ### All Tests (no target specified)
 
@@ -182,11 +184,10 @@ Task({
   description: "Run lint checks",
   subagent_type: "validator",
   model: "sonnet",
-  prompt: "Run lint checks in [CWD]:
+  prompt: "Run the repo's configured lint/format checks in [CWD] (the context file names them; generic default is `ruff check .` and `ruff format --check .` when available):
 
     cd [CWD]
-    python -m ruff check .
-    black --check .
+    <repo lint/format commands>
 
     Report: pass/fail for each tool, and any issues found.",
   run_in_background: true
@@ -207,11 +208,7 @@ Monitor all background tasks. Set a **2-minute timeout** from dispatch.
    pytest tests/ -v --tb=short
    ```
 4. Use the direct execution output for Result Aggregation
-5. Run lint directly too if lint agents also timed out:
-   ```bash
-   python -m ruff check .
-   black --check .
-   ```
+5. Run the repo's lint/format checks directly too if lint agents also timed out (commands per the context file; generic default `ruff check .` / `ruff format --check .` when available).
 
 This fallback ensures test results are always collected, even when agent dispatch fails.
 
@@ -227,8 +224,8 @@ After all runners complete, present a summary table:
 | unit | PASS | 42 | 0 | 2 | 3.1s |
 | integration | FAIL | 8 | 1 | 0 | 12.4s |
 | tools | PASS | 15 | 0 | 0 | 1.8s |
-| lint (ruff) | PASS | - | - | - | 0.5s |
-| lint (black) | PASS | - | - | - | 0.3s |
+| lint (check) | PASS | - | - | - | 0.5s |
+| lint (format) | PASS | - | - | - | 0.3s |
 
 ### Failures
 
@@ -437,20 +434,16 @@ The `frontend-tester` agent owns all browser interaction via BYOB MCP (`mcp__byo
 
 ## Happy Path Testing (`happy-paths` target)
 
-When `TEST_ARGS` starts with `happy-paths`, run the deterministic test runner directly. No subagent needed.
+When `TEST_ARGS` starts with `happy-paths`, run the repo's deterministic happy-path runner directly. No subagent needed. This target only applies when the context file declares such a runner (command and scenario directory); if none is declared, report "no happy-path runner configured in this repo" and skip.
 
 ### Execution:
-```bash
-python tools/happy_path_runner.py tests/happy-paths/scripts/
-```
+Run the runner command the context file specifies, against its declared scenario directory.
 
 ### Result format:
-The runner outputs a markdown summary table to stdout with pass/fail/error counts per script, followed by a JSON summary in an HTML comment block.
-Include results in the summary table alongside pytest and frontend suites.
+The runner typically outputs a markdown summary table to stdout with pass/fail/error counts per script, followed by a JSON summary in an HTML comment block. Include results in the summary table alongside pytest and frontend suites.
 
 ### When running all tests:
-If `tests/happy-paths/scripts/` contains `.sh` files, include happy-paths execution
-alongside pytest and frontend targets. Run via bash, not subagent.
+If the context file declares a happy-path scenario directory and it contains scripts, include happy-paths execution alongside pytest and frontend targets. Run via bash, not subagent.
 
 ## CWD-Relative Execution
 
@@ -473,10 +466,10 @@ After tests pass, run these additional quality scans and include results in the 
 
 ### Exception Swallow Scan
 
-Scan for `except Exception: pass` patterns that lack test coverage:
+Scan for `except Exception: pass` patterns that lack test coverage. Target the repo's primary source directories (the context file may name them; the generic default is every tracked source directory, e.g. `git ls-files '*.py'`):
 
 ```bash
-grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logger\|log\.\|warning\|error\|raise\|# .*tested" | head -20
+grep -rn "except.*Exception.*:" --include="*.py" <source-dirs> | grep -v "logger\|log\.\|warning\|error\|raise\|# .*tested" | head -20
 ```
 
 Report any bare exception handlers found. Each should either:
@@ -498,7 +491,7 @@ Flag if the changed files include output processing code but the test suite has 
 If any changed files contain inner functions or closures (functions defined inside other functions), flag whether those closures have dedicated test coverage:
 
 ```bash
-grep -rn "def .*(" --include="*.py" agent/ bridge/ | grep "^.*:.*def .*:$" | head -10
+grep -rn "def .*(" --include="*.py" <source-dirs> | grep "^.*:.*def .*:$" | head -10
 ```
 
 Closures that replicate logic already tested elsewhere (e.g., inline routing logic that should call a shared function) are a test smell. Note them in the report.
@@ -608,7 +601,7 @@ As the very last line of your final response, emit an OUTCOME contract so the pi
 - **Fail** (test failures found): `<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"passed":<N>,"failed":<N>}} -->`
 - **Partial** (tests passed but with flaky tests or warnings): `<!-- OUTCOME {"status":"partial","stage":"TEST","artifacts":{"passed":<N>,"failed":0,"flaky":<N>}} -->`
 
-This structured output is parsed by `classify_outcome()` in `agent/pipeline_state.py` (Tier 0) before any text pattern matching.
+This structured output is parsed by the repo's pipeline harness (Tier 0) before any text pattern matching — the context file names the exact parser when the repo has an SDLC pipeline.
 
 ## Notes
 
