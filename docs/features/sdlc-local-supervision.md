@@ -6,7 +6,7 @@
 
 ## Solution
 
-`/do-sdlc {issue|PR|description}` (`.claude/skills-global/do-sdlc/SKILL.md`) is the local stand-in for the bridge eng loop. It supervises the full pipeline in one invocation:
+`/do-sdlc {issue|PR|description}` (`.claude/skills/do-sdlc/SKILL.md`) is the local stand-in for the bridge eng loop. It supervises the full pipeline in one invocation:
 
 1. Resolves the issue (creates one via a `/do-issue` subagent if given a bare description) and runs `sdlc-tool session-ensure`.
 2. Loops: `sdlc-tool next-skill` → `sdlc-tool dispatch record` → spawn a stage subagent that invokes the stage's `/do-*` skill → read its structured report → repeat.
