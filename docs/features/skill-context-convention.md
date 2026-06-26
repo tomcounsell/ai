@@ -1,0 +1,81 @@
+# Skill Context Convention
+
+The `.claude/skill-context/` directory is the discoverable seam that lets a single global skill stay lean everywhere and get richer only where a repo opts in.
+
+Skills under `.claude/skills-global/` are hardlinked into `~/.claude/skills/` on every machine by `scripts/update/hardlinks.py::sync_claude_dirs`, so they load and run in every repo the user opens — not just this one. Their bodies are written as a generic baseline that depends on nothing more than `git` (and optionally `gh`). Repo-specific behavior lives in per-skill context files rather than baked into the shared skill body.
+
+## The Contract
+
+> **Absent file ⇒ lean generic behavior. Present file ⇒ rich repo behavior.**
+
+A global skill body probes for its context file early. If the file is absent (the common case in a foreign repo), the skill runs its generic baseline. If the file is present, the skill reads it and layers the declared repo-specifics back in. Nothing breaks when a repo ships no context files — the convention is purely additive.
+
+## The Canonical Probe Sentence
+
+Every coupled global skill body contains exactly one standardized probe step, worded identically (minus the path) across all skills so it is greppable and enforceable. The exact template:
+
+```
+If `<CONTEXT_PATH>` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+```
+
+The invariant suffix — `exists, read it and honor its declarations; otherwise use the generic defaults described below.` — is identical in every skill. Only `<CONTEXT_PATH>` varies. The `rule_13_coupling_signals` audit guard greps for this suffix to confirm every coupled body carries the probe.
+
+## Which Path Does a Skill Probe?
+
+The context path depends on skill type:
+
+| Skill type | Probe path | Why |
+|------------|------------|-----|
+| **The 8 SDLC pipeline skills** (`do-build`, `do-docs`, `do-merge`, `do-patch`, `do-plan`, `do-plan-critique`, `do-pr-review`, `do-test`) | `docs/sdlc/{skill}.md` | These already have per-stage addenda under `docs/sdlc/`. That directory is their skill-context seam. The probe points directly at it — no thin pointer file is created (avoids a redundant hop). |
+| **All other coupled (Bucket B) skills** (media/comms, `do-issue`, etc.) | `.claude/skill-context/{skill}.md` | No pre-existing `docs/sdlc/` addendum, so their repo-specifics live here. |
+
+### do-docs — the worked example
+
+`do-docs` is the convention's worked example and the copy-paste template for all non-SDLC Bucket B skills. Even though `do-docs` is one of the 8 SDLC pipeline skills, its operational ai-specifics (the stage-marker commands, the semantic doc-impact finder, the auto-fix substrate, the plan-completion marker, this repo's doc inventory locations) are carried in a rich `.claude/skill-context/do-docs.md` — not a thin pointer. The higher-level SDLC-pipeline guidance for docs remains in `docs/sdlc/do-docs.md` (referenced, not duplicated). This makes `do-docs` the cleanest demonstration of the `.claude/skill-context/{skill}.md` pattern that other skills copy.
+
+## Relationship to docs/sdlc/
+
+`docs/sdlc/{skill}.md` is the pre-existing per-skill context seam for the SDLC pipeline stages, headed `# {skill} addendum — this repo only` and capped at 300 lines. The `.claude/skill-context/` directory generalizes that same idea to all global skills. The two are not migrated into one another: SDLC skills keep reading `docs/sdlc/`; non-SDLC skills read `.claude/skill-context/`. Do not move or restructure the `docs/sdlc/*.md` files.
+
+## How a New Repo Opts In
+
+To make a global skill behave richly in some other repo, create `.claude/skill-context/{skill}.md` (or, for an SDLC skill, `docs/sdlc/{skill}.md`) in that repo and declare the repo's nuances. The skill body already probes for it — no skill edits needed.
+
+The file format is freeform markdown. Use section headers aligned to the numbered steps in the global `SKILL.md`, so readers can cross-reference. See `.claude/skill-context/do-docs.md` for a complete example.
+
+## Not Synced
+
+`.claude/skill-context/` is repo-local. `sync_claude_dirs()` only hardlinks `skills-global/`, `commands/`, and `hooks/` into `~/.claude/`, so `.claude/skill-context/` never leaves this repo — exactly like `docs/sdlc/`. That is what makes the "absent file ⇒ generic" contract hold in foreign repos: they never receive this repo's context files.
+
+## The rule_13_coupling_signals Audit Guard
+
+`rule_13_coupling_signals` in `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` enforces the convention:
+
+- It scans every global skill body for **coupling signals** — executable or import references that actually error or silently misfire in a foreign repo: `sdlc-tool`, `python -m tools.*`, `reflections.*`, `valor-*`, `config/identity.json`.
+- If any signal is found and the body does NOT contain the canonical probe suffix, the rule emits a `FAIL` finding. A `FAIL` causes the audit's `main()` to exit non-zero, blocking CI.
+- If any signal is found AND the probe suffix is present, the rule emits `PASS` — the body correctly defers to the skill-context seam.
+- If no coupling signals are found, the rule emits `PASS` unconditionally (the skill is already generic).
+
+Weak doc-path or branch-name mentions (`docs/features/`, `docs/plans/`, `session/{slug}`) are deliberately excluded from the signal set. A see-also markdown link does not break execution in a foreign repo.
+
+## Bucket C Skills (Project-Only)
+
+Some skills are too tightly coupled to this repo's infrastructure to generalize at all. Rather than carrying a probe step that points at a context file with every behavioral detail, these skills were moved from `.claude/skills-global/` to the project-only `.claude/skills/` directory (issue #1783):
+
+| Skill | Reason for project-only placement |
+|-------|-----------------------------------|
+| `setup` | Configures this repo's specific bridge, launchd plists, and vault paths |
+| `prime` | Onboards developers into this repo's exact architecture |
+| `sdlc` | SDLC router tightly coupled to this repo's stage model and pipeline state |
+| `do-sdlc` | Full pipeline supervisor referencing this repo's session and queue infrastructure |
+| `do-deploy` | Deploys to this repo's specific bridge machines |
+
+Skills in `.claude/skills/` are never synced. Moving a skill from `skills-global/` to `skills/` requires a `RENAMED_REMOVALS` entry in `scripts/update/hardlinks.py` so the stale hardlink is cleaned up on every machine.
+
+## See Also
+
+- `.claude/skill-context/README.md` — Full convention reference with authoring details
+- `.claude/skill-context/do-docs.md` — Worked example: the richest context file in this repo
+- `docs/features/sdlc-repo-addenda.md` — The pre-existing `docs/sdlc/` seam this convention generalizes
+- `docs/features/skills-global.md` — Global skill library overview and sync mechanism
+- `.claude/skills-global/do-skills-audit/scripts/audit_skills.py` — `rule_13_coupling_signals` implementation
