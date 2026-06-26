@@ -792,6 +792,129 @@ builder returns only the final assistant text (or `""` on failure); it never
 touches those container-owned fields. See
 [Pluggable Builder Harness](pluggable-builder-harness.md) for the full seam design.
 
+## Mid-run steering (issue #1779)
+
+The steady-state loop supports two in-flight steering channels, both additive to
+the existing `for turn` loop — no new threads, no new synchronization primitives.
+
+### Part 1 — Bridge → PM steering injection
+
+When a Telegram message arrives while a granite session is running, the bridge's
+`_ack_steering_routed` RPUSHes a JSON payload onto the Redis list
+`steering:{session_id}` via `agent.steering.push_steering_message`. The granite
+container drains this list at the **top of each steady-state turn** using the
+`poll_steering` callback injected by `BridgeAdapter`:
+
+```python
+# BridgeAdapter.run — storage-agnostic closure
+def _poll_steering() -> list[dict]:
+    if not steering_session_id:
+        return []
+    try:
+        return pop_all_steering_messages(steering_session_id)
+    except Exception as e:
+        logger.warning("[granite-bridge-adapter] poll_steering drain failed ...")
+        return []
+```
+
+`pop_all_steering_messages` performs an atomic FIFO LPOP drain — race-free across
+the bridge process (writer) and the worker's container thread (sole consumer).
+
+**Why the Redis list, not the Popoto `queued_steering_messages` ListField.** The
+Popoto field is consumed via a cross-process read-modify-write: the bridge reads
+[A], appends B, saves [A,B], while the container concurrently reads [A] and saves
+[]. A message can be dropped in this race window with no way to close it without a
+distributed lock. The `steering:{session_id}` Redis list uses atomic RPUSH / LPOP
+— a message pushed between two drains is simply picked up on the next turn, never
+lost. The Popoto field continues to serve the SDK/CLI harness path unchanged.
+
+**Injection flow (per turn):**
+
+1. `_poll_steering()` drains the Redis list. The call is fail-silent — a raised
+   exception returns `[]` and never crashes the loop, matching the `_on_turn`
+   pattern.
+2. If any drained message has `is_abort=True`, the container delivers the fixed
+   user-facing string `"Session stopped at your request."` through
+   `_on_user_payload` and sets `result.user_facing_routed = True` **before**
+   breaking with `exit_reason="steer_abort"`. Output emitted after the break is
+   dropped, so delivery must precede it. `steer_abort` is listed in
+   `_CLEAN_GRANITE_EXIT_REASONS` in `agent/session_executor.py` — it is reported
+   as a controlled operator termination, not a `REACTION_ERROR`.
+3. For non-abort messages, the container calls `_cycle_idle(self._pm_pty)` to wait
+   for PM to finish any in-flight tool execution before writing. This is the whole
+   guarantee that steering does not corrupt PM's current turn — the write lands
+   only once PM is confirmed idle.
+4. Each message is written as `\n[Steering from {sender}]: {text}\n` to the PM
+   PTY. Empty or whitespace-only messages are skipped. The `sender` field comes
+   from the Redis payload (the bridge records the Telegram sender name when it
+   calls `push_steering_message`).
+5. The loop falls through to the existing per-turn idle read. The `pm_baseline`
+   content-identity guard (a snapshot of the text-bearing JSONL entry count taken
+   before the idle read) requires a **new** entry from PM, so PM's response to the
+   steering is captured cleanly and routed normally.
+
+**Latency:** at-most-one-turn. A message pushed between two drains is picked up on
+the very next PM turn boundary.
+
+**PM-hang during injection:** if `_cycle_idle(PM)` returns `pm_idle=False` after a
+non-empty drain, the messages are already atomically removed from Redis and cannot
+be re-queued without reintroducing the cross-process race. The container logs a
+`WARNING` naming the count and text of lost messages (so an operator can
+re-deliver via `valor-session steer --id <id>`) and exits as `pm_hang`.
+
+### Part 2 — PM → Dev `[/dev:steer]` injection
+
+The PM can queue a mid-task correction directly into the Dev PTY by emitting a
+`[/dev:steer]` prefix. Both forms are accepted:
+
+```
+[/dev:steer]
+Focus on the auth module; the migration work is done.
+```
+
+```
+[/dev:steer] Focus on the auth module; the migration work is done.
+```
+
+`classify_pm_prefix` parses both into `destination="dev", harness="steer"`. In
+`_route_pm_classification`, the module constant `STEER_HARNESS_SUFFIX = "steer"`
+is checked **before** `_get_builder` — `steer` is a reserved harness suffix that
+real builder harnesses (`claude`, `pi`) must never receive.
+
+**Token-strip (single-line edge case).** The single-line form `[/dev:steer] text`
+fails the anchored `PREFIX_TOKEN_RE` (which requires nothing after `]` on line 1)
+and falls to the fallback classifier, which returns the whole tail — including the
+literal `[/dev:steer]` token — as the payload with `compliance_miss=True`. Writing
+that verbatim to Dev would poison the instruction with the routing token. The
+`dev_steer` branch applies a defensive strip regardless of which classifier path
+produced the payload:
+
+```python
+clean = re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()
+```
+
+This is a no-op for the strict path (already token-free) and removes the leaked
+token for the single-line fallback path.
+
+**Write-and-continue semantics (not preemption).** In the synchronous alternating
+loop, PM only runs when Dev is idle. At the moment PM emits `[/dev:steer]`, Dev
+is always idle — the loop is single-threaded and PM never runs while Dev has an
+active turn. The steer text is therefore written directly to the Dev PTY
+(`self._dev_pty.write(clean + "\n")`) without any Dev-idle wait, and Dev picks it
+up as its next input on the following read. The PM persona describes `[/dev:steer]`
+as "queue a correction Dev sees immediately as its next input" — not "interrupt
+Dev now." True preemption of an in-flight Dev tool call would require PTY signal
+handling and is explicitly out of scope.
+
+After the Dev write, a one-line continuation ack (`PM_DEV_STEER_ACK`) is written
+to the PM PTY so PM produces its next turn rather than hanging on an empty idle
+read. The turn is recorded as `TurnRecord(classification="dev_steer")` and the
+loop continues.
+
+If the payload is empty after token-stripping (a token-only `[/dev:steer]` with no
+body), `PM_COMPLIANCE_NUDGE` is written to PM — the same path as an empty `[/dev]`
+— and no Dev write occurs.
+
 ## Known limitations (deep-dive audit, PR #1612)
 
 1. **Resume is a fresh TUI session.** The container has no `claude --resume`
