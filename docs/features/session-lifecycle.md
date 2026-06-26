@@ -338,7 +338,7 @@ When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visi
 
 **Implication:** there is a ≤5-minute window (one watchdog tick interval) where ⏳ can briefly persist on the user's message after the session recovers, before the next tick clears the dedup. The recovery message itself lands first, so the user sees the recovery before the reaction is reset for a future stall.
 
-## Deferred Self-Draft Fallback Delivery (issues #1730, #1794)
+## Deferred Self-Draft Fallback Delivery (issues #1730, #1794, #1797)
 
 When the message drafter flags an output as an "empty promise" (`needs_self_draft=True`),
 `TelegramRelayOutputHandler.send()` injects a `sender="drafter-fallback"` steering message asking
@@ -373,11 +373,11 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
    responding" notice when text is absent.  Idempotent via Redis SETNX on its own key
    `self_draft_fallback_sent:{session_id}` (1 h TTL).
 
-3. **Synchronous chokepoint flush — TELEGRAM on ALL terminal paths (issue #1794)**: a new
+3. **Synchronous chokepoint flush — TELEGRAM on all paths, EMAIL on completed path (issues #1794, #1797)**: a new
    fully-synchronous helper `flush_deferred_self_draft_sync(session)` in `agent/session_health.py`
-   delivers the held Telegram text on **every** terminal status (`completed`, `failed`,
-   `abandoned`).  It is invoked once from `finalize_session` in `models/session_lifecycle.py` — the
-   single centralised terminal-transition chokepoint — with the following placement invariants:
+   delivers the held text on qualifying terminal statuses.  It is invoked once from `finalize_session`
+   in `models/session_lifecycle.py` — the single centralised terminal-transition chokepoint — with
+   the following placement invariants:
    - Runs **after** the idempotency early-return (already-terminal sessions exit before reaching it).
    - Runs **after** the `reject_from_terminal` guard (illegal re-transitions raise before reaching it).
    - Runs **before** `session.save()`, inside the CAS region.
@@ -385,15 +385,20 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
    - Reads the deferral flag from a **fresh authoritative session** via
      `get_authoritative_session(session_id)` — not the caller's possibly-stale object.
    - Deduplicates on its **own** SETNX key `self_draft_completed_flush_sent:{session_id}` (1 h TTL).
-   - **Synchronous by necessity**: the `completed` path has no running event loop, so the async
-     helper cannot be awaited there; the new helper writes directly to
-     `telegram:outbox:{session_id}` via `rpush`.
+   - **Transport/status gate** (evaluated before the dedup SETNX):
+     - **telegram** (or `None`): proceeds for **all** terminal statuses (`completed`, `failed`,
+       `abandoned`), writing directly to `telegram:outbox:{session_id}` via `rpush`.
+     - **email** + `completed`: proceeds and writes the payload (built via the shared
+       `build_email_outbox_payload` function in `agent/output_handler.py`) to
+       `email:outbox:{session_id}` via `rpush`.  The `build_email_outbox_payload` helper is pure
+       and synchronous — no I/O, no event loop — making it safe to call on the completed path.
+     - **email** + `failed`/`abandoned`: early-returns; the async helper owns those paths.
 
-4. **Disjoint-transport design**: the two helpers target disjoint transports — the sync chokepoint
-   owns **telegram** on all terminal paths; the async helper owns **email** on
-   `failed`/`abandoned`.  The two distinct SETNX keys (`self_draft_completed_flush_sent` vs.
-   `self_draft_fallback_sent`) make double-send structurally impossible regardless of execution
-   order.
+4. **Disjoint-transport design**: the two helpers partition all paths without overlap — the sync
+   chokepoint owns **telegram** on all terminal statuses, and **email** on the `completed` path; the
+   async helper owns **email** on `failed`/`abandoned`.  The two distinct SETNX keys
+   (`self_draft_completed_flush_sent` vs. `self_draft_fallback_sent`) make double-send structurally
+   impossible regardless of execution order.
 
 5. **Precedence**: the self-draft fallback fires *before* the generic degraded notice
    (`_deliver_tool_timeout_degraded_notice`).  When `deferred_self_draft_pending` is set, the
@@ -406,11 +411,6 @@ ran on the health-checker's `failed`/`abandoned` branches, never on the `complet
      guard so it fires unconditionally (covers `completed` + any telemetry-on caller).
    - **Seat B** (`agent/session_health.py`, next to `finalize_telemetry`): covers the
      `emit_telemetry=False` health-checker terminal finalizes that Seat A alone would miss.
-
-**Known gap:** an EMAIL-transport deferred self-draft that reaches `completed` (not
-`failed`/`abandoned`) is NOT flushed by this build.  Synchronously replicating the email outbox
-payload was out of appetite for issue #1794.  Email coverage on the `completed` path is tracked as
-follow-up issue #1797.
 
 **Cross-reference:** `_deliver_tool_timeout_degraded_notice` (added in PR #1738, issue #1711) is
 the delivery primitive this fallback is modelled after.  New precedence: self-draft fallback

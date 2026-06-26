@@ -128,6 +128,105 @@ class FileOutputHandler:
             pass  # Reactions are best-effort for file output
 
 
+def build_email_outbox_payload(
+    session: Any,
+    chat_id: str,
+    text: str,
+    file_paths: list[str] | None = None,
+) -> dict:
+    """Build the email outbox payload dict for a reply-all response.
+
+    Pure, synchronous function shared by the async ``TelegramRelayOutputHandler.
+    _send_via_email_outbox`` and the synchronous ``flush_deferred_self_draft_sync``
+    chokepoint.  It performs no I/O and has no side effects.
+
+    The returned dict matches the unified shape consumed by
+    ``bridge/email_relay.py``:
+
+    * ``to`` — reply-all list: primary recipient first, then every address
+      from the session's stamped ``email_to_addrs`` and ``email_cc_addrs``
+      minus the SMTP user (self) and the primary recipient (dedup).
+    * ``subject`` — original subject prefixed with ``"Re: "`` (or
+      ``"Re: (no subject)"`` for an empty original).  Already-prefixed
+      subjects (``re:`` prefix, case-insensitive) are passed through
+      unchanged.
+    * ``in_reply_to`` / ``references`` — sourced from
+      ``extra_context.email_message_id``; ``None`` when missing.
+    * ``from_addr`` — resolved from the ``SMTP_USER`` environment variable.
+
+    Args:
+        session: AgentSession (or any object with ``extra_context`` and
+            ``session_id`` attributes) carrying the email threading metadata
+            stamped by ``bridge/email_bridge.py``.
+        chat_id: Primary recipient address (the sender of the original
+            inbound message).
+        text: Drafted body text.
+        file_paths: Optional list of attachment paths.
+
+    Returns:
+        A dict payload ready to be JSON-serialised and pushed onto
+        ``email:outbox:{session_id}``.
+    """
+    session_id = getattr(session, "session_id", None) or chat_id
+
+    # Pull email metadata stamped on the session by bridge/email_bridge.py
+    # (or the test skill's spawn.py). Missing fields fall back to safe
+    # defaults so a malformed session still produces a valid envelope.
+    extra = getattr(session, "extra_context", None) or {}
+    original_subject = extra.get("email_subject") or ""
+    in_reply_to = extra.get("email_message_id") or None
+    original_to = extra.get("email_to_addrs") or []
+    original_cc = extra.get("email_cc_addrs") or []
+
+    # Subject prefixing: match bridge/email_bridge.py::_build_reply_mime
+    # worker-reply semantics — always prepend "Re: " unless the subject
+    # already starts with "re:" (case-insensitive). Empty subject becomes
+    # "Re: (no subject)" so threading still works in the recipient's client.
+    if original_subject:
+        if original_subject.lower().startswith("re:"):
+            subject = original_subject
+        else:
+            subject = f"Re: {original_subject}"
+    else:
+        subject = "Re: (no subject)"
+
+    # Build the reply-all recipient list. Mirrors the filter in
+    # bridge/email_bridge.py::EmailOutputHandler.send (lines ~591-598):
+    # primary recipient first, then everyone from To/CC except the SMTP
+    # user (our own address) and the primary recipient (dedupe).
+    own_addr = os.environ.get("SMTP_USER", "").lower()
+    primary_lower = (chat_id or "").lower()
+    reply_all = [chat_id] + [
+        a
+        for a in (list(original_to) + list(original_cc))
+        if isinstance(a, str) and a.lower() != own_addr and a.lower() != primary_lower
+    ]
+    # Deduplicate while preserving order in case the bridge stamped the
+    # same address twice across To and CC.
+    seen: set[str] = set()
+    to_field: list[str] = []
+    for a in reply_all:
+        if not a:
+            continue
+        key = a.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        to_field.append(a)
+
+    return {
+        "session_id": session_id,
+        "to": to_field,
+        "subject": subject,
+        "body": text,
+        "attachments": list(file_paths or []),
+        "in_reply_to": in_reply_to,
+        "references": in_reply_to,
+        "from_addr": os.environ.get("SMTP_USER", ""),
+        "timestamp": time.time(),
+    }
+
+
 class TelegramRelayOutputHandler:
     """Route agent output to the Redis outbox for Telegram delivery.
 
@@ -218,64 +317,10 @@ class TelegramRelayOutputHandler:
             file_paths: Optional list of attachment paths to forward to the
                 relay (consumed as ``attachments`` by ``email_relay.py``).
         """
-        session_id = getattr(session, "session_id", None) or chat_id
-
-        # Pull email metadata stamped on the session by bridge/email_bridge.py
-        # (or the test skill's spawn.py). Missing fields fall back to safe
-        # defaults so a malformed session still produces a valid envelope.
-        extra = getattr(session, "extra_context", None) or {}
-        original_subject = extra.get("email_subject") or ""
-        in_reply_to = extra.get("email_message_id") or None
-        original_to = extra.get("email_to_addrs") or []
-        original_cc = extra.get("email_cc_addrs") or []
-
-        # Subject prefixing: match bridge/email_bridge.py::_build_reply_mime
-        # worker-reply semantics — always prepend "Re: " unless the subject
-        # already starts with "re:" (case-insensitive). Empty subject becomes
-        # "Re: (no subject)" so threading still works in the recipient's client.
-        if original_subject:
-            if original_subject.lower().startswith("re:"):
-                subject = original_subject
-            else:
-                subject = f"Re: {original_subject}"
-        else:
-            subject = "Re: (no subject)"
-
-        # Build the reply-all recipient list. Mirrors the filter in
-        # bridge/email_bridge.py::EmailOutputHandler.send (lines ~591-598):
-        # primary recipient first, then everyone from To/CC except the SMTP
-        # user (our own address) and the primary recipient (dedupe).
-        own_addr = os.environ.get("SMTP_USER", "").lower()
-        primary_lower = (chat_id or "").lower()
-        reply_all = [chat_id] + [
-            a
-            for a in (list(original_to) + list(original_cc))
-            if isinstance(a, str) and a.lower() != own_addr and a.lower() != primary_lower
-        ]
-        # Deduplicate while preserving order in case the bridge stamped the
-        # same address twice across To and CC.
-        seen: set[str] = set()
-        to_field: list[str] = []
-        for a in reply_all:
-            if not a:
-                continue
-            key = a.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            to_field.append(a)
-
-        payload = {
-            "session_id": session_id,
-            "to": to_field,
-            "subject": subject,
-            "body": text,
-            "attachments": list(file_paths or []),
-            "in_reply_to": in_reply_to,
-            "references": in_reply_to,
-            "from_addr": os.environ.get("SMTP_USER", ""),
-            "timestamp": time.time(),
-        }
+        payload = build_email_outbox_payload(session, chat_id, text, file_paths)
+        session_id = payload["session_id"]
+        to_field = payload["to"]
+        in_reply_to = payload["in_reply_to"]
 
         queue_key = f"email:outbox:{session_id}"
         try:

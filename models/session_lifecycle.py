@@ -406,7 +406,7 @@ def finalize_session(
     try:
         from agent.session_health import flush_deferred_self_draft_sync
 
-        flush_deferred_self_draft_sync(session)
+        flush_deferred_self_draft_sync(session, status)
     except Exception as e:
         logger.warning(f"[lifecycle] Deferred self-draft flush failed (non-fatal): {e}")
 

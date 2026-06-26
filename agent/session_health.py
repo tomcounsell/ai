@@ -1582,24 +1582,31 @@ async def _deliver_tool_timeout_degraded_notice(
         )
 
 
-def flush_deferred_self_draft_sync(session: "AgentSession") -> None:
-    """TELEGRAM chokepoint flush for a never-redrafted deferred self-draft.
+def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> None:
+    """Chokepoint flush for a never-redrafted deferred self-draft on terminal paths.
 
     This is the synchronous flush invoked from the ``finalize_session``
     chokepoint (``models/session_lifecycle.py``) so a held self-draft reply is
-    delivered on **every** terminal status (``completed``, ``failed``,
-    ``abandoned``) — closing the gap where a cleanly-``completed`` session that
-    deferred a reply for self-draft and never redrafted silently swallowed it.
+    delivered on **every** qualifying terminal status — closing the gap where a
+    cleanly-``completed`` session that deferred a reply for self-draft and never
+    redrafted silently swallowed it.
 
-    Fully synchronous: it writes the payload directly to the Telegram outbox via
-    ``rpush`` with no event loop involvement (no ``await``, no
-    ``asyncio.create_task``, no ``run_until_complete``). The ``completed`` path
-    has no running event loop, so the async ``_deliver_deferred_self_draft_fallback``
-    cannot be used here.
+    Fully synchronous: it writes the payload directly to the outbox via ``rpush``
+    with no event loop involvement (no ``await``, no ``asyncio.create_task``, no
+    ``run_until_complete``). The ``completed`` path has no running event loop, so
+    the async ``_deliver_deferred_self_draft_fallback`` cannot be used here.
 
-    TELEGRAM ONLY: early-returns for ``transport == "email"`` (resolved from
-    ``extra_context``, NOT a top-level field — ``AgentSession`` has no top-level
-    ``transport``). Email coverage stays on the retained async helper.
+    Transport / status gate (evaluated BEFORE the dedup SETNX so the key is not
+    burned on ineligible paths):
+
+    * **telegram** (or ``None``): proceeds for all terminal statuses — ``completed``,
+      ``failed``, ``abandoned``.  The async helper early-returns for telegram, so
+      this chokepoint owns telegram delivery exclusively.
+    * **email** + ``status == "completed"``: proceeds and writes to
+      ``email:outbox:{session_id}``.  The async helper handles email
+      ``failed``/``abandoned`` paths.
+    * **email** + any other status (``failed``, ``abandoned``, ``None``): early-returns.
+      The async helper owns those paths so there is no double-send.
 
     Reads the deferral flag from a FRESH authoritative session via
     ``get_authoritative_session`` — never the caller's possibly-stale
@@ -1610,6 +1617,13 @@ def flush_deferred_self_draft_sync(session: "AgentSession") -> None:
     (SETNX, 1 h TTL) — DISTINCT from the async helper's
     ``self_draft_fallback_sent:{session_id}``. Never raises; failures are logged
     at WARNING and swallowed.
+
+    Args:
+        session: AgentSession to flush.
+        status: The terminal status being applied (e.g. ``"completed"``,
+            ``"failed"``, ``"abandoned"``).  Forwarded from
+            ``finalize_session`` so the email gate can restrict delivery to
+            the ``completed`` path only.
     """
     try:
         session_id = getattr(session, "session_id", None)
@@ -1625,10 +1639,16 @@ def flush_deferred_self_draft_sync(session: "AgentSession") -> None:
         if not extra_ctx.get("deferred_self_draft_pending"):
             return
 
-        # Transport gate: telegram only. Email stays on the async helper.
+        # Transport / status gate — evaluated BEFORE the dedup SETNX so the key
+        # is not burned on ineligible paths (e.g. email + failed).
         transport = extra_ctx.get("transport")
         if transport == "email":
-            return
+            # Email: only proceed on the completed path.  The async fallback
+            # helper (_deliver_deferred_self_draft_fallback) owns failed/abandoned.
+            if status != "completed":
+                return
+        # telegram / None transport: proceed unconditionally (async helper
+        # early-returns for telegram, so no double-send risk).
 
         from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
@@ -1662,28 +1682,41 @@ def flush_deferred_self_draft_sync(session: "AgentSession") -> None:
         else:
             message = "I couldn't finish responding to that — please try again."
 
-        # Build the telegram outbox payload (mirrors output_handler's recipe).
         import json  # noqa: PLC0415
 
         from agent.output_handler import TelegramRelayOutputHandler  # noqa: PLC0415
 
         chat_id = getattr(source, "chat_id", None) or ""
-        reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
-        payload = {
-            "chat_id": chat_id,
-            "reply_to": reply_to,
-            "text": message,
-            "session_id": session_id,
-            "timestamp": time.time(),
-        }
-        queue_key = f"telegram:outbox:{session_id}"
-        _R.rpush(queue_key, json.dumps(payload))
-        _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
+
+        if transport == "email":
+            # Email-completed branch: build the reply-all payload and push to
+            # email:outbox:{session_id} for the SMTP relay.
+            from agent.output_handler import build_email_outbox_payload  # noqa: PLC0415
+
+            email_payload = build_email_outbox_payload(source, chat_id, message)
+            queue_key = f"email:outbox:{session_id}"
+            _R.rpush(queue_key, json.dumps(email_payload))
+            _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
+        else:
+            # Telegram branch (unchanged): build the telegram outbox payload.
+            reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
+            payload = {
+                "chat_id": chat_id,
+                "reply_to": reply_to,
+                "text": message,
+                "session_id": session_id,
+                "timestamp": time.time(),
+            }
+            queue_key = f"telegram:outbox:{session_id}"
+            _R.rpush(queue_key, json.dumps(payload))
+            _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
 
         logger.info(
-            "[session-health] flushed deferred self-draft on terminal path for %s (%d chars)",
+            "[session-health] flushed deferred self-draft on terminal path for %s "
+            "(%d chars, transport=%s)",
             session_id,
             len(message),
+            transport or "telegram",
         )
 
         # Best-effort telemetry counter.
