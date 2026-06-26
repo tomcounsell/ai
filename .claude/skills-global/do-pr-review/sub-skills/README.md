@@ -1,8 +1,10 @@
 # PR Review Sub-Skills
 
 This directory contains focused sub-skills that decompose the `/do-pr-review` workflow
-into single-responsibility phases. Each sub-skill receives pre-resolved context via
-`$SDLC_*` environment variables (injected by `agent/sdk_client.py`, issue #420).
+into single-responsibility phases. Each sub-skill receives pre-resolved context — in
+the generic case from `$ARGUMENTS` and `gh`; when the repo-context file declares
+pre-resolved `$SDLC_*` environment variables (an SDLC pipeline injecting them), the
+sub-skills prefer those and fall back to git/gh resolution.
 
 ## Sub-Skills
 
@@ -15,16 +17,18 @@ into single-responsibility phases. Each sub-skill receives pre-resolved context 
 
 ## Context Variables
 
-All sub-skills can reference these environment variables (when available):
+When the repo-context file declares an SDLC pipeline that injects them, all
+sub-skills can reference these environment variables (otherwise resolve from
+`$ARGUMENTS`/git/gh):
 
-| Variable | Source | Example |
-|----------|--------|---------|
-| `$SDLC_PR_NUMBER` | `AgentSession.pr_url` | `220` |
-| `$SDLC_PR_BRANCH` | `AgentSession.branch_name` | `session/my-feature` |
-| `$SDLC_SLUG` | `AgentSession.work_item_slug` | `my-feature` |
-| `$SDLC_PLAN_PATH` | `AgentSession.plan_url` | `docs/plans/my-feature.md` |
-| `$SDLC_ISSUE_NUMBER` | `AgentSession.issue_url` | `415` |
-| `$SDLC_REPO` | `GH_REPO` env var | `tomcounsell/ai` |
+| Variable | Example |
+|----------|---------|
+| `$SDLC_PR_NUMBER` | `220` |
+| `$SDLC_PR_BRANCH` | `session/my-feature` |
+| `$SDLC_SLUG` | `my-feature` |
+| `$SDLC_PLAN_PATH` | `docs/plans/my-feature.md` |
+| `$SDLC_ISSUE_NUMBER` | `415` |
+| `$SDLC_REPO` | `your-org/your-repo` |
 
 ## Invocation
 
