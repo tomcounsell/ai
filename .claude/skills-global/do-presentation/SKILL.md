@@ -161,13 +161,13 @@ mv diagrams/logo-{slug}.svg.png diagrams/logo-{slug}.png
 
 ```markdown
 <!-- Inline next to text (small, 24-32px) -->
-![w:28](diagrams/logo-anthropic.svg) Anthropic ships Managed Agents
+![w:28](diagrams/logo-{slug}.svg) Anthropic ships Managed Agents
 
 <!-- In a table cell -->
-| ![w:24](diagrams/logo-stripe.svg) Stripe | Payment processing |
+| ![w:24](diagrams/logo-{slug}.svg) Stripe | Payment processing |
 
 <!-- Larger, standalone -->
-![w:80](diagrams/logo-redis.svg)
+![w:80](diagrams/logo-{slug}.svg)
 ```
 
 **Rules:**
