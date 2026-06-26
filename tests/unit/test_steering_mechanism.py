@@ -262,7 +262,7 @@ class TestSDLCRouterMergeGate:
         """
         import pathlib
 
-        skill_path = pathlib.Path(".claude/skills-global/sdlc/SKILL.md")
+        skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
         content = skill_path.read_text()
         assert "Row 10 merge gate" in content or "merge gate" in content.lower()
 
@@ -275,7 +275,7 @@ class TestSDLCRouterMergeGate:
         """
         import pathlib
 
-        skill_path = pathlib.Path(".claude/skills-global/sdlc/SKILL.md")
+        skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
         content = skill_path.read_text()
         assert "sdlc-tool next-skill" in content
 

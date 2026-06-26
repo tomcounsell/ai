@@ -1,6 +1,65 @@
 # do-plan-critique addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-plan-critique/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## Substrate Invocations (concrete commands the generic body defers here)
+
+These are the exact `sdlc-tool`/helper invocations the leaned body refers to
+abstractly. The roster-barrier mechanics (`critique-roster-check`, `_roster.json`,
+atomic result files, the `MAJOR REWORK (CRITIQUE INCOMPLETE)` STOP) and the
+Step 5.5 verdict-record + completion-marker block are documented in their own
+sections below — this section adds the invocations not covered there.
+
+**Plan resolution** also accepts the repo convention: plans live at
+`docs/plans/{slug}.md`; the slug derives from the plan filename or the issue.
+
+**Start-of-skill stage marker (in_progress).** Write at the very start, before triage:
+
+```bash
+sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number "$ISSUE_NUMBER"
+```
+
+`ISSUE_NUMBER` MUST be assigned unconditionally (never `${ISSUE_NUMBER:-…}`) and
+asserted to be a positive integer before any recorder call — a stale inherited
+value would divert recorder writes to the wrong session (#1731).
+
+**Step 2b crash-resume probe.** Before triage/roster freeze, check for a reusable
+incomplete run dir:
+
+```bash
+RESUME_DIR=$(critique-resume-probe --plan "$PLAN_PATH" --issue "$ISSUE_NUMBER" 2>/tmp/critique-resume-stale.txt)
+PROBE_EXIT=$?
+```
+
+If `PROBE_EXIT == 0`, set `CRITIQUE_RUN_DIR="$RESUME_DIR"`, `RESUMED=1`, GC the
+stale-hash siblings (`cat /tmp/critique-resume-stale.txt | xargs -r rm -rf`),
+skip triage + roster freeze, and dispatch only the missing critics.
+
+**Step 3a plan-hash + run-dir creation.** Compute the stale-resume guard hash and
+create the per-run directory (mkdir WITHOUT `-p` so a collision fails loudly):
+
+```bash
+PLAN_HASH=$(uv run --directory "${AI_REPO_ROOT:-$HOME/src/ai}" python -c "from tools.sdlc_verdict import compute_plan_hash; print(compute_plan_hash('$PLAN_PATH') or '')")
+ISSUE_OR_SLUG="${ISSUE_NUMBER:-$(basename "$PLAN_PATH" .md)}"
+CRITIQUE_RUN_DIR=".critique-runs/${ISSUE_OR_SLUG}-$(date +%s%N)"
+mkdir "$CRITIQUE_RUN_DIR"
+echo "$PLAN_HASH" > "$CRITIQUE_RUN_DIR/.plan_hash"
+```
+
+Then write the frozen roster manifest (`_roster.json`): LITE →
+`{"roster": ["Consolidated Critic"], "count": 1}`; FULL →
+`{"roster": ["Risk & Robustness", "Scope & Value", "History & Consistency"], "count": 3}`.
+
+**Step 5.6 plan-revising lock.** When the verdict needs a revision pass and
+`revision_applied` is not already `true`:
+
+```bash
+sdlc-tool meta-set --key plan_revising --value true --issue-number "$ISSUE_NUMBER"
+```
+
+This activates the SDLC router guard G7 (blocks `/do-build` until `/do-plan`
+clears the lock). Do NOT set it for `READY TO BUILD (no concerns)` or when
+`revision_applied: true` already.
+
 ## Triage Routing (LITE / FULL)
 
 Step 2.6 classifies each plan as LITE (1 Consolidated Critic) or FULL (3 merged critics). Force-FULL applies to doctrine paths (`config/personas/`, `.claude/skills/`, `.claude/skills-global/`, `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/hooks/`) and `appetite: Large` plans. For all other plans an LLM classifier biased toward FULL makes the call. See [`docs/features/plan-critique-triage.md`](../features/plan-critique-triage.md) for the full decision table and crash-resume flow.

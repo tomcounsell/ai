@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
+import scripts.update.hardlinks as hardlinks
 from scripts.update.hardlinks import (
     PROJECT_ONLY_SKILLS,
     RENAMED_REMOVALS,
     HardlinkSyncResult,
+    _cleanup_renamed,
     _sync_skills,
     sync_claude_dirs,
 )
@@ -208,3 +211,72 @@ def test_sync_migrates_skills_dir_symlink(symlink_migration_project):
 
     # Migration removal counted
     assert result.removed >= 1
+
+
+# ---------------------------------------------------------------------------
+# Bucket C RENAMED_REMOVALS entries (issue #1783)
+# ---------------------------------------------------------------------------
+
+BUCKET_C_MOVED_SKILLS = ["setup", "prime", "sdlc", "do-sdlc", "do-deploy"]
+
+
+@pytest.mark.parametrize("skill", BUCKET_C_MOVED_SKILLS)
+def test_bucket_c_skills_in_removals(skill: str):
+    """Each moved Bucket C skill must appear in RENAMED_REMOVALS as a skills entry."""
+    assert (
+        "skills",
+        skill,
+    ) in RENAMED_REMOVALS, f"Moved Bucket C skill {skill!r} missing from RENAMED_REMOVALS"
+
+
+# ---------------------------------------------------------------------------
+# _cleanup_renamed inode guard (issue #1783, concern #2)
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_renamed_removes_genuine_orphan(tmp_path: Path, monkeypatch):
+    """A stale user-level skill dir not hardlinked to any project source is removed."""
+    monkeypatch.setattr(hardlinks, "RENAMED_REMOVALS", [("skills", "sdlc")])
+
+    project = tmp_path / "project"
+    # Project no longer provides sdlc under skills-global (it was moved out)
+    (project / ".claude" / "skills-global").mkdir(parents=True)
+
+    user_claude = tmp_path / "home" / ".claude"
+    orphan = user_claude / "skills" / "sdlc"
+    orphan.mkdir(parents=True)
+    (orphan / "SKILL.md").write_text("# stale orphan, not hardlinked to anything live")
+
+    result = HardlinkSyncResult()
+    _cleanup_renamed(user_claude, project, result)
+
+    assert not orphan.exists(), "genuine orphan should be removed"
+    assert result.removed >= 1
+
+
+def test_cleanup_renamed_preserves_project_backed(tmp_path: Path, monkeypatch):
+    """A user-level skill still hardlinked to a live project source is preserved.
+
+    Simulates a foreign repo that legitimately provides its own same-named
+    skill under skills-global/ — the blanket RENAMED_REMOVALS sweep must not
+    delete it.
+    """
+    monkeypatch.setattr(hardlinks, "RENAMED_REMOVALS", [("skills", "sdlc")])
+
+    project = tmp_path / "project"
+    src_skill = project / ".claude" / "skills-global" / "sdlc"
+    src_skill.mkdir(parents=True)
+    src_file = src_skill / "SKILL.md"
+    src_file.write_text("# live project-backed sdlc skill")
+
+    user_claude = tmp_path / "home" / ".claude"
+    dst_skill = user_claude / "skills" / "sdlc"
+    dst_skill.mkdir(parents=True)
+    # Hardlink (shared inode) — proves it is project-backed
+    os.link(src_file, dst_skill / "SKILL.md")
+
+    result = HardlinkSyncResult()
+    _cleanup_renamed(user_claude, project, result)
+
+    assert dst_skill.exists(), "project-backed skill must be preserved"
+    assert (dst_skill / "SKILL.md").exists()

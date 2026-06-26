@@ -177,8 +177,9 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
 | [Session Watchdog Reliability](session-watchdog-reliability.md) | Type guards, activity-based stall detection, observer circuit breaker with escalating backoff | Shipped |
 | [Single-Machine Ownership](single-machine-ownership.md) | Strict rule: every bridge-contact identifier (DM contact id, Telegram group, email contact, email domain) is owned by exactly one machine; enforced by `bridge/config_validation.py` and gated by the update script's Step 4.6 green-light check | Shipped |
+| [Skill Context Convention](skill-context-convention.md) | Per-repo `.claude/skill-context/{skill}.md` files that let global skills stay generic and layer in repo-specific behavior only where needed; absent-file-means-generic contract, canonical probe sentence, and `rule_13` audit guard | Shipped |
 | [Skill Context Injection](skill-context-injection.md) | Pre-resolved SDLC_* env vars from AgentSession into Claude Code subprocesses, plus /do-pr-review sub-skill decomposition | Shipped |
-| [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 12 rules and Anthropic best practices sync | Shipped |
+| [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 13 rules (incl. `rule_13` coupling-signal guard) and Anthropic best practices sync | Shipped |
 | [Skills Dependency Map](skills-dependency-map.md) | Visual map of skill-to-skill, skill-to-agent, and sub-file relationships for cleanup planning | Shipped |
 | [Skills Global](skills-global.md) | Global skill library in `.claude/skills-global/` — 42 skills synced to `~/.claude/skills/` via hardlinks; includes 6 new skills added in #1319: ontologies, grill-me, deepen, observability, zoom-out, tdd | Shipped |
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |

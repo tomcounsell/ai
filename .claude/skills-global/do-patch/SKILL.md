@@ -8,9 +8,11 @@ argument-hint: "<description-of-what-to-patch>"
 
 You are a **focused fixer**. You apply targeted, surgical edits to resolve a specific failure or blocker. You do not plan features, orchestrate teams, or create PRs. You fix what is broken, verify it passes, and advance the pipeline.
 
-## Cross-Repo Resolution
+## Repo Context Probe
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+If `docs/sdlc/do-patch.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its patch specifics: the worktree/branch and plan-doc conventions for recovering build context, the lint/format commands, a plan-checkbox sync mechanism to bundle a criterion tick into the fix commit, cross-repo `gh` targeting, and any restart-after-patch requirement. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, and the repo's test runner — no repo-specific tooling required.
 
 ## When This Skill Is Invoked
 
@@ -37,8 +39,9 @@ The patch agent is re-entering the build loop. It needs the **same context** tha
 
 1. **Plan document** — The full plan, not just a summary:
    - If the caller passed the plan path, read it
-   - Otherwise: check git branch (`session/{slug}`) → read `docs/plans/{slug}.md`
+   - Otherwise, if the repo keeps plan docs, derive the plan path from the current branch (the context file declares the branch→slug→plan-path convention) and read it
    - Extract: goal, acceptance criteria, no-gos, relevant files, architectural decisions
+   - If the repo has no plan docs, proceed with the failure context alone
 2. **Tracking issue** — `gh issue view N` for the original issue context and discussion
 3. **Working directory** — Confirm CWD (worktree path if invoked by do-build, repo root if direct)
 4. **What was already built** — Run `git log --oneline main..HEAD` to see what the build has done so far
@@ -81,7 +84,7 @@ Parse the input to classify the fix type:
 
 #### Root Cause Analysis: Trace & Verify
 
-Before jumping to a fix, apply the Trace & Verify protocol (see `docs/features/trace-and-verify.md` for the full reference). This replaces narrative-only reasoning with data-driven verification:
+Before jumping to a fix, apply the Trace & Verify protocol (the context file may point to a fuller reference). This replaces narrative-only reasoning with data-driven verification:
 
 1. **Trace the data flow** from input to expected output. At each boundary between components, capture the actual values being passed. Where does the data diverge from expectations?
 2. **Write a failing test** that reproduces the exact broken behavior. The test must fail for the right reason (the bug), not a setup issue.
@@ -173,71 +176,55 @@ After the builder agent reports completion, run tests and lint directly — do N
 ```bash
 # Run full test suite
 pytest tests/ -v --tb=short
-
-# Run lint checks
-python -m ruff check .
-black --check .
 ```
 
+Then run the repo's lint/format checks (commands per the context file; generic default `ruff check .` / `ruff format --check .` when available, else skip).
+
 Parse the results:
-- **pytest exit code 0** AND **both lint tools pass**: All tests pass — proceed to Step 4
+- **pytest exit code 0** AND **lint passes**: All tests pass — proceed to Step 4
 - **pytest exit code 1**: Some tests failed — proceed to Step 5 (retry or report stuck)
 - **pytest exit code 2**: Test execution error — report the error and proceed to Step 5
 - **pytest exit code 5**: No tests collected — treat as pass (no tests to break)
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
-### Step 3.5: Sync Plan Checkbox (Atomic Commit)
+### Step 3.5: Commit the Fix (Atomic Single Commit)
 
 After the test-pass verification in Step 3 succeeds and BEFORE Report
-Completion, sync the plan-file checkbox so it lives in the same commit as the
-code fix. A separate "tick off completed plan items" commit is exactly the
-oscillation symptom this skill avoids — it would invalidate the prior PR
-approval (review-comment freshness gate) and force a re-review.
+Completion, commit the fix as a single atomic commit and push it to the current
+branch. A separate follow-up commit (e.g. ticking plan items) is exactly the
+oscillation symptom this skill avoids — on a repo with a review-freshness gate
+it would invalidate the prior PR approval and force a re-review.
 
-**Procedure:**
+**Generic procedure:**
 
 ```bash
-# Read the builder agent's reported `criterion_addressed` from Step 2's output.
-SLUG=$(echo "$BRANCH" | sed 's|^session/||')
-PLAN_PATH="docs/plans/${SLUG}.md"
-TICK_SUFFIX=""
-
-if [ -n "$CRITERION_ADDRESSED" ] && [ "$CRITERION_ADDRESSED" != "null" ]; then
-  if "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer tick "$PLAN_PATH" --criterion "$CRITERION_ADDRESSED"; then
-    TICK_SUFFIX=" — addresses \"$CRITERION_ADDRESSED\""
-  else
-    # Helper failure (MATCH_AMBIGUOUS / MATCH_NOT_FOUND / others) is NON-FATAL.
-    # The commit STILL happens (with the code change only); the failure is
-    # logged but does NOT abort the patch flow. The next /do-pr-review round
-    # will reconcile via tick/untick.
-    echo "WARN: plan_checkbox_writer failed for criterion: $CRITERION_ADDRESSED" >&2
-  fi
-fi
-
-# Atomic commit: `git add -A` captures BOTH the builder's code edits AND the
-# helper's plan-file edit (if any). The plan write and the code fix go into
-# the SAME commit. Do NOT use `git commit --amend` — every patch is a fresh
-# commit per the existing convention at SKILL.md "Commit and Push Rules".
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
 git add -A
-git commit -m "fix(#${SDLC_ISSUE_NUMBER}): ${SUMMARY}${TICK_SUFFIX}"
+git commit -m "fix: ${SUMMARY}"
 git push origin "HEAD:${BRANCH}"
 ```
 
-**Why same-commit (and not amend, not separate):** The single-commit invariant
-is what makes the merge-gate review-comment freshness check pass on the next
-attempt — the latest commit's `committer.date` advances together with the
-code change. A separate tick-off commit pushed AFTER the review would force
-re-review.
+**Plan-checkbox sync (only if the context file declares it).** If the repo keeps
+plan docs with acceptance-criteria checkboxes and the context file declares a
+plan-checkbox sync mechanism, tick the builder's reported `criterion_addressed`
+(from Step 2) in the SAME `git add -A` so the plan edit and the code fix land in
+one commit. A helper failure (ambiguous / not-found match) is NON-FATAL — the
+commit still happens with the code change only. If no such mechanism is declared
+(the generic case), skip the tick and just commit the fix.
 
-**Builder authorship invariant:** The builder agent does NOT commit (per
-SKILL.md "Commit and Push Rules"); the patch skill is the commit author.
-Step 3.5 preserves that — the helper invocation and the commit happen at the
-patch-skill level, not at the builder-agent level.
+**Why same-commit (and not amend, not separate):** Bundling everything into one
+commit keeps a repo's merge-gate review-comment freshness check passing on the
+next attempt — the latest commit's `committer.date` advances together with the
+code change. A separate follow-up commit pushed AFTER a review would force
+re-review. Do NOT use `git commit --amend` — every patch is a fresh commit.
+
+**Builder authorship invariant:** The builder agent does NOT commit; the patch
+skill is the commit author. Step 3.5 preserves that — any helper invocation and
+the commit happen at the patch-skill level, not at the builder-agent level.
 
 **Test ordering invariant:** The test-pass check in Step 3 happens BEFORE the
-commit in Step 3.5, so a failing fix never produces a commit. An ambiguous
-criterion in Step 3.5 is non-fatal; a failed test in Step 3 aborts the flow.
+commit in Step 3.5, so a failing fix never produces a commit.
 
 ### Step 4: Report Completion
 
@@ -277,12 +264,16 @@ This requires human review or a different approach. Escalating.
 
 ## Lint Discipline
 
-Lint and formatting are handled automatically -- agents should never waste iterations on lint fixes.
+If the repo auto-handles lint/format (via a pre-commit hook or editor-time
+formatter the context file describes), agents should never waste iterations on
+lint fixes:
 
-- **Intermediate commits**: Use `--no-verify` to skip the pre-commit hook during WIP commits mid-task. This avoids unnecessary lint interruptions while the agent is still working.
-- **Final commits**: Let the pre-commit hook run (no `--no-verify`). The hook auto-fixes all fixable lint/format issues via `ruff format` + `ruff check --fix` and re-stages the changes. Only genuinely unfixable issues block the commit.
-- **Never run manual lint checks**: Do NOT run `ruff check .` or `ruff format --check .` as a separate validation step. The pre-commit hook handles this automatically on final commits.
-- **PostToolUse hook**: The `format_file.py` hook runs `ruff check --fix` + `ruff format` on individual files after every Write/Edit, so files stay clean as agents work.
+- **Intermediate commits**: Use `--no-verify` to skip the pre-commit hook during WIP commits mid-task, avoiding unnecessary lint interruptions while still working.
+- **Final commits**: Let the pre-commit hook run (no `--no-verify`) so it auto-fixes and re-stages. Only genuinely unfixable issues block the commit.
+- **Avoid redundant manual lint** when an auto-fix hook already runs on commit.
+
+If the repo has no such automation (the generic case), run its lint/format
+checks once before committing and fix any reported issues manually.
 
 ## Commit and Push Rules
 

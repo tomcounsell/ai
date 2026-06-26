@@ -260,7 +260,7 @@ recorded `_judges` entry is self-describing.
 - `tools/cross_vendor_judge.py` — cross-vendor judge CLI (issue #1626).
 - `.claude/skills-global/do-pr-review/SKILL.md` — orchestration site.
 - `.claude/commands/do-merge.md` — downstream consumer (unchanged).
-- `.claude/skills-global/sdlc/SKILL.md` G6 — downstream consumer
+- `.claude/skills/sdlc/SKILL.md` G6 — downstream consumer
   (unchanged).
 - `tests/unit/test_review_multi_judge.py` — consensus rules + ordering
   regression.

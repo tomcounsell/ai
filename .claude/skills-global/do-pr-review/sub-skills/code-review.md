@@ -231,19 +231,10 @@ Only report items that are genuinely unaddressed. False positives are worse than
 
 ### 5. Run Verification Checks (if plan has ## Verification table)
 
-```bash
-python -c "
-from agent.verification_parser import parse_verification_table, run_checks, format_results
-from pathlib import Path
-plan = Path('${SDLC_PLAN_PATH}').read_text()
-checks = parse_verification_table(plan)
-if checks:
-    results = run_checks(checks)
-    print(format_results(results))
-else:
-    print('No verification table in plan.')
-"
-```
+If the plan has a `## Verification` section with a machine-readable table, run
+each check on the PR branch and compare against its `Expected` column. Generic
+baseline: read the table and run each `Command` directly. If the repo-context
+file declares a verification-table runner, use it instead.
 
 ### Pre-Verdict Checklist
 

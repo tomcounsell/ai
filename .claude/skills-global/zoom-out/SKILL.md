@@ -6,6 +6,12 @@ allowed-tools: Read, Bash
 
 # Skill: /zoom-out
 
+## Repo Context Probe
+
+If `.claude/skill-context/zoom-out.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares project-local tools for the steps below — a memory/recall CLI to synthesize recent context (Step 1) and a messaging CLI for remote delivery of the summary (Step 5). When the file is absent (the common case in a foreign repo), reconstruct context from `git log` and any session notes, and just print the summary in-session.
+
 ## Purpose
 Pull back from the current task, reassess priorities, and reorient toward the actual goal — before more time is spent solving the wrong problem.
 
@@ -20,11 +26,7 @@ Concrete trigger example: Run before a third consecutive patch loop on the same 
 
 ## Steps
 
-1. **Synthesize memory for recent context.** Search for observations related to the current work area:
-   ```bash
-   python -m tools.memory_search search "<recent keywords from current session>"
-   ```
-   Read the top 5 results. Note any corrections or pattern observations that apply.
+1. **Synthesize recent context.** If the repo context file declares a memory/recall CLI, use it to surface observations related to the current work area and read the top results, noting any corrections or pattern observations that apply. Otherwise reconstruct recent context from `git log` (Step 3) and any session notes — there is no generic memory store to query.
 
 2. **Check open GitHub issues.** Get a snapshot of active work:
    ```bash
@@ -44,10 +46,7 @@ Concrete trigger example: Run before a third consecutive patch loop on the same 
    - **Recommended next focus** (highest-leverage action)
    - **Deprioritization list** (2–3 things that can wait)
 
-5. **Deliver the summary.** Print it in the session. If the user is remote, optionally send via Telegram:
-   ```bash
-   valor-telegram send --chat "Dev: Valor" "<summary>"
-   ```
+5. **Deliver the summary.** Print it in the session. If the user is remote and the repo context file declares a messaging CLI, optionally send the summary through it.
 
 6. **Ask one question.** Close with: "Does this match your mental model, or is there something I'm missing?"
 

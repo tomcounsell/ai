@@ -31,3 +31,39 @@ Tests must pass at these thresholds before a PR can merge:
 - E2E: 90% pass
 
 A failing unit test is a blocker; do not open a PR with failing unit tests.
+
+## Lint / Format Commands (the generic body defers to here)
+
+This repo uses `ruff` for both lint and format. When lint is enabled, run:
+
+```bash
+python -m ruff check .
+python -m ruff format --check .
+```
+
+Do NOT run `black` — `ruff format` is the formatter. There is no separate
+formatter step.
+
+## Quality-Scan Source Directories
+
+The post-test quality scans (exception-swallow scan, closure-coverage flag)
+target this repo's primary source directories: `agent/ bridge/` (and, for wider
+sweeps, `tools/ worker/ monitoring/`). Substitute these for the generic body's
+`<source-dirs>` placeholder.
+
+## Happy-Path Runner
+
+The `happy-paths` target runs this repo's deterministic runner directly:
+
+```bash
+python tools/happy_path_runner.py tests/happy-paths/scripts/
+```
+
+It outputs a markdown summary table plus a JSON summary in an HTML comment block.
+When running all tests, if `tests/happy-paths/scripts/` contains `.sh` files,
+include happy-paths execution alongside the pytest and frontend targets.
+
+## OUTCOME Parser
+
+The OUTCOME contract this skill emits is parsed by `classify_outcome()` in
+`agent/pipeline_state.py` (Tier 0) before any text pattern matching.

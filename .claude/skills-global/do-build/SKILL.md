@@ -9,6 +9,14 @@ context: fork
 
 You are the **team lead** executing a plan document. You orchestrate work using Task tools - you NEVER build directly.
 
+## Repo Context Probe
+
+If `docs/sdlc/do-build.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo layers its build automation onto this generic baseline: a pipeline state machine and stage markers, a worktree manager, cross-repo target resolution, freshness/prerequisite/build/docs validation scripts, a plan-hash mid-build guard, the lint/format commands, and the docs-gate + plan-migration conventions. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, and the Task tool: it resolves the plan, creates an isolated worktree/branch, deploys builder/validator agents to execute the plan's tasks, verifies the Definition of Done and that the repo's tests pass, opens a PR, and reports — no repo-specific tooling required.
+
+Throughout the steps below, any action described as "if the context file declares X" is skipped in the generic case. The orchestration order (resolve → branch → implement → test → review → document → PR) holds either way; only the substrate calls that record/advance pipeline state are gated.
+
 ## What this skill does
 
 1. Resolves a plan document (by path or issue number)
@@ -78,10 +86,7 @@ if [ "$TARGET_REPO" != "$ORCHESTRATOR_REPO" ]; then
 fi
 ```
 
-Or using Python:
-```bash
-python -c "from agent.worktree_manager import resolve_repo_root; print(resolve_repo_root('$PLAN_PATH'))"
-```
+In the common single-repo case `TARGET_REPO` is just `git rev-parse --show-toplevel` and `TARGET_GH_REPO` is unset. If the context file declares a repo-resolution helper, use it instead.
 
 **All subsequent git, worktree, and PR operations must use `TARGET_REPO` as the repo root**, not the orchestrator repo. Specifically:
 - `create_worktree(Path(TARGET_REPO), slug)` instead of `create_worktree(Path('.'), slug)`
@@ -93,128 +98,49 @@ If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special 
 
 ## Instructions
 
-1. **Resolve the plan path** using the Plan Resolution logic above
-2. **Read the plan** at `PLAN_PATH`
-3. **Check pipeline state** - After resolving the plan path, derive `{slug}` from the plan filename and check for existing state:
-   ```bash
-   python -c "from agent.build_pipeline import load; import json; s = load('{slug}'); print(json.dumps(s) if s else 'null')"
-   ```
-   - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
-   - If no state (output is `null`): proceed normally — initialize state after worktree creation
-4. **Check issue comment freshness** - Verify the plan has incorporated the latest issue comments before building. This check is delegated to a helper script so the orchestrator only runs a single allowlisted command. If the script exits non-zero, the plan is stale and `/do-plan` must run before the build:
-   ```bash
-   python scripts/check_plan_freshness.py {PLAN_PATH}
-   ```
-   - Exit 0: plan is fresh (last_comment_id matches the latest comment, or no tracking issue, or no comments exist)
-   - Exit 1: plan is stale; stop and report that the plan needs updating via `/do-plan` first
-   - Implementation: the script reads the plan frontmatter (`tracking:`, `last_comment_id:`) and calls `gh issue view {number} --json comments` to fetch the latest comment id. It does NOT use `gh api` -- `gh api` is excluded from PM session Bash by `agent/hooks/pre_tool_use.py::PM_BASH_ALLOWED_PREFIXES` as a silent mutation vector.
-5. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-6. **Resolve target repo** - Determine which repo the plan belongs to (see "Target Repo Resolution" above):
-   ```bash
-   TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
-   ```
-7. **Ensure clean git state** - Before creating a worktree, verify the main working tree has no in-progress merge, rebase, or cherry-pick operations that would block git operations:
-   ```bash
-   python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; print(ensure_clean_git_state(Path('$TARGET_REPO')))"
-   ```
-   This aborts any in-progress merge/rebase/cherry-pick and stashes uncommitted changes. See `docs/features/git-state-guard.md` for details.
-7. **Get or create an isolated worktree** - Get the existing worktree or create `.worktrees/{slug}/` with branch `session/{slug}` in the **target repo** using the worktree manager (handles stale worktrees and session resumption automatically):
-   ```bash
-   python -c "from agent.worktree_manager import get_or_create_worktree; from pathlib import Path; print(get_or_create_worktree(Path('$TARGET_REPO'), '{slug}'))"
-   ```
-   This is idempotent: if the worktree already exists (e.g., from an interrupted session), it returns the existing path. If not, it creates a fresh one. It also handles stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
-   All subsequent agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, NOT the orchestrator repo directory.
+The generic orchestration flow. Each numbered step that touches a pipeline
+substrate (state machine, stage markers, validation scripts, plan-hash guard) is
+**gated behind the context file** — in a foreign repo those sub-steps are skipped
+and the build proceeds on `git`/`gh`/Task alone. The ordering is unconditional.
 
-   **Record the plan hash at build start** (defense-in-depth against mid-build plan revisions — see guard G7):
+1. **Resolve the plan path** using the Plan Resolution logic above; derive `{slug}` from the plan filename.
+2. **Read the plan** at `PLAN_PATH`.
+3. **Resume check (if the context file declares a pipeline state machine)** — load any existing build state for `{slug}`; if a prior stage is recorded, resume from it and skip completed stages. Otherwise treat this as a fresh build.
+4. **Freshness check (if the context file declares one)** — verify the plan has incorporated the latest tracking-issue comments. If stale, stop and report that `/do-plan` must run first. Generic default: skip.
+5. **Prerequisite validation (if the context file declares a checker, or the plan has a `## Prerequisites` section)** — run each prerequisite check command; if any fails, report and stop. No section ⇒ passes automatically.
+6. **Resolve target repo** (see "Target Repo Resolution" above): `TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)`.
+7. **Create an isolated worktree.** Generic baseline:
    ```bash
-   # PLAN_REPO may differ from TARGET_REPO for cross-repo builds (e.g. cuttlefish).
-   # Always resolve the plan's owning repo separately.
-   PLAN_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
-   git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
-   PLAN_REL=$(python -c "import os; print(os.path.relpath('$PLAN_PATH', '$PLAN_REPO'))")
-   PLAN_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-   sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" \
-     --issue-number {issue_number} 2>/dev/null || true
+   git -C "$TARGET_REPO" worktree add "$TARGET_REPO/.worktrees/{slug}" -b session/{slug} 2>/dev/null \
+     || git -C "$TARGET_REPO" worktree add "$TARGET_REPO/.worktrees/{slug}" session/{slug}
    ```
-   If `PLAN_HASH` is empty (e.g. the plan file is not tracked by git), the `meta-set` call writes an empty string, and the Step 21 check becomes a no-op (guarded by `STORED_HASH` non-empty check).
-8. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
-   ```bash
-   python -c "from agent.build_pipeline import initialize; initialize('{slug}', 'session/{slug}', '$TARGET_REPO/.worktrees/{slug}', target_repo='$TARGET_REPO')"
-   ```
-   Skip this step if state already existed from step 3.
-9. **Advance to branch stage** after worktree is ready:
-   ```bash
-   python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'branch')"
-   ```
-10. **Parse the Team Members** and Step by Step Tasks sections
-11. **Create all tasks** using `TaskCreate` before starting execution
-12. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
-13. **Advance to implement stage** before deploying builder agents:
-    ```bash
-    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'implement')"
-    ```
-14. **Monitor progress** and handle any issues
-15. **Advance to test stage** after implementation tasks complete:
-    ```bash
-    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'test')"
-    ```
-16. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
-16b. **Run build validation against plan** - After verifying definition of done, run the deterministic plan validator:
-    ```bash
-    (cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_build.py $PLAN_PATH)
-    ```
-    - If exit code 0: all plan assertions pass, proceed to review
-    - If exit code 1: feed the failure report into `/do-patch` for fixes, then re-run validation (up to 3 iterations)
-    - The script checks file existence assertions, verification table commands, and success criteria from the plan
-16c. **Run AI semantic evaluation against acceptance criteria** - After validate_build.py passes, run the AI evaluator:
-    ```bash
-    (cd $TARGET_REPO/.worktrees/{slug} && python scripts/evaluate_build.py $PLAN_PATH)
-    ```
-    - Exit code 0: all criteria PASS or PARTIAL — log any PARTIAL verdicts as warnings, proceed to step 17
-    - Exit code 2: FAIL verdicts found — bundle ALL FAIL verdicts into a single `/do-patch` call (not one call per FAIL); log `[AI Evaluator] FAIL on N criteria — routing to patch cycle (attempt X/2)` before each invocation; max 2 iterations; if FAIL persists after 2 iterations, log "AI evaluator: 2 iterations reached, proceeding to review" and proceed to step 17
-    - Exit code 3: no `## Acceptance Criteria` section — log "AI evaluator: no Acceptance Criteria section, skipping" and proceed to step 17
-    - Exit code 1 or any error: log "AI evaluator failed (non-blocking): {error}" and proceed to step 17
-17. **Advance to review stage** after tests pass:
-    ```bash
-    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
-    ```
-18. **Advance to document stage** after review passes:
-    ```bash
-    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'document')"
-    ```
-19. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
-20. **Advance to pr stage** after documentation gate passes:
-    ```bash
-    python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'pr')"
-    ```
-21. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
-
-   **Defense-in-depth: verify plan hash has not changed mid-build** (G7 second layer — catches revisions that committed during build execution):
-   ```bash
-   git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
-   CURRENT_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-   STORED_HASH=$(sdlc-tool stage-query --issue-number {issue_number} \
-     | python -c "import sys,json; print(json.load(sys.stdin).get('_meta',{}).get('plan_hash_at_build_start') or '')")
-   if [ -n "$STORED_HASH" ] && [ "$CURRENT_HASH" != "$STORED_HASH" ]; then
-     echo "BUILD ABORT: plan revised mid-build (was=$STORED_HASH, now=$CURRENT_HASH, path=$PLAN_PATH)"
-     sdlc-tool stage-marker --stage BUILD --status failed --issue-number {issue_number} 2>/dev/null || true
-     exit 1
-   fi
-   ```
-   This check is a no-op when `STORED_HASH` is empty (sessions that pre-date this feature, or when the plan is not git-tracked). A non-empty mismatch means the plan was revised by a concurrent critique/plan cycle — abort so the router can re-route via G7 to a fresh revision round.
-22. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
-23. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
-24. **Plan stays until merge** - Do NOT delete the plan here; `do-merge` deletes it after the PR merges (issue closes automatically via `Closes #N`)
-25. **Report completion** with PR URL when all tasks are done
+   This is the isolation boundary: all agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, never the orchestrator repo directory. If the context file declares a worktree manager (idempotent get-or-create, stale-worktree recovery, settings-file copying, clean-git-state guard), use it instead — it handles interrupted-session resumption and branch-already-in-use errors.
+8. **Initialize/record build state (if the context file declares a state machine)** — initialize pipeline state for a fresh build, and record the plan hash at build start for the mid-build revision guard. Generic default: skip.
+9. **Parse the Team Members and Step by Step Tasks** sections of the plan.
+10. **Create all tasks** with `TaskCreate` before starting execution; set dependencies (`addBlockedBy`).
+11. **Deploy agents** in order, respecting dependencies and parallel flags. Agents follow the Build → Test loop with up to 5 fix-and-retry iterations. **Advance the pipeline stage** at each transition (branch → implement → test → review → document → pr) **if the context file declares a state machine**; otherwise just proceed in that order.
+12. **Monitor progress** and handle any issues (see Workflow Step 4).
+13. **Verify Definition of Done** — all tasks complete with code working, the repo's tests passing, and lint/format clean.
+14. **Validate the build against the plan (if the context file declares validators)** — run the deterministic plan validator and/or AI semantic evaluator against the plan's assertions and acceptance criteria; route failures to `/do-patch` (bounded iterations) and re-run. Generic default: confirm the plan's `## Verification` checks pass (see Workflow Step 5.1) and the repo's tests pass.
+15. **Documentation gate** — ensure the plan's required docs were created/updated (see Workflow Step 6). If the context file declares a docs-validation script, run it; it BLOCKS PR creation on failure.
+16. **Verify commits exist before PR** — `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD`; if zero commits, **ABORT**: "BUILD FAILED: No commits on session/{slug}." Do NOT push or open a PR. **If the context file declares a plan-hash mid-build guard**, also verify the plan hash is unchanged and abort if it drifted (a concurrent revision landed).
+17. **Push and open a PR** — `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create` (add `--repo $TARGET_GH_REPO` only for cross-repo builds).
+18. **Run the documentation cascade** — invoke `/do-docs {PR-number}` to surgically update affected docs.
+19. **Plan stays until merge** — do NOT delete the plan here; `/do-merge` handles it after the PR merges (issue closes via `Closes #N`).
+20. **Report completion** with the PR URL when all tasks are done.
 
 ## Lint Discipline
 
-Lint and formatting are handled automatically -- agents should never waste iterations on lint fixes.
+If the repo auto-handles lint/format (via a pre-commit hook or editor-time
+formatter the context file describes), agents should never waste iterations on
+lint fixes:
 
-- **Intermediate commits**: Use `--no-verify` to skip the pre-commit hook during WIP commits mid-task. This avoids unnecessary lint interruptions while the agent is still working.
-- **Final commits**: Let the pre-commit hook run (no `--no-verify`). The hook auto-fixes all fixable lint/format issues via `ruff format` + `ruff check --fix` and re-stages the changes. Only genuinely unfixable issues block the commit.
-- **Never run manual lint checks**: Do NOT instruct agents to run `ruff check .` or `ruff format --check .` as a separate step. The pre-commit hook handles this automatically on final commits.
-- **PostToolUse hook**: The `format_file.py` hook runs `ruff check --fix` + `ruff format` on individual files after every Write/Edit, so files stay clean as agents work.
+- **Intermediate commits**: Use `--no-verify` to skip the pre-commit hook during WIP commits mid-task, avoiding lint interruptions while still working.
+- **Final commits**: Let the pre-commit hook run (no `--no-verify`) so it auto-fixes and re-stages. Only genuinely unfixable issues block the commit.
+- **Avoid redundant manual lint** when an auto-fix hook already runs on commit.
+
+If the repo has no such automation (the generic case), agents run its lint/format
+checks once before the final commit and fix any issues manually.
 
 ## Critical Rules
 
@@ -232,22 +158,15 @@ Lint and formatting are handled automatically -- agents should never waste itera
 
 ## Workflow
 
-### Step 0: Substrate Probe (degraded-mode awareness)
+### Step 0: Stage Marker (only if the context file declares a substrate)
 
-Before initializing tasks, probe whether the orchestration substrate (PM
-session + Redis) is reachable, mirroring the `do-docs` pattern. A forked
-sub-skill must announce degraded mode rather than silently lagging state:
+If the context file declares an orchestration substrate (a pipeline state
+machine + stage markers), write the BUILD `in_progress` marker now and follow
+its degraded-mode handling — a forked sub-skill announces degraded mode rather
+than silently lagging state. The build itself (worktree, agents, tests, PR) never
+depends on the substrate, so a missing or degraded substrate never blocks it.
 
-```bash
-sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number}
-```
-
-**Always pass `--issue-number {issue_number}`** on every `sdlc-tool` write (stage markers, meta-set, etc.). `--issue-number` is the authoritative session selector: it guarantees the write lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). The `VALOR_SESSION_ID` / `AGENT_SESSION_ID` env-var session is only a *last-resort* fallback, subordinate to `--issue-number`, used when the issue number is genuinely unknown. A forked build subagent that inherited a parent's env-var session must still pass `--issue-number` so its writes are not diverted to the parent's session (#1671/#1672).
-
-Parse the JSON output:
-- `{"stage": "BUILD", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
-- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". Continue the build; stage markers will not be recorded, but the build itself (worktree, agents, tests, PR) does not depend on the substrate.
-- Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
+In the generic case (no substrate declared), skip this step.
 
 ### Step 1: Initialize Task List
 
@@ -332,18 +251,14 @@ After deploying background agents, actively monitor their health:
 
 ### Step 5: Final Validation and Definition of Done
 
-When the final `validate-all` task completes, verify Definition of Done criteria:
+When the final `validate-all` task completes, verify Definition of Done criteria.
 
-**Pipeline stage at this point:** `test` → advance to `review` before proceeding.
-
-```bash
-python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'review')"
-```
+**Pipeline stage at this point:** `test` → advance to `review` before proceeding (if the context file declares a state machine; otherwise just proceed).
 
 **Definition of Done Checklist (pre-documentation):**
 - [x] **Built**: All code implemented and working
 - [x] **Tested**: All unit tests passing, integration tests passing
-- [x] **Quality**: Ruff and Black checks pass, no lint errors
+- [x] **Quality**: the repo's lint/format checks pass, no lint errors
 - [x] **Reviewed**: Review passes (no blocking issues)
 - [x] **Demonstrated**: Feature produces intended user-visible output (e.g., rendered message, API response, UI state)
 
@@ -353,27 +268,16 @@ If any criterion is not met, report the issue and do NOT proceed to the Document
 
 ### Step 5.1: Run Verification Checks from Plan
 
-If the plan has a `## Verification` section with a machine-readable table, extract and run each check automatically. This replaces manual validation judgment with deterministic pass/fail:
+If the plan has a `## Verification` section with a machine-readable table, run
+each check and confirm its expected result. This replaces manual validation
+judgment with deterministic pass/fail. Run the checks inside the worktree
+(`cd .worktrees/{slug}`).
 
-```bash
-(cd .worktrees/{slug} && python -c "
-from agent.verification_parser import parse_verification_table, run_checks, format_results
-from pathlib import Path
-plan = Path('{PLAN_PATH}').read_text()
-checks = parse_verification_table(plan)
-if checks:
-    results = run_checks(checks)
-    print(format_results(results))
-    if not all(r.passed for r in results):
-        raise SystemExit(1)
-else:
-    print('No verification table found in plan -- skipping automated checks.')
-")
-```
-
-- **Exit 0**: All verification checks passed, proceed
-- **Exit 1**: Some checks failed -- fix the specific failures (check name, command, expected vs actual) and re-run verification
-- If the plan has no `## Verification` section, this step is a no-op
+Generic baseline: read the `## Verification` table from the plan, run each
+`Command`, and compare against its `Expected` column. If any check fails, fix the
+specific failure and re-run. If the context file declares a verification-table
+parser/runner, use it instead. If the plan has no `## Verification` section, this
+step is a no-op.
 
 ### Step 5.5: CWD Safety Reset
 
@@ -396,58 +300,40 @@ After validating Definition of Done, run a soft check for the working-state scra
 
 ### Step 6: Documentation Gate
 
-After review passes, advance to the `document` stage and run documentation lifecycle checks:
-
-```bash
-python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'document')"
-```
-
-This is the Document phase of the pipeline: `Plan → Branch → Implement → Test → Review → **Document** → PR`. Documentation is written and validated here, after implementation is reviewed — not interleaved with implementation.
+After review passes, advance to the `document` stage (if the context file
+declares a state machine) and run documentation lifecycle checks. This is the
+Document phase of the pipeline: `Plan → Branch → Implement → Test → Review →
+**Document** → PR`. Documentation is written and validated here, after
+implementation is reviewed — not interleaved with implementation.
 
 **6.1 Validate Documentation Changes**
 
-Run the doc validation script to verify documentation was created/updated. This script runs `git diff` internally and needs the worktree as CWD to see the session branch changes.
+Confirm the plan's required documentation was created/updated. Inspect the
+session branch's diff for the doc files the plan's `## Documentation` section
+named (run inside the worktree so `git diff` sees the branch changes; use a
+`(cd .worktrees/{slug} && ...)` subshell so the orchestrator's CWD stays in the
+main repo). If a required doc is missing, **STOP and report failure** — this
+gate BLOCKS PR creation.
 
-**Execute each command below exactly as written, including the parentheses.** The `(...)` subshell syntax ensures the `cd` happens in a child process — the orchestrator's CWD stays in the main repo.
+If the context file declares a docs-validation script, run it (it enforces the
+gate deterministically). Generic default: verify by hand that the plan's named
+doc paths appear in `git diff --name-only main...HEAD`.
 
-```bash
-(cd .worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
-```
+**6.2 Scan for Related Documentation (optional)**
 
-- **Exit 0**: Documentation requirements met, proceed to next step
-- **Exit 1**: Documentation missing or insufficient, **STOP and report failure**
-- This check BLOCKS PR creation if it fails
-- The script checks that documentation matching the plan was created in `docs/features/` or `docs/`
+If the context file declares a related-docs scanner, collect the changed files
+(`git diff --name-only main...HEAD`) and run it to identify existing docs that
+may need updates. Otherwise rely on the `/do-docs` cascade in Step 7.6.
 
-**6.2 Scan for Related Documentation**
+**6.3 Create Review Issues for Discrepancies (optional)**
 
-Collect all changed files from git and scan for related docs:
-
-```bash
-(cd .worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
-```
-
-This identifies existing documentation that may need updates based on code changes.
-
-**6.3 Create Review Issues for Discrepancies**
-
-Pipe the scan results to create GitHub issues for HIGH/MED-HIGH confidence matches:
-
-```bash
-cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
-```
-
-This creates tracking issues for documentation that should be reviewed for updates.
+If a scanner ran and the context file declares an issue-creation helper, file
+review issues for HIGH/MED-HIGH confidence matches. Otherwise skip — the
+`/do-docs` cascade flags conflicts itself.
 
 ### Step 7: Create Pull Request
 
-After documentation gate passes, advance to the `pr` stage and push:
-
-```bash
-python -c "from agent.build_pipeline import advance_stage; advance_stage('{slug}', 'pr')"
-```
-
-Then push and create the PR. For cross-repo builds, use `$TARGET_REPO` and `--repo $TARGET_GH_REPO`:
+After the documentation gate passes, advance to the `pr` stage (if the context file declares a state machine), then push and create the PR. For cross-repo builds, use `$TARGET_REPO` and `--repo $TARGET_GH_REPO`:
 
 ```bash
 git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
@@ -462,7 +348,7 @@ gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Testing
 - [x] Unit tests passing
 - [x] Integration tests passing
-- [x] Linting (ruff, black) passing
+- [x] Lint/format checks passing
 
 ## Documentation
 - [x] Docs created per plan requirements
@@ -483,23 +369,18 @@ EOF
 
 ### Step 7.5: Worktree Cleanup
 
-After pushing and creating the PR, return to the repo root and clean up the worktree. The `cd` prevents CWD death if the shell is inside the worktree (issue #301):
+After pushing and creating the PR, return to the repo root and clean up the worktree. The `cd` to the repo root FIRST prevents CWD death if the shell is inside the worktree:
 
 ```bash
 # Return to repo root BEFORE cleanup (prevents CWD death)
-cd "${AI_REPO_ROOT:-$HOME/src/ai}"
+cd "$TARGET_REPO"
 
-python -c "
-from pathlib import Path
-from agent.worktree_manager import remove_worktree, prune_worktrees
-# Use TARGET_REPO for cross-repo builds, orchestrator repo for same-repo builds
-repo = Path('$TARGET_REPO')
-remove_worktree(repo, '{slug}', delete_branch=False)
-prune_worktrees(repo)
-"
+# Remove the worktree but KEEP the branch — the PR still references session/{slug}.
+git -C "$TARGET_REPO" worktree remove "$TARGET_REPO/.worktrees/{slug}"
+git -C "$TARGET_REPO" worktree prune
 ```
 
-Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged.
+If the context file declares a worktree manager, use its removal helper instead (it adds busy-session guards and stale-ref pruning). Do NOT delete the branch — it is cleaned up when the PR is merged.
 
 ### Step 7.6: Documentation Cascade
 
@@ -541,7 +422,7 @@ As the very last line of your final response, emit an OUTCOME contract so the pi
 - **Success** (PR created): `<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"<URL>"}} -->`
 - **Fail** (build failed, no PR): `<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{}} -->`
 
-This structured output is parsed by `classify_outcome()` in `agent/pipeline_state.py` (Tier 0) before any text pattern matching.
+This structured output is parsed by the repo's pipeline harness (Tier 0) before any text pattern matching — the context file names the exact parser when the repo has an SDLC pipeline.
 
 ## Agent Deployment Context
 
@@ -567,7 +448,7 @@ When deploying an agent, include:
 
 Both methods will execute the same plan if the plan file has:
 ```yaml
-tracking: https://github.com/valor-labs/ai/issues/42
+tracking: https://github.com/your-org/your-repo/issues/42
 ```
 
 ## Example Execution
@@ -605,7 +486,7 @@ After all tasks complete:
 - [x] Tested: Unit tests passing, integration tests passing
 - [x] Reviewed: Review passed (no blocking issues)
 - [x] Documented: Docs created after review (validated by docs gate)
-- [x] Quality: Ruff and Black checks pass
+- [x] Quality: the repo's lint/format checks pass
 - [x] Plans migrated: Plan moved from docs/plans/ to completed state
 
 ### Task Summary

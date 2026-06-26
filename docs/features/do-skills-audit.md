@@ -62,7 +62,7 @@ python .claude/skills/do-skills-audit/scripts/audit_skills.py --json
 
 ## Design Decisions
 
-- **Deterministic over LLM**: All 12 rules use regex/string matching, not AI inference. Reproducible, fast, no API costs.
+- **Deterministic over LLM**: All 13 rules use regex/string matching, not AI inference. Reproducible, fast, no API costs.
 - **Sync as default**: Best practices sync runs by default because staying aligned with Anthropic matters. Use `--no-sync` for speed.
 - **WARN vs FAIL**: Structural violations (broken links, missing frontmatter) are FAIL. Quality suggestions (trigger phrasing, classification hints) are WARN.
 - **Template variable awareness**: Rule 9 skips `{variable_name}` patterns in links to avoid false positives.

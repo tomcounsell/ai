@@ -20,6 +20,7 @@ sys.path.insert(
 
 from audit_skills import (  # noqa: E402
     AuditReport,
+    Finding,
     apply_fixes,
     audit_skill,
     discover_skills,
@@ -36,6 +37,7 @@ from audit_skills import (  # noqa: E402
     rule_10_duplicate_descriptions,
     rule_11_known_fields,
     rule_12_argument_hint,
+    rule_13_coupling_signals,
 )
 from sync_best_practices import (  # noqa: E402
     compare_fields,
@@ -229,12 +231,14 @@ class TestRule05DescriptionLength:
 
 
 class TestRule06InfraClassification:
+    # NOTE: `setup`/`prime` moved to project-only (issue #1783) and are no longer
+    # INFRA_SKILLS; `update` remains a representative infra skill.
     def test_infra_with_flag(self):
-        f = rule_06_infra_classification("setup", {"disable-model-invocation": True})
+        f = rule_06_infra_classification("update", {"disable-model-invocation": True})
         assert f.severity == "PASS"
 
     def test_infra_without_flag(self):
-        f = rule_06_infra_classification("setup", {})
+        f = rule_06_infra_classification("update", {})
         assert f.severity == "WARN"
 
     def test_non_infra(self):
@@ -497,3 +501,105 @@ class TestDiscovery:
         skills_dir.mkdir()
         paths = discover_skills(skills_dir, "nonexistent")
         assert len(paths) == 0
+
+
+# ---------------------------------------------------------------------------
+# Rule 13: coupling-signal guard (issue #1783)
+# ---------------------------------------------------------------------------
+
+import audit_skills as audit_mod  # noqa: E402
+
+LEANED_BODY = (
+    "## Repo context\n"
+    "If `.claude/skill-context/do-docs.md` exists, read it and honor its "
+    "declarations; otherwise use the generic defaults described below.\n\n"
+    "Run `sdlc-tool stage-marker` and `python -m tools.doc_impact_finder` "
+    "only when the context file declares them.\n"
+)
+
+COUPLED_BODY_NO_PROBE = (
+    "## Steps\n"
+    "1. Run `sdlc-tool stage-query` to read pipeline state.\n"
+    "2. Run `python -m tools.doc_impact_finder` over the diff.\n"
+)
+
+
+class TestRule13CouplingSignals:
+    def test_green_leaned_body_passes(self):
+        """Coupling signals present but with the probe step -> PASS, no FAIL."""
+        f = rule_13_coupling_signals("do-docs", LEANED_BODY)
+        assert f.severity == "PASS"
+        assert f.rule == 13
+
+    def test_red_coupled_without_probe_fails(self):
+        """Coupling signals without the probe step -> FAIL severity."""
+        f = rule_13_coupling_signals("do-docs", COUPLED_BODY_NO_PROBE)
+        assert f.severity == "FAIL"
+        assert f.rule == 13
+
+    def test_clean_body_passes(self):
+        f = rule_13_coupling_signals("generic-skill", "Just a normal generic body.")
+        assert f.severity == "PASS"
+
+    def test_doc_path_only_is_not_coupling(self):
+        """Doc-path/branch-name mentions are NOT coupling (executable-only set).
+
+        A bare see-also link to docs/features/ (or docs/plans/, session/{slug})
+        does not break execution in a foreign repo, so it must PASS even without
+        a probe — per plan Risk 2 the guard must not fire on Bucket A skills.
+        """
+        body = (
+            "See [`docs/features/byob-browser-control.md`](../../../docs/features/byob.md).\n"
+            "Plans live in `docs/plans/*.md`; branches use `session/{slug}`.\n"
+        )
+        f = rule_13_coupling_signals("mermaid-render", body)
+        assert f.severity == "PASS"
+
+    @pytest.mark.parametrize("body", ["", "no coupling here at all", "sdlc-tool"])
+    def test_edge_cases_return_finding_no_exception(self, body):
+        """Empty, coupling-only, and neither -> deterministic Finding, never raises."""
+        f = rule_13_coupling_signals("x", body)
+        assert isinstance(f, Finding)
+        assert f.rule == 13
+
+    def test_none_body_does_not_raise(self):
+        f = rule_13_coupling_signals("x", None)  # type: ignore[arg-type]
+        assert f.severity == "PASS"
+
+    def test_main_exits_nonzero_on_coupling_violation(self, tmp_path, monkeypatch):
+        """main() keys off summary['fail'] -> a FAIL coupling body yields exit code 1."""
+        skills_dir = tmp_path / "skills-global"
+        coupled = skills_dir / "coupled"
+        coupled.mkdir(parents=True)
+        (coupled / "SKILL.md").write_text(
+            '---\nname: coupled\ndescription: "Use when testing coupling."\n---\n'
+            + COUPLED_BODY_NO_PROBE
+        )
+
+        monkeypatch.setattr(audit_mod, "SKILLS_DIR", skills_dir)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["audit_skills.py", "--json", "--no-sync", "--skill", "coupled"],
+        )
+        exit_code = audit_mod.main()
+        assert exit_code == 1
+
+    def test_main_exits_zero_on_leaned_body(self, tmp_path, monkeypatch):
+        """A leaned (probed) body does not trip the red-state exit."""
+        skills_dir = tmp_path / "skills-global"
+        leaned = skills_dir / "leaned"
+        leaned.mkdir(parents=True)
+        (leaned / "SKILL.md").write_text(
+            '---\nname: leaned\ndescription: "Use when testing leaned bodies."\n---\n'
+            + LEANED_BODY.replace("do-docs.md", "leaned.md")
+        )
+
+        monkeypatch.setattr(audit_mod, "SKILLS_DIR", skills_dir)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["audit_skills.py", "--json", "--no-sync", "--skill", "leaned"],
+        )
+        exit_code = audit_mod.main()
+        assert exit_code == 0
