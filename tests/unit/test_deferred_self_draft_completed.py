@@ -1,25 +1,32 @@
 """Regression + failure-path tests for the deferred self-draft completed-path flush.
 
-Issue #1794: a session that defers a reply for self-draft and then reaches a
+Issue #1794 / #1797: a session that defers a reply for self-draft and then reaches a
 terminal status (``completed``, ``failed``, ``abandoned``) without redrafting
-must flush the held text to the human exactly once, on EVERY terminal path,
-via the single ``finalize_session`` chokepoint.
+must flush the held text to the human exactly once, on EVERY qualifying terminal
+path, via the single ``finalize_session`` chokepoint.
 
 The chokepoint invokes the synchronous helper
-``agent.session_health.flush_deferred_self_draft_sync(session)`` (placed in
+``agent.session_health.flush_deferred_self_draft_sync(session, status)`` (placed in
 ``models.session_lifecycle.finalize_session`` AFTER the idempotency early-return
 and the ``reject_from_terminal`` guard, BEFORE ``session.save()``). The helper:
 
   * reads the deferral flags from a FRESH authoritative session,
-  * gates telegram-only (``transport == "email"`` early-returns),
+  * gates on transport + status (see below),
   * SETNX-dedups on ``self_draft_completed_flush_sent:{session_id}`` (1 h),
   * applies the narration gate + empty-text canned notice,
-  * writes a telegram outbox payload via ``rpush`` to
-    ``telegram:outbox:{session_id}``.
+  * writes the outbox payload via ``rpush``.
 
-The async email-only helper ``_deliver_deferred_self_draft_fallback`` early-returns
-for telegram/None transport and dedups on a DISTINCT key
-``self_draft_fallback_sent:{session_id}``.
+**Transport routing:**
+
+  * telegram / None transport: proceeds for all terminal statuses; writes to
+    ``telegram:outbox:{session_id}``.
+  * email transport + ``status == "completed"``: proceeds; writes to
+    ``email:outbox:{session_id}`` (issue #1797 — the completed-path fix).
+  * email transport + other statuses (failed, abandoned, None): early-returns;
+    the async ``_deliver_deferred_self_draft_fallback`` owns those paths.
+
+The async email-only helper early-returns for telegram/None transport and dedups
+on a DISTINCT key ``self_draft_fallback_sent:{session_id}``.
 
 These tests use REAL Redis (the autouse ``redis_test_db`` fixture switches popoto
 to a per-worker test db), create REAL ``AgentSession`` records via the ORM, and
@@ -76,6 +83,21 @@ def _outbox_count(session_id: str) -> int:
     return _redis().llen(f"telegram:outbox:{session_id}")
 
 
+def _email_outbox_payloads(session_id: str) -> list[dict]:
+    """Return the decoded payloads in ``email:outbox:{session_id}`` (FIFO order)."""
+    raw = _redis().lrange(f"email:outbox:{session_id}", 0, -1)
+    out = []
+    for item in raw:
+        if isinstance(item, bytes):
+            item = item.decode("utf-8")
+        out.append(json.loads(item))
+    return out
+
+
+def _email_outbox_count(session_id: str) -> int:
+    return _redis().llen(f"email:outbox:{session_id}")
+
+
 def _make_session(
     session_id: str,
     *,
@@ -85,11 +107,19 @@ def _make_session(
     status: str = "running",
     chat_id: str = "12345",
     telegram_message_id: int = 263,
+    email_subject: str | None = None,
+    email_message_id: str | None = None,
+    email_to_addrs: list[str] | None = None,
+    email_cc_addrs: list[str] | None = None,
 ) -> AgentSession:
     """Create and SAVE a real running AgentSession with deferral flags.
 
     The session MUST be saved so the helper's authoritative re-read
     (``get_authoritative_session``) sees the deferral flags.
+
+    Email-specific parameters (``email_subject``, ``email_message_id``,
+    ``email_to_addrs``, ``email_cc_addrs``) are stamped into ``extra_context``
+    when provided, mirroring what ``bridge/email_bridge.py`` does at spawn time.
     """
     extra_context: dict = {}
     if transport is not None:
@@ -97,6 +127,14 @@ def _make_session(
     if pending:
         extra_context["deferred_self_draft_pending"] = True
         extra_context["deferred_self_draft_text"] = text if text is not None else ""
+    if email_subject is not None:
+        extra_context["email_subject"] = email_subject
+    if email_message_id is not None:
+        extra_context["email_message_id"] = email_message_id
+    if email_to_addrs is not None:
+        extra_context["email_to_addrs"] = email_to_addrs
+    if email_cc_addrs is not None:
+        extra_context["email_cc_addrs"] = email_cc_addrs
 
     return AgentSession.create(
         session_id=session_id,
@@ -118,7 +156,7 @@ def _make_session(
 
 @pytest.fixture
 def cleanup(redis_test_db):
-    """Track created session_ids; delete records + dedup keys + outbox in teardown."""
+    """Track created session_ids; delete records + dedup keys + outboxes in teardown."""
     created: list[str] = []
     yield created
     r = _redis()
@@ -130,6 +168,7 @@ def cleanup(redis_test_db):
             pass
         try:
             r.delete(f"telegram:outbox:{sid}")
+            r.delete(f"email:outbox:{sid}")
             r.delete(f"self_draft_completed_flush_sent:{sid}")
             r.delete(f"self_draft_fallback_sent:{sid}")
         except Exception:
@@ -273,25 +312,160 @@ def test_telegram_failed_or_abandoned_delivers_exactly_once(cleanup, terminal_st
 
 
 # ---------------------------------------------------------------------------
-# 5. Email-transport gate
+# 5. Email-transport delivery (#1797) — completed path writes to email:outbox
 # ---------------------------------------------------------------------------
 
 
-def test_email_transport_gate_writes_zero_telegram_outbox(cleanup):
-    """A session with extra_context['transport']=='email' reaching ``completed``
-    writes ZERO telegram outbox entries — the sync flush early-returns at the
-    transport gate (email coverage stays on the async helper)."""
-    sid = f"{SID_PREFIX}email-gate"
+def test_email_completed_delivers_to_email_outbox(cleanup, monkeypatch):
+    """Email + completed: the sync flush writes exactly one email:outbox entry
+    with the correct body, to, subject, in_reply_to, and from_addr — and writes
+    ZERO telegram:outbox entries.
+    """
+    monkeypatch.setenv("SMTP_USER", "robot@example.com")
+    sid = f"{SID_PREFIX}email-deliver"
     cleanup.append(sid)
-    session = _make_session(sid, text=ORIGINAL_REPLY, transport="email")
+    session = _make_session(
+        sid,
+        text=ORIGINAL_REPLY,
+        transport="email",
+        chat_id="sender@example.com",
+        email_subject="Sprint Review",
+        email_message_id="<orig123@host.example>",
+        email_to_addrs=["team@example.com"],
+        email_cc_addrs=[],
+    )
 
     finalize_session(session, "completed", reason="email completed")
 
-    assert _outbox_count(sid) == 0, (
-        "email transport must not produce a telegram outbox write at the sync chokepoint"
+    # Zero telegram outbox writes.
+    assert _outbox_count(sid) == 0, "email transport must not produce a telegram:outbox write"
+
+    # Exactly one email outbox entry.
+    email_payloads = _email_outbox_payloads(sid)
+    assert len(email_payloads) == 1, (
+        f"expected exactly one email:outbox write, got {len(email_payloads)}"
+    )
+    p = email_payloads[0]
+    assert p["body"] == ORIGINAL_REPLY, "body must be the verbatim held deferred text"
+    assert "sender@example.com" in p["to"], "primary recipient must be first in to"
+    assert p["subject"] == "Re: Sprint Review", "subject must have Re: prefix"
+    assert p["in_reply_to"] == "<orig123@host.example>", "in_reply_to must thread correctly"
+    assert p["from_addr"] == "robot@example.com", "from_addr must come from SMTP_USER"
+
+    # Terminal status write still happened.
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh.status == "completed"
+
+
+def test_email_completed_exactly_once_across_re_finalize(cleanup, monkeypatch):
+    """Calling flush_deferred_self_draft_sync twice (or finalize twice) for the
+    same email+completed session writes exactly ONE email:outbox entry — SETNX
+    dedup prevents the second write."""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}email-once"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=ORIGINAL_REPLY,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    flush_deferred_self_draft_sync(session, "completed")
+    # Second call: SETNX dedup should prevent a second write.
+    flush_deferred_self_draft_sync(session, "completed")
+
+    assert _email_outbox_count(sid) == 1, "SETNX dedup must prevent a second email:outbox write"
+
+
+def test_email_failed_zero_sync_flush_writes(cleanup, monkeypatch):
+    """Email + failed: the sync flush early-returns (status gate) so the
+    email:outbox receives ZERO writes.  The async helper owns that path."""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}email-failed"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=ORIGINAL_REPLY,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    finalize_session(session, "failed", reason="email failed gate test")
+
+    assert _email_outbox_count(sid) == 0, (
+        "email+failed must not produce an email:outbox write via the sync flush"
+    )
+    assert _outbox_count(sid) == 0, "no telegram:outbox write either"
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh.status == "failed"
+
+
+def test_email_abandoned_zero_sync_flush_writes(cleanup, monkeypatch):
+    """Email + abandoned: the sync flush early-returns (status gate) so the
+    email:outbox receives ZERO writes.  The async helper owns that path."""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}email-abandoned"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=ORIGINAL_REPLY,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    finalize_session(session, "abandoned", reason="email abandoned gate test")
+
+    assert _email_outbox_count(sid) == 0, (
+        "email+abandoned must not produce an email:outbox write via the sync flush"
     )
     fresh = list(AgentSession.query.filter(session_id=sid))[0]
-    assert fresh.status == "completed", "status write must still happen for email transport"
+    assert fresh.status == "abandoned"
+
+
+def test_email_completed_empty_text_canned_notice(cleanup, monkeypatch):
+    """Email + completed with empty/whitespace deferred text → the canned notice
+    is the email:outbox body, not a blank message."""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}email-canned"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text="   ",
+        transport="email",
+        chat_id="sender@example.com",
+        email_subject="Follow Up",
+    )
+
+    finalize_session(session, "completed", reason="email empty text")
+
+    email_payloads = _email_outbox_payloads(sid)
+    assert len(email_payloads) == 1
+    assert email_payloads[0]["body"] == CANNED_NOTICE, (
+        f"empty email deferred text must yield canned notice; got {email_payloads[0]['body']!r}"
+    )
+
+
+def test_email_completed_status_none_no_write(cleanup, monkeypatch):
+    """flush_deferred_self_draft_sync called directly with status=None for an
+    email session → no email:outbox write (status gate requires 'completed')."""
+    monkeypatch.delenv("SMTP_USER", raising=False)
+    sid = f"{SID_PREFIX}email-status-none"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=ORIGINAL_REPLY,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    from agent.session_health import flush_deferred_self_draft_sync
+
+    flush_deferred_self_draft_sync(session, status=None)
+
+    assert _email_outbox_count(sid) == 0, "status=None must not produce an email:outbox write"
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +482,7 @@ def test_flush_exception_does_not_block_terminal_status(cleanup, monkeypatch):
 
     import agent.session_health as session_health
 
-    def _boom(_session):
+    def _boom(_session, _status=None):
         raise RuntimeError("simulated flush failure")
 
     # finalize_session imports the symbol lazily from agent.session_health, so
@@ -322,6 +496,37 @@ def test_flush_exception_does_not_block_terminal_status(cleanup, monkeypatch):
     assert fresh.status == "completed", "a raising flush must not prevent the terminal status write"
     # No outbox write since the flush was replaced by the raising stub.
     assert _outbox_count(sid) == 0
+
+
+def test_email_flush_rpush_exception_does_not_block_terminal_status(cleanup, monkeypatch):
+    """If the Redis rpush inside the email flush branch raises, finalize_session
+    STILL writes the terminal status — the outer exception handler swallows it."""
+    import popoto.redis_db as rdb
+
+    sid = f"{SID_PREFIX}email-rpush-exception"
+    cleanup.append(sid)
+    session = _make_session(
+        sid,
+        text=ORIGINAL_REPLY,
+        transport="email",
+        chat_id="sender@example.com",
+    )
+
+    # Patch rpush on the live Redis handle so the email branch raises.
+    original_rpush = rdb.POPOTO_REDIS_DB.rpush
+
+    def _boom_rpush(key, *args, **kwargs):
+        if key.startswith("email:outbox:"):
+            raise RuntimeError("simulated email rpush failure")
+        return original_rpush(key, *args, **kwargs)
+
+    monkeypatch.setattr(rdb.POPOTO_REDIS_DB, "rpush", _boom_rpush)
+
+    # Must NOT raise — exception is swallowed inside flush_deferred_self_draft_sync.
+    finalize_session(session, "completed", reason="email rpush exception isolation")
+
+    fresh = list(AgentSession.query.filter(session_id=sid))[0]
+    assert fresh.status == "completed", "rpush failure must not prevent terminal status write"
 
 
 # ---------------------------------------------------------------------------
