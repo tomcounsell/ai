@@ -493,21 +493,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: projects.json: {projects_r.error}", v, always=True)
         result.warnings.append(f"projects.json: {projects_r.error}")
 
-    # Step 1.66: Ensure config/reflections.yaml is a symlink to the vault
+    # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
+    # symlink — the launchd worker's reflection scheduler reads it, and a
+    # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
     log("Verifying config/reflections.yaml...", v)
     result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
     refl_r = result.reflections_sync_result
     if refl_r.created:
-        log(
-            "config/reflections.yaml symlink created → ~/Desktop/Valor/reflections.yaml",
-            v,
-            always=True,
-        )
+        log("config/reflections.yaml copied from vault (was symlink or stale)", v, always=True)
+    elif refl_r.ok:
+        log("config/reflections.yaml OK (real file copy)", v)
     elif refl_r.skipped:
         log("config/reflections.yaml: vault not found, using in-repo fallback", v)
     if refl_r.error:
         log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
-        result.warnings.append(f"reflections.yaml symlink: {refl_r.error}")
+        result.warnings.append(f"reflections.yaml: {refl_r.error}")
 
     # Step 1.67: Bootstrap cross-machine zshenv loader.
     # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv

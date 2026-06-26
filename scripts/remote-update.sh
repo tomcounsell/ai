@@ -122,9 +122,12 @@ if [ -f "$REFLECTIONS_DST" ]; then
     echo "Removed legacy reflections launchd service: $REFLECTIONS_LABEL"
 fi
 
-# ── Sync config/reflections.yaml symlink ─────────────────────────────
+# ── Sync config/reflections.yaml (real file copy) ────────────────────
 # Vault file at ~/Desktop/Valor/reflections.yaml takes precedence over in-repo.
-# Idempotent: skips gracefully if vault file doesn't exist (fresh machine).
+# Must be a REAL COPY, never a symlink — the launchd worker's reflection
+# scheduler reads it, and a symlink to ~/Desktop hangs the asyncio event loop
+# under launchd TCC (June 2026 worker wedge). Idempotent: skips gracefully if
+# the vault file doesn't exist (fresh machine).
 "$PYTHON" -c "
 from scripts.update.env_sync import sync_reflections_yaml
 from pathlib import Path
@@ -132,9 +135,9 @@ result = sync_reflections_yaml(Path('$PROJECT_DIR'))
 if result.skipped:
     print('reflections.yaml: vault not found, using in-repo fallback')
 elif result.created:
-    print('reflections.yaml: symlink created → ~/Desktop/Valor/reflections.yaml')
-elif result.symlink_ok:
-    print('reflections.yaml: symlink OK')
+    print('reflections.yaml: copied from vault (was symlink or stale)')
+elif result.ok:
+    print('reflections.yaml: OK (real file copy)')
 elif result.error:
     print(f'reflections.yaml: WARNING - {result.error}')
 " 2>/dev/null || true

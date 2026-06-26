@@ -200,6 +200,27 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
         logged and skipped.
     """
     path = path or _resolve_registry_path()
+
+    # Defense in depth: under launchd, refuse to open() a path that resolves
+    # (through symlinks) into ~/Desktop. macOS TCC / iCloud eviction make the
+    # open() block indefinitely from a launchd agent, freezing the scheduler's
+    # asyncio task — and with it the whole worker event loop (June 2026 wedge:
+    # config/reflections.yaml was a symlink → ~/Desktop/Valor/reflections.yaml,
+    # silently defeating _resolve_registry_path's VALOR_LAUNCHD guard). realpath
+    # only readlink/lstats — it never opens the file, so it cannot hang here.
+    if os.environ.get("VALOR_LAUNCHD"):
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop") + os.sep
+        if os.path.realpath(path).startswith(desktop):
+            logger.error(
+                "Refusing to read reflections registry %s under launchd: it "
+                "resolves into ~/Desktop (realpath=%s), which blocks open() and "
+                "would freeze the worker. Reflections disabled until the local "
+                "copy is a real file (see scripts/update/env_sync.py).",
+                path,
+                os.path.realpath(path),
+            )
+            return []
+
     if not path.exists():
         logger.warning("Reflections registry not found at %s", path)
         return []
