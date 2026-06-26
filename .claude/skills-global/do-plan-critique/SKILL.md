@@ -7,23 +7,11 @@ context: fork
 
 # Plan Critique (War Room)
 
-## Stage Marker
+## Repo Context Probe
 
-At the very start of this skill, write an in_progress marker:
+If `docs/sdlc/do-plan-critique.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-```bash
-sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number "$ISSUE_NUMBER"
-```
-
-The completion marker is written in **Step 5.5**, co-located with the verdict record so the two can never desync. On a READY TO BUILD verdict, write the completion marker; on any other verdict, leave it `in_progress`. Step 5.5 is mandatory and reached on every exit path — see that step for the self-contained verdict-record + marker block:
-
-```bash
-# On READY TO BUILD verdict (written in Step 5.5, immediately after `verdict record`):
-sdlc-tool stage-marker --stage CRITIQUE --status completed --issue-number "$ISSUE_NUMBER"
-```
-
-Do NOT write the completion marker before the verdict is recorded, and do NOT record an APPROVED/READY verdict without the matching completion marker. They are a single unit.
-
+The context file is where a repo layers its SDLC automation onto this generic baseline: stage/status markers around the critique, the repo's mandated plan sections, force-FULL doctrine paths, a resume/roster-completion barrier (a crash-resume probe, a frozen roster manifest, a plan-hash guard, and a membership-gate CLI), a verdict-recording substrate the downstream pipeline reads, and a plan-revising lock. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, and the Agent tool — it dispatches critics in the foreground, waits for each to return its findings, aggregates, and prints a verdict (no repo-specific tooling required).
 
 ## What this skill does
 
@@ -123,11 +111,11 @@ This SOURCE_FILES block is passed to every critic in Step 3.
 Run these checks directly — no LLM needed:
 
 **2a. Required Sections**
-Verify these sections exist and are non-empty (per CLAUDE.md):
-- `## Documentation`
-- `## Update System`
-- `## Agent Integration`
-- `## Test Impact`
+Verify the plan's required sections exist and are non-empty. The context file
+declares which sections this repo mandates; absent a declaration, verify the
+plan's own structure is internally complete (problem, solution, tasks,
+verification). For reference, this repo mandates `## Documentation`,
+`## Update System`, `## Agent Integration`, and `## Test Impact`.
 
 **2b. Task Integrity**
 - Check for gaps in task numbering (e.g., 1, 2, 4 — missing 3)
@@ -155,32 +143,24 @@ Report structural findings with severity:
 - Non-existent file path → CONCERN (could be intentionally new)
 - Orphaned success criterion → CONCERN
 
-### Step 2b: Resume Probe
+### Step 2b: Resume Probe (only if the context file declares a roster barrier)
 
-Before triage or roster freeze, check for a reusable incomplete run dir from a prior crash:
+If the context file declares a crash-resume barrier, run its resume probe here:
+check for a reusable incomplete run dir from a prior crash, and if found, set
+`RESUMED=1`, reuse that dir's frozen roster, skip triage + roster freeze, and
+proceed directly to Step 3 to dispatch only the missing critics. Follow the
+context file's exact probe invocation and stale-dir GC instructions.
 
-```bash
-RESUME_DIR=$(critique-resume-probe --plan "$PLAN_PATH" --issue "$ISSUE_NUMBER" 2>/tmp/critique-resume-stale.txt)
-PROBE_EXIT=$?
-```
-
-If `$PROBE_EXIT == 0` (a reusable dir was found):
-- Set `CRITIQUE_RUN_DIR="$RESUME_DIR"` and `RESUMED=1`
-- GC any stale-hash sibling dirs printed on stderr: `cat /tmp/critique-resume-stale.txt | xargs -r rm -rf`
-- **Skip Step 2.6 (triage) and Step 3a (roster freeze)** — the surviving `_roster.json` defines the chosen path
-- Proceed directly to Step 3 (dispatch only missing critics)
-
-If `$PROBE_EXIT != 0` (no reusable dir):
-- Set `RESUMED=0`
-- Continue to Step 2.6 (triage) → Step 3a (roster freeze) → Step 3 (dispatch all critics)
+If no barrier is declared (the generic case), set `RESUMED=0` and continue to
+Step 2.6 (triage) → Step 3 (dispatch all critics). There is nothing to resume.
 
 ### Step 2.6: Triage (fresh path only — skip if RESUMED=1)
 
 Determine LITE (1 consolidated critic) or FULL (3 merged critics):
 
 **Deterministic force-FULL** — use FULL without an LLM call if ANY of:
-- The plan touches doctrine paths: `config/personas/`, `.claude/skills/`, `.claude/skills-global/`, `agent/sdlc_router.py`, `agent/pipeline_graph.py`, `.claude/hooks/`
-- The plan frontmatter has `appetite: Large`
+- The plan frontmatter has `appetite: Large` (or the repo's equivalent large-scope marker)
+- The plan touches doctrine paths the context file enumerates (high-risk areas a repo always wants the full war room to vet). If the context file declares no doctrine paths, this trigger does not apply.
 
 A LITE vote can never override force-FULL.
 
@@ -200,67 +180,43 @@ PLAN:
 
 Set `CRITIQUE_DEPTH` to `LITE` or `FULL` based on the result.
 
-### Step 3a: Compute and Freeze Roster Manifest
+### Step 3a: Fix the Critic Roster
 
-(Skip this step if RESUMED=1 — the surviving run dir already has `_roster.json` and `.plan_hash`.)
+(Skip this step if RESUMED=1 — the surviving run already defines the roster.)
 
-Before dispatching ANY critic, freeze the expected critic roster to a manifest file. This frozen manifest is the membership set that the Step 3.5 gate checks against — the gate cannot be satisfied by dispatching fewer critics than the manifest lists.
+Before dispatching ANY critic, fix the expected critic roster. This is the
+membership set the Step 3.5 completion check verifies — completion cannot be
+satisfied by dispatching fewer critics than the roster lists.
 
-1. **Compute the plan hash** for the stale-resume guard:
-   ```bash
-   PLAN_HASH=$(uv run --directory "${AI_REPO_ROOT:-$HOME/src/ai}" python -c "from tools.sdlc_verdict import compute_plan_hash; print(compute_plan_hash('$PLAN_PATH') or '')")
-   ```
+The roster follows from the triage depth:
+- **LITE** → `["Consolidated Critic"]` (1)
+- **FULL** → `["Risk & Robustness", "Scope & Value", "History & Consistency"]` (3)
 
-2. **Create the per-run directory** `${CRITIQUE_RUN_DIR}`, defaulting to `.critique-runs/{issue-or-slug}-{timestamp}/`, where `{timestamp}` is a **high-resolution** timestamp (`date +%s%N`, nanoseconds). Create it with `mkdir` **WITHOUT** the `-p` flag so a collision **fails loudly** (non-zero exit) instead of silently reusing a stale run dir's result files:
-
-   ```bash
-   ISSUE_OR_SLUG="${ISSUE_NUMBER:-$(basename "$PLAN_PATH" .md)}"
-   CRITIQUE_RUN_DIR=".critique-runs/${ISSUE_OR_SLUG}-$(date +%s%N)"
-   mkdir "$CRITIQUE_RUN_DIR"   # NO -p: a collision must fail loudly, never reuse a stale run dir
-   ```
-
-3. **Write the frozen roster manifest and plan hash**:
-
-   LITE path (CRITIQUE_DEPTH=LITE):
-   ```bash
-   cat > "$CRITIQUE_RUN_DIR/_roster.json" <<'JSON'
-   {"roster": ["Consolidated Critic"], "count": 1}
-   JSON
-   echo "$PLAN_HASH" > "$CRITIQUE_RUN_DIR/.plan_hash"
-   ```
-
-   FULL path (CRITIQUE_DEPTH=FULL):
-   ```bash
-   cat > "$CRITIQUE_RUN_DIR/_roster.json" <<'JSON'
-   {"roster": ["Risk & Robustness", "Scope & Value", "History & Consistency"], "count": 3}
-   JSON
-   echo "$PLAN_HASH" > "$CRITIQUE_RUN_DIR/.plan_hash"
-   ```
-
-This frozen manifest is the **membership set** that the Step 3.5 gate checks against: for every name in `_roster.json`, the corresponding `{name}.result.md` must exist and carry the terminal completion fence. **The gate cannot be satisfied by dispatching fewer critics than the manifest** — under-dispatch leaves a named roster member's result file missing, so the gate reports incomplete.
+If the context file declares a roster barrier (a frozen `_roster.json` manifest,
+a per-run directory, and a plan-hash stale-resume guard), create those artifacts
+exactly as it specifies — the frozen manifest is what makes the Step 3.5 gate
+mechanically verifiable across a crash. In the generic case, simply record the
+roster names in memory; the Step 3.5 check verifies each named critic returned
+its findings.
 
 ### Step 3: War Room (Parallel Critics)
 
 Read [CRITICS.md](CRITICS.md) for the full critic definitions and prompt templates.
 
-Dispatch **only critics whose `{name}.result.md` is absent or lacks the terminal fence** (on a fresh run, all roster members; on a resume, only those not yet completed). Read CRITICS.md for the 3 FULL critics and 1 Consolidated Critic (LITE). Each critic gets:
+Dispatch the roster's critics (on a fresh run, all roster members; on a resume, only those not yet completed). Read CRITICS.md for the 3 FULL critics and 1 Consolidated Critic (LITE). Each critic gets:
 - The full plan text
 - The SOURCE_FILES block (verified file contents from Step 1.5)
 - The issue context (if available)
 - Prior art summaries (if fetched)
 - Their specific lens and instructions from CRITICS.md
-- The `${CRITIQUE_RUN_DIR}` path and its own `{critic_name}` so it knows where to write its result file
 
 Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost.
 
-**Each critic writes its findings to a result file** `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`:
-- The critic writes its **findings body FIRST** — 0-3 findings (in the format below) or the literal `No findings.`
-- As its **FINAL action**, the critic appends a **two-line terminal completion fence**: the unique delimiter line `<<<CRITIQUE-RESULT-COMPLETE>>>` as the penultimate non-empty line, immediately followed by `STATUS: COMPLETED` as the last non-empty line.
-- The write **MUST be atomic**: write the full content to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`, then **rename** it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. The `.tmp` file and the canonical `.result.md` are both inside `${CRITIQUE_RUN_DIR}` (same filesystem), so the rename is **atomic** — a partial or truncated file is **never observed** at the canonical path, and a re-dispatched critic's overwrite can never expose a half-written file.
+**Generic completion model:** dispatch the critics in the **foreground** and wait for each to return its findings before aggregating. Each critic returns **0-3 findings** (or the literal `No findings.`).
 
-**Foreground vs. background dispatch is now a LATENCY preference only — it is NOT load-bearing for correctness.** The barrier is the **result-file membership check** in Step 3.5 (each named roster member's `{name}.result.md` must exist with the terminal completion fence), not whether the driver awaited the agents. Foreground single-message dispatch is recommended for latency, but completion is observed on the filesystem regardless of spawn mode. **Future readers: never re-introduce a "the harness awaits, so we're safe" prose-await dependency — that fire-and-forget assumption is exactly the bug this barrier replaces. The gate is the artifact, not the driver's await.**
+**If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file (atomic `.tmp`→rename) ending in a two-line terminal completion fence, and completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's exact write convention and pass each critic its run-dir path and `{critic_name}`. That barrier is the robust form for an environment where the agent driver may return early from a background dispatch; the generic foreground-and-wait model above is sufficient when the driver reliably blocks.
 
-Each critic returns **0-3 findings** (written into its result-file body) in this format:
+Each critic returns **0-3 findings** in this format:
 
 ```
 SEVERITY: BLOCKER | CONCERN | NIT
@@ -275,73 +231,77 @@ IMPLEMENTATION NOTE: [Required for CONCERN and BLOCKER severity. Exempt for NIT.
 
 NITs are exempt from the Implementation Note field. For CONCERN and BLOCKER findings, the note must be concrete: a specific guard condition (e.g., `if event: event.set()`), a call signature, or a "why" explanation that prevents naive application of the fix.
 
-### Step 3.5: Roster Membership Barrier (mandatory, runs BEFORE Step 4)
+### Step 3.5: Roster Completion Check (mandatory, runs BEFORE Step 4)
 
-This is the **barrier**. Completion is **observed on the filesystem** — a membership check against the frozen `_roster.json` manifest written in Step 3a — **independent of whether the driver awaited the critics**. You do NOT proceed to Step 4 (aggregation) until the gate reports the full roster complete, OR you record the `CRITIQUE INCOMPLETE` fallback after exhausting the re-dispatch cap.
+You do NOT proceed to Step 4 (aggregation) until every roster member fixed in
+Step 3a has returned its findings, OR you record the `CRITIQUE INCOMPLETE`
+fallback after exhausting the re-dispatch cap.
 
-**1. Invoke the gate.** Call `critique-roster-check` via the Bash tool against the run dir:
+**Generic check:** confirm each named roster member returned findings (or
+`No findings.`). If any are missing, re-dispatch ONLY the missing critics in the
+**foreground**, then re-check.
 
-```bash
-critique-roster-check --run-dir "$CRITIQUE_RUN_DIR"
-```
+**If the context file declares a membership-gate CLI**, invoke it against the run
+dir instead — it reads the frozen `_roster.json` manifest and verifies each
+named member's result file carries the terminal completion fence, printing a JSON
+gate decision (`{"complete": bool, "missing": [...], ...}`) and exiting non-zero
+until complete. This filesystem membership check holds whether or not the driver
+awaited the agents.
 
-It prints a JSON gate decision and sets its exit code:
-
-```json
-{"complete": false, "missing": ["Adversary","User"], "present": ["Skeptic","Operator","Archaeologist","Simplifier","Consistency Auditor"], "roster_count": 7, "completed_count": 5}
-```
-
-It exits `0` when `complete: true` (every frozen-roster member wrote a `{name}.result.md` carrying the terminal two-line completion fence), and **non-zero** otherwise. The gate is a **filesystem membership check against the frozen `_roster.json` manifest** — a missing or fence-less result file means that named roster member did not complete. Because completion is read off the filesystem, the barrier holds whether or not the driver chose to await the critic agents.
-
-**2. Bounded re-dispatch.** Define:
+**Bounded re-dispatch.** Define:
 
 ```
 MAX_CRITIC_REDISPATCH = 2
 ```
 
-If the gate reports `complete: false`, **re-dispatch ONLY the critics named in `missing`** — re-run each missing critic so it writes its `{name}.result.md` using the exact same atomic `.tmp`→rename + two-line terminal-fence convention from Step 3 (`<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` as the last two lines). Then re-run `critique-roster-check`. Repeat up to `MAX_CRITIC_REDISPATCH` rounds.
+If the roster is incomplete, re-dispatch ONLY the missing critics and re-check.
+Repeat up to `MAX_CRITIC_REDISPATCH` rounds. The total attempt budget is pinned:
+**1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts maximum per
+critic.** There is **NO unbounded retry loop** — the cap is named and fixed.
 
-The total attempt budget is pinned explicitly: **1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts maximum per critic.** There is **NO unbounded retry loop** — the cap is named and fixed.
+> **CRITICAL — re-dispatch is FOREGROUND.** The re-dispatch block must NEVER contain `run_in_background: true`. A background re-dispatch re-introduces exactly the fire-and-forget assumption this check replaces.
 
-> **CRITICAL — re-dispatch is FOREGROUND.** The re-dispatch block must NEVER contain `run_in_background: true`. Re-run each missing critic in the foreground. Spawn mode is irrelevant to correctness (the gate is the artifact, not the await), and a background re-dispatch would re-introduce exactly the fire-and-forget assumption this barrier replaces.
-
-**3. STOP-grade verdict on a still-incomplete roster.** If the roster is **STILL incomplete after `MAX_CRITIC_REDISPATCH` rounds**, do NOT aggregate and do NOT loop further. Jump to **Step 5.5** and record the verdict string:
+**STOP-grade verdict on a still-incomplete roster.** If the roster is **STILL
+incomplete after `MAX_CRITIC_REDISPATCH` rounds**, do NOT aggregate and do NOT
+loop further. Jump to **Step 5.5** and record the verdict string:
 
 ```
 MAJOR REWORK (CRITIQUE INCOMPLETE: roster N/M — missing: {names})
 ```
 
-Substitute `N` = the gate's `completed_count`, `M` = the gate's `roster_count`, and `{names}` = the gate's `missing` list (the critic names that never reported). Because the substring `MAJOR REWORK` matches the SDLC router's guard **G1** verbatim, this is a **router-consumable STOP** that routes back to `/do-plan` — the human sees exactly which critics never reported. The stage **ALWAYS produces a verdict**; it never returns empty and never lingers at `in_progress`. Then set the `plan_revising` lock per **Step 5.6** (a `CRITIQUE INCOMPLETE` verdict is revision-grade).
+Substitute `N` = completed count, `M` = roster count, `{names}` = the critic
+names that never reported. The `MAJOR REWORK` substring routes back to `/do-plan`
+(in a repo with an SDLC router its guard **G1** consumes it) — the human sees
+exactly which critics never reported. The stage **ALWAYS produces a verdict**; it
+never returns empty. Then set the plan-revising lock per **Step 5.6** (a
+`CRITIQUE INCOMPLETE` verdict is revision-grade).
 
 **Invariants (must hold on every path):**
 
-- **Never aggregate a partial set.** Step 4 runs only after the gate reports `complete: true`.
+- **Never aggregate a partial set.** Step 4 runs only after the roster is complete.
 - **Never record an empty verdict.** Every exit path records a concrete verdict string in Step 5.5.
-- **The verdict (Step 5.5) is recorded only when the gate reports `complete: true`, OR as the `CRITIQUE INCOMPLETE` fallback after the re-dispatch cap.** There is no third path.
-- **The incomplete-roster STOP is a recorded `MAJOR REWORK` verdict (G1-consumable), not a silent exit.**
-- **Only after the gate reports `complete: true` do you proceed to Step 4.**
+- **The incomplete-roster STOP is a recorded `MAJOR REWORK` verdict, not a silent exit.**
 
-**Run-dir cleanup gating.** After Step 5.5/5.6, clean up `${CRITIQUE_RUN_DIR}` **ONLY on the `complete: true` path**. On the incomplete / `CRITIQUE INCOMPLETE` path, **PRESERVE** `${CRITIQUE_RUN_DIR}` for forensics — the partial/missing result files are the diagnostic evidence of which critics never reported, and deleting them would destroy exactly what the STOP exists to surface.
-
-```bash
-# After the verdict is recorded (Step 5.5/5.6): clean up ONLY on the complete path.
-# On the incomplete path, PRESERVE the run dir for forensics — do NOT delete it.
-case "$VERDICT_STRING" in
-  *"CRITIQUE INCOMPLETE"*)
-    : ;;  # incomplete path — PRESERVE "$CRITIQUE_RUN_DIR" as forensic evidence
-  *)
-    # gate reported complete: true — safe to remove the ephemeral run dir
-    rm -rf "$CRITIQUE_RUN_DIR" ;;
-esac
-```
+**Run-dir cleanup gating (barrier only).** If the context file's barrier created
+a per-run directory, clean it up **ONLY on the complete path**. On the
+incomplete / `CRITIQUE INCOMPLETE` path, **PRESERVE** it for forensics — the
+partial/missing result files are the diagnostic evidence of which critics never
+reported.
 
 ### Step 4: Aggregate and Deduplicate
 
-The Step 3.5 gate has confirmed every roster member completed. Now aggregate from the result files.
+The Step 3.5 check has confirmed every roster member completed. Now aggregate
+their findings.
 
-**Aggregation invariant (mandatory): iterate every roster member in `${CRITIQUE_RUN_DIR}/_roster.json` (the frozen manifest) and read each roster member's `{name}.result.md`.** Name and read EVERY roster member listed in the manifest — do NOT "aggregate from the result files that are present" and do NOT skip a member because its file looks absent. A missing file at this point is a **visible gap** (the gate should already have caught it as incomplete and routed to re-dispatch or `CRITIQUE INCOMPLETE`), never a member silently dropped from aggregation. Reading by iterating the manifest — rather than by globbing whatever files happen to exist — is what guarantees an omitted critic surfaces as a gap instead of vanishing.
+**Aggregation invariant (mandatory): iterate every roster member fixed in Step 3a
+and read each one's findings.** Name and account for EVERY roster member — do NOT
+aggregate only "whatever happened to come back" and do NOT silently skip a member.
+A missing member at this point is a **visible gap** (Step 3.5 should already have
+caught it), never a member silently dropped from aggregation. (When the barrier is
+active, iterate the frozen `_roster.json` manifest and read each `{name}.result.md`
+rather than globbing whatever files exist.)
 
-1. Collect all findings (structural + critic), reading each roster member's `{name}.result.md` by iterating `_roster.json`
+1. Collect all findings (structural + critic), accounting for every roster member fixed in Step 3a
 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
 3. **Sort by severity**: BLOCKERs first, then CONCERNs, then NITs
 4. **Cross-validate**: If the Skeptic and Simplifier both flagged the same component, elevate to BLOCKER if not already
@@ -408,54 +368,41 @@ Output the final report in this format:
 - **MAJOR REWORK** — Fundamental issues identified. Recommend re-planning.
 ```
 
-### Step 5.5: Finalize — record verdict AND write completion marker (mandatory, self-contained)
+### Step 5.5: Finalize — record the verdict (mandatory, self-contained)
 
 This step is **mandatory and reached on EVERY exit path** — every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK) must pass through it. There is no path out of this skill that skips Step 5.5. Do not return control to a supervisor before completing it.
 
-After printing the verdict (Step 5), record it on the PM session so the SDLC router's Legal Dispatch Guards (G1, G5) can consume it. On a READY TO BUILD verdict, **co-locate** the completion stage-marker write with the verdict record so the verdict and the marker can never desync:
+**Generic case:** the verdict printed in Step 5 IS the recorded output — the caller reads it from your response. Nothing further to do.
 
-```bash
-# 1. Record the verdict (ALL verdicts) — mandatory.
-# Always pass --issue-number "$ISSUE_NUMBER" (quoted); ISSUE_NUMBER was
-# unconditionally assigned and validated in Plan Resolution (#1731).
-sdlc-tool verdict record --stage CRITIQUE \
-  --verdict "$VERDICT_STRING" --issue-number "$ISSUE_NUMBER"
+**If the context file declares a verdict-recording substrate** (so a downstream
+pipeline router can consume the verdict programmatically), record the verdict via
+that substrate now, and on a READY TO BUILD verdict **co-locate** the completion
+stage-marker write with the verdict record in the SAME block so the verdict and
+the marker can never desync. Follow the context file's exact invocation. Verdict
++ marker are a single unit on the READY path: never record one without the other.
+On any non-READY verdict, leave the stage marker at `in_progress`. Do NOT suppress
+substrate errors — a failed recording must surface as a visible non-zero exit.
 
-# 2. On a READY TO BUILD verdict ONLY, write the completion marker in the
-#    SAME block, immediately after the verdict record. Verdict + marker are a
-#    single unit: never record one without the other on the READY path.
-# NOTE: do NOT suppress with 2>/dev/null || true — a marker failure must
-# surface as a visible non-zero exit so the supervisor sees the error (#1731).
-case "$VERDICT_STRING" in
-  *"READY TO BUILD"*)
-    sdlc-tool stage-marker --stage CRITIQUE --status completed \
-      --issue-number "$ISSUE_NUMBER"
-    ;;
-esac
-```
+`$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`).
 
-Where `$VERDICT_STRING` is the exact verdict string emitted in Step 5 (e.g. `"NEEDS REVISION"`, `"READY TO BUILD (with concerns)"`). **Always pass `--issue-number "$ISSUE_NUMBER"` (quoted)** — it is the authoritative session selector and guarantees the verdict lands on the same session the router reads for that issue (`sdlc-local-{N}` or the bridge PM session that owns the issue). The variable is unconditionally assigned and validated in Plan Resolution — it is always a positive integer by the time Step 5.5 runs. A forked subagent that inherited a parent's env-var session is protected because the Plan Resolution block clobbers any inherited value and asserts a positive integer (#1731/#1671/#1672).
+### Step 5.6: Set plan-revising lock (only if the context file declares one)
 
-The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. On a non-READY verdict, leave the CRITIQUE marker at `in_progress` (the router's row 3 / row 2b handle re-routing).
-
-### Step 5.6: Set plan-revising lock (mandatory when revision is needed)
-
-After recording the verdict, set the `plan_revising` lock on the PM session whenever the verdict requires a revision pass AND `revision_applied` is not already set in the plan frontmatter. This lock activates guard G7 in the SDLC router, which blocks `/do-build` until `/do-plan` completes the revision and clears the lock.
+If the context file declares a plan-revising lock (a flag a downstream router
+reads to block build dispatch until a revision pass completes), set it after
+recording the verdict whenever the verdict requires a revision pass AND
+`revision_applied` is not already `true` in the plan frontmatter. Follow the
+context file's exact invocation.
 
 Set the lock when the verdict is one of:
 - `NEEDS REVISION`
 - `MAJOR REWORK`
 - `READY TO BUILD (with concerns)` — and `revision_applied` is not already `true` in the plan frontmatter
 
-```bash
-# Set plan_revising lock after verdict record, when revision is needed
-sdlc-tool meta-set --key plan_revising --value true \
-  --issue-number "$ISSUE_NUMBER"
-```
+**Do NOT set the lock** when the verdict is `READY TO BUILD (no concerns)` — no revision pass is needed.
 
-**Do NOT set the lock** when the verdict is `READY TO BUILD (no concerns)` — no revision pass is needed and the lock would incorrectly block build dispatch.
+**Do NOT set the lock** when `revision_applied: true` is already in the plan frontmatter — the revision has already been applied.
 
-**Do NOT set the lock** when `revision_applied: true` is already in the plan frontmatter — the revision has already been applied and the lock would be immediately self-healed by G7 anyway.
+In the generic case (no lock declared), skip this step — the printed verdict already tells the caller whether a revision pass is needed.
 
 ## Outcome Contract
 
