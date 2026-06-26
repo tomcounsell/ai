@@ -73,20 +73,25 @@ FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit
 # global skill in skills-global/ ships to every machine and runs in every repo,
 # so any of these tokens in the body means the skill leaks ai-repo specifics
 # unless it defers to the per-repo skill-context seam via the canonical probe
-# step. The set covers: the SDLC stage-marker CLI (sdlc-tool), this repo's
-# Python tool families (python -m tools.*, tools.doc_impact_finder, reflections.*),
-# the valor-* CLI wrappers, repo-specific doc paths (docs/features/, docs/plans/),
-# the identity config, and the slug-scoped branch convention (session/{slug}).
+# step.
+#
+# The set is deliberately limited to EXECUTABLE / IMPORT references — invocations
+# that actually *error or silently misfire* in a foreign repo (the plan's exact
+# concern): the SDLC stage-marker CLI (sdlc-tool), this repo's Python tool/module
+# families (python -m tools.*, reflections.*), the valor-* CLI wrappers, and the
+# identity config (config/identity.json) the harness reads at runtime.
+#
+# It deliberately EXCLUDES weak doc-path / branch-name tokens (docs/features/,
+# docs/plans/, session/{slug}). A bare see-also markdown link to docs/features/
+# does NOT break execution in another repo — treating it as coupling produced
+# false-positives on Bucket A skills the plan declares clean (mermaid-render,
+# reclassify, do-discover-paths). Per plan Risk 2 the guard must not fire on them.
 COUPLING_SIGNALS: tuple[str, ...] = (
     "sdlc-tool",
-    "reflections.",
     "python -m tools.",
-    "tools.doc_impact_finder",
+    "reflections.",
     "valor-",
-    "docs/features/",
-    "docs/plans/",
     "config/identity.json",
-    "session/{slug}",
 )
 
 # The canonical probe-step suffix (issue #1783). A leaned body that carries a
@@ -348,11 +353,17 @@ def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
     """Global skill bodies with ai-repo coupling MUST defer to the skill-context seam.
 
     A skill under skills-global/ ships to every machine and runs in every repo.
-    If its body contains any token from COUPLING_SIGNALS (sdlc-tool, valor-*,
-    python -m tools.*, reflections.*, repo-specific doc paths, etc.) it leaks
-    this repo's specifics into every repo — UNLESS it carries the canonical
-    probe step (PROBE_SUFFIX), which makes the body defer to the per-repo
-    skill-context seam (docs/sdlc/{skill}.md or .claude/skill-context/{skill}.md).
+    If its body contains any token from COUPLING_SIGNALS — the EXECUTABLE/IMPORT
+    set (sdlc-tool, python -m tools.*, reflections.*, valor-*, config/identity.json)
+    that actually errors or silently misfires in a foreign repo — it leaks this
+    repo's specifics into every repo, UNLESS it carries the canonical probe step
+    (PROBE_SUFFIX), which makes the body defer to the per-repo skill-context seam
+    (docs/sdlc/{skill}.md for SDLC skills, or .claude/skill-context/{skill}.md).
+
+    The signal set is intentionally executable-only: weak doc-path/branch-name
+    mentions (docs/features/, docs/plans/, session/{slug}) are NOT coupling — a
+    see-also markdown link does not break execution elsewhere — and including
+    them false-positived Bucket A skills the plan declares clean (plan Risk 2).
 
     Emits severity FAIL (not WARN) for a genuine violation: main() returns a
     non-zero exit code only when summary["fail"] > 0, so a WARN would never trip

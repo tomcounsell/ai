@@ -541,6 +541,20 @@ class TestRule13CouplingSignals:
         f = rule_13_coupling_signals("generic-skill", "Just a normal generic body.")
         assert f.severity == "PASS"
 
+    def test_doc_path_only_is_not_coupling(self):
+        """Doc-path/branch-name mentions are NOT coupling (executable-only set).
+
+        A bare see-also link to docs/features/ (or docs/plans/, session/{slug})
+        does not break execution in a foreign repo, so it must PASS even without
+        a probe — per plan Risk 2 the guard must not fire on Bucket A skills.
+        """
+        body = (
+            "See [`docs/features/byob-browser-control.md`](../../../docs/features/byob.md).\n"
+            "Plans live in `docs/plans/*.md`; branches use `session/{slug}`.\n"
+        )
+        f = rule_13_coupling_signals("mermaid-render", body)
+        assert f.severity == "PASS"
+
     @pytest.mark.parametrize("body", ["", "no coupling here at all", "sdlc-tool"])
     def test_edge_cases_return_finding_no_exception(self, body):
         """Empty, coupling-only, and neither -> deterministic Finding, never raises."""
