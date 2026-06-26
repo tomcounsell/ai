@@ -1,6 +1,6 @@
 ---
 name: do-voice-recording
-description: "Turn text into a spoken-audio file (OGG/Opus) from any project or directory. Kokoro local voice with OpenAI tts-1 cloud fallback. The canonical text-to-speech step — other skills (/do-presentation, /do-debrief) defer to this for synthesis. Use when asked to 'record a voiceover', 'narrate this', 'speak this', 'read this aloud', 'say this', 'make an audio/voice clip', or 'text to speech', e.g. recording narration after building a presentation."
+description: "Turn text into a spoken-audio file (OGG/Opus) from any project or directory. The canonical text-to-speech step — other skills (/do-presentation, /do-debrief) defer to this for synthesis. Use when asked to 'record a voiceover', 'narrate this', 'speak this', 'read this aloud', 'say this', 'make an audio/voice clip', or 'text to speech', e.g. recording narration after building a presentation."
 argument-hint: "<text> [--output <path.ogg>] [--voice <name>] [--force-cloud]"
 allowed-tools: Bash, Read
 user-invocable: true
@@ -8,65 +8,31 @@ user-invocable: true
 
 # /do-voice-recording — Text → Spoken Audio
 
-The single, simple text-to-speech surface for the whole system. Hand it text, get back an OGG/Opus file. Works from **any** directory on **any** machine, and every other skill that needs synthesis (`/do-presentation` voiceovers, `/do-debrief` voice notes) defers to this rather than reimplementing it.
+The single, simple text-to-speech surface for the whole system. Hand it text, get back a spoken-audio file (OGG/Opus). Every other skill that needs synthesis (`/do-presentation` voiceovers, `/do-debrief` voice notes) defers to this rather than reimplementing it.
 
-## Why this skill exists
+## Repo Context Probe
 
-`valor-tts` is registered in `~/src/ai/pyproject.toml [project.scripts]` and is only on `PATH` when that venv is active. From any other project the capability is invisible — which is the whole reason this skill exists: it makes TTS **discoverable and invocable regardless of cwd**, and it is the one place the synthesis mechanics (binary resolution, flags, prosody) are documented. It is listed in every machine's skill registry once `/update` hardlinks `.claude/skills-global/` into `~/.claude/skills/`.
+If `.claude/skill-context/do-voice-recording.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-## Resolve the binary (portable)
+The context file is where a repo declares the actual TTS CLI this skill drives: how to resolve the binary portably regardless of cwd, the synthesize command and its flags, the voice catalog, and how to deliver the result (e.g. as a chat voice note). When the file is absent (the common case in a foreign repo), follow the generic baseline below.
 
-Never assume `valor-tts` is on `PATH`. Resolve it in this order:
+## Generic baseline — TTS requires a repo-provided CLI
 
-```bash
-TTS="$(command -v valor-tts || true)"
-[ -z "$TTS" ] && [ -x "$HOME/src/ai/.venv/bin/valor-tts" ] && TTS="$HOME/src/ai/.venv/bin/valor-tts"
-[ -z "$TTS" ] && { echo "valor-tts not found — is the ~/src/ai venv installed? Run /update there." >&2; exit 1; }
-```
+Text-to-speech is not a capability the bare environment provides — it needs a synthesis engine. This skill does not bundle one; it drives whatever TTS CLI the repo supplies and documents in its context file.
 
-`$HOME/src/ai/.venv/bin/valor-tts` is correct on every machine (the repo lives at `~/src/ai` regardless of the OS username). Invoking by absolute path works from any cwd — the binary's shebang points at its own venv interpreter.
-
-## Synthesize
-
-```bash
-OUT="${OUTPUT:-$(mktemp -t voice).ogg}"
-"$TTS" --text "$TEXT" --output "$OUT" ${VOICE:+--voice "$VOICE"} ${FORCE_CLOUD:+--force-cloud} || {
-    echo "Synthesis failed" >&2
-    rm -f "$OUT"
-    exit 1
-}
-echo "$OUT"
-```
-
-## Flags
-
-| Flag | Meaning |
-|------|---------|
-| `--text` / `-t` | Text to synthesize. Empty or >4096 chars is rejected. |
-| `--output` / `-o` | Destination OGG/Opus path. Overwritten if it exists. Defaults to a `mktemp` file if the user didn't name one. |
-| `--voice` / `-v` | Voice name (e.g. `af_bella`, `am_michael`, `nova`). `default` uses the backend's canonical voice. Cross-backend names remap automatically. Catalog: `~/src/ai/tools/tts/README.md`. |
-| `--force-cloud` | Skip Kokoro and use OpenAI tts-1 even if Kokoro is available. |
+- **Context file present** → resolve and invoke the declared TTS command exactly as it specifies, passing the user's text and any `--voice` / output options. It returns (or names) the produced audio file path.
+- **Context file absent** → the synthesis dependency is unavailable in this repo. Tell the user that text-to-speech requires a repo-provided CLI which this repo does not declare, and stop gracefully. Do **not** attempt to install, download, or hand-roll a TTS engine — that is out of scope for a portable skill.
 
 ## Prosody (when the audio is for a listener, not a test)
 
-If the text will actually be heard, apply these read-aloud rules:
+If the text will actually be heard, apply these read-aloud rules regardless of which backend synthesizes it:
 
 - **Never recite multi-digit identifiers** (issue/PR/port numbers). TTS reads "1195" as "one thousand one hundred ninety-five" — wasted attention. Refer to things by substance.
 - **Contractions** read more naturally than expanded forms.
-- **Proper-noun respelling** for prosody (e.g. spell "Yudame" as `You-duh-may`). Dictionary-style hints only — never IPA in slashes; the phonemizer reads `/.../` literally and doubles the clip length.
+- **Proper-noun respelling** for prosody (e.g. spell "Yudame" as `You-duh-may`). Dictionary-style hints only — never IPA in slashes; phonemizers tend to read `/.../` literally and double the clip length.
 
 ## Delivering the result
 
-This skill only produces a file. To send it as a Telegram voice note:
-
-```bash
-valor-telegram send --chat "<chat>" --voice-note --cleanup-after-send --audio "$OUT"
-```
+This skill only produces a file. Delivering it (e.g. sending it as a chat voice note) is a separate step. If the context file declares a delivery command, use it; otherwise report the file path and let the caller decide how to deliver it.
 
 For a *constructed* executive brief (categorize → draft → review-gate → speak → send), use `/do-debrief`, which calls this skill for its synthesis step.
-
-## Related references
-
-- `~/src/ai/tools/tts/README.md` — full API, voice catalog, troubleshooting
-- `~/src/ai/docs/features/tts.md` — dual-backend (Kokoro/OpenAI) design rationale
-- `/do-debrief` — Telegram executive-voice-brief composite that defers here for synthesis

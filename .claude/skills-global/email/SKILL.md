@@ -7,27 +7,25 @@ user-invocable: true
 
 # Email
 
-Reach for the lightest tool that does the job. Walk the four-tier ladder below
+Reach for the lightest tool that does the job. Walk the tool ladder below
 top to bottom, trying each tier first and falling through to the next ONLY on
 tool absence OR auth failure. **Never use BYOB browser automation for a simple
 read or send** — it is slow, flaky, and burns browser context. BYOB is a last
 resort for tasks no CLI/MCP path can do at all.
 
+## Repo Context Probe
+
+If `.claude/skill-context/email.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares a faster project-local mail CLI (e.g. a Redis-cached mail CLI) to try as **Tier 1**, above the generic ladder. When the file is absent (the common case in a foreign repo), start the ladder at Tier 2 (`gws gmail`) — the generic tiers below need nothing beyond a Google Workspace login or an interactive MCP session.
+
 ## Tool Ladder (priority order)
 
-### Tier 1 — `valor-email` (preferred: Redis-cached, fastest)
+### Tier 1 — project mail CLI (only if the context file declares one)
 
-The project email CLI. Reads hit a Redis history cache (fast); sends queue via
-the email relay. Use this first whenever it is on PATH.
-
-```bash
-valor-email read --limit 5
-valor-email read --search "deployment" --since "2 hours ago"
-valor-email send --to alice@example.com --subject "Re: Deploy" "Looks good"
-```
-
-Fall through to Tier 2 if `valor-email` is not on PATH, or a read/send fails
-because the bridge/relay is unreachable.
+If the context file declares a fast project email CLI, try it first for both read and send.
+Fall through to Tier 2 if it is not on PATH, or a read/send fails because its backing
+service is unreachable. If no context file is present, skip this tier entirely.
 
 ### Tier 2 — `gws gmail` (Google Workspace CLI, direct API)
 
@@ -67,6 +65,6 @@ above is available.
 - **Fall through on absence OR auth failure**, not just absence. A present-but-
   unauthenticated `gws` must hand off to the next tier — do not stall on it.
 - **Never use BYOB for a simple read or send.** If you find yourself opening a
-  browser to read the inbox, stop and re-walk the ladder from Tier 1.
+  browser to read the inbox, stop and re-walk the ladder from the top.
 - **Draft-first for composition.** When sending on the user's behalf, prefer a
   draft the user reviews unless explicitly told to send.
