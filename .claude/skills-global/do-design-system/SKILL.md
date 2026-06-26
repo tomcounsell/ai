@@ -24,6 +24,12 @@ Do **not** use when the moodboard is abstract (vibes only, no reusable
 motifs) or when the existing system already matches — additive changes
 without a concrete signal waste effort.
 
+## Repo Context Probe
+
+If `.claude/skill-context/do-design-system.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The moodboard scrape, `.pen` JSON editing, motif tables, and gap-audit log are all generic — they need only a browser surface and a JSON-editable `.pen`. The context file declares the repo-specific machinery for Steps 5–7: the **deterministic generator** that emits downstream artifacts (`brand.css`, `source.css`, `design-system.md`) from the `.pen` source, any **PreToolUse hooks** that guard those generated artifacts, and the reference implementation. When the file is absent (the common case in a foreign repo), there is no generator — sync `brand.css` from the `.pen` variables by hand (Step 6) and skip the hook-specific guidance.
+
 ## Scope
 
 This skill edits ONLY:
@@ -317,29 +323,17 @@ proceed on assumed approval.
 
 ## Step 5 — Apply edits to `design-system.pen`
 
-### Safety-gate updates (two parts)
+### Safety-gate update
 
-The skill's safety gate has two distinct enforcement layers, both
-intentional:
+Before any `.pen` write, paste and execute the inline Python assertion below. It pins the write
+target to `design-system.pen` and refuses any other path. **Scope: the `.pen` source only.**
 
-- **Layer A — inline Python assertion (agent-level, runtime).** Paste and
-  execute the block below before any `.pen` write. It pins the write
-  target to `design-system.pen` and refuses any other path. **Scope: the
-  `.pen` source only.** It is intentionally not a guard for the
-  generated artifacts (`design-system.md`, `brand.css`, `source.css`) —
-  the assertion's `target` is hardcoded to the `.pen`, so an additional
-  `endswith("brand.css")` check on the same `target` would be vacuous.
-- **Layer B — `validate_design_system_readonly.py` PreToolUse hook
-  (tool-level, runtime).** Registered in `.claude/settings.json` against
-  the `Write`/`Edit` matchers. **Scope: the generated artifacts.** It
-  blocks any direct Write/Edit tool call against `design-system.md`,
-  `brand.css`, or `source.css` regardless of whether this skill is
-  active. This is the real enforcement for the generated-artifact case.
-
-The two layers are complementary, not redundant: Layer A discriminates
-the correct `.pen` write path from a wrong `.pen` write path; Layer B
-discriminates a write to a generated artifact from a write to anything
-else. Do NOT remove either; they cover different call paths.
+A repo may *also* register a tool-level PreToolUse hook that blocks direct Write/Edit against the
+generated artifacts (`design-system.md`, `brand.css`, `source.css`) regardless of whether this
+skill is active — the context file declares it if present. The two guards are complementary: the
+inline assertion discriminates the correct `.pen` write path from a wrong `.pen` write path; the
+hook discriminates a write to a generated artifact from a write to anything else. Where both
+exist, do NOT remove either.
 
 ```python
 from pathlib import Path
@@ -436,73 +430,37 @@ doc2 = json.loads(p.read_text())
 You can then re-open in Pencil (`mcp__pencil__open_document`) — the
 editor will reload the on-disk state.
 
-## Step 6 — Run the generator
+## Step 6 — Sync downstream CSS
 
-CSS files, `design-system.md`, and DTCG / Tailwind exports are GENERATED
-from `design-system.pen`. Do NOT hand-edit `brand.css`, `source.css`, or
-`design-system.md` — the `validate_design_system_readonly.py` PreToolUse
-hook will block the Write/Edit tool call, and the
-`validate_design_system_sync.py` hook will block the commit if drift is
-detected.
+Downstream artifacts — `brand.css` (`:root` tokens), `source.css` (Tailwind `@theme` bridge), and
+any `design-system.md` — must mirror the `.pen` source 1:1.
 
-Run the generator:
-
-```bash
-python -m tools.design_system_sync --all \
-    --pen <consumer-repo>/docs/designs/design-system.pen \
-    --css-root <consumer-repo>/<css-root>
-```
-
-Or rely on `design-system-sync.toml` adjacent to the `.pen`:
-
-```bash
-python -m tools.design_system_sync --all \
-    --pen <consumer-repo>/docs/designs/design-system.pen
-```
-
-Verify lint exits 0:
-
-```bash
-npx --no-install @google/design.md lint \
-    <consumer-repo>/docs/designs/design-system.md
-```
-
-The generator is deterministic: running twice produces byte-identical
-output. If you need to force regeneration (e.g. after a `.pen` pattern
-change), re-run `--all` and stage the resulting artifacts.
+- **Context file declares a generator** → run it exactly as specified. Such a generator is
+  typically deterministic (running twice produces byte-identical output) and emits every artifact
+  from the `.pen`. In that case do NOT hand-edit the generated files — the repo may register a
+  PreToolUse hook that blocks direct Write/Edit against them and a commit-time hook that blocks on
+  drift. Follow the context file's invocation and lint step.
+- **No context file (generic case)** → there is no generator. Hand-edit `brand.css` so its token
+  names and values match the `.pen` variables exactly (and `source.css` if the project uses
+  Tailwind). Token-name divergence between the `.pen` and the CSS is silent, so mirror them
+  carefully.
 
 For each new component, decide whether to ship a CSS class now or defer
 until a template needs it. Speculative classes rot; defer is usually
 right.
 
-**Note on Node:** `--all` requires `node` + `npx` (for lint + exports).
-`--generate` alone auto-falls back to Python-only emission when Node is
-absent (pass `--no-node` to be explicit). See
-`docs/features/design-system-tooling.md` for the full Node-absent
-fallback semantics.
-
 ## Step 7 — Produce the gap-audit diff (before commit)
 
-Run `--audit` BEFORE `git commit`. The audit diffs against
-`HEAD:<pen-dir>/design-system.md`, so `HEAD` must still hold the PRIOR
-pass's `design-system.md`. Running `--audit` after commit produces an
-empty diff; the generator emits a stderr `--stale-warn` when it detects
-that case.
+Record what this pass changed in `gap-audit.md` as a dated section, BEFORE `git commit`.
 
-Canonical sequence:
+- **Context file declares a generator with an audit mode** → run its audit step (which diffs the
+  regenerated artifacts against `HEAD`) before committing, and follow its ordering constraints
+  (the diff must be produced while `HEAD` still holds the prior pass's generated state). Paste its
+  output into `gap-audit.md`.
+- **No context file (generic case)** → hand-write the dated section: list the variable edits, new
+  components, and downstream CSS updates this pass made.
 
-```bash
-# 1. Regenerate every artifact from the updated .pen
-python -m tools.design_system_sync --all --pen <path-to>/design-system.pen
-
-# 2. Produce the diff table (goes to stdout)
-python -m tools.design_system_sync --audit --pen <path-to>/design-system.pen
-
-# 3. Paste the audit output into gap-audit.md under a new dated heading,
-#    THEN `git add` + `git commit`.
-```
-
-Append the audit output to `<pen-dir>/gap-audit.md` under:
+Append the audit/change summary to `<pen-dir>/gap-audit.md` under:
 
 ```markdown
 ## YYYY-MM-DD — <theme slug>
@@ -554,32 +512,20 @@ gap-audit additions. Reference moodboard pass folder.>
 
 ## Reference implementation
 
-Commit `a702484` on `yudame/cuttlefish` main (moodboard pass,
-2026-04-20):
-
-- Moodboard source: `https://www.cosmos.so/tomcounsell/yudame-research`
-- Files changed: `docs/designs/pencil-design-system.pen` (legacy name,
-  now `design-system.pen`), `static/css/brand.css`,
-  `static/css/source.css`,
-  `docs/designs/pencil-design-gap-audit.md` (legacy name, now
-  `gap-audit.md`), `docs/designs/inspiration/` (19 images, flat — now
-  would be `inspiration/2026-04-20-research-editorial/`).
-- Shape: 3 variable edits + 5 new components, no renames, no deletions.
+A worked reference implementation (a real moodboard pass: variable edits + new components, no
+renames or deletions) is recorded in `.claude/skill-context/do-design-system.md` when the repo
+declares one.
 
 ## Version history
 
-- v1.2.1 (2026-04-25): Clarified the safety-gate two-layer scope.
-  Layer A (inline Python assertion) covers the `.pen` source path only;
-  Layer B (PreToolUse `validate_design_system_readonly.py` hook) covers
-  generated artifacts. Removed three vacuous `endswith()` asserts that
-  would never fire because Layer A's `target` is hardcoded to the
-  `.pen` file.
-- v1.2.0 (2026-04-24): Steps 6 and 7 rewritten to invoke
-  `python -m tools.design_system_sync` (`--all` for regeneration,
-  `--audit` for the gap-audit diff). Added
-  `validate_design_system_readonly.py` PreToolUse hook for tool-level
-  writes to generated artifacts (Layer B of the safety gate). See
-  `docs/features/design-system-tooling.md`.
+- v1.3.0 (2026-06-26): Leaned to a repo-agnostic baseline. The deterministic downstream-artifact
+  generator, the PreToolUse safety hooks, and the reference implementation moved to
+  `.claude/skill-context/do-design-system.md`; added the repo-context probe. Steps 6–7 now sync
+  CSS by hand when no generator is declared.
+- v1.2.1 (2026-04-25): Clarified the safety-gate two-layer scope (inline `.pen` assertion vs the
+  tool-level PreToolUse guard on generated artifacts).
+- v1.2.0 (2026-04-24): Steps 6 and 7 rewritten to invoke the repo's deterministic design-system
+  generator (regeneration + gap-audit diff) plus a PreToolUse guard on generated artifacts.
 - v1.1.0 (2026-04-20): Added `charter.md` enforcement, file-organization
   Step 0, `product/` subfolder for non-system `.pen` files, safety gate
   on `.pen` writes, dated inspiration folders with per-pass READMEs,
