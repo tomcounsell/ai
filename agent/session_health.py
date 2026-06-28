@@ -2558,6 +2558,60 @@ async def _agent_session_health_check() -> None:
             worker_alive = worker is not None and not worker.done()
 
             if worker_alive:
+                # Slot-exhaustion forensic line (Deliverable D, issue #1808).
+                # Logging-ONLY — the ``event.set(); continue`` recovery decision is
+                # unchanged. Detects the suspension-wedge that asyncio set_debug is
+                # blind to (C1 limitation): a worker loop parked at
+                # ``await semaphore.acquire()`` yields the event loop cleanly, so it
+                # executes no slow callback and emits no set_debug log.
+                #
+                # Trigger: actual permit depletion (``_global_session_semaphore._value``),
+                # NOT running-count. Running-count is the wrong signal because
+                # ``running ⟹ slot-held`` is not invertible — a session requeued to
+                # pending while its slot stays leaked (#1537 class) produces
+                # ``running_count < slots_held``, which a running-count trigger
+                # misses while over-firing on healthy saturation. ``_value`` is a
+                # private asyncio attr but the only accurate permit-depletion signal;
+                # access is guarded for a None semaphore (fail-quiet).
+                #
+                # WARNING  iff permits_free == 0 AND running < max — leaked-slot fingerprint
+                # INFO     iff permits_free == 0 AND running >= max — healthy backpressure
+                # (silent)  when permits_free > 0 — loop is not parked; different anomaly
+                try:
+                    import agent.session_state as _health_ss  # noqa: PLC0415
+
+                    _sem = _health_ss._global_session_semaphore
+                    if _sem is not None:
+                        _permits_free = _sem._value  # private asyncio attr; only accurate source
+                        _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
+                        _running_count = len(list(AgentSession.query.filter(status="running")))
+                        if _permits_free == 0 and _running_count < _max_sessions:
+                            logger.warning(
+                                "[session-health] PENDING-WEDGE FINGERPRINT: "
+                                "worker_key=%s session=%s — semaphore permits_free=0 "
+                                "AND running_count=%d < max_sessions=%d. "
+                                "Slot held by non-running session (#1537 class): "
+                                "worker loop is parked at await semaphore.acquire(). "
+                                "See docs/features/worker-wedge-investigation.md.",
+                                worker_key,
+                                entry.agent_session_id,
+                                _running_count,
+                                _max_sessions,
+                            )
+                        elif _permits_free == 0:
+                            logger.info(
+                                "[session-health] worker_key=%s session=%s — "
+                                "semaphore permits_free=0, running_count=%d >= "
+                                "max_sessions=%d (healthy backpressure; worker loop "
+                                "legitimately queued on full semaphore).",
+                                worker_key,
+                                entry.agent_session_id,
+                                _running_count,
+                                _max_sessions,
+                            )
+                except Exception:
+                    pass  # Fail-quiet: never raise in the forensic log branch
+
                 # Worker exists — nudge its event in case it missed the original
                 # notify (e.g. startup-recovery race: session put to pending before
                 # the worker loop subscribed to its event).
