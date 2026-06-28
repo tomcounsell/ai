@@ -73,6 +73,12 @@ The worker supports two modes controlled by the `VALOR_WORKER_MODE` environment 
 
 Standalone mode is set automatically by `python -m worker`. In this mode, nudge re-enqueues are processed within milliseconds (no 10s launchd restart gap), enabling full SDLC pipeline execution end-to-end.
 
+### Debug / Diagnostic Env Vars
+
+| Env Var | Default | Effect |
+|---------|---------|--------|
+| `WORKER_ASYNCIO_DEBUG` | unset (off) | Set to `1` to enable asyncio debug mode at startup: `loop.set_debug(True)` + `slow_callback_duration=0.1` (100 ms). Logs slow synchronous callbacks to `logs/worker.log`. **C1 limitation:** does not detect the await-suspension wedge (sessions parked at `await semaphore.acquire()`); the always-on `PENDING-WEDGE FINGERPRINT` WARNING in `session_health.py` is the correct detector for that. See [Worker Wedge Investigation](worker-wedge-investigation.md). |
+
 ### Graceful Shutdown
 
 On SIGTERM (e.g., `./scripts/valor-service.sh worker-restart` or `/update` restart):

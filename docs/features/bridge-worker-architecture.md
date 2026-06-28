@@ -349,6 +349,8 @@ MAX_CONCURRENT_SESSIONS=8
 
 **PM/dev deadlock prevention:** There is no session-type-specific cap. PM sessions that spawn child dev sessions transition to `waiting_for_children`, which triggers `output_router.route_session_output` to return `"deliver"` — the PM releases its global slot before the child needs it. Child dev sessions sort ahead of peers via the child-boost ordering in `sort_key`, so they acquire the freed slot next. See issues #1004 and #1021 for the history.
 
+**Wedge detection:** When the semaphore is exhausted (`_global_session_semaphore._value == 0`) and running sessions are fewer than `MAX_CONCURRENT_SESSIONS`, the health monitor's pending-session branch (`_agent_session_health_check`) emits a `WARNING: PENDING-WEDGE FINGERPRINT` log line before its normal `event.set(); continue` nudge. The most common production path is H3 (PTY-pool saturation): sessions hold a global slot while blocked inside `_execute_agent_session` waiting for a granite PTY pair, which can exhaust the semaphore when `GRANITE__PTY_POOL_SIZE < MAX_CONCURRENT_SESSIONS`. See [Worker Wedge Investigation](worker-wedge-investigation.md) for the full root-cause analysis and acquire/release audit.
+
 ### Redis Pop Lock (TOCTOU Prevention)
 
 A short-lived Redis lock (`SETNX worker:pop_lock:{worker_key}`) wraps the query→transition block in both pop paths:

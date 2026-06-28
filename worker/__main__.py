@@ -51,6 +51,26 @@ WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"
 _heartbeat_stop_event = threading.Event()
 
 
+def _asyncio_debug_enabled(env_value: str | None) -> bool:
+    """Return True if asyncio debug mode should be enabled.
+
+    Parses the ``WORKER_ASYNCIO_DEBUG`` environment variable value.
+    Only ``"1"`` and other non-empty, non-``"0"`` / non-``"false"`` strings
+    enable debug; ``None``, ``""``, ``"0"``, and ``"false"`` are all off.
+
+    This helper is a pure, always-shipping module-level function so test
+    assertions have a stable import target on **both** investigation outcome
+    branches (root-cause-found or not-reproducible) — resolving the B2
+    orphan-helper concern from revision 4 of issue #1808.
+
+    Ref: #1808 (wedged-but-alive worker investigation).
+    """
+    if env_value is None:
+        return False
+    stripped = env_value.strip().lower()
+    return stripped not in ("", "0", "false")
+
+
 def _heartbeat_thread_main() -> None:
     """Dedicated daemon thread for worker heartbeat writes.
 
@@ -215,6 +235,34 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     _ss._global_session_semaphore = asyncio.Semaphore(_max_sessions)
     logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
+
+    # Opt-in asyncio debug mode (issue #1808 investigation — Deliverable B / C-rev4).
+    # Catches *synchronous* loop blocks (hypotheses 2/3 of the wedge investigation)
+    # by logging any callback that exceeds slow_callback_duration.
+    # Default-off (WORKER_ASYNCIO_DEBUG unset / "0" / "" → no-op); fail-open.
+    # Ships on BOTH investigation outcome branches because the env flag makes it
+    # zero steady-state cost (C-rev4: the helper always has a production caller).
+    # IMPORTANT — C1 LIMITATION: set_debug only detects *synchronous* blocking
+    # callbacks (CPU-bound work, blocking syscall). It is structurally blind to
+    # coroutines cleanly parked at ``await semaphore.acquire()`` (hypothesis 1).
+    # For the suspension-wedge detection surface see the always-on slot-exhaustion
+    # forensic line in agent/session_health.py (Deliverable D, issue #1808).
+    try:
+        if _asyncio_debug_enabled(os.environ.get("WORKER_ASYNCIO_DEBUG")):
+            _loop = asyncio.get_event_loop()
+            _loop.set_debug(True)
+            _loop.slow_callback_duration = 0.1  # 100 ms; tune lower for finer resolution
+            logger.info(
+                "[worker-startup] asyncio debug mode enabled (WORKER_ASYNCIO_DEBUG): "
+                "slow callbacks logged above %.0f ms. "
+                "Note C1 limitation — does NOT detect await-suspension wedge; "
+                "use the slot-exhaustion forensic log in session_health.py for that.",
+                _loop.slow_callback_duration * 1000,
+            )
+    except Exception as _dbg_exc:
+        logger.warning(
+            "[worker-startup] WORKER_ASYNCIO_DEBUG set_debug failed (fail-open): %s", _dbg_exc
+        )
 
     handler = TelegramRelayOutputHandler(file_handler=FileOutputHandler())
     from bridge.email_bridge import EmailOutputHandler as _EmailOutputHandler
