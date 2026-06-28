@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-28
 tracking: https://github.com/tomcounsell/ai/issues/1808
 last_comment_id:
+revision_applied: true
 ---
 
 # Investigation: Wedged-But-Alive Worker Leaves Sessions Pending Indefinitely
@@ -192,7 +193,7 @@ No existing tests are modified by this investigation plan — it is additive (on
 ## Race Conditions
 
 ### Race 1: Health-check `event.set()` lost between worker `event.clear()` and `await event.wait()`
-**Location:** `agent/agent_session_queue.py:1347-1366` (clear) and `2557-2566` (set in health check)
+**Location:** `agent/agent_session_queue.py:1347-1366` (event.clear) and `agent/session_health.py:2557-2566` (event.set in health check)
 **Trigger:** Health check sets the event while the worker is between `event.clear()` and `await event.wait()`.
 **Data prerequisite:** A `pending` session exists for the `worker_key`.
 **State prerequisite:** Worker loop is in the no-work drain window.
@@ -219,14 +220,14 @@ No agent integration required — this is a worker-internal investigation. No ne
 
 ### Inline Documentation
 - [ ] Docstring on the new test explaining what wedge it reproduces and what a pass/fail means.
-- [ ] Comment on the `WORKER_ASYNCIO_DEBUG` block in `worker/__main__.py` citing this investigation and the asyncio-debug research.
+- [ ] Comment on the `WORKER_ASYNCIO_DEBUG` block in `worker/__main__.py` citing this investigation and the asyncio-debug research (only applicable on the confirmed-root-cause branch; on the not-reproducible branch only the `.env.example` placeholder comment ships).
 
 ## Success Criteria
 
 - [ ] Reproduction harness `tests/integration/test_worker_wedge_pending.py` exists and runs deterministically (no timing flake).
 - [ ] All four hypotheses (semaphore exhaustion, event-loop block, PTY-pool acquire, set/clear race) are explicitly confirmed or rejected with evidence in the findings doc.
 - [ ] A binary decision is recorded: **root cause found** (with a filed fix issue linked) OR **not reproducible — resolved by #1804** (with #1808 closed and the rationale documented).
-- [ ] `WORKER_ASYNCIO_DEBUG=1` diagnostic is implemented, default-off, fails open, and is documented.
+- [ ] Diagnostic deliverable is branched on the investigation outcome (C2): **If root cause confirmed** — `WORKER_ASYNCIO_DEBUG=1` is implemented in `worker/__main__.py`, default-off, fails open, and documented; the `.env.example` placeholder ships. **If not reproducible — resolved by #1804** — only the `.env.example` placeholder ships; no `worker/__main__.py` change is made.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`) — `docs/features/worker-wedge-investigation.md` created and indexed.
 
@@ -238,14 +239,8 @@ The lead agent orchestrates; it does not investigate directly.
 
 - **Investigator (worker-wedge)**
   - Name: wedge-investigator
-  - Role: Reproduce the wedge, confirm/reject the four hypotheses via the harness + log analysis, author the findings doc and decision.
+  - Role: Reproduce the wedge, confirm/reject the four hypotheses via the harness + log analysis, conditionally ship the `WORKER_ASYNCIO_DEBUG` diagnostic (Task 3, gated on the hypothesis verdict), and author the findings doc and decision.
   - Agent Type: debugging-specialist
-  - Resume: true
-
-- **Builder (diagnostic-toggle)**
-  - Name: diag-builder
-  - Role: Implement the default-off `WORKER_ASYNCIO_DEBUG` diagnostic in `worker/__main__.py` and the `.env.example` placeholder.
-  - Agent Type: builder
   - Resume: true
 
 - **Validator (investigation)**
@@ -271,7 +266,10 @@ The lead agent orchestrates; it does not investigate directly.
 - **Agent Type**: debugging-specialist
 - **Parallel**: true
 - Drive hypothesis 1: register a non-`done()` worker future in `_active_workers[worker_key]`, drain `_global_session_semaphore` to 0, enqueue a `pending` AgentSession, run `await _agent_session_health_check()`, assert whether the session is recovered.
-- Add boundary cases: semaphore at 0 (exhausted) vs 1 (available); `WORKER_ASYNCIO_DEBUG` unset.
+- Add boundary cases: semaphore at 0 (exhausted) vs 1 (available).
+- **Env-flag assertions (this task owns them — C3 option b):** write all three `WORKER_ASYNCIO_DEBUG` off-cases (unset, empty `""`, `"0"`) and a truthy `"1"` on-case as parser assertions in this same test file. Task 3 (`build-diagnostic`) does NOT write to this file — it only edits `worker/__main__.py` and `.env.example`.
+- **N1 code-read comment:** add an inline comment in the test noting that `_agent_session_health_check()` never reads `_global_session_semaphore` (it only checks `worker.done()`), so the drain is scaffolding that models the worker-loop park condition. Confirming the loop actually parks at `await semaphore.acquire()` is established by Task 2's code-read of `_worker_loop` (hypothesis 1), not by this health-check test.
+- **Teardown of in-memory globals (C1):** wrap all module-global mutations in `try/finally` (or a `@pytest.fixture` with `yield`) that unconditionally runs `_active_workers.pop(worker_key, None)`, `_active_events.pop(worker_key, None)`, and `fake_future.cancel()` — using the same `worker_key` string from setup. `fake_future.cancel()` also suppresses "Future exception was never retrieved" warnings once Deliverable B's asyncio debug is enabled. This prevents the phantom Future leaking across boundary-case test functions in a shared xdist worker (which would collapse the semaphore=0 vs semaphore=1 cases and undermine the Task 6 3× determinism check).
 - Clean up all test AgentSession records via Popoto (`.delete()`), never raw Redis. Use a `test-wedge-` project_key prefix.
 
 ### 2. Confirm/reject all four hypotheses
@@ -286,16 +284,18 @@ The lead agent orchestrates; it does not investigate directly.
 - Hypothesis 4 (set/clear race): re-read `agent_session_queue.py:1347-1366`; confirm the `_has_pending` guard closes the window.
 - Record each verdict with evidence.
 
-### 3. Implement opt-in event-loop wedge diagnostic
+### 3. Implement opt-in event-loop wedge diagnostic (conditional on outcome)
 - **Task ID**: build-diagnostic
-- **Depends On**: none
-- **Validates**: tests/integration/test_worker_wedge_pending.py (env-flag handling assertions)
+- **Depends On**: analyze-hypotheses
+- **Validates**: env-flag parser assertions are written by Task 1 in `tests/integration/test_worker_wedge_pending.py` (pointer-only — C3 option b). This task writes ONLY `worker/__main__.py` and `.env.example`; it does not touch the test file.
 - **Informed By**: Research (asyncio set_debug / slow_callback_duration; aiodebug/BlockBuster pattern)
-- **Assigned To**: diag-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- In `worker/__main__.py` startup: if `WORKER_ASYNCIO_DEBUG` is truthy, call `loop.set_debug(True)` and set `loop.slow_callback_duration` (tunable, default ~0.1s). Log on enable; fail open if it raises.
-- Add `# WORKER_ASYNCIO_DEBUG=` placeholder + comment to `.env.example`.
+- **Assigned To**: wedge-investigator
+- **Agent Type**: debugging-specialist
+- **Parallel**: false
+- **Outcome branch (C2):** gate on Task 2's verdict.
+  - **If root cause confirmed (reproducible):** in `worker/__main__.py` startup, if `WORKER_ASYNCIO_DEBUG` is truthy, call `loop.set_debug(True)` and set `loop.slow_callback_duration` (tunable, default ~0.1s). Log on enable; fail open if it raises. Add the `# WORKER_ASYNCIO_DEBUG=` placeholder + comment to `.env.example`.
+  - **If not reproducible (resolved by #1804):** ship ONLY the `.env.example` placeholder + comment (so the flag is discoverable for the future fix issue); make NO change to `worker/__main__.py`. The permanent worker-startup branch is not added for a closed problem.
+- Rationale for folding into `wedge-investigator` (N2): this is ~5 guarded lines plus one `.env.example` entry, and it must read Task 2's verdict to decide whether to ship — keeping it with the investigator drops a coordination handoff.
 
 ### 4. Decision + (conditional) fix-issue filing
 - **Task ID**: record-decision
@@ -332,7 +332,7 @@ The lead agent orchestrates; it does not investigate directly.
 |-------|---------|----------|
 | Reproduction harness exists | `test -f tests/integration/test_worker_wedge_pending.py` | exit code 0 |
 | Harness runs deterministically | `pytest tests/integration/test_worker_wedge_pending.py -q` | exit code 0 |
-| Diagnostic is default-off (no set_debug at import) | `grep -n "WORKER_ASYNCIO_DEBUG" worker/__main__.py` | output contains WORKER_ASYNCIO_DEBUG |
+| Diagnostic is default-off (no set_debug at import) — **only if root cause confirmed** | `grep -n "WORKER_ASYNCIO_DEBUG" worker/__main__.py` | If confirmed: output contains WORKER_ASYNCIO_DEBUG (guarded, default-off). If not reproducible: N/A — no `worker/__main__.py` change ships. |
 | Findings doc created | `test -f docs/features/worker-wedge-investigation.md` | exit code 0 |
 | Findings doc indexed | `grep -c "worker-wedge-investigation" docs/features/README.md` | output > 0 |
 | Env placeholder present | `grep -c "WORKER_ASYNCIO_DEBUG" .env.example` | output > 0 |
@@ -342,12 +342,57 @@ The lead agent orchestrates; it does not investigate directly.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critics**: Risk & Robustness, Scope & Value, History & Consistency (FULL depth)
+**Findings**: 6 total (0 blockers, 3 concerns, 3 nits)
+**Verdict**: READY TO BUILD (with concerns) — a revision pass should embed the Implementation Notes below before build.
+**Revision status**: `revision_applied: true` — all 3 concerns and 3 nits embedded into the plan body (see "### Revision (applied)" below).
+
+### Revision (applied)
+
+All critique findings were embedded into the plan body. Summary of changes:
+
+- **C1** (harness teardown leaves globals dirty) → Task 1 now mandates a `try/finally`/fixture teardown that pops `_active_workers[worker_key]` / `_active_events[worker_key]` and cancels `fake_future`, preventing phantom-Future leakage across boundary cases in a shared xdist worker.
+- **C2 / OQ1** (diagnostic ships unconditionally on the "not reproducible" path) → **Success criterion 4 is now outcome-branched**: confirmed → `worker/__main__.py` diagnostic ships; not reproducible → only the `.env.example` placeholder. **Task 3 now `Depends On: analyze-hypotheses`** (gated behind Task 2's verdict) instead of running parallel to Task 1. Verification table row and inline-doc bullet flagged conditional.
+- **C3** (write-ownership ambiguity on the new test file) → resolved via option (b): Task 1 owns all `WORKER_ASYNCIO_DEBUG` env-flag parser assertions (unset/empty/`"0"`/`"1"`); Task 3's `Validates` is now pointer-only and Task 3 writes only `worker/__main__.py` + `.env.example`.
+- **N1** (semaphore drain orthogonal to the health-check path) → Task 1 now requires an inline code-read comment noting `_agent_session_health_check()` never reads the semaphore; the loop-park confirmation is Task 2's `_worker_loop` code-read.
+- **N2** (diag-builder over-provisioned for ~5 lines) → `diag-builder` team member removed; Task 3 folded into `wedge-investigator`.
+- **N3** (Race 1 Location mislabels line range) → split to `agent/agent_session_queue.py:1347-1366` (event.clear) and `agent/session_health.py:2557-2566` (event.set).
+
+### Concerns
+
+**C1 — Harness teardown leaves in-memory globals dirty (Risk & Robustness / Operator).**
+Task 1's cleanup spec covers Popoto record deletion but not the module-level globals the harness mutates: `_active_workers[worker_key]` (the fake non-`done()` Future) and `_active_events[worker_key]`. Two boundary-case test functions sharing one xdist worker process inherit the phantom Future, collapsing the semaphore=0 vs semaphore=1 cases into identical health-check behavior and undermining the Task 6 "3× determinism" check.
+*Implementation Note*: Wrap state mutations in `try/finally` (or a `@pytest.fixture` with `yield`) that unconditionally runs `_active_workers.pop(worker_key, None)`, `_active_events.pop(worker_key, None)`, and `fake_future.cancel()` (cancel suppresses "Future exception was never retrieved" warnings once Deliverable B enables asyncio debug). Same `worker_key` string used in setup.
+
+**C2 — `WORKER_ASYNCIO_DEBUG` ships unconditionally even on the "not reproducible" outcome (Scope & Value / Simplifier).**
+Success criterion 4 makes the diagnostic a hard, unconditional deliverable. If the decision is "not reproducible — resolved by #1804", the `worker/__main__.py` branch still ships as permanent production code for a closed problem. The plan's own Open Question #1 raises this tension but the criteria never resolve it.
+*Implementation Note*: Revise success criterion 4 to branch on outcome — "If root cause confirmed: `WORKER_ASYNCIO_DEBUG=1` implemented in `worker/__main__.py`, default-off, fails open, documented. If not reproducible: only the `.env.example` placeholder ships; no `worker/__main__.py` change." Make Task 3 (`build-diagnostic`) block on Task 2 (`analyze-hypotheses`) rather than running parallel to Task 1.
+
+**C3 — Task 1 / Task 3 write-ownership ambiguity on the new test file (History & Consistency / Consistency Auditor; cross-validated by Scope & Value's diag-builder NIT).**
+Task 1 and Task 3 are both `Parallel: true, Depends On: none`, yet Task 3's `Validates` field names the same file Task 1 creates. Task 1's description covers only the `WORKER_ASYNCIO_DEBUG` "unset" boundary; the Failure Path Test Strategy additionally requires empty and `"0"` off-cases assigned to neither task. Parallel agents either conflict on the new file or leave the off-cases unwritten.
+*Implementation Note*: Either (a) add `Depends On: build-repro-harness` to Task 3 so diag-builder appends env-flag assertions to the already-created file; or (b) expand Task 1's boundary-cases bullet to all three off-cases (unset, empty, `"0"`) and declare Task 3's `Validates` as pointer-only ("env-flag assertions written by Task 1; diag-builder only edits `worker/__main__.py` and `.env.example`"). Option (b) avoids serializing.
+
+### Nits
+
+- **N1 (Risk & Robustness / Adversary)**: The harness drains `_global_session_semaphore` to 0, but `_agent_session_health_check()` never reads the semaphore — it only calls `.done()` on the worker future. The drain is orthogonal scaffolding for the health-check test; confirming hypothesis-1 part (a) (the loop actually parks at `await semaphore.acquire()`) needs either a code-read comment or a second test running a live `_worker_loop` against a zero-slot semaphore.
+- **N2 (Scope & Value / User)**: `diag-builder` is spun up for ~5 guarded lines plus one `.env.example` entry — fold it into the investigator's scope to drop a coordination handoff (same fix as C3 option-a/b).
+- **N3 (History & Consistency / Consistency Auditor)**: Race 1's Location field labels lines `2557-2566` under `agent/agent_session_queue.py`, but that range is in `agent/session_health.py` (the pending branch). Split the reference: `agent_session_queue.py:1347-1366` (event.clear) and `session_health.py:2557-2566` (event.set).
+
+### Structural Checks
+
+| Check | Status | Detail |
+|-------|--------|--------|
+| Required sections | PASS | Documentation, Update System, Agent Integration, Test Impact all present and substantive |
+| Task numbering | PASS | Tasks 1–6 contiguous, no gaps |
+| Dependencies valid | PASS | All `Depends On` reference valid task IDs; no cycles |
+| File paths exist | PASS | All cited source files exist; 2 missing paths are intentional new deliverables (test harness + findings doc) |
+| Prerequisites met | PASS | Redis reachable, pytest importable |
+| Cross-references | PASS | Success criteria map to tasks; No-Gos and Rabbit Holes absent from Solution/tasks |
 
 ---
 
 ## Open Questions
 
-1. **Diagnostic scope** — Is the default-off `WORKER_ASYNCIO_DEBUG` toggle (Deliverable B) wanted as a permanent diagnostic, or should the investigation be pure analysis (harness + findings doc only) with no production-code touch? It is low-cost and directly aids capturing a real recurrence, but it does add one guarded branch to worker startup.
+1. ~~**Diagnostic scope**~~ — **RESOLVED by revision (C2).** The diagnostic is now outcome-branched: the permanent `worker/__main__.py` toggle ships only if a root cause is confirmed (where capturing a recurrence has clear value); on the "not reproducible — resolved by #1804" outcome no production-code branch ships (only the discoverable `.env.example` placeholder). This removes the "permanent code for a closed problem" tension without a human decision. (Original question retained for audit: was the default-off toggle wanted unconditionally, or pure analysis only?)
 2. **"Not reproducible" closure** — If the harness cannot reproduce the wedge post-#1804, is documenting the attempted scenarios + shipping the diagnostic sufficient to close #1808, or do you want a defined production observation window (e.g. "no recurrence in N days with the diagnostic available") before closing?
 3. **Fix-issue pre-filing** — If a root cause is confirmed, should the follow-up fix issue be filed automatically by the investigation (Task 4), or do you want to review the findings and decide the fix approach yourself before any issue is opened?
