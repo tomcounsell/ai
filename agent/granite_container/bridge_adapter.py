@@ -906,6 +906,7 @@ class BridgeAdapter:
         import inspect
 
         future = None
+        coro = None  # coroutine object; closed explicitly on error paths to suppress RuntimeWarning
         # True once we have reached the async scheduling path. Used to
         # distinguish "sync send_cb raised" from "async loop closed/timed
         # out", since only the latter warrants an outbox re-enqueue.
@@ -990,11 +991,17 @@ class BridgeAdapter:
                 # RuntimeError came from the sync send_cb call or pre-scheduling
                 # code (e.g. constructing the coroutine). No outbox fallback for
                 # non-delivery errors.
+                if coro is not None:
+                    coro.close()  # dispose unscheduled coroutine; suppresses RuntimeWarning
                 logger.warning("[bridge-adapter] send_cb raised before async scheduling: %s", e)
                 self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
                 return False
             # Loop closed between the check and the schedule (worker
-            # shutdown race). Re-enqueue so the reply isn't lost.
+            # shutdown race). The coroutine was passed to run_coroutine_threadsafe
+            # but never scheduled (loop already closed). Close it explicitly to
+            # suppress "coroutine was never awaited" RuntimeWarning.
+            coro.close()
+            # Re-enqueue so the reply isn't lost.
             logger.warning("[bridge-adapter] send_cb delivery failed (loop closed): %s", e)
             recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
             self._record_delivery_event(payload, f"{type(e).__name__}: {e}", recovered=recovered)
