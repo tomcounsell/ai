@@ -940,10 +940,41 @@ class BridgeAdapter:
                 # asyncio thread, e.g. in tests). Blocking on a future
                 # here would deadlock the loop — schedule fire-and-
                 # forget instead.
-                loop.create_task(coro)
-                # Fire-and-forget: we cannot confirm delivery synchronously
-                # on the same event loop. Count as False so the caller does
-                # not set user_facing_routed prematurely.
+                #
+                # We cannot confirm delivery synchronously, but the reply
+                # must still never be silently lost (issue #1805 core
+                # criterion). Attach a done-callback that re-enqueues to
+                # the outbox iff the task failed or was cancelled. On
+                # success the callback is a no-op, so there is no duplicate
+                # delivery.
+                task = loop.create_task(coro)
+
+                def _reenqueue_same_thread_on_failure(
+                    t: asyncio.Task[Any],
+                    _payload: str = payload,
+                    _chat_id: Any = chat_id,
+                    _reply_to: Any = reply_to,
+                ) -> None:
+                    try:
+                        if t.cancelled():
+                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            self._record_delivery_event(
+                                _payload, "CancelledError", recovered=recovered
+                            )
+                            return
+                        exc = t.exception()
+                        if exc is not None:
+                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            self._record_delivery_event(
+                                _payload, f"{type(exc).__name__}: {exc}", recovered=recovered
+                            )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("[bridge-adapter] same-thread re-enqueue callback failed")
+
+                task.add_done_callback(_reenqueue_same_thread_on_failure)
+                # Fire-and-forget: delivery is not yet confirmed, so return
+                # False; the caller will not set user_facing_routed. Recovery
+                # (if the task fails) is handled by the done-callback above.
                 return False
             # Production path: pexpect worker thread -> schedule on the
             # captured worker loop and block until delivered.
@@ -977,10 +1008,19 @@ class BridgeAdapter:
             # Cancel the timed-out future before re-enqueueing to
             # minimise the risk of duplicate delivery (the coroutine
             # may still run after the timeout fires).
-            if future is not None:
-                future.cancel()
+            #
+            # concurrent.futures.Future.cancel() returns False once the
+            # coroutine is already running — cancellation is best-effort.
+            # When it fails the original send may still complete AND the
+            # outbox re-enqueue delivers, so we tag the event distinctly
+            # (possible duplicate). The downstream redundancy filter
+            # (bridge/redundancy_filter.py::should_suppress) is the
+            # backstop for that already-running edge case.
+            failure_reason = f"{type(e).__name__}: {e}"
+            if future is not None and not future.cancel():
+                failure_reason = f"{failure_reason} [future_uncancellable_possible_duplicate]"
             recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
-            self._record_delivery_event(payload, f"{type(e).__name__}: {e}", recovered=recovered)
+            self._record_delivery_event(payload, failure_reason, recovered=recovered)
             return recovered
         return False
 

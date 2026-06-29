@@ -206,9 +206,45 @@ class TestDeliverFailureModes(unittest.TestCase):
         asyncio.run(_runner())
         self.assertEqual(delivered, [("42", "same-thread payload", 7)])
 
+    def test_same_thread_failure_reenqueues_to_outbox(self) -> None:
+        """Same-thread fire-and-forget path: if the scheduled send task
+        raises, the done-callback re-enqueues to the outbox so the reply
+        is not silently lost (issue #1805 concern 1)."""
+
+        async def failing_cb(chat_id, payload, reply_to, agent_session):
+            raise RuntimeError("send boom")
+
+        pool = MagicMock(spec=PTYPool)
+        adapter = BridgeAdapter(
+            agent_session=_fake_session(),
+            project_key="valor",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda pk, tr: (failing_cb, None),
+        )
+        mock_redis = MagicMock()
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_redis):
+
+            async def _runner():
+                adapter._loop = asyncio.get_running_loop()
+                adapter._on_user_payload("same-thread fail payload")
+                # Let the scheduled task run and its done-callback fire.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+            asyncio.run(_runner())
+
+        mock_redis.rpush.assert_called_once()
+        self.assertIn("telegram:outbox:", mock_redis.rpush.call_args[0][0])
+        events = adapter._agent_session.session_events
+        failures = [e for e in events if e["type"] == "delivery_failure"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["reason"], "recovered_via_outbox")
+
 
 class TestDeliveryTimeoutOutboxReenqueue(unittest.TestCase):
-    """Tests for the outbox re-enqueue recovery path (issue #1811)."""
+    """Tests for the outbox re-enqueue recovery path (issue #1805)."""
 
     def _slow_adapter(self, timeout_s: float = 0.05) -> BridgeAdapter:
         async def slow_cb(chat_id, payload, reply_to, agent_session):
