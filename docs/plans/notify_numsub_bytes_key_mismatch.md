@@ -8,304 +8,234 @@ tracking: https://github.com/tomcounsell/ai/issues/1811
 last_comment_id:
 ---
 
-# Notify-Listener NUMSUB Self-Check Livelock (bytes-vs-str key mismatch)
+# Notify-listener NUMSUB self-check livelocks: bytes-vs-str key mismatch
 
 ## Problem
 
-The standalone worker (`python -m worker`) learns about newly-enqueued sessions
-two ways: a fast **notify** path (Redis Pub/Sub on `valor:sessions:new`) and a
-slower **polling** fallback. PR #1809 (closing #1804) added a *subscribe-time
-NUMSUB self-check* to the notify listener: right after `pubsub.subscribe()`, it
-issues `PUBSUB NUMSUB valor:sessions:new` and, if the count isn't `>= 1`, it
-concludes the subscribe was a no-op, tears the listener down, and re-subscribes
-after a 5 s backoff.
+The standalone worker discovers newly-enqueued sessions via a fast Redis Pub/Sub
+**notify** path (channel `valor:sessions:new`) and a slower **polling** fallback.
+PR #1809 (closing #1804) added a subscribe-time **NUMSUB self-check** to the notify
+listener: right after `pubsub.subscribe()`, it issues `PUBSUB NUMSUB valor:sessions:new`
+and, if the count isn't `>= 1`, tears the listener down and re-subscribes after a 5 s
+backoff.
 
-That self-check is defective: it mis-parses the `PUBSUB NUMSUB` reply because of
-a **str-vs-bytes key mismatch**, so it always reads `0` subscribers and the
-listener re-subscribes forever.
+That self-check is defective. It mis-parses the `PUBSUB NUMSUB` reply because of a
+**str-vs-bytes key mismatch**, so it always reads `0` subscribers — even when the
+subscription registered correctly — and the listener tears itself down forever.
 
 **Current behavior** (observed on a healthy single worker, PID 76026, 2026-06-29):
 
 ```
 05:05:30 INFO    Session notify listener subscribed to valor:sessions:new
-05:05:30 WARNING Session notify: NUMSUB check reports 0 subscribers after subscribe (attempt 3/3) — ... falling through teardown to re-subscribe
+05:05:30 WARNING Session notify: NUMSUB check reports 0 subscribers after subscribe (attempt 3/3) — ...
 05:05:35 INFO    Session notify listener subscribed to valor:sessions:new
 05:05:36 WARNING Session notify: NUMSUB check reports 0 subscribers after subscribe (attempt 3/3) — ...
 ```
 
-This cycle repeated 52+ times, once every ~5 s, without converging. The listener
-never reaches `pubsub.listen()` (line 880); it always hits the early `return`
-(line 879) first.
+The cycle repeated 52+ times, once every ~5 s, and does not converge. The listener
+never reaches `pubsub.listen()` (line 880); it always hits the early `return` at line 879.
 
-**Root cause (confirmed in code + empirically):** the listener's dedicated
-connection is built with `decode_responses=kw.get("decode_responses", False)`
-(`agent/agent_session_queue.py:831`), and the POPOTO pool default is `False`. So
-`pubsub_numsub("valor:sessions:new")` returns **bytes**-keyed results — the live
-reply is a list of tuples `[(b'valor:sessions:new', 1)]`. The parse at
-`agent/agent_session_queue.py:850-856` compares against the **str** key
-`"valor:sessions:new"` in both the dict branch (`.get("valor:sessions:new", 0)`)
-and the list branch (`ch == "valor:sessions:new"`), so both default to `0`
-whenever keys are bytes. `_numsub_ok` stays `False`, the listener tears down, and
-the outer `while True` re-subscribes — forever.
+**Impact:**
+1. The notify fast-path is effectively dead — sessions are only picked up by the slower
+   polling fallback, adding latency to every session pickup.
+2. Log spam — a `WARNING` every 5 s, indefinitely.
+3. Continuous subscribe/teardown churn against Redis.
 
-**Desired outcome:** with a live subscription present, the self-check computes
-`count >= 1`, the listener proceeds into `pubsub.listen()`, the notify fast-path
-delivers session pickups, and the recurring WARNING / subscribe churn stops. A
-regression test asserts the parse yields the correct count for bytes-keyed
-replies in both list-of-tuples and dict shapes so this cannot silently regress.
+This is distinct from the recently-closed wedge work (#1808 detection harness, #1767
+U-state recovery), which concern a worker hung in an uninterruptible kernel syscall.
+This is a pure logic bug in the #1809 self-check, firing on a fully healthy worker.
+
+**Desired outcome:**
+With a live subscription present, the self-check computes `count >= 1`, the listener
+proceeds into `pubsub.listen()`, no recurring WARNING fires, and the notify fast-path
+delivers session pickups.
 
 ## Freshness Check
 
-**Baseline commit:** `7f8572ee` (HEAD at plan time)
+**Baseline commit:** `7f8572ee3bf1936536ba07bccde6912f35536d39`
 **Issue filed at:** 2026-06-29T06:08:15Z
 **Disposition:** Unchanged
 
-**File:line references re-verified against `main`:**
-- `agent/agent_session_queue.py:831` — `decode_responses=kw.get("decode_responses", False)` — still holds, exact match.
-- `agent/agent_session_queue.py:850-856` — dict branch `.get("valor:sessions:new", 0)` and list branch `ch == "valor:sessions:new"`, both defaulting to `0` — still holds, exact match.
-- `agent/agent_session_queue.py:870-879` — `if not _numsub_ok:` WARNING + early `return` before `pubsub.listen()` at line 880 — still holds, exact match.
+**File:line references re-verified** (against `agent/agent_session_queue.py` at the baseline commit):
+- `agent/agent_session_queue.py:831` — `decode_responses=kw.get("decode_responses", False)` — **still holds.** POPOTO pool default is `False`, so `pubsub_numsub` replies are bytes-keyed.
+- `agent/agent_session_queue.py:850-856` — both parse branches compare against the str key `"valor:sessions:new"` — **still holds** verbatim (dict branch `_numsub_result.get("valor:sessions:new", 0)`; list branch `next((c for ch, c in _numsub_result if ch == "valor:sessions:new"), 0)`).
+- `agent/agent_session_queue.py:870-879` — `_numsub_ok` stays `False`, WARNING fires, early `return` before `pubsub.listen()` at line 880 — **still holds.**
 
 **Cited sibling issues/PRs re-checked:**
-- #1804 — closed 2026-06-26 by PR #1809 (the self-check that introduced this bug).
-- PR #1809 — merged 2026-06-26; it is the source of the defective parse.
-- #1808 / #1767 (U-state wedged worker) — distinct concern (kernel-syscall hang), not related to this logic bug.
+- #1809 — MERGED 2026-06-26T16:34:55Z ("fix(worker): notify listener NUMSUB self-check + VALOR_WORKER_MODE in plist (#1804)"). This is the PR that introduced the bug.
+- #1808, #1767 — referenced only to disambiguate scope; unrelated U-state wedge work, no overlap.
 
-**Commits on main since issue was filed (touching `agent/agent_session_queue.py`):** none.
+**Commits on main since issue was filed (touching `agent/agent_session_queue.py`):** None.
 
-**Active plans in `docs/plans/` overlapping this area:** none. (`worker_watchdog_ustate_recovery.md` concerns the U-state wedge, a different problem.)
+**Active plans in `docs/plans/` overlapping this area:** None. The recent wedged-worker plans (#1808) concern U-state recovery, a separate concern.
 
-**Notes:** Issue is ~4 minutes old at plan time; verified anyway. No drift.
+**Notes:** No drift. All cited line numbers are exact at the baseline commit. The bug is confirmed present on current main.
 
 ## Prior Art
 
-- **PR #1809** ("fix(worker): notify listener NUMSUB self-check + VALOR_WORKER_MODE in plist", merged 2026-06-26): added the very self-check this issue fixes. Its intent — guard against a subscribe that silently fails to register — is sound; its parse is wrong for the bytes-keyed connection. This plan fixes the parse without removing the guard.
-- **#1804** (closed by #1809): the original "notify-listener miss strands sessions" report that motivated the self-check.
-- **#1808 / #1767** (U-state wedged worker): explicitly distinct — a worker hung in an uninterruptible kernel syscall, not a parse bug on a healthy worker. No overlap.
-
-No prior attempts to fix *this* bytes-vs-str mismatch exist; this is the first fix.
+- **PR #1809** (MERGED 2026-06-26): "fix(worker): notify listener NUMSUB self-check + VALOR_WORKER_MODE in plist (#1804)" — added the NUMSUB self-check that this issue fixes. The self-check logic was correct in intent (verify the subscribe registered) but the reply parsing assumed str keys while the connection yields bytes keys. See **Why Previous Fixes Failed** below.
+- No other prior issues/PRs address the bytes-vs-str parsing of `pubsub_numsub`.
 
 ## Why Previous Fixes Failed
 
-| Prior Fix | What It Did | Why It Was Incomplete |
-|-----------|-------------|------------------------|
-| PR #1809 | Added a NUMSUB self-check after `subscribe()` to verify the subscription registered before entering `listen()`. | Parsed the `PUBSUB NUMSUB` reply assuming **str** keys, but the listener's connection uses `decode_responses=False` (bytes keys). The check therefore always reads `0` and the guard it added livelocks on a healthy worker. The guard logic was correct; only the reply-key encoding was mishandled. |
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #1809 | Added a subscribe-time NUMSUB self-check to confirm the Pub/Sub subscription registered before entering `pubsub.listen()`. | The self-check parses `pubsub_numsub()` output by matching the channel against the **str** key `"valor:sessions:new"`, but the listener's connection is built with `decode_responses=False` (POPOTO default), so the reply is **bytes**-keyed (`[(b'valor:sessions:new', 1)]`). The comparison `b'valor:sessions:new' == "valor:sessions:new"` is never `True`, so `_count` always defaults to `0`. The guard meant to protect against a failed subscribe instead fires on every healthy subscribe. |
 
-**Root cause pattern:** the self-check and the connection it queries were written with mismatched assumptions about `decode_responses`. The connection inherits POPOTO's `False`; the parse assumed `True`. The fix makes the parse encoding-agnostic so the two cannot drift.
+**Root cause pattern:** The self-check's tests mocked `pubsub_numsub` with str keys (`{"valor:sessions:new": 1}`), matching the parsing code's assumption rather than the real `decode_responses=False` connection behavior. The test fixture masked the production bytes-keyed reply shape, so the defect shipped green.
 
 ## Data Flow
 
-1. **Listener startup** (`_session_notify_listener` → `_listen_in_thread`, `agent/agent_session_queue.py:~820`): builds a dedicated `redis.Redis` conn from the POPOTO pool kwargs with `decode_responses=False`.
-2. **Subscribe** (line 836): `pubsub.subscribe("valor:sessions:new")`.
-3. **Self-check** (lines 845-869): up to 3× `conn.pubsub_numsub("valor:sessions:new")`. With `decode_responses=False`, the reply is `[(b'valor:sessions:new', 1)]` (bytes-keyed list of tuples) or `{b'valor:sessions:new': 1}` (bytes-keyed dict on some redis-py versions).
-4. **Parse** (lines 850-856) — **bug here**: compares bytes channel against str literal → `_count = 0`.
-5. **Decision** (lines 857-879): `_count >= 1` would set `_numsub_ok=True` and `break`; instead it stays `False`, logs WARNING, and `return`s (teardown).
-6. **Intended path** (line 880+): `pubsub.listen()` consumes `message` frames; `message["data"]` (bytes under `decode_responses=False`) is fed to `json.loads` (which accepts bytes); `message["type"]` is a redis-py-normalized `str` regardless of `decode_responses`. The surgical fix does not touch this path.
+1. **Entry point:** `_session_notify_listener()` coroutine spawns `_listen_in_thread` on a background thread.
+2. **Connection build** (`agent/agent_session_queue.py:825-834`): a dedicated `redis.Redis` connection is built inheriting `decode_responses=False` from the POPOTO pool kwargs → all replies on this connection are bytes.
+3. **Subscribe** (line ~836): `pubsub.subscribe("valor:sessions:new")` registers the subscription server-side.
+4. **NUMSUB self-check** (lines 844-879): `conn.pubsub_numsub("valor:sessions:new")` returns `[(b'valor:sessions:new', 1)]` (list-of-tuples on this redis-py) → parse compares against str key → `_count = 0` → `_numsub_ok = False` → WARNING + early `return`.
+5. **Teardown + re-subscribe:** the `finally` teardown runs, the outer `while True` sleeps 5 s and re-subscribes → loop forever; **never reaches** step 6.
+6. **Listen loop** (line 880, currently unreachable): `for message in pubsub.listen()` → `json.loads(message["data"])` → `loop.call_soon_threadsafe(notify_queue.put_nowait, ...)`.
+
+The fix lives entirely at step 4. Steps 1-3 and 6 are correct and unchanged.
 
 ## Appetite
 
 **Size:** Small
 
-**Team:** Solo dev, 1 review round
+**Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 0
-- Review rounds: 1 (code review of the parse fix + regression tests)
+- PM check-ins: 0 (root cause confirmed empirically; no scope ambiguity)
+- Review rounds: 1 (standard SDLC critique + review)
 
 ## Prerequisites
 
-No prerequisites — this work has no external dependencies. (Redis is already
-required by the test suite; the regression tests mock `pubsub_numsub` and need no
-live broker.)
+No prerequisites — this is a self-contained logic fix in already-loaded code paths; no new external dependencies, secrets, or services.
 
 ## Solution
 
 ### Key Elements
 
-- **Encoding-agnostic NUMSUB parse**: normalize the channel key from each
-  `pubsub_numsub` reply entry to `str` before comparing, so the count is read
-  correctly whether redis-py returns `bytes` or `str` keys, and whether the reply
-  is a `dict` or a list of `(channel, count)` tuples.
-- **Regression tests**: assert the parse yields the correct count for
-  **bytes-keyed** replies in both list-of-tuples and dict shapes, plus the
-  existing str-keyed shapes, so neither encoding can silently regress.
+- **Bytes-aware NUMSUB parse**: normalize the channel comparison so it matches whether the `pubsub_numsub` reply key is `bytes` or `str`, in both the dict and list-of-tuples reply shapes. This is the surgical fix that touches only lines 850-856.
 
 ### Technical Approach
 
-Apply the **bytes-aware parse** (the surgical option from the issue), not
-`decode_responses=True`. Rationale: switching the connection to `decode_responses=True`
-would broaden the blast radius to every reply on that connection — including the
-`pubsub.listen()` message payloads — for no functional gain, since the parse fix
-is fully contained.
+Adopt the **bytes-aware parse** candidate from the issue (preferred over `decode_responses=True`, which would broaden the blast radius to every reply on the connection, including the `pubsub.listen()` message payloads).
 
-Extract a tiny module-level helper that both the dict and list branches use, so
-the comparison happens in exactly one place:
+Replace the two parse branches so the channel match accepts both key types. Concretely, compare each reply channel against the set `(b"valor:sessions:new", "valor:sessions:new")`, or decode bytes channels before comparing. Both the dict branch (`{channel: count}`, redis-py >= 4) and the list-of-tuples branch (older shape; the shape observed live) must be covered.
 
-```python
-def _numsub_count(numsub_result, channel: str) -> int:
-    """Read the subscriber count for `channel` from a pubsub_numsub reply,
-    tolerating bytes- or str-keyed dict and list-of-tuples shapes."""
-    def _key(ch):
-        return ch.decode() if isinstance(ch, (bytes, bytearray)) else ch
-    items = numsub_result.items() if isinstance(numsub_result, dict) else numsub_result
-    for ch, count in items:
-        if _key(ch) == channel:
-            return int(count)
-    return 0
-```
+Confirmed non-issues that require **no** changes (per the issue's recon, re-verified):
+- `message["type"]` in the listen loop is a redis-py-normalized `str` regardless of `decode_responses` — no change needed.
+- `json.loads(message["data"])` at line ~884 accepts `bytes` — no change needed.
 
-Then lines 850-856 collapse to:
-
-```python
-_count = _numsub_count(_numsub_result, "valor:sessions:new")
-```
-
-- The helper is module-level (not a closure) so the regression test can import
-  and call it directly with synthetic replies — decoupling the assertion from the
-  thread/asyncio machinery.
-- `int(count)` guards against count arriving as bytes/str on exotic clients.
-- No change to the connection, the subscribe call, the retry loop, the WARNING
-  text, or the `listen()` consumption.
-
-### Flow
-
-Worker start → notify listener thread subscribes → `_numsub_count(reply, ch)` reads
-`1` from the bytes-keyed reply → `_numsub_ok=True` → `pubsub.listen()` blocks for
-notifications → newly-enqueued session published to `valor:sessions:new` → listener
-delivers `(worker_key, is_pk)` to the async queue → session picked up via notify
-(not only polling).
+So the surgical parse fix needs no listen-loop changes; it is confined to the NUMSUB parsing block.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The NUMSUB retry loop already has an `except Exception` (lines 860-867) that logs a WARNING and `return`s. The fix does not change it; the existing `test_numsub_raises_no_crash_and_logs_warning` covers it. No new exception handler is introduced.
-- [ ] The new `_numsub_count` helper performs no I/O and raises only on genuinely malformed input; it is exercised directly by unit tests with both valid and edge-shaped inputs.
+- [ ] The NUMSUB block has a `try/except Exception` (lines ~864-871) that logs a WARNING ("NUMSUB check raised") and `return`s. This path is already covered by `test_numsub_raises_no_crash_and_logs_warning`; the fix does not change it, but the test must continue to pass.
+- [ ] No new `except Exception: pass` blocks are introduced by this fix.
 
 ### Empty/Invalid Input Handling
-- [ ] `_numsub_count` returns `0` for an empty dict `{}` and an empty list `[]` (channel absent) — add explicit test cases.
-- [ ] A reply for a *different* channel (e.g. `[(b'other', 3)]`) returns `0` — add a test case.
+- [ ] Document/verify behavior when `pubsub_numsub` returns an empty list `[]` or a dict without the channel key → `_count` correctly stays `0` and the existing teardown/re-subscribe path fires (this is the legitimate "subscribe failed" case the self-check was designed for). A regression test should cover the empty-reply case to confirm the fix does not mask genuine failures.
 
 ### Error State Rendering
-- [ ] No user-visible output. The failure surface is a worker-log WARNING; the existing `test_numsub_zero_skips_listen_and_logs_warning` asserts the WARNING path still fires when the count is genuinely `0`.
+- [ ] Not user-visible (background worker thread). The observable "error state" is the WARNING log; the fix's success is the **absence** of that WARNING on a healthy worker, asserted via `caplog` in the bytes-keyed regression test.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck` (`_make_mocks`, ~lines 292-399) — UPDATE: `_make_mocks` currently returns a **str**-keyed dict (`{"valor:sessions:new": numsub_return}`), which masked this bug. Update it (or add a parameter) so the "ok" cases exercise the **bytes**-keyed list-of-tuples shape that production actually returns, ensuring `test_numsub_ok_proceeds_to_listen` would have caught the regression.
-- [ ] `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck` — ADD direct unit tests for the new `_numsub_count` helper covering: bytes-keyed list-of-tuples, bytes-keyed dict, str-keyed list, str-keyed dict, empty reply, and wrong-channel reply.
-- [ ] `tests/integration/test_session_notify.py::test_notify_listener_uses_no_socket_timeout` (line 145) — UPDATE: `mock_conn.pubsub_numsub.return_value = {"valor:sessions:new": 1}` uses a str key. Change to the bytes-keyed shape `[(b"valor:sessions:new", 1)]` so the integration mock matches `decode_responses=False` reality and continues to drive the listener into `listen()`.
-
-No tests are deleted — the existing self-check tests remain valid behavior contracts; they are tightened to use realistic bytes-keyed inputs.
+- [ ] `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck._make_mocks` — UPDATE: the helper builds `pubsub_numsub.return_value` with **str** keys (`{"valor:sessions:new": numsub_return}`). Change it to return **bytes**-keyed shapes (matching the real `decode_responses=False` connection) so the existing cases exercise the real reply shape. Consider parametrizing the helper to emit both dict and list-of-tuples shapes.
+- [ ] `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck::test_numsub_ok_proceeds_to_listen` — UPDATE: with bytes-keyed mocks, this must still assert `pubsub.listen()` is reached (it will only pass after the fix; today it would fail with the bytes-keyed mock — the regression-proof of the bug).
+- [ ] `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck::test_numsub_zero_skips_listen_and_logs_warning` — UPDATE: feed a bytes-keyed empty/zero reply; assert teardown + WARNING still fire for a genuine zero-subscriber case.
+- [ ] `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck::test_numsub_raises_no_crash_and_logs_warning` — verify unchanged (exception path independent of key encoding); UPDATE only if the shared `_make_mocks` change affects it.
+- [ ] `tests/integration/test_session_notify.py` (line ~145) — UPDATE: `mock_conn.pubsub_numsub.return_value = {"valor:sessions:new": 1}` uses a str key. Change to a bytes-keyed reply so the integration test exercises the real connection behavior and the listener proceeds.
+- [ ] NEW regression cases in `tests/unit/test_agent_session_queue_async.py`: assert the parse computes `count == 1` for a bytes-keyed reply in **both** the list-of-tuples shape (`[(b"valor:sessions:new", 1)]`) and the dict shape (`{b"valor:sessions:new": 1}`), so this cannot silently regress.
 
 ## Rabbit Holes
 
-- **Do NOT flip the connection to `decode_responses=True`.** It changes the encoding of every `pubsub.listen()` payload on that connection for no benefit and widens the blast radius. The parse fix is self-contained.
-- **Do NOT refactor or "harden" the broader notify/poll architecture.** The polling fallback, the 5 s backoff, and the retry-count are out of scope; this is a one-line parse correctness fix plus tests.
-- **Do NOT chase the original psyoptimal stall incident.** It was a *contributing factor* mention; this plan restores the fast-path, it does not re-litigate that incident.
+- **`decode_responses=True` on the connection** — tempting as a "cleaner" fix, but it broadens blast radius to every reply on the listener connection (including `pubsub.listen()` message payloads and `json.loads` input). The issue explicitly weighs against it. Stay with the surgical parse fix.
+- **Refactoring the whole notify-listener / retry loop** — out of scope. The retry/backoff structure is correct; only the parse is wrong.
+- **"Fixing" `message["type"]` or `json.loads` for bytes** — confirmed non-issues. Do not touch the listen loop.
 
 ## Risks
 
-### Risk 1: redis-py returns a shape the helper doesn't anticipate
-**Impact:** `_numsub_count` reads `0`, re-introducing the livelock on some redis-py version.
-**Mitigation:** The helper handles both documented shapes (dict and list-of-tuples) and both key encodings (bytes/str) via a single normalization. Unit tests cover all four combinations plus empty/wrong-channel. `int(count)` tolerates non-int counts.
+### Risk 1: redis-py reply shape varies across versions
+**Impact:** If the installed redis-py returns a shape the parse doesn't handle (e.g. dict vs list), the count could read 0 again.
+**Mitigation:** The fix covers both dict and list-of-tuples shapes, each with bytes-aware key matching. Regression tests assert both shapes explicitly.
 
-### Risk 2: A real subscribe failure is now masked
-**Impact:** If a subscribe genuinely fails to register, the corrected check could (in theory) read a stale non-zero count from another connection's subscription.
-**Mitigation:** `PUBSUB NUMSUB` is server-global and counts the live subscription this thread just created; with the parse fixed it reads the true count (`>= 1` when this subscribe registered). The guard's purpose — detect a no-op subscribe (count `0`) — still works, because a genuine no-op still yields `0`. Net behavior is strictly closer to intent.
+### Risk 2: Masking a genuine failed-subscribe
+**Impact:** If the bytes-aware match is too permissive, the self-check could report `>=1` when the subscribe genuinely failed, defeating the #1804 guard.
+**Mitigation:** The match is exact on channel name (just key-type-agnostic). The empty-reply regression test confirms `_count` stays `0` and the teardown path still fires for a real zero-subscriber case.
 
 ## Race Conditions
 
-No new race conditions introduced. The NUMSUB read already happens on the
-listener thread's own `socket_timeout=None` connection (per the existing comment
-at lines 842-843), with no cross-thread sharing. `_numsub_count` is a pure
-function over the reply value and touches no shared state. The fix is a parse
-correction within the existing single-threaded read.
+No new race conditions introduced. The NUMSUB read happens on the listener thread's own `socket_timeout=None` connection (same connection used for subscribe), with no cross-thread sharing of the reply. The existing retry loop (3 attempts, ~300 ms) handles the documented one-frame NUMSUB propagation lag; the fix does not alter timing, only the parse of the returned value.
 
 ## No-Gos (Out of Scope)
 
-Nothing deferred — every relevant item is in scope for this plan. The fix, the
-helper extraction, and the regression/integration test updates are all completed
-within this plan.
+Nothing deferred — every relevant item is in scope for this plan. The fix, the test updates, and the new regression cases all land together.
 
 ## Update System
 
-No update system changes required — this is a pure in-process logic fix to
-`agent/agent_session_queue.py`. No new dependencies, config, or migration steps;
-no Popoto model changes. The corrected worker behavior propagates with the normal
-code update + worker restart (`./scripts/valor-service.sh worker-restart`).
+No update system changes required — this is a pure logic fix in `agent/agent_session_queue.py`. No new dependencies, no config files, no migrations, no Popoto model changes. The fix takes effect on the next worker restart (`./scripts/valor-service.sh worker-restart`), which is part of the normal deploy.
 
 ## Agent Integration
 
-No agent integration required — this is a worker-internal fix to the session
-notify listener. No CLI entry point, MCP surface, or bridge import changes. The
-agent reaches sessions through the existing enqueue/notify/poll machinery, which
-is unchanged in interface; only the internal NUMSUB parse is corrected.
+No agent integration required — this is a worker-internal change to the session notify listener. No MCP surface, no `.mcp.json` change, no bridge import. The agent reaches sessions through the existing queue; this fix only restores the fast-path latency on the worker side.
 
 ## Documentation
 
-No new feature documentation needed — this is a bug fix to existing internal
-behavior, not a new capability.
+### Feature Documentation
+- [ ] Update `docs/features/bridge-worker-architecture.md` (the notify/polling discovery section) if it documents the NUMSUB self-check behavior — add a note that the self-check is bytes-aware. If the self-check is not currently documented there, no change is needed and this checkbox is satisfied by confirming its absence.
 
 ### Inline Documentation
-- [ ] Add a one-line comment at the `_numsub_count` helper noting it tolerates
-      bytes/str keys because the listener connection uses `decode_responses=False`
-      (POPOTO pool default), referencing #1811 so the rationale survives future edits.
-- [ ] Update the existing NUMSUB-check comment block (lines 838-843) only if the
-      line references shift; keep it accurate.
-
-(If a reviewer judges that `docs/features/bridge-worker-architecture.md` should
-note the notify fast-path correctness fix, add a one-line entry — otherwise no
-docs change is warranted for a parse bug.)
+- [ ] Add a one-line comment at the parse site noting that `pubsub_numsub` keys are bytes under `decode_responses=False`, so the match must be key-type-agnostic (prevents a future regression to str-only matching).
 
 ## Success Criteria
 
 - [ ] With a live subscription present, the NUMSUB self-check computes `count >= 1` and the listener proceeds into `pubsub.listen()` (no teardown).
-- [ ] No recurring `NUMSUB check reports 0 subscribers` WARNINGs on a healthy worker (verify via `logs/worker.log` after a worker restart).
-- [ ] A newly-enqueued session is picked up via the notify fast-path (log line `Received session notify: worker_key=... session_id=...`), not only via polling.
-- [ ] Regression tests cover bytes-keyed `pubsub_numsub` replies in both list-of-tuples and dict shapes (and the str-keyed shapes), all green.
-- [ ] Tests pass (`/do-test`).
-- [ ] Lint and format clean.
+- [ ] No recurring `NUMSUB check reports 0 subscribers` warnings on a healthy worker.
+- [ ] The notify fast-path delivers session pickups (a newly-enqueued session is picked up via notify, not only polling).
+- [ ] Regression tests cover bytes-keyed `pubsub_numsub` replies in both list-of-tuples and dict shapes.
+- [ ] Existing unit/integration NUMSUB tests updated to bytes-keyed shapes and passing.
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
-
-When this plan is executed, the lead agent orchestrates. The lead does not build directly.
 
 ### Team Members
 
 - **Builder (notify-parse)**
   - Name: notify-parse-builder
-  - Role: Extract `_numsub_count` helper, rewire lines 850-856, update unit + integration tests.
+  - Role: Apply the bytes-aware NUMSUB parse fix and update/add tests
   - Agent Type: builder
   - Resume: true
 
 - **Validator (notify-parse)**
   - Name: notify-parse-validator
-  - Role: Verify the parse fix, run the targeted tests, confirm no recurring WARNING path on the corrected code.
+  - Role: Verify the fix, run the test suite, confirm no recurring WARNING
   - Agent Type: validator
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Implement bytes-aware NUMSUB parse
+### 1. Apply bytes-aware NUMSUB parse fix
 - **Task ID**: build-numsub-parse
 - **Depends On**: none
 - **Validates**: tests/unit/test_agent_session_queue_async.py, tests/integration/test_session_notify.py
-- **Informed By**: Recon (bytes-keyed reply confirmed empirically as `[(b'valor:sessions:new', 1)]`)
 - **Assigned To**: notify-parse-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add module-level helper `_numsub_count(numsub_result, channel)` in `agent/agent_session_queue.py` that normalizes bytes/str channel keys and handles dict + list-of-tuples shapes, returning `int(count)` or `0`.
-- Replace the parse at lines 850-856 with `_count = _numsub_count(_numsub_result, "valor:sessions:new")`.
-- Add an inline comment referencing #1811 and the `decode_responses=False` rationale.
+- Edit `agent/agent_session_queue.py` lines 850-856: make both the dict branch and the list-of-tuples branch match the channel against both `bytes` and `str` forms of `"valor:sessions:new"` (e.g. compare `ch` against `(b"valor:sessions:new", "valor:sessions:new")`, or decode `ch` before comparing).
+- Add a one-line inline comment noting `pubsub_numsub` keys are bytes under `decode_responses=False`.
+- Do NOT switch the connection to `decode_responses=True`; do NOT touch the `pubsub.listen()` loop or `json.loads`.
 
-### 2. Add/Update regression tests
+### 2. Update existing tests to bytes-keyed shapes + add regression cases
 - **Task ID**: build-numsub-tests
 - **Depends On**: build-numsub-parse
-- **Validates**: tests/unit/test_agent_session_queue_async.py, tests/integration/test_session_notify.py
 - **Assigned To**: notify-parse-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add direct unit tests for `_numsub_count`: bytes-keyed list-of-tuples → correct count; bytes-keyed dict → correct count; str-keyed list and dict → correct count; empty `[]`/`{}` → 0; wrong-channel reply → 0.
-- Update `TestNumsubSelfCheck._make_mocks` so the "ok" path drives a **bytes-keyed** reply (`[(b"valor:sessions:new", N)]`), confirming `test_numsub_ok_proceeds_to_listen` now exercises production reality.
-- Update `tests/integration/test_session_notify.py:145` to `mock_conn.pubsub_numsub.return_value = [(b"valor:sessions:new", 1)]`.
+- Update `tests/unit/test_agent_session_queue_async.py::TestNumsubSelfCheck._make_mocks` to emit bytes-keyed `pubsub_numsub` replies; ensure `test_numsub_ok_proceeds_to_listen`, `test_numsub_zero_skips_listen_and_logs_warning`, and `test_numsub_raises_no_crash_and_logs_warning` pass against the fixed code.
+- Add regression cases asserting `count == 1` for bytes-keyed replies in both list-of-tuples (`[(b"valor:sessions:new", 1)]`) and dict (`{b"valor:sessions:new": 1}`) shapes; add an empty-reply case asserting the genuine zero-subscriber teardown still fires.
+- Update `tests/integration/test_session_notify.py` (line ~145) to a bytes-keyed `pubsub_numsub` return value.
 
 ### 3. Validation
 - **Task ID**: validate-numsub
@@ -313,27 +243,38 @@ When this plan is executed, the lead agent orchestrates. The lead does not build
 - **Assigned To**: notify-parse-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `pytest tests/unit/test_agent_session_queue_async.py tests/integration/test_session_notify.py -q`.
-- Confirm `git grep` shows the str-key literal comparison at lines 850-856 is gone (replaced by the helper call).
+- Run `pytest tests/unit/test_agent_session_queue_async.py tests/integration/test_session_notify.py -q` and confirm all pass.
 - Run `python -m ruff check .` and `python -m ruff format --check .`.
-- Report pass/fail.
+- Confirm the success criteria are met and report pass/fail.
+
+### 4. Documentation
+- **Task ID**: document-feature
+- **Depends On**: validate-numsub
+- **Assigned To**: notify-parse-builder
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Update `docs/features/bridge-worker-architecture.md` notify section if it documents the self-check; otherwise confirm no doc change is needed.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Notify-listener tests pass | `pytest tests/unit/test_agent_session_queue_async.py tests/integration/test_session_notify.py -q` | exit code 0 |
-| Helper exists | `grep -c "_numsub_count" agent/agent_session_queue.py` | output > 0 |
-| Old str-key parse removed | `grep -c 'ch == "valor:sessions:new"' agent/agent_session_queue.py` | match count == 0 |
-| No decode_responses flip | `grep -c "decode_responses=True" agent/agent_session_queue.py` | match count == 0 |
+| NUMSUB unit tests pass | `pytest tests/unit/test_agent_session_queue_async.py -q` | exit code 0 |
+| Notify integration test passes | `pytest tests/integration/test_session_notify.py -q` | exit code 0 |
+| Full suite passes | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
+| No str-only NUMSUB match remains | `grep -n 'ch == "valor:sessions:new"' agent/agent_session_queue.py` | match count == 0 |
+| Bytes-keyed channel handled | `grep -c "b\"valor:sessions:new\"\|b'valor:sessions:new'" agent/agent_session_queue.py` | output > 0 |
 
 ## Critique Results
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 
+---
+
 ## Open Questions
 
-None. The root cause is confirmed in code and empirically; the fix is surgical
-and self-contained. Ready for critique.
+None. The root cause is confirmed empirically (live-Redis repro in the issue, re-verified
+against the baseline commit), the fix approach is settled (bytes-aware parse over
+`decode_responses=True`), and the test impact is fully enumerated. Ready for critique.
