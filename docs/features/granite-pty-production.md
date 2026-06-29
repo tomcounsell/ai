@@ -383,8 +383,9 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for session-runner regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert). For `startup_unresolved` exits: also carries `startup_failure_kind` (`"plateau"` or `"ceiling"`) and `startup_diagnostic_frame` (truncated frame excerpt, up to 1000 chars). Note: `pm_floor_delivered` is a clean exit and does NOT emit `exit_anomaly`. |
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
-| `granite_delivery_failure` | delivery timeout or loop-closed condition in `_deliver_sync`; also written when the same-thread done-callback fires on task failure/cancellation | `event_type` (`granite_delivery_recovered_via_outbox` or `granite_delivery_dropped`), `text`, `payload_chars`, `reason` (the outcome: `recovered_via_outbox` when re-enqueue succeeded, `dropped` when both timeout and re-enqueue failed), `failure_reason` (exception detail; tagged `[future_uncancellable_possible_duplicate]` when `future.cancel()` returned `False` because the coroutine was already running), `recovered` (bool), `ts` |
-| `delivery_failure` | a mid-loop `send_cb` raised (older alias, kept for back-compat) | `payload_chars`, `reason`, `ts` |
+| `granite_delivery_recovered_via_outbox` | delivery timeout or loop-closed condition in `_deliver_sync` where the payload was successfully re-enqueued to the outbox; also written when the same-thread done-callback fires on task failure/cancellation and re-enqueue succeeds | `event_type`, `text`, `payload_chars`, `reason` (`recovered_via_outbox`), `failure_reason` (exception detail; tagged `[future_uncancellable_possible_duplicate]` when `future.cancel()` returned `False`), `recovered` (`True`), `ts` |
+| `granite_delivery_dropped` | delivery timeout or loop-closed condition in `_deliver_sync` where **both** the primary send and the outbox re-enqueue failed (double-failure, permanent loss) | `event_type`, `text`, `payload_chars`, `reason` (`dropped`), `failure_reason` (exception detail), `recovered` (`False`), `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (older alias — `type` field on all delivery-failure events for back-compat; matches legacy events in Redis before the `granite_delivery_*` rename) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
@@ -765,9 +766,9 @@ handles generic field addition per issues #1099/#1172).
   6-field JSON dict matching the shape used by `agent/output_handler.py`:
   `chat_id`, `reply_to`, `text`, `session_id`, `timestamp`, and optional
   `file_paths`; the key expires after 3600 s. The relay then delivers it so
-  the reply is never silently lost. The resulting `granite_delivery_failure`
-  session event records `outcome=recovered_via_outbox` on success or
-  `outcome=dropped` on a double-failure (timeout AND re-enqueue both failed).
+  the reply is never silently lost. The resulting session event is
+  `granite_delivery_recovered_via_outbox` when re-enqueue succeeds, or
+  `granite_delivery_dropped` on a double-failure (timeout AND re-enqueue both failed).
   If `future.cancel()` returns `False` (the coroutine was already running and
   cannot be cancelled), the event is additionally tagged
   `[future_uncancellable_possible_duplicate]`; `bridge/redundancy_filter.py`
