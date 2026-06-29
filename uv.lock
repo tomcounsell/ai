@@ -32,7 +32,7 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.112.0"
+version = "0.113.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -44,9 +44,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7b/dd/808c144d4a883fcfd12fe0d7689b1d86bbbea6666c1cc957ad19f1017c22/anthropic-0.112.0.tar.gz", hash = "sha256:e180cd91aa5b9b32e4007fe69892ab128d8a86b9f90825103b1903fbc977d0af", size = 937460 }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/2a/f856135e5b055bf8b6f34133b313810dfe1cb848e5ac5ea843e196daefdd/anthropic-0.113.0.tar.gz", hash = "sha256:1830e866430ebd351c4f277d20e4c9b0aa9ad71f6569a23772ae88b33e0abaf8", size = 939444 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a9/26/ea71185027956325be1903d4fcaf7461d5ef40ca8f0e64f992e24ea9db0e/anthropic-0.112.0-py3-none-any.whl", hash = "sha256:bcc6268612c716dbb77133dd60fc41d26016d1b81dee9a52314d210193638751", size = 931954 },
+    { url = "https://files.pythonhosted.org/packages/3e/4d/ea001c0993b8f48153c5eb74eecf5a3ed120df07fe894757351e8308bbe6/anthropic-0.113.0-py3-none-any.whl", hash = "sha256:9a52ed7a4982e916fa878d1ed3eaec2dcdf98699a39d8fc45b54b3c50f1e7426", size = 937995 },
 ]
 
 [[package]]
@@ -3360,7 +3360,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = "==0.112.0" },
+    { name = "anthropic", specifier = "==0.113.0" },
     { name = "claude-agent-sdk", specifier = "==0.2.110" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
