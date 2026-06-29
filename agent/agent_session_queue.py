@@ -783,6 +783,25 @@ async def get_active_session_for_chat(chat_id: str) -> AgentSession | None:
     return sessions[0]
 
 
+def _numsub_count(numsub_result: object, channel: str) -> int:
+    """Read the subscriber count for `channel` from a pubsub_numsub reply.
+
+    Tolerates bytes- or str-keyed dict and list-of-tuples shapes, because the
+    listener connection uses ``decode_responses=False`` (POPOTO pool default, see
+    #1811).  ``int(count)`` guards against count arriving as a bytes/str value on
+    exotic redis-py builds.
+    """
+
+    def _key(ch: object) -> str:
+        return ch.decode() if isinstance(ch, (bytes, bytearray)) else str(ch)  # type: ignore[union-attr]
+
+    items = numsub_result.items() if isinstance(numsub_result, dict) else numsub_result  # type: ignore[union-attr]
+    for ch, count in items:
+        if _key(ch) == channel:
+            return int(count)
+    return 0
+
+
 async def _session_notify_listener() -> None:
     """Subscribe to valor:sessions:new and wake the worker on new sessions.
 
@@ -847,13 +866,9 @@ async def _session_notify_listener() -> None:
                         _numsub_result = conn.pubsub_numsub("valor:sessions:new")
                         # pubsub_numsub returns a dict {channel: count} for redis-py >= 4
                         # or a list of (channel, count) pairs for older versions.
-                        if isinstance(_numsub_result, dict):
-                            _count = _numsub_result.get("valor:sessions:new", 0)
-                        else:
-                            _count = next(
-                                (c for ch, c in _numsub_result if ch == "valor:sessions:new"),
-                                0,
-                            )
+                        # Keys are bytes when decode_responses=False (POPOTO default).
+                        # _numsub_count normalises both shapes and both encodings (#1811).
+                        _count = _numsub_count(_numsub_result, "valor:sessions:new")
                         if _count >= 1:
                             _numsub_ok = True
                             break

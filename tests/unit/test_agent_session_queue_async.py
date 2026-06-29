@@ -297,7 +297,12 @@ class TestNotifyListenerNusubSelfCheck:
     """
 
     def _make_mocks(self, numsub_return=None, numsub_raise=None):
-        """Build mock redis conn+pubsub and a mock POPOTO pool."""
+        """Build mock redis conn+pubsub and a mock POPOTO pool.
+
+        Uses bytes-keyed list-of-tuples — the shape redis-py returns when
+        ``decode_responses=False`` (POPOTO pool default, #1811).  This ensures
+        ``test_numsub_ok_proceeds_to_listen`` would have caught the regression.
+        """
         mock_pubsub = MagicMock()
         mock_pubsub.listen.return_value = iter([])  # empty; thread exits cleanly
 
@@ -306,11 +311,9 @@ class TestNotifyListenerNusubSelfCheck:
         if numsub_raise is not None:
             mock_conn.pubsub_numsub.side_effect = numsub_raise
         else:
-            mock_conn.pubsub_numsub.return_value = (
-                {"valor:sessions:new": numsub_return}
-                if numsub_return is not None
-                else {"valor:sessions:new": 1}
-            )
+            count = numsub_return if numsub_return is not None else 1
+            # Use bytes-keyed list-of-tuples to match production decode_responses=False
+            mock_conn.pubsub_numsub.return_value = [(b"valor:sessions:new", count)]
 
         mock_popoto = MagicMock()
         mock_popoto.connection_pool.connection_kwargs = {
@@ -403,3 +406,51 @@ class TestNotifyListenerNusubSelfCheck:
         )
         # Teardown (finally) must have run — unsubscribe() is called
         mock_conn.pubsub.return_value.unsubscribe.assert_called()
+
+
+class TestNumsubCount:
+    """Direct unit tests for the _numsub_count helper (#1811).
+
+    Covers both reply shapes (list-of-tuples and dict) and both key encodings
+    (bytes and str), plus edge cases, without touching the thread/asyncio machinery.
+    """
+
+    def setup_method(self):
+        from agent.agent_session_queue import _numsub_count
+
+        self.fn = _numsub_count
+        self.ch = "valor:sessions:new"
+
+    # --- list-of-tuples shapes ---
+
+    def test_bytes_key_list_correct_count(self):
+        """Production shape: bytes-keyed list-of-tuples from decode_responses=False."""
+        assert self.fn([(b"valor:sessions:new", 1)], self.ch) == 1
+
+    def test_bytes_key_list_higher_count(self):
+        assert self.fn([(b"valor:sessions:new", 3)], self.ch) == 3
+
+    def test_str_key_list_correct_count(self):
+        """str-keyed list (decode_responses=True or mocked)."""
+        assert self.fn([("valor:sessions:new", 2)], self.ch) == 2
+
+    def test_wrong_channel_list_returns_zero(self):
+        assert self.fn([(b"other:channel", 5)], self.ch) == 0
+
+    def test_empty_list_returns_zero(self):
+        assert self.fn([], self.ch) == 0
+
+    # --- dict shapes ---
+
+    def test_bytes_key_dict_correct_count(self):
+        """Some redis-py versions return a bytes-keyed dict."""
+        assert self.fn({b"valor:sessions:new": 1}, self.ch) == 1
+
+    def test_str_key_dict_correct_count(self):
+        assert self.fn({"valor:sessions:new": 1}, self.ch) == 1
+
+    def test_wrong_channel_dict_returns_zero(self):
+        assert self.fn({b"other:channel": 7}, self.ch) == 0
+
+    def test_empty_dict_returns_zero(self):
+        assert self.fn({}, self.ch) == 0
