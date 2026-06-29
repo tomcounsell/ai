@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-29
 tracking: https://github.com/tomcounsell/ai/issues/1815
 last_comment_id:
+revision_applied: true
 ---
 
 # Worker Liveness Recovery — Dead-Man's-Switch + Bounded PTY Waits
@@ -68,6 +69,19 @@ Two of the six acceptance criteria in #1815 (leaked-permit reclaim; recovery run
 from another process) belong to the deferred fixes #2/#5 and are explicitly **not**
 claimed by this PR — see Success Criteria.
 
+**Split decision (fix #1 vs fix #4) — recorded per critique:** the two fixes are fully
+decoupled (`depends: none`, zero shared code). Fix #4 (`pty_pool.py`, one file) carries
+**no** #1816 conflict; fix #1 (`worker/__main__.py` + `session_state.py`) carries the
+merge-coordination dependency on sibling #1816 (which also rewrites the worker startup
+wiring). **Decision: keep both in one PR** for now (they review as one coherent
+liveness-recovery story and the documentation is shared), but the split is available as a
+clean cut along the existing task boundary (task 1 = fix #4, task 2 = fix #1) if #1816's
+coordination cost grows. Because we are NOT splitting, the #1816 dependency is made
+explicit at the **merge gate** (Step-by-Step task 5) rather than hidden behind
+`depends: none` — task 5 must confirm coordination with #1816 before merge. If at build
+time #1816 is already mid-flight against `worker/__main__.py`, fall back to the split and
+land fix #4 first. See Open Question 3.
+
 ## Freshness Check
 
 **Baseline commit:** `b7fd781b32da5f80596bc68f88ad516e9900893b`
@@ -83,7 +97,7 @@ or `agent/agent_session_queue.py` since the issue was filed (`git log --since` e
 - `worker/__main__.py:48` — `WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"))` — **still holds**.
 - `agent/granite_container/pty_pool.py:285` — `await self._sem.acquire()` in `acquire_pair()` — **still holds**.
 - `agent/granite_container/pty_pool.py:358` — `await self._slot_available.wait()` in `_wait_for_idle_slot()` — **still holds**.
-- `agent/granite_container/pty_pool.py:362` — `await slot.event.wait()` (the POOL-1 hazard) — **still holds**; the divergent-primitive wake (a healthy slot finishing respawn notifies the condition var, not the parked event) is at `:540-568`.
+- `agent/granite_container/pty_pool.py:362` — `await slot.event.wait()` (the POOL-1 hazard) — **still holds**. **Correction (critique, source-confirmed against `b7fd781b`):** the `_spawn_slot` SUCCESS path at `:530-535` already sets BOTH `slot.event.set()` AND `_slot_available.notify_all()`. The real POOL-1 gap is the FAILURE path — `_spawn_slot` re-raises at `:542` (and `_respawn_slot` swallows at `:563-567`) before either wake, leaving the slot stuck in `respawning` with its event unset. There is **no** "divergent-primitive miss"; force-recycle only needs to reschedule the respawn. (Note: respawn tasks live in the pool-level `_respawn_tasks` list at `:486-488`; there is no per-slot `_respawn_task` field.)
 - `agent/granite_container/pty_pool.py:40-50` — POOL-1 hazard docstring — **still holds**.
 - `agent/session_state.py:75` — `_global_session_semaphore: asyncio.Semaphore | None = None` — **still holds**; natural home for `last_loop_tick`.
 - `agent/session_health.py:3001-3017` — `_write_worker_heartbeat()` (writes `data/last_worker_connected`, refreshes Redis PID #1271) — **still holds**.
@@ -218,19 +232,39 @@ PTY acquire → `wait_for(sem.acquire, T)` → idle-slot scan → `wait_for` on 
   - `WORKER_DEADMAN_STALENESS_THRESHOLD` (default ~90s) — several multiples of the
     tick + the 30s watchdog cycle, generous enough to absorb a GC pause or a brief
     legitimate sync block without a false abort. (The systemd "half-interval" guidance
-    inverts to: threshold ≫ tick; 90s ≫ 5s leaves wide margin.)
+    inverts to: threshold ≫ tick; 90s ≫ 5s leaves wide margin.) **Provisional — see the
+    beacon-age auditing + pre-merge spike below; tune against measured p100.**
+  - `WORKER_DEADMAN_STARTUP_GRACE_MAX` (default ~300s) — **unarmed-grace ceiling**. The
+    `armed` latch stays unarmed (writing green on process liveness) until the first real
+    tick, which leaves a freeze *inside* the startup window (index rebuild / recovery
+    sweep, before any tick) permanently undetectable. This ceiling closes that hole: if
+    the beacon is still `None` this long after the watchdog thread starts, abort anyway.
   - `WORKER_DEADMAN_ENABLED` (default `true`) — conservative-rollback kill switch;
     `false` restores #1767's unconditional green write.
 - New on-loop task `_loop_tick_task` in `_run_worker()` startup: `while True: bump_loop_tick(); await asyncio.sleep(WORKER_DEADMAN_TICK_INTERVAL)`. Start it *before* the heartbeat thread arms, and initialize `last_loop_tick` once at task start so the watchdog has a baseline.
 - Invert `_heartbeat_thread_main()`:
+  - Record `thread_start = time.monotonic()` at thread entry (needed for the unarmed-grace
+    ceiling below).
   - Maintain an `armed` latch: stay unarmed (write green based on process liveness,
     i.e. current behavior) until the first beacon newer than the thread's start time
     is observed. This prevents a false SIGABRT during slow startup (index rebuild,
     recovery sweep) when the loop legitimately isn't ticking yet.
+  - **Unarmed-grace ceiling (startup-freeze guard, per critique):** while still unarmed,
+    if `get_loop_tick() is None` **and** `time.monotonic() - thread_start >
+    WORKER_DEADMAN_STARTUP_GRACE_MAX` (~300s), the loop froze *before* it ever ticked
+    (e.g. wedged inside the startup recovery sweep / index rebuild) and the latch would
+    otherwise never arm. Treat this as a wedge: `logger.critical(...)` + `_self_kill()`,
+    gated on `WORKER_DEADMAN_ENABLED` and exempted by `_heartbeat_stop_event` first —
+    exactly like the steady-state abort. Without this ceiling, a startup-window freeze
+    stays silent forever (`None = unarmed, never stale`).
   - Once armed: if `now - get_loop_tick() <= WORKER_DEADMAN_STALENESS_THRESHOLD` →
     `_write_worker_heartbeat()` (green, unchanged). Else → `logger.critical(...)` with
     the staleness age + `os.abort()` (only when `WORKER_DEADMAN_ENABLED`). Use a
     `_self_kill()` seam so tests can assert the call without aborting the test process.
+  - **Beacon-age auditing (per critique — make the threshold headroom observable):** on
+    every armed green write, emit `logger.info("[deadman] beacon age=%.1fs", now - tick)`
+    at a low cadence (~once/min, not every cycle) so operators can watch the margin
+    between real on-loop sync work and the abort threshold in `logs/worker.log`.
   - Check `_heartbeat_stop_event` first each cycle so graceful shutdown never aborts.
 - Cross-thread safety: the beacon is a single `float` read/written without a lock —
   CPython GIL makes the read/write atomic; staleness math tolerates a one-cycle skew.
@@ -252,12 +286,24 @@ PTY acquire → `wait_for(sem.acquire, T)` → idle-slot scan → `wait_for` on 
   `TimeoutError` → the slot is stuck in `respawning` (POOL-1 hazard) → call
   `_force_recycle_slot(slot)` then `continue`.
 - `_force_recycle_slot(slot)`: log `error`; under `slot.lock`, only act if the slot is
-  still `respawning` with its event unset **and** its respawn task is done/dead (not
-  merely slow); then schedule a fresh `_respawn_slot(slot)` (reusing `_schedule_respawn`
-  / the `_respawn_tasks` list at `:486-488`). The recycle must wake **both** primitives
-  the acquire path waits on — `slot.event` and the `_slot_available` condition var
-  (`:535`) — to avoid re-triggering the divergent-primitive miss at `:540-568`.
-  Idempotent: if the original respawn later completes, the event-set path wins.
+  still `respawning` with its event unset; then reschedule the respawn by reusing the
+  inline `_respawn_tasks` pattern at `:486-488` (prune done tasks, then
+  `task = asyncio.create_task(self._respawn_slot(slot))` and append). Do **NOT** manually
+  `slot.event.set()` or notify the `_slot_available` condition var — the rescheduled
+  spawn's SUCCESS path (`:530-535`) already sets BOTH `slot.event.set()` and
+  `_slot_available.notify_all()`, so the acquire path's two waiters are re-armed by the
+  respawn itself. There is no "divergent-primitive miss" to patch (the POOL-1 gap is the
+  FAILURE path re-raising at `:542` / swallowing at `:563-567` before any wake — exactly
+  what the rescheduled respawn re-attempts). **Why manual poking is harmful:** setting
+  `slot.event.set()` while `state == "respawning"` injects a busy-spin window at `:362`
+  and a spurious `PTYPoolError` via the `slot.state != "idle"` guard at `:301`.
+  **Gate stays surgical (per NIT):** the `state == "respawning" and not slot.event.is_set()`
+  check under `slot.lock` is the whole guard — drop any `task.done()`/respawn-task-liveness
+  inspection. There is no per-slot `_respawn_task` field (respawn tasks live in the
+  pool-level `_respawn_tasks` list), so adding one would edge past the
+  no-state-machine-rewrite No-Go; the idempotency rule already covers the slow-task race.
+  Idempotent: if the original respawn later completes (event set, state `idle`), the
+  re-scan picks it up and recycle is a no-op.
 
 ## Failure Path Test Strategy
 
@@ -267,7 +313,7 @@ PTY acquire → `wait_for(sem.acquire, T)` → idle-slot scan → `wait_for` on 
 - [ ] The `os.abort()`/`_self_kill()` path is gated by `WORKER_DEADMAN_ENABLED`; test asserts that with the flag false, a stale beacon does NOT abort (only logs).
 
 ### Empty/Invalid Input Handling
-- [ ] `get_loop_tick()` returns `None` before the first tick — the watchdog must treat `None` as "unarmed", never as "stale" (no abort). Test the `None` beacon path explicitly.
+- [ ] `get_loop_tick()` returns `None` before the first tick — the watchdog must treat `None` as "unarmed", never as "stale" (no *staleness* abort). BUT after `WORKER_DEADMAN_STARTUP_GRACE_MAX` an all-`None` beacon DOES abort (startup-freeze guard). Test both: `None` within grace → no abort; `None` past the ceiling + enabled → `_self_kill`.
 - [ ] `wait_for` with a 0 or negative timeout (misconfig) must not busy-loop — clamp to a minimum or document that the env value must be positive; test a tiny timeout still recycles cleanly.
 
 ### Error State Rendering
@@ -280,19 +326,19 @@ PTY acquire → `wait_for(sem.acquire, T)` → idle-slot scan → `wait_for` on 
 - [ ] `tests/unit/test_worker_health_check.py::TestCheckWorkerHealth` — UPDATE (verify, likely no change): it checks `data/last_worker_connected` staleness against the 600s threshold. The file's *meaning* changes (loop-liveness, not process-liveness) but its format (ISO timestamp) and the consumer contract are unchanged. Confirm no assertion depends on "always written every 30s".
 - [ ] `tests/unit/granite_container/test_pty_pool.py::TestAcquireRelease` — UPDATE: add bounded-wait assertions; ensure the existing "blocks when all slots locked" test still passes within the new timeout (use a short `PTY_POOL_WAIT_TIMEOUT` via env in the test).
 - [ ] `tests/unit/granite_container/test_pty_pool.py::TestRespawnFailure` — UPDATE/EXTEND: today it asserts the slot lands in `respawning` after a spawn failure. Extend to assert the next acquirer force-recycles it within `PTY_POOL_WAIT_TIMEOUT` instead of blocking forever (this is the POOL-1 regression guard / acceptance criterion).
-- [ ] `tests/unit/granite_container/test_pty_pool_hardening.py` — UPDATE: add a case asserting a stuck-`respawning` slot is recycled by a bounded acquirer (new `_force_recycle_slot` coverage), and that both primitives are notified.
+- [ ] `tests/unit/granite_container/test_pty_pool_hardening.py` — UPDATE: add a case asserting a stuck-`respawning` slot is re-spawned by a bounded acquirer (new `_force_recycle_slot` coverage) and that a parked acquirer **proceeds within `PTY_POOL_WAIT_TIMEOUT`**. Do **NOT** assert "both primitives notified" — that would ossify a phantom bug; the rescheduled respawn's SUCCESS path (`:530-535`) re-arms `slot.event` and `_slot_available` on its own.
 - [ ] No DELETE/REPLACE: all changes are additive guards on existing paths; no test describes behavior that is being removed (the unconditional-green write is replaced, covered by the `TestHeartbeatIsolation` UPDATE above).
 
 New tests to add (greenfield, no prior coverage):
-- `tests/unit/test_worker_deadman.py` — beacon freshness → green; stale beacon + enabled → `_self_kill` called; stale + disabled → no abort; `None` beacon → unarmed → no abort; write-failure → no abort; startup grace (unarmed until first tick).
-- `tests/unit/granite_container/test_pty_pool_bounded_waits.py` — each of the three awaits times out and recovers (sem.acquire → `PTYPoolError`; `_slot_available` → re-scan; `slot.event` → force-recycle with both primitives notified).
+- `tests/unit/test_worker_deadman.py` — beacon freshness → green; stale beacon + enabled → `_self_kill` called; stale + disabled → no abort; `None` beacon → unarmed → no abort *before* `WORKER_DEADMAN_STARTUP_GRACE_MAX`; `None` beacon + elapsed past the ceiling + enabled → `_self_kill` fires (startup-freeze guard), disabled → no abort; write-failure → no abort; startup grace (unarmed until first tick); beacon-age `logger.info` emitted on the green path.
+- `tests/unit/granite_container/test_pty_pool_bounded_waits.py` — each of the three awaits times out and recovers (sem.acquire → `PTYPoolError`; `_slot_available` → re-scan; `slot.event` → force-recycle reschedules the respawn and the acquirer proceeds within `PTY_POOL_WAIT_TIMEOUT`).
 
 ## Rabbit Holes
 
 - **Do NOT implement the lease semaphore (#2) or progress-deadline cancel scope (#3) here.** They are the larger REAL FIXes and are filed as #1820. The bounded-wait + dead-man's-switch primitives in this plan are what they build on.
 - **Do NOT try to detect `await semaphore.acquire()` parks with the dead-man's-switch.** Fix #1 detects *synchronous* loop freezes only — the loop keeps spinning while a coroutine is parked, so the tick keeps bumping. That park is fix #4's job (for the PTY pool) and #2/#3's job (for the global slot). Conflating them produces false aborts.
 - **Do NOT close the wedged worker's PTY fds from the watchdog.** Already proven infeasible (#1767 spike: macOS `os.close` only owns own fds, `/proc` is Linux-only). Respawn the process instead.
-- **Do NOT rewrite the PTY pool state machine.** Fix #4 is a narrow `wait_for` + force-recycle, not a redesign of the respawn contract. Patch the divergent-primitive miss surgically (notify both primitives), don't re-architect.
+- **Do NOT rewrite the PTY pool state machine.** Fix #4 is a narrow `wait_for` + force-recycle, not a redesign of the respawn contract. `_force_recycle_slot` only reschedules `_respawn_slot` under `slot.lock`; it does NOT manually set `slot.event`, does NOT notify `_slot_available`, and adds NO per-slot respawn-task field (which would itself be a state-machine change). The rescheduled spawn's success path re-arms both waiters. Don't re-architect.
 - **Do NOT rewrite the worker startup task wiring beyond adding the tick task.** Sibling issue #1816 (event-loop sharing / respawn) also touches `worker/__main__.py` startup — keep this PR's footprint to the heartbeat thread + one new task to avoid a merge collision. Coordinate via #1818.
 - **Do NOT lower `WORKER_HEARTBEAT_INTERVAL` to chase faster detection.** The bounded window is `STALENESS_THRESHOLD + one watchdog cycle`; tune the threshold, not the cycle.
 - **Do NOT add a launchd `WatchdogSec` change.** launchd has no such knob; the SIGABRT→exit path uses the existing `KeepAlive`+`ThrottleInterval` restart, which needs no plist change.
@@ -303,13 +349,15 @@ New tests to add (greenfield, no prior coverage):
 **Impact:** A real (non-wedged) worker self-kills mid-session, re-queuing work unnecessarily (lossy restart).
 **Mitigation:** Generous `WORKER_DEADMAN_STALENESS_THRESHOLD` (~90s, provisional) — far longer than any legitimate on-loop sync block should be (real async code never blocks the loop that long). Startup-grace `armed` latch prevents aborts during index rebuild/recovery. `WORKER_DEADMAN_ENABLED=false` is an instant kill switch. Ship with the threshold deliberately conservative and tighten only after observing real tick-cadence histograms in `logs/worker.log`.
 
+**Residual mid-run risk (per critique — the ~90s threshold is justified only by assertion):** the armed latch covers *startup* grace only; it does nothing for a *mid-run* on-loop **synchronous** block (hourly reflection batch, memory-consolidation pass, a blocking subprocess running on the loop thread). If any steady-state on-loop sync op exceeds 90s, a healthy worker self-SIGABRTs and re-queues in-flight work. The worker loop body was not in the critique bundle, so the absence of such ops is **unverified**. Three-part mitigation: (a) the per-cycle beacon-age `logger.info("[deadman] beacon age=...")` auditing (Technical Approach) makes the live margin observable; (b) **pre-merge spike (required before merge):** log the max observed `now - last_loop_tick` over a representative window that includes the reflection/cleanup cycles, then set the threshold to a comfortable multiple of the measured p100; (c) if any legitimate on-loop op routinely approaches the threshold, move it off-loop via `run_in_executor` rather than widening the threshold. See Open Question 2.
+
 ### Risk 2: `asyncio.wait_for` cancelling `Semaphore.acquire()` corrupts the semaphore
 **Impact:** A bounded acquire that times out could (on old Python) leave a phantom permit, shrinking effective pool capacity.
 **Mitigation:** Python 3.14.3 (verified) fixed this pre-3.10 bug — a cancelled `acquire()` does not consume a permit. Guard the `finally` release behind a `sem_acquired` flag so a never-acquired permit is never released. Prerequisite check pins Python ≥ 3.11.
 
 ### Risk 3: `_force_recycle_slot` races the original respawn task completing
 **Impact:** Double-spawn of a slot, or a recycle that clobbers a slot that just became idle.
-**Mitigation:** Recycle is idempotent — under `slot.lock`, only re-schedule a respawn if the slot is still `respawning`, its event unset, **and** its respawn task is done/dead (not merely slow). If the original respawn completed (event set, state `idle`) the re-scan picks it up and recycle is a no-op.
+**Mitigation:** Recycle is idempotent — under `slot.lock`, only re-schedule a respawn if the slot is still `respawning` with its event unset. If the original respawn completed (event set, state `idle`) the re-scan picks it up and recycle is a no-op. (No respawn-task-liveness inspection — the gate is purely `state == "respawning" and not slot.event.is_set()`; see the `_force_recycle_slot` note in Technical Approach.)
 
 ### Risk 4: SIGABRT respawn storm under a persistent wedge cause
 **Impact:** If the wedge cause is deterministic (poisoned session), the worker self-kills, respawns, re-picks the same work, and wedges again — a crash loop.
@@ -328,7 +376,7 @@ New tests to add (greenfield, no prior coverage):
 **Location:** `pty_pool.py` `_wait_for_idle_slot` timeout path → `_force_recycle_slot`.
 **Trigger:** The original respawn task finishes (sets event, state→idle) just as the acquirer times out and decides to recycle.
 **Data prerequisite:** Slot state + event consistency under `slot.lock`.
-**State prerequisite:** Recycle only acts on a slot still `respawning`, event unset, respawn task done/dead.
+**State prerequisite:** Recycle only acts on a slot still `respawning` with its event unset.
 **Mitigation:** Re-check state under `slot.lock` inside `_force_recycle_slot`; if already idle or the task is still running, no-op and let the outer `continue` re-scan pick it up. Idempotent.
 
 ### Race 3: SIGABRT fires during graceful shutdown
@@ -385,8 +433,10 @@ In-scope acceptance criteria (the two this PR claims):
 
 Supporting criteria:
 - [ ] A missed `_slot_available` notify no longer parks an acquirer (test: timeout → re-scan finds the idle slot).
+- [ ] A startup-window freeze (beacon never ticks) self-kills after `WORKER_DEADMAN_STARTUP_GRACE_MAX` (test: `None` beacon + elapsed > ceiling + enabled → `_self_kill` fires; disabled → no abort).
 - [ ] With `WORKER_DEADMAN_ENABLED=false`, a stale beacon logs but does NOT abort (rollback path).
 - [ ] The green-write path still refreshes the Redis worker PID (#1271 preserved) and still swallows FS write errors without aborting.
+- [ ] **Pre-merge spike done:** max observed `now - last_loop_tick` over a representative window (incl. reflection/cleanup cycles) is recorded and `WORKER_DEADMAN_STALENESS_THRESHOLD` set to a comfortable multiple of the measured p100; beacon-age `logger.info` auditing is in place.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`): `docs/features/worker-liveness-recovery.md` exists.
 
@@ -435,7 +485,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Add `PTY_POOL_ACQUIRE_TIMEOUT` / `PTY_POOL_WAIT_TIMEOUT` env constants (provisional, commented).
 - Wrap `:285`, `:358`, `:362` awaits in `asyncio.wait_for`; guard the `finally` `sem.release()` behind a `sem_acquired` flag.
-- Implement `_force_recycle_slot(slot)` (idempotent, under `slot.lock`, task-done check, notify both `slot.event` and `_slot_available`, re-schedule respawn via `_schedule_respawn`).
+- Implement `_force_recycle_slot(slot)` (idempotent, under `slot.lock`; gate `state == "respawning" and not slot.event.is_set()`; reschedule respawn via the inline `_respawn_tasks` pattern at `:486-488`; do NOT manually set `slot.event`, do NOT notify `_slot_available`, add NO per-slot respawn-task field — the rescheduled spawn's success path re-arms both waiters).
 - Wire the timeout branches: sem → `PTYPoolError`; `_slot_available` → `continue`; `slot.event` → recycle + `continue`.
 
 ### 2. Invert the heartbeat into a dead-man's-switch (fix #1 — safety net)
@@ -474,6 +524,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: validator
 - **Parallel**: false
 - Run full verification table; confirm docs deliverable exists; generate final report.
+- **#1816 coordination gate (per critique):** before authorizing merge, confirm sibling #1816 is not mid-flight against `worker/__main__.py` startup wiring. If it is, fall back to the split (land fix #4 / `pty_pool.py` first, sequence fix #1 after #1816). Coordinate via umbrella #1818.
+- **Pre-merge spike gate (per critique):** confirm the staleness-threshold spike ran — max observed `now - last_loop_tick` over a representative window (incl. reflection/cleanup cycles) recorded and `WORKER_DEADMAN_STALENESS_THRESHOLD` set to a comfortable multiple of measured p100.
 
 ## Verification
 
@@ -492,7 +544,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room) 2026-06-29. Verdict: READY TO BUILD (with concerns). plan_revising lock set — a /do-plan revision pass must embed these Implementation Notes before /do-build. -->
+<!-- Populated by /do-plan-critique (war room) 2026-06-29. Verdict: READY TO BUILD (with concerns). REVISION APPLIED 2026-06-29 (revision_applied: true) — every Implementation Note below has been embedded in the plan body; plan_revising lock cleared. See "Revision Applied" summary beneath the table. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | CONCERN (consensus: Adversary + Simplifier + Consistency Auditor; structurally confirmed) | Risk & Robustness, Scope & Value, History & Consistency | The "divergent-primitive miss at :540-568" premise behind `_force_recycle_slot` is a misread. The verified `_spawn_slot` SUCCESS path (`pty_pool.py:530-535`) already sets BOTH `slot.event.set()` AND `_slot_available.notify_all()`. The real POOL-1 gap is the FAILURE path: `_spawn_slot` re-raises at `:542` before either wake. Plan lines 86, 132-133, 259, Rabbit Hole 295, and Test Impact 283 build a "wake both primitives to patch the divergent miss" requirement on a phantom bug. | _Revision pass_ | Make `_force_recycle_slot` ONLY reschedule `_respawn_slot` (reuse `_schedule_respawn`); do NOT manually set `slot.event` or notify the condition var — the rescheduled spawn's success path re-arms both. Guard under `slot.lock`: `if slot.state == "respawning" and not slot.event.is_set() and (slot._respawn_task is None or slot._respawn_task.done()): self._schedule_respawn(slot)`. Drop the "notify both primitives (:535)" / "divergent miss" framing from lines 86/132-133/259/295. Re-scope the Test Impact line 283 / `test_pty_pool_hardening` UPDATE to assert "stuck-respawning slot is re-spawned and a parked acquirer proceeds within `PTY_POOL_WAIT_TIMEOUT`" — NOT "both primitives notified," which would ossify a bug that does not exist in b7fd781b. Manually poking `slot.event.set()` while `state=="respawning"` injects a busy-spin window at `:362` + a spurious `PTYPoolError` via the `slot.state != "idle"` guard at `:301`. |
@@ -500,6 +552,16 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | CONCERN | Risk & Robustness (Operator) | The ~90s `WORKER_DEADMAN_STALENESS_THRESHOLD` is justified only by assertion. The armed latch covers STARTUP grace only — it does nothing for a mid-run on-loop SYNCHRONOUS block (hourly reflection batch, memory-consolidation pass, blocking subprocess on the loop thread). If any steady-state on-loop sync op exceeds 90s, a healthy worker self-SIGABRTs and re-queues in-flight work. The worker loop body was not in the bundle, so absence of such work is unverified. (Overlaps Open Question 2.) | _Revision pass_ | Treat the threshold as provisional and make headroom auditable: green path emits `logger.info("[deadman] beacon age=%.1fs", now - tick)` at low cadence (~once/min) so operators watch the margin. Before merge, run a spike logging max observed `now - last_loop_tick` over a representative window (incl. reflection/cleanup cycles) and set the threshold to a comfortable multiple of measured p100. If observed ages routinely approach the threshold during legit work, move the on-loop sync op off-loop (`run_in_executor`) rather than widening the threshold. |
 | CONCERN | Scope & Value (User) | Fix #1 (`worker/__main__.py` + `session_state.py`) and fix #4 (`pty_pool.py`) are admitted fully decoupled ("Neither subsumes the other," `depends: none`), sharing zero code. Fix #1 carries a known merge-coordination dependency on sibling #1816 (also touches `worker/__main__.py` startup wiring); fix #4 shares none of it. Bundling drags the clean one-file pty_pool fix into #1816's coordination bottleneck for no review benefit. (Overlaps Open Question 3.) | _Revision pass_ | Consider splitting into two PRs — land fix #4 (`pty_pool.py`, no #1816 conflict) immediately, sequence fix #1 against #1816 separately. The split is a clean cut along the existing task boundary (task 1 vs task 2). If kept as one PR, make the merge gate's dependence on #1816 coordination explicit in the Step-by-Step rather than leaving `depends: none`. |
 | NIT | History & Consistency (Consistency Auditor) | `_force_recycle_slot`'s gate "only act if ... its respawn task is done/dead (not merely slow)" (line 130/254) introduces respawn-task-liveness inspection the slot state machine does not have, edging past the "no state-machine rewrite" No-Go (line 165/295) and largely redundant with a rescheduled `_respawn_slot` that already re-arms both primitives on success. | _Revision pass (optional)_ | Keep surgical: gate on `(state=="respawning" and not slot.event.is_set())` under `slot.lock` and reschedule; the plan's own idempotency rule already covers the slow-task race without inspecting `task.done()`. If task-done inspection is retained, ensure the `_respawn_tasks` pruning (`[t for t in self._respawn_tasks if not t.done()]`) does not drop the task reference before force-recycle reads `task.done()`. |
+
+### Revision Applied (2026-06-29)
+
+Every Implementation Note above is now embedded in the plan body:
+
+1. **CONSENSUS phantom-bug correction** — `_force_recycle_slot` is rescoped to ONLY reschedule the respawn (no manual `slot.event.set()` / `_slot_available` notify). Source-confirmed against `b7fd781b`: the `_spawn_slot` SUCCESS path (`:530-535`) already sets both primitives; the real POOL-1 gap is the FAILURE path re-raising at `:542` / swallowing at `:563-567`. The "divergent-primitive miss / notify both primitives" framing was removed from the Freshness Check, Technical Approach, Rabbit Holes, Risk 3, Race 2, Test Impact, and Step-by-Step task 1. Additional source finding: there is **no per-slot `_respawn_task` field** (respawn tasks live in the pool-level `_respawn_tasks` list at `:486-488`), so the task-done inspection isn't feasible without a state-machine change — reinforcing the surgical gate.
+2. **Armed-latch startup-freeze gap** — added `WORKER_DEADMAN_STARTUP_GRACE_MAX` (~300s) constant + an unarmed-grace ceiling in `_heartbeat_thread_main` (abort if beacon still `None` past the ceiling), with matching Success Criteria + Failure-Path + new-test coverage.
+3. **~90s threshold justification** — added per-cycle beacon-age `logger.info` auditing, a required pre-merge spike (measure p100 over reflection/cleanup cycles, set threshold to a comfortable multiple), and the `run_in_executor` remedy for any legit on-loop op that approaches the threshold. Surfaced as a Risk 1 residual-risk note + merge-gate check + Success Criterion.
+4. **Fix #1 / fix #4 decoupling + #1816** — recorded the split decision in Scope Decision (keep one PR for now; clean split available along the task-1/task-2 boundary) and made the #1816 coordination dependency explicit at the merge gate (Step-by-Step task 5) instead of leaving `depends: none`.
+5. **NIT — surgical gate** — dropped the `task.done()`/respawn-task-liveness inspection from `_force_recycle_slot`; the gate is now purely `state == "respawning" and not slot.event.is_set()` under `slot.lock`, honoring the no-state-machine-rewrite No-Go.
 
 ---
 
