@@ -356,6 +356,34 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
+    def _get_claude_auth_health() -> dict:
+        """Check Claude Code subscription auth via `claude auth status`."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["claude", "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return {"status": "error", "logged_in": False, "auth_method": None}
+            import json as _json
+
+            data = _json.loads(result.stdout)
+            logged_in = bool(data.get("loggedIn"))
+            auth_method = data.get("authMethod")
+            subscription_type = data.get("subscriptionType")
+            return {
+                "status": "ok" if logged_in else "error",
+                "logged_in": logged_in,
+                "auth_method": auth_method,
+                "subscription_type": subscription_type,
+            }
+        except Exception:
+            return {"status": "error", "logged_in": False, "auth_method": None}
+
     def _get_email_health() -> dict:
         """Check email bridge health: process liveness first, then Redis heartbeat age."""
         import subprocess
@@ -489,6 +517,7 @@ def create_app() -> FastAPI:
         bridge = _get_bridge_health()
         worker = _get_worker_health()
         email = _get_email_health()
+        claude_auth = _get_claude_auth_health()
         sessions = get_all_sessions()
         reflections = get_all_reflections()
         analytics = get_analytics_summary()
@@ -503,6 +532,10 @@ def create_app() -> FastAPI:
                     "worker_last_seen_s": worker["age_s"],
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
+                    "claude_auth": claude_auth["status"],
+                    "claude_auth_logged_in": claude_auth["logged_in"],
+                    "claude_auth_method": claude_auth["auth_method"],
+                    "claude_auth_subscription_type": claude_auth["subscription_type"],
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,
@@ -522,6 +555,7 @@ def create_app() -> FastAPI:
         bridge = _get_bridge_health()
         worker = _get_worker_health()
         email = _get_email_health()
+        claude_auth = _get_claude_auth_health()
         return JSONResponse(
             {
                 "webserver": "ok",
@@ -531,6 +565,10 @@ def create_app() -> FastAPI:
                 "worker_last_seen_s": worker["age_s"],
                 "email": email["status"],
                 "email_last_seen_s": email["age_s"],
+                "claude_auth": claude_auth["status"],
+                "claude_auth_logged_in": claude_auth["logged_in"],
+                "claude_auth_method": claude_auth["auth_method"],
+                "claude_auth_subscription_type": claude_auth["subscription_type"],
             }
         )
 
@@ -567,6 +605,13 @@ def create_app() -> FastAPI:
         else:
             email_label = "email"
 
+        claude_auth = _get_claude_auth_health()
+        if claude_auth["status"] == "ok":
+            method = claude_auth.get("auth_method") or "claude"
+            claude_label = f"claude ({method})"
+        else:
+            claude_label = "claude (auth error)"
+
         return HTMLResponse(
             f'<span class="health-label">Bridges</span>'
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
@@ -574,6 +619,8 @@ def create_app() -> FastAPI:
             f'<span class="health-label">Services</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
             f'<span class="badge badge-ok">web</span>'
+            f'<span class="health-label">Auth</span>'
+            f'<span class="badge badge-{claude_auth["status"]}">{claude_label}</span>'
         )
 
     # Exception handler for Redis connection failures
