@@ -864,10 +864,11 @@ async def _session_notify_listener() -> None:
                 for _attempt in range(3):
                     try:
                         _numsub_result = conn.pubsub_numsub("valor:sessions:new")
-                        # pubsub_numsub returns a dict {channel: count} for redis-py >= 4
-                        # or a list of (channel, count) pairs for older versions.
-                        # Keys are bytes when decode_responses=False (POPOTO default).
-                        # _numsub_count normalises both shapes and both encodings (#1811).
+                        # pubsub_numsub returns a list of (channel, count) pairs on modern
+                        # redis-py (verified on 7.4.0); some builds/versions return a dict
+                        # {channel: count}.  Keys are bytes when decode_responses=False
+                        # (POPOTO default).  _numsub_count normalises both shapes and both
+                        # encodings (#1811).
                         _count = _numsub_count(_numsub_result, "valor:sessions:new")
                         if _count >= 1:
                             _numsub_ok = True
