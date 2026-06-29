@@ -135,9 +135,15 @@ class TestDeliverFailureModes(unittest.TestCase):
         events = adapter._agent_session.session_events
         failures = [e for e in events if e["type"] == "delivery_failure"]
         self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0]["reason"], "no_event_loop")
+        # reason holds the outcome; failure_reason holds the underlying cause.
+        self.assertEqual(failures[0]["reason"], "dropped")
+        self.assertEqual(failures[0]["failure_reason"], "no_event_loop")
 
     def test_timeout_records_failure_with_exception_type(self) -> None:
+        """On timeout, the payload is re-enqueued to the outbox (recovered
+        path), not silently dropped. The session event records outcome
+        `recovered_via_outbox`."""
+
         async def slow_cb(chat_id, payload, reply_to, agent_session):
             await asyncio.sleep(5)
 
@@ -151,15 +157,20 @@ class TestDeliverFailureModes(unittest.TestCase):
             delivery_timeout_s=0.05,
         )
 
-        async def _runner():
-            adapter._loop = asyncio.get_running_loop()
-            await asyncio.to_thread(adapter._on_user_payload, "slow payload")
+        mock_redis = MagicMock()
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_redis):
 
-        asyncio.run(_runner())
+            async def _runner():
+                adapter._loop = asyncio.get_running_loop()
+                await asyncio.to_thread(adapter._on_user_payload, "slow payload")
+
+            asyncio.run(_runner())
+
         events = adapter._agent_session.session_events
         failures = [e for e in events if e["type"] == "delivery_failure"]
         self.assertEqual(len(failures), 1)
-        self.assertIn("TimeoutError", failures[0]["reason"])
+        # Outcome is recovered (re-enqueued), not dropped.
+        self.assertEqual(failures[0]["reason"], "recovered_via_outbox")
 
     def test_sync_send_cb_called_directly(self) -> None:
         delivered: list = []
@@ -194,6 +205,93 @@ class TestDeliverFailureModes(unittest.TestCase):
 
         asyncio.run(_runner())
         self.assertEqual(delivered, [("42", "same-thread payload", 7)])
+
+
+class TestDeliveryTimeoutOutboxReenqueue(unittest.TestCase):
+    """Tests for the outbox re-enqueue recovery path (issue #1811)."""
+
+    def _slow_adapter(self, timeout_s: float = 0.05) -> BridgeAdapter:
+        async def slow_cb(chat_id, payload, reply_to, agent_session):
+            await asyncio.sleep(5)
+
+        pool = MagicMock(spec=PTYPool)
+        return BridgeAdapter(
+            agent_session=_fake_session(),
+            project_key="valor",
+            transport="telegram",
+            pool=pool,
+            resolve_callbacks=lambda pk, tr: (slow_cb, None),
+            delivery_timeout_s=timeout_s,
+        )
+
+    def test_timeout_reenqueues_to_outbox(self) -> None:
+        """TimeoutError path: rpush is called and the session event records
+        `recovered_via_outbox`."""
+        adapter = self._slow_adapter()
+        mock_redis = MagicMock()
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_redis):
+
+            async def _runner():
+                adapter._loop = asyncio.get_running_loop()
+                await asyncio.to_thread(adapter._on_user_payload, "timeout payload")
+
+            asyncio.run(_runner())
+
+        mock_redis.rpush.assert_called_once()
+        call_args = mock_redis.rpush.call_args
+        self.assertIn("telegram:outbox:", call_args[0][0])
+
+        events = adapter._agent_session.session_events
+        failures = [e for e in events if e["type"] == "delivery_failure"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["reason"], "recovered_via_outbox")
+
+    def test_loop_closed_reenqueues(self) -> None:
+        """Loop-closed RuntimeError path: re-enqueue is attempted via the outbox."""
+        adapter = self._slow_adapter()
+        mock_redis = MagicMock()
+
+        # Simulate a loop that is marked closed after capture.
+        closed_loop = MagicMock()
+        closed_loop.is_closed.return_value = False  # passes the initial check
+        closed_loop.is_running.return_value = False
+        # run_coroutine_threadsafe raises RuntimeError (loop closed race).
+        closed_loop.run_coroutine_threadsafe = MagicMock(
+            side_effect=RuntimeError("Event loop is closed")
+        )
+        adapter._loop = closed_loop
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_redis):
+            with patch("asyncio.run_coroutine_threadsafe", side_effect=RuntimeError("loop closed")):
+                adapter._on_user_payload("loop closed payload")
+
+        mock_redis.rpush.assert_called_once()
+
+    def test_double_failure_records_dropped(self) -> None:
+        """When timeout fires AND re-enqueue also fails (Redis down), the
+        session event records `dropped` and `_user_facing_routed` stays False."""
+        adapter = self._slow_adapter()
+
+        # Redis unavailable — rpush raises.
+        mock_redis = MagicMock()
+        mock_redis.rpush.side_effect = ConnectionError("Redis unavailable")
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_redis):
+
+            async def _runner():
+                adapter._loop = asyncio.get_running_loop()
+                await asyncio.to_thread(adapter._on_user_payload, "lost payload")
+
+            asyncio.run(_runner())
+
+        events = adapter._agent_session.session_events
+        failures = [e for e in events if e["type"] == "delivery_failure"]
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["reason"], "dropped")
+        self.assertFalse(failures[0]["recovered"])
+        # user_facing_routed must remain False on double failure.
+        self.assertFalse(adapter._user_facing_routed)
 
 
 if __name__ == "__main__":
