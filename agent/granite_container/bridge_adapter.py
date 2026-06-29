@@ -57,6 +57,7 @@ the container returns.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -80,7 +81,12 @@ logger = logging.getLogger(__name__)
 # Default timeout for the synchronous bridge-callback delivery. The
 # container's thread blocks for this long waiting on the asyncio
 # future. 30s matches the Telegram relay's standard send timeout.
-DEFAULT_DELIVERY_TIMEOUT_S = 30.0
+# Provisional/tunable — override with GRANITE_DELIVERY_TIMEOUT_S env var.
+DEFAULT_DELIVERY_TIMEOUT_S: float = float(os.environ.get("GRANITE_DELIVERY_TIMEOUT_S", "30.0"))
+
+# TTL for outbox re-enqueue entries. Mirrors output_handler.py::OUTBOX_TTL
+# so the bridge relay drains them within the same expiry window.
+_OUTBOX_TTL = 3600
 
 # Transcript tailer tick interval (seconds). Each tick reads only new bytes
 # since last tick (O(Δbytes)). Bounded by PTY pool size — total save
@@ -899,6 +905,12 @@ class BridgeAdapter:
         """
         import inspect
 
+        future = None
+        coro = None  # coroutine object; closed explicitly on error paths to suppress RuntimeWarning
+        # True once we have reached the async scheduling path. Used to
+        # distinguish "sync send_cb raised" from "async loop closed/timed
+        # out", since only the latter warrants an outbox re-enqueue.
+        _async_delivery_started = False
         try:
             if not inspect.iscoroutinefunction(send_cb):
                 # Sync send_cb (test doubles, legacy wrappers): call
@@ -911,13 +923,16 @@ class BridgeAdapter:
                 # run() was never awaited (direct Container use) or
                 # the worker loop is gone (shutdown). Without a live
                 # loop there is nowhere to schedule the coroutine.
+                # Re-enqueue to the outbox so the reply is not lost
+                # (_enqueue_to_outbox is sync Redis, needs no event loop).
                 logger.warning(
                     "[bridge-adapter] no captured event loop for send_cb; "
-                    "delivery skipped (loop=%r)",
+                    "re-enqueueing to outbox (loop=%r)",
                     loop,
                 )
-                self._record_delivery_failure(payload, "no_event_loop")
-                return False
+                recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+                self._record_delivery_event(payload, "no_event_loop", recovered=recovered)
+                return recovered
 
             coro = send_cb(chat_id, payload, reply_to, agent_session)
             try:
@@ -929,21 +944,68 @@ class BridgeAdapter:
                 # asyncio thread, e.g. in tests). Blocking on a future
                 # here would deadlock the loop — schedule fire-and-
                 # forget instead.
-                loop.create_task(coro)
-                # Fire-and-forget: we cannot confirm delivery synchronously
-                # on the same event loop. Count as False so the caller does
-                # not set user_facing_routed prematurely.
+                #
+                # We cannot confirm delivery synchronously, but the reply
+                # must still never be silently lost (issue #1805 core
+                # criterion). Attach a done-callback that re-enqueues to
+                # the outbox iff the task failed or was cancelled. On
+                # success the callback is a no-op, so there is no duplicate
+                # delivery.
+                task = loop.create_task(coro)
+
+                def _reenqueue_same_thread_on_failure(
+                    t: asyncio.Task[Any],
+                    _payload: str = payload,
+                    _chat_id: Any = chat_id,
+                    _reply_to: Any = reply_to,
+                ) -> None:
+                    try:
+                        if t.cancelled():
+                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            self._record_delivery_event(
+                                _payload, "CancelledError", recovered=recovered
+                            )
+                            return
+                        exc = t.exception()
+                        if exc is not None:
+                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            self._record_delivery_event(
+                                _payload, f"{type(exc).__name__}: {exc}", recovered=recovered
+                            )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("[bridge-adapter] same-thread re-enqueue callback failed")
+
+                task.add_done_callback(_reenqueue_same_thread_on_failure)
+                # Fire-and-forget: delivery is not yet confirmed, so return
+                # False; the caller will not set user_facing_routed. Recovery
+                # (if the task fails) is handled by the done-callback above.
                 return False
             # Production path: pexpect worker thread -> schedule on the
             # captured worker loop and block until delivered.
+            _async_delivery_started = True
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             future.result(timeout=timeout_s)
             return True
         except RuntimeError as e:
+            if not _async_delivery_started:
+                # RuntimeError came from the sync send_cb call or pre-scheduling
+                # code (e.g. constructing the coroutine). No outbox fallback for
+                # non-delivery errors.
+                if coro is not None:
+                    coro.close()  # dispose unscheduled coroutine; suppresses RuntimeWarning
+                logger.warning("[bridge-adapter] send_cb raised before async scheduling: %s", e)
+                self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
+                return False
             # Loop closed between the check and the schedule (worker
-            # shutdown race).
+            # shutdown race). The coroutine was passed to run_coroutine_threadsafe
+            # but never scheduled (loop already closed). Close it explicitly to
+            # suppress "coroutine was never awaited" RuntimeWarning.
+            coro.close()
+            # Re-enqueue so the reply isn't lost.
             logger.warning("[bridge-adapter] send_cb delivery failed (loop closed): %s", e)
-            self._record_delivery_failure(payload, "loop_closed")
+            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+            self._record_delivery_event(payload, f"{type(e).__name__}: {e}", recovered=recovered)
+            return recovered
         except Exception as e:
             # Anything else (including FutureTimeoutError): log and
             # continue. The container must not crash on a delivery
@@ -953,27 +1015,106 @@ class BridgeAdapter:
                 e,
                 len(payload),
             )
-            # Include the exception type: TimeoutError stringifies to "".
-            self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
+            # Cancel the timed-out future before re-enqueueing to
+            # minimise the risk of duplicate delivery (the coroutine
+            # may still run after the timeout fires).
+            #
+            # concurrent.futures.Future.cancel() returns False once the
+            # coroutine is already running — cancellation is best-effort.
+            # When it fails the original send may still complete AND the
+            # outbox re-enqueue delivers, so we tag the event distinctly
+            # (possible duplicate). The downstream redundancy filter
+            # (bridge/redundancy_filter.py::should_suppress) is the
+            # backstop for that already-running edge case.
+            failure_reason = f"{type(e).__name__}: {e}"
+            if future is not None and not future.cancel():
+                failure_reason = f"{failure_reason} [future_uncancellable_possible_duplicate]"
+            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+            self._record_delivery_event(payload, failure_reason, recovered=recovered)
+            return recovered
         return False
 
     def _record_delivery_failure(self, payload: str, reason: str) -> None:
-        """Append a `session_events` entry when a mid-loop
-        delivery fails. The dashboard surfaces the error; we
-        do NOT emit a user-visible "I tried to send you a
-        message but it failed" delivery (would violate the
-        no-spam rule)."""
+        """Backward-compat wrapper: record a non-recovered delivery failure."""
+        self._record_delivery_event(payload, reason, recovered=False)
+
+    def _record_delivery_event(self, payload: str, failure_reason: str, *, recovered: bool) -> None:
+        """Append a `session_events` entry when a mid-loop delivery fails.
+
+        If `recovered` is True the payload was re-enqueued to the outbox
+        and will be delivered later — event type is `recovered_via_outbox`.
+        If `recovered` is False the payload is permanently lost — event
+        type is `dropped`.
+
+        The dashboard surfaces the event; we do NOT emit a user-visible
+        "message failed" reply (would violate the no-spam rule).
+        """
+        outcome = "recovered_via_outbox" if recovered else "dropped"
         _append_session_event(
             self._agent_session,
             {
-                "event_type": "granite_delivery_failure",
-                "text": f"delivery failed: {reason} ({len(payload)} chars)",
+                "event_type": f"granite_delivery_{outcome}",
+                "text": f"delivery {outcome}: {failure_reason} ({len(payload)} chars)",
                 "type": "delivery_failure",
                 "payload_chars": len(payload),
-                "reason": reason,
+                "reason": outcome,
+                "failure_reason": failure_reason,
+                "recovered": recovered,
                 "ts": _now_iso(),
             },
         )
+
+    def _enqueue_to_outbox(
+        self,
+        chat_id: Any,
+        payload: str,
+        reply_to: Any,
+        file_paths: list[str] | None = None,
+    ) -> bool:
+        """Write payload to `telegram:outbox:{session_id}` as a fallback
+        when the primary send_cb delivery times out or fails.
+
+        Uses the same Redis list key and payload shape as
+        `output_handler.py` so the bridge relay processes it identically.
+
+        Returns True if the rpush succeeded, False otherwise.
+        """
+        session_id = str(getattr(self._agent_session, "session_id", "") or "")
+        if not session_id:
+            logger.warning(
+                "[bridge-adapter] _enqueue_to_outbox: no session_id on agent_session, "
+                "cannot re-enqueue (%d chars)",
+                len(payload),
+            )
+            return False
+        queue_key = f"telegram:outbox:{session_id}"
+        outbox_payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "reply_to": reply_to,
+            "text": payload,
+            "session_id": session_id,
+            "timestamp": time.time(),
+        }
+        if file_paths:
+            outbox_payload["file_paths"] = file_paths
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB  # noqa: N811
+
+            POPOTO_REDIS_DB.rpush(queue_key, json.dumps(outbox_payload))
+            POPOTO_REDIS_DB.expire(queue_key, _OUTBOX_TTL)
+            logger.info(
+                "[bridge-adapter] re-enqueued to outbox %s (%d chars)",
+                queue_key,
+                len(payload),
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "[bridge-adapter] _enqueue_to_outbox failed for %s: %s",
+                queue_key,
+                e,
+            )
+            return False
 
     # -- Transcript tailer (incremental telemetry, issue #1648) -----------
 

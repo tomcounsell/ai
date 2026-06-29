@@ -152,11 +152,17 @@ recovery backstop: [`docs/features/granite-login-recovery.md`](granite-login-rec
 
 ## Configuration
 
-One operator-facing setting, in `config/settings.py` under `GraniteSettings`:
+Operator-facing settings:
 
 - `granite.pty_pool_size` — hard maximum of concurrent PM+Dev PTY pairs.
   Default `3`. Override via the `GRANITE__PTY_POOL_SIZE` env var (note the
   **double underscore** — pydantic nested-settings delimiter).
+
+- `GRANITE_DELIVERY_TIMEOUT_S` — delivery timeout in seconds for the
+  `_deliver_sync` call that schedules a `[/user]` or `[/complete]` payload
+  back onto the event loop from the pexpect thread. Default `30.0`. Override
+  via the env var of the same name (`DEFAULT_DELIVERY_TIMEOUT_S` constant in
+  `agent/granite_container/bridge_adapter.py`).
 
 The pool size is intentionally **smaller** than `MAX_CONCURRENT_SESSIONS`
 (default 8) so the Redis queue absorbs over-cap sessions rather than
@@ -377,8 +383,9 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for session-runner regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert). For `startup_unresolved` exits: also carries `startup_failure_kind` (`"plateau"` or `"ceiling"`) and `startup_diagnostic_frame` (truncated frame excerpt, up to 1000 chars). Note: `pm_floor_delivered` is a clean exit and does NOT emit `exit_anomaly`. |
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
-| `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
-| `delivery_failure` | a mid-loop `send_cb` raised (older alias, kept for back-compat) | `payload_chars`, `reason`, `ts` |
+| `granite_delivery_recovered_via_outbox` | delivery timeout or loop-closed condition in `_deliver_sync` where the payload was successfully re-enqueued to the outbox; also written when the same-thread done-callback fires on task failure/cancellation and re-enqueue succeeds | `event_type`, `text`, `payload_chars`, `reason` (`recovered_via_outbox`), `failure_reason` (exception detail; tagged `[future_uncancellable_possible_duplicate]` when `future.cancel()` returned `False`), `recovered` (`True`), `ts` |
+| `granite_delivery_dropped` | delivery timeout or loop-closed condition in `_deliver_sync` where **both** the primary send and the outbox re-enqueue failed (double-failure, permanent loss) | `event_type`, `text`, `payload_chars`, `reason` (`dropped`), `failure_reason` (exception detail), `recovered` (`False`), `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (older alias — `type` field on all delivery-failure events for back-compat; matches legacy events in Redis before the `granite_delivery_*` rename) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
@@ -751,9 +758,24 @@ handles generic field addition per issues #1099/#1172).
   `_resolve_callbacks` returns `(None, None)`; the adapter installs
   logger-only no-op callbacks and the container still runs to completion. No
   crash, no user delivery.
-- **Mid-loop `send_cb` raises**: the adapter logs at WARNING, writes a
-  `delivery_failure` event, and continues to the next turn. The user does not
-  see a "delivery failed" message (no-spam rule).
+- **Mid-loop delivery timeout (outbox re-enqueue recovery)**: when the
+  event-loop future that delivers a `[/user]` or `[/complete]` payload does
+  not resolve within `GRANITE_DELIVERY_TIMEOUT_S` (default 30 s,
+  env-overridable), `_deliver_sync` re-enqueues the payload to
+  `telegram:outbox:{session_id}` via `_enqueue_to_outbox`. The payload is a
+  6-field JSON dict matching the shape used by `agent/output_handler.py`:
+  `chat_id`, `reply_to`, `text`, `session_id`, `timestamp`, and optional
+  `file_paths`; the key expires after 3600 s. The relay then delivers it so
+  the reply is never silently lost. The resulting session event is
+  `granite_delivery_recovered_via_outbox` when re-enqueue succeeds, or
+  `granite_delivery_dropped` on a double-failure (timeout AND re-enqueue both failed).
+  If `future.cancel()` returns `False` (the coroutine was already running and
+  cannot be cancelled), the event is additionally tagged
+  `[future_uncancellable_possible_duplicate]`; `bridge/redundancy_filter.py`
+  is the downstream backstop against duplicate delivery in that case. The same
+  re-enqueue path is also attached as a done-callback on the same-thread
+  fire-and-forget branch so task failure or cancellation likewise triggers
+  recovery. The user never sees a delivery-failed message (no-spam rule).
 - **Worker SIGKILL mid-run**: orphan PTY children survive. The next worker
   startup reads `data/granite_pty_pids.json` and PID-kills them. The kill is
   PID-targeted, so an operator's personal interactive `claude` session on
