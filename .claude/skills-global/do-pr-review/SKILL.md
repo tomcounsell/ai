@@ -472,6 +472,31 @@ fi
 ```
 Save this URL as `{review_url}` for the output summary.
 
+### 6.6. Record the verdict (only if the context file declares a substrate)
+
+In the generic case (no substrate declared) the posted GitHub review IS the
+verdict — skip this step.
+
+If the context file declares a verdict-recording substrate (so a pipeline router
+can consume the verdict programmatically), you MUST record the verdict **here,
+before emitting the OUTCOME block**. Recording is a terminal, non-optional action,
+not a trailing nicety. A locally-run pipeline (e.g. `/do-sdlc`) has no hooks to
+record on your behalf: if you skip this, the router never sees the verdict and the
+pipeline stalls in a re-review loop. Do NOT treat the OUTCOME block as your final
+action — the verdict record must already be written when you emit it.
+
+Follow the context file's exact invocation. The invariant that must hold: on the
+**APPROVED** path, the verdict record AND the REVIEW completion marker are ONE
+self-contained block — never record APPROVED without immediately writing the
+completion marker, or the marker desyncs from the verdict and the router stalls.
+On a findings (`CHANGES REQUESTED`) or preflight short-circuit
+(`BLOCKED_ON_CONFLICT` / `PR_CLOSED`) verdict, leave the marker `in_progress`. A
+failed recording must surface loudly (non-zero exit), never silently corrupt
+verdict state.
+
+After recording, read the verdict back (the context file's read-back command) to
+confirm it persisted, then proceed to the Output Summary and OUTCOME block.
+
 ### 7. Output Summary
 
 **Present review summary** (use bullets — Telegram-bound output must not contain markdown tables; see docs/features/message-drafter.md):
@@ -503,7 +528,7 @@ Save this URL as `{review_url}` for the output summary.
 
 ## Outcome Contract
 
-After posting the review and verifying it was posted (Steps 6-6.5), emit a typed outcome as the **very last line** of output.
+After posting the review (Step 6), verifying it was posted (Step 6.5), and recording the verdict if a substrate is declared (Step 6.6), emit a typed outcome as the **very last line** of output. If the context file declares a verdict substrate, the verdict record from Step 6.6 must already be written before you emit this block — the OUTCOME block is the last line, not the last action.
 
 **Verdict taxonomy:**
 
@@ -582,22 +607,12 @@ every consensus configuration:
 
 In the generic case, skip all of this — one reviewer, one verdict.
 
-### Record the verdict (only if the context file declares a substrate)
+### Record the verdict
 
-The posted GitHub review (Step 6) IS the verdict in the generic case — the
-`## Review: Approved` / `## Review: Changes Requested` body and the OUTCOME block
-are what downstream consumers read. Nothing further to do.
-
-If the context file declares a verdict-recording substrate (so a pipeline router
-can consume the verdict programmatically), record the verdict via that substrate
-after emitting the OUTCOME block, following its exact invocation. The invariant
-that must hold: on the **APPROVED** path, the verdict record AND the REVIEW
-completion marker are ONE self-contained block — never record APPROVED without
-immediately writing the completion marker, or the marker desyncs from the verdict
-and the router stalls. On a findings (`CHANGES REQUESTED`) or preflight
-short-circuit (`BLOCKED_ON_CONFLICT` / `PR_CLOSED`) verdict, leave the marker
-`in_progress`. A failed recording must surface loudly (non-zero exit), never
-silently corrupt verdict state.
+Canonical step is **6.6** (above) — verdict recording runs immediately after the
+review is posted and **before** the OUTCOME block, so a substrate-backed router
+always sees the verdict. Multi-judge: exactly ONE single-writer record call after
+`compute_consensus`.
 
 ## Hard Rules
 
@@ -608,6 +623,7 @@ silently corrupt verdict state.
 5. **Review identity follows the context file.** Generic default: post under the operator's `gh` credential. If the context file declares a bot/service-account identity and marker, apply it to the single review-posting subprocess only.
 6. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
 7. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one browser-MCP screenshot before posting an approval. If screenshots were not captured (browser unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. Visual bugs in frontend changes are invisible to static analysis.
+8. **If the context file declares a verdict substrate, recording the verdict (Step 6.6) is mandatory and terminal.** Emitting the OUTCOME block does NOT complete the skill — the `sdlc-tool verdict record` call (and, on APPROVED, the co-written completion marker) must run first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. This is the #1 local-pipeline failure mode — do not exit until the verdict reads back.
 
 ## Best Practices
 

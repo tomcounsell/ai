@@ -49,8 +49,12 @@ sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSU
 python -c "from agent.verification_parser import parse_verification_table, run_checks, format_results; ..."
 ```
 
-**Verdict recording (Record the verdict).** Always pass `--issue-number` (quoted)
-— it is the authoritative session selector:
+**Verdict recording (global skill Step 6.6).** This runs **before** the OUTCOME
+block, not after it. In a local pipeline run (`/do-sdlc`) there are no hooks to
+write markers/verdicts for you — this `sdlc-tool` call is the ONLY thing that
+persists the verdict, and the router (`sdlc-tool next-skill`) re-dispatches REVIEW
+in a loop until it sees one. Skipping it is the #1 local-pipeline stall. Always
+pass `--issue-number` (quoted) — it is the authoritative session selector:
 
 ```bash
 # APPROVED (status=success) — verdict + completion marker are ONE block (#1642):
@@ -63,6 +67,8 @@ sdlc-tool verdict record --stage REVIEW --verdict "BLOCKED_ON_CONFLICT" --blocke
 sdlc-tool verdict record --stage REVIEW --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
 # Multi-judge: ONE record call with --judges-json/--consensus-json after
 # agent.sdlc_review_consensus.compute_consensus (single-writer invariant).
+# Read back to confirm persistence before emitting the OUTCOME block:
+sdlc-tool verdict get --stage REVIEW --issue-number "$ISSUE_NUMBER"
 ```
 
 **Cross-vendor judge (opt-in, default OFF).** After collecting the Claude judge
