@@ -64,7 +64,6 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "setup"),
     ("skills", "prime"),
     ("skills", "sdlc"),
-    ("skills", "do-sdlc"),
     ("skills", "do-deploy"),
 ]
 

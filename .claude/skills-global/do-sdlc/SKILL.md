@@ -10,6 +10,10 @@ This skill is the **local stand-in for the bridge PM session**. `/sdlc` is a sin
 
 You are the supervisor, not the worker. You assess, dispatch, and track. The stage subagents do all the work.
 
+## Repo Context Probe
+
+If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise use the generic defaults described below. The defaults drive the pipeline through `sdlc-tool` (synced to every machine via `~/.local/bin`), `gh`, and `git`.
+
 ## Hard Rules
 
 1. **NEVER write code, run tests, or create plans directly** — every stage executes inside a stage subagent that invokes the stage's `/do-*` skill.

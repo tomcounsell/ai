@@ -217,7 +217,7 @@ def test_sync_migrates_skills_dir_symlink(symlink_migration_project):
 # Bucket C RENAMED_REMOVALS entries (issue #1783)
 # ---------------------------------------------------------------------------
 
-BUCKET_C_MOVED_SKILLS = ["setup", "prime", "sdlc", "do-sdlc", "do-deploy"]
+BUCKET_C_MOVED_SKILLS = ["setup", "prime", "sdlc", "do-deploy"]
 
 
 @pytest.mark.parametrize("skill", BUCKET_C_MOVED_SKILLS)
