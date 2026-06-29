@@ -96,7 +96,8 @@ class TestEngHarnessFullChain:
         assert any(
             token in persona.lower() for token in ("engineer", "worker", "stub project claude.md")
         ), (
-            f"Persona content must contain an eng-specific signal. First 200 chars: {persona[:200]!r}"
+            f"Persona content must contain an eng-specific signal. "
+            f"First 200 chars: {persona[:200]!r}"
         )
 
         # Capture the cmd + proc_env passed to the leaf subprocess invoker.

@@ -415,6 +415,8 @@ class TestRebuildIndexesCalled:
                     dry_run=False,
                 )
 
+            assert stats["renamed"] == 1
+            assert stats["errors"] == 0
             # rebuild_indexes must have been called
             mock_tm.rebuild_indexes.assert_called_once()
 
@@ -446,6 +448,9 @@ class TestRebuildIndexesCalled:
                 dry_run=True,
             )
 
+            # dry_run counts would-be renames; rebuild_indexes is gated on `not dry_run`
+            assert stats["renamed"] == 1
+            assert stats["total_dev_records"] == 1
             mock_tm.rebuild_indexes.assert_not_called()
 
     def test_rebuild_indexes_not_called_when_no_records_renamed(self, redis_test_db):
@@ -471,6 +476,8 @@ class TestRebuildIndexesCalled:
                     dry_run=False,
                 )
 
+            assert stats["renamed"] == 0
+            assert stats["total_dev_records"] == 0
             mock_tm.rebuild_indexes.assert_not_called()
 
 
