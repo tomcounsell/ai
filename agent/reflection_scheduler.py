@@ -44,6 +44,14 @@ logger = logging.getLogger(__name__)
 # Scheduler tick interval in seconds
 SCHEDULER_TICK_INTERVAL = 60
 
+# Per-tick cap on concurrently dispatched function-type reflections.
+# At worker startup all ~30 reflections are overdue; without a cap they fire
+# as concurrent asyncio tasks in a single pass, saturating the event loop and
+# starving time-sensitive coroutines (e.g. granite delivery callbacks).
+# Remaining due reflections are deferred to the next tick (~60s later).
+# Provisional / tunable — override via REFLECTION_STARTUP_MAX_CONCURRENT env var.
+REFLECTION_STARTUP_MAX_CONCURRENT = int(os.environ.get("REFLECTION_STARTUP_MAX_CONCURRENT", "4"))
+
 
 # Path to the reflections registry.
 # Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml → config/
@@ -639,6 +647,10 @@ class ReflectionScheduler:
         """
         now = time.time()
         enqueued = 0
+        # Count of function-type reflections dispatched this tick.  We cap at
+        # REFLECTION_STARTUP_MAX_CONCURRENT to avoid saturating the event loop
+        # when many reflections are simultaneously overdue (e.g. at startup).
+        function_dispatched_this_tick = 0
 
         for entry in self._entries:
             try:
@@ -676,9 +688,18 @@ class ReflectionScheduler:
                     continue
 
                 # Execute or enqueue
-                logger.info("[reflection] %s is due, executing", entry.name)
-
                 if entry.execution_type == "function":
+                    # Per-tick cap: defer excess function-type reflections to the
+                    # next tick (~60s) to avoid event-loop saturation at startup.
+                    if function_dispatched_this_tick >= REFLECTION_STARTUP_MAX_CONCURRENT:
+                        logger.debug(
+                            "[reflection] Deferring %s to next tick (per-tick cap %d reached)",
+                            entry.name,
+                            REFLECTION_STARTUP_MAX_CONCURRENT,
+                        )
+                        continue
+
+                    logger.info("[reflection] %s is due, executing", entry.name)
                     # Run function-type reflections as background tasks
                     task = asyncio.create_task(
                         run_reflection(entry, state),
@@ -689,7 +710,12 @@ class ReflectionScheduler:
                     task.add_done_callback(
                         lambda t, name=entry.name: self._running_tasks.pop(name, None)
                     )
+                    function_dispatched_this_tick += 1
+                    # Yield the event loop between dispatches so time-sensitive
+                    # coroutines (e.g. granite delivery callbacks) can be scheduled.
+                    await asyncio.sleep(0)
                 else:
+                    logger.info("[reflection] %s is due, executing", entry.name)
                     # Agent-type reflections are enqueued to session queue
                     await run_reflection(entry, state)
 
