@@ -746,7 +746,11 @@ class TestHistoryParsing:
         history = [
             {"event_type": "granite_user_routed", "text": "user message delivered", "ts": 111.0},
             {"event_type": "granite_complete_routed", "text": "complete delivered", "ts": 222.0},
-            {"event_type": "granite_delivery_failure", "text": "failed", "ts": 333.0},
+            {
+                "event_type": "granite_delivery_recovered_via_outbox",
+                "text": "recovered",
+                "ts": 333.0,
+            },
         ]
         events = _parse_history(history)
         assert len(events) == 3
@@ -754,7 +758,7 @@ class TestHistoryParsing:
         assert events[0].text == "user message delivered"
         assert events[0].timestamp == 111.0
         assert events[1].event_type == "granite_complete_routed"
-        assert events[2].event_type == "granite_delivery_failure"
+        assert events[2].event_type == "granite_delivery_recovered_via_outbox"
 
     def test_exit_anomaly_event_rendered_with_reason(self):
         """exit_anomaly entries are rendered with their exit_reason."""

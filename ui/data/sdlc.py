@@ -648,7 +648,8 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
             elif event_type in (
                 "granite_user_routed",
                 "granite_complete_routed",
-                "granite_delivery_failure",
+                "granite_delivery_recovered_via_outbox",
+                "granite_delivery_dropped",
             ):
                 text = raw_text or event_type
             elif entry.get("type") == "exit_anomaly":

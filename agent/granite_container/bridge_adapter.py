@@ -922,13 +922,16 @@ class BridgeAdapter:
                 # run() was never awaited (direct Container use) or
                 # the worker loop is gone (shutdown). Without a live
                 # loop there is nowhere to schedule the coroutine.
+                # Re-enqueue to the outbox so the reply is not lost
+                # (_enqueue_to_outbox is sync Redis, needs no event loop).
                 logger.warning(
                     "[bridge-adapter] no captured event loop for send_cb; "
-                    "delivery skipped (loop=%r)",
+                    "re-enqueueing to outbox (loop=%r)",
                     loop,
                 )
-                self._record_delivery_failure(payload, "no_event_loop")
-                return False
+                recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+                self._record_delivery_event(payload, "no_event_loop", recovered=recovered)
+                return recovered
 
             coro = send_cb(chat_id, payload, reply_to, agent_session)
             try:

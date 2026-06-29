@@ -122,21 +122,28 @@ class TestDeliverFromWorkerThread(unittest.TestCase):
 
 
 class TestDeliverFailureModes(unittest.TestCase):
-    def test_no_captured_loop_records_failure(self) -> None:
-        """Async send_cb with no captured loop: skip delivery, record
-        a delivery_failure with reason no_event_loop."""
+    def test_no_captured_loop_reenqueues_to_outbox(self) -> None:
+        """Async send_cb with no captured loop: primary delivery skipped,
+        payload re-enqueued to outbox via _enqueue_to_outbox (sync Redis).
+        Session event records outcome recovered_via_outbox."""
         delivered: list = []
         adapter = _adapter_with_async_cb(delivered)
         self.assertIsNone(adapter._loop)
 
-        adapter._on_user_payload("payload without loop")
+        mock_redis = MagicMock()
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_redis):
+            adapter._on_user_payload("payload without loop")
 
+        # Primary send_cb was not invoked.
         self.assertEqual(delivered, [])
+        # _enqueue_to_outbox was called — Redis rpush received the payload.
+        mock_redis.rpush.assert_called_once()
+        self.assertIn("telegram:outbox:", mock_redis.rpush.call_args[0][0])
         events = adapter._agent_session.session_events
         failures = [e for e in events if e["type"] == "delivery_failure"]
         self.assertEqual(len(failures), 1)
-        # reason holds the outcome; failure_reason holds the underlying cause.
-        self.assertEqual(failures[0]["reason"], "dropped")
+        # Outbox enqueue succeeded → outcome is recovered, not dropped.
+        self.assertEqual(failures[0]["reason"], "recovered_via_outbox")
         self.assertEqual(failures[0]["failure_reason"], "no_event_loop")
 
     def test_timeout_records_failure_with_exception_type(self) -> None:
