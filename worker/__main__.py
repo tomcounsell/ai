@@ -927,6 +927,13 @@ def main() -> None:
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
 
+    # Configure resilient Redis connection before any Popoto model is accessed.
+    # Degrade-don't-die: if Redis is unreachable at boot this logs a warning
+    # and returns without raising so operators can start Redis and restart.
+    from config.redis_bootstrap import configure_resilient_redis  # noqa: PLC0415
+
+    configure_resilient_redis()
+
     # Validate agent definition files are usable on disk. Missing, malformed,
     # or unreadable files are not fatal — the SDK falls back gracefully — but
     # we surface warnings early so operators can fix them before users hit

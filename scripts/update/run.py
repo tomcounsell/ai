@@ -38,6 +38,7 @@ from scripts.update import (  # noqa: E402
     officecli,
     persona_drift,
     readme_check,
+    redis_persistence,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -140,6 +141,7 @@ class UpdateResult:
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
+    redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -885,6 +887,38 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"WARN: ffmpeg: {fr.error}", v)
         result.warnings.append(f"ffmpeg: {fr.error}")
+
+    # Step 3.13: Redis durability configuration.
+    # Pins AOF persistence (appendonly yes, appendfsync everysec) and eviction
+    # policy (maxmemory-policy noeviction) on every machine. Idempotent: CONFIG SET
+    # is a no-op if already set. CONFIG REWRITE persists directives into redis.conf;
+    # if Redis was started without a config file, a stub redis.conf is written and a
+    # loud WARNING is emitted. Non-fatal: if redis-cli is absent or Redis is down,
+    # the result is logged and the update continues.
+    log("Configuring Redis durability (AOF + eviction policy)...", v)
+    try:
+        result.redis_persistence_result = redis_persistence.apply_redis_persistence()
+        rp = result.redis_persistence_result
+        if rp.success:
+            if rp.action == "applied":
+                log("Redis durability: AOF enabled and persisted to redis.conf", v, always=True)
+            else:
+                log(
+                    f"Redis durability: AOF enabled ({rp.action})",
+                    v,
+                    always=True,
+                )
+            if rp.warning:
+                log(f"WARN: Redis durability: {rp.warning}", v, always=True)
+                result.warnings.append(f"Redis durability: {rp.warning}")
+        elif rp.action == "skipped":
+            log(f"Redis durability: skipped — {rp.error}", v)
+        else:
+            log(f"WARN: Redis durability: {rp.error}", v, always=True)
+            result.warnings.append(f"Redis durability: {rp.error}")
+    except Exception as _rp_exc:
+        log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
+        result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
 
     # Step 4: Ollama generation model (full mode only).
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a
