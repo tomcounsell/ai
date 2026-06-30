@@ -119,18 +119,21 @@ async def test_reprobe_loop_flips_flag():
     async def _fake_to_thread(fn, *args, **kwargs):
         return probe_results.pop(0)
 
+    sleep_count = [0]
+
+    async def _counted_sleep(duration):
+        sleep_count[0] += 1
+        # Cancel on the second sleep so the loop runs exactly one probe cycle.
+        if sleep_count[0] >= 2:
+            raise asyncio.CancelledError
+
     with (
-        patch("asyncio.sleep", new=AsyncMock(return_value=None)),
+        patch("asyncio.sleep", side_effect=_counted_sleep),
         patch("asyncio.to_thread", new=_fake_to_thread),
         patch.object(wm, "_resume_deferred_granite_sessions", MagicMock()),
     ):
-        # Run one iteration of the loop, then cancel it
-        task = asyncio.create_task(_granite_reprobe_loop())
-        await asyncio.sleep(0)  # yield so task runs
-        await asyncio.sleep(0)  # let loop body execute
-        task.cancel()
         try:
-            await task
+            await _granite_reprobe_loop()
         except asyncio.CancelledError:
             pass
 
