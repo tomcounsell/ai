@@ -139,12 +139,16 @@ no external libraries, APIs, or ecosystem patterns are involved.
      may be cleared by the time extraction runs in the background task. It is
      therefore unreliable at extraction time.
 - **Confidence**: high
-- **Impact on plan**: Thread `turn_count` as an explicit parameter sourced from
-  `session.turn_count` at the scheduler. Do NOT depend on
-  `sdk_client.get_turn_count()` inside the background extraction task — it may be
-  cleared. The gate keys on turn count (not length), per the issue's "Revised"
-  recon item. Default the new parameter to `None` (gate is a no-op when unknown)
-  so direct callers and tests stay backward-compatible.
+- **Impact on plan**: Thread `turn_count` as an explicit parameter, captured
+  **at schedule time** (inside the executor turn, before teardown) — NOT read off
+  the stale in-memory `session.turn_count`, which is a different instance than the
+  one `sdk_client` writes and is typically `0`. Capture via
+  `sdk_client.get_turn_count(session.session_id)` at the schedule call site OR a
+  fresh Popoto re-fetch of the newest `AgentSession`. Do NOT call
+  `sdk_client.get_turn_count()` *inside* the background extraction task — it may
+  be cleared by then. The gate keys on turn count (not length), per the issue's
+  "Revised" recon item. Default the new parameter to `None` (gate is a no-op when
+  unknown) so direct callers and tests stay backward-compatible.
 
 ### spike-2: Does the Memory model expose a baseline `confidence` for Fix 4?
 - **Assumption**: "Records carry a `confidence` field whose untouched baseline is
@@ -204,9 +208,9 @@ still slips through.
 - **New dependencies**: none.
 - **Interface changes**: `run_post_session_extraction()`,
   `_schedule_post_session_extraction()`, and `extract_observations_async()` gain
-  an optional `turn_count: int | None = None` parameter (backward-compatible
-  default). Optional LLM-refusal complement (Fix 1) reuses the existing
-  `_llm_call` helper — no new call pattern.
+  an optional `turn_count: int | None = None` parameter plus a session
+  origin/type signal (backward-compatible defaults). No new LLM call pattern (the
+  LLM-refusal complement is cut to a follow-up).
 - **Coupling**: slightly increases coupling between the executor (turn count) and
   the extraction pipeline, but via an explicit parameter, not a global.
 - **Data ownership**: unchanged. Memory records still owned by the memory system.
@@ -220,21 +224,18 @@ still slips through.
 **Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm the optional LLM-refusal complement is wanted vs.
-  pattern-extension-only; confirm GC tier thresholds)
+- PM check-ins: 0 (all open questions resolved; LLM complement cut to follow-up)
 - Review rounds: 1
 
 Four small, independent fixes in one module plus one reflection. Coding time is
-short; the overhead is the design decision on Fix 1's optional LLM complement and
-careful test coverage for each new filter.
+short; the overhead is careful test coverage for each new filter (narrowness +
+origin-gating).
 
 ## Prerequisites
 
-| Requirement | Check Command | Purpose |
-|-------------|---------------|---------|
-| Anthropic API key (only if the optional LLM-refusal complement in Fix 1 is built) | `python -c "from utils.api_keys import get_anthropic_api_key as g; assert g()"` | The optional LLM refusal detector calls Haiku via the existing `_llm_call` path. Pattern-extension (the core of Fix 1) needs no key. |
-
-Run via `python scripts/check_prerequisites.py docs/plans/memory-extraction-noise-sources.md`.
+None — all four fixes are pure-Python edits to extraction filters and a GC
+reflection. (The LLM-refusal complement that would have needed an Anthropic API
+key is cut from this PR and filed as a follow-up.)
 
 ## Solution
 
@@ -242,17 +243,20 @@ Run via `python scripts/check_prerequisites.py docs/plans/memory-extraction-nois
 
 - **Fix 1 — Extend `_REFUSAL_PATTERNS`**: append the 7 confirmed phrasings as
   narrow, full-phrase substrings, each annotated with its originating memory ID
-  per the existing convention. Optionally add an LLM-based refusal complement
-  (Haiku yes/no) so future rephrasing self-heals without a manual cycle.
+  per the existing convention. **SCOPE CUT (critique):** the optional LLM-based
+  refusal complement is DROPPED from this PR — the 7 pattern appends satisfy every
+  success criterion. The LLM complement (env flag, extra Haiku call, API-key
+  prereq) is filed as separate follow-up issue #1829 to avoid gold-plating here.
 - **Fix 2 — Trivial-session gate**: skip extraction when `turn_count <= 1`,
   sourced from `session.turn_count` and threaded explicitly to the extraction
   call. Keys on turn count, not length (per recon "Revised" item).
 - **Fix 3 — Scoping-boilerplate filter**: drop any observation whose text
   contains a session-scoping marker (`"sdlc-local-"`, `"scoped to isolated
   session"`, `"scope boundary"`, `"cross-session"`) before it is saved.
-- **Fix 4 — GC second tier**: in `memory_decay_prune`, add a tier matching
-  `importance <= 1.0`, `access_count == 0`, `confidence ≈ 0.5`, `age > 14 days`,
-  reusing the existing `MEMORY_DECAY_PRUNE_APPLY` dry-run gate.
+- **Fix 4 — GC second tier**: in `memory_decay_prune`, add a non-overlapping tier
+  (`WF_MIN_THRESHOLD <= importance <= 1.0`, `access_count == 0`, `confidence ≈
+  0.5`, `age > 14 days`) behind its OWN dedicated default-off gate
+  `MEMORY_NOISE_PRUNE_APPLY`, deduped against tier-1 before the shared cap.
 
 ### Flow
 
@@ -270,28 +274,65 @@ tier prunes residual baseline noise.
   `TestRefusalPatternsNarrowness`. Derive each phrase from the actual stored
   content of the 7 cited memory IDs (read them via
   `python -m tools.memory_search inspect --id <ID>` before choosing the
-  substring). The optional LLM complement, if approved, is a new helper that
-  reuses `_llm_call(MODEL_FAST, ...)` and is called only on the post-LLM path
-  (cost: one extra Haiku call per non-empty extraction) — gate it behind a small
-  env flag so it can be disabled.
+  substring). **The LLM refusal-complement is OUT OF SCOPE for this PR** (filed as
+  follow-up #1829) — pattern-extension is the complete Fix 1 deliverable here.
 - **Fix 2:** Add `turn_count: int | None = None` to
   `_schedule_post_session_extraction`, `run_post_session_extraction`, and
-  `extract_observations_async`. Source it from `session.turn_count` at line 1920.
-  Gate at the top of `extract_observations_async` (alongside the 50-char guard):
-  `if turn_count is not None and turn_count <= 1: return []`. `None` = unknown =
-  no-op, preserving existing direct-caller/test behavior.
+  `extract_observations_async`. **CRITICAL (critique BLOCKER):** the executor's
+  in-memory `session` object at line ~1920 is a *different* instance than the one
+  `sdk_client` persists `turn_count` onto (`sdk_client.py:2573-2584`), so its
+  in-memory `session.turn_count` is stale (often `0`). Reading it would make the
+  gate (`<= 1`) fire for *every* session and silently kill all extraction.
+  RESOLUTION — capture the real turn count **synchronously at schedule time,
+  while still inside the executor turn (before teardown clears anything)** and
+  pass the captured `int` by value into the background task. Source it via
+  `agent.sdk_client.get_turn_count(session.session_id)` read at schedule time
+  (line ~1920), OR by a fresh Popoto re-fetch of the newest `AgentSession` for
+  that `session_id` (`sdk_client.py:2573-2576` pattern). Do NOT read
+  `session.turn_count` off the stale in-scope object, and do NOT call
+  `get_turn_count()` from *inside* the background task (teardown may have cleared
+  it). **Do NOT blanket-skip every single-turn session** — a substantive
+  single-turn conversational message (e.g. a one-shot Telegram correction) is
+  high-value and must still extract. Pair the turn-count signal with a
+  session-origin/type signal so the gate ONLY skips non-conversational / CLI-origin
+  single-turn sessions. Thread the session origin/type alongside the captured
+  `turn_count` (e.g. a captured `is_cli_origin: bool` / session_type, sourced at
+  schedule time from the in-scope `session`). Gate at the top of
+  `extract_observations_async` (alongside the 50-char guard): skip (`return []`)
+  only when `turn_count is not None and turn_count <= 1 AND` the session is
+  CLI-origin / non-conversational. `turn_count=None` (unknown) = no-op, preserving
+  existing direct-caller/test behavior. Tests: (a) the gate sees the real count
+  (not 0) for a multi-turn session; (b) a substantive single-turn **Telegram**
+  correction STILL extracts; (c) a CLI `/update`-style single-turn session does
+  NOT extract.
 - **Fix 3:** Define a module constant `_SCOPING_MARKERS = ("sdlc-local-",
-  "scoped to isolated session", "scope boundary", "cross-session")`. Add a
-  helper `_is_scoping_boilerplate(text) -> bool` (case-insensitive substring
-  match) and filter in `_parse_categorized_observations` (both JSON and
+  "scoped to isolated session")` — **only substrings actually observed in real
+  noise records.** The previously-listed `"scope boundary"` and `"cross-session"`
+  are UNCONFIRMED (never seen in an evidenced noise record) and are dropped:
+  adding an unevidenced marker risks silently dropping legitimate observations.
+  Add a helper `_is_scoping_boilerplate(text) -> bool` (case-insensitive
+  substring match) and filter in `_parse_categorized_observations` (both JSON and
   line-based paths) before tuples are emitted, so direct callers are covered too.
+  Add a `_SCOPING_MARKERS` narrowness regression test (mirroring Fix 1's
+  `TestRefusalPatternsNarrowness`) asserting legitimate observations that merely
+  mention sessions/scope are NOT dropped.
 - **Fix 4:** In `memory_decay_prune.py::run`, after the existing tier-1 candidate
   loop, add a tier-2 pass over the same `all_memories` with the new predicate
   (`importance <= 1.0`, `access_count == 0`, `abs((confidence or 0.5) - 0.5) <
   1e-6`, age > `NOISE_PRUNE_AGE_DAYS = 14`, not superseded, importance < 7.0).
-  Reuse the existing `MEMORY_DECAY_PRUNE_APPLY` env gate and `MAX_PRUNE_PER_RUN`
-  cap (apply the cap across the union of both tiers). Make `NOISE_PRUNE_AGE_DAYS`
-  a named module constant with a "provisional/tunable" comment.
+  **Tier overlap (critique BLOCKER):** tier-1 (`importance < WF_MIN_THRESHOLD =
+  0.15`) is a strict subset of tier-2 (`importance <= 1.0`), so a naive two-loop
+  concat double-counts against `MAX_PRUNE_PER_RUN` and issues duplicate deletes.
+  RESOLUTION — make the tiers non-overlapping by construction: give tier-2 a lower
+  bound `importance >= WF_MIN_THRESHOLD` so it excludes tier-1 (AND dedupe the
+  union by `memory_id` before slicing to the cap as a belt-and-suspenders).
+  **Separate gate (critique):** tier-2 gets its OWN dedicated default-off env gate
+  `MEMORY_NOISE_PRUNE_APPLY` (distinct from `MEMORY_DECAY_PRUNE_APPLY`) so the
+  broader tier-2 predicate can be validated in dry-run independently before any
+  deletion is enabled. Tier-1 keeps using `MEMORY_DECAY_PRUNE_APPLY`. Apply the
+  shared `MAX_PRUNE_PER_RUN` cap across the deduped union. Make
+  `NOISE_PRUNE_AGE_DAYS` a named module constant with a "provisional/tunable"
+  comment.
 
 ## Failure Path Test Strategy
 
@@ -327,10 +368,13 @@ tier prunes residual baseline noise.
   UPDATE: verify the 7 new patterns are full-phrase and do NOT false-positive on
   legitimate observations that share keywords (add narrowness cases).
 - [ ] `tests/unit/test_memory_extraction.py::TestRunPostSessionExtraction` —
-  UPDATE: add a `turn_count=1` skip case and a `turn_count=None`/`turn_count=3`
-  proceed case.
+  UPDATE: add a CLI-origin `turn_count=1` skip case, a substantive single-turn
+  Telegram `turn_count=1` PROCEED case, and `turn_count=None`/`turn_count=3`
+  proceed cases.
 - [ ] `tests/unit/test_memory_extraction.py::TestParseCategorizedObservations` —
-  UPDATE: add scoping-boilerplate drop cases (JSON path + line-based path).
+  UPDATE: add scoping-boilerplate drop cases (JSON path + line-based path) AND a
+  `_SCOPING_MARKERS` narrowness case (legitimate session/scope-mentioning
+  observation is NOT dropped).
 - [ ] `tests/unit/test_session_executor_extraction_decoupling.py` — UPDATE: the
   `_schedule_post_session_extraction` signature gains `turn_count`; verify the
   mock/patch call sites still match and that `session.turn_count` is threaded.
@@ -339,15 +383,16 @@ tier prunes residual baseline noise.
   call remains compatible).
 - [ ] New test file `tests/unit/test_memory_decay_prune.py` (create if absent;
   otherwise extend the existing decay-prune test) — REPLACE/ADD: cover tier-2
-  candidate selection, dry-run reporting, the 14-day boundary, the `confidence ≈
-  0.5` epsilon, and the shared `MAX_PRUNE_PER_RUN` cap across both tiers.
+  candidate selection, the non-overlap with tier-1, union dedup by `memory_id`,
+  the dedicated `MEMORY_NOISE_PRUNE_APPLY` gate (dry-run vs apply), dry-run
+  reporting, the 14-day boundary, the `confidence ≈ 0.5` epsilon, and the shared
+  `MAX_PRUNE_PER_RUN` cap across the deduped union.
 
 ## Rabbit Holes
 
-- **Over-engineering the LLM-refusal complement (Fix 1).** It is optional and
-  cost-bearing (extra Haiku call). Do not build a classifier, training set, or
-  caching layer. If approved, it is a single yes/no Haiku call behind an env
-  flag, nothing more. The pattern-extension is the load-bearing fix.
+- **Building the LLM-refusal complement (Fix 1).** Cut from this PR entirely and
+  filed as a follow-up issue. Ship the 7 pattern appends only — they satisfy every
+  success criterion. Do not add an env flag, an extra Haiku call, or a classifier.
 - **Hunting down the exact source of the scoping preamble.** Fix 3 filters on
   observation *content*; the preamble's origin (skill/prime file vs. dynamic
   prompt) is irrelevant to the filter. Do not refactor the SDLC sub-session
@@ -390,14 +435,17 @@ review the candidate report, then enable. `MAX_PRUNE_PER_RUN` caps blast radius.
 **Location:** `agent/session_executor.py:1920` → background task.
 **Trigger:** `turn_count` is captured when the task is *scheduled* but consumed
 later when it *runs*.
-**Data prerequisite:** `session.turn_count` must be final before line 1920.
+**Data prerequisite:** the real turn count must be captured at schedule time
+(before teardown clears `sdk_client`'s tracker), not read off the stale in-scope
+`session.turn_count`.
 **State prerequisite:** the value is captured as a plain int argument at schedule
 time (not re-read from a mutable global inside the task), so there is no shared
 mutable state to race on.
-**Mitigation:** Pass `turn_count` by value into the asyncio task closure (same
-pattern as `response_text` today). Do NOT call `sdk_client.get_turn_count()`
-inside the task — it may be cleared (spike-1 caveat). This makes the read
-race-free.
+**Mitigation:** Capture `turn_count` via `sdk_client.get_turn_count(session_id)`
+(or a fresh Popoto re-fetch) at schedule time and pass it by value into the
+asyncio task closure (same pattern as `response_text` today). Do NOT call
+`sdk_client.get_turn_count()` inside the task — it may be cleared (spike-1
+caveat). This makes the read race-free.
 
 ## No-Gos (Out of Scope)
 
@@ -437,10 +485,11 @@ benefits automatically via cleaner memory recall on subsequent turns.
 
 ### Feature Documentation
 - [ ] Update `docs/features/subconscious-memory.md` — document the four noise
-  filters: extended refusal vocabulary (+ optional LLM complement), the
-  trivial-session (`turn_count <= 1`) gate, the scoping-boilerplate content
-  filter, and the `memory_decay_prune` second tier (with its dry-run gate and
-  14-day / confidence-baseline criteria).
+  filters: extended refusal vocabulary, the CLI-origin single-turn gate
+  (`turn_count <= 1` paired with session origin), the scoping-boilerplate content
+  filter, and the `memory_decay_prune` second tier (with its dedicated
+  `MEMORY_NOISE_PRUNE_APPLY` dry-run gate and 14-day / confidence-baseline
+  criteria). Note the LLM-refusal complement is tracked as a separate follow-up.
 - [ ] No new `docs/features/README.md` index entry needed — the feature page
   already exists in the index.
 
@@ -457,14 +506,19 @@ benefits automatically via cleaner memory recall on subsequent turns.
 - [ ] All 7 confirmed noise phrasings (`0208f60d`, `b0b24ef7`, `517ccf5`,
   `9fd6006a`, `1a572475`, `868869`, `8f2c9d5c`) return `True` from
   `_looks_like_refusal()`.
-- [ ] A session with `turn_count == 1` produces zero Memory records via
-  post-session extraction (and makes no Haiku call).
+- [ ] A CLI-origin single-turn session (`turn_count == 1`, e.g. `/update`)
+  produces zero Memory records via post-session extraction (and makes no Haiku
+  call); a substantive single-turn **Telegram** correction STILL extracts.
 - [ ] A session with `turn_count == None` or `>= 2` still extracts normally.
 - [ ] No observation containing `"sdlc-local-"` or `"scoped to isolated session"`
-  is persisted.
-- [ ] `memory_decay_prune` reports (dry-run) candidates matching `importance <=
-  1.0`, `access_count == 0`, `confidence ≈ 0.5`, `age > 14 days`, and deletes
-  them only when `MEMORY_DECAY_PRUNE_APPLY` is set.
+  is persisted; legitimate observations mentioning sessions/scope are NOT dropped.
+- [ ] `memory_decay_prune` reports (dry-run) tier-2 candidates matching
+  `WF_MIN_THRESHOLD <= importance <= 1.0`, `access_count == 0`, `confidence ≈
+  0.5`, `age > 14 days`, deletes them only when `MEMORY_NOISE_PRUNE_APPLY` is set,
+  and the tier-1/tier-2 union is deduped before the `MAX_PRUNE_PER_RUN` cap.
+- [ ] **Outcome check:** a recall query (or tier-2 dry-run candidate count against
+  the known noise corpus) confirms a known noise record (e.g. `b0b24ef7`) no
+  longer surfaces / is selected for pruning.
 - [ ] Existing `tests/unit/test_memory_extraction.py` passes with no narrowness
   regressions.
 - [ ] A test exists for each new refusal pattern.
@@ -481,9 +535,9 @@ The lead orchestrates; it does not build directly.
 
 - **Builder (extraction-filters)**
   - Name: `extraction-builder`
-  - Role: Implement Fix 1 (patterns + optional LLM complement), Fix 2
-    (turn_count gate + signature threading), Fix 3 (scoping filter) in
-    `agent/memory_extraction.py` and `agent/session_executor.py`.
+  - Role: Implement Fix 1 (7 pattern appends only — no LLM complement), Fix 2
+    (origin-paired turn_count gate + signature threading), Fix 3 (scoping filter)
+    in `agent/memory_extraction.py` and `agent/session_executor.py`.
   - Agent Type: builder
   - Domain: async/concurrency, Redis/Popoto data
   - Resume: true
@@ -531,7 +585,7 @@ task assignments per `DOMAIN_FRAMING.md`.
 - **Parallel**: true
 - Read the 7 cited memory bodies (`python -m tools.memory_search inspect --id <ID>`); choose a narrow full-phrase substring for each.
 - Append the 7 annotated entries to `_REFUSAL_PATTERNS`.
-- (If PM approves) add an optional Haiku refusal-complement helper behind an env flag, reusing `_llm_call`.
+- LLM refusal-complement is OUT OF SCOPE (follow-up #1829) — do NOT build it here.
 
 ### 2. Trivial-session gate (Fix 2)
 - **Task ID**: build-turn-gate
@@ -565,8 +619,8 @@ task assignments per `DOMAIN_FRAMING.md`.
 - **Agent Type**: builder
 - **Domain**: Redis/Popoto data
 - **Parallel**: true
-- Add `NOISE_PRUNE_AGE_DAYS = 14` (provisional/tunable comment) and tier-2 predicate.
-- Apply shared cap across both tiers; reuse the existing dry-run gate; update module docstring.
+- Add `NOISE_PRUNE_AGE_DAYS = 14` (provisional/tunable comment) and a non-overlapping tier-2 predicate (`WF_MIN_THRESHOLD <= importance <= 1.0`).
+- Add a dedicated default-off `MEMORY_NOISE_PRUNE_APPLY` gate (distinct from `MEMORY_DECAY_PRUNE_APPLY`); dedupe the tier-1/tier-2 union by `memory_id` before the shared `MAX_PRUNE_PER_RUN` cap; update module docstring.
 
 ### 5. Tests for all fixes
 - **Task ID**: build-tests
@@ -605,13 +659,25 @@ task assignments per `DOMAIN_FRAMING.md`.
 | turn_count threaded into schedule | `grep -c "turn_count" agent/session_executor.py` | output > 0 |
 | Scoping markers filter present | `grep -c "sdlc-local-" agent/memory_extraction.py` | output > 0 |
 | GC tier age constant present | `grep -c "NOISE_PRUNE_AGE_DAYS" reflections/memory/memory_decay_prune.py` | output > 0 |
-| Apply-mode NOT defaulted on (anti-criterion) | `grep -n 'MEMORY_DECAY_PRUNE_APPLY.*=.*"true"' reflections/memory/memory_decay_prune.py` | match count == 0 |
+| Tier-2 dedicated gate present | `grep -c "MEMORY_NOISE_PRUNE_APPLY" reflections/memory/memory_decay_prune.py` | output > 0 |
+| Decay apply-mode NOT defaulted on (anti-criterion) | `grep -n 'MEMORY_DECAY_PRUNE_APPLY.*=.*"true"' reflections/memory/memory_decay_prune.py` | match count == 0 |
+| Noise apply-mode NOT defaulted on (anti-criterion) | `grep -n 'MEMORY_NOISE_PRUNE_APPLY.*=.*"true"' reflections/memory/memory_decay_prune.py` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Three critique rounds (FULL, 3 lenses) converged. All findings resolved in-plan;
+plan FROZEN for BUILD on 2026-06-30.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Correctness | Fix 2 read stale in-memory `session.turn_count` (different instance than sdk_client persists; stays 0) → gate would kill ALL extraction | Capture real turn count at schedule time via `sdk_client.get_turn_count(session_id)` / fresh Popoto re-fetch, pass by value | Technical Approach Fix 2, spike-1 impact, Race 1 |
+| BLOCKER | Correctness | Fix 4 tier-1 ⊂ tier-2 → double-count vs cap + duplicate deletes | Non-overlapping tiers (`importance >= WF_MIN_THRESHOLD` lower bound) + dedupe union by `memory_id` | Technical Approach Fix 4 |
+| CONCERN | Safety | Fix 4 shared `MEMORY_DECAY_PRUNE_APPLY` gate prevents validating tier-2 independently | Dedicated default-off `MEMORY_NOISE_PRUNE_APPLY` gate for tier-2 | Technical Approach Fix 4, Open Q3 |
+| CONCERN | Correctness | Blanket `turn_count <= 1` skip discards high-value single-turn conversational corrections | Pair turn-count with session origin/type; only skip CLI-origin single-turn | Technical Approach Fix 2, Success Criteria |
+| CONCERN | Safety | Fix 3 `_SCOPING_MARKERS` included unconfirmed substrings (`"cross-session"`, `"scope boundary"`) → silent false-positive drops | Dropped to only evidenced markers + narrowness regression test | Technical Approach Fix 3 |
+| SCOPE | Simplicity | Fix 1 optional LLM refusal-complement is gold-plating (env flag, API key, extra Haiku call) | Cut from PR; filed as follow-up; ship 7 pattern appends only | Key Elements / Step 1 / Prerequisites |
+| NIT | Coverage | No outcome-level assertion that known noise stops surfacing | Added outcome-check success criterion (recall / dry-run candidate count) | Success Criteria |
+| NIT | History | Step 1 carried stale "(If PM approves)" hedge | Removed; Q1 resolved | Step 1 |
 
 ---
 
@@ -630,5 +696,7 @@ task assignments per `DOMAIN_FRAMING.md`.
    threshold.
 3. **Fix 4 — separate env gate or reuse `MEMORY_DECAY_PRUNE_APPLY`?** Reusing the
    existing gate means enabling apply-mode enables BOTH tiers at once.
-   **RESOLVED:** reuse the single `MEMORY_DECAY_PRUNE_APPLY` gate for simplicity;
-   the conjunctive tier-2 predicate is already conservative.
+   **RESOLVED (revised by critique):** give tier-2 its OWN dedicated default-off
+   gate `MEMORY_NOISE_PRUNE_APPLY` (distinct from `MEMORY_DECAY_PRUNE_APPLY`) so
+   the broader tier-2 predicate can be validated in dry-run independently before
+   any deletion is enabled.
