@@ -41,6 +41,17 @@ class FakeMemory:
         self.deleted = True
 
 
+def _fixture_confidence(memory) -> float:
+    """Live-confidence stand-in for tests.
+
+    Production reads the ConfidenceField companion hash via
+    ``_live_confidence``; FakeMemory has no companion hash, so tests patch the
+    helper to read the fixture's ``confidence`` attribute (None → 0.5 baseline).
+    """
+    c = getattr(memory, "confidence", None)
+    return 0.5 if c is None else float(c)
+
+
 def _run_with(memories, env):
     """Run the reflection with Memory.query.all() patched to return `memories`."""
     import asyncio
@@ -53,6 +64,10 @@ def _run_with(memories, env):
     with (
         patch.dict("os.environ", env, clear=False),
         patch("models.memory.Memory", fake_memory_cls),
+        patch(
+            "reflections.memory.memory_decay_prune._live_confidence",
+            _fixture_confidence,
+        ),
     ):
         return asyncio.run(memory_decay_prune.run())
 
@@ -120,11 +135,40 @@ def test_tiers_are_non_overlapping():
 
 
 def test_reinforced_confidence_excluded_from_tier2():
-    """confidence away from 0.5 baseline (reinforced/dismissed) is NOT tier-2 noise."""
+    """LIVE confidence away from 0.5 baseline (reinforced/dismissed) is NOT tier-2 noise.
+
+    `_run_with` patches `_live_confidence` to read the fixture's confidence,
+    standing in for the production read of the ConfidenceField companion hash.
+    """
     m = FakeMemory(memory_id="reinforced", importance=1.0, confidence=0.8, age_days=30)
     result = _run_with([m], {"MEMORY_NOISE_PRUNE_APPLY": "true"})
     assert m.deleted is False
     assert "tier2=0" in result["summary"]
+
+
+def test_live_confidence_falls_back_to_baseline_on_bad_read():
+    """_live_confidence returns the 0.5 baseline (never raises) when the read fails."""
+    from reflections.memory.memory_decay_prune import (
+        NOISE_BASELINE_CONFIDENCE,
+        _live_confidence,
+    )
+
+    class _NoMeta:
+        pass
+
+    assert _live_confidence(_NoMeta()) == NOISE_BASELINE_CONFIDENCE
+
+
+def test_live_confidence_uses_canonical_accessor(monkeypatch):
+    """_live_confidence reads via ConfidenceField.get_confidence, not the stale attribute."""
+    from popoto.fields.confidence_field import ConfidenceField
+
+    from reflections.memory.memory_decay_prune import _live_confidence
+
+    monkeypatch.setattr(ConfidenceField, "get_confidence", classmethod(lambda cls, m, f: 0.91))
+    # The attribute mirror says 0.5, but the live accessor must win.
+    fake = FakeMemory(memory_id="live", importance=1.0, confidence=0.5)
+    assert _live_confidence(fake) == 0.91
 
 
 def test_confidence_epsilon_tolerance():

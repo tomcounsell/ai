@@ -78,6 +78,28 @@ def _created_ts(memory) -> float | None:
     return to_unix_ts(created_at)
 
 
+def _live_confidence(memory) -> float:
+    """Return the LIVE confidence for a memory via the canonical accessor.
+
+    The plain ``memory.confidence`` attribute only mirrors the 0.5 baseline on
+    the model's main hash — ``ConfidenceField`` keeps the reinforced value in a
+    companion Redis hash, so reading the attribute would report ~0.5 for every
+    record regardless of reinforcement (the tier-2 "never reinforced" filter
+    would be inert). ``ConfidenceField.get_confidence`` is the sanctioned reader
+    of that companion hash; it returns ``initial_confidence`` (0.5) when no
+    reinforcement data exists. Any failure falls back to the 0.5 baseline so a
+    single bad read never aborts the whole reflection run. (The conjunctive
+    ``access_count == 0`` predicate remains the primary "never acted on" guard;
+    this confidence check is the secondary "never reinforced" filter.)
+    """
+    try:
+        from popoto.fields.confidence_field import ConfidenceField
+
+        return float(ConfidenceField.get_confidence(memory, "confidence"))
+    except Exception:
+        return NOISE_BASELINE_CONFIDENCE
+
+
 async def run() -> dict:
     """Delete low-value memories across two non-overlapping tiers (see module docstring).
 
@@ -140,13 +162,16 @@ async def run() -> dict:
             elif importance <= NOISE_IMPORTANCE_CEILING:
                 # Tier 2: extraction noise. Never-reinforced (confidence ≈ 0.5),
                 # 14-day age. Disjoint from tier 1 by the importance band above.
-                confidence = memory.confidence
-                if confidence is None:
-                    confidence = NOISE_BASELINE_CONFIDENCE
-                if abs(confidence - NOISE_BASELINE_CONFIDENCE) >= NOISE_CONFIDENCE_EPSILON:
-                    continue
-                if created_ts <= tier2_cutoff:
-                    tier2.append(memory)
+                # Cheap age check first so the companion-hash confidence read
+                # only happens for already-old records.
+                if created_ts > tier2_cutoff:
+                    continue  # younger than NOISE_PRUNE_AGE_DAYS — exempt
+                if (
+                    abs(_live_confidence(memory) - NOISE_BASELINE_CONFIDENCE)
+                    >= NOISE_CONFIDENCE_EPSILON
+                ):
+                    continue  # reinforced/dismissed away from baseline — not noise
+                tier2.append(memory)
 
         tier1_count = len(tier1)
         tier2_count = len(tier2)
