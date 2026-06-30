@@ -1,0 +1,53 @@
+# HAProxy TCP frontend for Redis — stable-address layer (Option A, Fix #5 — #1827)
+#
+# This is a TEMPLATE. Nothing here is active until an operator substitutes the
+# <PLACEHOLDER> tokens and starts HAProxy with this file.
+#
+# WHY: Sentinel promotes a replica to master on primary loss, but the new master
+# has a DIFFERENT host/port. None of this system's 17 Redis connection mechanisms
+# are Sentinel-aware. HAProxy fronts the cluster at ONE fixed bind address; it
+# health-checks every backend and only routes traffic to the node currently
+# reporting "role:master". REDIS_URL points at this fixed bind, so promotion is
+# transparent to the application — ZERO Python change (Option A).
+#
+# Placeholder tokens:
+#   <BIND_HOST>      — address HAProxy listens on (what REDIS_URL points at)
+#   <BIND_PORT>      — port HAProxy listens on (e.g. 6379)
+#   <PRIMARY_HOST>   — hostname/IP of the first Redis node
+#   <PRIMARY_PORT>   — port of the first Redis node
+#   <REPLICA_HOST>   — hostname/IP of the second Redis node
+#   <PRIMARY_PORT>   — (replica typically shares the same port)
+#
+# ALTERNATIVE — keepalived VIP: instead of an HAProxy TCP hop, a keepalived
+# virtual IP (L2 adjacency) can float to whichever host holds the master; a
+# Sentinel client-reconfig-script moves the VIP on promotion. The VIP removes the
+# extra proxy hop but requires the nodes to share an L2 segment. HAProxy works
+# cross-subnet. Pick per your network topology (see the runbook).
+
+global
+    log /dev/log local0
+    maxconn 4096
+
+defaults
+    mode tcp
+    timeout connect 3s
+    timeout client  1m
+    timeout server  1m
+
+# One fixed bind that REDIS_URL targets.
+frontend redis_front
+    bind <BIND_HOST>:<BIND_PORT>
+    default_backend redis_master
+
+# Only the node reporting "role:master" passes the health check, so traffic
+# always reaches the current master even after a Sentinel-driven failover.
+backend redis_master
+    option tcp-check
+    tcp-check send PING\r\n
+    tcp-check expect string +PONG
+    tcp-check send info\ replication\r\n
+    tcp-check expect string role:master
+    tcp-check send QUIT\r\n
+    tcp-check expect string +OK
+    server redis_node1 <PRIMARY_HOST>:<PRIMARY_PORT> check inter 1s fall 2 rise 2
+    server redis_node2 <REPLICA_HOST>:<PRIMARY_PORT> check inter 1s fall 2 rise 2
