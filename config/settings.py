@@ -422,6 +422,34 @@ class GraniteSettings(BaseModel):
         ),
     )
 
+    # --- Background-task supervisor (Fix #4, issue #1816) ---
+    supervisor_max_restarts: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Max restarts within WORKER_SUPERVISOR_WINDOW_S before the storm cap fires "
+            "and recycles the process via SIGABRT. Conservative default — erring toward "
+            "NOT killing legitimate work. Provisional/tunable. "
+            "Override via WORKER_SUPERVISOR_MAX_RESTARTS env var."
+        ),
+    )
+    supervisor_window_s: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "Rolling window (seconds) for the restart-count denominator. "
+            "Provisional/tunable. Override via WORKER_SUPERVISOR_WINDOW_S env var."
+        ),
+    )
+    supervisor_base_backoff_s: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Base backoff (seconds) before the first respawn; doubles each restart. "
+            "Provisional/tunable. Override via WORKER_SUPERVISOR_BASE_BACKOFF_S env var."
+        ),
+    )
+
 
 class PathSettings(BaseModel):
     """Path settings derived from project root. No hardcoded usernames."""
