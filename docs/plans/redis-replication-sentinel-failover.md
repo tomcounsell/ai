@@ -349,17 +349,26 @@ The lead agent orchestrates; it does not build directly.
 
 ## Open Questions
 
-1. **Option A vs Option B — which architecture?** Recommendation: **Option A**
-   (stable-address VIP/HAProxy front, zero Python change, matches "infra/config
-   only" and 2026 best practice). Option B (Sentinel-aware clients across 18 sites)
-   is larger and contradicts the issue framing. Confirm A before build.
-2. **Host topology — two hosts or three?** The issue says "second host," but real
-   HA needs ≥3 Sentinels on 3 independent machines (witness host for tie-break).
-   Do we provision a third lightweight witness, or accept the documented two-host
-   quorum=2 fallback with its split-brain caveat?
-3. **Where does the stable-address layer live?** keepalived VIP (needs L2 adjacency
-   between hosts) vs HAProxy TCP frontend (works across subnets, adds a hop). Which
-   fits the actual deployment network?
-4. **Is a staging/second host available now** to verify the failover procedure end
-   to end, or does this plan ship the artifacts + runbook and defer the live
-   verification to the operator cutover (the [EXTERNAL] No-Go)?
+**RESOLVED (PM sign-off 2026-06-30):** All four questions are answered below; build
+proceeds on these decisions.
+
+1. **Option A vs Option B — which architecture?** **RESOLVED → Option A**
+   (stable-address VIP/HAProxy front, zero Python change). Matches the issue's
+   "infra/config only" framing and 2026 best practice. Option B (Sentinel-aware
+   clients across 18 sites) is explicitly rejected — out of scope, larger blast
+   radius, contradicts the issue.
+2. **Host topology — two hosts or three?** **RESOLVED → ship topology-agnostic
+   artifacts; document ≥3-Sentinel/quorum=2 as the production target in the
+   runbook.** Artifacts must NOT hard-require 3 hosts to land. The two-host
+   quorum=2 fallback is documented with its split-brain caveat; actual host
+   provisioning is an operator action (see Update System / runbook).
+3. **Where does the stable-address layer live?** **RESOLVED → document both** the
+   keepalived VIP (L2 adjacency) and HAProxy TCP frontend (cross-subnet) options
+   in the runbook; ship config templates for both so the operator picks per their
+   network. Neither is hard-coded into a required build step.
+4. **Is a staging/second host available now?** **RESOLVED → no live verification
+   required to merge.** This PR ships the deliverables that need no hardware: config
+   artifacts/templates, the idempotent `/update` propagation step, the
+   `redis-replication-health` doctor check, and the operator runbook. Live failover
+   verification and the `REDIS_URL`/VIP cutover are explicit operator steps in the
+   runbook (the `[EXTERNAL]` No-Gos), deferred to the operator.
