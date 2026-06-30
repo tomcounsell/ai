@@ -933,7 +933,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         result.redis_replication_result = redis_replication.apply_redis_replication()
         rr = result.redis_replication_result
         if rr.success:
-            if rr.action == "applied":
+            if rr.action in ("applied", "applied_with_warning"):
                 log("Redis replication: seeded replica/Sentinel config", v, always=True)
             else:
                 log(f"Redis replication: {rr.action}", v)
