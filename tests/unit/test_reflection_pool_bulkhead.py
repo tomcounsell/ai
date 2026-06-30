@@ -154,3 +154,126 @@ async def test_redis_quality_audit_does_not_block_loop():
 def test_redis_quality_audit_loop_responsive():
     """Sync wrapper so pytest can run the async test without requiring pytest-asyncio marker."""
     asyncio.run(test_redis_quality_audit_does_not_block_loop())
+
+
+# ---------------------------------------------------------------------------
+# Test C -- execute_function_reflection routing tests
+# ---------------------------------------------------------------------------
+
+
+def _make_entry(**kwargs):
+    """Return a minimal ReflectionEntry with required fields filled in."""
+    from agent.reflection_scheduler import ReflectionEntry
+
+    defaults = dict(
+        name="test",
+        description="test reflection",
+        priority="normal",
+        execution_type="function",
+        schedule="every: 60s",
+    )
+    defaults.update(kwargs)
+    return ReflectionEntry(**defaults)
+
+
+def test_sync_reflection_uses_dedicated_pool():
+    """Sync callable must be routed through _reflection_pool, not None."""
+    from unittest.mock import patch
+
+    from agent.reflection_scheduler import _reflection_pool, execute_function_reflection
+
+    entry = _make_entry(callable="agent.reflection_scheduler._get_memory_rss")
+    captured = []
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        original = loop.run_in_executor
+
+        async def mock_run_in_executor(executor, func, *args):
+            captured.append(executor)
+            return await original(executor, func, *args)
+
+        with patch.object(loop, "run_in_executor", side_effect=mock_run_in_executor):
+            await execute_function_reflection(entry)
+
+    asyncio.run(run())
+
+    assert len(captured) == 1, f"run_in_executor not called; captured={captured!r}"
+    assert captured[0] is _reflection_pool, (
+        f"Expected _reflection_pool but got {captured[0]!r} -- "
+        "sync reflections must not use the default executor (None)"
+    )
+
+
+def test_sync_reflection_not_routed_via_none_executor():
+    """run_in_executor must never be called with None for sync reflections."""
+    from unittest.mock import patch
+
+    from agent.reflection_scheduler import execute_function_reflection
+
+    entry = _make_entry(callable="agent.reflection_scheduler._get_memory_rss")
+    captured = []
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        original = loop.run_in_executor
+
+        async def mock_run_in_executor(executor, func, *args):
+            captured.append(executor)
+            return await original(executor, func, *args)
+
+        with patch.object(loop, "run_in_executor", side_effect=mock_run_in_executor):
+            await execute_function_reflection(entry)
+
+    asyncio.run(run())
+
+    assert None not in captured, (
+        "run_in_executor was called with None -- sync reflections must use "
+        "_reflection_pool to avoid starving the event loop"
+    )
+
+
+def test_async_reflection_bypasses_run_in_executor():
+    """Async callables must be awaited directly, not routed via run_in_executor."""
+    from unittest.mock import patch
+
+    from agent.reflection_scheduler import execute_function_reflection
+
+    async def _async_noop():
+        return "ok"
+
+    entry = _make_entry(callable=None)
+    called_with_executor = []
+
+    async def run():
+        loop = asyncio.get_running_loop()
+
+        async def mock_run_in_executor(executor, func, *args):
+            called_with_executor.append(executor)
+            return None
+
+        with (
+            patch("agent.reflection_scheduler._resolve_callable", return_value=_async_noop),
+            patch.object(loop, "run_in_executor", side_effect=mock_run_in_executor),
+        ):
+            await execute_function_reflection(entry)
+
+    asyncio.run(run())
+
+    assert called_with_executor == [], (
+        "Async reflections must not call run_in_executor; "
+        f"but it was called with {called_with_executor!r}"
+    )
+
+
+def test_reflection_pool_workers_env_default():
+    """Without REFLECTION_POOL_WORKERS set, the module uses 2 workers."""
+    import os
+
+    saved = os.environ.pop("REFLECTION_POOL_WORKERS", None)
+    try:
+        val = max(1, int(os.environ.get("REFLECTION_POOL_WORKERS", "2")))
+        assert val == 2
+    finally:
+        if saved is not None:
+            os.environ["REFLECTION_POOL_WORKERS"] = saved

@@ -1,12 +1,15 @@
 """Unit tests for granite graceful degradation (issue #1816 Fix #1).
 
 Covers:
-- test_degraded_boot_no_exit: Worker starts gracefully when ensure_granite_model fails
-- test_granite_flag_set_on_success: granite_available=True after successful probe
-- test_granite_flag_false_on_failure: granite_available=False after failed probe
+- Constants validation: GRANITE_REPROBE_INTERVAL_S, GRANITE_BREAKER_OPEN_THRESHOLD,
+  GRANITE_BREAKER_COOLDOWN_S
+- GraniteSettings validation: breaker defaults match worker constants
 - test_reprobe_loop_flips_flag: reprobe loop sets granite_available=True when ollama recovers
 - test_breaker_opens_after_threshold: circuit opens after GRANITE_BREAKER_OPEN_THRESHOLD failures
-- test_degraded_mode_defers_granite_sessions: ENG sessions deferred, not dropped, when unavailable
+- test_reprobe_recovers_from_open_to_closed: circuit closes after successful half-open probe
+- test_reprobe_cancelled_error_exits_cleanly: CancelledError exits without raising
+- test_reprobe_loop_sets_flag_false_on_failure: flag becomes False after failed probe
+- test_pickup_returns_none_when_granite_unavailable: project-keyed pickup deferred when granite down
 """
 
 from __future__ import annotations
@@ -34,71 +37,59 @@ def _reset_granite_flag(value: bool) -> None:
     _ss.granite_available = value
 
 
-async def _run_loop_one_cycle(probe_result: tuple) -> None:
-    """Run _granite_reprobe_loop through exactly one probe cycle then cancel."""
-    sleep_count = [0]
-
-    async def _counted_sleep(duration):
-        sleep_count[0] += 1
-        if sleep_count[0] >= 2:
-            raise asyncio.CancelledError
-
-    async def _fake_to_thread(fn, *args, **kwargs):
-        return probe_result
-
-    with (
-        patch("asyncio.sleep", side_effect=_counted_sleep),
-        patch("asyncio.to_thread", new=_fake_to_thread),
-        patch.object(wm, "_resume_deferred_granite_sessions", MagicMock()),
-    ):
-        try:
-            await _granite_reprobe_loop()
-        except asyncio.CancelledError:
-            pass
-
-
 # ---------------------------------------------------------------------------
-# test_degraded_boot_no_exit
+# Constants validation
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_degraded_boot_no_exit():
-    """When ensure_granite_model fails, the reprobe loop handles it without crashing.
+def test_granite_constants_exist_in_worker():
+    """All three granite circuit-breaker constants are defined in worker.__main__."""
+    assert hasattr(wm, "GRANITE_REPROBE_INTERVAL_S"), "Missing GRANITE_REPROBE_INTERVAL_S"
+    assert hasattr(wm, "GRANITE_BREAKER_OPEN_THRESHOLD"), "Missing GRANITE_BREAKER_OPEN_THRESHOLD"
+    assert hasattr(wm, "GRANITE_BREAKER_COOLDOWN_S"), "Missing GRANITE_BREAKER_COOLDOWN_S"
 
-    Calls _granite_reprobe_loop directly with a failing probe — verifies the loop
-    exits via CancelledError (no sys.exit, no unhandled exception) and
-    granite_available stays False.
-    """
-    _reset_granite_flag(False)
-    await _run_loop_one_cycle((False, "ollama not found"))
-    assert _ss.granite_available is False, "Flag must stay False when probe fails"
+
+def test_granite_constants_are_numeric():
+    assert isinstance(wm.GRANITE_REPROBE_INTERVAL_S, float)
+    assert isinstance(wm.GRANITE_BREAKER_OPEN_THRESHOLD, int)
+    assert isinstance(wm.GRANITE_BREAKER_COOLDOWN_S, float)
+
+
+def test_granite_constants_have_sensible_defaults():
+    assert wm.GRANITE_REPROBE_INTERVAL_S > 0
+    assert wm.GRANITE_BREAKER_OPEN_THRESHOLD >= 1
+    assert wm.GRANITE_BREAKER_COOLDOWN_S > 0
+
+
+def test_granite_available_flag_in_session_state():
+    """granite_available lives in agent.session_state for cross-module access."""
+    assert hasattr(_ss, "granite_available"), "Missing granite_available in session_state"
+    assert isinstance(_ss.granite_available, bool)
 
 
 # ---------------------------------------------------------------------------
-# test_granite_flag_set_on_success
+# GraniteSettings validation
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_granite_flag_set_on_success():
-    """When ensure_granite_model succeeds, _granite_reprobe_loop sets granite_available=True."""
-    _reset_granite_flag(False)
-    await _run_loop_one_cycle((True, "granite4.1:3b responsive"))
-    assert _ss.granite_available is True, "Flag must be True after successful probe"
+def test_granite_breaker_in_settings():
+    """GraniteSettings includes the circuit-breaker constants."""
+    from config.settings import GraniteSettings
+
+    g = GraniteSettings()
+    assert hasattr(g, "reprobe_interval_s"), "Missing reprobe_interval_s in GraniteSettings"
+    assert hasattr(g, "breaker_open_threshold"), "Missing breaker_open_threshold in GraniteSettings"
+    assert hasattr(g, "breaker_cooldown_s"), "Missing breaker_cooldown_s in GraniteSettings"
 
 
-# ---------------------------------------------------------------------------
-# test_granite_flag_false_on_failure
-# ---------------------------------------------------------------------------
+def test_granite_breaker_defaults_match_worker_constants():
+    """GraniteSettings breaker defaults match the env-level defaults."""
+    from config.settings import GraniteSettings
 
-
-@pytest.mark.asyncio
-async def test_granite_flag_false_on_failure():
-    """When ensure_granite_model fails, _granite_reprobe_loop sets granite_available=False."""
-    _reset_granite_flag(True)  # was previously True
-    await _run_loop_one_cycle((False, "ollama timeout"))
-    assert _ss.granite_available is False, "Flag must be False after failed probe"
+    g = GraniteSettings()
+    assert g.reprobe_interval_s == wm.GRANITE_REPROBE_INTERVAL_S
+    assert g.breaker_open_threshold == wm.GRANITE_BREAKER_OPEN_THRESHOLD
+    assert g.breaker_cooldown_s == wm.GRANITE_BREAKER_COOLDOWN_S
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +101,7 @@ async def test_granite_flag_false_on_failure():
 async def test_reprobe_loop_flips_flag():
     """Reprobe loop flips granite_available to True when ollama recovers.
 
-    Simulates: startup probe failed → flag False → loop probes → success →
+    Simulates: startup probe failed -> flag False -> loop probes -> success ->
     flag becomes True.
     """
     _reset_granite_flag(False)
@@ -206,25 +197,127 @@ async def test_breaker_opens_after_threshold():
 
 
 # ---------------------------------------------------------------------------
-# test_degraded_mode_defers_granite_sessions
+# test_reprobe_recovers_from_open_to_closed
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_degraded_mode_defers_granite_sessions():
-    """_pop_agent_session returns None for project-keyed workers when granite is unavailable.
+async def test_reprobe_recovers_from_open_to_closed():
+    """After cooldown, a successful half-open probe closes the circuit."""
+    _reset_granite_flag(False)
+    threshold = GRANITE_BREAKER_OPEN_THRESHOLD
 
-    Calls _pop_agent_session directly with is_project_keyed=True and granite_available=False.
-    The granite gate short-circuits before any Redis query (Redis fails open in unit tests),
-    so no session is picked up — it stays in the queue until granite recovers.
+    probe_calls = []
+
+    def mock_probe():
+        probe_calls.append(1)
+        if len(probe_calls) <= threshold:
+            return (False, "ollama unreachable")
+        return (True, "granite4.1:3b responsive")
+
+    sleep_calls = []
+
+    async def _counted_sleep(duration):
+        sleep_calls.append(duration)
+        if len(probe_calls) >= threshold + 1 and _ss.granite_available:
+            raise asyncio.CancelledError
+
+    with (
+        patch("asyncio.sleep", side_effect=_counted_sleep),
+        patch(
+            "asyncio.to_thread",
+            new=AsyncMock(side_effect=lambda fn, *a, **kw: mock_probe()),
+        ),
+        patch.object(wm, "_resume_deferred_granite_sessions", MagicMock()),
+    ):
+        try:
+            await _granite_reprobe_loop()
+        except asyncio.CancelledError:
+            pass
+
+    assert _ss.granite_available is True, (
+        f"Expected granite_available=True after recovery. "
+        f"probe_calls={len(probe_calls)}, sleep_calls={sleep_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# test_reprobe_cancelled_error_exits_cleanly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reprobe_cancelled_error_exits_cleanly():
+    """CancelledError in the reprobe loop exits without raising."""
+
+    async def _immediate_cancel(_):
+        raise asyncio.CancelledError
+
+    with (
+        patch("asyncio.sleep", side_effect=_immediate_cancel),
+        patch("asyncio.to_thread", return_value=(False, "ollama unreachable")),
+        patch.object(wm, "_resume_deferred_granite_sessions", MagicMock()),
+    ):
+        task = asyncio.create_task(_granite_reprobe_loop())
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # Expected
+
+
+# ---------------------------------------------------------------------------
+# test_reprobe_loop_sets_flag_false_on_failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reprobe_loop_sets_flag_false_on_failure():
+    """reprobe loop sets granite_available=False when ensure_granite_model fails."""
+    _reset_granite_flag(True)  # Start True, should become False
+
+    probe_called = [0]
+    sleep_count = [0]
+
+    async def _fake_to_thread(fn, *args, **kwargs):
+        probe_called[0] += 1
+        return (False, "ollama timeout")
+
+    async def _counted_sleep(duration):
+        sleep_count[0] += 1
+        if sleep_count[0] >= 2:
+            raise asyncio.CancelledError
+
+    with (
+        patch("asyncio.sleep", side_effect=_counted_sleep),
+        patch("asyncio.to_thread", new=_fake_to_thread),
+        patch.object(wm, "_resume_deferred_granite_sessions", MagicMock()),
+    ):
+        try:
+            await _granite_reprobe_loop()
+        except asyncio.CancelledError:
+            pass
+
+    assert _ss.granite_available is False, "Flag should be False after failed probe"
+
+
+# ---------------------------------------------------------------------------
+# test_pickup_returns_none_when_granite_unavailable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pickup_returns_none_when_granite_unavailable():
+    """Project-keyed session pickup returns None when granite_available is False.
+
+    Drives the REAL _pop_agent_session gate rather than simulating it inline.
     """
-
     _reset_granite_flag(False)
 
-    # Redis is unavailable in unit tests; the sustainability guard fails open,
-    # allowing execution to reach the granite gate (is_project_keyed=True check).
-    result = await _pop_agent_session("valor", is_project_keyed=True)
+    mock_r = MagicMock()
+    mock_r.get.return_value = None  # No queue_paused, no hibernating, no throttle
 
-    assert result is None, (
-        "Expected None — project-keyed session pickup must be deferred when granite is down"
-    )
+    with patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r):
+        result = await _pop_agent_session("valor", is_project_keyed=True)
+
+    assert result is None, "Project-keyed pickup must return None when granite_available=False"
