@@ -69,6 +69,15 @@ async def test_supervise_respawns_on_crash():
         except (asyncio.CancelledError, RuntimeError):
             pass
 
+        # Drain any pending _delayed_respawn tasks spawned by backoff respawns.
+        for t in list(asyncio.all_tasks()):
+            if not t.done() and t is not asyncio.current_task():
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, RuntimeError):
+                    pass
+
     assert call_count[0] >= 2, (
         f"Factory should be called at least twice (initial + 1 respawn); got {call_count[0]}"
     )

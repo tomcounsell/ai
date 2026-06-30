@@ -16,6 +16,12 @@ from unittest.mock import MagicMock, patch
 from agent.granite_container.container import Container
 
 
+def _set_ptys(c: Container, pm: MagicMock, dev: MagicMock) -> None:
+    """Side-effect for patching _spawn_pair on a self-spawned Container."""
+    c._pm_pty = pm
+    c._dev_pty = dev
+
+
 def _mock_pty(
     idle_buffer: str = "[/complete] done\nbypass permissions\n❯ ",
     session_id: str = "mock-session-00000000",
@@ -68,15 +74,26 @@ class TestPkillDeleted(unittest.TestCase):
 
 
 class TestProcessGroupTeardown(unittest.TestCase):
-    """Teardown uses os.killpg scoped to each PTY's process group."""
+    """Teardown uses os.killpg scoped to each PTY's process group.
 
-    def test_pool_backed_run_completes_successfully(self) -> None:
-        """Pool-backed run completes with pm_complete (no pkill in teardown path)."""
+    Two real paths:
+    - Pool-backed: _uses_pool_pair() → True → killpg never called (pool owns lifecycle)
+    - Self-spawned: pids captured before _close_pair() → killpg called after close
+    """
+
+    def test_pool_backed_teardown_does_not_kill_pool_pair(self) -> None:
+        """Pool-backed container: killpg is NEVER called — the pool owns its PTYs.
+
+        Directly asserts the bystander-survives acceptance criterion:
+        the pool's prewarmed pair is not signalled during teardown.
+        """
         pm = _mock_pty(session_id="mock-session-pm", pid=1001)
         dev = _mock_pty(session_id="mock-session-dev", pid=2002)
+        # Pass as prewarmed pair → _uses_pool_pair() returns True.
+        c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
+        # Mark as pool-owned so _close_pair() skips them (as BridgeAdapter does).
         pm._released_to_pool = True
         dev._released_to_pool = True
-        c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -86,18 +103,24 @@ class TestProcessGroupTeardown(unittest.TestCase):
         with (
             patch("agent.granite_container.container.last_assistant_text", side_effect=_lat_stub),
             patch("os.getpgid", side_effect=lambda pid: pid + 10000),
-            patch("os.killpg"),
+            patch("os.killpg") as mock_killpg,
         ):
             result = c.run()
-        self.assertEqual(result.exit_reason, "pm_complete")
 
-    def test_teardown_calls_killpg_with_correct_pgid(self) -> None:
-        """Normal teardown path calls killpg for each live PTY by its pgid."""
-        pm = _mock_pty(session_id="mock-session-pm", pid=1001)
-        dev = _mock_pty(session_id="mock-session-dev", pid=2002)
-        pm._released_to_pool = True
-        dev._released_to_pool = True
-        c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
+        self.assertEqual(result.exit_reason, "pm_complete")
+        # CRITICAL: pool pair must not be killed.
+        mock_killpg.assert_not_called()
+
+    def test_self_spawned_teardown_calls_killpg_for_each_pty(self) -> None:
+        """Self-spawned container: pids captured before _close_pair → killpg IS called.
+
+        Asserts the orphan-reap acceptance criterion:
+        the self-spawned container's process groups are signalled after teardown.
+        """
+        pm = _mock_pty(session_id="mock-session-pm", pid=3001)
+        dev = _mock_pty(session_id="mock-session-dev", pid=4002)
+        # No prewarmed pair → _uses_pool_pair() returns False.
+        c = Container(user_message="hi")
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -105,6 +128,7 @@ class TestProcessGroupTeardown(unittest.TestCase):
             return "[/complete]\nDone."
 
         with (
+            patch.object(c, "_spawn_pair", side_effect=lambda: _set_ptys(c, pm, dev)),
             patch("agent.granite_container.container.last_assistant_text", side_effect=_lat_stub),
             patch("os.getpgid", side_effect=lambda pid: pid + 10000) as mock_getpgid,
             patch("os.killpg") as mock_killpg,
@@ -112,20 +136,18 @@ class TestProcessGroupTeardown(unittest.TestCase):
             result = c.run()
 
         self.assertEqual(result.exit_reason, "pm_complete")
-        mock_getpgid.assert_any_call(1001)
-        mock_getpgid.assert_any_call(2002)
-        mock_killpg.assert_any_call(11001, signal.SIGTERM)
-        mock_killpg.assert_any_call(12002, signal.SIGTERM)
+        # Pids were pre-captured → killpg fires for each PTY's pgroup.
+        mock_getpgid.assert_any_call(3001)
+        mock_getpgid.assert_any_call(4002)
+        mock_killpg.assert_any_call(13001, signal.SIGTERM)
+        mock_killpg.assert_any_call(14002, signal.SIGTERM)
 
     def test_bystander_process_not_affected(self) -> None:
-        """A process in a different pgroup is never killed."""
-        pm = _mock_pty(session_id="mock-session-pm", pid=1001)
-        dev = _mock_pty(session_id="mock-session-dev", pid=2002)
-        pm._released_to_pool = True
-        dev._released_to_pool = True
-        c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
-
-        bystander_pgid = 99999  # not 1001 or 2002 or their groups
+        """A process in a different pgroup is never killed by self-spawned teardown."""
+        pm = _mock_pty(session_id="mock-session-pm", pid=5001)
+        dev = _mock_pty(session_id="mock-session-dev", pid=6002)
+        c = Container(user_message="hi")
+        bystander_pgid = 99999
         killed_pgids: list[int] = []
 
         def _lat_stub(path, *, baseline_text_count=None):
@@ -137,6 +159,7 @@ class TestProcessGroupTeardown(unittest.TestCase):
             killed_pgids.append(pgid)
 
         with (
+            patch.object(c, "_spawn_pair", side_effect=lambda: _set_ptys(c, pm, dev)),
             patch("agent.granite_container.container.last_assistant_text", side_effect=_lat_stub),
             patch("os.getpgid", side_effect=lambda pid: pid + 10000),
             patch("os.killpg", side_effect=_fake_killpg),
@@ -144,16 +167,14 @@ class TestProcessGroupTeardown(unittest.TestCase):
             c.run()
 
         self.assertNotIn(bystander_pgid, killed_pgids)
-        # Only the two PTY pgroups were touched
-        self.assertTrue(all(pgid in (11001, 12002) for pgid in killed_pgids))
+        # Only the two PTY pgroups were touched.
+        self.assertTrue(all(pgid in (15001, 16002) for pgid in killed_pgids))
 
     def test_dead_pty_skipped_gracefully(self) -> None:
-        """If a PTY reports not alive, killpg is never called for it."""
-        pm = _mock_pty(session_id="mock-session-pm", pid=1001, alive=False)
-        dev = _mock_pty(session_id="mock-session-dev", pid=2002, alive=False)
-        pm._released_to_pool = True
-        dev._released_to_pool = True
-        c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
+        """OSError from killpg (process already dead) does not propagate."""
+        pm = _mock_pty(session_id="mock-session-pm", pid=7001)
+        dev = _mock_pty(session_id="mock-session-dev", pid=8002)
+        c = Container(user_message="hi")
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -161,35 +182,15 @@ class TestProcessGroupTeardown(unittest.TestCase):
             return "[/complete]\nDone."
 
         with (
+            patch.object(c, "_spawn_pair", side_effect=lambda: _set_ptys(c, pm, dev)),
             patch("agent.granite_container.container.last_assistant_text", side_effect=_lat_stub),
-            patch("os.getpgid"),
+            patch("os.getpgid", side_effect=ProcessLookupError("already dead")),
             patch("os.killpg") as mock_killpg,
         ):
-            c.run()
-
-        mock_killpg.assert_not_called()
-
-    def test_oserror_during_kill_is_swallowed(self) -> None:
-        """OSError from killpg (process already dead) does not propagate."""
-        pm = _mock_pty(session_id="mock-session-pm", pid=1001)
-        dev = _mock_pty(session_id="mock-session-dev", pid=2002)
-        pm._released_to_pool = True
-        dev._released_to_pool = True
-        c = Container(user_message="hi", pm_pty=pm, dev_pty=dev)
-
-        def _lat_stub(path, *, baseline_text_count=None):
-            if not path or "mock-session-dev" in path:
-                return ""
-            return "[/complete]\nDone."
-
-        with (
-            patch("agent.granite_container.container.last_assistant_text", side_effect=_lat_stub),
-            patch("os.getpgid", return_value=11001),
-            patch("os.killpg", side_effect=ProcessLookupError("already dead")),
-        ):
-            # Must not raise
             result = c.run()
+
         self.assertEqual(result.exit_reason, "pm_complete")
+        mock_killpg.assert_not_called()
 
 
 class TestSpawnFailureTeardown(unittest.TestCase):

@@ -202,10 +202,17 @@ def supervise(
 
         async def _delayed_respawn() -> None:
             await asyncio.sleep(backoff)
+            import agent.session_state as _ss_state  # noqa: PLC0415
+
+            if _ss_state._shutdown_requested:
+                logger.debug(
+                    "[supervisor] Shutdown requested; cancelling delayed respawn of %r", name
+                )
+                return
             new_task = asyncio.create_task(factory(), name=name)
             new_task.add_done_callback(_done_callback)
 
-        asyncio.get_event_loop().create_task(_delayed_respawn())
+        asyncio.create_task(_delayed_respawn())
 
     task = asyncio.create_task(factory(), name=name)
     task.add_done_callback(_done_callback)

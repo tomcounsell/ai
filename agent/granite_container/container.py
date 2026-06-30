@@ -749,6 +749,42 @@ class Container:
         """
         return self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None
 
+    def _close_pair_and_reap(self) -> None:
+        """Close PTYs, then reap orphaned process groups on the self-spawned path only.
+
+        Pool-backed pairs are owned by the PTYPool (close-on-release + PID-targeted
+        orphan kill at worker startup); signalling their process groups races the
+        pool's respawn, so we never touch them. On the self-spawned path (tests,
+        ping-pong), pexpect's force-close does not signal grandchildren (MCP/bash
+        subprocesses in the child's pgroup), so we capture each PTY's pgid BEFORE
+        close (close nulls _child, after which .pid returns None) and SIGTERM/SIGKILL
+        the group after close.
+        """
+        reap_pgids: list[tuple[str, int]] = []
+        if not self._uses_pool_pair():
+            for _name, _pty in (("pm_pty", self._pm_pty), ("dev_pty", self._dev_pty)):
+                if _pty is None:
+                    continue
+                _pid = getattr(_pty, "pid", None)
+                if _pid is None:
+                    continue
+                try:
+                    reap_pgids.append((_name, os.getpgid(_pid)))
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+        self._close_pair()
+        for _name, _pgid in reap_pgids:
+            try:
+                os.killpg(_pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError) as _e:
+                logger.debug("Could not SIGTERM %s pgid %s: %s", _name, _pgid, _e)
+                continue
+            time.sleep(0.5)
+            try:
+                os.killpg(_pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass  # group already gone after SIGTERM — expected
+
     # -- Startup phase ----------------------------------------------------
 
     def _handle_startup(self, buffer_pm: str, buffer_dev: str) -> str | None:
@@ -1510,24 +1546,7 @@ class Container:
                     result.resume_uuid = self._pm_pty.last_resume_uuid()
             except Exception:
                 pass
-            self._close_pair()
-            # Kill any surviving PTY children by process group
-            for _pty_name, _pty in [("pm_pty", self._pm_pty), ("dev_pty", self._dev_pty)]:
-                if _pty is None:
-                    continue
-                _pid = getattr(_pty, "pid", None)
-                if _pid is None:
-                    continue
-                try:
-                    if not _pty.isalive():
-                        continue
-                    _pgid = os.getpgid(_pid)
-                    os.killpg(_pgid, signal.SIGTERM)
-                    time.sleep(0.5)
-                    if _pty.isalive():
-                        os.killpg(_pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError) as _e:
-                    logger.debug("Could not kill %s pid %s: %s", _pty_name, _pid, _e)
+            self._close_pair_and_reap()
 
         return result
 
@@ -1962,24 +1981,7 @@ class Container:
             logger.warning("ping_pong failed: %s", e)
             return False
         finally:
-            self._close_pair()
-            # Kill any surviving PTY children by process group
-            for _pty_name, _pty in [("pm_pty", self._pm_pty), ("dev_pty", self._dev_pty)]:
-                if _pty is None:
-                    continue
-                _pid = getattr(_pty, "pid", None)
-                if _pid is None:
-                    continue
-                try:
-                    if not _pty.isalive():
-                        continue
-                    _pgid = os.getpgid(_pid)
-                    os.killpg(_pgid, signal.SIGTERM)
-                    time.sleep(0.5)
-                    if _pty.isalive():
-                        os.killpg(_pgid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError) as _e:
-                    logger.debug("Could not kill %s pid %s: %s", _pty_name, _pid, _e)
+            self._close_pair_and_reap()
 
 
 # ---------------------------------------------------------------------------
