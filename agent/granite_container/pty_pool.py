@@ -23,7 +23,10 @@ Slot lifecycle
     idle --acquire--> locked --release--> respawning --respawn done--> idle
                                   \\-> respawn failed: still in respawning
                                        (semaphore not released; respawn task
-                                        holds the slot, logs the failure)
+                                        logs the failure). The next bounded
+                                        acquirer that waits past
+                                        PTY_POOL_WAIT_TIMEOUT force-recycles
+                                        the slot, rescheduling the respawn.
 
 Contract for `_respawn_slot` (race-free, harden POOL-1 + ADV-4):
 
@@ -37,17 +40,20 @@ Contract for `_respawn_slot` (race-free, harden POOL-1 + ADV-4):
    only fire after the lock is released (i.e. after `event.set()`
    or after the spawn raised).
 3. `event.set()` only after the new pair is in place.
-4. On failure, the respawn task re-raises (or logs and exits) — the
-   per-slot state is left as `respawning` and the next acquirer
-   blocks on the event. The semaphore is NOT released (the
-   per-slot state machine recovers via the operator's intervention
-   — log loudly so it surfaces in dashboard.json's health view).
+4. On failure, the respawn task re-raises (or logs and exits) and
+   the per-slot state is left as `respawning` with its event unset.
+   The semaphore is NOT released. The next acquirer that waits on
+   this slot's event past `PTY_POOL_WAIT_TIMEOUT` calls
+   `_force_recycle_slot`, which reschedules `_respawn_slot` under
+   the per-slot lock. The slot recovers automatically (the failure
+   is still logged loudly so it surfaces in dashboard.json's health
+   view).
 
 Worker-shutdown drain: `worker/__main__.py` shutdown hook MUST
 `await asyncio.gather(*self._pool._respawn_tasks, return_exceptions=True)`
 before the PID-targeted kill step. Without it, a half-spawned slot
-can be left in `respawning` permanently and the next `acquire_pair`
-blocks forever on its event.
+can be left in `respawning` and the next `acquire_pair` waits up to
+`PTY_POOL_WAIT_TIMEOUT` on its event before force-recycling it.
 """
 
 from __future__ import annotations
@@ -71,15 +77,17 @@ DEFAULT_PID_REGISTRY_PATH = "data/granite_pty_pids.json"
 
 # Timeout (seconds) for the semaphore acquire in `acquire_pair`. If the
 # pool is fully locked for this long the pool is likely wedged (POOL-1).
-# Provisional/tunable — override with PTY_POOL_ACQUIRE_TIMEOUT env var.
-PTY_POOL_ACQUIRE_TIMEOUT: int = int(os.environ.get("PTY_POOL_ACQUIRE_TIMEOUT", "120"))
+# Provisional default, tune after observing real acquire rates; override
+# with the PTY_POOL_ACQUIRE_TIMEOUT env var.
+PTY_POOL_ACQUIRE_TIMEOUT: float = float(os.environ.get("PTY_POOL_ACQUIRE_TIMEOUT", "120"))
 
 # Timeout (seconds) for individual waits inside `_wait_for_idle_slot`:
 # both the pool-level condition wait and the per-slot event wait.
 # A missed notify is re-scanned after this many seconds; a slot stuck
 # in `respawning` past this deadline triggers `_force_recycle_slot`.
-# Provisional/tunable — override with PTY_POOL_WAIT_TIMEOUT env var.
-PTY_POOL_WAIT_TIMEOUT: int = int(os.environ.get("PTY_POOL_WAIT_TIMEOUT", "60"))
+# Provisional default, tune after observing real wait rates; override
+# with the PTY_POOL_WAIT_TIMEOUT env var.
+PTY_POOL_WAIT_TIMEOUT: float = float(os.environ.get("PTY_POOL_WAIT_TIMEOUT", "60"))
 
 
 @dataclass
@@ -298,11 +306,11 @@ class PTYPool:
         try:
             await asyncio.wait_for(self._sem.acquire(), PTY_POOL_ACQUIRE_TIMEOUT)
             sem_acquired = True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise PTYPoolError(
-                f"PTY pool semaphore acquire timed out after {PTY_POOL_ACQUIRE_TIMEOUT}s;"
+                f"PTY pool semaphore acquire timed out after {PTY_POOL_ACQUIRE_TIMEOUT:g}s;"
                 " pool may be wedged"
-            )
+            ) from None
         slot: _Slot | None = None
         recycles = 0
         try:
@@ -377,18 +385,17 @@ class PTYPool:
                     if any(s.state == "idle" and s.event.is_set() for s in self._slots):
                         continue
                     try:
-                        await asyncio.wait_for(
-                            self._slot_available.wait(), PTY_POOL_WAIT_TIMEOUT
-                        )
-                    except asyncio.TimeoutError:
-                        # Missed notify or spurious timeout — re-scan.
+                        await asyncio.wait_for(self._slot_available.wait(), PTY_POOL_WAIT_TIMEOUT)
+                    except TimeoutError:
+                        # Missed notify or spurious timeout: fall through
+                        # to the outer `continue` and re-scan the slots.
                         pass
                 continue
             # Wait on the first respawning slot we see.
             slot = respawning[0]
             try:
                 await asyncio.wait_for(slot.event.wait(), PTY_POOL_WAIT_TIMEOUT)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # The slot is stuck in `respawning` (POOL-1 hazard).
                 # Force-recycle it and re-scan.
                 await self._force_recycle_slot(slot)
@@ -404,11 +411,12 @@ class PTYPool:
         Reschedules `_respawn_slot` under the per-slot lock if (and only
         if) the slot is still in `respawning` with its event unset. The
         rescheduled spawn's SUCCESS path sets `slot.event` and notifies
-        `_slot_available`, so the caller MUST NOT do either — doing so
-        would race against the new spawn task.
+        `_slot_available`, so the caller MUST NOT do either; doing so
+        would race against the new spawn task (a busy-spin at the event
+        wait plus a spurious PTYPoolError via the non-idle-state guard).
         """
         logger.error(
-            "[pty-pool] slot %d stuck in respawning past %ds; force-recycling",
+            "[pty-pool] slot %d stuck in respawning past %ss; force-recycling",
             slot.idx,
             PTY_POOL_WAIT_TIMEOUT,
         )
@@ -425,9 +433,7 @@ class PTYPool:
                         slot.idx,
                     )
         except Exception as e:
-            logger.error(
-                "[pty-pool] slot %d force-recycle failed: %s", slot.idx, e
-            )
+            logger.error("[pty-pool] slot %d force-recycle failed: %s", slot.idx, e)
 
     def _pair_is_live(self, slot: _Slot) -> bool:
         """Whether the slot holds a pair whose PTY children are both alive.
@@ -571,8 +577,10 @@ class PTYPool:
         than `idle` with a stale pair.
 
         Failure logs and re-raises; the slot is left in
-        `respawning` (the event is not set, so the next acquirer
-        blocks — operator's intervention surfaces the issue).
+        `respawning` with its event unset. The next acquirer that
+        waits on this slot past `PTY_POOL_WAIT_TIMEOUT` force-recycles
+        it (reschedules this respawn), so the failure is recovered
+        automatically while still being logged loudly.
         """
         slot = self._slots[idx]
         slot.state = "respawning"
@@ -603,7 +611,8 @@ class PTYPool:
             # Re-raise so initialize can surface it; for respawn
             # tasks, the exception is captured by the task's own
             # state and the slot stays in `respawning` (event not
-            # set). Operator must intervene.
+            # set). The next bounded acquirer force-recycles the slot
+            # after PTY_POOL_WAIT_TIMEOUT.
             raise
 
     async def _respawn_slot(self, slot: _Slot) -> None:
@@ -627,9 +636,11 @@ class PTYPool:
             logger.info("[pty-pool] respawn for slot %d cancelled", slot.idx)
         except Exception as e:
             # Spawn failed. Slot is in `respawning`; event is not
-            # set. Next acquirer blocks. Log loudly.
+            # set. The next bounded acquirer force-recycles the slot
+            # after PTY_POOL_WAIT_TIMEOUT. Log loudly.
             logger.error("[pty-pool] respawn for slot %d failed: %s", slot.idx, e)
-            # Do not set the event; the slot remains unavailable.
+            # Do not set the event; the slot remains unavailable
+            # until a force-recycle reschedules the respawn.
 
 
 # -- Module-level singleton + worker hooks (plan #1572) ------------------------
