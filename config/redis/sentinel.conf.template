@@ -1,0 +1,34 @@
+# Redis Sentinel configuration template (Fix #5 — #1827)
+#
+# This is a TEMPLATE. Nothing here is active until an operator substitutes the
+# <PLACEHOLDER> tokens and starts a Sentinel process with:
+#   redis-sentinel /path/to/sentinel.conf
+#
+# Placeholder tokens:
+#   <MASTER_NAME>   — logical name for the monitored master (e.g. "valor-redis")
+#   <PRIMARY_HOST>  — hostname/IP of the current primary Redis (the master)
+#   <PRIMARY_PORT>  — port of the primary Redis (default 6379)
+#   <QUORUM>        — number of Sentinels that must agree the master is down
+#
+# PRODUCTION TARGET: deploy >= 3 Sentinels on 3 independent machines with
+# <QUORUM> = 2. Never co-locate a Sentinel with the master it watches. A strict
+# two-host topology technically works with quorum=2 but has NO split-brain
+# protection — document and acknowledge that fallback explicitly (see the runbook
+# in docs/features/redis-durability.md).
+
+port 26379
+
+# Monitor the master. The last field is the quorum: how many Sentinels must agree
+# the master is unreachable before a failover is authorized.
+sentinel monitor <MASTER_NAME> <PRIMARY_HOST> <PRIMARY_PORT> <QUORUM>
+
+# How long (ms) a master must be unreachable before this Sentinel marks it
+# subjectively down (the RTO floor — bridged by the #1814 client retry policy).
+sentinel down-after-milliseconds <MASTER_NAME> 5000
+
+# Abort and restart a failover that does not complete within this window (ms).
+sentinel failover-timeout <MASTER_NAME> 60000
+
+# How many replicas to reconfigure against the new master simultaneously after a
+# promotion. 1 keeps at most one replica unavailable for resync at a time.
+sentinel parallel-syncs <MASTER_NAME> 1

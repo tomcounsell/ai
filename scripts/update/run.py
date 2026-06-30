@@ -39,6 +39,7 @@ from scripts.update import (  # noqa: E402
     persona_drift,
     readme_check,
     redis_persistence,
+    redis_replication,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -142,6 +143,7 @@ class UpdateResult:
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
     redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
+    redis_replication_result: redis_replication.RedisReplicationResult | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -919,6 +921,33 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     except Exception as _rp_exc:
         log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
         result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
+
+    # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
+    # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this
+    # step is a clean no-op on every client-only machine (no data/redis-replication-
+    # enabled marker) and on any established cluster (presence-check early-exit). It
+    # NEVER CONFIG SET replicaof on a role:master node — seeding a virgin opted-in
+    # node is file-only. Non-fatal: failures are logged and the update continues.
+    log("Seeding Redis replication/Sentinel config (if opted in)...", v)
+    try:
+        result.redis_replication_result = redis_replication.apply_redis_replication()
+        rr = result.redis_replication_result
+        if rr.success:
+            if rr.action in ("applied", "applied_with_warning"):
+                log("Redis replication: seeded replica/Sentinel config", v, always=True)
+            else:
+                log(f"Redis replication: {rr.action}", v)
+            if rr.warning:
+                log(f"WARN: Redis replication: {rr.warning}", v, always=True)
+                result.warnings.append(f"Redis replication: {rr.warning}")
+        elif rr.action == "skipped":
+            log(f"Redis replication: skipped — {rr.error}", v)
+        else:
+            log(f"WARN: Redis replication: {rr.error}", v, always=True)
+            result.warnings.append(f"Redis replication: {rr.error}")
+    except Exception as _rr_exc:
+        log(f"WARN: Redis replication step failed unexpectedly: {_rr_exc}", v, always=True)
+        result.warnings.append(f"Redis replication: unexpected error: {_rr_exc}")
 
     # Step 4: Ollama generation model (full mode only).
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a

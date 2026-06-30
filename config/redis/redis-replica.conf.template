@@ -1,0 +1,29 @@
+# Redis replica configuration template (Fix #5 — #1827)
+#
+# This is a TEMPLATE. Nothing here is active until an operator:
+#   1. Provisions a second host (the replica host).
+#   2. Substitutes the <PLACEHOLDER> tokens below with real values.
+#   3. Starts redis-server with the resulting file on that host.
+#
+# Placeholder tokens:
+#   <PRIMARY_HOST>  — hostname/IP of the current primary Redis (the master)
+#   <PRIMARY_PORT>  — port of the primary Redis (default 6379)
+#
+# This replica inherits the #1814 durability posture (AOF on, noeviction) so the
+# replica's own on-disk copy is as durable as the primary's. Note: AOF on the
+# replica bounds loss from a *replica* crash; it CANNOT recover writes the primary
+# acknowledged but never shipped (the asynchronous-replication RPO window). See
+# docs/features/redis-durability.md "Replication + Sentinel Failover (Fix #5)".
+
+# --- Replication ---
+# Make this node a live replica of the primary. Sentinel rewrites this directive
+# at every failover, so do NOT re-apply this template on an established node.
+replicaof <PRIMARY_HOST> <PRIMARY_PORT>
+
+# Refuse writes to the replica so application writes always land on the master.
+replica-read-only yes
+
+# --- Durability (inherited from #1814) ---
+appendonly yes
+appendfsync everysec
+maxmemory-policy noeviction
