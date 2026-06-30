@@ -27,7 +27,8 @@ All thresholds are NAMED env-overridable constants with provisional/tunable comm
 ### Fix #2 — process-group teardown (`agent/granite_container/container.py`)
 
 - **Deleted `_run_pkill_fallback`**: the machine-wide `pkill -f "claude --permission-mode bypassPermissions"` is gone from `container.py`.
-- **Replaced with `os.killpg(os.getpgid(pty.pid), SIGTERM→SIGKILL)`** scoped to each container's own `_pm_pty` / `_dev_pty` process groups. Each PTY child is a session leader (`pty.fork()` → `setsid`), so killing its pgid cannot affect bystander processes.
+- **Replaced with `os.killpg(os.getpgid(pty.pid), SIGTERM→SIGKILL)`** (`_close_pair_and_reap`) scoped to each container's own `_pm_pty` / `_dev_pty` process groups. Each PTY child is a session leader (`pty.fork()` → `setsid`), so killing its pgid cannot affect bystander processes.
+- **Pool-owned pairs are excluded** via `_uses_pool_pair()`: on the production path the PTY pool owns pair lifecycle (close-on-release + PID-targeted reap), so the scoped `killpg` fires only on the self-spawned path (tests, ping-pong runs).
 - **Spawn-failure orphan reap** (callsite `container.py:~1080`): when `_spawn_pair()` raises after partially creating a child, **both** PTYs are iterated independently — a `None` pid skips silently, a non-None pid is `killpg`'d inside `try/except ProcessLookupError` so a half-created `claude` orphan cannot survive.
 - `isalive()` check before kill prevents killing an already-dead pid whose pgid might have been recycled by the OS.
 
