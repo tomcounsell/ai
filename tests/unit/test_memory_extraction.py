@@ -1,5 +1,7 @@
 """Unit tests for post-session memory extraction and outcome detection."""
 
+import json
+
 import pytest
 
 
@@ -272,6 +274,108 @@ class TestRunPostSessionExtraction:
         mock_llm.assert_called_once()  # the LLM WAS invoked
         mock_memory.safe_save.assert_not_called()  # but no save occurred
 
+    # --- Issue #1822 Fix 2: trivial-session (turn_count + origin) gate ---
+
+    @pytest.mark.asyncio
+    async def test_cli_single_turn_skips_llm_call(self):
+        """CLI-origin single-turn session (turn_count=1, not conversational) skips Haiku."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        # Long, real-shaped input that would otherwise pass every pre-LLM guard
+        # (this is the /update-style case: ~2000 chars of skill docs).
+        update_output = (
+            "Running /update: pulled latest changes, synced dependencies, "
+            "verified environment, restarted the bridge service. " * 20
+        )
+        assert len(update_output) >= 500
+
+        mock_llm = AsyncMock(side_effect=AssertionError("trivial CLI session MUST NOT call Haiku"))
+        with patch("agent.memory_extraction._llm_call", mock_llm):
+            result = await extract_observations_async(
+                "sess-cli-1turn",
+                update_output,
+                turn_count=1,
+                is_conversational=False,
+            )
+        assert result == []
+        mock_llm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_conversational_single_turn_still_extracts(self):
+        """A substantive single-turn Telegram correction (conversational) STILL extracts."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        correction = (
+            "Correction: never use em-dashes in published text — they are a "
+            "vanilla-LLM tell. Substitute periods, colons, or parentheses instead."
+        )
+        assert len(correction) >= 50
+
+        # is_conversational=True must defeat the turn_count<=1 skip → Haiku runs.
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(
+                "sess-tg-1turn",
+                correction,
+                turn_count=1,
+                is_conversational=True,
+            )
+        assert result == []  # NONE → nothing saved, but the LLM WAS consulted
+        mock_llm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_unknown_turn_count_is_noop(self):
+        """turn_count=None (unknown) never skips — gate is backward-compatible."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        text = (
+            "Worker finished session sess-xyz in 9.1s and deployed the new "
+            "extraction filters across all three fixes."
+        )
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            # turn_count defaults to None, is_conversational defaults to True
+            result = await extract_observations_async("sess-unknown", text)
+        assert result == []
+        mock_llm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_cli_session_extracts(self):
+        """A multi-turn CLI session (turn_count>=2) is NOT skipped even when non-conversational."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        text = (
+            "Across the build we extended the refusal vocabulary, added the "
+            "trivial-session gate, and shipped the scoping filter."
+        )
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(
+                "sess-cli-multi",
+                text,
+                turn_count=3,
+                is_conversational=False,
+            )
+        assert result == []
+        mock_llm.assert_called_once()
+
 
 class TestParseCategorizedObservations:
     """Test agent/memory_extraction.py _parse_categorized_observations()."""
@@ -333,6 +437,45 @@ class TestParseCategorizedObservations:
         result = _parse_categorized_observations(raw)
         assert len(result) == 1
         assert result[0][1] == CATEGORY_IMPORTANCE["correction"]
+
+    # --- Issue #1822 Fix 3: scoping-boilerplate observations dropped ---
+
+    def test_scoping_boilerplate_dropped_json_path(self):
+        """An observation echoing session-scoping boilerplate is dropped (JSON path)."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = json.dumps(
+            [
+                {
+                    "category": "pattern",
+                    "observation": "Valor AI agentic system scoped to isolated session "
+                    "contexts (sdlc-local-96) with strict boundary enforcement",
+                },
+                {
+                    "category": "decision",
+                    "observation": "Chose blue-green deployment for zero-downtime rollout.",
+                },
+            ]
+        )
+        result = _parse_categorized_observations(raw)
+        contents = [c for c, _, _ in result]
+        assert all("sdlc-local-" not in c for c in contents)
+        assert any("blue-green" in c for c in contents)
+        assert len(result) == 1
+
+    def test_scoping_boilerplate_dropped_line_path(self):
+        """An observation echoing session-scoping boilerplate is dropped (line-based path)."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = (
+            "PATTERN: this session is scoped to isolated session contexts; do not "
+            "include work from other sessions\n"
+            "PATTERN: all Popoto models use safe_save as the primary entry point"
+        )
+        result = _parse_categorized_observations(raw)
+        contents = [c for c, _, _ in result]
+        assert all("scoped to isolated session" not in c.lower() for c in contents)
+        assert any("safe_save" in c for c in contents)
 
     def test_fallback_uncategorized(self):
         from agent.memory_extraction import (
@@ -728,6 +871,138 @@ class TestRefusalPatternsNarrowness:
             "captured during the #1231 build."
         )
         assert _looks_like_refusal(text) is False
+
+
+class TestExtendedRefusalPatterns1822:
+    """Issue #1822 Fix 1: the 7 new refusal phrasings each return True.
+
+    Each phrase is a representative of one new ``_REFUSAL_PATTERNS`` entry
+    (annotated with its originating Memory ID in the source). Haiku rephrased
+    its refusal in these distinct ways and they escaped the #1212 vocabulary,
+    landing as high-confidence noise records.
+    """
+
+    # (memory_id, representative refusal phrasing)
+    NEW_REFUSALS = [
+        ("0208f60d", "The session response contains only metadata about tool availability."),
+        (
+            "b0b24ef7",
+            "The session response contains only system metadata about agent modes and permissions.",
+        ),
+        (
+            "517ccf5",
+            "The session response contains procedural documentation and instructions, "
+            "not observations.",
+        ),
+        (
+            "9fd6006a",
+            "The response does not contain any substantive observations worth saving.",
+        ),
+        ("1a572475", "The session response does not contain any extractable signal."),
+        ("868869", "There are no substantive observations to extract from this session."),
+        ("8f2c9d5c", "The session response appears to contain only setup boilerplate."),
+    ]
+
+    @pytest.mark.parametrize("memory_id,phrase", NEW_REFUSALS, ids=[m for m, _ in NEW_REFUSALS])
+    def test_new_refusal_phrasing_detected(self, memory_id, phrase):
+        from agent.memory_extraction import _looks_like_refusal
+
+        assert _looks_like_refusal(phrase) is True, f"missed refusal from {memory_id}"
+
+    def test_new_patterns_are_full_phrases_not_keywords(self):
+        """Narrowness invariant: every new pattern is multi-word (no bare keyword)."""
+        from agent.memory_extraction import _REFUSAL_PATTERNS
+
+        for pattern in _REFUSAL_PATTERNS:
+            assert " " in pattern or pattern.startswith("**"), (
+                f"refusal pattern {pattern!r} is a bare keyword — too broad"
+            )
+
+
+class TestScopingBoilerplate1822:
+    """Issue #1822 Fix 3: session-scoping boilerplate detection + narrowness."""
+
+    def test_sdlc_local_marker_detected(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert (
+            _is_scoping_boilerplate(
+                "Valor AI agentic system scoped to isolated session contexts "
+                "(sdlc-local-96) with strict boundary enforcement"
+            )
+            is True
+        )
+
+    def test_scoped_to_isolated_session_marker_detected(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert (
+            _is_scoping_boilerplate("This session is scoped to isolated session contexts.") is True
+        )
+
+    def test_case_insensitive(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert _is_scoping_boilerplate("SDLC-LOCAL-42 boundary preamble") is True
+
+    def test_empty_returns_false(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert _is_scoping_boilerplate("") is False
+        assert _is_scoping_boilerplate("   ") is False
+
+
+class TestScopingMarkersNarrowness:
+    """Issue #1822 Fix 3: legitimate observations mentioning sessions/scope are NOT dropped.
+
+    Mirrors ``TestRefusalPatternsNarrowness``. The markers are narrow by
+    construction (only evidenced substrings); an unevidenced marker would
+    silently drop real content. All cases below must return False.
+    """
+
+    def test_observation_mentioning_session_scope_is_not_boilerplate(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert (
+            _is_scoping_boilerplate(
+                "Sessions are scoped by Telegram thread ID; reply-to resumes the "
+                "original session context."
+            )
+            is False
+        )
+
+    def test_observation_about_local_dev_is_not_boilerplate(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert (
+            _is_scoping_boilerplate(
+                "Local CLI sessions run via create_local and lack a Telegram origin."
+            )
+            is False
+        )
+
+    def test_observation_mentioning_sdlc_is_not_boilerplate(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        assert (
+            _is_scoping_boilerplate(
+                "The SDLC pipeline stages are Plan, Critique, Build, Test, Patch, "
+                "Review, Docs, Merge."
+            )
+            is False
+        )
+
+    def test_observation_mentioning_boundary_is_not_boilerplate(self):
+        from agent.memory_extraction import _is_scoping_boilerplate
+
+        # "scope boundary" was deliberately NOT added as a marker (unconfirmed).
+        assert (
+            _is_scoping_boilerplate(
+                "The turn-count gate sits at the scope boundary of extraction, "
+                "before the try block."
+            )
+            is False
+        )
 
 
 class TestExtractPostMergeLearning:

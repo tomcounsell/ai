@@ -168,7 +168,58 @@ def _tick_backstop_check_compaction(
 _pending_extraction_tasks: dict[str, asyncio.Task] = {}
 
 
-def _schedule_post_session_extraction(session_id: str, response_text: str) -> None:
+def _capture_turn_count(session_id: str) -> int | None:
+    """Re-fetch the persisted ``turn_count`` for a session at schedule time (Fix 2, #1822).
+
+    The in-scope executor ``session`` object is a *different* instance than the
+    one ``sdk_client`` persists ``turn_count`` onto (``sdk_client.py:2573-2584``),
+    so its in-memory ``session.turn_count`` is stale (typically ``0``). The
+    in-memory ``get_turn_count()`` tracker is also already cleared by the harness
+    ``finally`` (``sdk_client.py:1932``) by the time finalization runs here. The
+    durable, timing-independent source is the persisted ``AgentSession`` record —
+    re-fetch the newest by ``session_id`` (the ``sdk_client.py:2573-2576``
+    newest-by-``created_at`` pattern). Returns ``None`` on any failure so the
+    gate stays a safe no-op (never over-skips).
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return None
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        return sessions[0].turn_count
+    except Exception as exc:  # noqa: BLE001 - capture must never crash finalization
+        logger.debug(
+            "[memory_extraction] turn_count capture failed for %s (non-fatal): %s",
+            session_id,
+            exc,
+        )
+        return None
+
+
+def _is_conversational_session(session: AgentSession) -> bool:
+    """True when ``session`` originated from a real conversational channel (Fix 2, #1822).
+
+    Telegram-originated sessions (``create_eng`` / ``create_teammate`` / SDLC
+    children) carry an ``initial_telegram_message`` dict; local CLI sessions
+    (``create_local``) do not. Conversational sessions must ALWAYS extract — a
+    substantive single-turn Telegram correction is high-value — so they are
+    exempt from the trivial-session skip. Defaults to ``True`` (no-skip) when the
+    signal is unreadable, so the gate never over-skips.
+    """
+    try:
+        return bool(getattr(session, "initial_telegram_message", None))
+    except Exception:  # noqa: BLE001 - origin read must never crash finalization
+        return True
+
+
+def _schedule_post_session_extraction(
+    session_id: str,
+    response_text: str,
+    turn_count: int | None = None,
+    is_conversational: bool = True,
+) -> None:
     """Fire-and-forget post-session memory extraction (hotfix #1055).
 
     Synchronous — creates and registers an ``asyncio.create_task``; does NOT
@@ -204,7 +255,12 @@ def _schedule_post_session_extraction(session_id: str, response_text: str) -> No
         try:
             from agent.memory_extraction import run_post_session_extraction
 
-            await run_post_session_extraction(session_id, response_text)
+            await run_post_session_extraction(
+                session_id,
+                response_text,
+                turn_count=turn_count,
+                is_conversational=is_conversational,
+            )
         except asyncio.CancelledError:
             raise  # preserve cancellation semantics for shutdown drain
         except Exception as e:
@@ -1917,7 +1973,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # and the #917 fallback at ~L1346). Extraction runs in the background;
         # its completion or failure does not delay the eng nudge. See
         # drain_pending_extractions() for shutdown wiring.
-        _schedule_post_session_extraction(session.session_id, task._result or "")
+        #
+        # Fix 2 (#1822): capture the trivial-session gate signals synchronously
+        # HERE (before teardown clears the in-memory turn-count tracker) and pass
+        # them by value. turn_count is re-fetched from the persisted AgentSession
+        # (the in-scope session.turn_count is a stale instance); origin comes from
+        # the in-scope session's initial_telegram_message.
+        _ext_turn_count = _capture_turn_count(session.session_id)
+        _ext_is_conversational = _is_conversational_session(session)
+        _schedule_post_session_extraction(
+            session.session_id,
+            task._result or "",
+            turn_count=_ext_turn_count,
+            is_conversational=_ext_is_conversational,
+        )
 
         # Save session snapshot for error cases
         if task.error:
