@@ -374,6 +374,32 @@ class GraniteSettings(BaseModel):
             "Plan #1572 / docs/features/granite-pty-production.md."
         ),
     )
+    reprobe_interval_s: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "How often (seconds) to re-probe granite when the circuit is CLOSED. "
+            "Provisional/tunable — tune after observing real ollama outage rates. "
+            "Override via GRANITE_REPROBE_INTERVAL_S env var."
+        ),
+    )
+    breaker_open_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Consecutive probe failures required to trip the circuit to OPEN. "
+            "Provisional/tunable. Override via GRANITE_BREAKER_OPEN_THRESHOLD env var."
+        ),
+    )
+    breaker_cooldown_s: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Seconds the circuit stays OPEN before allowing a half-open re-probe. "
+            "Provisional/tunable. Override via GRANITE_BREAKER_COOLDOWN_S env var."
+        ),
+    )
     pm_model: str = Field(
         default="opus",
         description=(
