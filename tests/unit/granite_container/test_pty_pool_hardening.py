@@ -1,6 +1,6 @@
 """Tests for the PTYPool hardenings from the PR #1612 deep-dive audit.
 
-Covers four fixes:
+Covers five fixes:
 
 1. Respawned slots reuse the cwd captured by `initialize(cwd=...)` —
    previously respawns silently fell back to the worker process's cwd.
@@ -10,6 +10,8 @@ Covers four fixes:
    not grow by one Task per session for the worker's lifetime.
 4. `initialize` loads persisted pids BEFORE the first spawn persists,
    so a prior process's orphan pids are not clobbered.
+5. Bounded waits: a stuck-`respawning` slot is force-recycled by
+   `_force_recycle_slot` instead of blocking the acquirer forever.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import agent.granite_container.pty_pool as pty_pool_mod
 from agent.granite_container.pty_pool import PTYPool
 
 
@@ -190,6 +193,93 @@ class TestPidRegistryLoadOrder(_PoolTestBase):
         self.assertIn(987654, pids, "prior orphan pid clobbered by pre-warm persist")
         on_disk = json.loads(Path(self.registry).read_text())["pids"]
         self.assertIn(987654, on_disk)
+
+
+class TestForceRecycleStuckRespawning(_PoolTestBase):
+    """Fix #5 / POOL-1: a slot stuck in `respawning` (event never set) is
+    re-spawned by `_force_recycle_slot` and the parked acquirer proceeds
+    within PTY_POOL_WAIT_TIMEOUT."""
+
+    def test_stuck_respawning_slot_triggers_force_recycle(self) -> None:
+        """Simulate a slot permanently stuck in `respawning`: its respawn
+        task exited without setting the event. A bounded acquirer detects
+        the timeout, calls `_force_recycle_slot`, and the new respawn
+        task brings the slot back to `idle` so the acquirer can proceed."""
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+            await pool.initialize(cwd="/x")
+            slot = pool._slots[0]
+
+            # Simulate a stuck-respawning slot: mark it respawning,
+            # clear the event, and drain any background respawn tasks
+            # so nothing will set the event on its own.
+            slot.state = "respawning"
+            slot.event.clear()
+            # Cancel any pending respawn tasks so none of them will
+            # set the event.
+            for t in pool._respawn_tasks:
+                t.cancel()
+            await asyncio.gather(*pool._respawn_tasks, return_exceptions=True)
+            pool._respawn_tasks.clear()
+
+            # Use a very short wait timeout so the force-recycle fires fast.
+            with patch.object(pty_pool_mod, "PTY_POOL_WAIT_TIMEOUT", 0.05):
+                with patch.object(pty_pool_mod, "PTY_POOL_ACQUIRE_TIMEOUT", 10):
+                    async with pool.acquire_pair() as (pm, dev, slot_idx):
+                        # The acquirer got a slot — force-recycle worked.
+                        self.assertIsInstance(slot_idx, int)
+                        self.assertEqual(pool._slots[slot_idx].state, "locked")
+
+            await pool.drain_respawns()
+
+        asyncio.run(_run())
+
+    def test_force_recycle_no_op_if_slot_already_idle(self) -> None:
+        """If the slot became idle between the timeout and the lock
+        acquisition, `_force_recycle_slot` does nothing (idempotent)."""
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+            await pool.initialize(cwd="/x")
+            slot = pool._slots[0]
+
+            # Slot is already idle — force-recycle must be a no-op.
+            tasks_before = list(pool._respawn_tasks)
+            await pool._force_recycle_slot(slot)
+            # No new tasks added; slot is still idle.
+            self.assertEqual(pool._respawn_tasks, tasks_before)
+            self.assertEqual(slot.state, "idle")
+
+        asyncio.run(_run())
+
+    def test_force_recycle_reschedules_new_respawn_task(self) -> None:
+        """When a slot is genuinely stuck, `_force_recycle_slot` creates
+        exactly one new entry in `_respawn_tasks`."""
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry)
+            await pool.initialize(cwd="/x")
+            slot = pool._slots[0]
+
+            # Simulate stuck-respawning.
+            slot.state = "respawning"
+            slot.event.clear()
+            for t in pool._respawn_tasks:
+                t.cancel()
+            await asyncio.gather(*pool._respawn_tasks, return_exceptions=True)
+            pool._respawn_tasks.clear()
+
+            tasks_before = len(pool._respawn_tasks)
+            await pool._force_recycle_slot(slot)
+            # Exactly one new respawn task was created.
+            self.assertEqual(len(pool._respawn_tasks), tasks_before + 1)
+            await pool.drain_respawns()
+            # After the respawn completes the slot should be idle.
+            self.assertEqual(slot.state, "idle")
+            self.assertTrue(slot.event.is_set())
+
+        asyncio.run(_run())
 
 
 class TestNeedsSessionSpawn(_PoolTestBase):
