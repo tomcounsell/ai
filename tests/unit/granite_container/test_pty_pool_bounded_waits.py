@@ -244,6 +244,47 @@ class TestSlotEventWaitTimeout(unittest.TestCase):
         with patch("agent.granite_container.pty_pool.PTYDriver", _FakeDriver):
             asyncio.run(_run())
 
+    def test_force_recycle_schedule_failure_logs_and_does_not_raise(self) -> None:
+        """If rescheduling the respawn fails (e.g. create_task raises),
+        `_force_recycle_slot` logs at error level and swallows the
+        exception so it never propagates into the acquire loop."""
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _FakeDriver):
+            pool = _make_pool(size=1)
+            asyncio.run(pool.initialize(cwd="/x"))
+
+        async def _run():
+            slot = pool._slots[0]
+            slot.state = "respawning"
+            slot.event.clear()
+            for t in pool._respawn_tasks:
+                t.cancel()
+            await asyncio.gather(*pool._respawn_tasks, return_exceptions=True)
+            pool._respawn_tasks.clear()
+
+            # Make the reschedule fail: create_task raises. Close the
+            # coroutine it was handed so no "never awaited" warning leaks.
+            def _boom(coro, *_a, **_k):
+                if asyncio.iscoroutine(coro):
+                    coro.close()
+                raise RuntimeError("cannot schedule")
+
+            with patch("agent.granite_container.pty_pool.asyncio.create_task", _boom):
+                with self.assertLogs("agent.granite_container.pty_pool", level="ERROR") as cm:
+                    # Must NOT raise despite the create_task failure.
+                    await pool._force_recycle_slot(slot)
+
+            # The failure was logged at error level.
+            self.assertTrue(
+                any("force-recycle failed" in m for m in cm.output),
+                f"expected a force-recycle-failed error log, got: {cm.output}",
+            )
+            # No task was appended (the schedule failed).
+            self.assertEqual(pool._respawn_tasks, [])
+
+        with patch("agent.granite_container.pty_pool.PTYDriver", _FakeDriver):
+            asyncio.run(_run())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
