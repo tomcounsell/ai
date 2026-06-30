@@ -1,0 +1,224 @@
+# Worker Liveness Recovery: Dead-Man's-Switch + Bounded PTY Waits
+
+This document describes the first landing of the liveness-vs-progress wedge recovery work
+(issue #1815). Two independent fixes shipped together: a dead-man's-switch heartbeat that
+aborts a frozen event loop, and bounded timeouts on every PTY-pool await that previously
+had no deadline. Deferred follow-ups: fix #2 (lease semaphore) + fix #3 (progress-deadline
+cancel scope) are tracked in issue #1820; fix #5 (out-of-domain recovery) + fix #6
+(per-tool budget backstop) are tracked in issue #1821.
+
+## Background
+
+Issue #1808 (documented in [Worker Wedge Investigation](worker-wedge-investigation.md))
+established that a worker process can be alive at the OS level while its asyncio event loop
+is wedged. The prior heartbeat write in `data/last_worker_connected` was unconditional on
+process liveness, so a frozen loop still produced a fresh green heartbeat from the off-loop
+watchdog thread. The watchdog never declared the process sick.
+
+Separately, the PTY pool's three internal awaits had no timeout. If a PTY slot's respawn
+task died on the error path without setting its completion event, the next caller would
+block on that event forever, holding a global semaphore slot. With enough concurrent
+sessions all wedged this way, the whole granite path deadlocked.
+
+## Fix 1: Dead-Man's-Switch Heartbeat (Heartbeat Inversion)
+
+### The Core Idea
+
+The old design wrote "green" unconditionally from the off-loop watchdog thread every
+heartbeat cycle. The new design inverts this: the on-loop code must bump a beacon on
+every event-loop tick, and the off-loop watchdog writes "green" only when it sees a fresh
+beacon. If the beacon goes stale, the watchdog aborts the process via `os.abort()` (SIGABRT),
+and launchd's existing `KeepAlive=true` + `ThrottleInterval=10` respawns the worker.
+Worker startup recovery then re-queues the interrupted session.
+
+This is the same pattern as systemd's `WatchdogSec` + `sd_notify("WATCHDOG=1")`: live
+code must emit a keep-alive within the configured interval or the supervisor restarts.
+launchd has no native `WatchdogSec`, so the off-loop thread plays the supervisor-timer role
+(self-SIGABRT when the on-loop tick is stale) and launchd's `KeepAlive` provides the
+respawn.
+
+### On-Loop Beacon (`agent/session_state.py`)
+
+Two new module-level globals and two accessors were added:
+
+- `last_loop_tick: float | None` initialized to `None` (unarmed state)
+- `bump_loop_tick()` sets it to `time.monotonic()`. Called by the on-loop asyncio task.
+- `get_loop_tick()` returns the current value. Read by the off-loop watchdog thread.
+
+`None` means unarmed: the process started but the event loop has not yet run the tick
+task. `time.monotonic()` is used (not wall clock) for freeze detection.
+
+### On-Loop Tick Task (`worker/__main__.py`)
+
+`_loop_tick_task()` is an asyncio task scheduled at worker startup. It runs an infinite
+loop that calls `bump_loop_tick()` then sleeps for `WORKER_DEADMAN_TICK_INTERVAL` seconds.
+Because it runs on the event loop, a synchronous freeze that blocks the loop also stops
+the bumps. This is the property that makes the mechanism work: the beacon going stale
+proves the loop is not making progress.
+
+### Off-Loop Watchdog Thread (`worker/__main__.py`)
+
+`_heartbeat_thread_main()` runs on a daemon thread outside the event loop. Each cycle:
+
+1. Read `get_loop_tick()`.
+2. If `None` (unarmed): check the startup-freeze guard (see below), then write green
+   (the old #1767 unconditional behavior). This keeps the heartbeat green during normal
+   slow startup (index rebuild, recovery sweep).
+3. If armed and fresh (age below `WORKER_DEADMAN_STALENESS_THRESHOLD`): write
+   `data/last_worker_connected` green and refresh the Redis PID record.
+4. If armed and stale (age at or above threshold): log a CRITICAL message and call
+   `_self_kill()`, which executes `os.abort()` to raise SIGABRT.
+
+An `armed` latch prevents false aborts during startup: the watchdog stays in the
+unarmed (green-write) path until `bump_loop_tick()` has fired at least once.
+
+### Startup-Freeze Guard
+
+If the beacon is still `None` after `WORKER_DEADMAN_STARTUP_GRACE_MAX` seconds (measured
+by how long the process has been running), the event loop froze before ever ticking. The
+watchdog aborts anyway (when `WORKER_DEADMAN_ENABLED=true`). This closes the gap where
+a freeze during index rebuild or recovery sweep would leave the process alive but silent
+forever, never arming the normal dead-man's-switch path.
+
+### Beacon-Age Auditing
+
+The green-write path logs `[deadman] beacon age=...` at roughly once per minute so
+operators can observe the margin between the actual on-loop sync work duration and the
+abort threshold. If real sync work routinely approaches the threshold, the threshold
+should be raised before it produces false aborts.
+
+### Environment Constants (Provisional)
+
+All constants are env-overridable and marked provisional/tunable. They live in
+`worker/__main__.py`.
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `WORKER_DEADMAN_ENABLED` | `true` | Set to `false` to restore #1767 unconditional-green write (instant rollback, no code change needed) |
+| `WORKER_DEADMAN_TICK_INTERVAL` | `5` s | How often the on-loop task bumps the beacon |
+| `WORKER_DEADMAN_STALENESS_THRESHOLD` | `90` s | Age at which the watchdog declares the loop frozen and aborts |
+| `WORKER_DEADMAN_STARTUP_GRACE_MAX` | `300` s | How long the process may stay unarmed before the startup-freeze guard aborts it |
+
+The margin between `WORKER_DEADMAN_TICK_INTERVAL` and `WORKER_DEADMAN_STALENESS_THRESHOLD`
+is intentionally large (5s vs 90s). Real on-loop sync work (awaiting Claude tool calls,
+DB writes) should complete well within 90 seconds. The threshold is a freeze detector,
+not a latency budget.
+
+### Recovery After Abort
+
+`os.abort()` produces a core dump and exits with a non-zero status. launchd sees the
+non-zero exit, applies `ThrottleInterval=10`, and respawns the process after 10 seconds.
+The worker's startup sequence (index rebuild, corrupted+orphan cleanup, dead-worker sweep,
+recovery) re-queues any session that was running at abort time. No manual intervention
+is required.
+
+## Fix 4: Bounded PTY-Pool Waits
+
+### The POOL-1 Hazard
+
+The PTY pool (`agent/granite_container/pty_pool.py`) maintains a fixed set of slots, each
+cycling through spawning, ready, and respawning states. The pre-fix code had three
+unbounded `await` calls:
+
+1. `await self._sem.acquire()` (semaphore for pool-size limit)
+2. `await self._slot_available.wait()` (condition signaling a ready slot exists)
+3. `await slot.event.wait()` (per-slot event signaling respawn complete)
+
+The POOL-1 hazard targeted await #3. A slot whose `_spawn_slot` task dies on the failure
+path (the task re-raises before calling `slot.event.set()`) is left stuck in `respawning`
+forever with `slot.event` never set. The next caller that wins the semaphore and the
+condition wait then parks on `slot.event.wait()` indefinitely. It holds a semaphore permit.
+With enough callers blocked this way, all permits exhaust and the entire granite path
+deadlocks: new sessions can never acquire, existing waiting calls never finish.
+
+### Bounded Awaits
+
+All three awaits are now wrapped in `asyncio.wait_for` with the following timeouts and
+recovery behaviors:
+
+**Semaphore acquire (`await self._sem.acquire()`):**
+- Timeout: `PTY_POOL_ACQUIRE_TIMEOUT` (120s by default).
+- On `asyncio.TimeoutError`: raise `PTYPoolError`. The session fails and is re-queued for
+  retry instead of wedging the worker permanently.
+- A `sem_acquired` flag guards the `finally` release: if the acquire timed out, the permit
+  was never held, so it must not be released.
+
+**Condition wait (`await self._slot_available.wait()`):**
+- Timeout: `PTY_POOL_WAIT_TIMEOUT` (60s by default).
+- On `asyncio.TimeoutError`: re-scan by breaking out of the inner wait loop. This defeats
+  a missed `notify_all` where all waiters were asleep when the notification fired.
+
+**Slot event wait (`await slot.event.wait()`):**
+- Timeout: `PTY_POOL_WAIT_TIMEOUT` (60s by default).
+- On `asyncio.TimeoutError`: the slot is still stuck in `respawning` past the deadline.
+  `_force_recycle_slot(slot)` is called.
+
+### Force Recycle (`_force_recycle_slot`)
+
+`_force_recycle_slot(slot)` is called when a slot's event wait times out. Under
+`slot.lock`, it checks that the slot is still in `respawning` with `event` unset (the
+stuck condition). If so, it schedules a fresh `_respawn_slot` task. The rescheduled task's
+success path sets both `slot.event` and notifies `_slot_available`. `_force_recycle_slot`
+does not set these directly: it hands the work to the new spawn task, which performs the
+proper state transitions under the slot lock.
+
+The re-check under `slot.lock` is important: between the timeout and the lock acquisition,
+another caller might have already recycled the slot. The guard prevents a double-recycle.
+
+### Environment Constants (Provisional)
+
+Both constants are env-overridable and live in `agent/granite_container/pty_pool.py`.
+
+| Constant | Default | Description |
+|----------|---------|-------------|
+| `PTY_POOL_ACQUIRE_TIMEOUT` | `120` s | Max wait for the pool semaphore before raising `PTYPoolError` |
+| `PTY_POOL_WAIT_TIMEOUT` | `60` s | Max wait for both the ready-slot condition and the per-slot respawn event before re-scan or force-recycle |
+
+## How the Two Fixes Interact
+
+Fix 1 (dead-man's-switch) catches event-loop freezes, including cases where the granite
+executor itself is stuck somewhere that never reaches the PTY pool. Fix 4 (bounded PTY
+waits) catches PTY-pool-level deadlocks: callers return an error or trigger a force-recycle
+instead of parking forever. Together they close the two most common wedge shapes observed
+in production.
+
+## Disabling and Rollback
+
+**Dead-man's-switch:** Set `WORKER_DEADMAN_ENABLED=false` in the environment before
+starting the worker. This restores #1767's unconditional-green heartbeat write with no
+code change.
+
+**PTY-pool timeouts:** Set `PTY_POOL_ACQUIRE_TIMEOUT` and `PTY_POOL_WAIT_TIMEOUT` to very
+large values (e.g., `86400`) to effectively disable the timeouts without removing the
+`asyncio.wait_for` wrappers.
+
+## Observability
+
+- Dead-man's-switch status: `[deadman] beacon age=...` INFO lines in `logs/worker.log`
+  (emitted roughly once per minute from the green-write path).
+- Abort events: CRITICAL log line from `_heartbeat_thread_main` immediately before
+  `os.abort()` fires.
+- PTY pool timeouts: `PTYPoolError` is logged at ERROR level with the session ID; the
+  session transitions to failed/re-queued.
+- Force-recycle events: logged at WARNING level from `_force_recycle_slot`.
+
+## Deferred Work
+
+This landing covers fix #1 (dead-man's-switch) and fix #4 (bounded PTY waits).
+
+- Issue #1820: fix #2 (lease semaphore to decouple global slot holds from PTY wait
+  duration) + fix #3 (progress-deadline cancel scope inside the executor).
+- Issue #1821: fix #5 (out-of-domain session recovery) + fix #6 (per-tool budget
+  backstop).
+
+## See Also
+
+- [Worker Wedge Investigation](worker-wedge-investigation.md) — root-cause analysis that
+  motivated these fixes (issue #1808)
+- [Worker Service](worker-service.md) — worker architecture, launchd setup, env vars
+- [Bridge Self-Healing](bridge-self-healing.md) — worker watchdog and escalation ladder
+- [Granite PTY Container: Production Path](granite-pty-production.md) — PTY pool design
+  and session execution path
+- `agent/session_state.py` — beacon globals and accessors
+- `worker/__main__.py` — tick task, watchdog thread, and dead-man's-switch constants
+- `agent/granite_container/pty_pool.py` — bounded awaits and force-recycle

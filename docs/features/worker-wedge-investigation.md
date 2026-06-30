@@ -2,6 +2,11 @@
 
 **Status: Investigation complete — mechanism demonstrated, no concrete slot-leak found.**
 
+**Implemented fix:** The two highest-priority findings from this investigation have been
+addressed. See [Worker Liveness Recovery](worker-liveness-recovery.md) for the implemented
+solution: a dead-man's-switch heartbeat that aborts a frozen event loop (fix #1), and
+bounded PTY-pool waits with force-recycle that close the POOL-1 deadlock hazard (fix #4).
+
 This document records the full findings of the `session/wedged-worker-pending-investigation`
 branch investigating issue #1808 ("Wedged-but-alive worker leaves sessions pending
 indefinitely despite 300s health backstop").
