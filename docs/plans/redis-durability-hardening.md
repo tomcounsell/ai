@@ -177,7 +177,7 @@ four distinct surfaces with real review overhead.
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `redis-cli` available | `redis-cli PING` | Apply/verify AOF + maxmemory-policy |
-| Redis ≥ 4.0 (AOF+RDB hybrid) | `redis-cli INFO server \| grep redis_version` | RDB-preamble AOF support |
+| Redis ≥ 4.0 (AOF+RDB hybrid) | `redis-cli INFO server` | RDB-preamble AOF support |
 | Writable Redis config dir | `redis-cli CONFIG GET dir` | Persist `CONFIG REWRITE` to redis.conf |
 | SQLite (stdlib) | `python -c "import sqlite3"` | Secondary store |
 
