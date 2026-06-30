@@ -91,6 +91,22 @@ GRANITE_BREAKER_COOLDOWN_S: float = float(os.environ.get("GRANITE_BREAKER_COOLDO
 # This alias is provided for readability in worker.__main__ code that writes the flag.
 # GRANITE_AVAILABLE is not a constant; it is mutated by _granite_reprobe_loop.
 
+# Background-task supervisor constants (Fix #4, #1816) — all env-overridable.
+# Grain of salt: defaults below are PROVISIONAL / conservative — tune after
+# observing real respawn cadence in logs/worker.log.
+# Max number of restarts within WORKER_SUPERVISOR_WINDOW_S before the storm
+# cap fires and recycles the process via SIGABRT. Erring toward NOT killing
+# legitimate work — a task that crashes once every few minutes is fine.
+WORKER_SUPERVISOR_MAX_RESTARTS: int = int(os.environ.get("WORKER_SUPERVISOR_MAX_RESTARTS", "5"))
+# Rolling window (seconds) for the restart-count denominator.
+# Provisional — tune based on longest legitimate startup transient.
+WORKER_SUPERVISOR_WINDOW_S: float = float(os.environ.get("WORKER_SUPERVISOR_WINDOW_S", "300"))
+# Base backoff (seconds) before the first respawn; doubles each restart.
+# Provisional — minimum viable grace window before hammering a failing factory.
+WORKER_SUPERVISOR_BASE_BACKOFF_S: float = float(
+    os.environ.get("WORKER_SUPERVISOR_BASE_BACKOFF_S", "1.0")
+)
+
 
 def _self_kill() -> None:
     """Kill this process via SIGABRT so launchd can respawn it.
@@ -99,6 +115,101 @@ def _self_kill() -> None:
     the test process.
     """
     os.abort()
+
+
+def supervise(
+    name: str,
+    factory,
+    *,
+    max_restarts: int = WORKER_SUPERVISOR_MAX_RESTARTS,
+    window_s: float = WORKER_SUPERVISOR_WINDOW_S,
+    base_backoff_s: float = WORKER_SUPERVISOR_BASE_BACKOFF_S,
+) -> asyncio.Task:
+    """Create and supervise a background asyncio Task with exponential-backoff respawn.
+
+    Wraps asyncio.create_task(factory()) and installs a done-callback that
+    respawns the task on unexpected death (any exit that is not a cancellation).
+    Restart timestamps are tracked in a rolling window; if the task crashes more
+    than ``max_restarts`` times within ``window_s`` seconds, the process is
+    recycled unconditionally via ``_self_kill()`` (SIGABRT) so launchd can
+    respawn it clean.
+
+    Backoff: the first respawn waits ``base_backoff_s``, the second waits
+    ``base_backoff_s * 2``, and so on (capped at ``window_s / 2``).
+
+    Storm-cap recycle is UNCONDITIONAL ``os.abort()`` via ``_self_kill()`` —
+    the same SIGABRT seam used by the dead-man's-switch (#1815). Never a bare
+    ``sys.exit(1)``: a ``SystemExit`` raised inside an asyncio done-callback is
+    swallowed by the event loop's callback-exception handler, so the process
+    would keep running and the cap would silently fail to recycle.
+
+    Shutdown guard: cancelled tasks are never respawned (cancellation is the
+    normal shutdown signal). The ``agent.session_state._shutdown_requested``
+    flag is also checked so in-flight tasks during a graceful SIGTERM shutdown
+    are not respawned.
+    """
+    restart_times: list[float] = []
+    restart_count = [0]
+
+    def _done_callback(t: asyncio.Task) -> None:
+        import agent.session_state as _ss_state  # noqa: PLC0415
+
+        if t.cancelled():
+            return  # Normal shutdown — never respawn a cancelled task.
+        if _ss_state._shutdown_requested:
+            return  # Graceful SIGTERM shutdown — suppress respawn.
+
+        exc = t.exception()
+        if exc is not None:
+            logger.warning(
+                "[supervisor] Task %r exited unexpectedly: %s(%s)",
+                name,
+                type(exc).__name__,
+                exc,
+            )
+
+        # Prune restart times outside the rolling window.
+        now = time.monotonic()
+        cutoff = now - window_s
+        while restart_times and restart_times[0] < cutoff:
+            restart_times.pop(0)
+
+        # Storm-cap check — UNCONDITIONAL _self_kill() if exceeded.
+        if len(restart_times) >= max_restarts:
+            logger.critical(
+                "[supervisor] Task %r hit storm cap (%d restarts in %.0fs) — "
+                "recycling process via SIGABRT so launchd can respawn clean.",
+                name,
+                max_restarts,
+                window_s,
+            )
+            # _self_kill() IS os.abort() — every branch reaches this, no exceptions.
+            # Never sys.exit(1): a SystemExit in a done-callback is swallowed by the
+            # event loop so the process would keep running with the cap silently failed.
+            _self_kill()
+            return  # Unreachable — os.abort() terminates the process.
+
+        # Exponential backoff: 1s, 2s, 4s … capped at window_s/2.
+        backoff = min(base_backoff_s * (2 ** len(restart_times)), window_s / 2)
+        restart_count[0] += 1
+        restart_times.append(now)
+        logger.warning(
+            "[supervisor] Respawning task %r (restart #%d, backoff=%.1fs)",
+            name,
+            restart_count[0],
+            backoff,
+        )
+
+        async def _delayed_respawn() -> None:
+            await asyncio.sleep(backoff)
+            new_task = asyncio.create_task(factory(), name=name)
+            new_task.add_done_callback(_done_callback)
+
+        asyncio.get_event_loop().create_task(_delayed_respawn())
+
+    task = asyncio.create_task(factory(), name=name)
+    task.add_done_callback(_done_callback)
+    return task
 
 
 def _asyncio_debug_enabled(env_value: str | None) -> bool:
@@ -783,18 +894,10 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.info("Granite classifier ready: %s", granite_detail)
         _ss_granite.granite_available = True
 
-    # Start _granite_reprobe_loop as a background task — it doubles as the
+    # Start _granite_reprobe_loop as a supervised background task — it doubles as the
     # circuit breaker, toggling granite_available as the model appears/disappears.
-    reprobe_task = asyncio.create_task(_granite_reprobe_loop(), name="granite-reprobe")
-
-    def _reprobe_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Granite reprobe loop exited unexpectedly: %s", exc)
-
-    reprobe_task.add_done_callback(_reprobe_task_done)
+    # supervise() respawns with exponential backoff; storm cap → _self_kill() SIGABRT.
+    reprobe_task = supervise("granite-reprobe", _granite_reprobe_loop)
 
     # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
     # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
@@ -898,89 +1001,44 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     )
     heartbeat_thread.start()
 
-    # Start health monitor as background task
-    health_task = asyncio.create_task(_agent_session_health_loop(), name="session-health-monitor")
+    # Start health monitor as a supervised background task (#1816 Fix #4).
+    # supervise() respawns on unexpected death with exponential backoff;
+    # storm cap exceeds → _self_kill() SIGABRT so launchd can respawn clean.
+    health_task = supervise("session-health-monitor", _agent_session_health_loop)
 
-    def _health_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            # Guards against unexpected task exit — ordinary exceptions are already caught
-            # inside the loop's own try-except.
-            logger.error("Health monitor task exited unexpectedly: %s", exc)
+    # Start per-tool timeout sub-loop (issue #1270) — supervised.
+    # Parallel to the main 5-min health loop on its own 30s cadence so the
+    # 30s internal-tier budget can fire within one tick of expiry.
+    tool_timeout_task = supervise("session-tool-timeout-monitor", _agent_session_tool_timeout_loop)
 
-    health_task.add_done_callback(_health_task_done)
-
-    # Start per-tool timeout sub-loop (issue #1270) — parallel to the main 5-min
-    # health loop on its own 30s cadence so the 30s internal-tier budget can fire
-    # within one tick of expiry. Independent done-callback so a crash here is
-    # logged distinctly from the main monitor.
-    tool_timeout_task = asyncio.create_task(
-        _agent_session_tool_timeout_loop(), name="session-tool-timeout-monitor"
-    )
-
-    def _tool_timeout_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Tool-timeout sub-loop exited unexpectedly: %s", exc)
-
-    tool_timeout_task.add_done_callback(_tool_timeout_task_done)
-
-    # Start unified reflection scheduler (moved from bridge — processing belongs in worker)
+    # Start unified reflection scheduler (moved from bridge — processing belongs in worker).
+    # Supervised so a scheduler crash is respawned rather than silently lost.
     reflection_task = None
     try:
         from agent.reflection_scheduler import ReflectionScheduler
 
         _reflection_scheduler = ReflectionScheduler()
-        reflection_task = asyncio.create_task(
-            _reflection_scheduler.start(), name="reflection-scheduler"
-        )
 
-        def _reflection_task_done(t: asyncio.Task) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.error("Reflection scheduler exited unexpectedly: %s", exc)
+        def _make_reflection_task():
+            return _reflection_scheduler.start()
 
-        reflection_task.add_done_callback(_reflection_task_done)
-        logger.info("Reflection scheduler started")
+        reflection_task = supervise("reflection-scheduler", _make_reflection_task)
+        logger.info("Reflection scheduler started (supervised)")
     except Exception as e:
         logger.error(f"Failed to start reflection scheduler: {e}")
 
-    # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
-    notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
+    # Start pub/sub listener — supervised; delivers ~1s session pickup vs 5-min health check.
+    notify_task = supervise("session-notify-listener", _session_notify_listener)
 
-    def _notify_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Session notify listener exited unexpectedly: %s", exc)
-
-    notify_task.add_done_callback(_notify_task_done)
-
-    # Start idle SDK-client sweeper (issue #1128). Worker-internal because
-    # `_active_clients` is process-local — the session-watchdog (separate
-    # process) cannot reach the registry. See `worker/idle_sweeper.py`.
+    # Start idle SDK-client sweeper (issue #1128) — supervised. Worker-internal because
+    # `_active_clients` is process-local — the session-watchdog (separate process)
+    # cannot reach the registry. See `worker/idle_sweeper.py`.
     idle_sweep_task = None
     try:
         from worker.idle_sweeper import run_idle_sweep
 
-        idle_sweep_task = asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
-
-        def _idle_sweep_done(t: asyncio.Task) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.error("Idle sweeper exited unexpectedly: %s", exc)
-
-        idle_sweep_task.add_done_callback(_idle_sweep_done)
-        logger.info("Idle SDK-client sweeper started")
+        idle_sweep_task = supervise("idle-sweeper", run_idle_sweep)
+        logger.info("Idle SDK-client sweeper started (supervised)")
     except Exception as e:
         logger.warning("Failed to start idle sweeper: %s", e)
 
@@ -1045,6 +1103,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     health_task.cancel()
     try:
         await health_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel per-tool timeout sub-loop
+    tool_timeout_task.cancel()
+    try:
+        await tool_timeout_task
     except asyncio.CancelledError:
         pass
 
