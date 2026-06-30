@@ -33,30 +33,45 @@ def _reset_granite_flag(value: bool) -> None:
     _ss.granite_available = value
 
 
+async def _run_loop_one_cycle(probe_result: tuple) -> None:
+    """Run _granite_reprobe_loop through exactly one probe cycle then cancel."""
+    sleep_count = [0]
+
+    async def _counted_sleep(duration):
+        sleep_count[0] += 1
+        if sleep_count[0] >= 2:
+            raise asyncio.CancelledError
+
+    async def _fake_to_thread(fn, *args, **kwargs):
+        return probe_result
+
+    with (
+        patch("asyncio.sleep", side_effect=_counted_sleep),
+        patch("asyncio.to_thread", new=_fake_to_thread),
+        patch.object(wm, "_resume_deferred_granite_sessions", MagicMock()),
+    ):
+        try:
+            await _granite_reprobe_loop()
+        except asyncio.CancelledError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # test_degraded_boot_no_exit
 # ---------------------------------------------------------------------------
 
 
-def test_degraded_boot_no_exit():
-    """When ensure_granite_model fails, no sys.exit is raised; the flag stays False."""
+@pytest.mark.asyncio
+async def test_degraded_boot_no_exit():
+    """When ensure_granite_model fails, the reprobe loop handles it without crashing.
+
+    Calls _granite_reprobe_loop directly with a failing probe — verifies the loop
+    exits via CancelledError (no sys.exit, no unhandled exception) and
+    granite_available stays False.
+    """
     _reset_granite_flag(False)
-
-    with patch(
-        "agent.granite_container.granite_classifier.ensure_granite_model",
-        return_value=(False, "ollama not found"),
-    ):
-        # The startup logic sets granite_available = False (no exit).
-        # Simulate what _run_worker does at the startup gate.
-        import agent.session_state as ss
-
-        ok, _detail = (False, "ollama not found")
-        if not ok:
-            ss.granite_available = False
-        else:
-            ss.granite_available = True
-
-    assert _ss.granite_available is False, "Flag must be False when probe fails"
+    await _run_loop_one_cycle((False, "ollama not found"))
+    assert _ss.granite_available is False, "Flag must stay False when probe fails"
 
 
 # ---------------------------------------------------------------------------
@@ -64,19 +79,12 @@ def test_degraded_boot_no_exit():
 # ---------------------------------------------------------------------------
 
 
-def test_granite_flag_set_on_success():
-    """When ensure_granite_model succeeds, granite_available is set to True."""
+@pytest.mark.asyncio
+async def test_granite_flag_set_on_success():
+    """When ensure_granite_model succeeds, _granite_reprobe_loop sets granite_available=True."""
     _reset_granite_flag(False)
-
-    import agent.session_state as ss
-
-    ok, _detail = (True, "granite4.1:3b responsive")
-    if not ok:
-        ss.granite_available = False
-    else:
-        ss.granite_available = True
-
-    assert _ss.granite_available is True
+    await _run_loop_one_cycle((True, "granite4.1:3b responsive"))
+    assert _ss.granite_available is True, "Flag must be True after successful probe"
 
 
 # ---------------------------------------------------------------------------
@@ -84,19 +92,12 @@ def test_granite_flag_set_on_success():
 # ---------------------------------------------------------------------------
 
 
-def test_granite_flag_false_on_failure():
-    """When ensure_granite_model fails, granite_available remains False."""
+@pytest.mark.asyncio
+async def test_granite_flag_false_on_failure():
+    """When ensure_granite_model fails, _granite_reprobe_loop sets granite_available=False."""
     _reset_granite_flag(True)  # was previously True
-
-    import agent.session_state as ss
-
-    ok, _detail = (False, "ollama timeout")
-    if not ok:
-        ss.granite_available = False
-    else:
-        ss.granite_available = True
-
-    assert _ss.granite_available is False
+    await _run_loop_one_cycle((False, "ollama timeout"))
+    assert _ss.granite_available is False, "Flag must be False after failed probe"
 
 
 # ---------------------------------------------------------------------------
