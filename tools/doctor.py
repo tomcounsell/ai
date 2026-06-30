@@ -175,6 +175,111 @@ def _check_redis() -> CheckResult:
         )
 
 
+def _check_redis_durability() -> list[CheckResult]:
+    """Check Redis durability configuration: AOF and eviction policy.
+
+    Asserts:
+    - ``aof_enabled:1`` via ``redis-cli INFO persistence``
+    - ``maxmemory-policy == noeviction`` via ``redis-cli CONFIG GET maxmemory-policy``
+
+    Returns a list of two CheckResult objects (one per assertion) so each
+    failure is independently actionable.  Never raises — renders failure state
+    cleanly if Redis is unreachable or redis-cli is not installed.
+    """
+    results: list[CheckResult] = []
+
+    # --- AOF enabled ---
+    try:
+        proc = subprocess.run(
+            ["redis-cli", "INFO", "persistence"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output = proc.stdout
+        aof_enabled = "aof_enabled:1" in output
+        results.append(
+            CheckResult(
+                name="redis_aof",
+                category="Services",
+                passed=aof_enabled,
+                message="AOF persistence enabled"
+                if aof_enabled
+                else "AOF persistence disabled (aof_enabled:0)",
+                fix=None
+                if aof_enabled
+                else "Enable AOF: run /update which sets appendonly yes in redis.conf",
+            )
+        )
+    except FileNotFoundError:
+        results.append(
+            CheckResult(
+                name="redis_aof",
+                category="Services",
+                passed=False,
+                message="redis-cli not found — cannot check AOF status",
+                fix="Install Redis CLI: brew install redis",
+            )
+        )
+    except Exception as e:
+        results.append(
+            CheckResult(
+                name="redis_aof",
+                category="Services",
+                passed=False,
+                message=f"AOF check failed: {e}",
+                fix="Run /update to apply Redis durability configuration",
+            )
+        )
+
+    # --- maxmemory-policy noeviction ---
+    try:
+        proc = subprocess.run(
+            ["redis-cli", "CONFIG", "GET", "maxmemory-policy"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+        # redis-cli CONFIG GET returns two lines: key then value
+        policy = lines[1] if len(lines) >= 2 else ""
+        noeviction = policy == "noeviction"
+        results.append(
+            CheckResult(
+                name="redis_eviction_policy",
+                category="Services",
+                passed=noeviction,
+                message=f"maxmemory-policy={policy or '(unknown)'}"
+                + (" (correct)" if noeviction else " (should be noeviction)"),
+                fix=None
+                if noeviction
+                else "Set noeviction: run /update which configures maxmemory-policy noeviction",
+            )
+        )
+    except FileNotFoundError:
+        results.append(
+            CheckResult(
+                name="redis_eviction_policy",
+                category="Services",
+                passed=False,
+                message="redis-cli not found — cannot check maxmemory-policy",
+                fix="Install Redis CLI: brew install redis",
+            )
+        )
+    except Exception as e:
+        results.append(
+            CheckResult(
+                name="redis_eviction_policy",
+                category="Services",
+                passed=False,
+                message=f"Eviction policy check failed: {e}",
+                fix="Run /update to apply Redis durability configuration",
+            )
+        )
+
+    return results
+
+
 def _check_bridge() -> CheckResult:
     """Check if Telegram bridge is running."""
     try:
@@ -593,6 +698,7 @@ def get_checks(
         _check_python_deps,
         # Services
         _check_redis,
+        _check_redis_durability,
         _check_bridge,
         _check_worker,
         # Auth
