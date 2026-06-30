@@ -93,7 +93,7 @@ class TestSessionFinalizationDecoupled:
         # exercises the real timeout path against a cooperative hang with the
         # hard-timeout shortened via monkeypatch. The scheduler-level SLO this
         # test asserts is identical whether the inner coroutine yields or not.
-        async def _slow_extract(session_id, response_text, project_key=None):
+        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
             await asyncio.sleep(30)  # Long stall; scheduler must not await.
 
         monkeypatch.setattr(
@@ -152,7 +152,7 @@ class TestSessionFinalizationDecoupled:
 
         caplog.set_level(logging.WARNING, logger="agent.session_executor")
 
-        async def _slow_extract(session_id, response_text, project_key=None):
+        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
             await asyncio.sleep(30)  # Cooperative; cancellable at await point.
 
         monkeypatch.setattr(
@@ -196,7 +196,7 @@ class TestSessionFinalizationDecoupled:
         """
         from agent import session_executor as se
 
-        async def _slow_extract(session_id, response_text, project_key=None):
+        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
             await asyncio.sleep(30)
 
         monkeypatch.setattr(
