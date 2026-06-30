@@ -174,7 +174,7 @@ You can intentionally save project-level learnings that should persist across se
 
 **User corrections** (importance 8.0, source "human"): When the user corrects a misconception or clarifies how something actually works, save the distilled lesson — not the raw correction, but the takeaway.
 ```bash
-python -m tools.memory_search save "Redis is used for operational state only, not durable records. Popoto models handle persistence." --importance 8.0 --source human
+python -m tools.memory_search save "Redis (via Popoto) IS the durable store — sessions, memories, bloom filter, message history all live there. AOF persistence (appendfsync everysec) is pinned so writes survive restarts with at most 1s of loss." --importance 8.0 --source human
 ```
 
 **Explicit "remember this" requests** (importance 8.0, source "human"): When the user explicitly asks you to remember something, save it directly.
