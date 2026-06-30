@@ -198,15 +198,15 @@ If a build-time grep finds none of the above in `tests/`, the dispositions colla
 
 ### Risk 3: Supervisor respawn masks a real, persistent crash (thrash)
 **Impact:** A task that always crashes would respawn forever, hiding the root cause and burning CPU.
-**Mitigation:** K-restarts-in-window storm cap → controlled `sys.exit(1)` so launchd recycles the whole process (visible, throttled). Every respawn logs at WARNING with a running count; the cap exit logs CRITICAL.
+**Mitigation:** A conservative K-restarts-in-window storm cap (NAMED env-overridable constants, erring toward NOT killing legitimate work) → controlled recycle via **`_self_kill()` (SIGABRT, gated by `WORKER_DEADMAN_ENABLED`); `os.abort()` if the deadman is disabled — NEVER a bare `sys.exit(1)`**, because a `SystemExit` raised inside an asyncio done-callback is caught by the loop's callback-exception handler and logged, not propagated, so the process would keep running and the cap would silently fail. launchd recycles the whole process (visible, throttled) after the SIGABRT. Every respawn logs at WARNING with a running count; the cap recycle logs CRITICAL. The storm-cap test asserts REAL subprocess death, not just the log line.
 
-### Risk 4: Fix #1 and Fix #6 fight over the "ollama is down" signal
-**Impact:** Two independent degraded-state machines could oscillate (one says available, the other open).
-**Mitigation:** Single source of truth — the runtime breaker (#6) drives `GRANITE_AVAILABLE` (#1); the startup probe seeds the initial state. Land #1 first; #6 plugs into the same flag.
+### Risk 4: Two degraded-state signals could fight over "ollama is down"
+**Impact:** If a standalone breaker and the re-probe flag were independent, they could oscillate (one says available, the other open).
+**Mitigation:** Eliminated by folding the breaker into Fix #1 — there is exactly ONE state machine (`_granite_reprobe_loop`) and ONE flag (`GRANITE_AVAILABLE`). The startup probe seeds the initial state; the loop owns every subsequent transition. Nothing to reconcile.
 
-### Risk 5: Reflection subprocess (#5) double-runs jobs or races the worker
-**Impact:** If both the worker and the new subprocess construct a scheduler during rollout, reflections could run twice.
-**Mitigation:** Delete the worker's `create_task` in the **same** change that adds the subprocess (no parallel-run window — per the no-parallel-migrations rule). The scheduler already coordinates via Redis `Reflection` records (single-owner claim). Ship #5 last, after #1–#4 de-risk the loop.
+### Risk 5: Deferred reflection subprocess (#1828) double-runs jobs at rollout
+**Impact:** When #1828 lands, if both the worker and the new subprocess construct a scheduler during rollout, reflections could run twice.
+**Mitigation (carried to #1828's plan):** Delete the worker's `create_task` in the **same** change that adds the subprocess (no parallel-run window — per the no-parallel-migrations rule). The scheduler already coordinates via Redis `Reflection` records (single-owner claim). Out of scope for this slug; recorded here so the follow-up inherits the constraint.
 
 ## Race Conditions
 
@@ -309,22 +309,9 @@ The lead agent orchestrates; it never builds directly. Work is staged — Stage 
 
 - **Builder (supervisor)**
   - Name: supervisor-builder
-  - Role: Fix #4 — `supervise()` helper with backoff + storm cap, wrap five spawn sites
+  - Role: Fix #4 — `supervise()` helper with backoff + SIGABRT storm cap (`_self_kill()`/`os.abort()`, never `sys.exit`), wrap five spawn sites + the #1 re-probe loop
   - Agent Type: builder
   - Domain: async/concurrency
-  - Resume: true
-
-- **Builder (ollama-breaker)**
-  - Name: breaker-builder
-  - Role: Fix #6 — runtime circuit breaker around granite_classifier, drives the #1 flag
-  - Agent Type: builder
-  - Domain: async/concurrency
-  - Resume: true
-
-- **Builder (reflection-subprocess)**
-  - Name: reflection-split-builder
-  - Role: Fix #5 — `reflections/__main__.py`, launchd plist, installer, `/update` wiring, delete worker create_task
-  - Agent Type: builder
   - Resume: true
 
 - **Validator (fault-containment)**
@@ -348,23 +335,25 @@ Per repo standard — Tier 1 `builder`/`validator`/`documentarian`; concurrency-
 ### 1. Fix #1 — ollama graceful degradation
 - **Task ID**: build-granite-degrade
 - **Depends On**: none
-- **Validates**: tests/ (degraded-boot pickup-deferral test, create); worker startup smoke
+- **Validates**: tests/ (degraded-boot pickup-deferral test + re-probe/breaker open/half-open/closed test, create); worker startup smoke
 - **Assigned To**: granite-degrade-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Convert `worker/__main__.py:620-638` from `sys.exit(1)` to `GRANITE_AVAILABLE = False` + warning.
-- Add supervised `_granite_reprobe_loop` that flips the flag when `ensure_granite_model()` succeeds.
+- Convert `worker/__main__.py:617-638` from `sys.exit(1)` to `GRANITE_AVAILABLE = False` + warning.
+- Add supervised `_granite_reprobe_loop` that re-probes `ensure_granite_model()` on `GRANITE_REPROBE_INTERVAL_S` and flips the flag on success. **The loop carries the folded-in breaker** (formerly Fix #6): consecutive-timeout counter, open after `GRANITE_BREAKER_OPEN_THRESHOLD`, half-open re-probe after `GRANITE_BREAKER_COOLDOWN_S`. All NAMED env-overridable constants with provisional/tunable comments; breaker state process-global.
 - Gate granite-routed (PM/Dev SDLC) session pickup on `GRANITE_AVAILABLE`, reusing the `paused_circuit`/deferred vocabulary.
+- Reconcile the stale in-code comments (`worker/__main__.py:617-625`, `granite_classifier.py:49-58` docstring) so neither claims a runtime ollama routing role.
 
 ### 2. Fix #2 — process-group teardown
 - **Task ID**: build-pgroup-teardown
 - **Depends On**: none
-- **Validates**: tests/ (bystander-survival test, create)
+- **Validates**: tests/ (bystander-survival test + spawn-failure partial-child orphan-reap test, create)
 - **Assigned To**: teardown-builder
 - **Agent Type**: builder
 - **Parallel**: true
 - Delete `_run_pkill_fallback` (`container.py:757-775`).
 - Replace callsites 1080, 1522, 1958 with `os.killpg(os.getpgid(pty.pid), SIGTERM)`→`SIGKILL` over `self._pm_pty`/`self._dev_pty`, guarded for dead/None pids + `isalive()` liveness check.
+- **Spawn-failure callsite (1080):** iterate BOTH PTYs and `killpg` each non-None group inside `try/except ProcessLookupError` — do NOT short-circuit both PTYs on a single None-check, so a half-created child is reaped, not leaked. Add the "spawn raises after partial child creation → no orphan survives" test.
 
 ### 3. Fix #3 — reflection bulkhead pool
 - **Task ID**: build-reflection-pool
@@ -387,48 +376,29 @@ Per repo standard — Tier 1 `builder`/`validator`/`documentarian`; concurrency-
 ### 5. Fix #4 — background-task supervisor
 - **Task ID**: build-supervisor
 - **Depends On**: validate-stage-a
-- **Validates**: tests/ (respawn-with-backoff + storm-cap test, create)
+- **Validates**: tests/ (respawn-with-backoff + storm-cap test asserting REAL SIGABRT process death, create)
 - **Assigned To**: supervisor-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `supervise(name, factory, *, max_restarts, window_s, base_backoff_s)` in `worker/`.
-- Wrap the five `create_task` sites (717, 734, 753, 770, 788) + the #1 re-probe loop; respawn on unexpected death; storm-cap → `sys.exit(1)`.
+- Add `supervise(name, factory, *, max_restarts, window_s, base_backoff_s)` in `worker/`, defaults from NAMED env-overridable conservative-provisional constants (`WORKER_SUPERVISOR_MAX_RESTARTS`/`WORKER_SUPERVISOR_WINDOW_S`/`WORKER_SUPERVISOR_BASE_BACKOFF_S`).
+- Wrap the five `create_task` sites (717, 734, 753, 770, 788) + the #1 re-probe loop; respawn on unexpected death.
+- **Storm-cap recycle uses SIGABRT, never `sys.exit(1)`**: on exceeding the cap, `logger.critical` then `_self_kill()` (#1815 seam, gated by `WORKER_DEADMAN_ENABLED`); if the deadman is disabled, `os.abort()`. The storm-cap test runs the worker under a subprocess and asserts it actually dies (a swallowed `SystemExit` would falsely pass a log-only check).
 
-### 6. Fix #6 — runtime ollama circuit breaker
-- **Task ID**: build-breaker
-- **Depends On**: build-supervisor
-- **Validates**: tests/ (breaker open/half-open/closed test, create)
-- **Assigned To**: breaker-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Wrap `granite_classifier.py` probe/call in a breaker (open after N timeouts → fast-fail + degraded fallback + cooldown → half-open).
-- Make the breaker the single source of truth driving `GRANITE_AVAILABLE`.
-
-### 7. Fix #5 — reflection subprocess split
-- **Task ID**: build-reflection-split
-- **Depends On**: build-breaker
-- **Validates**: tests/ (reflection-freeze isolation test, create); `/update` dry-run
-- **Assigned To**: reflection-split-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Create `reflections/__main__.py` running `ReflectionScheduler`; delete `create_task` at `worker/__main__.py:753` in the same change.
-- Add `com.valor.reflection-worker.plist` + `scripts/install_reflection_worker.sh` (idempotent, role-gated); wire into `scripts/update/run.py`.
-
-### 8. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-reflection-split
+- **Depends On**: build-supervisor
 - **Assigned To**: fc-documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/worker-fault-containment.md`; add to `docs/features/README.md`; cross-reference granite-pty + bridge-worker docs.
+- Create `docs/features/worker-fault-containment.md`; add to `docs/features/README.md`; cross-reference granite-pty + bridge-worker docs. Note the deferred reflection subprocess split (#1828) as future work.
 
-### 9. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: build-supervisor, build-breaker, build-reflection-split, document-feature
+- **Depends On**: build-supervisor, document-feature
 - **Assigned To**: fc-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run all new tests + full success criteria; confirm grep anti-criteria; generate final report.
+- Run all new tests + full success criteria; confirm grep anti-criteria (no `pkill`, no `_run_pkill_fallback`, no bare `sys.exit` in the storm-cap path); generate final report.
 
 ## Verification
 
@@ -441,10 +411,9 @@ Per repo standard — Tier 1 `builder`/`validator`/`documentarian`; concurrency-
 | pkill deleted (anti-criterion) | `grep -c 'pkill' agent/granite_container/container.py` | match count == 0 |
 | pkill-fallback method gone (anti-criterion) | `grep -c '_run_pkill_fallback' agent/granite_container/container.py` | match count == 0 |
 | Worker no longer hard-exits on granite (anti-criterion) | `grep -A3 'ensure_granite_model' worker/__main__.py \| grep -c 'sys.exit'` | match count == 0 |
-| Reflection scheduler off worker loop (anti-criterion) | `grep -c 'ReflectionScheduler()' worker/__main__.py` | match count == 0 |
 | Supervisor helper present | `grep -c 'def supervise' worker/__main__.py` | output contains 1 |
-| Reflection entry point present | `test -f reflections/__main__.py && echo ok` | output contains ok |
-| Reflection plist + installer present | `test -f scripts/install_reflection_worker.sh && echo ok` | output contains ok |
+| Storm-cap uses SIGABRT not sys.exit (anti-criterion) | `grep -n '_self_kill\|os.abort' worker/__main__.py` | matches present in supervisor path |
+| Re-probe/breaker constants are named (no bare literals) | `grep -c 'GRANITE_REPROBE_INTERVAL_S\|GRANITE_BREAKER_OPEN_THRESHOLD\|GRANITE_BREAKER_COOLDOWN_S' config/settings.py` | output ≥ 1 |
 
 ## Critique Results
 
@@ -457,12 +426,33 @@ Per repo standard — Tier 1 `builder`/`validator`/`documentarian`; concurrency-
 | CONCERN | Scope&Value (User) | Fix #5 (reflection subprocess split, Task 7) is DAG-chained behind `build-breaker` (Fix #6) despite sharing zero source files with it. After Fix #3 caps the reflection pool and Fix #4 supervises respawn, a wedged reflection can no longer starve the critical path — Fix #5's only real prerequisite is that #3/#4 de-risked the loop, not the breaker. | Re-point Task 7's `Depends On` from `build-breaker` to `validate-stage-a` (or `build-supervisor`). The BLOCKER's removal of `build-breaker` forces this anyway. (Coordinator already resolved the ship/no-ship of Fix #5 — this is purely the DAG dependency.) | Fix #5 touches `reflections/__main__.py` (new), `com.valor.reflection-worker.plist` (new), `scripts/install_reflection_worker.sh` (new), `scripts/update/run.py`, and deletes the `create_task` at `worker/__main__.py:753` — no overlap with Fixes #4/#6. The `build-breaker` dependency is ordering-by-convenience, not a coupling. |
 | CONCERN | History&Consistency (Consistency Auditor) | Stale in-code comments contradict Fix #1's safety premise. `worker/__main__.py:113-114` ("every PM/Dev turn is routed by an ollama call against it") and `ensure_granite_model`'s docstring `granite_classifier.py:189-191` ("the PM/Dev PTY sessions themselves use the model via the TUI") assert a runtime ollama role that Fix #1 denies. If those comments are correct, Fix #1 would let granite-routed sessions boot against a missing model and mis-route. | Add an explicit reconciliation task: confirm (with file:line) that these comments are stale, and correct them so the codebase no longer claims a runtime ollama routing role. Add to the Inline Documentation section a task to rewrite `granite_classifier.py:189-191` and `worker/__main__.py:113-114` to state granite is classification-only. | The plan's premise (PTYs on Claude OAuth; ollama only for the now-regex classifier) is authoritative, but the plan must make it authoritative by deleting the contradicting comments — otherwise Fix #1 ships a non-fatal gate while surrounding code still claims every turn needs ollama. |
 
+### Revision Resolution (applied 2026-06-30)
+
+All five findings addressed in this revision (`revision_applied: true`):
+
+1. **BLOCKER (Fix #6 redundancy)** — Standalone Fix #6 / Stage C / `build-breaker` task / `breaker-builder` **deleted**. Breaker logic (consecutive-timeout/open/half-open/closed/cooldown) folded into Fix #1's `_granite_reprobe_loop`. "Mid-session"/"per-turn"/"cascading 60s stall" framing removed from Data Flow step 5, Key Elements, Technical Approach, and Success Criteria. The untestable "fast-fails mid-session" criterion is gone.
+2. **CONCERN (storm-cap swallowed `sys.exit`)** — Standardized on SIGABRT everywhere: storm cap calls `_self_kill()` (gated by `WORKER_DEADMAN_ENABLED`), `os.abort()` fallback, never bare `sys.exit(1)`. Fixed in Technical Approach Fix #4, Key Elements, Risk 3, and the task. Storm-cap test now asserts REAL subprocess death.
+3. **CONCERN (spawn-failure orphan reap)** — Fix #2 preserves an explicit reap at callsite `container.py:1080`: iterate BOTH PTYs, `killpg` each non-None group in `try/except ProcessLookupError`. Added the "spawn raises after partial child creation → no orphan survives" test to Test Impact + Failure Path Test Strategy + the task.
+4. **CONCERN (DAG dependency for Fix #5)** — Moot: Fix #5 split to follow-up **#1828** (no longer chained behind anything); the `build-breaker` dependency is gone with the task.
+5. **CONCERN (stale in-code comments)** — Added reconciliation task. Corrected the critique's drifted line numbers to the actual locations: `worker/__main__.py:617-625` (Step 4b.5 comment block) and `granite_classifier.py:49-58` (`ensure_granite_model` docstring). Task recorded in Inline Documentation, Fix #1 task, and Fix #1 Technical Approach.
+
+Coordinator resolutions to the four prior Open Questions folded in (named env-overridable provisional constants for re-probe/breaker and supervisor cap; reflection-worker gating follows the bridge-role launchd pattern in #1828). See **## Open Questions** (all marked RESOLVED) and **## Downstream / Deferred**.
+
+---
+
+## Downstream / Deferred
+
+- **#1828 — Reflection scheduler subprocess split (formerly Fix #5).** Split to its own follow-up issue per the CRITIQUE coordinator (labels: `bug`, `reflections`; parent #1816). Ships once Stages A–B are in production and observed. Carries forward: `reflections/__main__.py` entry point, `com.valor.reflection-worker.plist` + `scripts/install_reflection_worker.sh` (idempotent, machine-role-gated following the existing bridge-role launchd gating pattern), `scripts/update/run.py` wiring, same-change deletion of the worker `create_task` (no parallel-run window), and reflection-freeze isolation tests. A full plan should be produced via `/do-plan` when scheduled.
+- **(Folded, not deferred) Former Fix #6 — runtime ollama breaker.** Absorbed into Fix #1's `_granite_reprobe_loop`. No separate issue; nothing to track.
+
 ---
 
 ## Open Questions
 
-1. **Re-probe / breaker interval defaults.** What re-probe cadence (#1) and breaker thresholds (#6) are acceptable — e.g. re-probe every 30s, breaker opens after 3 consecutive timeouts, 60s cooldown? Provisional defaults are proposed; confirm or adjust.
-2. **Supervisor storm cap.** Is K=5 restarts in a 60s window before a launchd recycle the right aggressiveness, or should a wedged monitor be tolerated longer before recycling the whole process?
-3. **Fix #5 scheduling.** Confirm #5 (reflection subprocess) should ship in *this* slug after #1–#4, vs. splitting it into a follow-up once Stage A/B are in production and observed. The issue lists it as part of this plan but explicitly "scheduled once 1–4 de-risk the loop."
-3a. **Fix #6 redundancy (spike-verified).** Spike-3 confirmed there is no ollama call on the mid-session granite path, so a standalone Fix #6 runtime breaker protects nothing Fix #1's startup re-probe circuit doesn't already cover. Recommend folding #6 into #1 (or dropping it). Confirm — or name the specific mid-session call a separate breaker would guard.
-4. **Reflection-worker role gating.** Should the reflection subprocess run on every worker machine, or only the single designated bridge machine? (Affects the installer's machine-gate in `/update`.)
+_All open questions were RESOLVED by the CRITIQUE coordinator. Retained here as a settled record._
+
+1. **Re-probe / breaker interval defaults — RESOLVED.** Defaults live as NAMED, env-overridable module constants with provisional/tunable grain-of-salt comments — no bare literals: `GRANITE_REPROBE_INTERVAL_S`, `GRANITE_BREAKER_OPEN_THRESHOLD`, `GRANITE_BREAKER_COOLDOWN_S`. Tunable in the field; not hardcoded.
+2. **Supervisor storm cap — RESOLVED.** A conservative provisional NAMED env-overridable constant (`WORKER_SUPERVISOR_MAX_RESTARTS` / `WORKER_SUPERVISOR_WINDOW_S`), erring toward NOT killing legitimate work. Recycle is via SIGABRT (`_self_kill()`/`os.abort()`), never a swallowed `sys.exit`.
+3. **Fix #5 scheduling — RESOLVED.** Split to follow-up issue **#1828**; NOT shipped in this slug. This slug ships Stages A–C (Fixes #1–#4; #6 folded into #1). See **## Downstream / Deferred**.
+3a. **Fix #6 redundancy — RESOLVED.** Folded into Fix #1's re-probe loop (the loop IS the breaker, wrapping the single `ensure_granite_model` call). No standalone breaker; no separate Stage C/task/builder. Confirmed there is no mid-session ollama call to guard.
+4. **Reflection-worker role gating — RESOLVED (deferred to #1828).** When the subprocess lands in #1828, its installer follows the existing bridge-role launchd gating pattern (only bridge machines that run the worker run the reflection subprocess). No machine-gate decision is needed in this slug.
