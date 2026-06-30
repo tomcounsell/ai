@@ -69,6 +69,18 @@ logger = logging.getLogger(__name__)
 # this at startup to clear orphans from a prior worker process.
 DEFAULT_PID_REGISTRY_PATH = "data/granite_pty_pids.json"
 
+# Timeout (seconds) for the semaphore acquire in `acquire_pair`. If the
+# pool is fully locked for this long the pool is likely wedged (POOL-1).
+# Provisional/tunable — override with PTY_POOL_ACQUIRE_TIMEOUT env var.
+PTY_POOL_ACQUIRE_TIMEOUT: int = int(os.environ.get("PTY_POOL_ACQUIRE_TIMEOUT", "120"))
+
+# Timeout (seconds) for individual waits inside `_wait_for_idle_slot`:
+# both the pool-level condition wait and the per-slot event wait.
+# A missed notify is re-scanned after this many seconds; a slot stuck
+# in `respawning` past this deadline triggers `_force_recycle_slot`.
+# Provisional/tunable — override with PTY_POOL_WAIT_TIMEOUT env var.
+PTY_POOL_WAIT_TIMEOUT: int = int(os.environ.get("PTY_POOL_WAIT_TIMEOUT", "60"))
+
 
 @dataclass
 class _Slot:
@@ -282,7 +294,15 @@ class PTYPool:
         On exit: the slot is released, old PTYs are closed, and a
         background respawn is scheduled.
         """
-        await self._sem.acquire()
+        sem_acquired = False
+        try:
+            await asyncio.wait_for(self._sem.acquire(), PTY_POOL_ACQUIRE_TIMEOUT)
+            sem_acquired = True
+        except asyncio.TimeoutError:
+            raise PTYPoolError(
+                f"PTY pool semaphore acquire timed out after {PTY_POOL_ACQUIRE_TIMEOUT}s;"
+                " pool may be wedged"
+            )
         slot: _Slot | None = None
         recycles = 0
         try:
@@ -328,6 +348,7 @@ class PTYPool:
             if slot is not None:
                 # Release: close old PTYs, schedule respawn.
                 await self._release_pair(slot)
+            if sem_acquired:
                 self._sem.release()
 
     async def _wait_for_idle_slot(self) -> _Slot:
@@ -355,14 +376,58 @@ class PTYPool:
                 async with self._slot_available:
                     if any(s.state == "idle" and s.event.is_set() for s in self._slots):
                         continue
-                    await self._slot_available.wait()
+                    try:
+                        await asyncio.wait_for(
+                            self._slot_available.wait(), PTY_POOL_WAIT_TIMEOUT
+                        )
+                    except asyncio.TimeoutError:
+                        # Missed notify or spurious timeout — re-scan.
+                        pass
                 continue
             # Wait on the first respawning slot we see.
             slot = respawning[0]
-            await slot.event.wait()
+            try:
+                await asyncio.wait_for(slot.event.wait(), PTY_POOL_WAIT_TIMEOUT)
+            except asyncio.TimeoutError:
+                # The slot is stuck in `respawning` (POOL-1 hazard).
+                # Force-recycle it and re-scan.
+                await self._force_recycle_slot(slot)
+                continue
             # Loop again — the slot we just waited on might be
             # `idle` now, or a different one might have become
             # `idle` while we waited.
+
+    async def _force_recycle_slot(self, slot: _Slot) -> None:
+        """Force-recycle a slot that has been stuck in `respawning` past
+        `PTY_POOL_WAIT_TIMEOUT` seconds (POOL-1 hazard).
+
+        Reschedules `_respawn_slot` under the per-slot lock if (and only
+        if) the slot is still in `respawning` with its event unset. The
+        rescheduled spawn's SUCCESS path sets `slot.event` and notifies
+        `_slot_available`, so the caller MUST NOT do either — doing so
+        would race against the new spawn task.
+        """
+        logger.error(
+            "[pty-pool] slot %d stuck in respawning past %ds; force-recycling",
+            slot.idx,
+            PTY_POOL_WAIT_TIMEOUT,
+        )
+        try:
+            async with slot.lock:
+                if slot.state == "respawning" and not slot.event.is_set():
+                    # Prune done tasks first (same pattern as _release_pair).
+                    self._respawn_tasks = [t for t in self._respawn_tasks if not t.done()]
+                    task = asyncio.create_task(self._respawn_slot(slot))
+                    self._respawn_tasks.append(task)
+                else:
+                    logger.debug(
+                        "[pty-pool] slot %d no longer stuck; skipping force-recycle",
+                        slot.idx,
+                    )
+        except Exception as e:
+            logger.error(
+                "[pty-pool] slot %d force-recycle failed: %s", slot.idx, e
+            )
 
     def _pair_is_live(self, slot: _Slot) -> bool:
         """Whether the slot holds a pair whose PTY children are both alive.
