@@ -617,17 +617,18 @@ task assignments per `DOMAIN_FRAMING.md`.
 
 ## Open Questions
 
+**All three resolved 2026-06-30 with the recommended defaults — no human blocker remains.**
+
 1. **Fix 1 LLM-refusal complement — build it or pattern-extension only?** The
    issue suggests it ("Consider also adding an LLM-based refusal detector"). It
    costs one extra Haiku call per non-empty extraction and adds latency to a
-   background path. Recommendation: ship pattern-extension now (zero-risk), add
-   the LLM complement behind a default-off env flag as an opt-in. Confirm.
+   background path. **RESOLVED:** ship pattern-extension now (zero-risk); add the
+   LLM complement behind a **default-off** env flag as an opt-in.
 2. **Fix 2 gate threshold — `turn_count <= 1` only, or also a length floor?**
-   Recon says key on turn count, not length. Recommendation: turn count only
-   (length is already covered by the 50-char guard). Confirm no separate length
-   threshold is wanted.
+   Recon says key on turn count, not length. **RESOLVED:** turn count only
+   (length is already covered by the 50-char guard); no separate length
+   threshold.
 3. **Fix 4 — separate env gate or reuse `MEMORY_DECAY_PRUNE_APPLY`?** Reusing the
    existing gate means enabling apply-mode enables BOTH tiers at once.
-   Recommendation: reuse the one gate for simplicity; the conjunctive predicate
-   already makes tier-2 conservative. Confirm, or request a distinct
-   `MEMORY_NOISE_PRUNE_APPLY` flag for staged rollout.
+   **RESOLVED:** reuse the single `MEMORY_DECAY_PRUNE_APPLY` gate for simplicity;
+   the conjunctive tier-2 predicate is already conservative.
