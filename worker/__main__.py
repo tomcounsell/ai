@@ -939,7 +939,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
                 transition_status(
                     session,
                     "paused_circuit",
-                    # noqa: E501 — reason string kept long for log clarity
                     reason="granite-degrade: startup probe failed; resumes when granite recovers",
                 )
                 deferred_count += 1

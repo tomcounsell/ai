@@ -326,7 +326,25 @@ async def _pop_agent_session(
             # Telegram thread ID, not a slug) — at typical teammate pop rates
             # this extra indexed query is imperceptible.
             pending = await AgentSession.query.async_filter(slug=worker_key, status="pending")
-            if not pending:
+            if pending:
+                # Slug query found ENG worktree sessions.  Apply the same granite gate
+                # that project-keyed workers get: ENG sessions need granite regardless
+                # of whether their worker_key is the project_key or a slug.  Only ENG
+                # sessions carry a slug, so a non-empty slug result always means ENG work.
+                # Teammate / chat_id-routed sessions fall through the else branch below
+                # and are never gated here, ensuring they keep serving without granite.
+                try:
+                    import agent.session_state as _ss_granite_slug
+
+                    if not _ss_granite_slug.granite_available:
+                        logger.debug(
+                            "[worker:%s] Granite unavailable — deferring slug-keyed ENG pickup",
+                            worker_key,
+                        )
+                        return None
+                except Exception:
+                    pass  # Fail open: gate is advisory
+            else:
                 pending = await AgentSession.query.async_filter(
                     chat_id=worker_key, status="pending"
                 )

@@ -96,63 +96,67 @@ def _make_mock_record(attr_map: dict):
 async def test_redis_quality_audit_does_not_block_loop():
     """Heavy .query.all() scans must not stall the event loop.
 
-    Before the asyncio.to_thread fix, each .query.all() call executed
-    synchronously on the event loop inside the async run() coroutine,
-    blocking all other coroutines for the duration of the scan.
+    This test FAILS if the asyncio.to_thread wrapping is removed from
+    redis_quality_audit.run().  Without to_thread, .query.all() executes
+    synchronously on the event loop, blocking it for the duration of the scan.
+    With to_thread, the scan runs in a worker thread and the loop is free to
+    service other coroutines concurrently.
 
-    After the fix, each scan runs in a thread via asyncio.to_thread, so the
-    loop remains free to service other coroutines while the scan executes.
-
-    This test verifies loop responsiveness: a trivial coroutine scheduled
-    concurrently with the audit must complete in a short time even while
-    the audit is running its (mocked) scans.
+    Proof mechanism:
+    - Each .query.all() mock sleeps for SCAN_DURATION seconds (real time.sleep).
+    - A concurrent fast_coroutine records the event-loop timestamp at which it runs.
+    - If the loop is blocked (no to_thread): fast_coroutine cannot run until after
+      the first SCAN_DURATION sleep completes, so its scheduled_at delay ≥ SCAN_DURATION.
+    - If the loop is free (with to_thread): fast_coroutine is scheduled immediately
+      after the first to_thread call suspends the audit, so delay ≈ 0.
+    - deadline < scan_duration ensures the assertion distinguishes the two paths.
     """
-    now = time.time()
+    scan_duration = 0.25  # Each .query.all() blocks for this long
+    deadline = 0.1  # fast_coroutine must start within this window (< scan_duration)
 
-    # Mock models to return quick but non-trivial results
-    mock_link = _make_mock_record(
-        {"timestamp": now - 100, "ai_summary": None, "url": "x", "chat_id": "1", "status": "ok"}
-    )
-    mock_chat = _make_mock_record(
-        {"updated_at": now - 100, "chat_name": "test", "chat_type": "group"}
-    )
-    mock_session = _make_mock_record({"started_at": now - 100, "log_path": None})
-    mock_msg = _make_mock_record({"timestamp": now - 100, "chat_id": "1"})
+    def _slow_all():
+        """Simulate an expensive synchronous query scan."""
+        time.sleep(scan_duration)
+        return []
 
-    def make_query_all(records):
+    def make_slow_query():
         q = MagicMock()
-        q.all.return_value = records
+        q.all.side_effect = _slow_all
         q.filter.return_value = []
         return q
 
+    loop = asyncio.get_running_loop()
+    scheduled_at: list[float] = []
+
+    async def fast_coroutine():
+        scheduled_at.append(loop.time())
+
     with (
-        patch("models.link.Link.query", make_query_all([mock_link])),
-        patch("models.chat.Chat.query", make_query_all([mock_chat])),
-        patch("models.agent_session.AgentSession.query", make_query_all([mock_session])),
-        patch("models.telegram.TelegramMessage.query", make_query_all([mock_msg])),
+        patch("models.link.Link.query", make_slow_query()),
+        patch("models.chat.Chat.query", make_slow_query()),
+        patch("models.agent_session.AgentSession.query", make_slow_query()),
+        patch("models.telegram.TelegramMessage.query", make_slow_query()),
     ):
         from reflections.audits.redis_quality_audit import run as audit_run
 
-        # Schedule audit concurrently with a trivial coroutine
-        audit_task = asyncio.create_task(audit_run())
-
-        # Measure how long a trivial coroutine takes while audit is running
-        loop = asyncio.get_running_loop()
         start = loop.time()
-        await asyncio.sleep(0)  # yield to let audit start
-        elapsed = loop.time() - start
+        # Create both tasks so they compete on the same event loop
+        audit_task = asyncio.create_task(audit_run())
+        fast_task = asyncio.create_task(fast_coroutine())
+        result = (await asyncio.gather(audit_task, fast_task))[0]
 
-        result = await audit_task
-
-    # Loop must stay responsive while audit runs (not blocked on-loop)
-    assert elapsed < 0.5, (
-        f"Event loop was blocked for {elapsed:.3f}s — .query.all() may still be on-loop"
+    assert scheduled_at, "fast_coroutine was never scheduled"
+    delay = scheduled_at[0] - start
+    # fast_coroutine must have run DURING the audit (loop was not blocked)
+    assert delay < deadline, (
+        f"fast_coroutine delayed {delay:.3f}s (limit {deadline}s) — "
+        f"loop was blocked; .query.all() may not be wrapped in asyncio.to_thread"
     )
     assert result["status"] == "ok"
 
 
 def test_redis_quality_audit_loop_responsive():
-    """Sync wrapper so pytest can run the async test without requiring pytest-asyncio marker."""
+    """Sync wrapper so pytest can run the async test without requiring pytest-asyncio."""
     asyncio.run(test_redis_quality_audit_does_not_block_loop())
 
 

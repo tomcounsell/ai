@@ -321,3 +321,106 @@ async def test_pickup_returns_none_when_granite_unavailable():
         result = await _pop_agent_session("valor", is_project_keyed=True)
 
     assert result is None, "Project-keyed pickup must return None when granite_available=False"
+
+
+# ---------------------------------------------------------------------------
+# test_slug_keyed_eng_pickup_deferred_when_granite_unavailable  (Fix #2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slug_keyed_eng_pickup_deferred_when_granite_unavailable():
+    """Slug-keyed ENG worktree sessions are deferred when granite_available is False.
+
+    Before the Fix #2 alignment, slug-keyed workers (is_project_keyed=False) bypassed
+    the granite gate entirely and could pick up ENG sessions even while granite was down.
+    After the fix, a non-empty slug query triggers the same gate, returning None.
+
+    The mock simulates a pending ENG session with slug=slug_key so the slug lookup
+    returns a result, then verifies that _pop_agent_session returns None (deferred).
+    """
+    _reset_granite_flag(False)
+    slug_key = "worker-fault-containment"
+
+    mock_r = MagicMock()
+    mock_r.get.return_value = None  # No queue_paused, no hibernating, no throttle
+
+    # Fake pending session returned by the slug index query
+    fake_session = MagicMock()
+    fake_session.session_type = "eng"
+    fake_session.worker_key = slug_key
+    fake_session.status = "pending"
+
+    async def _fake_async_filter(**kwargs):
+        if kwargs.get("slug") == slug_key and kwargs.get("status") == "pending":
+            return [fake_session]
+        return []
+
+    with (
+        patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+        patch(
+            "agent.session_pickup.AgentSession.query.async_filter", side_effect=_fake_async_filter
+        ),
+    ):
+        result = await _pop_agent_session(slug_key, is_project_keyed=False)
+
+    assert result is None, (
+        "Slug-keyed ENG pickup must return None when granite_available=False "
+        "(Fix #2: align runtime gate with startup deferral)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_teammate_pickup_not_deferred_when_granite_unavailable():
+    """Teammate/chat_id-routed sessions are NOT deferred when granite is down.
+
+    Granite is only required for ENG sessions.  Teammate sessions must keep
+    serving regardless of granite availability so the system stays responsive
+    to non-ENG conversations.
+
+    The slug lookup returns nothing for a chat_id-keyed worker (teammate sessions
+    have no slug), so the granite gate must not fire on the chat_id fallback path.
+    """
+    _reset_granite_flag(False)
+    chat_id_key = "-1001234567890"  # Telegram group chat_id format
+
+    mock_r = MagicMock()
+    mock_r.get.return_value = None
+
+    # Fake pending teammate session returned by the chat_id index query
+    fake_session = MagicMock()
+    fake_session.session_type = "teammate"
+    fake_session.worker_key = chat_id_key
+    fake_session.status = "pending"
+    fake_session.scheduled_at = None
+    fake_session.priority = "normal"
+    fake_session.created_at = None
+    fake_session.parent_agent_session_id = None
+
+    async def _fake_async_filter(**kwargs):
+        # Slug lookup: teammates have no slug matching a chat_id
+        if kwargs.get("slug") == chat_id_key and kwargs.get("status") == "pending":
+            return []
+        # chat_id fallback: teammate session is here
+        if kwargs.get("chat_id") == chat_id_key and kwargs.get("status") == "pending":
+            return [fake_session]
+        return []
+
+    with (
+        patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+        patch(
+            "agent.session_pickup.AgentSession.query.async_filter", side_effect=_fake_async_filter
+        ),
+        patch("agent.session_pickup._acquire_pop_lock", return_value=True),
+        patch("agent.session_pickup._release_pop_lock"),
+    ):
+        result = await _pop_agent_session(chat_id_key, is_project_keyed=False)
+
+    # Teammate session must NOT be blocked by the granite gate.
+    # It either returns the session or None for other reasons (e.g. eligible filter),
+    # but must NOT return None due to the granite gate.
+    # We assert it is not None — the session was popped successfully.
+    assert result is not None, (
+        "Teammate/chat_id-routed pickup must not be deferred by the granite gate; "
+        "granite is only required for ENG sessions"
+    )
