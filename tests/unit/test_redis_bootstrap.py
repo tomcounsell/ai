@@ -5,7 +5,7 @@ Coverage:
 - Run-once guard: calling twice only runs setup once.
 - Pytest no-op guard: PYTEST_CURRENT_TEST set → no call to set_REDIS_DB_settings.
 - Empty/missing REDIS_URL: falls back to 127.0.0.1:6379/db=0.
-- Retry kwargs: set_REDIS_DB_settings receives retry, retry_on_timeout, health_check_interval.
+- Retry kwargs: set_REDIS_DB_settings receives retry, retry_on_error, health_check_interval.
 """
 
 from __future__ import annotations
@@ -248,8 +248,10 @@ class TestRetryKwargs:
             rdb.set_REDIS_DB_settings = original
 
         assert "retry" in captured, f"retry kwarg missing. Got keys: {list(captured)}"
-        assert captured.get("retry_on_timeout") is True, "retry_on_timeout must be True"
         assert "retry_on_error" in captured, "retry_on_error kwarg missing"
+        assert "retry_on_timeout" not in captured, (
+            "retry_on_timeout is deprecated in redis-py >=6.0 and must not be passed"
+        )
         has_connection_err = any(
             issubclass(e, (ConnectionError, OSError)) for e in captured["retry_on_error"]
         )

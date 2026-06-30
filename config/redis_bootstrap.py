@@ -60,7 +60,6 @@ def configure_resilient_redis() -> None:
     test fixture retains control of ``POPOTO_REDIS_DB``.
 
     Calls ``popoto.redis_db.set_REDIS_DB_settings(...)`` with:
-    - ``retry_on_timeout=True``
     - ``Retry(ExponentialBackoff(cap=10, base=1), 3)`` on ``ConnectionError``,
       ``TimeoutError``, and ``ConnectionResetError``
     - ``health_check_interval=30`` (background ping every 30 s)
@@ -125,7 +124,6 @@ def configure_resilient_redis() -> None:
             port=port,
             db=db,
             password=password,
-            retry_on_timeout=True,
             retry=retry,
             retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionResetError],
             health_check_interval=30,
