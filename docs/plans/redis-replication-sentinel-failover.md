@@ -4,7 +4,7 @@ type: chore
 appetite: Medium
 owner: Valor Engels
 created: 2026-06-30
-tracking: https://github.com/yudame/ai/issues/1827
+tracking: https://github.com/tomcounsell/ai/issues/1827
 last_comment_id:
 ---
 
