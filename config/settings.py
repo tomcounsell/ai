@@ -332,6 +332,17 @@ class FeatureSettings(BaseModel):
             "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
         ),
     )
+    reflection_pool_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description=(
+            "Thread-pool size for the reflection bulkhead executor. Sync reflections "
+            "run in this dedicated pool instead of the asyncio default pool, preventing "
+            "heavy scans from starving critical-path work (e.g. bridge routing). "
+            "Provisional/tunable. Env: FEATURES__REFLECTION_POOL_WORKERS."
+        ),
+    )
 
 
 class GraniteSettings(BaseModel):

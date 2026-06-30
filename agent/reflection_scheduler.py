@@ -19,6 +19,7 @@ import inspect
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,16 @@ SCHEDULER_TICK_INTERVAL = 60
 # Remaining due reflections are deferred to the next tick (~60s later).
 # Provisional / tunable — override via REFLECTION_STARTUP_MAX_CONCURRENT env var.
 REFLECTION_STARTUP_MAX_CONCURRENT = int(os.environ.get("REFLECTION_STARTUP_MAX_CONCURRENT", "4"))
+
+# Dedicated thread pool for sync reflections — bulkhead from the default/critical-path pool.
+# Sync reflections routed through run_in_executor use this pool instead of the shared
+# asyncio default pool, preventing heavy scans from starving critical-path work
+# (e.g. bridge routing callbacks). Provisional/tunable via env; clamped to minimum 1.
+REFLECTION_POOL_WORKERS = max(1, int(os.environ.get("REFLECTION_POOL_WORKERS", "2")))
+
+_reflection_pool = ThreadPoolExecutor(
+    max_workers=REFLECTION_POOL_WORKERS, thread_name_prefix="reflection-"
+)
 
 
 # Path to the reflections registry.
@@ -436,10 +447,12 @@ async def execute_function_reflection(entry: ReflectionEntry) -> Any:
     if inspect.iscoroutinefunction(func):
         return await func(params=entry.params) if accepts_params else await func()
     else:
-        # Run sync functions in a thread to avoid blocking the event loop
+        # Run sync functions in the dedicated reflection thread pool (bulkhead).
+        # Using _reflection_pool instead of None (default pool) prevents heavy
+        # sync reflections from starving critical-path work like bridge routing.
         loop = asyncio.get_running_loop()
         call = (lambda: func(params=entry.params)) if accepts_params else func
-        return await loop.run_in_executor(None, call)
+        return await loop.run_in_executor(_reflection_pool, call)
 
 
 def _get_memory_rss() -> int | None:
