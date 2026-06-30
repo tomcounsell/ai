@@ -4,6 +4,7 @@ Prevents circular imports between executor and health modules.
 """
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -73,6 +74,26 @@ _starting_workers: set[str] = set()
 # starts, so it is always available when _worker_loop() first awaits it.
 # None sentinel means no ceiling (pre-initialization or testing).
 _global_session_semaphore: asyncio.Semaphore | None = None
+
+# Loop-liveness beacon: bumped by an on-loop task; read by the off-loop
+# watchdog to distinguish "loop ticking" from "loop frozen". monotonic()
+# so wall-clock jumps (NTP, sleep/wake) can't forge freshness. A single
+# float read/written without a lock — CPython's GIL makes the read/write
+# atomic, and the staleness math tolerates a one-cycle skew. None = the
+# loop has not ticked yet (unarmed), never treated as stale.
+last_loop_tick: float | None = None
+
+
+def bump_loop_tick() -> None:
+    """Called by the on-loop tick task to signal the loop is alive."""
+    global last_loop_tick
+    last_loop_tick = time.monotonic()
+
+
+def get_loop_tick() -> float | None:
+    """Read the last loop tick timestamp (None if the loop has not ticked yet)."""
+    return last_loop_tick
+
 
 # Graceful shutdown coordination: when set, worker loops finish their current
 # session and exit instead of waiting for new work.
