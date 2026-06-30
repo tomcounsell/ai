@@ -73,15 +73,14 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 
 **Agents actually referenced by skills (7):** builder, validator, code-reviewer, test-engineer, documentarian, frontend-tester, plan-maker
 
-**Full 25-agent roster (3 tiers):**
+**Full 16-agent roster (2 groups) — see [`subagent-roster.md`](subagent-roster.md) for the canonical catalog:**
 
-| Tier | Agents | Purpose |
+| Group | Agents | Purpose |
 |------|--------|---------|
-| **Tier 1 — Core (7)** | builder, validator, code-reviewer, test-engineer, documentarian, plan-maker, frontend-tester | Wired into SDLC pipeline |
-| **Tier 2 — Specialists (13)** | debugging-specialist, async-specialist, security-reviewer, performance-optimizer, mcp-specialist, agent-architect, api-integration-specialist, data-architect, migration-specialist, documentation-specialist, test-writer, ui-ux-specialist, designer | Recruitable by plans for domain expertise |
-| **Tier 2b — Service (5)** | linear, notion, sentry, stripe, render | Domain-specific task delegation |
+| **A — SDLC pipeline (11)** | builder, validator, code-reviewer, test-engineer, baseline-verifier, frontend-tester, plan-maker, plan-reviewer, documentarian, cruft-auditor, strategic-analyst | Dispatched by the `/do-*` skills (and `analyze`) as the pipeline runs |
+| **B — Service / MCP (5)** | linear, notion, sentry, stripe, render | Portable per-service agents, dispatched on demand; available in any repo via synced `~/.claude/agents/` |
 
-**Agents consolidated (issue #155):** database-architect (patterns now in builder), infrastructure-engineer (patterns now in performance-optimizer), integration-specialist (patterns now in mcp-specialist), tool-developer (patterns now in mcp-specialist), validation-specialist (patterns now in validator), quality-auditor (covered by code-reviewer), agents README (now in skills README)
+The old "Tier 2 — Specialists (13)" pack and the stub agents (planner, reviewer, scout, documenter, red-team) were deleted as dead weight — never dispatched by any skill. Their genuinely unique framing was salvaged into [`do-plan/DOMAIN_FRAMING.md`](../../.claude/skills-global/do-plan/DOMAIN_FRAMING.md); domain work is now handled by prompting a `builder`/`code-reviewer`, or the built-in `Explore`/`Plan` agents. See [`subagent-roster.md`](subagent-roster.md#why-the-roster-is-16-and-not-34).
 
 ## Progressive Disclosure (Sub-files)
 
@@ -148,8 +147,8 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 
 ## Observations
 
-### Agent Roster Status (post issue #155 cleanup)
-25 agents remain after deleting 7 redundant/merged files. 7 agents are wired into the SDLC pipeline, 13 are specialist agents recruitable by plans, and 5 are service agents. The full tiered roster is documented in PLAN_TEMPLATE.md and the skills README.
+### Agent Roster Status
+16 agents remain after deleting the 18-agent dead-weight pack (13 pre-pivot "specialists" + 5 generic stubs). 11 are SDLC-pipeline agents dispatched by `/do-*` skills (and `analyze`); 5 are portable service/MCP agents dispatched on demand. The canonical catalog is [`subagent-roster.md`](subagent-roster.md); `PLAN_TEMPLATE.md` lists the dispatchable subset for plan authors, and salvaged specialist framing lives in `do-plan/DOMAIN_FRAMING.md`.
 
 ### Potential Redundancies
 - **sdlc** vs **do-build**: sdlc describes the pattern that do-build executes. sdlc adds Plan + Review phases around do-build. Consider whether sdlc should be folded into CLAUDE.md workflow docs instead of being a skill.

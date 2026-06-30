@@ -377,23 +377,19 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - `plan-maker` - Planning subagent
 - `frontend-tester` - Browser testing
 
-**Tier 2 — Specialists (recruit for specific needs):**
-- `debugging-specialist` - Complex bug investigation, memory leaks, async debugging
-- `async-specialist` - Concurrency, rate limiting, circuit breakers, event loop optimization
-- `security-reviewer` - OWASP vulnerability scanning, auth review, secrets detection
-- `performance-optimizer` - Query optimization, multi-tier caching, profiling
-- `mcp-specialist` - MCP server development and tool integration
-- `agent-architect` - Agent systems, context management, living codebase patterns
-- `api-integration-specialist` - External API auth, rate limiting, error strategies
-- `data-architect` - Schema design, migrations, audit triggers, archival
-- `migration-specialist` - Data migration, traffic routing, rollback procedures
-- `documentation-specialist` - Doc format standards, templates, Mermaid diagrams
-- `test-writer` - Edge case generation, assertion patterns, async testing
-- `ui-ux-specialist` - Conversational UX, error humanization, accessibility
-- `designer` - UI implementation, atomic design, design system adherence
+**Domain expertise (no dedicated agent — prompt a Tier 1 agent):**
+There is no standing pool of "specialist" agents. For domain-specific work
+(async/concurrency, Redis/Popoto data, security/untrusted-input, debugging,
+MCP-tool/API integration, conversational-UX/testing), assign a `builder` (or
+`code-reviewer` for review-only work), add a `Domain: <tag>` line to the task,
+and paste the matching rules from [`DOMAIN_FRAMING.md`](DOMAIN_FRAMING.md) into
+the task's assignment. That cheatsheet is the salvaged, repo-specific signal from
+the retired specialist agents. For broad recon use the built-in `Explore` /
+`general-purpose` agents.
 
 **Service Agents (domain-specific task delegation):**
-- `linear`, `notion`, `sentry`, `stripe`, `render`
+- `linear`, `notion`, `sentry`, `stripe`, `render` — portable agents that wrap a
+  SaaS/MCP integration; available in any repo via the synced `~/.claude/agents/`.
 
 ## Step by Step Tasks
 

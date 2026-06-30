@@ -30,6 +30,8 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # Retired skills — consolidated into new-skill
     ("skills", "add-feature"),
     ("skills", "new-valor-skill"),
+    # Orphan hardlink from an old repo version — removed with no source remaining
+    ("skills", "prepare-app"),
     # Retired skills — moved to reflections
     ("skills", "daily-integration-audit"),
     # Retired skills — superseded by byob MCP + bowser subagent

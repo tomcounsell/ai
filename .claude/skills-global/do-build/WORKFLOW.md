@@ -47,6 +47,8 @@ Plan context: [relevant plan sections]
 
 Your assignment:
 - [specific actions from task]
+[If the task carries a `Domain: <tag>` line, read `../do-plan/DOMAIN_FRAMING.md` and
+append that domain's rules here so the builder/reviewer applies them.]
 
 When complete, commit your changes and update your task status.
 
