@@ -928,6 +928,14 @@ class TestHeartbeatIsolation:
     These tests cover the two acceptance criteria from the issue #1767 plan:
     1. The heartbeat thread writes independently of thread-pool saturation.
     2. HEARTBEAT_THRESHOLD is env-tunable.
+
+    Under the issue #1815 dead-man's-switch inversion, this off-loop isolation
+    is no longer just "the thread keeps writing green" — it is precisely what
+    lets the thread observe a frozen on-loop beacon and SIGABRT for launchd
+    respawn while the loop itself is wedged. The thread now writes green ONLY
+    when the loop beacon is fresh (verified end-to-end in
+    ``tests/unit/test_worker_deadman.py``); the property exercised below is the
+    surviving-thread half that powers that abort.
     """
 
     def test_heartbeat_thread_writes_independent_of_executor(self, tmp_path):
@@ -984,6 +992,35 @@ class TestHeartbeatIsolation:
             heartbeat_thread.join(timeout=2)
             # Cancel the saturating futures immediately.
             executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_frozen_loop_surviving_thread_self_kills(self):
+        """The surviving off-loop thread fires the SIGABRT when the loop is frozen.
+
+        Inversion meaning of #1767 isolation (#1815): because the heartbeat
+        thread runs independently of the (now-frozen) event loop, it observes
+        the stale beacon and triggers ``_self_kill`` so launchd can respawn a
+        healthy worker — exactly the abort path the loop itself could never run.
+        """
+        import time
+        from unittest.mock import patch
+
+        import worker.__main__ as wm
+
+        now = time.monotonic()
+        stale_tick = now - 999.0  # far beyond any threshold — loop is wedged
+
+        kills: list[str] = []
+        with (
+            patch.object(wm, "WORKER_DEADMAN_ENABLED", True),
+            patch.object(wm, "WORKER_DEADMAN_STALENESS_THRESHOLD", 90.0),
+            patch.object(wm, "_self_kill", lambda: kills.append("killed")),
+            patch.object(wm, "_green_heartbeat_write", lambda: None),
+            patch("agent.session_state.get_loop_tick", return_value=stale_tick),
+            patch.object(wm.time, "monotonic", return_value=now),
+        ):
+            wm._heartbeat_cycle(armed=True, thread_start=now - 200.0, beacon_log_next=0.0)
+
+        assert kills == ["killed"], "Surviving off-loop thread must self-kill on a frozen loop"
 
     def test_heartbeat_threshold_env_override(self, monkeypatch):
         """HEARTBEAT_THRESHOLD uses the HEARTBEAT_THRESHOLD env var when set."""
