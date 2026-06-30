@@ -1,7 +1,7 @@
 ---
 status: Planning
 type: bug
-appetite: Large
+appetite: Medium
 owner: Valor Engels
 created: 2026-06-30
 tracking: https://github.com/tomcounsell/ai/issues/1814
@@ -12,509 +12,518 @@ last_comment_id:
 
 ## Problem
 
-Every durable record in the system — `AgentSession`s, memories, Telegram/email
-history, the bloom filter — lives in Popoto, and **Popoto is Redis**. There is no
-write-ahead log persisted across restarts, no second store, no retry on the
-client, and an unbounded `noeviction` memory policy. A hard crash, power loss, or
-OOM-kill of `redis-server` loses every write since the last RDB snapshot (worst
-case ~1 hour), and a total data-dir loss (FLUSHALL / disk failure) loses
-everything with no fallback.
+Every durable thing in the system — `AgentSession` records, memory, Telegram/email
+history, the bloom filter — lives in Popoto, and Popoto is backed by a single
+Redis instance with no replication. Three concrete, low-effort gaps make that
+Redis a single point of failure with no graceful degradation:
 
-**Current behavior:**
-- AOF is enabled on the *current* host (`aof_enabled:1`) but this is not pinned in
-  `redis.conf` and not propagated by `/update`, so it is not guaranteed on every
-  machine or across a Redis reinstall.
-- The Popoto redis client (`popoto/redis_db.py`, a **pip-installed package**) is
-  built at import with `socket_timeout=5` and **no** `retry_on_timeout`,
-  `health_check_interval`, or backoff; it `raise`s on connection failure, so if
-  Redis is down at boot, `import popoto` fails and the worker/bridge cannot start.
-- Hot-path `AgentSession.query.*` calls run the *sync* redis-py client on the
-  asyncio loop (`agent/agent_session_queue.py` drain loop, ~line 1367); a slow
-  Redis wedges the whole loop up to 5s per call.
-- `maxmemory-policy` is `noeviction`. If anyone later switches to `allkeys-lru`,
-  Redis will silently evict index sets, class sets, and bloom-filter keys
-  (`agent/memory_hook.py` ~line 180) — none carry TTLs marking them transient.
-- A teaching example in `config/personas/segments/work-patterns.md:177` asserts
-  "Redis is used for operational state only, not durable records" — factually
-  wrong (Popoto *is* Redis).
+1. **AOF persistence is not durably configured.** AOF happens to be on on the
+   current host (`aof_enabled:1`), but it is a runtime `CONFIG SET`, not pinned in
+   `redis.conf`, and it is not guaranteed on every machine. A Redis restart or a
+   fresh machine reverts to RDB-only — worst case ~1 hour of session-state loss
+   per the configured `save 3600 1`. (There is documented precedent: on 2026-06-03
+   a `flushdb()` against db=0 wiped production *because AOF was off and the RDB was
+   overwritten* — see `tests/unit/test_redis_flush_guard.py`.)
 
-**Desired outcome:** Bounded-loss durability guaranteed on every machine, a
-Redis client that survives restarts and degrades rather than crashing at import, a
-true second store so Redis loss is survivable, a pinned eviction policy that can
-never silently drop durable keys, and docs/persona copy that match reality.
+2. **The Popoto Redis client is retry-less and dies at import.**
+   `popoto/redis_db.py:112-130` builds the global client at module import with
+   `socket_timeout=5`/`socket_connect_timeout=5` but **no** `retry_on_timeout`, **no**
+   `health_check_interval`, **no** backoff, and `raise`s on connection failure. If
+   Redis is down or restarting at boot, `import popoto` fails and the worker/bridge
+   **cannot start at all** — there is no degraded-start path.
+
+3. **No pinned eviction policy.** `maxmemory-policy` is `noeviction` today, but it
+   is not pinned in config. If anyone later sets `allkeys-lru` to stop OOM, Redis
+   will silently evict index sets, class sets, and **bloom-filter keys**
+   (`agent/memory_hook.py:180-188`) — none of which carry TTLs marking them
+   transient — causing session loss the cleanup scripts cannot distinguish from
+   legitimate deletes.
+
+A false belief compounds all three: `config/personas/segments/work-patterns.md:177`
+contains the literal claim *"Redis is used for operational state only, not durable
+records. Popoto models handle persistence."* (As an example `memory_search save`
+command — see Freshness Check.) This is factually wrong (Popoto *is* Redis) and is
+likely why AOF was never pinned.
+
+**Current behavior:** A hard crash / power loss / OOM-kill of `redis-server` loses
+every write since the last RDB snapshot. A Redis outage at process boot crashes the
+worker and bridge with an unhandled import-time exception. Eviction policy is
+unpinned and unguarded.
+
+**Desired outcome:** Bounded-loss durability (AOF `everysec`, pinned in `redis.conf`
+and propagated to every machine via `/update`), a Popoto client that survives a
+Redis restart and degrades-don't-dies at import, and a pinned `noeviction` policy
+that provably cannot drop durable keys — with the persistence model honestly
+documented.
+
+## Scope (agreed with supervisor)
+
+**IN SCOPE for this PR (Medium appetite):**
+- Fix #1 — Enable/pin Redis AOF (`appendfsync everysec`), keep RDB. `CONFIG SET appendonly yes`
+  + persist to `redis.conf` + propagate via `/update`.
+- Fix #3 — Add retry/backoff/health-check to the Popoto client + degrade-don't-die at import.
+- Fix #6 — Pin `maxmemory-policy noeviction` + audit/document that durable keys carry no
+  silent-eviction risk.
+- Doc correction — `config/personas/segments/work-patterns.md:177`.
+- The required `docs/features/` durability-model page (AOF + secondary-store roadmap + failover).
+
+**DEFERRED (named here; the supervisor splits each into its own new issue, see No-Gos):**
+- Fix #2 — Durable secondary store (SQLite export of `AgentSession`), ~1-2d.
+- Fix #4 — Move hot-path Redis off the event loop (async / `run_in_executor`), ~2-3d.
+- Fix #5 — Redis replication + Sentinel, infra + ops.
 
 ## Freshness Check
 
-**Baseline commit:** aa6b9968
+**Baseline commit:** `aa6b996867e59b5d2c9d95986dcfe17a88dbf192` (main, plan time)
 **Issue filed at:** 2026-06-29T09:20:43Z
-**Disposition:** Minor drift
+**Disposition:** Unchanged
 
-**File:line references re-verified:**
-- `popoto/redis_db.py` (~line 112-130) — client built at import with
-  `socket_timeout=5`/`socket_connect_timeout=5`, no retry/health-check/backoff,
-  `raise` on failure — **still holds verbatim**. Drift: this file lives in
-  `.venv/lib/python3.14/site-packages/popoto/`, i.e. it is a **third-party
-  pip-installed package, not vendored repo source**. Fix #3 therefore cannot be a
-  plain in-repo edit (see Technical Approach).
-- `agent/agent_session_queue.py` (~line 1367) — sync `AgentSession.query.filter(...)`
-  on the drain loop — **still holds**.
-- `agent/memory_hook.py` (~line 180) — bloom field via `Memory._meta.fields["bloom"]`
-  — **still holds**.
-- `config/personas/segments/work-patterns.md:177` — the asserted string is present,
-  but it is an **example `memory_search save` command** inside a "When to Save"
-  memory-teaching section, not a standalone architectural assertion. Still worth
-  correcting; it is doc copy, not config-driving.
-- `config/settings.py` (~line 141-142) — `REDIS_URL` env-driven default — **still holds**.
+**File:line references re-verified (all still hold):**
+- `popoto/redis_db.py:112-130` — client built at import with `socket_timeout=5`,
+  `socket_connect_timeout=5`, **no** `retry_on_timeout`/`health_check_interval`/backoff,
+  and bare `raise` on failure. Confirmed verbatim at
+  `.venv/lib/python3.14/site-packages/popoto/redis_db.py` (pip-installed, NOT vendored).
+- `agent/agent_session_queue.py:1367-1376` — `AgentSession.query.filter(...)` runs
+  synchronously inside the drain loop. Confirmed (this is the hot path; Fix #4,
+  moving it off the loop, is DEFERRED — see No-Gos).
+- `agent/memory_hook.py:180-188` — bloom-filter access via `Memory._meta.fields["bloom"]`,
+  no TTL. Confirmed.
+- `config/personas/segments/work-patterns.md:177` — contains the literal false-claim
+  string. Confirmed. **Drift note (already surfaced in the issue):** it is an EXAMPLE
+  `memory_search save` command inside a "When to Save" teaching section, not a
+  standalone architectural assertion. Still corrected, but it is doc copy, not a
+  config-driving claim.
+- `config/settings.py` — `REDIS_URL` is env-driven (`redis_url` field, ~line 142).
+  Confirmed; relevant to Fix #3's app-boundary wrapping.
 
-**Live-host re-verification (plan time):**
-- `redis-cli CONFIG GET appendonly` → **`yes`**, `aof_enabled:1` (issue reported
-  `no`). Fix #1 reframes from "turn AOF on" to "pin AOF in `redis.conf` + propagate
-  via `/update` so it survives restart and is guaranteed on every machine."
-- `redis-cli CONFIG GET maxmemory-policy` → `noeviction` (unchanged, as reported).
+**Live-host re-verification (plan time):** `aof_enabled:1` / `appendonly yes` is already
+true on THIS host (issue's recon noted the same drift). Fix #1 is therefore "pin AOF in
+`redis.conf` + propagate via `/update` so it survives restart and is guaranteed on every
+machine," not "turn AOF on." `maxmemory-policy` is `noeviction` (unchanged).
 
-**Cited sibling issues/PRs re-checked:** None cited (this is workstream 1 of 4; only
-#1814 is filed).
+**Cited sibling issues/PRs re-checked:** none cited in the issue body.
 
-**Commits on main since issue was filed (touching referenced files):** None.
+**Commits on main since issue was filed (touching referenced files):** none.
+`git log --since=2026-06-29T09:20:43Z` over `agent/agent_session_queue.py`,
+`agent/memory_hook.py`, `config/settings.py`, `work-patterns.md`, and `scripts/update/`
+returned zero commits. Premises are intact.
 
-**Active plans in `docs/plans/` overlapping this area:** `redis-popoto-migration.md`
-(historical Redis/Popoto migration) — predates this work, no live overlap.
+**#1815 overlap (PR #1823, merged into the baseline):** #1815 touched
+`worker/__main__.py`, `agent/session_state.py`, `agent/granite_container/pty_pool.py`.
+This plan centers on `popoto/redis_db.py` (third-party), a new app-boundary redis
+bootstrap module, `redis.conf`, `scripts/update/`, `config/personas/segments/work-patterns.md`,
+and a new `docs/features/` page. **No file overlap with #1815.** BUILD should branch
+from current main (which already includes #1823) and rebase cleanly — no conflicts expected.
 
-**Notes:** No drift changes the plan premise. The two material drifts (popoto is a
-pip package; AOF already on this host) are folded into the Technical Approach below.
+**Active plans in `docs/plans/` overlapping this area:** none with live overlap.
+
+**Notes:** The single biggest planning constraint (issue-surfaced and re-confirmed):
+`popoto` is a pip-installed third-party package, so Fix #3 cannot be a plain in-repo
+edit. Popoto exposes `set_REDIS_DB_settings(*args, **kwargs)` which rebuilds the
+global `POPOTO_REDIS_DB` — that is the clean app-boundary seam (see Technical Approach).
 
 ## Prior Art
 
-No prior issues or merged PRs found for `redis durability`, `AOF`, or `persistence`
-hardening (`gh issue list --state closed` and `gh pr list --state merged` both
-empty for those keywords). This is greenfield durability work.
-
-- `docs/plans/redis-popoto-migration.md` — historical migration onto Popoto/Redis;
-  established Popoto as the persistence layer but did not address AOF, a secondary
-  store, or client resilience. It is the reason "Popoto handles persistence" became
-  the mental model the issue flags as incomplete.
+- **No prior issues or PRs** found via `gh issue list --state closed --search "redis durability AOF persistence"`
+  or the equivalent merged-PR search. This is the first durability-hardening pass on Redis.
+- **`tests/unit/test_redis_flush_guard.py`** + `tests/conftest.py::_install_redis_db0_flush_guard`
+  are direct prior art: a 2026-06-03 production wipe (flushdb on db=0, AOF off, RDB overwritten)
+  drove a conftest-level flush guard. That incident is the strongest existing justification for
+  Fix #1 — AOF being durably on would have made that wipe recoverable.
+- **`tests/conftest.py::redis_test_db`** already monkeypatches `POPOTO_REDIS_DB` across every
+  popoto submodule that holds the symbol (lazy module cache, ~lines 149-214). This is the proven
+  pattern for swapping the global client and is the template for Fix #3's reconfiguration call.
 
 ## Research
 
-**Queries used:**
-- Redis AOF appendfsync everysec durability vs RDB best practices 2025
-- redis-py retry_on_timeout health_check_interval reconnect backoff best practice
-- atomic SQLite write temp file rename durability WAL mode best practice python
-
-**Key findings:**
-- **AOF + RDB hybrid is the recommended production config.** Since Redis 4.0 the
-  AOF can carry an RDB preamble — fast restart from the RDB snapshot plus ≤1s loss
-  from `appendfsync everysec`. We keep RDB and pin AOF on. Source:
-  https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/
-- **redis-py resilient client recipe.** Pass `retry=Retry(ExponentialBackoff(cap=10,
-  base=1), N)` + `retry_on_error=[ConnectionError, TimeoutError, ConnectionResetError]`
-  + `health_check_interval`. redis-py ≥6.0 already retries 3× by default; the gap is
-  the *no-raise-at-import* and *health-check* behavior, not retry count. Source:
-  https://redis.io/docs/latest/develop/clients/redis-py/produsage/
-- **SQLite secondary store config.** `PRAGMA journal_mode=WAL` + `synchronous=NORMAL`
-  + `busy_timeout=5000` is the production sweet spot; durable atomic snapshot via
-  write-temp-then-`os.replace()`. Source: https://sqlite.org/wal.html
+No external research needed — the substrate is well-known redis-py and Redis server
+config. Confirmed locally that the installed `redis==7.4.0` exposes `redis.retry.Retry`
+and `redis.backoff.ExponentialBackoff`, so Fix #3 can use first-class retry config
+rather than hand-rolled loops. AOF + RDB hybrid is the standard Redis production config;
+`appendfsync everysec` is the durability/throughput balance. No new dependencies.
 
 ## Data Flow
 
-For the secondary-store path (fix #2), trace from terminal transition to durable disk:
+This change touches the persistence substrate, not a request path. The relevant flows:
 
-1. **Entry point**: a session reaches a terminal status →
-   `models/session_lifecycle.py::finalize_session()`.
-2. **Archive hook**: `finalize_session` calls a new `agent/session_archive.py`
-   exporter, which serializes the `AgentSession` fields to a row in SQLite.
-3. **Periodic sweep**: a cadence-driven sweep (reflection or worker timer) exports
-   *all* live sessions, not just terminal ones, so non-terminal state is also
-   covered.
-4. **Restore**: on worker startup, if Redis is empty (`DBSIZE == 0` or no
-   `AgentSession` index), the restore path rehydrates sessions from SQLite back into
-   Popoto before the drain loop starts.
-5. **Output**: a single-file SQLite DB on disk (WAL mode) that survives a full Redis
-   data-dir loss.
-
-## Why Previous Fixes Failed
-
-No prior fix attempts exist for this problem — greenfield. The closest prior work
-(`redis-popoto-migration.md`) is not a failed fix; it simply never scoped
-durability, which is the gap this plan closes.
+1. **Process boot → `import popoto` → global `POPOTO_REDIS_DB` constructed.** Today an
+   unreachable Redis raises here and crashes the process. Fix #3 inserts an app-boundary
+   bootstrap (`config/redis_bootstrap.py`, imported early in worker/bridge startup) that
+   calls `set_REDIS_DB_settings(...)` with resilient kwargs and tolerates a down Redis,
+   logging a degraded-start warning instead of crashing.
+2. **Any `AgentSession.query.*` / `Memory.*` call → `POPOTO_REDIS_DB` → redis-server.**
+   With `retry_on_timeout` + `health_check_interval`, a transient Redis restart reconnects
+   transparently instead of bubbling a hard error.
+3. **redis-server write → AOF (`everysec`) + RDB.** Fix #1 guarantees AOF is the durable
+   floor on every machine.
 
 ## Architectural Impact
 
-- **New dependencies**: SQLite (stdlib `sqlite3`, no new package). No new external
-  service for fixes #1–#4/#6. Fix #5 (Sentinel) would add a second Redis host +
-  ops, hence deferred (see No-Gos).
-- **Interface changes**: `finalize_session()` gains an archive side-effect (best-effort,
-  never blocks the transition). A new `agent/session_archive.py` module. Redis client
-  construction moves behind a resilient builder at the app boundary (`config/settings.py`),
-  not inside the pip package.
-- **Coupling**: adds a one-way dependency from `session_lifecycle` → `session_archive`.
-  The archive must be fire-and-forget so a SQLite failure never blocks a session
-  transition.
-- **Data ownership**: Redis remains the source of truth; SQLite is a derived,
-  restore-only mirror. No dual-write consistency contract beyond "SQLite is
-  eventually ≤ cadence behind Redis."
-- **Reversibility**: every element is independently revertible. AOF/policy via
-  `CONFIG SET` + redis.conf; client wrapper behind a settings flag; archive module
-  deletable; doc edit trivial.
+- **New dependencies:** none (uses installed `redis==7.4.0` retry primitives).
+- **Interface changes:** new `config/redis_bootstrap.py` module with a single
+  idempotent `configure_resilient_redis()` entry point. No signature changes to
+  existing code; worker/bridge call it once at startup.
+- **Coupling:** slightly *reduces* coupling to popoto's import-time client by routing
+  client construction through the documented `set_REDIS_DB_settings` seam.
+- **Data ownership:** unchanged. Redis remains the single store this PR (the durable
+  secondary store, Fix #2, is explicitly deferred).
+- **Reversibility:** high. AOF/eviction are config flags (revert via `redis.conf` +
+  `CONFIG SET`); the bootstrap module can be made a no-op.
 
 ## Appetite
 
-**Size:** Large
+**Size:** Medium
 
-**Team:** Solo dev, PM, code reviewer
+**Team:** Solo dev, code reviewer
 
 **Interactions:**
-- PM check-ins: 2-3 (scope alignment — especially which fixes land now vs defer)
-- Review rounds: 2+ (the resilient-client wrapper and the restore path both warrant
-  careful review; restore is a data-integrity surface)
+- PM check-ins: 1-2 (scope alignment — confirm the three-fix scope and the deferral split)
+- Review rounds: 1 (the `/update` propagation correctness is the thing to review carefully)
 
-This spans Redis config propagation, a new persistence module with a restore path,
-a client-resilience wrapper around a third-party package, and an event-loop offload —
-four distinct surfaces with real review overhead.
+This is config + a thin client-bootstrap module + docs. Coding time is small; the
+care goes into idempotent cross-machine propagation and not regressing the test
+Redis isolation.
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| `redis-cli` available | `redis-cli PING` | Apply/verify AOF + maxmemory-policy |
-| Redis ≥ 4.0 (AOF+RDB hybrid) | `redis-cli INFO server` | RDB-preamble AOF support |
-| Writable Redis config dir | `redis-cli CONFIG GET dir` | Persist `CONFIG REWRITE` to redis.conf |
-| SQLite (stdlib) | `python -c "import sqlite3"` | Secondary store |
-
-Run via `python scripts/check_prerequisites.py docs/plans/redis-durability-hardening.md`.
+| `redis-cli` available | `command -v redis-cli` | Apply/verify `CONFIG SET` |
+| Redis ≥ 4.0 (AOF+RDB hybrid) | `redis-cli INFO server \| grep redis_version` | Hybrid persistence support |
+| Writable Redis config dir | `redis-cli CONFIG GET dir` | Persist AOF/eviction settings via CONFIG REWRITE |
+| redis-py retry primitives | `python -c "from redis.retry import Retry; from redis.backoff import ExponentialBackoff"` | Fix #3 resilient client |
 
 ## Solution
 
 ### Key Elements
 
-- **AOF pinned + propagated (#1)**: ensure `appendonly yes` + `appendfsync everysec`
-  is written into `redis.conf` (`CONFIG SET` then `CONFIG REWRITE`) and that `/update`
-  asserts/applies it on every machine, with a post-condition check on `aof_enabled:1`.
-- **SQLite secondary store (#2)**: `agent/session_archive.py` — periodic + on-terminal
-  `AgentSession` export to a WAL-mode SQLite file (atomic snapshot), plus a startup
-  restore path that rehydrates Popoto when Redis is empty.
-- **Resilient Redis client (#3)**: a resilient builder at the app boundary
-  (`config/settings.py`) that constructs the redis-py client with
-  `retry`/`retry_on_error`/`health_check_interval` and, critically, **does not crash
-  the process when Redis is down at import** — degrade, log, reconnect.
-- **Hot-path offload (#4)**: move the drain-loop and startup-scan `AgentSession.query.*`
-  calls off the event loop via `run_in_executor` (or an async client) so a slow Redis
-  cannot freeze every session in lockstep.
-- **Pinned eviction policy (#6)**: pin a `maxmemory-policy` (keep `noeviction` +
-  alerting, OR `volatile-*` with TTLs) documented and applied so eviction can never
-  silently drop durable/index/bloom keys.
-- **Doc correction (—)**: fix the `work-patterns.md:177` example and document the real
-  durability model.
+- **Pinned AOF (Fix #1):** `appendonly yes` + `appendfsync everysec` applied via
+  `CONFIG SET` at runtime AND persisted into `redis.conf` (via `CONFIG REWRITE`), with
+  RDB kept as a second layer. Propagated to every machine by a new `/update` step.
+- **Resilient Popoto client (Fix #3):** a new `config/redis_bootstrap.py` that calls
+  popoto's `set_REDIS_DB_settings(...)` with `retry_on_timeout=True`, an
+  `ExponentialBackoff` retry, `health_check_interval=30`, and the existing socket
+  timeouts — and a degrade-don't-die guard so a down-at-boot Redis logs a warning
+  instead of crashing the worker/bridge. Called once, early, in worker and bridge startup.
+- **Pinned eviction policy (Fix #6):** `maxmemory-policy noeviction` pinned in
+  `redis.conf` (via `CONFIG REWRITE`) and asserted by the same `/update` step + a doctor
+  check, with a documented audit confirming durable keys (sessions, index sets, bloom)
+  carry no silent-eviction risk under the pinned policy.
+- **Doc correction:** rewrite the false `work-patterns.md:177` example so it no longer
+  encodes "Redis is operational-only, not durable."
+- **Durability-model feature doc:** a new `docs/features/redis-durability.md` covering
+  the AOF floor, the resilient client, the eviction policy, and the secondary-store +
+  failover roadmap (the deferred fixes).
 
 ### Flow
 
-Redis crash/restart → resilient client reconnects (no process death) → AOF replays
-≤1s of writes → if data-dir lost, startup restore rehydrates from SQLite → drain
-loop resumes on the executor-offloaded query path.
+Process boots → `configure_resilient_redis()` runs early → popoto global client rebuilt
+with retry/backoff/health-check → if Redis is down, log degraded-start warning and
+continue → all subsequent Popoto ops survive transient Redis restarts → writes land in
+AOF (`everysec`) on every machine → eviction can never silently drop durable keys.
 
 ### Technical Approach
 
-- **#1 (AOF):** Do NOT rely on `CONFIG SET` alone — pair it with `CONFIG REWRITE`
-  so it persists to `redis.conf`, and add an `/update` step that asserts
-  `aof_enabled:1` + `appendfsync everysec` and applies them if missing. Keep RDB
-  (`save`) untouched for the hybrid fast-restart.
-- **#3 (client) — the key constraint:** `popoto/redis_db.py` is a **pip package**,
-  not repo source, so we must NOT edit site-packages. Two viable paths, to be
-  confirmed by spike-1:
-  (a) Popoto exposes `set_REDIS_DB_settings()` (seen in the same file) — call it at
-  app startup with a pre-built resilient client / connection-pool kwargs; or
-  (b) set `REDIS_URL`/connection kwargs from `config/settings.py` and wrap import so
-  a down-Redis-at-import degrades instead of raising.
-  Whichever path, the resilient client gets `retry=Retry(ExponentialBackoff(cap=10,
-  base=1), N)`, `retry_on_error=[ConnectionError, TimeoutError, ConnectionResetError]`,
-  and `health_check_interval`.
-- **#2 (SQLite):** WAL mode, `synchronous=NORMAL`, `busy_timeout=5000`. Atomic
-  full-snapshot via write-to-temp + `os.replace()`; incremental on-terminal upsert via
-  the `finalize_session` hook. Restore gated on "Redis has no AgentSession index."
-  Archive writes are best-effort and never block a transition.
-- **#4 (offload):** wrap the specific hot-path `AgentSession.query.*` calls
-  (`agent_session_queue.py` ~1367; startup scans in `worker/__main__.py`) in
-  `loop.run_in_executor(None, ...)`. Confirm scope is bounded (do not blanket-async
-  all of Popoto — see Rabbit Holes).
-- **#6 (policy):** pin the chosen policy via `CONFIG SET maxmemory-policy ...` +
-  `CONFIG REWRITE`, propagate via `/update`, document why durable keys cannot be
-  evicted under it.
+- **Fix #1 / #6 — Redis server config via a new `scripts/update/redis_persistence.py`
+  module** (mirrors the dataclass-result shape of `scripts/update/kokoro.py`), wired
+  into `scripts/update/run.py` as a new step. The module, idempotently on every machine:
+  1. `redis-cli CONFIG SET appendonly yes`, `CONFIG SET appendfsync everysec`,
+     `CONFIG SET maxmemory-policy noeviction` (runtime effect, no restart).
+  2. `redis-cli CONFIG REWRITE` so the three directives are persisted into the machine's
+     active `redis.conf` and survive a `redis-server` restart. (CONFIG REWRITE writes back
+     to the conf file Redis was started with — no manual path crawling needed.)
+  3. Post-condition asserts `aof_enabled:1` + the expected `maxmemory-policy`; returns a
+     structured result. `run.py` logs applied/skipped/failed. **Skips gracefully** if
+     `redis-cli` is unavailable or Redis is not running (non-fatal — must never block `/update`).
+- **Fix #3 — `config/redis_bootstrap.py`** with `configure_resilient_redis()`:
+  - Builds retry config: `Retry(ExponentialBackoff(cap=10, base=1), retries=3)` with
+    `retry_on_error=[ConnectionError, TimeoutError, ConnectionResetError]`.
+  - Calls `popoto.redis_db.set_REDIS_DB_settings(host=..., port=..., db=..., retry_on_timeout=True, retry=..., health_check_interval=30, socket_timeout=5, socket_connect_timeout=5)`
+    — deriving host/port/db from `REDIS_URL`/settings exactly as popoto's import-time
+    code does, so the *only* delta is the resilience kwargs.
+  - Wrapped in try/except: on a down-at-boot Redis, log a `logger.warning` degraded-start
+    line and return without raising (degraded start, not a crash — see Risk 2).
+  - Re-applies the popoto submodule sync the same way `conftest.redis_test_db` does, so
+    every cached `POPOTO_REDIS_DB` symbol points at the resilient client.
+  - Called once at the top of worker startup (`worker/__main__.py`) and bridge
+    startup (`bridge/telegram_bridge.py`), guarded to run at most once and to no-op under pytest.
+- **Doctor check:** extend `tools/doctor.py::_check_redis` (or add `_check_redis_durability`)
+  to assert `aof_enabled:1` and `maxmemory-policy == noeviction`, with an actionable fix
+  string pointing at the `/update` step.
+- **Doc correction:** edit `config/personas/segments/work-patterns.md:177` example to a
+  truthful learning (e.g. a non-Redis example) so it no longer encodes the false claim.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The archive hook in `finalize_session` must catch and **log** (not silently
-  swallow) any SQLite error — test asserts a `logger.warning` fires and the session
-  transition still completes.
-- [ ] The resilient-client builder must log on degraded start (Redis down at import)
-  rather than `raise` — test asserts process continues and logs.
+- [ ] `config/redis_bootstrap.py` will contain exactly one broad guard (the degrade-don't-die
+      path). Test asserts it logs a `logger.warning` (observable) and returns without raising
+      when Redis is unreachable — no silent `except: pass`.
+- [ ] `scripts/update/redis_persistence.py`'s skip path (no `redis-cli` / Redis down) must
+      log and return a `failed`/`skipped` action, asserted by test — not swallowed silently.
 
 ### Empty/Invalid Input Handling
-- [ ] Restore path with an **empty** SQLite file → no-op, no crash.
-- [ ] Restore path when Redis is **non-empty** → must NOT clobber live data (guard on
-  empty-Redis precondition).
-- [ ] Archive of a session with null/partial fields → row written without error.
+- [ ] `configure_resilient_redis()` with an empty/missing `REDIS_URL` must fall back to the
+      same `127.0.0.1:6379` default popoto uses; test the empty-string and unset cases.
+- [ ] CONFIG REWRITE failure (e.g. Redis started without a conf file) must be caught and
+      reported as a non-fatal `failed` action — tested.
 
 ### Error State Rendering
-- [ ] No user-visible surface in this work (infra/persistence). State: error states
-  are operator-visible via logs/metrics, not end-user output. Tests assert log lines.
+- [ ] Degraded-start warning must reach the process log (worker/bridge) so an operator can
+      see "started with Redis unavailable" — test asserts the log line, not just no-crash.
+- [ ] Doctor durability check must render a red/actionable result (not a crash) when
+      `aof_enabled:0` — test the failure rendering path.
 
 ## Test Impact
 
-- [ ] `tests/` — no existing test directly covers AOF config, the Popoto client
-  construction, or `finalize_session` archival. **No existing tests affected** — this
-  is additive durability infrastructure with no prior coverage of these surfaces; new
-  tests are created for the archive/restore round-trip, the resilient client degraded
-  start, and the offload path. (Search for existing `finalize_session` and redis-config
-  tests during build to confirm none assert the old no-archive behavior; if any do,
-  reclassify to UPDATE.)
+- [ ] `tests/conftest.py::redis_test_db` / `_install_redis_db0_flush_guard` — UPDATE (verify-only):
+      the new `configure_resilient_redis()` must NOT fight the test fixture's `POPOTO_REDIS_DB`
+      swap or the db0 flush guard. Add a guard so the bootstrap is a no-op (or db-respecting)
+      under pytest (`PYTEST_CURRENT_TEST` / test-db detection). Confirm the existing fixture
+      still wins; adjust if it does not.
+- [ ] `tests/unit/test_redis_flush_guard.py` — UPDATE (verify-only): re-run to confirm AOF/eviction
+      config changes and the bootstrap module don't alter db-selection behavior the guard depends on.
+- [ ] `tests/unit/test_doctor.py` — UPDATE: add/extend a case for the new redis-durability doctor
+      check (asserts `aof_enabled` + `maxmemory-policy`).
+- [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE (verify-only): the hot-path drain loop
+      is unchanged by this PR (Fix #4 deferred); confirm the resilient client swap doesn't change
+      query semantics.
+- [ ] New tests: `tests/unit/test_redis_bootstrap.py` (degrade-don't-die, empty-URL fallback,
+      retry kwargs present) and `tests/unit/test_update_redis_persistence.py` (CONFIG REWRITE
+      persistence, skip-when-down) — CREATE (greenfield for the new modules).
 
 ## Rabbit Holes
 
-- **Vendoring/forking Popoto** to edit `redis_db.py` directly. Do NOT — wrap at the app
-  boundary via the resilient builder + `set_REDIS_DB_settings()`. Forking the package
-  is a maintenance tar pit.
-- **Blanket-asyncifying all Popoto access (#4).** Only the named hot paths need
-  offloading. Converting every `.query.*` call is a multi-week rewrite and out of scope.
-- **Building a full bidirectional Redis↔SQLite sync / CDC.** SQLite is a one-way,
-  restore-only mirror. Do not chase live consistency.
-- **Sentinel/replication topology (#5).** Real ops + a second host; deferred (No-Gos).
+- **Vendoring popoto to edit `redis_db.py` directly.** Do NOT. popoto is pip-installed;
+  the `set_REDIS_DB_settings` seam is the sanctioned app-boundary fix. Vendoring is a
+  separate, much larger project.
+- **Moving the hot-path Redis call off the event loop (Fix #4).** Tempting while in the
+  area, but it is 2-3d of async refactoring with its own test surface. DEFERRED — do not
+  start it here.
+- **Standing up the SQLite secondary store (Fix #2).** Greenfield `agent/session_archive.py`
+  + a restore path is 1-2d. DEFERRED. This PR's job is the AOF floor, not the second store.
+- **Redis replication + Sentinel (Fix #5).** Infra + second-host + ops. DEFERRED.
+- **Hand-rolling `redis.conf` path discovery.** Use `CONFIG REWRITE` (writes back to the
+  conf Redis was started with) rather than crawling Homebrew/Linux paths. If Redis was
+  started without a conf file, `CONFIG REWRITE` errors — catch it, apply runtime `CONFIG SET`,
+  and log a warning. Don't build an exhaustive path crawler.
 
 ## Risks
 
-### Risk 1: Restore path clobbers live Redis data
-**Impact:** Rehydrating from a stale SQLite snapshot over a healthy Redis would
-overwrite newer state — data loss caused by the durability feature itself.
-**Mitigation:** Restore runs ONLY when Redis has no `AgentSession` index (empty-Redis
-precondition), gated and tested. Restore is additive (create-if-absent), never an
-overwrite of existing keys.
+### Risk 1: `/update` step silently fails on a machine, leaving AOF off there
+**Impact:** That machine reverts to RDB-only on next Redis restart — the exact gap we're closing.
+**Mitigation:** The doctor durability check (`aof_enabled:1`, `maxmemory-policy noeviction`)
+runs independently of `/update` and renders an actionable red result, so drift is visible.
+The `/update` step logs applied/skipped/failed explicitly and asserts the post-condition.
 
-### Risk 2: Resilient-client change breaks worker/bridge startup
-**Impact:** Mis-wiring `set_REDIS_DB_settings()` or the degraded-import path could make
-the process fail to connect even when Redis is healthy.
-**Mitigation:** Behind a settings flag; spike-1 confirms the Popoto seam before build;
-integration test asserts normal start (Redis up) AND degraded start (Redis down) both
-work. Revertible by flag.
+### Risk 2: The resilient-client bootstrap regresses test Redis isolation
+**Impact:** A bootstrap that rebuilds `POPOTO_REDIS_DB` could clobber the per-worker test db,
+risking a db0 write (the 2026-06-03 incident class).
+**Mitigation:** `configure_resilient_redis()` is gated to no-op (or db-respecting) under pytest
+and runs only at worker/bridge startup, never at import. The existing flush guard + `redis_test_db`
+fixture remain the last line of defense and are re-verified in Test Impact.
 
-### Risk 3: AOF `CONFIG REWRITE` fails on a read-only/missing redis.conf
-**Impact:** AOF set at runtime but lost on next restart on some machines.
-**Mitigation:** `/update` step checks `CONFIG GET dir` writability and surfaces a clear
-error; post-condition asserts `aof_enabled:1`. If `CONFIG REWRITE` cannot persist, fail
-loudly rather than silently leaving a non-durable machine.
+### Risk 3: `appendfsync everysec` adds disk I/O
+**Impact:** Marginal write-latency increase on the Redis host.
+**Mitigation:** `everysec` (not `always`) is the standard durability/throughput balance; AOF is
+already effectively on on the primary host with no observed issue. RDB is kept as a second layer.
 
 ## Race Conditions
 
-### Race 1: Concurrent archive write vs. periodic snapshot
-**Location:** `agent/session_archive.py`
-**Trigger:** A terminal-transition upsert fires while the periodic full-snapshot is
-mid-write to the same SQLite file.
-**Data prerequisite:** SQLite file in a consistent state before either writer commits.
-**State prerequisite:** Single-writer semantics per SQLite connection.
-**Mitigation:** WAL mode + `busy_timeout=5000` serializes writers; full-snapshot uses
-write-temp + `os.replace()` (atomic) so a concurrent reader/writer never sees a partial
-file. On-terminal upserts use a short transaction.
-
-### Race 2: Restore racing the drain loop on startup
-**Location:** `worker/__main__.py` startup → `agent_session_queue` drain loop
-**Trigger:** Drain loop starts pulling sessions before restore finishes rehydrating.
-**Data prerequisite:** All restored sessions present in Redis before the loop reads.
-**State prerequisite:** Restore completes (or no-ops) before the loop is signalled.
-**Mitigation:** Run restore synchronously in the startup sequence BEFORE the drain
-loop is started/signalled; it is gated on empty-Redis so it is a no-op in the common case.
+### Race 1: Concurrent bootstrap from worker and bridge in the same process tree
+**Location:** `config/redis_bootstrap.py::configure_resilient_redis`
+**Trigger:** Worker and bridge both call the bootstrap at startup.
+**Data prerequisite:** The global `POPOTO_REDIS_DB` must be fully rebuilt before any
+`AgentSession.query.*` runs.
+**State prerequisite:** Only one rebuild should win; a half-applied client must never be observed.
+**Mitigation:** Idempotent + run-once guard (module-level sentinel). Worker and bridge are
+separate processes in production, so cross-process contention is moot; the run-once guard
+covers the in-process double-call case. The call is synchronous and completes before the
+event loop starts.
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #1814] Fix #5 (Redis replication + Sentinel on a second host).
-  Requires a second physical/virtual Redis host plus ops runbook; it is the one item
-  that cannot be done purely in-repo by the agent. The other five fixes fully close the
-  single-host durability gap; #5 is the cross-host failover layer on top.
-- [EXTERNAL] Applying AOF/maxmemory-policy on machines the agent cannot reach — those
-  apply on their next `/update` run on that machine.
+- [SEPARATE-SLUG #1814] **Fix #2 — Durable secondary store (SQLite export of `AgentSession`
+  + restore path).** ~1-2d greenfield (`agent/session_archive.py`, hook
+  `models/session_lifecycle.py::finalize_session`). Tracked under parent #1814 until the
+  supervisor splits it into its own issue. Covers total Redis data-dir loss, which AOF does not.
+- [SEPARATE-SLUG #1814] **Fix #4 — Move hot-path Redis off the event loop**
+  (`agent/agent_session_queue.py:1367-1376`, startup scans) via async client / `run_in_executor`.
+  ~2-3d. Tracked under parent #1814 until the supervisor splits it into its own issue.
+- [SEPARATE-SLUG #1814] **Fix #5 — Redis replication + Sentinel** on a second host for
+  primary-loss failover. Infra + ops. Tracked under parent #1814 until the supervisor splits it.
+- [EXTERNAL] Applying AOF/maxmemory-policy on machines the agent cannot reach — those apply on
+  their next `/update` run on that machine.
+
+<!-- NOTE for the supervisor: Fix #2/#4/#5 above are DEFERRED per the agreed scope decision and
+are currently tagged against the parent #1814 so the validator's `gh issue view` resolves. The
+agreed plan is for the supervisor to split each into its own new issue; once those exist, BUILD/PM
+should update each tag to the real new number. This plan step deliberately does NOT create them. -->
 
 ## Update System
 
-**This plan is heavily `/update`-coupled — Redis config must reach every machine.**
+**This plan is heavily `/update`-coupled — this is the core of Fix #1 and #6.**
 
-- Add a step to `scripts/update/run.py` (Redis-hardening step) that:
-  - Asserts/sets `appendonly yes` + `appendfsync everysec`, then `CONFIG REWRITE`.
-  - Asserts/sets the chosen `maxmemory-policy`, then `CONFIG REWRITE`.
-  - Post-condition: `aof_enabled:1` and the expected policy; fail loudly if not.
-  - Idempotent; safe to run on a machine where AOF is already on (current host).
-- No new Popoto model is introduced for the SQLite store, so no
-  `scripts/update/migrations.py` entry is strictly required. **However**, if the
-  resilient-client wiring or archive introduces any persisted Popoto field, add a
-  migration to `migrations.py` and register it in `MIGRATIONS` (per repo convention).
-- No new pip dependency (SQLite is stdlib; redis-py already present).
+- **New step in `scripts/update/run.py`:** add a Redis-persistence step (after the
+  dependency/migration steps, before service restart) that invokes a new module
+  `scripts/update/redis_persistence.py`. The module:
+  - Applies `CONFIG SET appendonly yes`, `CONFIG SET appendfsync everysec`,
+    `CONFIG SET maxmemory-policy noeviction` at runtime via `redis-cli`.
+  - Runs `CONFIG REWRITE` so those three directives persist into the active `redis.conf`
+    and survive a `redis-server` restart.
+  - Post-condition asserts `aof_enabled:1` + the expected policy; logs applied/skipped/failed.
+  - Returns a `dataclass` result; `run.py` logs it.
+  - Is **non-fatal**: if `redis-cli` is absent or Redis is down, it logs and skips —
+    it must never block the rest of `/update`.
+- **No new Python deps to propagate** (uses installed `redis==7.4.0` + system `redis-cli`).
+- **No `scripts/update/migrations.py` change** — this is server config, not a Popoto schema
+  change. (Per repo convention, IF any persisted Popoto field is introduced during build,
+  add and register a migration — but the in-scope work introduces none.)
+- **Migration for existing installations:** the first `/update` run after this PR applies
+  the config on every machine; the doctor durability check confirms it landed.
 
 ## Agent Integration
 
-No new agent/MCP tool surface and no `.mcp.json` change. This is bridge/worker-internal
-durability infrastructure:
-- The resilient client and offload are transparent to the agent.
-- The archive/restore runs inside the worker startup + `finalize_session` hook.
-- Integration tests verify the worker starts (and degrades) correctly; no agent-invokable
-  capability is added. State: **No agent integration required — bridge/worker-internal change.**
+No agent integration required — this is bridge/worker-internal infrastructure.
+
+- **No new CLI entry point** in `pyproject.toml [project.scripts]`.
+- **No new MCP server / `.mcp.json` change.**
+- The Popoto client change (`config/redis_bootstrap.py`) is internal to every process
+  that imports popoto (worker, bridge, tools, dashboard). It is invoked at worker startup
+  (`worker/__main__.py`) and bridge startup (`bridge/telegram_bridge.py`); no agent-facing
+  surface changes. Integration coverage is the worker/bridge startup tests confirming the
+  resilient client is active and degrade-don't-die works.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/redis-durability.md` describing the durability model
-  (AOF+RDB hybrid, SQLite secondary store + restore path, resilient client,
-  eviction policy, and the deferred Sentinel option).
+- [ ] Create `docs/features/redis-durability.md` — the durability model: AOF (`everysec`)
+      floor + RDB, the resilient Popoto client (retry/backoff/health-check, degrade-don't-die),
+      the pinned `noeviction` policy + durable-key eviction audit, and the deferred roadmap
+      (secondary SQLite store, off-loop hot path, replication + Sentinel).
 - [ ] Add an entry to `docs/features/README.md` index table.
-- [ ] Create `docs/infra/redis-durability-hardening.md` (current state, new
-  requirements, rules/constraints — AOF + policy + SQLite location, rollback plan).
 
 ### Inline Documentation
-- [ ] Correct `config/personas/segments/work-patterns.md:177` so the example no longer
-  asserts "Redis is used for operational state only, not durable records." Replace with
-  an accurate save example.
-- [ ] Docstrings on `agent/session_archive.py` public functions and the resilient-client builder.
+- [ ] Docstring on `config/redis_bootstrap.py::configure_resilient_redis` explaining the
+      `set_REDIS_DB_settings` seam and why it exists (popoto is third-party).
+- [ ] Comment in `scripts/update/redis_persistence.py` on the CONFIG REWRITE persistence + idempotency.
+
+### Correction
+- [ ] Rewrite the false example at `config/personas/segments/work-patterns.md:177` so it no
+      longer asserts "Redis is operational-only, not durable. Popoto models handle persistence."
 
 ## Success Criteria
 
-- [ ] AOF pinned in `redis.conf` and applied by `/update`; `aof_enabled:1` verified on
-  every machine via the post-condition check.
-- [ ] Periodic + on-terminal `AgentSession` export to WAL-mode SQLite, with a tested
-  restore path that rehydrates Popoto when Redis is empty and is a no-op otherwise.
-- [ ] Popoto client survives a Redis restart (reconnect/backoff) and does NOT crash the
-  process at import when Redis is down (tested degraded start).
-- [ ] Hot-path drain-loop `AgentSession.query.*` calls run off the event loop.
-- [ ] A pinned `maxmemory-policy` documented and applied, proven not to evict durable keys.
-- [ ] `work-patterns.md:177` corrected.
+- [ ] AOF pinned in `redis.conf` (via CONFIG REWRITE) and applied on every machine via `/update`;
+      `redis-cli INFO persistence` shows `aof_enabled:1`.
+- [ ] `maxmemory-policy noeviction` pinned and applied; a documented audit confirms durable keys
+      (sessions, index sets, bloom) carry no silent-eviction risk.
+- [ ] Popoto client survives a Redis restart (reconnect/backoff) and the worker/bridge do NOT crash
+      at startup when Redis is down (degraded-start warning logged instead).
+- [ ] `work-patterns.md:177` corrected — no longer encodes the false durability claim.
 - [ ] `docs/features/redis-durability.md` created and indexed.
+- [ ] Doctor durability check asserts `aof_enabled:1` + `noeviction`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
+When this plan is executed, the lead agent orchestrates work using Task tools.
+
 ### Team Members
 
 - **Builder (redis-config)**
   - Name: redis-config-builder
-  - Role: AOF + maxmemory-policy pinning and `/update` step (#1, #6)
+  - Role: `scripts/update/redis_persistence.py` + `run.py` wiring + CONFIG REWRITE persistence
   - Agent Type: builder
-  - Resume: true
-
-- **Builder (secondary-store)**
-  - Name: archive-builder
-  - Role: `agent/session_archive.py` + `finalize_session` hook + restore path (#2)
-  - Agent Type: data-architect
   - Resume: true
 
 - **Builder (resilient-client)**
   - Name: client-builder
-  - Role: resilient redis-py builder at app boundary + degrade-at-import (#3)
+  - Role: `config/redis_bootstrap.py` + worker/bridge startup wiring + doctor check
   - Agent Type: async-specialist
   - Resume: true
 
-- **Builder (loop-offload)**
-  - Name: offload-builder
-  - Role: move hot-path queries off the event loop (#4)
-  - Agent Type: async-specialist
+- **Validator (durability)**
+  - Name: durability-validator
+  - Role: verify AOF/eviction applied, degrade-don't-die, test isolation intact
+  - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: durability-doc
-  - Role: feature + infra docs, persona correction
+  - Role: `docs/features/redis-durability.md`, README index, work-patterns.md correction
   - Agent Type: documentarian
   - Resume: true
 
-- **Validator**
-  - Name: durability-validator
-  - Role: verify all success criteria, run restore round-trip + degraded-start tests
-  - Agent Type: validator
-  - Resume: true
-
-### Available Agent Types
-
-(See template tiers — using builder, data-architect, async-specialist, documentarian, validator.)
-
 ## Step by Step Tasks
 
-### 0. Spike: confirm the Popoto client seam
-- **Task ID**: spike-1
-- **Depends On**: none
-- **Method**: code-read
-- **Agent Type**: Explore
-- **Parallel**: true
-- Confirm whether `set_REDIS_DB_settings()` in `popoto/redis_db.py` accepts a
-  pre-built client / connection kwargs, and whether setting `REDIS_URL` + import order
-  lets us inject retry/health-check params without editing site-packages.
-- **Result**: [filled at build time] **Confidence**: [ ] **Impact if false**: fall back to
-  wrapping the import in `config/settings.py` and degrading on connection error.
-
-### 1. AOF + maxmemory-policy + /update step
+### 1. Redis server config + /update propagation
 - **Task ID**: build-redis-config
 - **Depends On**: none
-- **Validates**: `tests/` new test asserting the `/update` step is idempotent and
-  post-conditions `aof_enabled:1`
+- **Validates**: tests/unit/test_update_redis_persistence.py (create)
 - **Assigned To**: redis-config-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Pin `appendonly yes` + `appendfsync everysec` and the chosen `maxmemory-policy` via
-  `CONFIG SET` + `CONFIG REWRITE`; add the idempotent `/update` step with post-condition check.
+- Create `scripts/update/redis_persistence.py` (dataclass-result, mirror `kokoro.py` shape).
+- Apply `CONFIG SET appendonly yes` / `appendfsync everysec` / `maxmemory-policy noeviction`.
+- Run `CONFIG REWRITE`; assert post-condition `aof_enabled:1` + policy.
+- Wire a new step into `scripts/update/run.py`; make it non-fatal on missing redis-cli/down Redis.
 
-### 2. SQLite secondary store + restore
-- **Task ID**: build-archive
-- **Depends On**: spike-1
-- **Validates**: new `tests/` archive→restore round-trip + empty/non-empty restore guards
-- **Informed By**: spike-1
-- **Assigned To**: archive-builder
-- **Agent Type**: data-architect
-- **Parallel**: true
-- Create `agent/session_archive.py` (WAL, atomic snapshot, on-terminal upsert), wire the
-  `finalize_session` hook (best-effort/logged), add the startup restore path gated on empty Redis.
-
-### 3. Resilient Redis client
-- **Task ID**: build-client
-- **Depends On**: spike-1
-- **Validates**: integration test — normal start (Redis up) AND degraded start (Redis down)
-- **Informed By**: spike-1
+### 2. Resilient Popoto client + startup wiring
+- **Task ID**: build-resilient-client
+- **Depends On**: none
+- **Validates**: tests/unit/test_redis_bootstrap.py (create)
 - **Assigned To**: client-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- Build the resilient client at the app boundary with retry/backoff/health-check; ensure
-  import does not crash when Redis is down.
+- Create `config/redis_bootstrap.py::configure_resilient_redis()` using `set_REDIS_DB_settings`
+  with `retry_on_timeout`, `Retry(ExponentialBackoff(cap=10, base=1), 3)`, `health_check_interval=30`.
+- Degrade-don't-die guard (log warning, no raise when Redis down); run-once + pytest no-op guard.
+- Call it at worker (`worker/__main__.py`) and bridge (`bridge/telegram_bridge.py`) startup.
+- Extend `tools/doctor.py` with the durability check (`aof_enabled` + `noeviction`).
 
-### 4. Hot-path loop offload
-- **Task ID**: build-offload
-- **Depends On**: build-client
-- **Validates**: test asserting the drain-loop query runs via executor
-- **Assigned To**: offload-builder
-- **Agent Type**: async-specialist
+### 3. Validation
+- **Task ID**: validate-durability
+- **Depends On**: build-redis-config, build-resilient-client
+- **Assigned To**: durability-validator
+- **Agent Type**: validator
 - **Parallel**: false
-- Wrap the named hot-path `AgentSession.query.*` calls in `run_in_executor`.
+- Verify `redis-cli INFO persistence` → `aof_enabled:1`; `CONFIG GET maxmemory-policy` → `noeviction`.
+- Verify degrade-don't-die: simulate Redis-down at startup → warning logged, no crash.
+- Re-run `tests/unit/test_redis_flush_guard.py` + queue async tests; confirm test isolation intact.
 
-### 5. Documentation + persona correction
+### 4. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-redis-config, build-archive, build-client, build-offload
+- **Depends On**: validate-durability
 - **Assigned To**: durability-doc
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Create `docs/features/redis-durability.md` + index entry + `docs/infra/redis-durability-hardening.md`;
-  correct `work-patterns.md:177`.
+- Create `docs/features/redis-durability.md`; add README index entry.
+- Correct `config/personas/segments/work-patterns.md:177`.
 
-### 6. Final validation
+### 5. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: durability-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run all verification checks; confirm every success criterion; run restore round-trip + degraded-start.
+- Run all Verification checks; confirm every Success Criterion; generate final report.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/ -x -q` | exit code 0 |
+| Tests pass | `pytest tests/unit/test_redis_bootstrap.py tests/unit/test_update_redis_persistence.py tests/unit/test_doctor.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| AOF enabled | `redis-cli INFO persistence \| grep -c 'aof_enabled:1'` | output contains 1 |
-| Archive module exists | `test -f agent/session_archive.py` | exit code 0 |
-| Persona claim corrected | `grep -c 'operational state only, not durable records' config/personas/segments/work-patterns.md` | match count == 0 |
-| Feature doc exists | `test -f docs/features/redis-durability.md` | exit code 0 |
-| /update Redis step present | `grep -rc 'appendfsync\|maxmemory-policy' scripts/update/run.py` | output > 0 |
+| AOF enabled | `redis-cli INFO persistence \| grep aof_enabled` | output contains `aof_enabled:1` |
+| Eviction pinned | `redis-cli CONFIG GET maxmemory-policy` | output contains `noeviction` |
+| Bootstrap module exists | `test -f config/redis_bootstrap.py && echo ok` | output contains `ok` |
+| Update step wired | `grep -c redis_persistence scripts/update/run.py` | output > 0 |
+| False claim removed | `grep -c "operational state only, not durable records" config/personas/segments/work-patterns.md` | match count == 0 |
+| Feature doc exists | `test -f docs/features/redis-durability.md && echo ok` | output contains `ok` |
+| No popoto vendoring | `git ls-files \| grep -c "^popoto/redis_db.py$"` | match count == 0 |
 
 ## Critique Results
 
@@ -526,12 +535,13 @@ durability infrastructure:
 
 ## Open Questions
 
-1. **Scope of this plan vs. follow-ups.** Recommend landing #1, #2, #3, #4, #6 + the
-   doc fix here, and deferring #5 (replication + Sentinel) to a dedicated follow-up
-   issue (it needs a second host + ops). Agree, or fold #5 in?
-2. **Eviction policy choice (#6).** Keep `noeviction` + add OOM alerting (safest for
-   durability), or move to a `volatile-*` policy with explicit TTLs on transient keys?
-   The former is lower-risk; the latter requires auditing which keys are safe to evict.
-3. **Restore trigger precondition.** Is "Redis has no `AgentSession` index" the right
-   empty-Redis signal, or should restore also key off `DBSIZE == 0` to avoid rehydrating
-   into a partially-populated Redis?
+1. **Deferred-fix issue filing.** The plan tags Fix #2/#4/#5 as `[SEPARATE-SLUG #1814]`
+   placeholders and asks the supervisor to split each into its own new issue (per the scope
+   decision). Confirm the supervisor will do so and update the tags to the real numbers —
+   the plan deliberately does not create them itself.
+2. **`redis.conf` persistence when Redis was started without a conf file.** The persistence
+   step uses `CONFIG REWRITE`, which errors if Redis was launched with no config file. Plan
+   currently falls back to runtime `CONFIG SET` + a loud warning in that case. Confirm that is
+   the desired behavior vs. hard-failing the step.
+3. **Doctor check severity.** Should `aof_enabled:0` on a machine be a doctor *warning* or a
+   *failure* (non-zero `/update` verify)? Plan currently treats it as an actionable warning.
