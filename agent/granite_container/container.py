@@ -31,7 +31,7 @@ import logging
 import os
 import re
 import shutil
-import subprocess
+import signal
 import tempfile
 import threading
 import time
@@ -742,37 +742,12 @@ class Container:
     def _uses_pool_pair(self) -> bool:
         """Whether this container runs on a PTYPool-prewarmed pair.
 
-        Pool-backed runs must NEVER use the pkill fallback: the
-        pattern matches every `claude --permission-mode
-        bypassPermissions` process on the machine, which includes
-        the pool's other slots (idle prewarmed pairs and pairs
-        mid-run in concurrent granite sessions) and any operator-
-        owned interactive session. The pool owns its PTY lifecycle
-        (close-on-release + PID-targeted orphan kill at worker
-        startup); the machine-wide pkill is only safe for the
-        self-spawned single-container path (tests, ping-pong).
+        Pool-backed containers receive a prewarmed PM+Dev PTY pair from the
+        PTYPool; self-spawned containers (tests, ping-pong) create their own.
+        The pool owns its PTY lifecycle via close-on-release and PID-targeted
+        orphan kill at worker startup.
         """
         return self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None
-
-    def _run_pkill_fallback(self) -> None:
-        """Last-ditch teardown: kill any orphaned `claude --bypassPermissions` PTYs.
-
-        Mirrors the probe's teardown at
-        `scripts/probe_slash_arguments.py:367-373`. The container
-        prefers `child.close(force=True)`; this is the safety net.
-        Skipped entirely for pool-backed runs — see `_uses_pool_pair`.
-        """
-        if self._uses_pool_pair():
-            return
-        try:
-            subprocess.run(
-                ["pkill", "-f", "claude --permission-mode bypassPermissions"],
-                check=False,
-                timeout=5,
-                capture_output=True,
-            )
-        except Exception:
-            pass
 
     # -- Startup phase ----------------------------------------------------
 
@@ -1077,7 +1052,24 @@ class Container:
         except Exception as e:
             result.exit_reason = "exception"
             result.exit_message = _truncate_exit_message(f"spawn failed: {e}")
-            self._run_pkill_fallback()
+            # Reap any partially-spawned PTY children — iterate BOTH PTYs
+            for _pty in [self._pm_pty, self._dev_pty]:
+                if _pty is not None:
+                    _pid = getattr(_pty, "pid", None)
+                    if _pid is not None:
+                        try:
+                            _pgid = os.getpgid(_pid)
+                            if _pty.isalive():
+                                os.killpg(_pgid, signal.SIGTERM)
+                                time.sleep(0.5)
+                                if _pty.isalive():
+                                    os.killpg(_pgid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError, OSError) as _e:
+                            logger.debug(
+                                "Could not kill PTY pid %s during spawn cleanup: %s",
+                                _pid,
+                                _e,
+                            )
             return result
 
         logger.info(
@@ -1519,7 +1511,23 @@ class Container:
             except Exception:
                 pass
             self._close_pair()
-            self._run_pkill_fallback()
+            # Kill any surviving PTY children by process group
+            for _pty_name, _pty in [("pm_pty", self._pm_pty), ("dev_pty", self._dev_pty)]:
+                if _pty is None:
+                    continue
+                _pid = getattr(_pty, "pid", None)
+                if _pid is None:
+                    continue
+                try:
+                    if not _pty.isalive():
+                        continue
+                    _pgid = os.getpgid(_pid)
+                    os.killpg(_pgid, signal.SIGTERM)
+                    time.sleep(0.5)
+                    if _pty.isalive():
+                        os.killpg(_pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError) as _e:
+                    logger.debug("Could not kill %s pid %s: %s", _pty_name, _pid, _e)
 
         return result
 
@@ -1955,7 +1963,23 @@ class Container:
             return False
         finally:
             self._close_pair()
-            self._run_pkill_fallback()
+            # Kill any surviving PTY children by process group
+            for _pty_name, _pty in [("pm_pty", self._pm_pty), ("dev_pty", self._dev_pty)]:
+                if _pty is None:
+                    continue
+                _pid = getattr(_pty, "pid", None)
+                if _pid is None:
+                    continue
+                try:
+                    if not _pty.isalive():
+                        continue
+                    _pgid = os.getpgid(_pid)
+                    os.killpg(_pgid, signal.SIGTERM)
+                    time.sleep(0.5)
+                    if _pty.isalive():
+                        os.killpg(_pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError) as _e:
+                    logger.debug("Could not kill %s pid %s: %s", _pty_name, _pid, _e)
 
 
 # ---------------------------------------------------------------------------
