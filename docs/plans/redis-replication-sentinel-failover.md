@@ -66,14 +66,14 @@ doc lists Fix #5 only as a deferred "TBD" line).
 
 **Key findings:**
 - **HAProxy/VIP + Sentinel is the modern best-practice pattern** ([redis.io Sentinel docs](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/), [blog.poespas.me 2025](https://blog.poespas.me/posts/2025/03/06/redis-cluster-haproxy-sentinel-failover/)). Sentinel orchestrates *promotion* but does **not** route client traffic. A stable endpoint in front (HAProxy as a TCP balancer, or a keepalived VIP) gives the application one fixed address that always points at the current master — so no application code changes. This directly informs the **Option A** recommendation below: keep `REDIS_URL` a fixed address, let infra repoint it.
-- **Sentinel-aware clients (`redis.sentinel.Sentinel(...).master_for(svc)`)** are the alternative ("smart client"). They remove the extra HAProxy hop but require application code on every connection path — this is **Option B**, and it contradicts the issue's "infra/config only" framing because we have 18 distinct connection points (see Technical Approach).
+- **Sentinel-aware clients (`redis.sentinel.Sentinel(...).master_for(svc)`)** are the alternative ("smart client"). They remove the extra HAProxy hop but require application code on every connection path — this is **Option B**, and it contradicts the issue's "infra/config only" framing because we have 17 distinct connection mechanisms (16 raw + the Popoto bootstrap) (see Technical Approach).
 - **Quorum / host-count constraints** ([redis.io](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/), [oneuptime](https://oneuptime.com/blog/post/2026-03-31-redis-sentinel-quorum-configuration/view)): production needs **≥3 Sentinels with quorum=2** on **3 independent machines**; never co-locate a Sentinel with the master it watches. A strict **two-host** topology (the issue's literal acceptance bullet) technically works with quorum=2 but is fragile — it gives no protection against split-brain and a single host loss can take out both a Redis node and a Sentinel. This is a real constraint, captured as a Risk and an Open Question.
 
 ## Architectural Impact
 
 - **New dependencies:** none in Python. New *operational* components: a second Redis host (replica), 3 Sentinel processes, and — under the recommended Option A — a stable-address layer (HAProxy or keepalived VIP).
 - **Interface changes:** none to Python interfaces under Option A. `REDIS_URL` stays a single address string; its *value* changes (points at the VIP/HAProxy instead of `localhost`).
-- **Coupling:** Option A keeps the app fully decoupled from Sentinel (the infra hides failover). Option B would couple 18 connection sites to the Sentinel protocol.
+- **Coupling:** Option A keeps the app fully decoupled from Sentinel (the infra hides failover). Option B would couple 17 connection mechanisms to the Sentinel protocol.
 - **Data ownership:** unchanged. Redis remains the owner; the replica is a read-through copy promoted on failover.
 - **Reversibility:** high. Tearing down the replica/Sentinel/HAProxy and pointing `REDIS_URL` back at a single host fully reverts. No data-model or schema change.
 
@@ -105,7 +105,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/redis-replication-sent
 
 - **Replica config artifact** — a checked-in `replicaof`-style directive set (and a `redis-replica.conf` template) so a second host can be brought up as a live replica of the primary deterministically.
 - **Sentinel config artifact** — a `sentinel.conf` template (`sentinel monitor`, `down-after-milliseconds`, `failover-timeout`, `parallel-syncs`, quorum) plus guidance on the ≥3-Sentinel / 3-machine layout.
-- **Stable-address layer (Option A, recommended)** — an HAProxy or keepalived VIP template that exposes one fixed endpoint; `REDIS_URL` points at it so promotion is transparent to all 18 connection sites.
+- **Stable-address layer (Option A, recommended)** — an HAProxy or keepalived VIP template that exposes one fixed endpoint; `REDIS_URL` points at it so promotion is transparent to all 17 connection mechanisms.
 - **`/update` propagation step** — a module analogous to `scripts/update/redis_persistence.py` that, on a host tagged as a Redis node, applies/verifies the replica + Sentinel directives idempotently (non-fatal, like the existing step).
 - **Doctor check extension** — assert replication health (`INFO replication` → `role`, `connected_slaves`/`master_link_status`) and Sentinel reachability, so drift is caught independently of `/update`.
 - **Documentation** — fill in the Fix #5 section of `docs/features/redis-durability.md`: topology diagram, failover model, manual + automatic failover runbook, promotion verification.
@@ -136,7 +136,8 @@ Two client-construction paths both bind to a **fixed host/port derived from
    `monitoring/bridge_watchdog.py`.
 
 Classic Sentinel promotion gives the new master a **different IP/port**. None of
-these 18 sites are Sentinel-aware, so they'd keep dialing the dead master.
+these **17 connection mechanisms** (16 raw `from_url` sites + the single Popoto
+bootstrap seam) are Sentinel-aware, so they'd keep dialing the dead master.
 
 - **Option A — stable-address front (RECOMMENDED, matches "infra/config only").**
   Keep `REDIS_URL` a fixed address (keepalived VIP or HAProxy TCP frontend) that
@@ -158,12 +159,30 @@ lightweight witness running the tie-breaking Sentinel. If only two hosts are
 truly available, document the quorum=2 two-host fallback and its split-brain
 caveat explicitly rather than shipping it silently.
 
-**Propagation seam.** Mirror `scripts/update/redis_persistence.py`: a new
-`scripts/update/redis_replication.py::apply_redis_replication()` invoked from a
-new step in `run.py`, role-gated (only runs on hosts tagged as Redis nodes — most
-machines are clients and skip non-fatally). It verifies replica/Sentinel directives
-are present and applies them idempotently via `redis-cli CONFIG`. Non-fatal,
-matching the existing step's contract.
+**Propagation seam — BOOTSTRAP-ONLY, never idempotent re-apply.** Mirror
+`scripts/update/redis_persistence.py` *in structure* (non-fatal, role-gated,
+`redis-cli`-only, returns a result dataclass), but with a critical semantic
+difference: replication/Sentinel topology is **runtime-mutable and Sentinel-owned**.
+`replicaof` and `sentinel monitor` change at every failover. Re-applying a static
+template on an established cluster would **demote a promoted master back to a
+replica of the dead primary** — a catastrophic regression.
+
+Therefore `scripts/update/redis_replication.py::apply_redis_replication()` is
+**seed-once / bootstrap-only** with a presence-check-then-early-exit guard:
+
+1. Role-gate: only runs on hosts tagged as Redis nodes (most machines are clients →
+   neutral skip).
+2. **Presence check:** query `SENTINEL master <name>` (and the node's `role`). If a
+   Sentinel already monitors the cluster, the topology is established → **early
+   exit, touch nothing.**
+3. Only on a virgin node (no Sentinel knows it, freshly provisioned) does it seed
+   the initial replica/Sentinel directives.
+4. **Hard invariant:** NEVER `CONFIG SET replicaof` on a node reporting
+   `role:master`. Re-applying on an established topology must be a no-op by
+   construction, not by luck.
+
+This makes the step safe to run on every `/update` (the common case) while making
+accidental demotion impossible. Non-fatal, matching the existing step's contract.
 
 ## Failure Path Test Strategy
 
@@ -190,7 +209,7 @@ No existing *behavioral* tests are expected to break — Option A adds config ar
 ## Rabbit Holes
 
 - **Building a custom failover daemon.** Sentinel already does promotion. Do not reinvent health-checking or election. Configure Sentinel; don't write one.
-- **Rewriting all 18 connection sites to be Sentinel-aware (Option B) by default.** That is a large, risky refactor that contradicts "infra/config only." Only pursue if PM explicitly picks Option B.
+- **Rewriting all 17 connection mechanisms to be Sentinel-aware (Option B) by default.** That is a large, risky refactor that contradicts "infra/config only." Only pursue if PM explicitly picks Option B.
 - **Multi-datacenter / WAN replication, TLS between nodes, ACL hardening.** Real concerns, but separate scope from "stand up a replica + Sentinel for host-loss failover." Note and move on.
 - **Automating the second-host provisioning end-to-end.** The agent cannot provision a machine. Provide the config artifacts and a runbook; the host itself is operator-supplied.
 - **Read-scaling / splitting reads to the replica.** Tempting once a replica exists, but it's a performance feature, not failover. Out of scope.
@@ -212,9 +231,9 @@ No existing *behavioral* tests are expected to break — Option A adds config ar
 ## Race Conditions
 
 ### Race 1: Application reconnect during the promotion window
-**Location:** All 18 connection sites + `config/redis_bootstrap.py` retry policy.
+**Location:** All 17 connection mechanisms (16 raw `from_url` sites + the single Popoto bootstrap seam, which carries the #1814 retry policy).
 **Trigger:** Primary dies; for the `down-after-milliseconds` + `failover-timeout` window there is no writable master.
-**Data prerequisite:** The replica must have received the writes (async replication → a small window of unreplicated writes can be lost; this is the documented RPO, bounded further by AOF on the replica).
+**Data prerequisite:** The replica must have received the writes. Replication is **asynchronous**, so writes acknowledged by the primary but not yet shipped to the replica are **permanently lost** on promotion — this is the RPO. AOF on the replica does **not** recover them: a replica can only persist (and thus replay) writes it actually received; AOF bounds loss from a *replica* crash, not the unreplicated-write window from the *primary's* failure. The RPO is therefore the in-flight replication lag, not zero.
 **State prerequisite:** Sentinel quorum reached and promotion complete before clients retry-succeed.
 **Mitigation:** The resilient client from #1814 (`Retry(ExponentialBackoff(cap=10, base=1), retries=3)`, `health_check_interval=30`) already retries through transient `ConnectionError`/`TimeoutError`. Document the expected interruption window (RTO) and unreplicated-write window (RPO) in the runbook; no new locking needed.
 
@@ -222,7 +241,7 @@ No existing *behavioral* tests are expected to break — Option A adds config ar
 
 - [EXTERNAL] **Provisioning the physical/virtual second (and witness) host(s).** The agent cannot allocate machines or configure inter-host networking/firewalls (ports 6379/26379). This plan delivers the config artifacts, the /update propagation, and the runbook; the operator brings the hosts.
 - [EXTERNAL] **Pointing production `REDIS_URL` at the VIP/HAProxy and cutting over live traffic.** A real human-gated operational change on running infrastructure; this plan documents the procedure and provides the templates.
-- [SEPARATE-SLUG #1827-followup-B] Adopting Sentinel-aware "smart clients" across all 18 connection sites (Option B) is documented as the alternative but is **not** built unless PM selects it; if selected it replaces Option A in this same plan rather than being deferred. *(If PM picks Option A and later wants Option B, file a dedicated issue.)*
+- [SEPARATE-SLUG #1827-followup-B] Adopting Sentinel-aware "smart clients" across all 17 connection mechanisms (Option B) is documented as the alternative but is **not** built unless PM selects it; if selected it replaces Option A in this same plan rather than being deferred. *(If PM picks Option A and later wants Option B, file a dedicated issue.)*
 - Fix #2 (SQLite secondary store) and Fix #4 (async Redis off the event loop) — separate deferred items in the same #1814 table, tracked independently in `docs/features/redis-durability.md`. Not this issue.
 
 ## Update System
@@ -231,11 +250,19 @@ This is the core of the work. The `/update` skill must propagate the replica +
 Sentinel configuration to Redis-node machines, mirroring the existing AOF step.
 
 - **New module:** `scripts/update/redis_replication.py::apply_redis_replication()` —
-  idempotent, non-fatal, returns a `RedisReplicationResult` dataclass (same shape
-  and contract as `RedisPersistenceResult`). Role-gated so client-only machines
-  skip cleanly.
+  **bootstrap-only / seed-once** (NOT idempotent re-apply — see Technical Approach),
+  non-fatal, returns a `RedisReplicationResult` dataclass modeled on
+  `RedisPersistenceResult`. That contract has **four** `action` values, not three:
+  `applied`, `applied_with_warning`, `skipped`, `failed`. The replication result
+  mirrors all four (`skipped` is the common path — client-only machines and
+  already-established clusters both early-exit as `skipped`). Role-gated so
+  client-only machines skip cleanly; presence-check-gated so established clusters
+  skip too.
 - **New step in `scripts/update/run.py`** adjacent to the existing Step 3.13
   (Redis durability), with the same logging/warning/result-collection treatment.
+  The step runs on every `/update` but is a **no-op on any established cluster**
+  (presence-check early-exit) — it only ever seeds a virgin, never-monitored node.
+  It MUST NOT `CONFIG SET replicaof` on a `role:master` node under any path.
 - **Config artifacts checked into the repo** (templates applied by the step and by
   the runbook): replica directives, `sentinel.conf` template, and — for Option A —
   the HAProxy/keepalived template.
@@ -272,9 +299,9 @@ existing `python -m tools.doctor` surface — no new wiring.
 - [ ] Architecture decision (Option A vs B) recorded in the plan and the doc, with PM sign-off.
 - [ ] Replica + Sentinel **config artifacts** checked into the repo (replica directives, `sentinel.conf` template, and Option-A stable-address template).
 - [ ] `scripts/update/redis_replication.py` exists, is invoked from `run.py`, is idempotent + non-fatal + role-gated, and has unit tests modeled on the persistence-step tests.
-- [ ] `python -m tools.doctor` includes a `redis-replication-health` check that asserts `role`/`master_link_status` and degrades gracefully when unreachable.
+- [ ] `python -m tools.doctor` includes a `redis-replication-health` check that is **role-gated**: on a non-Redis-node (client-only) machine it returns a neutral **SKIP** (matching the `/update` step's role tag), never a perma-warn or a false-green. On a Redis node it asserts `role`/`master_link_status` and Sentinel reachability, and degrades gracefully (SKIP/neutral) when Redis is unreachable. On a standalone single-node localhost Redis it must not warn — replication absence is the expected default posture, reported as informational, not a failure.
 - [ ] `docs/features/redis-durability.md` Fix #5 section is complete with topology, failover model, and runbook; the deferred-table "TBD" is replaced with #1827.
-- [ ] Documented failover procedure verified at least once in a staging/two-host bring-up (manual `SENTINEL failover`, confirm `REDIS_URL` reaches the promoted master) — evidence captured in the runbook or PR.
+- [ ] **[EXTERNAL — operator-deferred, NON-BLOCKING for merge]** Documented failover procedure verified at least once in a staging/two-host bring-up (manual `SENTINEL failover`, confirm `REDIS_URL` reaches the promoted master). This requires physical hardware (the two `[EXTERNAL]` No-Gos) and is explicitly NOT a merge gate — it is an operator action captured in the runbook. Resolves the tension with OQ4 ("no live verification required to merge"): the PR merges on config+docs+tooling; live verification is a post-merge operator step.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 - [ ] grep confirms `run.py` references `redis_replication` (Agent-Integration/wiring assertion).
@@ -355,7 +382,7 @@ proceeds on these decisions.
 1. **Option A vs Option B — which architecture?** **RESOLVED → Option A**
    (stable-address VIP/HAProxy front, zero Python change). Matches the issue's
    "infra/config only" framing and 2026 best practice. Option B (Sentinel-aware
-   clients across 18 sites) is explicitly rejected — out of scope, larger blast
+   clients across 17 mechanisms) is explicitly rejected — out of scope, larger blast
    radius, contradicts the issue.
 2. **Host topology — two hosts or three?** **RESOLVED → ship topology-agnostic
    artifacts; document ≥3-Sentinel/quorum=2 as the production target in the
