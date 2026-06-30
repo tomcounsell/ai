@@ -241,12 +241,6 @@ If a build-time grep finds none of the above in `tests/`, the dispositions colla
 
 ## Update System
 
-<<<<<<< Updated upstream
-- **Fix #1 graceful-degradation rollout**: no new dependency, but `/update`'s post-restart verification should confirm the worker comes up even when ollama is unavailable (degraded boot is the new expected state, not a failure). Update any update-script health assertion that currently treats a missing granite model as a hard failure.
-- **New env vars** (`REFLECTION_POOL_WORKERS`, breaker thresholds `GRANITE_BREAKER_OPEN_THRESHOLD`/`GRANITE_BREAKER_COOLDOWN_S`, re-probe interval `GRANITE_REPROBE_INTERVAL_S`, supervisor `WORKER_SUPERVISOR_MAX_RESTARTS`/`WORKER_SUPERVISOR_WINDOW_S`/`WORKER_SUPERVISOR_BASE_BACKOFF_S`) must be added to `.env.example` with a comment line above each (completeness check) and to `config/settings.py`. All defaults are provisional/tunable with grain-of-salt comments.
-- No Popoto schema change in this slug (the `Reflection` model is unchanged), so no `migrations.py` entry is required.
-- The reflection-subprocess launchd/plist wiring (new `com.valor.reflection-worker.plist`, `scripts/install_reflection_worker.sh`, and the `scripts/update/run.py` hook) is **out of scope here — it moves with Fix #5 to follow-up issue #1828**.
-=======
 - **No new launchd plist in this slug.** The reflection-worker plist + installer + `scripts/update/run.py` wiring (formerly Fix #5) are **deferred to #1828**. When that lands, the installer must be idempotent and machine-role-gated following the existing bridge-role launchd gating pattern (only bridge machines that run the worker run the reflection subprocess) — recorded here so #1828's plan inherits it.
 - **Fix #1 graceful-degradation rollout**: no new dependency, but `/update`'s post-restart verification should confirm the worker comes up even when ollama is unavailable (degraded boot is the new expected state, not a failure). Update any update-script health assertion that currently treats a missing granite model as a hard failure.
 - **New env vars** must be added to `.env.example` with a comment line above each (completeness check) and to `config/settings.py`, all as NAMED constants with provisional/tunable grain-of-salt comments (no bare literals):
@@ -255,34 +249,21 @@ If a build-time grep finds none of the above in `tests/`, the dispositions colla
   - `WORKER_SUPERVISOR_MAX_RESTARTS`, `WORKER_SUPERVISOR_WINDOW_S`, `WORKER_SUPERVISOR_BASE_BACKOFF_S` (Fix #4 — conservative provisional, err toward not killing legitimate work)
 - The Fix #4 storm-cap recycle reuses the existing `WORKER_DEADMAN_ENABLED` kill switch (#1815); no new env var for the recycle path itself.
 - No Popoto schema change (the `Reflection` model is unchanged), so no `migrations.py` entry is required.
->>>>>>> Stashed changes
 
 ## Agent Integration
 
 - **No new MCP tool or `.mcp.json` change.** This is worker/bridge-internal infrastructure — fault containment of the existing session-execution engine. The agent surface (Telegram → bridge → worker) is unchanged.
-<<<<<<< Updated upstream
-- **Fix #1** changes worker *behavior* the agent indirectly experiences (granite-routed SDLC work pauses when ollama is down) but exposes no new tool. Integration coverage is via the worker/integration tests listed in Test Impact, not MCP tests.
-- **No new entry point in `pyproject.toml [project.scripts]`.** Fixes #1–#4 are all in-process changes to the existing worker; none adds an agent-invokable CLI. (The `python -m reflections` background-service entry point belongs to the deferred Fix #5 in #1828, not this slug.)
-=======
 - **No new process entry point in this slug.** The `python -m reflections` background-service entry point (formerly Fix #5) is deferred to #1828.
 - **Fix #1** changes worker *behavior* the agent indirectly experiences (granite-routed SDLC work pauses when ollama is down) but exposes no new tool. Integration coverage is via the worker/integration tests listed in Test Impact, not MCP tests.
 - **No agent integration required** for this slug — no `pyproject.toml [project.scripts]` entry, no bridge import changes.
->>>>>>> Stashed changes
 
 ## Documentation
 
 ### Feature Documentation
-<<<<<<< Updated upstream
-- [ ] Create `docs/features/worker-fault-containment.md` describing the fault-containment model for this slug: `GRANITE_AVAILABLE` graceful degradation with the folded-in re-probe breaker (Fix #1), process-group teardown (Fix #2), the reflection bulkhead pool + off-loop async-audit (Fix #3), and the `supervise()` helper with the unconditional SIGABRT storm cap (Fix #4). Note the deferred reflection subprocess split (#1828) as future work, not part of this slug.
-- [ ] Add entry to `docs/features/README.md` index table.
-- [ ] Update `docs/features/granite-pty-production.md` (or the relevant granite teardown doc) to reflect the deletion of `_run_pkill_fallback` and the new process-group kill.
-- [ ] Cross-reference from `docs/features/bridge-worker-architecture.md` (the worker's background-task topology changes: tasks are now supervised with respawn-backoff and a SIGABRT storm cap; reflections run in a dedicated bulkhead pool).
-=======
 - [ ] Create `docs/features/worker-fault-containment.md` describing the fault-containment model for this slug: the four bulkheaded concerns — `GRANITE_AVAILABLE` graceful degradation with the folded-in re-probe/breaker (Fix #1), process-group teardown with spawn-failure orphan reap (Fix #2), the reflection bulkhead pool (Fix #3), and the `supervise()` helper with the SIGABRT storm-cap recycle (Fix #4). Note the deferred reflection subprocess split (#1828) as future work.
 - [ ] Add entry to `docs/features/README.md` index table.
 - [ ] Update `docs/features/granite-pty-production.md` (or the relevant granite teardown doc) to reflect the deletion of `_run_pkill_fallback`, the new process-group kill, and the spawn-failure orphan-reap path.
 - [ ] Cross-reference from `docs/features/bridge-worker-architecture.md` (the worker's background-task topology gains a supervisor; note the reflection scheduler stays in-process until #1828).
->>>>>>> Stashed changes
 
 ### External Documentation Site
 - [ ] Not applicable — this repo has no external Sphinx/MkDocs site for worker internals.
@@ -297,32 +278,18 @@ If a build-time grep finds none of the above in `tests/`, the dispositions colla
 
 ## Success Criteria
 
-<<<<<<< Updated upstream
-- [ ] Worker starts and serves non-granite work when ollama is unavailable; granite-routed work is *deferred* (not dropped/failed) and resumes automatically when ollama returns. The folded-in breaker (consecutive-timeout → open → cooldown → half-open → closed) lives inside `_granite_reprobe_loop` and a wedged ollama daemon never blocks boot. (Fix #1)
-- [ ] Teardown provably cannot kill processes outside the target container's process group — bystander `claude` survives a session teardown; the worker survives. Anti-criterion: `pkill -f` is gone from `container.py`. The spawn-failure path still reaps a half-created PTY (no orphan survives a partial `_spawn_pair()`). (Fix #2)
-- [ ] A wedged reflection cannot exhaust the critical-path thread pool — saturation test proves a critical-path `run_in_executor` call still completes with N reflections wedged. The `async def` audit (`redis_quality_audit.py`) runs its heavy scans OFF the event loop (via `asyncio.to_thread`/executor) — a verification test asserts the loop stays responsive while a heavy audit scan runs. (Fix #3)
-- [ ] A crashed background monitor task is respawned with backoff; once the storm cap fires it ALWAYS recycles the process via SIGABRT (`os.abort()` — what `_self_kill()` does) so launchd respawns it. A subprocess test asserts REAL process death by SIGABRT. (Fix #4)
-=======
 - [ ] Worker starts and serves non-granite work when ollama is unavailable; granite-routed work is *deferred* (not dropped/failed) and resumes automatically when ollama returns. The startup probe no longer blocks boot indefinitely: the re-probe loop's folded-in breaker opens after consecutive timeouts and re-probes on a cooldown. (Fix #1)
 - [ ] Teardown provably cannot kill processes outside the target container's process group — bystander `claude` survives a session teardown; the worker survives. The spawn-FAILURE path reaps any half-created PTY child (no orphan leak). Anti-criterion: `pkill -f` is gone from `container.py`. (Fix #2)
 - [ ] A wedged reflection cannot exhaust the critical-path thread pool — saturation test proves a critical-path `run_in_executor` call still completes with N reflections wedged. (Fix #3)
 - [ ] A crashed background monitor task is respawned with backoff; a restart storm escalates to a clean **SIGABRT** (`_self_kill()`/`os.abort()`) launchd recycle — verified by a test asserting REAL process death, not a swallowed `SystemExit`. (Fix #4)
->>>>>>> Stashed changes
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`), including the in-code comment reconciliation (worker/__main__.py + granite_classifier.py docstring no longer claim a runtime ollama routing role).
 - [ ] grep confirms `_run_pkill_fallback` and the `pkill -f "claude --permission-mode"` string are absent from `agent/granite_container/container.py`.
-<<<<<<< Updated upstream
-
-## Team Orchestration
-
-The lead agent orchestrates; it never builds directly. Work is staged — **Stage A (Fixes #1, #2, #3)** can run as three parallel builder+validator pairs; **Stage B (Fix #4)** is a sequential gate after Stage A validates. There is **no Stage C breaker** (former Fix #6 is folded into Fix #1) and **no Fix #5 stage** (deferred to follow-up #1828).
-=======
 - [ ] grep confirms the storm-cap path uses no bare `sys.exit` — it routes through `_self_kill()`/`os.abort()`.
 
 ## Team Orchestration
 
 The lead agent orchestrates; it never builds directly. Work is staged — Stage A (fixes 1,2,3) can run as three parallel builder+validator pairs; Stage B (#4) is a sequential gate. (The former Stage C / Fix #6 is folded into Fix #1; the former Stage D / Fix #5 is deferred to #1828.)
->>>>>>> Stashed changes
 
 ### Team Members
 
@@ -348,11 +315,7 @@ The lead agent orchestrates; it never builds directly. Work is staged — Stage 
 
 - **Builder (supervisor)**
   - Name: supervisor-builder
-<<<<<<< Updated upstream
-  - Role: Fix #4 — `supervise()` helper with backoff + unconditional SIGABRT storm cap (`os.abort()`, which `_self_kill()` is; never `sys.exit`, no missing-`else` no-op), wrap five spawn sites + the #1 re-probe loop
-=======
   - Role: Fix #4 — `supervise()` helper with backoff + SIGABRT storm cap (`_self_kill()`/`os.abort()`, never `sys.exit`), wrap five spawn sites + the #1 re-probe loop
->>>>>>> Stashed changes
   - Agent Type: builder
   - Domain: async/concurrency
   - Resume: true
