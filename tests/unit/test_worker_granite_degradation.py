@@ -18,6 +18,7 @@ import pytest
 
 import agent.session_state as _ss
 import worker.__main__ as wm
+from agent.session_pickup import _pop_agent_session
 from worker.__main__ import (
     GRANITE_BREAKER_OPEN_THRESHOLD,
     _granite_reprobe_loop,
@@ -209,39 +210,21 @@ async def test_breaker_opens_after_threshold():
 # ---------------------------------------------------------------------------
 
 
-def test_degraded_mode_defers_granite_sessions():
-    """ENG sessions are deferred to paused_circuit when granite is unavailable.
+@pytest.mark.asyncio
+async def test_degraded_mode_defers_granite_sessions():
+    """_pop_agent_session returns None for project-keyed workers when granite is unavailable.
 
-    The deferral must use transition_status('paused_circuit'), not drop the session.
+    Calls _pop_agent_session directly with is_project_keyed=True and granite_available=False.
+    The granite gate short-circuits before any Redis query (Redis fails open in unit tests),
+    so no session is picked up — it stays in the queue until granite recovers.
     """
+
     _reset_granite_flag(False)
 
-    fake_session = MagicMock()
-    fake_session.session_type = "eng"
-    fake_session.session_id = "test-session-123"
+    # Redis is unavailable in unit tests; the sustainability guard fails open,
+    # allowing execution to reach the granite gate (is_project_keyed=True check).
+    result = await _pop_agent_session("valor", is_project_keyed=True)
 
-    transition_calls = []
-
-    def _fake_transition(session, status, reason=""):
-        transition_calls.append((session, status, reason))
-
-    with patch(
-        "models.session_lifecycle.transition_status",
-        side_effect=_fake_transition,
-    ):
-        import agent.session_state as ss
-
-        # Simulate the startup deferral logic from _run_worker
-        if not ss.granite_available and fake_session.session_type == "eng":
-            _fake_transition(
-                fake_session,
-                "paused_circuit",
-                reason=(
-                    "granite-degrade: startup probe failed — will resume when granite is available"
-                ),
-            )
-
-    assert len(transition_calls) == 1, "Should have deferred exactly one session"
-    _, status, reason = transition_calls[0]
-    assert status == "paused_circuit", f"Expected paused_circuit, got {status}"
-    assert "granite" in reason.lower(), f"Reason should mention granite: {reason}"
+    assert result is None, (
+        "Expected None — project-keyed session pickup must be deferred when granite is down"
+    )
