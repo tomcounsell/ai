@@ -266,7 +266,8 @@ async def _pop_agent_session(
 
             if not _ss_granite.granite_available:
                 logger.debug(
-                    "[worker:%s] Granite unavailable — deferring eng session pickup", worker_key
+                    "[worker:%s] Granite unavailable — deferring project-keyed session pickup",
+                    worker_key,
                 )
                 return None
         except Exception:
