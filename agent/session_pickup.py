@@ -254,6 +254,22 @@ async def _pop_agent_session(
         )
         _throttle = "none"
 
+    # Granite-degraded gate: defer project-keyed (eng) session pickup when ollama is down.
+    # classify_pm_prefix is pure regex — this gate is a scheduling bulkhead, not a
+    # routing requirement. When granite_available flips True (reprobe loop), normal
+    # pickup resumes. Fails open on ImportError (running outside worker context).
+    if is_project_keyed:
+        try:
+            import agent.session_state as _ss_granite
+
+            if not _ss_granite.granite_available:
+                logger.debug(
+                    "[worker:%s] Granite unavailable — deferring eng session pickup", worker_key
+                )
+                return None
+        except Exception:
+            pass  # Fail open: gate is advisory
+
     if not _acquire_pop_lock(worker_key):
         logger.debug(f"[worker:{worker_key}] Pop lock held by another worker, skipping pop")
         return None

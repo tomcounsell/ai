@@ -39,6 +39,8 @@ if not os.environ.get("VALOR_LAUNCHD"):
 
 logger = logging.getLogger("worker")
 
+# Shared mutable state (granite_available, shutdown_requested, etc.)
+
 # Set to True when SIGTERM is received; causes main() to exit with code 1
 # so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
 _shutdown_via_signal = False
@@ -73,6 +75,21 @@ WORKER_DEADMAN_ENABLED: bool = os.environ.get(
 
 # Stop event for the heartbeat daemon thread — set on worker shutdown.
 _heartbeat_stop_event = threading.Event()
+
+# Granite re-probe / circuit breaker — provisional, tunable via env.
+# Grain of salt: defaults below are PROVISIONAL — tune after observing real
+# ollama outage / false-positive rates in logs/worker.log.
+# How often to probe granite when the circuit is closed.
+GRANITE_REPROBE_INTERVAL_S: float = float(os.environ.get("GRANITE_REPROBE_INTERVAL_S", "30"))
+# Consecutive probe timeouts/failures before the circuit trips to OPEN.
+GRANITE_BREAKER_OPEN_THRESHOLD: int = int(os.environ.get("GRANITE_BREAKER_OPEN_THRESHOLD", "3"))
+# How long the circuit stays OPEN before allowing a half-open re-probe.
+GRANITE_BREAKER_COOLDOWN_S: float = float(os.environ.get("GRANITE_BREAKER_COOLDOWN_S", "120"))
+
+# Module-level alias — the authoritative flag lives in agent.session_state
+# (so agent_session_queue._worker_loop can read it without a circular import).
+# This alias is provided for readability in worker.__main__ code that writes the flag.
+# GRANITE_AVAILABLE is not a constant; it is mutated by _granite_reprobe_loop.
 
 
 def _self_kill() -> None:
@@ -351,6 +368,131 @@ def _load_projects(project_filter: str | None = None) -> dict:
     return all_projects
 
 
+async def _granite_reprobe_loop() -> None:
+    """Background circuit breaker that re-probes granite and updates granite_available.
+
+    States:
+      CLOSED  — probe every GRANITE_REPROBE_INTERVAL_S; success keeps it closed;
+                failure increments the consecutive-failure counter.
+      OPEN    — entered when consecutive failures reach GRANITE_BREAKER_OPEN_THRESHOLD;
+                waits GRANITE_BREAKER_COOLDOWN_S then moves to HALF_OPEN.
+      HALF_OPEN — tries a single probe; success → CLOSED + granite_available=True;
+                  failure → back to OPEN (reset cooldown).
+
+    Logs every state transition. CancelledError exits cleanly (normal shutdown path).
+    The probe call uses asyncio.to_thread so the synchronous ensure_granite_model
+    does not block the event loop.
+    """
+    import agent.session_state as _ss  # noqa: PLC0415
+    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
+
+    # Circuit state strings (lowercase as required by ruff N806)
+    state_closed = "closed"
+    state_open = "open"
+    state_half_open = "half_open"
+
+    # Start closed; initial availability already set by the startup probe.
+    state = state_closed
+    consecutive_failures = 0 if _ss.granite_available else 1  # count startup failure
+
+    logger.debug(
+        "Granite reprobe loop started (state=%s, granite_available=%s)",
+        state,
+        _ss.granite_available,
+    )
+
+    try:
+        while True:
+            if state == state_closed:
+                await asyncio.sleep(GRANITE_REPROBE_INTERVAL_S)
+                ok, detail = await asyncio.to_thread(ensure_granite_model)
+                if ok:
+                    if not _ss.granite_available:
+                        logger.info(
+                            "Granite classifier recovered: %s. Resuming deferred sessions.",
+                            detail,
+                        )
+                        _ss.granite_available = True
+                        _resume_deferred_granite_sessions()
+                    consecutive_failures = 0
+                    # Stay closed
+                else:
+                    consecutive_failures += 1
+                    logger.warning(
+                        "Granite probe failed (%d/%d): %s",
+                        consecutive_failures,
+                        GRANITE_BREAKER_OPEN_THRESHOLD,
+                        detail,
+                    )
+                    if _ss.granite_available:
+                        _ss.granite_available = False
+                        logger.warning(
+                            "Granite unavailable — ENG sessions will be deferred to paused_circuit."
+                        )
+                    if consecutive_failures >= GRANITE_BREAKER_OPEN_THRESHOLD:
+                        state = state_open
+                        logger.warning(
+                            "Granite circuit breaker OPEN after %d consecutive failures. "
+                            "Cooling down for %.0fs before next probe.",
+                            consecutive_failures,
+                            GRANITE_BREAKER_COOLDOWN_S,
+                        )
+
+            elif state == state_open:
+                await asyncio.sleep(GRANITE_BREAKER_COOLDOWN_S)
+                state = state_half_open
+                logger.info("Granite circuit breaker HALF_OPEN — attempting re-probe.")
+
+            elif state == state_half_open:
+                ok, detail = await asyncio.to_thread(ensure_granite_model)
+                if ok:
+                    state = state_closed
+                    consecutive_failures = 0
+                    _ss.granite_available = True
+                    logger.info(
+                        "Granite circuit breaker CLOSED after half-open success: %s. "
+                        "Resuming deferred sessions.",
+                        detail,
+                    )
+                    _resume_deferred_granite_sessions()
+                else:
+                    state = state_open
+                    logger.warning(
+                        "Granite half-open probe failed: %s. Circuit back to OPEN, "
+                        "cooling down for %.0fs.",
+                        detail,
+                        GRANITE_BREAKER_COOLDOWN_S,
+                    )
+
+    except asyncio.CancelledError:
+        logger.debug("Granite reprobe loop cancelled (shutdown).")
+
+
+def _resume_deferred_granite_sessions() -> None:
+    """Set the worker:recovering Redis flag so session_recovery_drip re-queues
+    paused_circuit sessions that were deferred due to granite unavailability.
+
+    Uses a best-effort approach: if Redis is unreachable the drip will simply
+    not fire on the next tick, but granite will be available again at that point
+    so the next enqueue will proceed normally anyway.
+    """
+    try:
+        import os  # noqa: PLC0415
+
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+        project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
+        r = POPOTO_REDIS_DB
+        rec_key = f"{project_key}:worker:recovering"
+        r.set(rec_key, "1", ex=3600)  # TTL: 1 hour, drip clears it when queues drain
+        logger.info(
+            "Set %s flag — session_recovery_drip will re-queue paused_circuit sessions.",
+            rec_key,
+        )
+    except Exception as e:
+        logger.warning("Could not set worker:recovering flag for granite recovery: %s", e)
+
+
 async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
@@ -615,28 +757,44 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
 
     # Step 4b.5: Verify the granite classifier model is present and responsive.
-    # Granite is the routing brain of the PTY container — every PM/Dev turn is
-    # routed by an ollama call against it. Without granite the worker would come
-    # up and silently mis-route every session, so this is a HARD startup
-    # precondition (the granite PTY path is all-or-nothing; there is no runtime
-    # fallback). Every restart path funnels through here — /update's inline
-    # restart, the cron deferred restart-flag → SIGTERM → launchd respawn
-    # (agent_session_queue._trigger_restart), and manual worker-restart — so
-    # gating at startup covers them all, not just the interactive /update path.
-    # Pulls once on miss; exits non-zero if granite still can't be made
-    # available (launchd respawns after ThrottleInterval, self-healing once
-    # granite becomes reachable).
-    from agent.granite_container.granite_classifier import ensure_granite_model
+    # The only ollama call is ensure_granite_model() — a one-time startup probe
+    # and a background re-probe loop. Classification of PM prefix tokens is pure
+    # regex (classify_pm_prefix); PTY sessions run on Claude OAuth subscription,
+    # not ollama. When the probe succeeds, granite_available is set True and ENG
+    # sessions are dispatched normally. When it fails, the worker starts in
+    # DEGRADED mode: granite_available stays False, ENG sessions are deferred to
+    # paused_circuit, and _granite_reprobe_loop retries in the background until
+    # the model becomes reachable (circuit breaker: OPEN after
+    # GRANITE_BREAKER_OPEN_THRESHOLD consecutive failures, COOLDOWN before
+    # half-open re-probe). Non-ENG sessions (TEAMMATE) proceed unaffected.
+    import agent.session_state as _ss_granite  # noqa: PLC0415
+    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
 
     granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)
     if not granite_ok:
-        logger.critical(
-            "Granite classifier unavailable: %s. The PTY container cannot route "
-            "sessions without it — exiting. Fix with 'ollama pull granite4.1:3b'.",
+        logger.warning(
+            "Granite classifier unavailable: %s. Starting in degraded mode — "
+            "ENG sessions will be deferred to paused_circuit until granite "
+            "becomes reachable. Fix with 'ollama pull granite4.1:3b'.",
             granite_detail,
         )
-        sys.exit(1)
-    logger.info("Granite classifier ready: %s", granite_detail)
+        _ss_granite.granite_available = False
+    else:
+        logger.info("Granite classifier ready: %s", granite_detail)
+        _ss_granite.granite_available = True
+
+    # Start _granite_reprobe_loop as a background task — it doubles as the
+    # circuit breaker, toggling granite_available as the model appears/disappears.
+    reprobe_task = asyncio.create_task(_granite_reprobe_loop(), name="granite-reprobe")
+
+    def _reprobe_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error("Granite reprobe loop exited unexpectedly: %s", exc)
+
+    reprobe_task.add_done_callback(_reprobe_task_done)
 
     # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
     # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
@@ -655,11 +813,37 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
     # For startup, we need to kick workers for any pending sessions.
-    from models.agent_session import AgentSession
+    # Gate: when granite is unavailable, ENG sessions are deferred to paused_circuit
+    # so they are not silently mis-routed. Non-ENG sessions (TEAMMATE) proceed.
+    from models.agent_session import AgentSession  # noqa: PLC0415
+    from models.session_lifecycle import transition_status  # noqa: PLC0415
 
     pending_sessions = list(AgentSession.query.filter(status="pending"))
+    deferred_count = 0
     started_workers: set[str] = set()
     for session in pending_sessions:
+        session_type = getattr(session, "session_type", None)
+        if not _ss_granite.granite_available and session_type == "eng":
+            # Defer ENG sessions until granite becomes reachable.
+            try:
+                transition_status(
+                    session,
+                    "paused_circuit",
+                    # noqa: E501 — reason string kept long for log clarity
+                    reason="granite-degrade: startup probe failed; resumes when granite recovers",
+                )
+                deferred_count += 1
+                logger.info(
+                    "Deferred ENG session %s to paused_circuit (granite unavailable)",
+                    getattr(session, "session_id", "?"),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not defer ENG session %s to paused_circuit: %s",
+                    getattr(session, "session_id", "?"),
+                    e,
+                )
+            continue
         wk = session.worker_key
         if wk not in started_workers:
             _ensure_worker(wk, is_project_keyed=session.is_project_keyed)
@@ -668,7 +852,8 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     logger.info(
         f"Worker started: {len(projects)} project(s), "
         f"{len(pending_sessions)} pending session(s), "
-        f"{len(started_workers)} worker loop(s)"
+        f"{len(started_workers)} worker loop(s), "
+        f"{deferred_count} ENG session(s) deferred (granite degraded)"
     )
 
     # Write heartbeat immediately so dashboard shows green without waiting
@@ -884,6 +1069,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             await reflection_task
         except asyncio.CancelledError:
             pass
+
+    # Cancel granite re-probe / circuit breaker loop (Fix #1)
+    reprobe_task.cancel()
+    try:
+        await reprobe_task
+    except asyncio.CancelledError:
+        pass
 
     # Cancel idle-sweeper (issue #1128)
     if idle_sweep_task is not None:
