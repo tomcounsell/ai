@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import agent.granite_container.pty_pool as pty_pool_mod
 from agent.granite_container.pty_pool import PTYPool, PTYPoolError
 
 
@@ -146,53 +147,55 @@ class TestAcquireRelease(unittest.TestCase):
             asyncio.run(_runner())
 
     def test_acquire_blocks_when_all_slots_locked(self) -> None:
-        pool = _make_pool(size=2)
-        with _patch_spawn_to_succeed():
-            asyncio.run(pool.initialize())
+        # Use a short acquire timeout so the test finishes quickly if the
+        # third acquirer is not properly blocked before slots free up.
+        with patch.object(pty_pool_mod, "PTY_POOL_ACQUIRE_TIMEOUT", 2):
+            pool = _make_pool(size=2)
+            with _patch_spawn_to_succeed():
+                asyncio.run(pool.initialize())
 
-            acquired_count = 0
-            release_event = asyncio.Event()
+                acquired_count = 0
+                release_event = asyncio.Event()
 
-            async def hold_slot() -> None:
-                nonlocal acquired_count
-                async with pool.acquire_pair():
-                    acquired_count += 1
-                    await release_event.wait()
-
-            async def try_acquire() -> None:
-                # Try to acquire a third slot. Should block.
-                try:
+                async def hold_slot() -> None:
+                    nonlocal acquired_count
                     async with pool.acquire_pair():
+                        acquired_count += 1
+                        await release_event.wait()
+
+                async def try_acquire() -> None:
+                    # Try to acquire a third slot. Should block until released.
+                    try:
+                        async with pool.acquire_pair():
+                            pass
+                    except (TimeoutError, PTYPoolError):
                         pass
-                except TimeoutError:
-                    pass
 
-            async def runner() -> None:
-                # Start two holders (uses both slots).
-                holders = [asyncio.create_task(hold_slot()) for _ in range(2)]
-                # Give the holders a moment to acquire.
-                await asyncio.sleep(0.05)
-                self.assertEqual(acquired_count, 2)
-                # Try to acquire a third; this should hang.
-                third = asyncio.create_task(try_acquire())
-                # If the third is hung, that's the assertion: it
-                # never completes within 0.2s.
-                try:
-                    await asyncio.wait_for(third, timeout=0.2)
-                except TimeoutError:
-                    pass  # Expected: blocked
-                # Release the holders and let the third try.
-                release_event.set()
-                await asyncio.gather(*holders, return_exceptions=True)
-                # After release, the semaphore frees up; the third
-                # task should now complete (if it had been given
-                # the chance to re-run). Cancel the third task
-                # because we are just asserting blocking.
-                third.cancel()
-                with __import__("contextlib").suppress(asyncio.CancelledError):
-                    await third
+                async def runner() -> None:
+                    # Start two holders (uses both slots).
+                    holders = [asyncio.create_task(hold_slot()) for _ in range(2)]
+                    # Give the holders a moment to acquire.
+                    await asyncio.sleep(0.05)
+                    self.assertEqual(acquired_count, 2)
+                    # Try to acquire a third; this should block initially.
+                    third = asyncio.create_task(try_acquire())
+                    # If the third is hung, that's the assertion: it
+                    # never completes within 0.2s.
+                    try:
+                        await asyncio.wait_for(asyncio.shield(third), timeout=0.2)
+                    except TimeoutError:
+                        pass  # Expected: blocked
+                    # Release the holders and let the third try.
+                    release_event.set()
+                    await asyncio.gather(*holders, return_exceptions=True)
+                    # After release the semaphore frees up; the third
+                    # task should now complete. Cancel it because we are
+                    # just asserting blocking behavior.
+                    third.cancel()
+                    with __import__("contextlib").suppress(asyncio.CancelledError):
+                        await third
 
-            asyncio.run(runner())
+                asyncio.run(runner())
 
     def test_release_schedules_respawn(self) -> None:
         pool = _make_pool(size=1)
@@ -226,6 +229,41 @@ class TestRespawnFailure(unittest.TestCase):
             self.assertEqual(slot.state, "respawning")
             # The event is NOT set; an acquirer would block.
             self.assertFalse(slot.event.is_set())
+
+    def test_stuck_respawning_slot_is_force_recycled_by_bounded_acquirer(self) -> None:
+        """A slot stuck in `respawning` with its event never set triggers
+        `_force_recycle_slot` via the bounded slot.event.wait() timeout,
+        and the next acquirer proceeds within PTY_POOL_WAIT_TIMEOUT."""
+        spawn_calls = {"count": 0, "fail": True}
+
+        def _controlled_spawn(self_driver) -> None:
+            spawn_calls["count"] += 1
+            if spawn_calls["fail"] and spawn_calls["count"] <= 2:
+                # First two spawns (pre-warm) fail → slot stuck in respawning.
+                raise RuntimeError("simulated pre-warm failure")
+            # Subsequent spawns (force-recycle path) succeed.
+
+        with patch("agent.granite_container.pty_pool.PTYDriver.spawn", _controlled_spawn):
+            pool = _make_pool(size=1)
+            asyncio.run(pool.initialize())
+            slot = pool._slots[0]
+            self.assertEqual(slot.state, "respawning")
+            self.assertFalse(slot.event.is_set())
+
+            # Now allow spawns to succeed for the force-recycle path.
+            spawn_calls["fail"] = False
+
+            # Use a very short wait timeout so the force-recycle fires quickly.
+            with patch.object(pty_pool_mod, "PTY_POOL_WAIT_TIMEOUT", 0.05):
+                with patch.object(pty_pool_mod, "PTY_POOL_ACQUIRE_TIMEOUT", 10):
+
+                    async def _try_acquire():
+                        async with pool.acquire_pair() as (pm, dev, slot_idx):
+                            return slot_idx
+
+                    result = asyncio.run(asyncio.wait_for(_try_acquire(), timeout=5.0))
+                    # The acquirer obtained a slot after the force-recycle.
+                    self.assertIsInstance(result, int)
 
 
 class TestEventClearFirstLine(unittest.TestCase):

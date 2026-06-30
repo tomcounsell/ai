@@ -73,6 +73,24 @@ The worker supports two modes controlled by the `VALOR_WORKER_MODE` environment 
 
 Standalone mode is set automatically by `python -m worker`. In this mode, nudge re-enqueues are processed within milliseconds (no 10s launchd restart gap), enabling full SDLC pipeline execution end-to-end.
 
+### Heartbeat and Dead-Man's-Switch
+
+The `data/last_worker_connected` heartbeat file is no longer an unconditional process-liveness
+write. It is now loop-liveness-gated: the off-loop watchdog thread only writes "green"
+when it sees a fresh beacon from the on-loop tick task. If the event loop freezes (the
+tick task stops bumping the beacon), the watchdog declares the loop dead and aborts the
+process via `os.abort()`, letting launchd respawn it. See
+[Worker Liveness Recovery](worker-liveness-recovery.md) for the full design.
+
+Key env vars (all provisional, all env-overridable):
+
+| Env Var | Default | Effect |
+|---------|---------|--------|
+| `WORKER_DEADMAN_ENABLED` | `true` | Set to `false` to restore unconditional-green heartbeat write (instant rollback) |
+| `WORKER_DEADMAN_TICK_INTERVAL` | `5` s | How often the on-loop task bumps the beacon |
+| `WORKER_DEADMAN_STALENESS_THRESHOLD` | `90` s | Beacon age at which the watchdog aborts the process |
+| `WORKER_DEADMAN_STARTUP_GRACE_MAX` | `300` s | Grace period before the startup-freeze guard aborts a still-unarmed process |
+
 ### Debug / Diagnostic Env Vars
 
 | Env Var | Default | Effect |

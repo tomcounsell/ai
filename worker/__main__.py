@@ -47,8 +47,41 @@ _shutdown_via_signal = False
 # data/last_worker_connected. Env-tunable for conservative rollout.
 WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"))
 
+# Dead-man's-switch constants (all env-overridable for conservative rollout).
+# Grain of salt: every default below is PROVISIONAL — tune after observing real
+# freeze / false-positive rates in logs/worker.log (per the plan's pre-merge spike).
+# On-loop bump cadence — how often the beacon task refreshes last_loop_tick.
+WORKER_DEADMAN_TICK_INTERVAL: float = float(os.environ.get("WORKER_DEADMAN_TICK_INTERVAL", "5"))
+# Abort once armed if the beacon is older than this. Generous (several multiples
+# of the tick + 30s watchdog cycle) so legitimate on-loop sync blocks don't trip it.
+# Provisional — tune after observing real freeze/false-positive rates.
+WORKER_DEADMAN_STALENESS_THRESHOLD: float = float(
+    os.environ.get("WORKER_DEADMAN_STALENESS_THRESHOLD", "90")
+)
+# Unarmed-grace ceiling: if the beacon is still None this long after the watchdog
+# thread starts, the loop wedged before the first tick (startup freeze) — abort
+# anyway. Provisional — tune after observing real freeze/false-positive rates.
+WORKER_DEADMAN_STARTUP_GRACE_MAX: float = float(
+    os.environ.get("WORKER_DEADMAN_STARTUP_GRACE_MAX", "300")
+)
+# Conservative rollback kill switch: false restores #1767's unconditional green
+# write (the switch only logs, never aborts). Provisional default — tune after
+# observing real freeze/false-positive rates.
+WORKER_DEADMAN_ENABLED: bool = os.environ.get(
+    "WORKER_DEADMAN_ENABLED", "true"
+).strip().lower() not in ("", "0", "false")
+
 # Stop event for the heartbeat daemon thread — set on worker shutdown.
 _heartbeat_stop_event = threading.Event()
+
+
+def _self_kill() -> None:
+    """Kill this process via SIGABRT so launchd can respawn it.
+
+    Extracted as a seam so unit tests can assert the call without aborting
+    the test process.
+    """
+    os.abort()
 
 
 def _asyncio_debug_enabled(env_value: str | None) -> bool:
@@ -71,26 +104,146 @@ def _asyncio_debug_enabled(env_value: str | None) -> bool:
     return stripped not in ("", "0", "false")
 
 
+def _green_heartbeat_write() -> None:
+    """Write data/last_worker_connected, swallowing FS errors.
+
+    The dead-man's switch NEVER aborts on a write failure — a transient
+    filesystem error must not be confused with a frozen event loop. Refreshes
+    the Redis worker PID as a side effect (issue #1271).
+    """
+    from agent.agent_session_queue import _write_worker_heartbeat  # noqa: PLC0415
+
+    try:
+        _write_worker_heartbeat()
+    except Exception as exc:
+        logger.warning("Heartbeat thread: write failed: %s", exc)
+
+
+def _heartbeat_cycle(
+    armed: bool, thread_start: float, beacon_log_next: float
+) -> tuple[bool, float]:
+    """Run ONE dead-man's-switch cycle and return ``(new_armed, new_beacon_log_next)``.
+
+    Pure per-cycle body extracted from :func:`_heartbeat_thread_main` so unit
+    tests can drive a single cycle deterministically (no threads/sleeps). The
+    only side effects are the green heartbeat write, logging, and — on a wedge —
+    the :func:`_self_kill` seam (gated by ``WORKER_DEADMAN_ENABLED``).
+
+    Semantics (issue #1815 fix #1):
+
+    - **Unarmed:** the switch stays unarmed until the first beacon tick newer
+      than ``thread_start`` is observed (writing green on process liveness, the
+      #1767 behaviour). ``None`` is unarmed, NEVER stale.
+    - **Startup-freeze guard:** while still unarmed, if the beacon is ``None``
+      past ``WORKER_DEADMAN_STARTUP_GRACE_MAX`` the event loop wedged before the
+      tick task could initialise — abort (the wedge would otherwise stay silent
+      forever, since ``None`` is never stale).
+    - **Armed:** if ``now - tick <= WORKER_DEADMAN_STALENESS_THRESHOLD`` the loop
+      is ticking → write green + low-cadence beacon-age audit. Otherwise the loop
+      is synchronously frozen → CRITICAL + ``_self_kill`` (SIGABRT) so launchd
+      respawns a healthy worker.
+
+    ``WORKER_DEADMAN_ENABLED=false`` is the rollback kill switch: stale/None-past-
+    ceiling beacons only log, then fall through to an unconditional green write
+    (restoring #1767).
+    """
+    from agent.session_state import get_loop_tick  # noqa: PLC0415
+
+    tick = get_loop_tick()
+    now = time.monotonic()
+
+    if not armed:
+        if tick is not None and tick > thread_start:
+            # First tick after thread start — arm the switch and fall through to
+            # the armed staleness check this same cycle.
+            armed = True
+            logger.info(
+                "[deadman] armed: first beacon tick observed %.1fs after thread start",
+                tick - thread_start,
+            )
+        elif tick is None and (now - thread_start) > WORKER_DEADMAN_STARTUP_GRACE_MAX:
+            # Beacon never ticked past the grace ceiling — startup-window freeze.
+            logger.critical(
+                "[deadman] beacon never ticked %.1fs after start; startup-window freeze — aborting",
+                now - thread_start,
+            )
+            if WORKER_DEADMAN_ENABLED:
+                _self_kill()
+            else:
+                logger.warning("[deadman] WORKER_DEADMAN_ENABLED=false — logging only, not killing")
+            # Rollback path (or _self_kill stubbed in tests): write green so the
+            # dashboard still reflects process liveness.
+            _green_heartbeat_write()
+            return armed, beacon_log_next
+        else:
+            # Still within startup grace, beacon not yet ticked — green write on
+            # process liveness (the #1767 behaviour).
+            _green_heartbeat_write()
+            return armed, beacon_log_next
+
+    # Armed (possibly just-armed this cycle): tick is non-None here.
+    beacon_age = now - tick  # type: ignore[operator]
+    if beacon_age <= WORKER_DEADMAN_STALENESS_THRESHOLD:
+        _green_heartbeat_write()
+        # Beacon-age audit: low cadence (~once/min) so operators can watch the
+        # live margin without spamming the log every cycle.
+        if now >= beacon_log_next:
+            logger.info("[deadman] beacon age=%.1fs", beacon_age)
+            beacon_log_next = now + 60
+        return armed, beacon_log_next
+
+    # Beacon stale — the event loop is synchronously frozen.
+    logger.critical(
+        "[deadman] loop beacon stale: age=%.1fs > %.1fs threshold — aborting for launchd respawn",
+        beacon_age,
+        WORKER_DEADMAN_STALENESS_THRESHOLD,
+    )
+    if WORKER_DEADMAN_ENABLED:
+        _self_kill()
+    else:
+        logger.warning("[deadman] WORKER_DEADMAN_ENABLED=false — logging only, not killing")
+    return armed, beacon_log_next
+
+
 def _heartbeat_thread_main() -> None:
-    """Dedicated daemon thread for worker heartbeat writes.
+    """Dedicated daemon thread for worker heartbeat writes, inverted into a
+    dead-man's switch (issue #1815 fix #1).
 
     Runs independently of the asyncio event loop so PTY/thread-pool
     saturation (incident 2026-06-23, issue #1767) cannot prevent heartbeat
-    writes. The loop wakes every WORKER_HEARTBEAT_INTERVAL seconds and
-    writes data/last_worker_connected via the existing _write_worker_heartbeat().
+    writes. The loop wakes every WORKER_HEARTBEAT_INTERVAL seconds and delegates
+    each cycle to :func:`_heartbeat_cycle`.
 
-    Ref: #1055 for the pattern of moving blocking calls off the hot path.
+    When the on-loop beacon (last_loop_tick) is fresh, writes the green
+    heartbeat as before. When the beacon goes stale beyond
+    WORKER_DEADMAN_STALENESS_THRESHOLD (or never ticks past the startup grace
+    ceiling), logs a CRITICAL and self-kills via SIGABRT so launchd can respawn
+    a healthy worker.
+
+    WORKER_DEADMAN_ENABLED=false restores the unconditional green-write
+    behaviour of issue #1767 (rollback kill switch).
+
+    Ref: #1055 for the executor-isolation pattern.
+    Ref: #1767 for the original off-loop thread design.
+    Ref: #1815 for the dead-man's-switch inversion.
     """
-    # Import deferred to after module-level code runs (avoids circular imports
-    # at the top of the file where agent packages are not yet on sys.path).
-    from agent.agent_session_queue import _write_worker_heartbeat  # noqa: PLC0415
+    thread_start = time.monotonic()
+    armed = False
+    beacon_log_next = 0.0
 
-    logger.info("Heartbeat thread started (interval=%ds)", WORKER_HEARTBEAT_INTERVAL)
+    logger.info(
+        "Heartbeat thread started (interval=%ds, deadman=%s, threshold=%ds, grace=%ds)",
+        WORKER_HEARTBEAT_INTERVAL,
+        WORKER_DEADMAN_ENABLED,
+        WORKER_DEADMAN_STALENESS_THRESHOLD,
+        WORKER_DEADMAN_STARTUP_GRACE_MAX,
+    )
+
+    # wait() returns True only when the stop event is set, so the loop exits on
+    # graceful shutdown and never aborts during teardown (Race 3).
     while not _heartbeat_stop_event.wait(timeout=WORKER_HEARTBEAT_INTERVAL):
-        try:
-            _write_worker_heartbeat()
-        except Exception as exc:
-            logger.warning("Heartbeat thread: write failed: %s", exc)
+        armed, beacon_log_next = _heartbeat_cycle(armed, thread_start, beacon_log_next)
+
     logger.info("Heartbeat thread stopped")
 
 
@@ -522,7 +675,33 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # for the first 5-minute health loop tick.
     _write_worker_heartbeat()
 
-    # Start dedicated heartbeat daemon thread (issue #1767).
+    # Start on-loop liveness beacon task (issue #1815 fix #1).
+    # Must be started BEFORE the heartbeat thread so the thread can observe
+    # the first tick within its startup grace window.
+    async def _loop_tick_task() -> None:
+        """On-loop heartbeat: bumps last_loop_tick so the off-loop watchdog can
+        distinguish a ticking loop from a synchronously-frozen one."""
+        from agent.session_state import bump_loop_tick  # noqa: PLC0415
+
+        bump_loop_tick()  # Initialize before first sleep so watchdog has a baseline
+        while True:
+            await asyncio.sleep(WORKER_DEADMAN_TICK_INTERVAL)
+            bump_loop_tick()
+
+    loop_tick_task = asyncio.create_task(_loop_tick_task(), name="loop-tick")
+
+    def _loop_tick_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return  # Normal shutdown path
+        exc = t.exception()
+        if exc is not None:
+            # The beacon stopping means the watchdog will eventually self-kill;
+            # surface the cause so the crash is diagnosable.
+            logger.error("Loop-tick beacon task exited unexpectedly: %s", exc)
+
+    loop_tick_task.add_done_callback(_loop_tick_task_done)
+
+    # Start dedicated heartbeat daemon thread (issue #1767, inverted #1815).
     # Runs outside the asyncio event loop so PTY/thread-pool saturation
     # cannot starve heartbeat writes. daemon=True ensures it cannot outlive
     # the worker process even on abnormal exit.
@@ -545,15 +724,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             # Guards against unexpected task exit — ordinary exceptions are already caught
             # inside the loop's own try-except.
             logger.error("Health monitor task exited unexpectedly: %s", exc)
-
-    health_task.add_done_callback(_health_task_done)
-
-    def _health_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Health monitor exited unexpectedly: %s", exc)
 
     health_task.add_done_callback(_health_task_done)
 
@@ -690,6 +860,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     health_task.cancel()
     try:
         await health_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel on-loop liveness beacon (issue #1815 fix #1)
+    loop_tick_task.cancel()
+    try:
+        await loop_tick_task
     except asyncio.CancelledError:
         pass
 
