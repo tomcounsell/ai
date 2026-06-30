@@ -332,6 +332,17 @@ class FeatureSettings(BaseModel):
             "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
         ),
     )
+    reflection_pool_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description=(
+            "Thread-pool size for the reflection bulkhead executor. Sync reflections "
+            "run in this dedicated pool instead of the asyncio default pool, preventing "
+            "heavy scans from starving critical-path work (e.g. bridge routing). "
+            "Provisional/tunable. Env: FEATURES__REFLECTION_POOL_WORKERS."
+        ),
+    )
 
 
 class GraniteSettings(BaseModel):
@@ -363,6 +374,32 @@ class GraniteSettings(BaseModel):
             "Plan #1572 / docs/features/granite-pty-production.md."
         ),
     )
+    reprobe_interval_s: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "How often (seconds) to re-probe granite when the circuit is CLOSED. "
+            "Provisional/tunable — tune after observing real ollama outage rates. "
+            "Override via GRANITE_REPROBE_INTERVAL_S env var."
+        ),
+    )
+    breaker_open_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Consecutive probe failures required to trip the circuit to OPEN. "
+            "Provisional/tunable. Override via GRANITE_BREAKER_OPEN_THRESHOLD env var."
+        ),
+    )
+    breaker_cooldown_s: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Seconds the circuit stays OPEN before allowing a half-open re-probe. "
+            "Provisional/tunable. Override via GRANITE_BREAKER_COOLDOWN_S env var."
+        ),
+    )
     pm_model: str = Field(
         default="opus",
         description=(
@@ -382,6 +419,34 @@ class GraniteSettings(BaseModel):
             "Dev role now owns the full SDLC pipeline (issue #1692) and fans "
             "out to Sonnet subagents for parallel work; opus is the default "
             "for the Dev TUI itself. Override via GRANITE__DEV_MODEL."
+        ),
+    )
+
+    # --- Background-task supervisor (Fix #4, issue #1816) ---
+    supervisor_max_restarts: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Max restarts within WORKER_SUPERVISOR_WINDOW_S before the storm cap fires "
+            "and recycles the process via SIGABRT. Conservative default — erring toward "
+            "NOT killing legitimate work. Provisional/tunable. "
+            "Override via WORKER_SUPERVISOR_MAX_RESTARTS env var."
+        ),
+    )
+    supervisor_window_s: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "Rolling window (seconds) for the restart-count denominator. "
+            "Provisional/tunable. Override via WORKER_SUPERVISOR_WINDOW_S env var."
+        ),
+    )
+    supervisor_base_backoff_s: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Base backoff (seconds) before the first respawn; doubles each restart. "
+            "Provisional/tunable. Override via WORKER_SUPERVISOR_BASE_BACKOFF_S env var."
         ),
     )
 

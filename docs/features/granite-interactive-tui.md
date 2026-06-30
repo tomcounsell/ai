@@ -45,8 +45,12 @@ Bridge → Container → Granite + PM/Dev
    container's boundary. Granite consumes the same list shape
    `agent/granite_router.py:276` consumes today.
 9. **Idempotent teardown** — every PTY's `close(force=True)` runs in a
-   `try/finally`; a `pkill -f "claude --permission-mode bypassPermissions"`
-   fallback runs on exit.
+   `try/finally`; on exit `_close_pair_and_reap()` reaps each self-spawned
+   PTY's process group via `os.killpg(getpgid(pid), SIGTERM→SIGKILL)`.
+   Pool-owned pairs are skipped (the pool owns their lifecycle). The
+   machine-wide `pkill -f "claude --permission-mode bypassPermissions"`
+   fallback was removed in #1816 because it could kill bystander `claude`
+   sessions — see [Worker Fault Containment](worker-fault-containment.md).
 10. **Two-PTY coordination is the early risk** — the container's loop is
     single-threaded; reads from both PTYs are not interleaved within a
     single tick. The `await_idle(pty)` invariant: the container only

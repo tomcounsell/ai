@@ -13,6 +13,7 @@ See also: config/reflections.yaml (declaration), docs/features/reflections.md
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,7 +37,7 @@ async def run() -> dict:
         month_ago = _time.time() - (30 * 86400)
 
         # 1. Unsummarized links
-        all_links = Link.query.all()
+        all_links = await asyncio.to_thread(lambda: Link.query.all())
         unsummarized = [
             link
             for link in all_links
@@ -50,7 +51,7 @@ async def run() -> dict:
                 )
 
         # 2. Dead channels
-        all_chats = Chat.query.all()
+        all_chats = await asyncio.to_thread(lambda: Chat.query.all())
         dead_chats = [chat for chat in all_chats if chat.updated_at and chat.updated_at < month_ago]
         if dead_chats:
             findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
@@ -65,7 +66,7 @@ async def run() -> dict:
 
         # 3. Error patterns in recent session transcripts
         recent_cutoff = _time.time() - (7 * 86400)
-        all_sessions = AgentSession.query.all()
+        all_sessions = await asyncio.to_thread(lambda: AgentSession.query.all())
         recent_sessions = [
             s
             for s in all_sessions
@@ -111,7 +112,7 @@ async def run() -> dict:
                 findings.append(f"  {keyword}: {count} occurrences")
 
         # 4. Message volume per chat
-        all_messages = TelegramMessage.query.all()[:10000]
+        all_messages = (await asyncio.to_thread(lambda: TelegramMessage.query.all()))[:10000]
         recent_messages = [m for m in all_messages if m.timestamp and m.timestamp > week_ago]
         chat_volumes: dict[str, int] = {}
         for msg in recent_messages:

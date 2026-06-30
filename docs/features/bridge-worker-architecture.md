@@ -232,8 +232,8 @@ clients well before that window.
 worker/__main__.py startup
     |
     v
-asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
-    |
+supervise("idle-sweeper", run_idle_sweep)   # respawns on unexpected death
+    |                                        # (see Worker Fault Containment #1816)
     v
 loop every IDLE_SWEEP_INTERVAL seconds:
     _sweep_once()

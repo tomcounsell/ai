@@ -39,6 +39,8 @@ if not os.environ.get("VALOR_LAUNCHD"):
 
 logger = logging.getLogger("worker")
 
+# Shared mutable state (granite_available, shutdown_requested, etc.)
+
 # Set to True when SIGTERM is received; causes main() to exit with code 1
 # so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
 _shutdown_via_signal = False
@@ -74,6 +76,37 @@ WORKER_DEADMAN_ENABLED: bool = os.environ.get(
 # Stop event for the heartbeat daemon thread — set on worker shutdown.
 _heartbeat_stop_event = threading.Event()
 
+# Granite re-probe / circuit breaker — provisional, tunable via env.
+# Grain of salt: defaults below are PROVISIONAL — tune after observing real
+# ollama outage / false-positive rates in logs/worker.log.
+# How often to probe granite when the circuit is closed.
+GRANITE_REPROBE_INTERVAL_S: float = float(os.environ.get("GRANITE_REPROBE_INTERVAL_S", "30"))
+# Consecutive probe timeouts/failures before the circuit trips to OPEN.
+GRANITE_BREAKER_OPEN_THRESHOLD: int = int(os.environ.get("GRANITE_BREAKER_OPEN_THRESHOLD", "3"))
+# How long the circuit stays OPEN before allowing a half-open re-probe.
+GRANITE_BREAKER_COOLDOWN_S: float = float(os.environ.get("GRANITE_BREAKER_COOLDOWN_S", "120"))
+
+# Module-level alias — the authoritative flag lives in agent.session_state
+# (so agent_session_queue._worker_loop can read it without a circular import).
+# This alias is provided for readability in worker.__main__ code that writes the flag.
+# GRANITE_AVAILABLE is not a constant; it is mutated by _granite_reprobe_loop.
+
+# Background-task supervisor constants (Fix #4, #1816) — all env-overridable.
+# Grain of salt: defaults below are PROVISIONAL / conservative — tune after
+# observing real respawn cadence in logs/worker.log.
+# Max number of restarts within WORKER_SUPERVISOR_WINDOW_S before the storm
+# cap fires and recycles the process via SIGABRT. Erring toward NOT killing
+# legitimate work — a task that crashes once every few minutes is fine.
+WORKER_SUPERVISOR_MAX_RESTARTS: int = int(os.environ.get("WORKER_SUPERVISOR_MAX_RESTARTS", "5"))
+# Rolling window (seconds) for the restart-count denominator.
+# Provisional — tune based on longest legitimate startup transient.
+WORKER_SUPERVISOR_WINDOW_S: float = float(os.environ.get("WORKER_SUPERVISOR_WINDOW_S", "300"))
+# Base backoff (seconds) before the first respawn; doubles each restart.
+# Provisional — minimum viable grace window before hammering a failing factory.
+WORKER_SUPERVISOR_BASE_BACKOFF_S: float = float(
+    os.environ.get("WORKER_SUPERVISOR_BASE_BACKOFF_S", "1.0")
+)
+
 
 def _self_kill() -> None:
     """Kill this process via SIGABRT so launchd can respawn it.
@@ -82,6 +115,108 @@ def _self_kill() -> None:
     the test process.
     """
     os.abort()
+
+
+def supervise(
+    name: str,
+    factory,
+    *,
+    max_restarts: int = WORKER_SUPERVISOR_MAX_RESTARTS,
+    window_s: float = WORKER_SUPERVISOR_WINDOW_S,
+    base_backoff_s: float = WORKER_SUPERVISOR_BASE_BACKOFF_S,
+) -> asyncio.Task:
+    """Create and supervise a background asyncio Task with exponential-backoff respawn.
+
+    Wraps asyncio.create_task(factory()) and installs a done-callback that
+    respawns the task on unexpected death (any exit that is not a cancellation).
+    Restart timestamps are tracked in a rolling window; if the task crashes more
+    than ``max_restarts`` times within ``window_s`` seconds, the process is
+    recycled unconditionally via ``_self_kill()`` (SIGABRT) so launchd can
+    respawn it clean.
+
+    Backoff: the first respawn waits ``base_backoff_s``, the second waits
+    ``base_backoff_s * 2``, and so on (capped at ``window_s / 2``).
+
+    Storm-cap recycle is UNCONDITIONAL ``os.abort()`` via ``_self_kill()`` —
+    the same SIGABRT seam used by the dead-man's-switch (#1815). Never a bare
+    ``sys.exit(1)``: a ``SystemExit`` raised inside an asyncio done-callback is
+    swallowed by the event loop's callback-exception handler, so the process
+    would keep running and the cap would silently fail to recycle.
+
+    Shutdown guard: cancelled tasks are never respawned (cancellation is the
+    normal shutdown signal). The ``agent.session_state._shutdown_requested``
+    flag is also checked so in-flight tasks during a graceful SIGTERM shutdown
+    are not respawned.
+    """
+    restart_times: list[float] = []
+    restart_count = [0]
+
+    def _done_callback(t: asyncio.Task) -> None:
+        import agent.session_state as _ss_state  # noqa: PLC0415
+
+        if t.cancelled():
+            return  # Normal shutdown — never respawn a cancelled task.
+        if _ss_state._shutdown_requested:
+            return  # Graceful SIGTERM shutdown — suppress respawn.
+
+        exc = t.exception()
+        if exc is not None:
+            logger.warning(
+                "[supervisor] Task %r exited unexpectedly: %s(%s)",
+                name,
+                type(exc).__name__,
+                exc,
+            )
+
+        # Prune restart times outside the rolling window.
+        now = time.monotonic()
+        cutoff = now - window_s
+        while restart_times and restart_times[0] < cutoff:
+            restart_times.pop(0)
+
+        # Storm-cap check — UNCONDITIONAL _self_kill() if exceeded.
+        if len(restart_times) >= max_restarts:
+            logger.critical(
+                "[supervisor] Task %r hit storm cap (%d restarts in %.0fs) — "
+                "recycling process via SIGABRT so launchd can respawn clean.",
+                name,
+                max_restarts,
+                window_s,
+            )
+            # _self_kill() IS os.abort() — every branch reaches this, no exceptions.
+            # Never sys.exit(1): a SystemExit in a done-callback is swallowed by the
+            # event loop so the process would keep running with the cap silently failed.
+            _self_kill()
+            return  # Unreachable — os.abort() terminates the process.
+
+        # Exponential backoff: 1s, 2s, 4s … capped at window_s/2.
+        backoff = min(base_backoff_s * (2 ** len(restart_times)), window_s / 2)
+        restart_count[0] += 1
+        restart_times.append(now)
+        logger.warning(
+            "[supervisor] Respawning task %r (restart #%d, backoff=%.1fs)",
+            name,
+            restart_count[0],
+            backoff,
+        )
+
+        async def _delayed_respawn() -> None:
+            await asyncio.sleep(backoff)
+            import agent.session_state as _ss_state  # noqa: PLC0415
+
+            if _ss_state._shutdown_requested:
+                logger.debug(
+                    "[supervisor] Shutdown requested; cancelling delayed respawn of %r", name
+                )
+                return
+            new_task = asyncio.create_task(factory(), name=name)
+            new_task.add_done_callback(_done_callback)
+
+        asyncio.create_task(_delayed_respawn())
+
+    task = asyncio.create_task(factory(), name=name)
+    task.add_done_callback(_done_callback)
+    return task
 
 
 def _asyncio_debug_enabled(env_value: str | None) -> bool:
@@ -351,6 +486,131 @@ def _load_projects(project_filter: str | None = None) -> dict:
     return all_projects
 
 
+async def _granite_reprobe_loop() -> None:
+    """Background circuit breaker that re-probes granite and updates granite_available.
+
+    States:
+      CLOSED  — probe every GRANITE_REPROBE_INTERVAL_S; success keeps it closed;
+                failure increments the consecutive-failure counter.
+      OPEN    — entered when consecutive failures reach GRANITE_BREAKER_OPEN_THRESHOLD;
+                waits GRANITE_BREAKER_COOLDOWN_S then moves to HALF_OPEN.
+      HALF_OPEN — tries a single probe; success → CLOSED + granite_available=True;
+                  failure → back to OPEN (reset cooldown).
+
+    Logs every state transition. CancelledError exits cleanly (normal shutdown path).
+    The probe call uses asyncio.to_thread so the synchronous ensure_granite_model
+    does not block the event loop.
+    """
+    import agent.session_state as _ss  # noqa: PLC0415
+    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
+
+    # Circuit state strings (lowercase as required by ruff N806)
+    state_closed = "closed"
+    state_open = "open"
+    state_half_open = "half_open"
+
+    # Start closed; initial availability already set by the startup probe.
+    state = state_closed
+    consecutive_failures = 0 if _ss.granite_available else 1  # count startup failure
+
+    logger.debug(
+        "Granite reprobe loop started (state=%s, granite_available=%s)",
+        state,
+        _ss.granite_available,
+    )
+
+    try:
+        while True:
+            if state == state_closed:
+                await asyncio.sleep(GRANITE_REPROBE_INTERVAL_S)
+                ok, detail = await asyncio.to_thread(ensure_granite_model)
+                if ok:
+                    if not _ss.granite_available:
+                        logger.info(
+                            "Granite classifier recovered: %s. Resuming deferred sessions.",
+                            detail,
+                        )
+                        _ss.granite_available = True
+                        _resume_deferred_granite_sessions()
+                    consecutive_failures = 0
+                    # Stay closed
+                else:
+                    consecutive_failures += 1
+                    logger.warning(
+                        "Granite probe failed (%d/%d): %s",
+                        consecutive_failures,
+                        GRANITE_BREAKER_OPEN_THRESHOLD,
+                        detail,
+                    )
+                    if _ss.granite_available:
+                        _ss.granite_available = False
+                        logger.warning(
+                            "Granite unavailable — ENG sessions will be deferred to paused_circuit."
+                        )
+                    if consecutive_failures >= GRANITE_BREAKER_OPEN_THRESHOLD:
+                        state = state_open
+                        logger.warning(
+                            "Granite circuit breaker OPEN after %d consecutive failures. "
+                            "Cooling down for %.0fs before next probe.",
+                            consecutive_failures,
+                            GRANITE_BREAKER_COOLDOWN_S,
+                        )
+
+            elif state == state_open:
+                await asyncio.sleep(GRANITE_BREAKER_COOLDOWN_S)
+                state = state_half_open
+                logger.info("Granite circuit breaker HALF_OPEN — attempting re-probe.")
+
+            elif state == state_half_open:
+                ok, detail = await asyncio.to_thread(ensure_granite_model)
+                if ok:
+                    state = state_closed
+                    consecutive_failures = 0
+                    _ss.granite_available = True
+                    logger.info(
+                        "Granite circuit breaker CLOSED after half-open success: %s. "
+                        "Resuming deferred sessions.",
+                        detail,
+                    )
+                    _resume_deferred_granite_sessions()
+                else:
+                    state = state_open
+                    logger.warning(
+                        "Granite half-open probe failed: %s. Circuit back to OPEN, "
+                        "cooling down for %.0fs.",
+                        detail,
+                        GRANITE_BREAKER_COOLDOWN_S,
+                    )
+
+    except asyncio.CancelledError:
+        logger.debug("Granite reprobe loop cancelled (shutdown).")
+
+
+def _resume_deferred_granite_sessions() -> None:
+    """Set the worker:recovering Redis flag so session_recovery_drip re-queues
+    paused_circuit sessions that were deferred due to granite unavailability.
+
+    Uses a best-effort approach: if Redis is unreachable the drip will simply
+    not fire on the next tick, but granite will be available again at that point
+    so the next enqueue will proceed normally anyway.
+    """
+    try:
+        import os  # noqa: PLC0415
+
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+        project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
+        r = POPOTO_REDIS_DB
+        rec_key = f"{project_key}:worker:recovering"
+        r.set(rec_key, "1", ex=3600)  # TTL: 1 hour, drip clears it when queues drain
+        logger.info(
+            "Set %s flag — session_recovery_drip will re-queue paused_circuit sessions.",
+            rec_key,
+        )
+    except Exception as e:
+        logger.warning("Could not set worker:recovering flag for granite recovery: %s", e)
+
+
 async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
@@ -615,28 +875,36 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
 
     # Step 4b.5: Verify the granite classifier model is present and responsive.
-    # Granite is the routing brain of the PTY container — every PM/Dev turn is
-    # routed by an ollama call against it. Without granite the worker would come
-    # up and silently mis-route every session, so this is a HARD startup
-    # precondition (the granite PTY path is all-or-nothing; there is no runtime
-    # fallback). Every restart path funnels through here — /update's inline
-    # restart, the cron deferred restart-flag → SIGTERM → launchd respawn
-    # (agent_session_queue._trigger_restart), and manual worker-restart — so
-    # gating at startup covers them all, not just the interactive /update path.
-    # Pulls once on miss; exits non-zero if granite still can't be made
-    # available (launchd respawns after ThrottleInterval, self-healing once
-    # granite becomes reachable).
-    from agent.granite_container.granite_classifier import ensure_granite_model
+    # The only ollama call is ensure_granite_model() — a one-time startup probe
+    # and a background re-probe loop. Classification of PM prefix tokens is pure
+    # regex (classify_pm_prefix); PTY sessions run on Claude OAuth subscription,
+    # not ollama. When the probe succeeds, granite_available is set True and ENG
+    # sessions are dispatched normally. When it fails, the worker starts in
+    # DEGRADED mode: granite_available stays False, ENG sessions are deferred to
+    # paused_circuit, and _granite_reprobe_loop retries in the background until
+    # the model becomes reachable (circuit breaker: OPEN after
+    # GRANITE_BREAKER_OPEN_THRESHOLD consecutive failures, COOLDOWN before
+    # half-open re-probe). Non-ENG sessions (TEAMMATE) proceed unaffected.
+    import agent.session_state as _ss_granite  # noqa: PLC0415
+    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
 
     granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)
     if not granite_ok:
-        logger.critical(
-            "Granite classifier unavailable: %s. The PTY container cannot route "
-            "sessions without it — exiting. Fix with 'ollama pull granite4.1:3b'.",
+        logger.warning(
+            "Granite classifier unavailable: %s. Starting in degraded mode — "
+            "ENG sessions will be deferred to paused_circuit until granite "
+            "becomes reachable. Fix with 'ollama pull granite4.1:3b'.",
             granite_detail,
         )
-        sys.exit(1)
-    logger.info("Granite classifier ready: %s", granite_detail)
+        _ss_granite.granite_available = False
+    else:
+        logger.info("Granite classifier ready: %s", granite_detail)
+        _ss_granite.granite_available = True
+
+    # Start _granite_reprobe_loop as a supervised background task — it doubles as the
+    # circuit breaker, toggling granite_available as the model appears/disappears.
+    # supervise() respawns with exponential backoff; storm cap → _self_kill() SIGABRT.
+    reprobe_task = supervise("granite-reprobe", _granite_reprobe_loop)
 
     # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
     # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
@@ -655,11 +923,36 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
     # For startup, we need to kick workers for any pending sessions.
-    from models.agent_session import AgentSession
+    # Gate: when granite is unavailable, ENG sessions are deferred to paused_circuit
+    # so they are not silently mis-routed. Non-ENG sessions (TEAMMATE) proceed.
+    from models.agent_session import AgentSession  # noqa: PLC0415
+    from models.session_lifecycle import transition_status  # noqa: PLC0415
 
     pending_sessions = list(AgentSession.query.filter(status="pending"))
+    deferred_count = 0
     started_workers: set[str] = set()
     for session in pending_sessions:
+        session_type = getattr(session, "session_type", None)
+        if not _ss_granite.granite_available and session_type == "eng":
+            # Defer ENG sessions until granite becomes reachable.
+            try:
+                transition_status(
+                    session,
+                    "paused_circuit",
+                    reason="granite-degrade: startup probe failed; resumes when granite recovers",
+                )
+                deferred_count += 1
+                logger.info(
+                    "Deferred ENG session %s to paused_circuit (granite unavailable)",
+                    getattr(session, "session_id", "?"),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not defer ENG session %s to paused_circuit: %s",
+                    getattr(session, "session_id", "?"),
+                    e,
+                )
+            continue
         wk = session.worker_key
         if wk not in started_workers:
             _ensure_worker(wk, is_project_keyed=session.is_project_keyed)
@@ -668,7 +961,8 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     logger.info(
         f"Worker started: {len(projects)} project(s), "
         f"{len(pending_sessions)} pending session(s), "
-        f"{len(started_workers)} worker loop(s)"
+        f"{len(started_workers)} worker loop(s), "
+        f"{deferred_count} ENG session(s) deferred (granite degraded)"
     )
 
     # Write heartbeat immediately so dashboard shows green without waiting
@@ -713,89 +1007,44 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     )
     heartbeat_thread.start()
 
-    # Start health monitor as background task
-    health_task = asyncio.create_task(_agent_session_health_loop(), name="session-health-monitor")
+    # Start health monitor as a supervised background task (#1816 Fix #4).
+    # supervise() respawns on unexpected death with exponential backoff;
+    # storm cap exceeds → _self_kill() SIGABRT so launchd can respawn clean.
+    health_task = supervise("session-health-monitor", _agent_session_health_loop)
 
-    def _health_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            # Guards against unexpected task exit — ordinary exceptions are already caught
-            # inside the loop's own try-except.
-            logger.error("Health monitor task exited unexpectedly: %s", exc)
+    # Start per-tool timeout sub-loop (issue #1270) — supervised.
+    # Parallel to the main 5-min health loop on its own 30s cadence so the
+    # 30s internal-tier budget can fire within one tick of expiry.
+    tool_timeout_task = supervise("session-tool-timeout-monitor", _agent_session_tool_timeout_loop)
 
-    health_task.add_done_callback(_health_task_done)
-
-    # Start per-tool timeout sub-loop (issue #1270) — parallel to the main 5-min
-    # health loop on its own 30s cadence so the 30s internal-tier budget can fire
-    # within one tick of expiry. Independent done-callback so a crash here is
-    # logged distinctly from the main monitor.
-    tool_timeout_task = asyncio.create_task(
-        _agent_session_tool_timeout_loop(), name="session-tool-timeout-monitor"
-    )
-
-    def _tool_timeout_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Tool-timeout sub-loop exited unexpectedly: %s", exc)
-
-    tool_timeout_task.add_done_callback(_tool_timeout_task_done)
-
-    # Start unified reflection scheduler (moved from bridge — processing belongs in worker)
+    # Start unified reflection scheduler (moved from bridge — processing belongs in worker).
+    # Supervised so a scheduler crash is respawned rather than silently lost.
     reflection_task = None
     try:
         from agent.reflection_scheduler import ReflectionScheduler
 
         _reflection_scheduler = ReflectionScheduler()
-        reflection_task = asyncio.create_task(
-            _reflection_scheduler.start(), name="reflection-scheduler"
-        )
 
-        def _reflection_task_done(t: asyncio.Task) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.error("Reflection scheduler exited unexpectedly: %s", exc)
+        def _make_reflection_task():
+            return _reflection_scheduler.start()
 
-        reflection_task.add_done_callback(_reflection_task_done)
-        logger.info("Reflection scheduler started")
+        reflection_task = supervise("reflection-scheduler", _make_reflection_task)
+        logger.info("Reflection scheduler started (supervised)")
     except Exception as e:
         logger.error(f"Failed to start reflection scheduler: {e}")
 
-    # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
-    notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
+    # Start pub/sub listener — supervised; delivers ~1s session pickup vs 5-min health check.
+    notify_task = supervise("session-notify-listener", _session_notify_listener)
 
-    def _notify_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Session notify listener exited unexpectedly: %s", exc)
-
-    notify_task.add_done_callback(_notify_task_done)
-
-    # Start idle SDK-client sweeper (issue #1128). Worker-internal because
-    # `_active_clients` is process-local — the session-watchdog (separate
-    # process) cannot reach the registry. See `worker/idle_sweeper.py`.
+    # Start idle SDK-client sweeper (issue #1128) — supervised. Worker-internal because
+    # `_active_clients` is process-local — the session-watchdog (separate process)
+    # cannot reach the registry. See `worker/idle_sweeper.py`.
     idle_sweep_task = None
     try:
         from worker.idle_sweeper import run_idle_sweep
 
-        idle_sweep_task = asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
-
-        def _idle_sweep_done(t: asyncio.Task) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.error("Idle sweeper exited unexpectedly: %s", exc)
-
-        idle_sweep_task.add_done_callback(_idle_sweep_done)
-        logger.info("Idle SDK-client sweeper started")
+        idle_sweep_task = supervise("idle-sweeper", run_idle_sweep)
+        logger.info("Idle SDK-client sweeper started (supervised)")
     except Exception as e:
         logger.warning("Failed to start idle sweeper: %s", e)
 
@@ -863,6 +1112,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except asyncio.CancelledError:
         pass
 
+    # Cancel per-tool timeout sub-loop
+    tool_timeout_task.cancel()
+    try:
+        await tool_timeout_task
+    except asyncio.CancelledError:
+        pass
+
     # Cancel on-loop liveness beacon (issue #1815 fix #1)
     loop_tick_task.cancel()
     try:
@@ -884,6 +1140,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             await reflection_task
         except asyncio.CancelledError:
             pass
+
+    # Cancel granite re-probe / circuit breaker loop (Fix #1)
+    reprobe_task.cancel()
+    try:
+        await reprobe_task
+    except asyncio.CancelledError:
+        pass
 
     # Cancel idle-sweeper (issue #1128)
     if idle_sweep_task is not None:

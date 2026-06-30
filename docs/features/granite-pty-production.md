@@ -961,8 +961,10 @@ body), `PM_COMPLIANCE_NUDGE` is written to PM — the same path as an empty `[/d
 
 Hardenings landed by the same audit: mid-loop delivery now schedules onto the
 worker loop captured in `BridgeAdapter.run` (previously every delivery from
-the pexpect thread was skipped as `no_event_loop`); `Container` skips its
-machine-wide `pkill` fallback for pool-owned pairs; the pool respawns with the
+the pexpect thread was skipped as `no_event_loop`); `Container` teardown reaps
+only its own self-spawned PTY process groups via `os.killpg` and never touches
+pool-owned pairs (the machine-wide `pkill -f` fallback was removed in #1816 —
+see [Worker Fault Containment](worker-fault-containment.md)); the pool respawns with the
 original `cwd`, checks pair liveness at acquire, clears the slot event at
 release, and prunes completed respawn tasks; `read_until_idle` declares idle
 only after `QUIESCENCE_S` (2.0s) of byte-silence, evaluated level-triggered
