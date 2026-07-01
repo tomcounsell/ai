@@ -224,7 +224,7 @@ def _run_startup_only(c: Container):
         patch.object(c, "_spawn_pair"),
         patch.object(c, "_close_pair"),
         patch.object(c, "_prime_session"),
-        patch.object(c, "_run_pkill_fallback"),
+        patch.object(c, "_close_pair_and_reap"),
     ):
         return c.run()
 

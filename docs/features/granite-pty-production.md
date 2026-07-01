@@ -372,6 +372,17 @@ the operator does not want.
 > [pm-session-liveness.md — PTY-liveness gates](pm-session-liveness.md#pty-liveness-gates-for-kill-paths)
 > for the full side-by-side comparison of both gates.
 
+## Failure-simulation test harness
+
+The silent-wedge failures this production path is prone to (idle-heuristic
+breakage on a Claude Code UI revision, startup-dialog drift, process hang, loop,
+crash) are reproduced locally and at volume by the
+[Granite Failure-Simulation Test Harness](granite-failure-simulation-harness.md)
+(#1837). It pairs a deterministic seam-injection substrate (always-on, no model)
+with an ollama-backed real-`claude` E2E substrate (free, gated on
+`GRANITE_OLLAMA_SMOKE=1`) that doubles as a canary for new `claude` binary
+releases. Test-only: it changes nothing in this production path.
+
 ## Observability
 
 The adapter writes non-user-visible progress to `agent_session.session_events`

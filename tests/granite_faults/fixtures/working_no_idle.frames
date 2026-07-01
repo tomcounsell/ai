@@ -1,0 +1,7 @@
+✻ Sprouting… (2s · esc to interrupt)
+⏺ Searching the codebase for read_until_idle callers
+✽ Whirlpooling… (7s · esc to interrupt)
+⏺ Editing agent/granite_container/container.py
+✳ Cookin… (12s · esc to interrupt)
+⏺ Running tests/unit/granite_container/test_pty_driver.py
+✢ Honking… (18s · esc to interrupt)
