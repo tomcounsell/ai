@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -156,8 +156,9 @@ and `redis-durability-hardening.md` are both **completed**; this plan builds on 
   `ThreadPoolExecutor` so heavy scans don't starve critical-path work). This plan mirrors
   it exactly for the redis-offload pool.
 - **`worker/__main__.py:891`, `agent/session_health.py:2047`, `agent/session_executor.py:354,486`**
-  — existing `asyncio.to_thread` / `run_in_executor` offloads of sync work at startup and
-  in the health path — establishes that off-loop offload of blocking work is idiomatic here.
+  — existing `asyncio.to_thread` / `run_in_executor` offloads of sync work in the
+  health/execution path — establishes that off-loop offload of blocking work is idiomatic here.
+  (Precedent only; this plan adds one new instrumented seam, `offload_redis`, not raw `to_thread`.)
 - **#1815 `_loop_tick_task`** — the on-loop beacon whose liveness this plan protects.
 
 ## Why Previous Fixes Failed
@@ -166,11 +167,12 @@ and `redis-durability-hardening.md` are both **completed**; this plan builds on 
 |-----------|-------------|----------------------|
 | #1814 (Fix #3) resilient client | Added retry/backoff/health-check so a transient Redis restart reconnects | Bounds *recovery*, not *loop occupancy*: a slow call still blocks the loop for its full duration, and retries make that block **longer**. Fix #4 (off-loop) was explicitly deferred. |
 | #1815 on-loop tick / dead-man's-switch | Detects a synchronously-frozen loop and self-kills | Cannot distinguish "worker wedged" from "Redis slow, loop blocked in a sync redis call" — so a slow Redis can *false-trigger* the self-kill. This plan removes the on-loop block that confuses it. |
-| enqueue-path `to_thread` wrapping | Offloaded the *write* path's Popoto calls | Never covered the *read* hot path (`:1367-1376`) or the startup scans — the two remaining on-loop blocking sites. |
+| enqueue-path `to_thread` wrapping | Offloaded the *write* path's Popoto calls | Never covered the *read* hot path (`:1367-1376`) — the one remaining on-loop, concurrently-running blocking site that starves the tick. |
 
 **Root-cause pattern:** the async migration of Popoto calls was done piecemeal on the
-write/enqueue path but the read hot path and startup scans were left synchronous on the
-loop. This plan finishes the cut-over for the two named sites.
+write/enqueue path but the read hot path was left synchronous on the loop, where it runs
+concurrently with the tick and every session. This plan finishes the cut-over for that one
+site (the startup scans are deliberately left alone — see the Problem-section rationale).
 
 ## Research
 
@@ -184,7 +186,7 @@ against source (below): a real async client is infeasible because Popoto's entir
 
 | Option | Verdict | Rationale |
 |--------|---------|-----------|
-| **`run_in_executor` / thread pool** | ✅ **CHOSEN** | Popoto is sync and *pervasive* (every model, query, index op). redis-py's `redis.Redis` + `ConnectionPool` are **thread-safe** — the pool hands out a distinct connection per concurrent operation. The repo **already** offloads Popoto via `asyncio.to_thread` on the enqueue path (`:321,363,375,404,776,939`), proving thread-safety is already relied upon. Zero ORM changes; surgical cut-over of two call sites. |
+| **`run_in_executor` / thread pool** | ✅ **CHOSEN** | Popoto is sync and *pervasive* (every model, query, index op). redis-py's `redis.Redis` + `ConnectionPool` are **thread-safe** — the pool hands out a distinct connection per concurrent operation. The repo **already** offloads Popoto via `asyncio.to_thread` on the enqueue path (`:321,363,375,404,776,939`), proving thread-safety is already relied upon. Zero ORM changes; surgical cut-over of one call site. |
 | **Real async client (`redis.asyncio`)** | ❌ Rejected | Would require reimplementing Popoto's ORM (models, query builder, index/class sets, save/delete) against an async client — a multi-week rewrite of a third-party package, far beyond a Medium appetite, and would create a **parallel** async ORM alongside the sync one used everywhere else. |
 
 **Thread-safety plan (spelled out, per critique lesson #2):**
@@ -195,7 +197,9 @@ against source (below): a real async client is infeasible because Popoto's entir
 - Offload runs on a **dedicated bounded** `ThreadPoolExecutor` (`_redis_io_pool`,
   `REDIS_IO_POOL_MAX_WORKERS`, default 4, clamped ≥1) — a bulkhead mirroring
   `_reflection_pool` so a slow Redis cannot exhaust the shared asyncio default pool that
-  granite probes / `session_executor` also use.
+  granite probes / `session_executor` also use. There is exactly ONE offload seam
+  (`offload_redis` on `_redis_io_pool`); the plan does NOT mix in raw `asyncio.to_thread`
+  (which would route calls through the unmeasured shared default pool and defeat the metric).
 - **Invariant (documented + guarded by a No-Go):** executor `max_workers` must stay ≤ the
   redis-py pool capacity. Because the pool is unbounded today, any small worker count is
   safe; if anyone later sets `max_connections`, it must be ≥ `REDIS_IO_POOL_MAX_WORKERS +
@@ -215,22 +219,24 @@ against source (below): a real async client is infeasible because Popoto's entir
    preserved:** the pending-check still happens BEFORE `event.clear()` (the existing
    lost-wakeup mitigation, `:1363-1366`).
 
-**Startup (`worker/__main__.py`, sequential):**
+**Startup (`worker/__main__.py`, sequential) — UNCHANGED by this plan:**
 1. `register_worker_pid()` → Redis-verify scan (`:699`) → cleanup/recovery scans
-   (`:772,786,811,827,841,849`) → pending-sessions scan (`:931`) → `_ensure_worker` kick.
-2. Each scan is wrapped in `await offload_redis(...)` (or `asyncio.to_thread` for the
-   one-shot helpers), **awaited sequentially** so the ordering guarantees (index rebuild →
-   corrupted cleanup → class-set → heal → 3a sweep → 3b recover → pending kick) are
-   **unchanged**. The `await` serializes; no `gather`, no reordering.
+   (`:772,786,811,827,841,849`) → pending-sessions scan (`:931`) → `_ensure_worker` kick →
+   `_loop_tick_task` created (`:985`). These run synchronously on the loop exactly as today.
+2. They are **not** offloaded: they precede beacon arming (`:985`), run sequentially with
+   nothing else on the loop, and their order is load-bearing (3a before 3b, `:832-839`).
+   Offloading them would protect no liveness and risk a startup re-order — see No-Gos.
 
 **Liveness composition (#1815):**
-3. The on-loop `_loop_tick_task` keeps bumping `last_loop_tick` every ~5s while offloaded
-   calls run in threads → beacon stays fresh under a slow Redis → the off-loop watchdog
-   does **not** false-SIGABRT. The tick task itself is untouched and stays on-loop.
+3. Once the drain loops are running, the on-loop `_loop_tick_task` keeps bumping
+   `last_loop_tick` every ~5s while the offloaded hot-path idle-check runs in a thread →
+   beacon stays fresh under a slow Redis → the off-loop watchdog does **not** false-SIGABRT.
+   The tick task itself is untouched and stays on-loop.
 
 **Metric surface:**
-4. `offload_redis` times each call, updates module-global `last`/`max` latency gauges, and
-   emits a threshold-gated WARNING; `ui/app.py::dashboard_json` surfaces the gauges.
+4. `offload_redis` times **every** offloaded call (there is only the one hot-path site),
+   updates module-global `last`/`max` latency gauges, and emits a threshold-gated WARNING;
+   `ui/app.py::dashboard_json` surfaces the gauges — so 100% of offloaded Redis I/O is measured.
 
 ## Architectural Impact
 
@@ -238,13 +244,16 @@ against source (below): a real async client is infeasible because Popoto's entir
   `asyncio.get_running_loop().run_in_executor`).
 - **Interface changes:** a new `agent/redis_offload.py` with `offload_redis(fn, *args)`,
   the `_redis_io_pool`, and latency-gauge accessors. No signature changes to existing
-  functions; two call sites change from sync to `await`.
+  functions; one call site (the drain-loop idle-check) changes from sync to `await`, and
+  `ui/app.py::dashboard_json` gains a read-only metric block.
 - **Coupling:** slightly *reduces* on-loop coupling to Redis; adds a bounded, isolated
   bulkhead. The hot-path call site becomes `async`-aware (it is already inside an async
   function).
 - **Data ownership:** unchanged. Redis remains the single store; query semantics identical.
-- **Reversibility:** high. `offload_redis` can be made a synchronous pass-through
-  (`REDIS_OFFLOAD_ENABLED=false`) to restore on-loop behavior; the pool size is env-tunable.
+- **Reversibility:** high and **complete**. The only offloaded site is the one that routes
+  through `offload_redis`, so `REDIS_OFFLOAD_ENABLED=false` makes that seam a synchronous
+  pass-through and restores prior on-loop behavior at **every** cut-over site (there is no raw
+  `to_thread` startup path to leave un-reverted). The pool size is env-tunable.
 
 ## Appetite
 
@@ -255,18 +264,17 @@ cancellation semantics), 1 review round.
 
 **Interactions:**
 - PM check-ins: 1 (confirm executor-vs-async decision + the metric surface shape).
-- Review rounds: 1 (async correctness of the cut-over + confirming the #1815 tick and the
-  startup ordering are preserved).
+- Review rounds: 1 (async correctness of the cut-over + confirming the #1815 tick is preserved).
 
-This is one small new module + two surgical call-site cut-overs + a dashboard field. The
-care goes into (a) not defeating the #1815 tick, (b) not reordering startup, and (c)
-proving no loop freeze under a slow Redis.
+This is one small new module + one surgical call-site cut-over + a dashboard field. The
+care goes into (a) not defeating the #1815 tick and (b) proving no loop freeze under a
+slow Redis. Startup is left entirely untouched.
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Python ≥ 3.11 | `python -c "import sys; assert sys.version_info >= (3, 11)"` | Leak-safe `run_in_executor` cancellation |
+| Python ≥ 3.11 | `python -c "import sys; assert sys.version_info >= (3, 11)"` | Modern `asyncio`/`run_in_executor` semantics (note: an in-flight executor thread still runs to completion on cancel — see Risk 3; this is not force-cancellation) |
 | redis-py thread-safe pool | `python -c "import redis; print(redis.__version__)"` | `ConnectionPool` thread-safety (7.4.0 ✓) |
 | Resilient client present (#1814) | `test -f config/redis_bootstrap.py && echo ok` | Off-thread calls use the retry/backoff client |
 | #1815 tick present | `grep -c "_loop_tick_task\|bump_loop_tick" worker/__main__.py` | Composition target exists |
@@ -280,14 +288,14 @@ proving no loop freeze under a slow Redis.
     thread_name_prefix="redis-io-")` (default 4, clamped ≥1) — the bulkhead.
   - `async def offload_redis(fn, *args, **kwargs)` — `await loop.run_in_executor(_redis_io_pool, functools.partial(fn, *args, **kwargs))`, timing the call, updating latency gauges, and emitting a threshold-gated WARNING. A `REDIS_OFFLOAD_ENABLED` kill switch (default true) makes it a synchronous pass-through for rollback.
   - Latency gauges (`get_last_redis_latency()`, `get_max_redis_latency()`, `reset_max`) — module-global floats, GIL-atomic.
-- **Hot-path cut-over** (`agent_session_queue.py:1367-1376`): replace the synchronous
-  `_has_pending = bool(AgentSession.query.filter(...))` with the awaited `offload_redis(...)`
-  form, **preserving the check-before-`event.clear()` ordering**. No sync fallback left.
-- **Startup cut-over** (`worker/__main__.py`): wrap the `:699` verify scan, the `:931`
-  pending scan, and the `:772/786/811/827/841/849` cleanup/recovery helpers in awaited
-  offload calls (one-shot helpers via `asyncio.to_thread`; the two direct `query.filter`
-  scans via `offload_redis`), **awaited sequentially** to preserve ordering. The
-  `sys.exit(1)`-on-failure semantics of the verify scan are unchanged.
+- **Hot-path cut-over (the ONLY code cut-over)** (`agent_session_queue.py:1367-1376`):
+  replace the synchronous `_has_pending = bool(AgentSession.query.filter(...))` with the
+  awaited `offload_redis(...)` form, **preserving the check-before-`event.clear()` ordering**.
+  No sync fallback left. Every offloaded Redis call in the codebase after this change goes
+  through the single instrumented `offload_redis` seam.
+- **Startup scans left untouched** (`worker/__main__.py:691,699,772,786,811,827,841,849,931`):
+  NOT offloaded. The beacon (`:985`) is created after all of them, so they protect no liveness,
+  and their order is load-bearing — see No-Gos.
 - **Operator metric**: `ui/app.py::dashboard_json` gains a `redis_offload` block
   (`last_latency_s`, `max_latency_s`); a WARNING logs when a single call exceeds
   `REDIS_OFFLOAD_SLOW_THRESHOLD` (default ~1s).
@@ -296,10 +304,10 @@ proving no loop freeze under a slow Redis.
 
 ### Flow
 
-Worker starts → `configure_resilient_redis()` (unchanged, #1814) → startup scans run via
-`offload_redis`/`to_thread`, awaited **in order** → `_loop_tick_task` starts (on-loop,
-unchanged) → drain loops run; the idle-check `offload_redis(...)` executes on
-`_redis_io_pool` so the loop stays free → a slow Redis lengthens *individual* call latency
+Worker starts → `configure_resilient_redis()` (unchanged, #1814) → startup scans run
+synchronously **in order** (unchanged; beacon not yet armed) → `_loop_tick_task` starts
+(on-loop, unchanged, `:985`) → drain loops run; the idle-check `offload_redis(...)` executes
+on `_redis_io_pool` so the loop stays free → a slow Redis lengthens *individual* call latency
 (surfaced on the dashboard + WARNING) but the tick keeps firing and unrelated sessions keep
 progressing → no loop-wide freeze, no false dead-man's-switch abort.
 
@@ -371,17 +379,11 @@ The `lambda` materializes the query result **inside the thread** (Popoto's
 `query.filter` returns a lazy result; wrap in `list(...)` so all Redis I/O happens
 off-loop, then `bool(...)` on the loop). The check stays BEFORE `event.clear()`.
 
-**3. Startup cut-over (`worker/__main__.py`), sequential await, ordering preserved:**
-- `:699` verify scan → `await offload_redis(lambda: list(AgentSession.query.filter(status="pending")))`;
-  keep the `except → sys.exit(1)`.
-- One-shot helpers (`run_cleanup`, `cleanup_corrupted_agent_sessions`, `clean_indexes`
-  loop, `_heal_future_updated_at`, `_sweep_dead_worker_sessions`,
-  `_recover_interrupted_agent_sessions_startup`) → `await asyncio.to_thread(fn)` each,
-  **awaited in the existing order** (3a strictly before 3b — the `await` serializes, so
-  the ordering comment at `:832-839` is honored). `register_worker_pid()` (`:691`, a single
-  write) → `await asyncio.to_thread(register_worker_pid)`.
-- `:931` pending scan → `await offload_redis(lambda: list(AgentSession.query.filter(status="pending")))`
-  before the `_ensure_worker` kick loop.
+**3. Startup scans — NO code change (`worker/__main__.py`):** leave `:691` `register_worker_pid()`,
+the `:699` verify scan (incl. its `except → sys.exit(1)`), the `:772/786/811/827/841/849`
+cleanup/recovery helpers, and the `:931` pending scan exactly as they are — synchronous and
+in-order. They run before the beacon is armed (`:985`), so offloading them protects no liveness,
+and their order is load-bearing (3a before 3b, `:832-839`). Descoped — see No-Gos.
 
 **4. Metric surface (`ui/app.py::dashboard_json`):** add
 `"redis_offload": {"last_latency_s": get_last_redis_latency(), "max_latency_s": get_max_redis_latency()}`
@@ -400,8 +402,9 @@ test.
       `ConnectionError`) to the awaiting caller — NOT swallow it — so the drain loop's
       existing error handling still applies. Test asserts the exception surfaces through
       `run_in_executor`.
-- [ ] The `:699` verify scan still `sys.exit(1)` when the offloaded scan raises (Redis
-      down at boot). Test asserts exit-on-failure is preserved after the cut-over.
+- [ ] The `:699` verify scan still `sys.exit(1)` when the (unchanged, on-loop) scan raises
+      (Redis down at boot). Verify-only: this path is NOT touched by this plan, so the test
+      confirms the descope left boot-time exit semantics intact.
 - [ ] `offload_redis`'s latency-gauge update runs in `finally` even when the call raises —
       test that a raising call still records latency and does not leak the gauge.
 
@@ -429,16 +432,16 @@ test.
 - [ ] `tests/unit/test_agent_session_queue.py` — UPDATE (verify-only): confirm drain
       semantics (pop → idle-check → clear → wait) are unchanged by the offload.
 - [ ] `tests/unit/test_worker_startup.py` / `tests/unit/test_worker_startup_validation.py` /
-      `tests/unit/test_worker_entry.py` — UPDATE: startup scans are now awaited via
-      `offload_redis`/`to_thread`. Confirm the step ORDER (index rebuild → corrupted → class-set
-      → heal → 3a sweep → 3b recover → pending kick) still holds and the verify-scan `sys.exit(1)`
-      path still fires. If any test patched a sync helper expecting a direct on-loop call, UPDATE
-      it to tolerate the `to_thread` hop.
+      `tests/unit/test_worker_entry.py` — UPDATE (verify-only): the startup scans are NOT
+      changed by this plan (descoped). Confirm these tests still pass unchanged — the step ORDER
+      (index rebuild → corrupted → class-set → heal → 3a sweep → 3b recover → pending kick) and
+      the verify-scan `sys.exit(1)` path are untouched. No code change means no test change; this
+      row is a regression guard proving the descope introduced no startup drift.
 - [ ] `tests/unit/test_worker_deadman.py` — UPDATE (verify-only): confirm the tick task and
       watchdog are unchanged; add/point to the composition test (below) proving the tick keeps
       advancing while a Redis call is slow.
 - [ ] `tests/unit/test_worker_session_sweep.py` — UPDATE (verify-only): `_sweep_dead_worker_sessions`
-      is now awaited via `to_thread`; confirm the sweep result/ordering is unchanged.
+      is NOT offloaded (startup is descoped); confirm the sweep result/ordering is unchanged.
 - [ ] New: `tests/unit/test_redis_offload.py` — CREATE: pass-through when disabled; clamp
       `max_workers` ≥ 1; exception propagation; latency gauge update in `finally`; slow-call
       WARNING; concurrent calls run on distinct threads (thread-safety smoke).
@@ -453,15 +456,19 @@ test.
 - **Rewriting Popoto to `redis.asyncio`.** Do NOT. Popoto is pip-installed and its whole ORM
   is synchronous; an async rewrite is a multi-week third-party reimplementation and would
   create a parallel async ORM. The executor is the sanctioned, already-used seam.
-- **Offloading *every* Popoto call in the codebase.** Scope is the two named sites (hot-path
-  drain query + startup scans). A blanket sweep of every `.query.` in the repo is a separate,
-  much larger effort and risks breaking synchronous call sites that are not on the loop.
+- **Offloading the startup scans (`worker/__main__.py`).** Do NOT — this was in an earlier
+  draft and is deliberately descoped. The `_loop_tick_task` beacon is not created until
+  `:985`, *after* every startup scan (`:691,699,772,786,811,827,841,849,931`), so the beacon
+  is unarmed during startup and offloading those scans protects **no** liveness. They are also
+  strictly sequential with nothing else on the loop and their order is load-bearing (3a before
+  3b, `:832-839`). Offloading them buys zero liveness while adding a startup re-ordering hazard.
+  Leave them synchronous and in-order.
+- **Offloading *every* Popoto call in the codebase.** Scope is the ONE named site (the hot-path
+  drain query). A blanket sweep of every `.query.` in the repo is a separate, much larger effort
+  and risks breaking synchronous call sites that are not on the loop.
 - **Moving the #1815 tick task off-loop.** NEVER. The tick is the liveness signal — it MUST
   stay on-loop or it can no longer detect a real synchronous freeze. This plan protects the
   tick; it does not touch it.
-- **Parallelizing startup scans with `asyncio.gather`.** Do NOT. The startup order is
-  load-bearing (3a dead-worker sweep strictly before 3b recovery, `:832-839`). Offload each
-  scan but keep them **sequentially awaited**.
 - **Tightening the redis-py `ConnectionPool` `max_connections`.** Do NOT set it below the
   combined executor workers (`REDIS_IO_POOL_MAX_WORKERS` + `REFLECTION_POOL_WORKERS` +
   default-pool peak). A too-tight pool turns off-loop calls into `BlockingConnectionPool`
@@ -499,12 +506,13 @@ leaked thread finishes and returns its connection to the pool. `daemon`-style
 `ThreadPoolExecutor` threads cannot outlive the process. No shared mutable state is left
 half-written (reads only). Acceptable for a Medium-appetite fix.
 
-### Risk 4: Offloading startup scans changes startup timing/ordering
-**Impact:** A subtle reorder could run recovery (3b) before the dead-worker sweep (3a),
-violating `:832-839`.
-**Mitigation:** Each scan is **awaited sequentially** (never `gather`ed); `await` serializes,
-so the observable order is identical. A startup test asserts the step order and the
-verify-scan `sys.exit(1)` path. No `gather` is introduced (Rabbit Hole + No-Go).
+### Risk 4: Startup timing/ordering regression — ELIMINATED by descope
+**Impact (in an earlier draft):** offloading startup scans risked a reorder running recovery
+(3b) before the dead-worker sweep (3a), violating `:832-839`.
+**Resolution:** The startup scans are **no longer offloaded** (descoped — see No-Gos). They
+remain synchronous and in-order exactly as on HEAD, so this risk does not exist for the
+current scope. The startup tests are retained as verify-only regression guards proving the
+descope introduced no drift. No `gather`, no `await` reordering, no code change at those sites.
 
 ## Race Conditions
 
@@ -521,33 +529,43 @@ recovered. Same guarantee as pre-fix, wider window by one executor round-trip (R
 
 ### Race 2: Concurrent offloaded calls checking out Redis connections
 **Location:** `_redis_io_pool` threads → shared `POPOTO_REDIS_DB` `ConnectionPool`.
-**Trigger:** Multiple worker loops (or startup + a worker) offload Redis calls simultaneously.
+**Trigger:** Multiple worker drain loops offload their idle-check Redis calls simultaneously.
 **Data prerequisite:** Each call needs a live connection.
 **State prerequisite:** The pool must be thread-safe and have capacity.
 **Mitigation:** redis-py's `ConnectionPool` is thread-safe and unbounded (default); each
 call checks out and returns its own connection. Executor `max_workers` ≪ any realistic pool
-cap. No shared client mutation — the client is reassigned only once at startup, before any
-offload. Documented invariant + No-Go against tightening `max_connections`.
+cap. No shared client mutation — the client is reassigned only once at startup (before any
+drain loop and thus before any offload). Documented invariant + No-Go against tightening
+`max_connections`.
 
-### Race 3: Startup offload runs before `configure_resilient_redis()` finishes
-**Location:** `worker/__main__.py` startup.
-**Trigger:** An offloaded scan could theoretically run against the pre-resilient client.
+### Race 3: First offload runs before `configure_resilient_redis()` finishes — cannot occur
+**Location:** startup ordering vs. the drain loop.
+**Trigger:** The (only) offloaded call is the drain-loop idle-check.
 **Data prerequisite:** The resilient client must be installed before the first offload.
 **State prerequisite:** `configure_resilient_redis()` is synchronous and runs at the top of
-startup, before any `await`.
-**Mitigation:** Ordering is guaranteed — `configure_resilient_redis()` (sync, #1814) completes
-before the first awaited offload. No new ordering risk introduced.
+startup; the drain loops (the sole offload site) start only after all startup completes.
+**Mitigation:** Ordering is guaranteed by construction — `configure_resilient_redis()` (sync,
+#1814) completes at the top of startup, long before any drain loop issues an `offload_redis`.
+No new ordering risk introduced.
 
 ## No-Gos (Out of Scope)
 
 - **Rewriting Popoto / introducing `redis.asyncio` for the ORM.** Rejected in Research; would
   create a parallel async ORM. Out of scope.
-- **Offloading Popoto calls beyond the two named sites** (hot-path drain query + startup
-  scans). A repo-wide sweep is a separate effort.
+- **Offloading the startup scans** (`worker/__main__.py:691,699,772,786,811,827,841,849,931`).
+  DESCOPED. The `_loop_tick_task` beacon is not created until `:985`, *after* every startup scan,
+  so the beacon is unarmed during startup and offloading those scans protects **no liveness**.
+  They are strictly sequential with nothing else on the loop, and their order is load-bearing
+  (3a before 3b, `:832-839`). Offloading them would add a startup re-ordering hazard for zero
+  liveness gain. Leave them synchronous, on-loop, and in-order — unchanged from HEAD.
+- **Offloading Popoto calls beyond the ONE named site** (the hot-path drain query). A repo-wide
+  sweep is a separate effort.
 - **Moving or reworking the #1815 `_loop_tick_task` / `last_loop_tick` beacon.** It stays
   on-loop and unchanged — this plan only relieves the loop of the blocking calls that starved it.
-- **Reordering or parallelizing startup steps.** The 3a-before-3b ordering (`:832-839`) and the
-  full startup sequence are preserved by sequential `await`.
+- **Mixing in raw `asyncio.to_thread` as a second offload mechanism.** There is exactly ONE
+  offload seam (`offload_redis` on the instrumented `_redis_io_pool`). Routing any offloaded call
+  through the shared asyncio default pool via bare `to_thread` would leave it unmeasured and
+  could starve the default pool the bulkhead exists to protect. Do not add a parallel mechanism.
 - **Tightening the redis-py `ConnectionPool` `max_connections`.** Would re-introduce a stall
   via blocking checkout; the pool stays unbounded.
 - **[SEPARATE #1814] Fix #2 (SQLite secondary store) and Fix #5 (Redis replication + Sentinel).**
@@ -557,8 +575,8 @@ before the first awaited offload. No new ordering risk introduced.
 
 ## Update System
 
-No update-script or migration changes required. The new module and the two call-site
-cut-overs are pure in-repo Python — no new dependency, no Popoto model/field (so **no
+No update-script or migration changes required. The new module and the single call-site
+cut-over are pure in-repo Python — no new dependency, no Popoto model/field (so **no
 `scripts/update/migrations.py` entry**), no plist change, no service-restart-sequence
 change. The worker is restarted by the standard `./scripts/valor-service.sh worker-restart`
 after merge.
@@ -574,7 +592,7 @@ No agent integration required — this is a worker-internal performance/resilien
 
 - **No new CLI entry point** in `pyproject.toml [project.scripts]`.
 - **No new MCP surface**; the bridge does not import `agent/redis_offload.py` (it is called
-  from the worker drain loop and worker startup). The bridge already gets the resilient
+  only from the worker drain loop's idle-check). The bridge already gets the resilient
   client via `configure_resilient_redis()` (#1814); its own Redis calls are unchanged by
   this plan.
 - **Operator-facing surface:** the `redis_offload` block added to `/dashboard.json`
@@ -588,9 +606,10 @@ No agent integration required — this is a worker-internal performance/resilien
 ### Feature Documentation
 - [ ] Update `docs/features/redis-durability.md` (created by #1814) — replace the "off-loop
       hot path" line in its deferred-roadmap section with a concrete "Off-Loop Redis Access"
-      section describing the `_redis_io_pool` bulkhead, the `offload_redis` seam, the two
-      cut-over sites, and the executor-vs-async decision. (Per the no-historical-artifacts
-      rule: describe the new status quo, not "was deferred, now done".)
+      section describing the `_redis_io_pool` bulkhead, the single `offload_redis` seam, the one
+      cut-over site (the drain-loop idle-check), why the startup scans are deliberately left
+      on-loop (beacon unarmed at boot), and the executor-vs-async decision. (Per the
+      no-historical-artifacts rule: describe the new status quo, not "was deferred, now done".)
 - [ ] Forward-link from `docs/features/worker-liveness-recovery.md` (#1815) noting that the
       off-loop hot path is what keeps the dead-man's-switch tick from false-firing under a
       slow Redis (the composition guarantee).
@@ -608,16 +627,22 @@ No agent integration required — this is a worker-internal performance/resilien
 
 - [ ] The hot-path drain query (`agent_session_queue.py:1367-1376`) executes off the event
       loop via `offload_redis`; no synchronous `AgentSession.query.filter(...)` remains on the
-      loop at that site (no parallel sync path).
-- [ ] The startup scans (`worker/__main__.py:699,931` + the cleanup/recovery helpers) execute
-      off the loop, **awaited sequentially**, with the step order (incl. 3a-before-3b) and the
-      verify-scan `sys.exit(1)` semantics preserved.
+      loop at that site (no parallel sync path). This is the ONLY offloaded site.
+- [ ] The startup scans (`worker/__main__.py:691,699,772,786,811,827,841,849,931`) are
+      **unchanged** — still synchronous, on-loop, and in-order (incl. 3a-before-3b and the
+      verify-scan `sys.exit(1)`). Descoped: the beacon is unarmed at boot, so there is no
+      liveness to protect. Startup tests pass unchanged as a regression guard.
+- [ ] Every offloaded Redis call routes through the single instrumented `offload_redis` seam
+      on `_redis_io_pool` — no raw `asyncio.to_thread` offload is introduced — so 100% of
+      offloaded Redis I/O is latency-measured (the "operator-visible latency" criterion holds).
 - [ ] Under an artificially slowed Redis: `get_loop_tick()` keeps advancing, an unrelated
       coroutine makes progress, and no `_self_kill`/SIGABRT fires (acceptance test passes).
 - [ ] The #1815 `_loop_tick_task` and `last_loop_tick` beacon are unchanged (on-loop).
 - [ ] Redis-call latency is operator-visible: `/dashboard.json` exposes a `redis_offload`
       block and a WARNING logs on calls exceeding `REDIS_OFFLOAD_SLOW_THRESHOLD`.
-- [ ] `REDIS_OFFLOAD_ENABLED=false` restores on-loop behavior (rollback path works).
+- [ ] `REDIS_OFFLOAD_ENABLED=false` restores prior on-loop behavior at **every** cut-over site
+      — because the sole cut-over site routes through `offload_redis`, the kill switch is a
+      complete rollback (no un-reverted `to_thread` path exists).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`): `docs/features/redis-durability.md` gains the
       off-loop section; `worker-liveness-recovery.md` forward-links the composition.
@@ -635,15 +660,15 @@ NEVER builds directly.
   - Agent Type: async-specialist
   - Resume: true
 
-- **Builder (startup-scans)**
-  - Name: startup-builder
-  - Role: `worker/__main__.py` startup-scan cut-over (sequential await, ordering preserved) + dashboard `redis_offload` block
+- **Builder (dashboard-metric)**
+  - Name: metric-builder
+  - Role: `ui/app.py::dashboard_json` `redis_offload` metric block (lazy-import the gauge accessors). Does NOT touch `worker/__main__.py` startup scans (descoped).
   - Agent Type: async-specialist
   - Resume: true
 
 - **Validator (loop-freeze)**
   - Name: freeze-validator
-  - Role: verify off-loop cut-over, slow-Redis acceptance test, #1815 tick composition, startup ordering
+  - Role: verify off-loop cut-over, single-mechanism (`offload_redis`-only) invariant, slow-Redis acceptance test, #1815 tick composition, and that startup scans are unchanged
   - Agent Type: validator
   - Resume: true
 
@@ -667,27 +692,28 @@ NEVER builds directly.
 - Cut over `agent_session_queue.py:1367-1376` to `await offload_redis(lambda: list(...))`,
   preserving the check-before-`event.clear()` ordering. Leave NO sync fallback at the site.
 
-### 2. Startup-scan cut-over + dashboard metric
-- **Task ID**: build-startup
+### 2. Dashboard metric block
+- **Task ID**: build-metric
 - **Depends On**: build-offload
-- **Validates**: tests/unit/test_worker_startup.py, tests/unit/test_worker_startup_validation.py, tests/unit/test_worker_entry.py
-- **Assigned To**: startup-builder
+- **Validates**: dashboard `redis_offload` shape assertion (in test_redis_offload or a ui test)
+- **Assigned To**: metric-builder
 - **Agent Type**: async-specialist
 - **Parallel**: false
-- Wrap `:699` and `:931` scans in `await offload_redis(...)`; wrap the one-shot cleanup/recovery
-  helpers + `register_worker_pid` in `await asyncio.to_thread(...)`, **awaited sequentially**
-  (3a strictly before 3b). Preserve the verify-scan `sys.exit(1)`.
-- Add the `redis_offload` block to `ui/app.py::dashboard_json` (lazy-import the accessors).
+- Add the `redis_offload` block (`last_latency_s`, `max_latency_s`) to `ui/app.py::dashboard_json`
+  (lazy-import the gauge accessors, matching the existing lazy-import style there).
+- Do NOT touch `worker/__main__.py` startup scans — they are descoped and stay unchanged.
 
 ### 3. Validate off-loop behavior + composition
 - **Task ID**: validate-freeze
-- **Depends On**: build-offload, build-startup
+- **Depends On**: build-offload, build-metric
 - **Validates**: tests/integration/test_slow_redis_no_loop_freeze.py (create)
 - **Assigned To**: freeze-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the slow-Redis acceptance test: tick keeps advancing, unrelated coroutine progresses,
-  no SIGABRT. Confirm startup ordering + `sys.exit(1)` preserved. Confirm #1815 tick untouched.
+  no SIGABRT. Confirm the ONLY offloaded site is the hot-path drain query via `offload_redis`
+  (no raw `to_thread` offload added). Confirm the startup scans are unchanged from HEAD (still
+  synchronous, in-order, `sys.exit(1)` intact). Confirm #1815 tick untouched.
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -714,16 +740,19 @@ NEVER builds directly.
 | Lint clean | `python -m ruff check agent/redis_offload.py agent/agent_session_queue.py worker/__main__.py ui/app.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/redis_offload.py agent/agent_session_queue.py worker/__main__.py` | exit code 0 |
 | Offload module exists | `test -f agent/redis_offload.py && echo ok` | output contains `ok` |
-| Hot path offloaded | `grep -c "offload_redis" agent/agent_session_queue.py` | output > 0 |
-| No sync hot-path scan left | `grep -c "_has_pending = bool(\s*$" agent/agent_session_queue.py` | match count == 0 |
-| Startup scans offloaded | `grep -c "offload_redis\|asyncio.to_thread\|run_in_executor" worker/__main__.py` | output > 0 |
+| Hot path imports the seam | `grep -c "from agent.redis_offload import offload_redis" agent/agent_session_queue.py` | output ≥ 1 |
+| Hot-path idle-check IS offloaded (guaranteed-green, portable) | `python3 -c "import re; print(1 if re.search(r'_has_pending\s*=\s*bool\(\s*await\s+offload_redis\(', open('agent/agent_session_queue.py').read()) else 0)"` | output `1` — matches the exact two-line form the builder writes |
+| Old on-loop `_has_pending` scan is gone | `python3 -c "import re; print(1 if re.search(r'_has_pending\s*=\s*bool\(\s*AgentSession\.query\.filter', open('agent/agent_session_queue.py').read()) else 0)"` | output `0` — the sync-on-loop form no longer exists |
+| Startup scans NOT offloaded (descoped) | `grep -c "offload_redis" worker/__main__.py` | match count == 0 |
+| Startup file has no added offload lines | `git diff --unified=0 -- worker/__main__.py \| grep -cE "^\+.*(offload_redis|asyncio\.to_thread|run_in_executor)"` | match count == 0 (startup untouched) |
 | #1815 tick preserved | `grep -c "_loop_tick_task\|bump_loop_tick" worker/__main__.py` | output > 0 |
 | Tick NOT offloaded | `grep -c "offload_redis(.*bump_loop_tick\|to_thread(.*bump_loop_tick" worker/__main__.py` | match count == 0 |
 | Bulkhead pool present | `grep -c "ThreadPoolExecutor" agent/redis_offload.py` | output > 0 |
+| Single instrumented seam | `grep -c "run_in_executor(_redis_io_pool" agent/redis_offload.py` | output == 1 |
 | No async-redis ORM rewrite | `grep -rc "redis.asyncio" agent/redis_offload.py agent/agent_session_queue.py` | match count == 0 |
 | Metric on dashboard | `grep -c "redis_offload" ui/app.py` | output > 0 |
 | Rollback switch present | `grep -c "REDIS_OFFLOAD_ENABLED" agent/redis_offload.py` | output > 0 |
-| Startup ordering intact | `grep -n "Step 3a\|Step 3b" worker/__main__.py` | 3a line precedes 3b line |
+| Startup ordering unchanged | `grep -n "Step 3a\|Step 3b" worker/__main__.py` | 3a line precedes 3b line (unchanged from HEAD) |
 
 ## Open Questions
 
@@ -734,9 +763,13 @@ NEVER builds directly.
 2. **Slow-call threshold.** `REDIS_OFFLOAD_SLOW_THRESHOLD=1.0s` for the WARNING — right level,
    or align to `socket_timeout` (5s) so it only fires near the retry ceiling? Plan ships 1s to
    surface early degradation.
-3. **`register_worker_pid` offload.** It is a single write, not a scan. Plan offloads it via
-   `to_thread` for uniformity; confirm that is desired vs. leaving the one small write on-loop.
-4. **Startup-scan mechanism split.** Plan uses `offload_redis` for the two direct
-   `query.filter` scans and `asyncio.to_thread` (default pool) for the one-shot cleanup
-   helpers, to avoid routing heavy one-shot startup scans through the small hot-path bulkhead.
-   Confirm this split reads as one mechanism (off-loop offload), not two parallel systems.
+3. **`register_worker_pid` offload — RESOLVED (dropped).** It is a single startup write, not a
+   scan, and runs before the beacon is armed. Offloading it was scope creep with no liveness
+   benefit; it stays on-loop and unchanged, consistent with the startup-scan descope.
+4. **Offload mechanism — RESOLVED (one mechanism).** There is exactly ONE offload seam:
+   `offload_redis` on the instrumented, dedicated `_redis_io_pool`. The earlier draft's split
+   (some sites via `offload_redis`, some via raw `asyncio.to_thread` on the shared default pool)
+   is removed — it left most sites unmeasured and routed heavy scans through the very default
+   pool the bulkhead protects. With the startup scans descoped, the sole offloaded site (the
+   hot-path drain query) routes through `offload_redis`, so 100% of offloaded Redis I/O is
+   measured. No open question remains; this is a coherent single mechanism.

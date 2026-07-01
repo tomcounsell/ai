@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -59,8 +59,13 @@ mirroring the existing email/heartbeat freshness pattern.
 - Operator surface: `data/session_archive.db` `_meta` row (last-export ts, row count,
   kind), a new `archive` block on `dashboard.json` + `/health`, and a
   `session-archive-freshness` doctor check.
-- `valor-session-archive` CLI (`export` / `restore` / `status` subcommands) for agent
-  reachability and manual ops.
+- `valor-session-archive` CLI for agent reachability and safe manual ops: a `status`
+  subcommand (prints `get_archive_status()` JSON) and a **read-only** `restore --dry-run`
+  subcommand (reports the guard decision + would-restore count without writing). The
+  write paths (`export`, live `restore`) are deliberately **not** exposed as CLI
+  subcommands — export runs automatically (daemon thread + terminal hook) and restore
+  runs automatically at guarded startup, so a manual write subcommand would only
+  duplicate that and add a footgun. See No-Gos.
 - Docs: implement the currently roadmap-only "Fix #2" section of
   `docs/features/redis-durability.md`.
 
@@ -74,7 +79,11 @@ mirroring the existing email/heartbeat freshness pattern.
 
 **Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045` (main, plan time)
 **Issue filed at:** #1825, part of the #1818 resilience cluster; #1814 merged as PR #1824.
-**Disposition:** Unchanged — all cited file:line anchors re-verified at HEAD below.
+**Disposition:** Anchors re-verified at HEAD during the post-critique revision. Two
+worker startup anchors were corrected (the `if dry_run: return` guard at 746-751 and the
+`register_callbacks`/index-rebuild layout at 753-764) so restore lands below the dry-run
+guard; the heartbeat-thread anchor was tightened to 1003-1005. The `id`/`AutoKeyField`
+key-preservation fact and the two-writer thread model were added below.
 
 **File:line references verified at HEAD (`b99e2958`):**
 - `models/session_lifecycle.py:221` — `finalize_session(...)` signature. Confirmed.
@@ -85,24 +94,56 @@ mirroring the existing email/heartbeat freshness pattern.
   authoritative Redis save. Confirmed `TERMINAL_STATUSES` at line 61 and `ALL_STATUSES`
   at line 97.
 - `worker/__main__.py:695-703` — "Redis connection verified" block (`AgentSession.query.filter(status="pending")`).
-  The guarded restore step (new "Step 0") slots in **immediately after line 703** and
-  **before** the Step 1 index rebuild at line 764. Confirmed.
-- `worker/__main__.py:998-1008` — heartbeat daemon thread spawn
-  (`threading.Thread(target=_heartbeat_thread_main, daemon=True)`). The export daemon
-  thread is spawned adjacent to it using the identical pattern. Confirmed.
+  Re-verified at HEAD.
+- `worker/__main__.py:746-751` — the `if dry_run: ... return` guard. **Restore MUST run
+  below this guard**, not after line 703, or a `--dry-run` boot against an empty Redis
+  would rehydrate/mutate Redis (a dry run must never write). Re-verified at HEAD.
+- `worker/__main__.py:753-762` — callback/handler registration (`register_callbacks`).
+  Restore slots into the **751→753 gap**: after the dry-run `return` and **before**
+  handler registration and the Step 1 index rebuild. This keeps Race Condition #2's
+  invariant (restore completes before any handler can create a new session) while
+  respecting the dry-run guard. Re-verified at HEAD.
+- `worker/__main__.py:764` — Step 1 index rebuild (`run_cleanup()`); restore precedes it
+  so the rebuild reindexes the freshly-restored rows (they are otherwise not queryable —
+  see the cold-boot success criterion). Re-verified at HEAD.
+- `worker/__main__.py:1003-1005` — heartbeat daemon thread spawn
+  (`threading.Thread(target=_heartbeat_thread_main, name="worker-heartbeat", daemon=True)`).
+  The export daemon thread is spawned adjacent to it using the identical pattern.
+  Re-verified at HEAD.
 - `agent/session_health.py:3001-3011` — `_write_worker_heartbeat()` uses the
   write-temp-then-`os.replace()` atomic file pattern. This is the in-repo precedent for
   atomic writes (though the archive uses a SQLite transaction instead — see Technical
   Approach for why). Confirmed.
 - `analytics/collector.py:9-31` — existing in-repo SQLite usage: `sqlite3`,
   `_DB_DIR = Path(__file__).parent.parent / "data"`, `PRAGMA journal_mode=WAL`,
-  module-level connection, `_SQLITE_TIMEOUT = 5`. This is the pattern the archive
-  mirrors. Confirmed.
+  `_SQLITE_TIMEOUT = 5`, **and a single module-level `_sqlite_conn` opened with the
+  default `check_same_thread=True`** (line 30-31). The archive borrows the file/WAL/
+  timeout shape but **must NOT** copy the single-shared-connection detail: analytics is
+  written from one thread, whereas this archive is written from **two** (see the
+  two-writer note below). Re-verified at HEAD.
+- `models/agent_session.py:137` — `id = AutoKeyField()` is the **real persisted key**;
+  `agent_session_id` (lines 1124-1132) is only a `@property`/setter alias. Critically,
+  `_normalize_kwargs` at **lines 805-806** *pops and discards* any `agent_session_id`
+  kwarg (`# AutoKeyField, ignore`), while an explicit `id=` kwarg is honored. Verified
+  empirically at HEAD: `AgentSession(id=X, ...).save()` preserves the key and
+  `query.get(id=X)` finds it; `AgentSession(agent_session_id=X, ...)` regenerates a fresh
+  UUID (X is dropped). AutoKeyField mints a new value only when `id` is empty
+  (`auto_field_mixin.py:285-301`). **This is the crux of Blocker #1**: export/restore
+  must key on `id`, not `agent_session_id`, or the key regenerates on restore and every
+  `parent_agent_session_id` link dangles.
+- **Two-writer thread model (Blocker #2, verified by design):** `export_all()` runs on
+  the periodic **daemon thread**; `export_session()` runs inside `finalize_session`,
+  which executes on the **asyncio event-loop thread**. SQLite connection objects are
+  thread-affine under the default `check_same_thread=True` — sharing one module-level
+  connection across these two threads raises `sqlite3.ProgrammingError`. WAL +
+  busy-timeout do NOT fix this (they serialize *separate* connections/processes, not
+  cross-thread reuse of one object). Mitigation stated in Technical Approach / Risks /
+  Race Conditions.
 - `ui/app.py:507-548` — `/dashboard.json` route; `_get_email_health()` (388-421) is the
   freshness-block template to mirror; `_session_to_json` at 424. Confirmed.
 - `models/agent_session.py:84-336` — `AgentSession` field set (all `Field`/`KeyField`/
-  `IndexedField`/`DatetimeField`/`DictField`/`ListField` declarations). `query.all()`
-  used at line 988. Confirmed.
+  `IndexedField`/`DatetimeField`/`DictField`/`ListField` declarations), with the key
+  `id = AutoKeyField()` at line 137. `query.all()` used at line 988. Confirmed.
 - `.gitignore:171-181` — `*.db`, `*.db-shm`, `*.db-wal`, and `data/` are already
   ignored, so `data/session_archive.db` and its WAL sidecars are never committed. Confirmed.
 
@@ -141,9 +182,15 @@ intact. Premises hold.
 No external research needed — `sqlite3` is stdlib and already used in-repo. The only
 substrate question (how to enumerate/rebuild all `AgentSession` fields for a
 high-fidelity round-trip) is answered by Popoto source: `session._meta.fields` is the
-field map, and reconstruction is `AgentSession(**field_kwargs).save()` (the same path
-`async_create` funnels through). Datetime/dict/list fields are the fidelity risk and
-are handled explicitly (see Risks and Rabbit Holes).
+field map, and reconstruction is `AgentSession(**field_kwargs).save()`. **Key
+preservation is mandatory** — the field map includes the real `id` (`AutoKeyField`), and
+the restore kwargs MUST carry `id=<archived id>` so the AutoKey is *not* regenerated.
+Passing the `agent_session_id` alias instead is a trap: `_normalize_kwargs`
+(`models/agent_session.py:805-806`) pops it, and Popoto mints a fresh UUID, orphaning
+every `parent_agent_session_id` reference. Empirically verified at HEAD: explicit `id=`
+survives `save()` and `query.get(id=...)`; `agent_session_id=` does not. Datetime/dict/
+list fields are the additional fidelity risk and are handled explicitly (see Risks and
+Rabbit Holes).
 
 ## Data Flow
 
@@ -165,11 +212,18 @@ path. Three flows:
    both the Redis scan and the SQLite write are blocking.
 
 3. **Cold start → restore (startup, guarded).**
-   `_run_worker()` calls `session_archive.restore_if_empty()` right after the Redis
-   connection is verified and **before** the index rebuild. The function checks the
-   empty-Redis guard (below); on a provably-empty Redis it rehydrates every archived
-   row back into Redis via `AgentSession(**fields).save()`; on any non-empty Redis it
-   logs and returns without touching Redis.
+   `_run_worker()` calls `session_archive.restore_if_empty()` **after the `if dry_run:
+   return` guard** (`worker/__main__.py:746-751`) and **before** the Step 1 index rebuild
+   (line 764) — i.e. in the 751→753 gap. Placing it below the dry-run guard is
+   load-bearing: a `--dry-run` boot must observe/report but never mutate Redis, so restore
+   (which writes) cannot run above the guard. The function checks the empty-Redis guard
+   (below); on a provably-empty Redis it rehydrates every archived row back into Redis via
+   `AgentSession(id=<archived id>, **other_fields).save()` — **the archived `id` is passed
+   explicitly** so the AutoKey is preserved and parent/child links stay intact (never the
+   `agent_session_id` alias, which `_normalize_kwargs` drops). On any non-empty Redis it
+   logs and returns without touching Redis. Rehydrated rows are not queryable by
+   secondary index until the Step 1 rebuild runs immediately after, which is why restore
+   must precede it.
 
 **Empty-Redis guard (precise):** restore proceeds **iff BOTH** are true:
 `AgentSession.query.all()` returns zero records **AND** a bounded `SCAN` for keys
@@ -226,23 +280,39 @@ well-tested empty-Redis guard — not volume of code.
 ### Key Elements
 
 - **`agent/session_archive.py`** — the whole secondary store in one module:
-  - `_connect()` — opens/creates `data/session_archive.db` with WAL journal mode and a
-    bounded busy-timeout so concurrent reads (dashboard/CLI) never block the writer.
-    One `sessions` table (promoted columns `agent_session_id` PK, `session_id`,
-    `project_key`, `status`, `updated_at`, plus a `payload` JSON blob holding the full
-    `_meta.fields` snapshot) and one `_meta` table (`last_export_ts`, `row_count`,
+  - `_connect()` — **opens a fresh connection per operation** (open at the start of each
+    `export_session`/`export_all`/`restore_if_empty`/`get_archive_status` call, close in a
+    `finally`), created with WAL journal mode and a bounded busy-timeout. This differs
+    deliberately from `analytics/collector.py`'s single module-level connection: the
+    archive is written from **two threads** (the periodic daemon thread and the
+    event-loop `finalize_session` hook), and a shared connection under the default
+    `check_same_thread=True` would raise `sqlite3.ProgrammingError` when reused across
+    threads. A per-operation connection sidesteps thread-affinity entirely; WAL +
+    busy-timeout then serialize the two short-lived connections at the DB level. (An
+    equivalent alternative — one `check_same_thread=False` connection guarded by an
+    explicit `threading.Lock` — is viable but strictly more error-prone; per-operation
+    connections are chosen for simplicity and are cheap for this low-frequency workload.)
+    One `sessions` table (promoted columns **`id` PK** — the real `AutoKeyField` key,
+    NOT the `agent_session_id` alias — `session_id`, `project_key`, `status`,
+    `updated_at`, plus a `payload` JSON blob holding the full `_meta.fields` snapshot,
+    which itself includes `id`) and one `_meta` table (`last_export_ts`, `row_count`,
     `kind`).
-  - `export_session(session)` — serialize one session's full field set, upsert one row
-    in a single transaction, refresh `_meta` (`kind="terminal"`). Fast, single-row.
+  - `export_session(session)` — serialize one session's full field set (keyed on the
+    real `id`), upsert one row in a single transaction on its own connection, refresh
+    `_meta` (`kind="terminal"`). Fast, single-row.
   - `export_all()` — `AgentSession.query.all()` → upsert every row in **one**
-    transaction, refresh `_meta` (`kind="periodic"`). Rows present in the DB but absent
-    from Redis are **retained** (the archive is a superset floor, never prunes live-set
-    deletions — deletion is not a durability event we want to propagate on a cold start).
+    transaction on its own connection, refresh `_meta` (`kind="periodic"`). Rows present
+    in the DB but absent from Redis are **retained** (the archive is a superset floor,
+    never prunes live-set deletions — deletion is not a durability event we want to
+    propagate on a cold start).
   - `restore_if_empty()` — apply the empty-Redis guard; on pass, iterate archived rows
-    and `AgentSession(**fields).save()` each (idempotent — re-running on a now-populated
-    Redis fails the guard and no-ops). Returns a structured result
-    `{restored: int, skipped_reason: str|None}`.
-  - `get_archive_status()` — read `_meta` + `sqlite_master`; return
+    and `AgentSession(id=<archived id>, **other_fields).save()` each — **the archived
+    `id` is passed explicitly so the AutoKey is preserved** (verified: an explicit `id=`
+    survives save; the `agent_session_id` alias is dropped by `_normalize_kwargs`).
+    Idempotent — re-running on a now-populated Redis fails the guard and no-ops. Returns
+    a structured result `{restored: int, skipped_reason: str|None}`.
+  - `get_archive_status()` — open a short-lived read connection, read `_meta` +
+    `sqlite_master`; return
     `{db_path, exists, row_count, last_export_ts, last_export_age_s, kind, healthy}`
     for the dashboard, `/health`, doctor, and CLI. Never raises (returns a
     `healthy=False` shape on any error).
@@ -250,10 +320,13 @@ well-tested empty-Redis guard — not volume of code.
 - **Periodic daemon thread** — `worker/__main__.py` spawns `worker-session-archive`
   alongside the heartbeat thread; each cycle calls `export_all()` and sleeps
   `SESSION_ARCHIVE_INTERVAL`.
-- **Guarded restore step** — one call in `_run_worker` startup before index rebuild.
-- **`valor-session-archive` CLI** — `export` (force full sweep), `restore`
-  (`--dry-run` reports the guard decision + would-restore count without writing),
-  `status` (prints `get_archive_status()` as JSON).
+- **Guarded restore step** — one call in `_run_worker` startup, below the dry-run guard
+  and before the Step 1 index rebuild.
+- **`valor-session-archive` CLI** — read-only surface only: `status` (prints
+  `get_archive_status()` as JSON) and `restore --dry-run` (reports the guard decision +
+  would-restore count without writing). No `export` or live-`restore` write subcommands —
+  those paths run automatically (daemon thread + terminal hook / guarded startup) and a
+  manual write subcommand would only duplicate them and add a footgun.
 - **Doctor + dashboard** — freshness surfaces mirroring email/heartbeat.
 
 ### Flow
@@ -268,6 +341,28 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
 
 ### Technical Approach
 
+- **Connection model — per-operation connection (NOT a shared module-level one).**
+  Every public entry point opens its own `sqlite3.Connection` at the top of the call and
+  closes it in a `finally`. This is a deliberate divergence from
+  `analytics/collector.py`'s reused module-level `_sqlite_conn`. The reason is the
+  **two-writer thread model**: `export_all()` runs on the periodic **daemon thread**
+  while `export_session()` runs (via the `finalize_session` hook) on the **asyncio
+  event-loop thread**. A SQLite connection under the default `check_same_thread=True` is
+  bound to its creating thread; reusing one shared connection across those two threads
+  raises `sqlite3.ProgrammingError`. WAL + busy-timeout do **not** address this — they
+  serialize *distinct* connections/processes at the file level, not cross-thread reuse of
+  a single connection object. A per-operation connection removes thread-affinity
+  concerns entirely and is cheap at this workload (single-row terminal upserts + a 5-min
+  full sweep). (The alternative — one `check_same_thread=False` connection + an explicit
+  `threading.Lock` around every use — is functionally equivalent but easier to get wrong;
+  per-operation is preferred.)
+- **Key preservation on restore.** The archive stores the real `id` (`AutoKeyField`) as
+  the primary column and inside the JSON payload, and restore reconstructs via
+  `AgentSession(id=<archived id>, **other_fields).save()`. This is mandatory: verified at
+  HEAD, an explicit `id=` is honored and preserved through `save()`, whereas the
+  `agent_session_id` alias is popped by `_normalize_kwargs` (`models/agent_session.py:805-806`)
+  and a fresh UUID is minted — which would silently dangle every `parent_agent_session_id`
+  / child linkage at cold start. Never key on `agent_session_id`.
 - **Atomicity mechanism — SQLite transaction, deliberately NOT temp-file-rename.**
   The crash-safe primitive here is a single `BEGIN IMMEDIATE ... COMMIT` transaction:
   SQLite in WAL mode is ACID, so a crash mid-commit rolls the whole batch back and a
@@ -280,12 +375,14 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
   called out so review does not flag it as a missing atomicity guard.
 - **Serialization fidelity.** `export_*` enumerates `session._meta.fields` and reads
   each attribute into a dict, converting `datetime` → ISO-8601 string and leaving
-  dict/list fields as JSON-native. The whole dict is stored as a JSON `payload` column,
-  with `agent_session_id`/`session_id`/`project_key`/`status`/`updated_at` promoted to
-  real columns for queryability and the restore ordering. On restore, ISO strings are
-  parsed back to `datetime` for `DatetimeField`/`SortedField`/`created_at` before
-  `AgentSession(**fields).save()`. The datetime round-trip is the one fidelity risk
-  and gets a dedicated test.
+  dict/list fields as JSON-native. The whole dict is stored as a JSON `payload` column
+  (including the real `id`), with `id`/`session_id`/`project_key`/`status`/`updated_at`
+  promoted to real columns for queryability and the restore ordering. On restore, ISO
+  strings are parsed back to `datetime` for `DatetimeField`/`SortedField`/`created_at`,
+  and the row is reconstructed via `AgentSession(id=<archived id>, **other_fields).save()`
+  so the key is preserved (see Key preservation above). The datetime round-trip and the
+  key/parent-child-graph preservation are the two fidelity risks and each gets a
+  dedicated test.
 - **Empty-Redis guard (exact).** In `restore_if_empty()`:
   1. `records = list(AgentSession.query.all())`; if `records` is non-empty → skip
      (`skipped_reason="redis_has_records"`).
@@ -295,11 +392,15 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
      not a gate.
   4. Only when 1 AND 2 are both empty: rehydrate. Guard is evaluated **once**, before
      any write; the whole function is a no-op on any non-empty Redis.
-- **Startup ordering.** Restore runs after "Redis connection verified"
-  (`worker/__main__.py:703`) and **before** the Step 1 index rebuild (line 764), so the
-  index rebuild indexes the freshly-restored rows. It is exception-isolated (a restore
-  failure logs and must not block worker startup — a worker that can't start is worse
-  than a worker with an un-restored archive).
+- **Startup ordering.** Restore runs **below the `if dry_run: return` guard**
+  (`worker/__main__.py:746-751`) so a `--dry-run` boot never mutates Redis, and **before**
+  the Step 1 index rebuild (line 764) so the rebuild indexes the freshly-restored rows
+  (rehydrated rows are not queryable by secondary index until then). Concretely it slots
+  into the 751→753 gap, ahead of handler registration (`register_callbacks`, 753-762) —
+  which also upholds Race Condition #2's invariant that no new session can be created
+  during restore. It is exception-isolated (a restore failure logs and must not block
+  worker startup — a worker that can't start is worse than a worker with an un-restored
+  archive).
 - **Cadence.** `SESSION_ARCHIVE_INTERVAL` is a named, env-overridable constant in
   `agent/constants.py`, default `300` seconds — a provisional/tunable value (grain of
   salt: matched to the existing heartbeat/health cadence; loss window between periodic
@@ -330,6 +431,18 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
       and returns `{restored: 0}` (no spurious writes).
 - [ ] Datetime round-trip: a session with `created_at`/`completed_at`/`scheduled_at`
       set exports and restores with identical timestamps (the fidelity risk).
+- [ ] **Key + parent/child graph preservation (Blocker #1):** export a parent session
+      and a child whose `parent_agent_session_id` points at the parent's `id`, restore
+      both into an empty Redis, and assert (a) each restored row's `id` **equals** the
+      original archived `id` (not a regenerated UUID), and (b) the child's
+      `parent_agent_session_id` still resolves to the restored parent via
+      `AgentSession.query.get(id=parent_id)`. This is distinct from the datetime
+      round-trip test and specifically guards against keying on the popped
+      `agent_session_id` alias.
+- [ ] **Two-thread connection safety (Blocker #2):** invoke `export_session()` from a
+      spawned `threading.Thread` while `export_all()` runs on the main thread against the
+      same DB path, and assert neither raises `sqlite3.ProgrammingError` and both rows
+      land (proves the per-operation-connection model is thread-safe, not just WAL).
 
 ### Error State Rendering
 - [ ] `dashboard.json.archive` renders `healthy=False` + `last_export_age_s=None` when
@@ -352,6 +465,20 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
 - [ ] **Idempotency:** running `restore_if_empty()` twice — the second call sees a
       populated Redis (from the first) and no-ops (`restored: 0`).
 
+### Cold-boot recovery, end-to-end (validation altitude — Concern #4)
+- [ ] **Full boot ordering against a wiped Redis** (`tests/integration/test_session_archive_cold_boot.py`,
+      CREATE): seed a populated archive DB (parent + child + a datetime-bearing row),
+      point Redis at an isolated empty test db, then drive the real worker startup
+      restore→rebuild sequence (invoke `restore_if_empty()` then the same
+      `run_cleanup()` index rebuild the worker runs at Step 1, in that order) and assert
+      the sessions become **queryable via the normal secondary-index paths**
+      (`AgentSession.query.filter(status=...)`, `query.get(id=...)`, and the child's
+      parent link resolves) — i.e. the rows are not merely written but reachable through
+      the index the app actually uses. This proves the ordering claim (restore must
+      precede rebuild) end-to-end rather than validating components in isolation; a
+      restore that ran *after* the rebuild would leave rows unindexed and this test would
+      fail.
+
 ## Test Impact
 
 - [ ] `tests/unit/test_session_lifecycle.py` (or the file covering `finalize_session`)
@@ -365,11 +492,16 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
 - [ ] `tests/unit/test_doctor.py` — UPDATE: add a case for the new
       `session-archive-freshness` doctor check (healthy + stale rendering).
 - [ ] New: `tests/unit/test_session_archive.py` — CREATE: export/restore round-trip,
-      the four restore-guard cases, datetime fidelity, empty-input handling,
+      the four restore-guard cases, datetime fidelity, **key + parent/child graph
+      preservation**, **two-thread connection safety**, empty-input handling,
       `get_archive_status()` shapes, exception isolation. (Greenfield — the archive
       module is new.)
-- [ ] New: `tests/unit/test_session_archive_cli.py` — CREATE: `export`/`status`/
-      `restore --dry-run` exit codes and JSON output. (Greenfield.)
+- [ ] New: `tests/integration/test_session_archive_cold_boot.py` — CREATE: the full
+      restore→rebuild→query cold-boot recovery test (see Cold-boot recovery above).
+      (Greenfield.)
+- [ ] New: `tests/unit/test_session_archive_cli.py` — CREATE: `status` and
+      `restore --dry-run` exit codes and JSON output; assert there is **no** `export`
+      write subcommand and no live-`restore` write path. (Greenfield.)
 
 No existing test asserts AgentSession-to-SQLite behavior today (greenfield module), so
 the only *changes* to existing tests are the additive `finalize_session` and doctor
@@ -386,6 +518,20 @@ cases above; everything else is new coverage.
   normal operation). Pruning risks racing a legitimate delete against a durability copy.
 - **Do NOT** temp-write-then-`os.replace()` the SQLite file (corrupts WAL / races
   readers) — the transaction is the atomic primitive here.
+- **Do NOT** key the archive or restore on `agent_session_id`. It is a `@property` alias
+  that `_normalize_kwargs` (`models/agent_session.py:805-806`) *pops and discards*;
+  restoring by it regenerates the `AutoKeyField` `id` and dangles every
+  `parent_agent_session_id`. Export and restore the real `id`, and pass it explicitly to
+  `AgentSession(id=..., ...)` on restore.
+- **Do NOT** reuse a single module-level SQLite connection across threads (the way
+  `analytics/collector.py` does). Exports come from two threads (daemon + event loop);
+  the default `check_same_thread=True` would raise `ProgrammingError`. Use a
+  per-operation connection (or `check_same_thread=False` + an explicit `Lock`).
+- **Do NOT** run restore above the `if dry_run: return` guard in `_run_worker`. A
+  `--dry-run` boot must never mutate Redis; restore belongs below the guard (751→753 gap).
+- **Do NOT** expose `export` or live-`restore` write subcommands on the CLI. Writes run
+  automatically (daemon + terminal hook / guarded startup); the CLI is read-only
+  (`status`, `restore --dry-run`).
 - **Do NOT** restore into a partially-populated Redis under any circumstance — the guard
   is all-or-nothing (both `query.all()` empty AND no `AgentSession*` keys).
 - **Do NOT** expand scope to `Memory`, message history, or the bloom filter. This is
@@ -413,31 +559,34 @@ cases above; everything else is new coverage.
 ## Agent Integration
 
 - **New CLI entry point required.** Add `valor-session-archive = "tools.session_archive_cli:main"`
-  to `pyproject.toml [project.scripts]` so the agent can invoke it via Bash
-  (`valor-session-archive status`, `valor-session-archive export`,
-  `valor-session-archive restore --dry-run`). This is the agent-reachable surface for
-  the new module — the `agent/session_archive.py` functions alone are invisible to the
-  agent until wired here.
+  to `pyproject.toml [project.scripts]` so the agent can invoke it via Bash. The CLI is
+  **read-only**: `valor-session-archive status` and `valor-session-archive restore
+  --dry-run`. `status` is the only subcommand required for agent reachability; `restore
+  --dry-run` is included because it is safe (never writes) and useful for operator
+  triage. This is the agent-reachable surface for the new module — the
+  `agent/session_archive.py` functions alone are invisible to the agent until wired here.
 - **Bridge internal import:** none required. The bridge does not need to call the
   archive directly; export is driven by the worker (daemon thread + `finalize_session`
   hook) and restore by worker startup.
 - **Integration test for agent reachability:** `tests/unit/test_session_archive_cli.py`
-  verifies the CLI runs end-to-end (the agent's actual invocation path), and a
-  dashboard test confirms `dashboard.json.archive` is present (the agent reads
-  `curl localhost:8500/dashboard.json` for system state).
+  verifies the CLI runs end-to-end (the agent's actual invocation path — `status` and
+  `restore --dry-run`), and a dashboard test confirms `dashboard.json.archive` is present
+  (the agent reads `curl localhost:8500/dashboard.json` for system state).
 
 ## Documentation
 
 - [ ] Update `docs/features/redis-durability.md` — replace the roadmap-only "Fix #2"
       row in the "Deferred Durability Work" table with an **implemented** section
       documenting: the SQLite archive location, the export cadence + terminal hook, the
-      empty-Redis restore guard (with the precise both-must-be-empty rule), the
-      dashboard/doctor freshness surfaces, and the operational runbook (how to inspect
-      the archive, force an export, dry-run a restore).
+      empty-Redis restore guard (with the precise both-must-be-empty rule and the
+      `id`-key-preservation note), the dashboard/doctor freshness surfaces, and the
+      operational runbook (how to inspect the archive via `valor-session-archive status`
+      and dry-run a restore via `valor-session-archive restore --dry-run` — noting that
+      export and live restore are automatic, not manual CLI actions).
 - [ ] Add a `## Knowledge Base` / cross-link entry in `docs/features/README.md` index if
       the durability doc is not already listed there (verify during build).
 - [ ] Add a `valor-session-archive` row to the CLI table in `CLAUDE.md` Quick Commands
-      (export/restore/status).
+      (`status`, `restore --dry-run`).
 
 ## Success Criteria
 
@@ -450,12 +599,19 @@ cases above; everything else is new coverage.
 4. `restore_if_empty()` rehydrates on a provably-empty Redis and is a **no-op** on a
    partial Redis — all four guard cases pass in tests.
 5. Restore is idempotent (second run no-ops).
-6. `dashboard.json` exposes an `archive` block (`last_export_age_s`, `row_count`,
+6. **Restore preserves the real `id` and the parent/child graph:** a restored session's
+   `id` equals its archived `id` (not a regenerated UUID) and a child's
+   `parent_agent_session_id` still resolves to its parent — verified by a dedicated test.
+7. **Cold-boot recovery works end-to-end:** against a wiped Redis, the real startup
+   sequence (`restore_if_empty()` → Step 1 index rebuild) leaves the rehydrated sessions
+   **queryable via secondary index** (`query.filter(status=...)`, `query.get(id=...)`,
+   and the parent link) — proven by an integration test, not just component tests.
+8. `dashboard.json` exposes an `archive` block (`last_export_age_s`, `row_count`,
    `healthy`); `/health` and a `session-archive-freshness` doctor check agree.
-7. `valor-session-archive` CLI (`export`/`restore`/`status`) works and is wired in
-   `pyproject.toml`.
-8. `docs/features/redis-durability.md` Fix #2 section documents the implemented store.
-9. `python -m ruff check .` and `python -m ruff format --check .` pass; new tests pass.
+9. `valor-session-archive` CLI (`status`, `restore --dry-run`; no write subcommands)
+   works and is wired in `pyproject.toml`.
+10. `docs/features/redis-durability.md` Fix #2 section documents the implemented store.
+11. `python -m ruff check .` and `python -m ruff format --check .` pass; new tests pass.
 
 ## Step by Step Tasks
 
@@ -463,15 +619,19 @@ cases above; everything else is new coverage.
 - **Task ID**: build-archive-module
 - **Depends On**: none
 - **Validates**: tests/unit/test_session_archive.py (create)
-- Create `agent/session_archive.py`: `_connect()` (WAL, busy-timeout,
-  `SESSION_ARCHIVE_DB_PATH` override, pytest-safe), `sessions` + `_meta` tables,
+- Create `agent/session_archive.py`: `_connect()` (**per-operation connection**, WAL,
+  busy-timeout, `SESSION_ARCHIVE_DB_PATH` override, pytest-safe — NOT a shared
+  module-level connection, see Technical Approach on the two-writer thread model),
+  `sessions` table keyed on the real **`id`** (not `agent_session_id`) + `_meta` table,
   `export_session`, `export_all` (single-transaction upsert), `restore_if_empty`
-  (both-empty guard), `get_archive_status`.
+  (both-empty guard; reconstructs via `AgentSession(id=..., ...)` to preserve the key),
+  `get_archive_status`.
 - Add `SESSION_ARCHIVE_INTERVAL` (300) and `SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S`
   (2×interval) to `agent/constants.py` as env-overridable named constants with a
   grain-of-salt "provisional/tunable" comment.
 - Write `tests/unit/test_session_archive.py` (round-trip, 4 guard cases, datetime
-  fidelity, empty input, status shapes, exception isolation).
+  fidelity, **key + parent/child graph preservation**, **two-thread connection safety**,
+  empty input, status shapes, exception isolation).
 
 ### 2. finalize_session terminal hook
 - **Task ID**: build-finalize-hook
@@ -487,10 +647,13 @@ cases above; everything else is new coverage.
 - **Task ID**: build-worker-wiring
 - **Depends On**: build-archive-module
 - **Validates**: tests/unit/test_session_archive.py (restore path), manual worker boot
-- Add the guarded restore call in `_run_worker` after "Redis connection verified"
-  (after line 703), before the Step 1 index rebuild, exception-isolated.
-- Spawn a `worker-session-archive` daemon thread near the heartbeat thread (line 1008)
-  that calls `export_all()` every `SESSION_ARCHIVE_INTERVAL`; pytest no-op guard.
+- Add the guarded restore call in `_run_worker` **below the `if dry_run: return` guard
+  (lines 746-751)** and before the Step 1 index rebuild (line 764) — i.e. in the 751→753
+  gap, ahead of `register_callbacks` — exception-isolated. (Placing it after line 703
+  would mutate Redis on a `--dry-run` boot — do NOT.)
+- Spawn a `worker-session-archive` daemon thread near the heartbeat thread (line
+  1003-1005) that calls `export_all()` every `SESSION_ARCHIVE_INTERVAL`; pytest no-op
+  guard.
 
 ### 4. Operator surfaces (dashboard + doctor)
 - **Task ID**: build-surfaces
@@ -504,7 +667,9 @@ cases above; everything else is new coverage.
 - **Task ID**: build-cli
 - **Depends On**: build-archive-module
 - **Validates**: tests/unit/test_session_archive_cli.py (create)
-- Create `tools/session_archive_cli.py` with `export`/`restore`(`--dry-run`)/`status`.
+- Create `tools/session_archive_cli.py` with **read-only** subcommands only: `status`
+  and `restore --dry-run`. No `export` or live-`restore` write subcommands (writes run
+  automatically via the daemon thread + terminal hook / guarded startup).
 - Wire `valor-session-archive` into `pyproject.toml [project.scripts]`.
 
 ### 6. Documentation
@@ -522,14 +687,17 @@ cases above; everything else is new coverage.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| New tests pass | `pytest tests/unit/test_session_archive.py tests/unit/test_session_archive_cli.py -q` | exit code 0 |
+| New unit tests pass | `pytest tests/unit/test_session_archive.py tests/unit/test_session_archive_cli.py -q` | exit code 0 |
+| Cold-boot integration test passes | `pytest tests/integration/test_session_archive_cold_boot.py -q` | exit code 0 |
 | Lifecycle + doctor tests pass | `pytest tests/unit/test_session_lifecycle.py tests/unit/test_doctor.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Archive module exists | `test -f agent/session_archive.py && echo ok` | output contains `ok` |
 | Four public entry points present | `grep -c "^def export_session\|^def export_all\|^def restore_if_empty\|^def get_archive_status" agent/session_archive.py` | output is `4` |
 | Terminal hook wired | `grep -c "export_session" models/session_lifecycle.py` | output is `1` |
-| Restore step wired before index rebuild | `grep -n "restore_if_empty" worker/__main__.py` | prints a line number below 764 and above the Step 1 block start |
+| Restore wired below dry-run guard, before index rebuild | `grep -n "restore_if_empty\|if dry_run\|Step 1: Rebuild" worker/__main__.py` | `restore_if_empty` line is ABOVE the "Step 1: Rebuild" line and BELOW the `if dry_run` guard line |
+| Restore keys on real id, not the alias | `grep -c "agent_session_id" agent/session_archive.py` | output is `0` (archive keys on `id`) |
+| Per-operation connection, no shared module conn | `grep -c "_sqlite_conn\|module-level connection" agent/session_archive.py` | output is `0` |
 | Periodic thread wired | `grep -c "worker-session-archive" worker/__main__.py` | output is `1` |
 | Cadence constant named | `grep -c "SESSION_ARCHIVE_INTERVAL" agent/constants.py` | output greater than 0 |
 | Dashboard field present | `grep -c "\"archive\"" ui/app.py` | output greater than 0 |
@@ -546,35 +714,51 @@ cases above; everything else is new coverage.
    datetimes to ISO-8601 explicitly, store dict/list natively as JSON, and add a
    dedicated datetime round-trip test. Any unmappable field type fails loudly in the
    test, not silently in prod.
-2. **Popoto internal coupling.** Reading `session._meta.fields` and reconstructing via
-   `AgentSession(**fields).save()` depends on Popoto internals (as does the existing
-   `_saved_field_values` code). *Mitigation:* one clearly-commented coupling point with
-   a "re-verify on Popoto upgrade" note; the round-trip test catches a break.
-3. **Export cost at scale.** `export_all()` reads every session each cycle; a large
+2. **Popoto internal coupling + key regeneration.** Reading `session._meta.fields` and
+   reconstructing via `AgentSession(id=..., **fields).save()` depends on Popoto internals
+   (as does the existing `_saved_field_values` code). The specific trap: `id` is an
+   `AutoKeyField` and `_normalize_kwargs` pops the `agent_session_id` alias — restoring by
+   the alias would silently regenerate the PK and dangle parent/child links.
+   *Mitigation:* archive and restore the real `id` explicitly; one clearly-commented
+   coupling point with a "re-verify on Popoto upgrade" note; the key + parent/child graph
+   preservation test catches a break loudly.
+3. **Cross-thread SQLite misuse.** The archive is written from two threads (periodic
+   daemon + event-loop `finalize_session` hook). A shared connection under the default
+   `check_same_thread=True` would raise `sqlite3.ProgrammingError` at runtime — a
+   false-green in single-thread unit tests. *Mitigation:* per-operation connections
+   (no shared connection object) plus an explicit two-thread concurrent-write test that
+   would surface any regression to a shared connection.
+4. **Export cost at scale.** `export_all()` reads every session each cycle; a large
    backlog could make the sweep slow. *Mitigation:* it runs off-loop in a daemon thread
    on a 5-min cadence, single transaction; terminal sessions are the common case and are
    covered by the fast single-row hook. If the full-set count grows large, the interval
    is env-tunable and a future incremental-by-`updated_at` sweep is a clean follow-up.
-4. **False-green freshness.** A daemon thread that dies silently would let the archive
+5. **False-green freshness.** A daemon thread that dies silently would let the archive
    go stale unnoticed. *Mitigation:* the `session-archive-freshness` doctor check +
    `dashboard.json.archive.healthy` surface staleness (age > threshold), mirroring the
    email/heartbeat pattern the issue explicitly asks us to follow.
 
 ## Race Conditions
 
-1. **Concurrent export writers (periodic thread vs. terminal hook).** The daemon thread's
-   `export_all()` and a `finalize_session` `export_session()` can run at the same instant
-   against the same DB. *Mitigation:* SQLite WAL + a busy-timeout serializes writers; each
-   is a self-contained transaction, so worst case one waits briefly for the other. No
-   read-modify-write across the two — each upserts by primary key, so ordering is
-   irrelevant (last writer for a given row wins, and both write the same authoritative
+1. **Concurrent export writers (periodic thread vs. terminal hook), on DIFFERENT threads.**
+   `export_all()` (periodic daemon thread) and `export_session()` (event-loop
+   `finalize_session` hook) can run at the same instant against the same DB **from two
+   different threads**. Two distinct mechanisms are needed and both are provided:
+   (a) **thread-affinity** — each operation opens its **own** connection (no shared
+   `sqlite3.Connection` reused across threads), so no `ProgrammingError`; and (b)
+   **write serialization** — SQLite WAL + a busy-timeout serializes those two
+   independent connections at the DB level, so worst case one waits briefly for the
+   other. Note (a) and (b) are orthogonal: WAL alone does **not** make a single
+   connection thread-safe — (a) is the reason there is no shared connection object.
+   No read-modify-write across the two — each upserts by primary key (`id`), so ordering
+   is irrelevant (last writer for a given row wins, and both write the same authoritative
    Redis state).
 2. **Restore vs. incoming enqueue at startup.** A message could arrive and create a new
-   AgentSession while `restore_if_empty()` is mid-flight. *Mitigation:* restore runs at
-   the very top of `_run_worker` **before** callbacks/handlers are registered
-   (registration happens at line 753+), so no new session can be created during the
-   guard evaluation or the rehydrate. The guard is also evaluated once, atomically-read,
-   before any write.
+   AgentSession while `restore_if_empty()` is mid-flight. *Mitigation:* restore runs in
+   the 751→753 gap of `_run_worker` — after the dry-run guard but **before**
+   callbacks/handlers are registered (`register_callbacks`, lines 753-762), so no new
+   session can be created during the guard evaluation or the rehydrate. The guard is also
+   evaluated once, atomically-read, before any write.
 3. **Dashboard/CLI reading the DB during a write.** *Mitigation:* WAL mode gives readers
    a consistent snapshot without blocking the writer; `get_archive_status()` opens its
    own read connection and never holds a write lock.
@@ -591,9 +775,12 @@ cases above; everything else is new coverage.
 - **Incremental/delta export by `updated_at` in v1.** Tempting for cost, but adds
   tombstone/consistency complexity. Ship the full-sweep + terminal-hook first; the
   interval is tunable and delta export is a clean follow-up if the sweep ever hurts.
-- **Restoring child/parent graph ordering explicitly.** Popoto reconstructs indexes on
-  `.save()` + the Step 1 rebuild; do not build a topological restore — just save every
-  row and let the existing recovery/index machinery sort it out.
+- **Restoring child/parent graph ordering explicitly.** Because each row is restored with
+  its **real preserved `id`**, `parent_agent_session_id` links resolve regardless of the
+  order rows are saved in. Popoto reconstructs indexes on `.save()` + the Step 1 rebuild;
+  do not build a topological restore — just save every row (with its original `id`) and
+  let the existing recovery/index machinery sort it out. (This is why key preservation,
+  not ordering, is the load-bearing requirement.)
 - **Cross-machine archive sharing.** Each machine's archive mirrors its own Redis; do
   not attempt to sync archives (would violate single-machine-ownership and could restore
   another machine's sessions).
