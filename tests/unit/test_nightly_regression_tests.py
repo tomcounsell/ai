@@ -192,3 +192,52 @@ class TestRunTtftGate:
                 threshold=120.0,
             )
             assert msg is None  # exceptions are swallowed
+
+
+class TestRunOllamaSuiteSelfSkip:
+    """Plan Task 6 verification: unreachable ollama self-skips with a logged
+    reason and spawns NO subprocess (never hard-fails the nightly run)."""
+
+    def test_unreachable_skips_with_logged_reason_and_no_subprocess(self, tmp_path: Path) -> None:
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        logged: list[str] = []
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=False),
+            patch.object(nrt, "log", side_effect=logged.append),
+            patch.object(nrt, "subprocess") as mock_subprocess,
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        # The self-skip is LOGGED with a reason ...
+        assert any("skipped" in m.lower() for m in logged), logged
+        assert any("unreachable" in m.lower() for m in logged), logged
+        # ... and no pytest subprocess was spawned, no alert sent.
+        mock_subprocess.run.assert_not_called()
+        mock_telegram.assert_not_called()
+
+    def test_probe_swallows_import_errors_to_false(self, tmp_path: Path) -> None:
+        """A failed reachability import must self-skip, never crash the run."""
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        with patch.dict("sys.modules", {"tests.granite_faults.ollama_env": None}):
+            # Importing a None module raises ImportError → swallowed to False.
+            assert nrt.ollama_reachable_for_nightly() is False
+
+
+class TestClaudeCanaryAlert:
+    """Version-pinned canary: alert only on drift from the pinned version."""
+
+    def test_no_alert_when_version_matches(self) -> None:
+        with patch.object(nrt, "get_claude_version", return_value=nrt.PINNED_CLAUDE_VERSION):
+            assert nrt.claude_canary_alert() is None
+
+    def test_no_alert_when_version_unknown(self) -> None:
+        with patch.object(nrt, "get_claude_version", return_value=None):
+            assert nrt.claude_canary_alert() is None
+
+    def test_alerts_on_drift(self) -> None:
+        with patch.object(nrt, "get_claude_version", return_value="9.9.9"):
+            alert = nrt.claude_canary_alert()
+        assert alert is not None
+        assert "9.9.9" in alert
+        assert nrt.PINNED_CLAUDE_VERSION in alert
