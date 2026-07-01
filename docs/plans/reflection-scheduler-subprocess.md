@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1828
 last_comment_id:
-revision_applied: false
+revision_applied: true
 ---
 
 # Reflection Scheduler Subprocess Split (off-load the worker hot loop)
@@ -47,7 +47,21 @@ constructing the scheduler in the same change** (no parallel-run window — this
 has a HARD no-parallel-migrations rule). The worker loop then hosts only session
 execution + liveness monitors. Because the scheduler is now out-of-process, its
 health must remain **operator-visible** (a crash-looping or silently-dead scheduler
-must not become invisible).
+must not become invisible) — surfaced by BOTH a per-tick freshness heartbeat AND a
+process-start / restart-count signal (so a crash-restart loop, which keeps the tick
+heartbeat fresh, stays visible — see Data Flow).
+
+The subprocess runs **exactly where the worker runs**. `scripts/install_worker.sh`
+and `service.install_worker` install the worker on **every machine that runs
+`/update`** — there is no bridge-role gate on the worker install (verified: the
+`run.py:1341` worker-install block is guarded only by `plist.exists()`, not by
+`if has_bridge:`). The reflection subprocess is therefore gated on **worker presence**
+(the machine owns at least one project in `projects.json`), NOT on bridge-role, so
+reflections run precisely where the worker runs. Bridge-role gating would silently
+stop reflections on a dev/worker machine with no Telegram-configured project — the
+same over-narrow-gating failure class as **issue #1379** (which gated calendar on
+`session.slug` and thereby DROPPED all non-slug work). The resolved gate is a
+`has_worker_role()` check (see Solution / Update System).
 
 ## Freshness Check
 
@@ -87,7 +101,32 @@ must not become invisible).
   `has_bridge_role()` reads `projects.json`, matches `scutil --get ComputerName`
   against each project's `machine`, qualifies if any owned project has a `telegram`
   block, and on a non-bridge machine **skips install AND removes any stale plist**
-  (bootout + `rm -f`). This is the exact self-skip pattern the new installer copies.
+  (bootout + `rm -f`). This is the structural self-skip pattern the new installer
+  copies. **But the reflection installer gates on worker presence, not bridge role**
+  (see next bullet): the new `has_worker_role()` is `has_bridge_role()` with the
+  `if proj.get("telegram")` clause dropped — it qualifies if ANY project's `machine`
+  matches this host, regardless of Telegram config. No such helper exists yet in the
+  repo (`grep -rn "has_worker_role" scripts/` returns nothing), so the plan adds it.
+- **Worker install is ubiquitous (no role gate):** `scripts/update/run.py:1341-1343`
+  installs the worker under `if (project_dir / "com.valor.worker.plist").exists():` —
+  **NOT** under `if has_bridge:`. `service.install_worker` (`scripts/update/service.py:280`)
+  bootstraps the plist on every machine that runs `/update`. `scripts/install_worker.sh`
+  has no `scutil`/machine gate at all. Confirmed: the worker runs on every /update
+  machine; gating reflections on bridge-role would strand reflections on worker-only
+  machines. This grounds the OQ1 resolution (worker-presence gate).
+- **Worker restart is a HARD kill, not a graceful drain:** `restart_worker()` in
+  `scripts/valor-service.sh:834-853` runs `launchctl kickstart -k
+  "gui/<uid>/$WORKER_PLIST_NAME"` — the `-k` flag SIGKILLs the running worker and
+  immediately relaunches (no drain, no in-process await; `stop_worker`'s graceful
+  bootout+wait path is a SEPARATE codepath used only for stop/disable). `install_worker`
+  (`service.py:326-354`) is content-idempotent but on a code change does
+  `bootout` → rewrite plist → `bootstrap`, which also terminates then relaunches.
+  Consequence for cutover: the OLD in-process scheduler dies **instantly** (SIGKILL /
+  bootout) at the worker restart, and the NEW worker (no scheduler) comes up ~5s later
+  (`restart_worker` sleeps 5s before probing). The zero-scheduler window therefore
+  spans from worker-restart to reflection-plist-bootstrap — a handful of seconds, and
+  it is a clean hard cut (no lingering old scheduler), so the "never double" claim
+  holds by construction. See Risk 1 / Cutover.
 - **Update wiring:** `scripts/update/run.py:1341-1343` installs the worker
   (`service.install_worker`); `:1447-1450` installs nightly-tests under `if
   has_bridge:` via `service.install_nightly_tests` (which delegates to the
@@ -98,13 +137,24 @@ must not become invisible).
   disable project-scoped reflections this machine doesn't own. After the split, the
   **reflection subprocess** owns reflections, so this copy+filter belongs in the new
   installer (moved, not duplicated — see Update System).
-- **Operator surface:** `ui/app.py:341` `_get_worker_health()` reads
-  `data/last_worker_connected` file freshness; `ui/app.py:514-541` `/dashboard.json`
-  route surfaces reflection state via `ui/data/reflections.get_all_reflections()`
+- **Operator surface:** `_get_worker_health()` (`ui/app.py:340`, the `def` line; body
+  reads `Path(__file__).parent.parent / "data" / "last_worker_connected"` mtime and
+  buckets age against `HEARTBEAT_STALENESS_THRESHOLD_S` / `WORKER_DOWN_THRESHOLD_S`)
+  is the exact mirror for the new `_get_reflection_scheduler_health()`. The
+  `/dashboard.json` route builds a `health` dict (`ui/app.py:517-541`) and surfaces
+  reflection state via `ui/data/reflections.get_all_reflections()`
   (per-`Reflection`-record `last_status`/`ran_at`). There is **no scheduler-level
   heartbeat today** — if the whole scheduler dies, individual records just go stale
   with no single "scheduler alive" signal. This gap is what moving out-of-process
   makes worse, and what this plan closes.
+- **Freshness heartbeat alone cannot catch a crash-restart loop:** under launchd
+  `KeepAlive`+`ThrottleInterval`, a scheduler that boots, writes the tick heartbeat,
+  then crashes — repeatedly — keeps `data/last_reflection_tick` looking FRESH, masking
+  exactly the crash-loop failure this feature exists to make visible. The plan
+  therefore adds a SECOND signal: a **process-start timestamp + restart counter**
+  written once at subprocess boot (`data/reflection_worker_starts`), surfaced on
+  `/dashboard.json`. A rising restart count / churning start-time reveals a crash loop
+  even when tick freshness looks healthy.
 - Data dir today: `data/last_worker_connected`, `data/last_connected` — the
   file-freshness heartbeat convention the new scheduler heartbeat mirrors.
 
@@ -115,8 +165,8 @@ reflection wiring) — deleting the worker's reflection block does not break it.
 directly (unchanged by this move). No test asserts the worker *owns* the scheduler.
 
 **Notes:** No drift. The class is reused unchanged; the whole change is *relocation +
-supervision + role-gated install + a heartbeat surface + deletion of the in-worker
-wiring*.
+supervision + worker-role-gated install + a two-signal (tick + restart-count) heartbeat
+surface + deletion of the in-worker wiring*.
 
 ## Prior Art
 
@@ -130,7 +180,12 @@ wiring*.
   Establishes the Redis-record contract the subprocess communicates through (no
   schema change needed).
 - **`scripts/install_nightly_tests.sh` / `install_email_bridge.sh`** — the
-  role-gated-install + self-skip + stale-plist-removal precedents this installer copies.
+  role-gated-install + self-skip + stale-plist-removal precedents this installer adapts
+  (structurally identical; the gate is broadened from bridge-role to worker-role).
+- **#1379 (calendar work logging)** — the over-narrow-gating precedent this plan
+  explicitly avoids: gating on `session.slug` DROPPED all non-slug agent work. Gating
+  reflections on bridge-role would repeat that class of error on worker-only machines;
+  hence the worker-role gate.
 - **`com.valor.worker.plist`** — the `KeepAlive`/`ThrottleInterval` long-lived
   launchd lifecycle template.
 
@@ -150,6 +205,9 @@ worker/__main__.py:_run_worker
 ```
 launchd (com.valor.reflection-worker, KeepAlive=true)
   → python -m reflections   (reflections/__main__.py, VALOR_LAUNCHD=1)
+      → ON BOOT (once per process start):
+          → write data/reflection_worker_starts  (append/increment a restart counter
+            + record the boot timestamp)  ← crash-loop signal (survives fresh ticks)
       → ReflectionScheduler().start()   [same class, same tick loop]
           → each tick: write data/last_reflection_tick  (heartbeat file, mtime)
           → reads config/reflections.yaml (local copy; VALOR_LAUNCHD skips vault)
@@ -161,9 +219,22 @@ worker/__main__.py:_run_worker
   → still executes the AgentSession records the scheduler enqueues (unchanged)
 
 ui/app.py /dashboard.json
-  → _get_reflection_scheduler_health()  reads data/last_reflection_tick freshness
-  → surfaces {running, last_tick_at, age_seconds} in the payload  ← NEW operator surface
+  → _get_reflection_scheduler_health()  reads BOTH heartbeat files:
+      • data/last_reflection_tick freshness → {status, tick_age_s}   (is it ticking?)
+      • data/reflection_worker_starts       → {restart_count, last_start_age_s}
+        (is it crash-looping? a rising count / churning start-age = crash loop even
+         when tick_age_s looks fresh)
+  → surfaces a reflection_scheduler block in the payload  ← NEW operator surface
 ```
+
+**Crash-loop detection semantics:** the tick heartbeat answers "is a scheduler
+currently ticking?"; the restart counter answers "is the scheduler process stable, or
+is launchd respawning it?". A healthy scheduler shows a fresh tick AND a stable
+restart count (start-age climbing steadily, count flat). A crash loop shows a fresh
+tick (each short-lived process writes one before dying) BUT a restart count that keeps
+incrementing and a start-age that keeps resetting to near-zero. The dashboard flags
+the crash loop when the restart count rises faster than a small threshold over a
+rolling window (constant provisional, tuned after observing real restart rates).
 
 **Key invariants preserved:** the scheduler↔worker seam is *already* Redis
 `Reflection`/`AgentSession` records — moving the scheduler to a sibling process
@@ -181,8 +252,10 @@ reflection.
   `supervise()` respawn for the scheduler — launchd is now the supervisor.
 - **Interface changes:** `worker/__main__.py` loses ~20 lines (construction + cancel).
   New `reflections/__main__.py` (thin entry: build scheduler, install signal handlers,
-  `asyncio.run(scheduler.start())`, heartbeat). New `ui/app.py`
-  `_get_reflection_scheduler_health()` + one additive `/dashboard.json` field.
+  `asyncio.run(scheduler.start())`, per-tick heartbeat + on-boot restart-counter write).
+  New `ui/app.py` `_get_reflection_scheduler_health()` + one additive
+  `reflection_scheduler` block on `/dashboard.json` (both tick-freshness and
+  restart-count fields).
 - **No Popoto schema change** — communication is via existing `Reflection` records.
 - **Ownership move:** the `config/reflections.yaml` copy + `reflection_machine_filter`
   step moves from `install_worker.sh` into `install_reflection_worker.sh` (the new
@@ -200,10 +273,11 @@ blast-radius than the parent slug's in-loop refactors, but touches deploy wiring
 across machines (careful role-gating + cutover ordering required).
 
 **Interactions:**
-- PM check-ins: 1 (confirm the bridge-role gate is the intended machine set — see
-  Open Question 1: dev-only worker machines).
-- Review rounds: 1–2 (cutover ordering / double-vs-zero-scheduler; role-gate
-  self-skip; heartbeat surface).
+- PM check-ins: 0 blocking. The gate question (bridge-role vs worker-role) is RESOLVED
+  in-plan toward worker-presence gating (see Solution); no open confirmation is
+  required to proceed.
+- Review rounds: 1–2 (cutover ordering / double-vs-zero-scheduler; worker-role
+  gate self-skip; heartbeat + restart-count surface).
 
 **PR strategy:** single PR. The delete + add + install + heartbeat are one atomic
 cutover (no-parallel-migration rule forbids splitting the delete from the add).
@@ -216,7 +290,8 @@ Builds on #1816 primitives, already merged.
 |-------------|---------------|---------|
 | `ReflectionScheduler` present | `grep -c "class ReflectionScheduler" agent/reflection_scheduler.py` | The class the subprocess reuses |
 | Worker still constructs it (pre-change) | `grep -c "ReflectionScheduler()" worker/__main__.py` | Confirms the create_task site to delete exists |
-| Role-gate precedent present | `grep -c "has_bridge_role" scripts/install_nightly_tests.sh` | The self-skip pattern to copy |
+| Role-gate structural precedent present | `grep -c "has_bridge_role" scripts/install_nightly_tests.sh` | The self-skip pattern to adapt (dropping the Telegram clause → worker-role) |
+| Worker install has NO bridge gate | `grep -c "if has_bridge" scripts/install_worker.sh` | Confirms the worker (and thus the gate target) runs on every /update machine — must be 0 |
 | Worker plist lifecycle template | `grep -c "KeepAlive" com.valor.worker.plist` | The `KeepAlive`+`ThrottleInterval` template |
 
 ## Solution
@@ -229,13 +304,19 @@ Builds on #1816 primitives, already merged.
   verbatim. Writes a `data/last_reflection_tick` heartbeat file each tick (see below).
   Accepts `--dry-run` (load registry, print status, exit 0) mirroring `python -m
   worker --dry-run` so the installer can validate before bootstrapping.
-- **Heartbeat surface** — the scheduler writes `data/last_reflection_tick` (touch the
-  file / write `time.time()`) at the top of every `tick()`. Two implementation
-  options: (a) a thin wrapper in `reflections/__main__.py` that wraps
-  `scheduler.tick`, or (b) a `heartbeat_path` hook on `ReflectionScheduler`. **Prefer
-  (a)** — keeps the class free of process-specific I/O (the class is also imported by
-  tests and, historically, the worker). The `__main__` wraps the tick loop or passes
-  an `on_tick` callback.
+- **Heartbeat surface (two signals)** — (1) the scheduler writes
+  `data/last_reflection_tick` (write `time.time()`) at the top of every `tick()`;
+  (2) on process boot, `reflections/__main__.py` bumps a **restart counter + start
+  timestamp** in `data/reflection_worker_starts` (read prior count, increment, write
+  back `{count, last_start_ts}`; a corrupt/absent file resets to count=1). The tick
+  file answers "is it ticking?"; the starts file answers "is it crash-looping?" —
+  because a scheduler that crashes right after each tick keeps the tick file fresh but
+  drives the restart count up (see Data Flow). Both are `data/` files (mtime/content),
+  never a DB row. Implementation options for the tick hook: (a) a thin wrapper in
+  `reflections/__main__.py` that wraps `scheduler.tick`, or (b) a `heartbeat_path` hook
+  on `ReflectionScheduler`. **Prefer (a)** — keeps the class free of process-specific
+  I/O (the class is also imported by tests and, historically, the worker). The
+  restart-counter write lives only in `__main__` boot, never in the class.
 - **`com.valor.reflection-worker.plist`** — long-lived launchd agent modeled on
   `com.valor.worker.plist`: `RunAtLoad=true`, `KeepAlive=true`, `ThrottleInterval`
   (restart-storm cap), `VALOR_LAUNCHD=1` (skip iCloud/TCC config paths),
@@ -245,40 +326,51 @@ Builds on #1816 primitives, already merged.
   Redis/GitHub creds are present; or env-injection like `install_worker.sh` — see
   Update System for the TCC rationale and the chosen approach).
 - **`scripts/install_reflection_worker.sh`** — modeled on `install_sdlc_reflection.sh`
-  (sed path-substitution, bootout/bootstrap) + the `has_bridge_role()` gate from
-  `install_nightly_tests.sh` (self-skip + stale-plist removal on non-bridge machines)
-  + the `config/reflections.yaml` copy and `reflection_machine_filter` invocation
-  **moved** from `install_worker.sh`.
+  (sed path-substitution, bootout/bootstrap) + a **`has_worker_role()` gate** adapted
+  from `has_bridge_role()` in `install_nightly_tests.sh:20-72` (self-skip +
+  stale-plist removal on machines with no owned project) + the `config/reflections.yaml`
+  copy and `reflection_machine_filter` invocation **moved** from `install_worker.sh`.
+  `has_worker_role()` is `has_bridge_role()` **minus the `if proj.get("telegram")`
+  clause**: it qualifies if ANY project's `machine` matches `scutil --get ComputerName`,
+  regardless of Telegram config, so reflections install wherever the worker installs
+  (grounded: the worker install has no bridge gate — see Freshness Check). Same
+  fail-open contract (unreadable `projects.json` / missing venv / `scutil` error →
+  install). This deliberately avoids the #1379 over-narrow-gating class.
 - **Delete the in-worker scheduler** — remove `worker/__main__.py:1020-1034`
   (construction) and `:1136-1142` (shutdown cancel) in the SAME change. Grep-verify
   zero residual `ReflectionScheduler(` in `worker/`.
 - **Update wiring** — `scripts/update/service.install_reflection_worker()` delegating
   to the self-gating script, invoked from `scripts/update/run.py` **after the worker
   install/restart block** (cutover ordering — see below).
-- **Dashboard surface** — `ui/app.py` `_get_reflection_scheduler_health()` reads
-  `data/last_reflection_tick` freshness; `/dashboard.json` gains an additive
-  `reflection_scheduler` health block.
+- **Dashboard surface** — `ui/app.py` `_get_reflection_scheduler_health()` reads BOTH
+  `data/last_reflection_tick` freshness AND `data/reflection_worker_starts`
+  (restart count + last-start age); `/dashboard.json` gains an additive
+  `reflection_scheduler` health block carrying `{status, tick_age_s, restart_count,
+  last_start_age_s}` so a crash loop is visible even when tick freshness looks healthy.
 
 ### Flow
 
 /update on a bridge machine → git pull (new worker code w/o scheduler + new
 installer) → uv sync → **worker install/restart** (new worker starts, no in-process
 scheduler → brief zero-scheduler window) → **`install_reflection_worker.sh`**
-(has_bridge_role → copy `config/reflections.yaml` + machine-filter → bootstrap plist,
-`RunAtLoad` starts the subprocess → scheduler resumes). On a non-bridge machine the
-installer self-skips and removes any stale plist. Dashboard reads
-`data/last_reflection_tick` to show the subprocess is alive.
+(has_worker_role → copy `config/reflections.yaml` + machine-filter → bootstrap plist,
+`RunAtLoad` starts the subprocess → scheduler resumes). On a machine with no owned
+project the installer self-skips and removes any stale plist. Dashboard reads
+`data/last_reflection_tick` + `data/reflection_worker_starts` to show the subprocess is
+alive and not crash-looping.
 
 ### Technical Approach
 
 **1. `reflections/__main__.py` (new).**
 ```python
 # python -m reflections   → long-lived launchd process (KeepAlive)
-import argparse, asyncio, logging, signal, time
+import argparse, asyncio, json, logging, signal, time
 from pathlib import Path
 from agent.reflection_scheduler import ReflectionScheduler
 
-_HEARTBEAT = Path(__file__).parent.parent / "data" / "last_reflection_tick"
+_DATA = Path(__file__).parent.parent / "data"
+_HEARTBEAT = _DATA / "last_reflection_tick"
+_STARTS = _DATA / "reflection_worker_starts"   # crash-loop signal
 
 def _write_heartbeat() -> None:
     try:
@@ -287,10 +379,26 @@ def _write_heartbeat() -> None:
     except OSError as e:
         logging.getLogger("reflections").warning("heartbeat write failed: %s", e)
 
+def _bump_restart_counter() -> None:
+    """Increment the restart counter + record boot time, once per process start.
+    A crash-restart loop keeps last_reflection_tick fresh but drives this count up,
+    so the dashboard can distinguish 'ticking' from 'crash-looping'."""
+    try:
+        _STARTS.parent.mkdir(exist_ok=True)
+        prior = 0
+        try:
+            prior = int(json.loads(_STARTS.read_text()).get("count", 0))
+        except (OSError, ValueError, json.JSONDecodeError):
+            prior = 0  # corrupt/absent → reset to 1 below
+        _STARTS.write_text(json.dumps({"count": prior + 1, "last_start_ts": time.time()}))
+    except OSError as e:
+        logging.getLogger("reflections").warning("restart-counter write failed: %s", e)
+
 async def _run(dry_run: bool) -> None:
     scheduler = ReflectionScheduler()
     if dry_run:
         scheduler.load(); print(scheduler.format_status()); return
+    _bump_restart_counter()   # once per boot, before the tick loop
     # wrap tick to emit the heartbeat without polluting the class
     _orig_tick = scheduler.tick
     async def _tick_with_heartbeat():
@@ -326,43 +434,76 @@ parallel-run. After: `grep -c "ReflectionScheduler(" worker/__main__.py == 0` an
 `grep -rc "ReflectionScheduler\|reflection-scheduler\|reflection_task" worker/ == 0`.
 
 **3. `com.valor.reflection-worker.plist` (new).** Copy `com.valor.worker.plist`,
-change Label to `__SERVICE_LABEL__` (→ `com.valor.reflection-worker`),
-`ProgramArguments` to `[.venv/bin/python, -m, reflections]`, keep `RunAtLoad`,
+change Label to `__SERVICE_LABEL__` (→ `com.valor.reflection-worker`), keep `RunAtLoad`,
 `KeepAlive=true`, `ThrottleInterval` (use the worker's 10 or a longer value, e.g. 30 —
-provisional, commented as tunable), set `VALOR_LAUNCHD=1`, redirect logs to
-`logs/reflection_worker.log` / `_error.log`.
+provisional, commented as tunable), set `VALOR_LAUNCHD=1` in `EnvironmentVariables`,
+redirect logs to `logs/reflection_worker.log` / `_error.log`. **Creds delivery: source
+`.env` in `ProgramArguments`** via the sdlc-reflection idiom
+(`com.valor.sdlc-reflection.plist:11`): `ProgramArguments` = `["/bin/zsh", "-lc",
+"set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python -m
+reflections"]`. This is TCC-safe under `VALOR_LAUNCHD=1` (no iCloud/vault read) and
+keeps the plist self-contained (no install-time env-injection). It also makes the
+installer's `--dry-run` env parity trivial (the installer sources the same `.env`
+before probing — step 4).
 
 **4. `scripts/install_reflection_worker.sh` (new).** Structure:
-- Header + `set -euo pipefail` + `SCRIPT_DIR`/`PROJECT_DIR` + source `.env` +
-  `SERVICE_LABEL_PREFIX` (copy from `install_sdlc_reflection.sh:1-18`).
-- **`has_bridge_role()` gate** copied verbatim from `install_nightly_tests.sh:20-72`
-  (self-skip + `rm -f` stale plist on non-bridge machines).
+- Header + `set -euo pipefail` + `SCRIPT_DIR`/`PROJECT_DIR` + `set -a; [ -f .env ] &&
+  source .env; set +a` (the `install_sdlc_reflection.sh:10-12` env-sourcing pattern) +
+  `SERVICE_LABEL_PREFIX`.
+- **`has_worker_role()` gate** adapted from `has_bridge_role()`
+  (`install_nightly_tests.sh:20-72`): identical structure and fail-open contract, but
+  the Python snippet drops the `if proj.get("telegram")` clause — it `sys.exit(0)`
+  (qualify) as soon as any project's `machine` matches the host. Self-skip + `rm -f`
+  stale plist on machines with no owned project (bootout + remove, exactly like the
+  nightly-tests self-skip).
 - **Config prep (moved from `install_worker.sh:47-62`):** `_copy_config_file
   "$HOME/Desktop/Valor/reflections.yaml" "$PROJECT_DIR/config/reflections.yaml"`, then
   run `tools.reflection_machine_filter` against the copied yaml + `projects.json`.
   (This is the MOVE — delete the same block from `install_worker.sh`; the worker no
   longer runs reflections so it no longer needs the reflections.yaml copy.)
-- Verify subprocess starts: `.venv/bin/python -m reflections --dry-run`.
-- bootout existing → sed path-substitution into `$PLIST_DST` → (env-injection like
-  `install_worker.sh:100-167` if the plist doesn't source `.env`) → `plutil -lint` →
-  `launchctl bootstrap`.
+- **Verify subprocess starts with production env parity:** run
+  `.venv/bin/python -m reflections --dry-run` **after** the `.env` has been sourced
+  and with `VALOR_LAUNCHD=1` exported, so the dry-run exercises the SAME env resolution
+  the plist runtime will (the plist sources `.env` in `ProgramArguments` and sets
+  `VALOR_LAUNCHD=1` — see step 3). Without this, the dry-run would read the vault path
+  or a different config and give a false verification signal. Concretely, wrap the
+  probe as `VALOR_LAUNCHD=1 .venv/bin/python -m reflections --dry-run` inside the
+  already-`source`d installer shell.
+- bootout existing → sed path-substitution into `$PLIST_DST` → `plutil -lint` →
+  `launchctl bootstrap`. (The plist sources `.env` itself in `ProgramArguments` per
+  step 3, so no separate env-injection step is required — matching sdlc-reflection.)
 
 **5. Wire into `scripts/update/`.**
 - `scripts/update/service.py`: add `install_reflection_worker(project_dir)` modeled on
   `install_nightly_tests()` (`:360-388`) — locate `scripts/install_reflection_worker.sh`,
   run it, log rc; the shell script self-gates so the Python wrapper stays dumb.
 - `scripts/update/run.py`: call `service.install_reflection_worker(project_dir)`
-  **after** the worker install/restart block (ends ~`:1443`) and near the nightly-tests
-  block (`:1447-1450`), under the existing `if has_bridge:` guard (defense-in-depth
-  with the script's own gate). Placing it AFTER the worker restart guarantees the
-  worker (new code, no scheduler) is up before the subprocess starts — see Cutover.
+  **after** the worker install/restart block (ends ~`:1443`), **unconditionally** (NOT
+  under `if has_bridge:`) — the shell script self-gates on `has_worker_role()`, and the
+  subprocess must install everywhere the worker does. Placing it AFTER the worker
+  restart guarantees the worker (new code, no scheduler) is up before the subprocess
+  starts — see Cutover.
 
 **6. Cutover ordering (avoid double/zero scheduler).**
 - **Ordering rule:** worker restart FIRST (new worker has no in-process scheduler),
   THEN `install_reflection_worker.sh` bootstraps the plist (`RunAtLoad` starts the
-  subprocess). This yields at most a **brief zero-scheduler window** (seconds, while
-  the plist loads) — reflections are periodic (tick interval ≥ 60s, job intervals
-  hours/days), so a few-seconds gap is harmless.
+  subprocess).
+- **Window claim substantiated against the actual restart mechanism.**
+  `restart_worker()` (`scripts/valor-service.sh:838`) restarts via
+  `launchctl kickstart -k "gui/<uid>/$WORKER_PLIST_NAME"` — the `-k` flag is a **hard
+  kill-and-relaunch** (SIGKILL the running worker, immediately respawn); there is NO
+  graceful drain in the restart path (the graceful bootout+wait lives only in the
+  separate `stop_worker`). On a code change, `install_worker` (`service.py:326-354`)
+  likewise does `bootout` → rewrite → `bootstrap`, which also terminates-then-relaunches.
+  Either way the OLD in-process scheduler dies **atomically at the restart instant** —
+  no lingering old scheduler. `restart_worker` then `sleep 5` before probing, so the
+  new (schedulerless) worker is up ~5s later, and the reflection plist bootstrap
+  follows in the next `run.py` step. Net zero-scheduler window: a handful of seconds,
+  bounded by the worker-restart-to-plist-bootstrap gap. Reflections are periodic (tick
+  interval ≥ 60s, job intervals hours/days), so no reflection misses its due window.
+  Because the old scheduler is hard-killed (not drained-in-parallel), there is also no
+  window in which BOTH tick — the "never double" claim holds by construction, not just
+  by idempotency.
 - **Never double:** the alternative order (start the plist while the OLD worker still
   runs its in-process scheduler) would briefly run TWO schedulers. Worker-first
   ordering forbids that. **Defense-in-depth:** even if ordering slips, a two-scheduler
@@ -375,13 +516,19 @@ provisional, commented as tunable), set `VALOR_LAUNCHD=1`, redirect logs to
   scheduler dies exactly when the worker is restarted with the new code, before the
   plist is bootstrapped → clean handoff.
 
-**7. Operator surface (heartbeat → dashboard).**
-- `data/last_reflection_tick` written every tick (step 1).
+**7. Operator surface (heartbeat + restart-count → dashboard).**
+- `data/last_reflection_tick` written every tick (step 1); `data/reflection_worker_starts`
+  bumped once per process boot (step 1, `_bump_restart_counter`).
 - `ui/app.py`: add `_get_reflection_scheduler_health()` mirroring
-  `_get_worker_health()` (`:341`) — read the file mtime, compute age, flag `running`
-  if age < 2× `SCHEDULER_TICK_INTERVAL` (stale threshold). Add a `reflection_scheduler`
-  block to the `/dashboard.json` payload (`:514-541`). Additive field only — the rest
-  of the dashboard contract is unchanged.
+  `_get_worker_health()` (`ui/app.py:340`) — read `last_reflection_tick` mtime, compute
+  `tick_age_s`, flag `status` (`ok`/`running`/`error`) against a stale threshold
+  (≈ 2× `SCHEDULER_TICK_INTERVAL`, provisional constant, commented as tunable); ALSO
+  read `reflection_worker_starts` for `restart_count` + `last_start_age_s`. Add a
+  `reflection_scheduler` block to the `/dashboard.json` `health`/payload
+  (`ui/app.py:517-541`) carrying `{status, tick_age_s, restart_count,
+  last_start_age_s}`. Additive fields only — the rest of the dashboard contract is
+  unchanged. A crash loop reads as fresh `tick_age_s` + a climbing `restart_count` /
+  near-zero `last_start_age_s`.
 
 ## Failure Path Test Strategy
 
@@ -393,14 +540,24 @@ provisional, commented as tunable), set `VALOR_LAUNCHD=1`, redirect logs to
 - [ ] SIGTERM during a tick shuts the process down cleanly (cancel + await the
   scheduler task, no traceback) so launchd `KeepAlive` restarts are graceful. Test:
   drive `_run`, fire the SIGTERM handler, assert clean return.
-- [ ] `has_bridge_role()` fails OPEN on unreadable `projects.json` / missing venv /
+- [ ] `has_worker_role()` fails OPEN on unreadable `projects.json` / missing venv /
   `scutil` error (installs rather than silently skipping) — mirrors the nightly-tests
-  contract. Test the shell gate via a `projects.json` fixture matrix (bridge machine →
-  install; non-bridge → skip + remove stale plist; missing config → fail-open install).
+  contract. Test the shell gate via a `projects.json` fixture matrix: machine owning a
+  project WITHOUT a `telegram` block → **install** (the #1379-avoidance case);
+  machine owning no project → skip + remove stale plist; missing config → fail-open
+  install.
+- [ ] Restart-counter write is resilient: a corrupt/absent `data/reflection_worker_starts`
+  resets to `count=1` (never raises); an OSError on write is logged, not fatal. Test:
+  seed a garbage file, boot `_bump_restart_counter`, assert count resets and no
+  exception escapes.
 
 ### Empty/Invalid Input Handling
 - [ ] `python -m reflections --dry-run` with an empty/absent `config/reflections.yaml`
   loads zero entries, prints status, exits 0 (never bootstraps a broken plist). Test.
+- [ ] Installer `--dry-run` env parity: the verify probe runs with `.env` sourced and
+  `VALOR_LAUNCHD=1` set, exercising the same config-resolution path the plist runtime
+  uses. Test: assert the installer's probe command line carries `VALOR_LAUNCHD=1` and
+  runs after the `source .env` step (shell-level fixture / lint of the script).
 - [ ] Reflection registry with a disabled/invalid entry is skipped by the existing
   `load_registry` validation (unchanged) — subprocess start is unaffected. Covered by
   existing `test_reflection_scheduler.py`; add a smoke test that `python -m reflections
@@ -408,8 +565,13 @@ provisional, commented as tunable), set `VALOR_LAUNCHD=1`, redirect logs to
 
 ### Error State Rendering
 - [ ] A dead scheduler is VISIBLE: with a stale/absent `data/last_reflection_tick`,
-  `_get_reflection_scheduler_health()` reports `running=False` with the age, and
+  `_get_reflection_scheduler_health()` reports `status="error"` with the age, and
   `/dashboard.json` shows the stale block. Test the health helper with a stale mtime.
+- [ ] A crash-LOOPING scheduler is VISIBLE even with a fresh tick: with a fresh
+  `data/last_reflection_tick` but a high `restart_count` + near-zero `last_start_age_s`
+  in `data/reflection_worker_starts`, `_get_reflection_scheduler_health()` surfaces the
+  rising `restart_count`. Test the helper with a fresh-tick + churning-start fixture,
+  asserting the restart fields expose the loop.
 - [ ] The subprocess logs a startup line naming the tick interval and entry count
   (existing `ReflectionScheduler.start()` log) to `logs/reflection_worker.log` so
   operators can confirm it came up. Assert the log line on start.
@@ -435,13 +597,18 @@ provisional, commented as tunable), set `VALOR_LAUNCHD=1`, redirect logs to
 New tests (greenfield):
 - `tests/unit/test_reflections_main.py` — `python -m reflections --dry-run` exits 0
   and prints status; heartbeat is written each tick; a heartbeat OSError is swallowed
-  with a WARNING; SIGTERM triggers clean shutdown.
+  with a WARNING; the restart counter increments on boot and resets from a corrupt
+  file; SIGTERM triggers clean shutdown.
 - `tests/unit/test_reflection_scheduler_health.py` — `_get_reflection_scheduler_health()`
-  reports `running` for a fresh `data/last_reflection_tick` and stale/dead for an old
-  or absent file; `/dashboard.json` includes the additive `reflection_scheduler` block.
+  reports `ok`/`running` for a fresh `data/last_reflection_tick` and `error` for an old
+  or absent file; surfaces `restart_count`/`last_start_age_s`; distinguishes a healthy
+  scheduler (fresh tick, flat count) from a crash loop (fresh tick, climbing count);
+  `/dashboard.json` includes the additive `reflection_scheduler` block.
 - `tests/integration/test_install_reflection_worker.py` (or a shell-level fixture test)
-  — `has_bridge_role()` install/skip matrix: bridge machine installs, non-bridge skips
-  and removes a pre-seeded stale plist, unreadable config fails-open.
+  — `has_worker_role()` install/skip matrix: machine owning a non-Telegram project
+  installs (the #1379-avoidance case), machine owning no project skips and removes a
+  pre-seeded stale plist, unreadable config fails-open; and the `--dry-run` probe runs
+  with `VALOR_LAUNCHD=1` after `source .env`.
 
 ## Rabbit Holes
 
@@ -461,16 +628,25 @@ New tests (greenfield):
 - **Do NOT build a separate watchdog process** for the reflection subprocess. launchd
   `KeepAlive` IS the supervisor; the dashboard heartbeat is the visibility layer. A
   bespoke watchdog would recreate machinery launchd already provides.
-- **Do NOT gate on a bespoke "worker-role" check** — reuse `has_bridge_role()` (the
-  established, tested precedent). See Open Question 1 for the behavior nuance.
+- **Do NOT gate on `has_bridge_role()`** — that would strand reflections on
+  worker-only (non-Telegram) machines, the #1379 over-narrow-gating failure class.
+  Gate on `has_worker_role()` (adapted from `has_bridge_role()` by dropping the
+  Telegram clause) so reflections run exactly where the worker runs. Keep the adaptation
+  minimal and structurally identical to `has_bridge_role()` (same fail-open contract,
+  same self-skip + stale-plist removal) — the ONLY delta is the removed
+  `if proj.get("telegram")` clause.
 
 ## Risks
 
 ### Risk 1: Zero-scheduler window during cutover
 **Impact:** Between the worker restart (new code, no in-process scheduler) and the
 plist bootstrap, no scheduler ticks.
-**Mitigation:** The window is seconds; reflection tick interval is ≥60s and job
-intervals are hours/days, so no reflection misses its due window. Ordering
+**Mitigation:** The window is a handful of seconds, substantiated against the actual
+restart mechanism: `restart_worker` uses `launchctl kickstart -k`
+(`scripts/valor-service.sh:838`), a HARD kill-and-relaunch (no graceful drain), so the
+old scheduler dies atomically and the new schedulerless worker is up ~5s later; the
+reflection plist bootstrap follows immediately in `run.py`. Reflection tick interval is
+≥60s and job intervals are hours/days, so no reflection misses its due window. Ordering
 (worker-restart-then-install) is deterministic in `run.py`. Acceptable by design.
 
 ### Risk 2: Transient double-scheduler if ordering slips
@@ -480,17 +656,19 @@ source of truth + `reap_stale_running()` make double-enqueue idempotent; the sec
 tick finds `running` and skips. Deterministic ordering in `run.py` avoids the overlap
 in the first place; the idempotency is defense-in-depth.
 
-### Risk 3: Dev-only worker machines lose reflections under the bridge-role gate
-**Impact:** A machine that runs the worker but has NO `telegram`-configured project
-(a dev workstation) currently runs the in-process scheduler; after the split,
-`has_bridge_role()` skips the reflection subprocess there → those machines stop
-running reflections.
-**Mitigation:** This matches the issue's explicit "only bridge machines that run the
-worker" language and concentrates maintenance reflections on the canonical bridge
-machine (single-machine-ownership already scopes project audits via
-`reflection_machine_filter`). Flagged as **Open Question 1** for PM confirmation. If
-"preserve exact current behavior" is required, swap the gate for a worker-role check
-(machine has any assigned project) — a one-function change, noted in OQ1.
+### Risk 3: Over-narrow install gate strands reflections on worker machines
+**Impact:** If the subprocess were gated on `has_bridge_role()`, a machine that runs
+the worker but has NO `telegram`-configured project (a dev workstation) would stop
+running the reflections its in-process scheduler runs today — silently, and exactly
+the #1379 failure class (over-narrow gating that DROPS legitimate work).
+**Mitigation (RESOLVED, not open):** the installer gates on **`has_worker_role()`** —
+qualify if the host owns ANY project in `projects.json` (Telegram or not), so the
+subprocess installs precisely where the worker installs (the worker install has no
+bridge gate — see Freshness Check). `reflection_machine_filter` still scopes
+project-specific audits so a machine only runs the reflections it owns. This preserves
+current behavior (reflections run wherever the worker runs) while retaining the
+self-skip + stale-plist-removal hygiene for machines that own nothing. No open PM
+question remains.
 
 ### Risk 4: Subprocess can't read config under launchd (TCC)
 **Impact:** launchd agents can't read `~/Desktop` iCloud files; a naive read of the
@@ -523,7 +701,7 @@ false-negative that self-corrects on the next tick. Mirrors the existing
 
 ### Race 3: Two machines both run the subprocess
 **Location:** cross-machine, if `projects.json` mis-assigns a project's `machine`.
-**Trigger:** two bridge machines both qualify via `has_bridge_role()`.
+**Trigger:** two machines both qualify via `has_worker_role()`.
 **Data prerequisite:** single-machine-ownership in `projects.json`.
 **State prerequisite:** `reflection_machine_filter` disables project-scoped
 reflections this machine doesn't own (run at install time).
@@ -538,9 +716,10 @@ that exists today. Global reflections' idempotency (Race 1) covers the rest.
 - **A Popoto schema change or migration.** Redis-record contract unchanged.
 - **A bespoke reflection watchdog process.** launchd `KeepAlive` + dashboard
   heartbeat only.
-- **[ORDERED] Tuning `ThrottleInterval` / the heartbeat stale-threshold** to
-  production-observed values — ships conservative, tuned after observing restart rates
-  on the live bridge machine (same posture as #1815's threshold tuning).
+- **[ORDERED] Tuning `ThrottleInterval` / the heartbeat stale-threshold / the
+  crash-loop restart-count threshold** to production-observed values — ships
+  conservative, tuned after observing real restart rates on the live machine (same
+  posture as #1815's threshold tuning).
 - **[SEPARATE] Cross-machine reflection failover / warm standby** — out of scope;
   single-machine-ownership stands.
 
@@ -551,27 +730,36 @@ launchd service that must be installed on the right machines, self-skip on the w
 ones, and be wired into the multi-machine `/update` flow (`scripts/remote-update.sh`
 → `scripts/update/run.py`).
 
-**New installer, role-gated + self-healing (mirrors nightly-tests exactly):**
-- `scripts/install_reflection_worker.sh` contains a `has_bridge_role()` gate copied
-  verbatim from `scripts/install_nightly_tests.sh:20-72`. On a machine with no
-  `telegram`-configured owned project it: prints "Skipping reflection-worker install",
-  and if a stale `com.valor.reflection-worker.plist` exists in
-  `~/Library/LaunchAgents/`, `launchctl bootout` + `rm -f` it, then `exit 0`. This is
-  the **self-skip + stale-plist-removal** contract that keeps non-bridge machines
-  clean when a machine changes role.
+**New installer, worker-role-gated + self-healing (adapts the nightly-tests pattern):**
+- `scripts/install_reflection_worker.sh` contains a `has_worker_role()` gate adapted
+  from `has_bridge_role()` (`scripts/install_nightly_tests.sh:20-72`) — same structure
+  and fail-open contract, but the Python snippet **drops the `if proj.get("telegram")`
+  clause** so it qualifies when the host owns ANY project. This matches where the
+  worker actually installs (the worker install is ungated by role — `run.py:1341` is
+  guarded only by `plist.exists()`, and `install_worker.sh` has no machine gate). On a
+  machine that owns NO project it: prints "Skipping reflection-worker install", and if
+  a stale `com.valor.reflection-worker.plist` exists in `~/Library/LaunchAgents/`,
+  `launchctl bootout` + `rm -f` it, then `exit 0` — the **self-skip +
+  stale-plist-removal** contract for role changes.
+- **Why not `has_bridge_role()`:** gating on bridge-role would strand reflections on
+  worker-only (non-Telegram) machines — the #1379 over-narrow-gating failure class
+  (which gated calendar on `session.slug` and DROPPED all non-slug work). Worker-role
+  gating runs reflections precisely where the worker runs.
 - Fail-open: unreadable `projects.json`, missing venv, or `scutil` error → install
-  (matches nightly-tests, so a config hiccup never silently drops reflections on the
-  real bridge machine).
+  (matches nightly-tests, so a config hiccup never silently drops reflections).
 
 **Wiring into `scripts/update/run.py`:**
 - Add `scripts/update/service.py::install_reflection_worker(project_dir)` modeled on
   `install_nightly_tests()` (`:360-388`): resolve `scripts/install_reflection_worker.sh`,
   run it, log rc; the shell script owns the gate so the Python wrapper is dumb.
 - Call it in `run.py` from the service-restart branch, **after** the worker
-  install/restart block (~`:1341-1443`) and adjacent to the nightly-tests install
-  (`:1447-1450`), under the existing `if has_bridge:` guard (defense-in-depth over the
-  script's own gate). **Placement after the worker restart is load-bearing for
-  cutover ordering** (worker-first → at most a brief zero-scheduler window, never
+  install/restart block (~`:1341-1443`). **Do NOT place it under `if has_bridge:`** —
+  the reflection subprocess must install wherever the worker installs (every /update
+  machine), so the call is unconditional (mirroring the ungated worker-install block at
+  `:1341`); the shell script's own `has_worker_role()` gate handles the skip/self-heal
+  on machines that own nothing. This is the key wiring difference from the nightly-tests
+  install (which IS bridge-gated). **Placement after the worker restart is load-bearing
+  for cutover ordering** (worker-first → at most a brief zero-scheduler window, never
   double — see Technical Approach step 6).
 
 **Config propagation (MOVE, not duplicate):**
@@ -587,12 +775,12 @@ ones, and be wired into the multi-machine `/update` flow (`scripts/remote-update
   file (not a symlink) still run before either installer — the subprocess benefits from
   them unchanged.
 
-**Migration for existing installations:** on the next `/update` on the (single) live
-bridge machine, the new worker code (no in-process scheduler) lands, the worker
-restarts, then `install_reflection_worker.sh` bootstraps the new plist. No manual
-step. On any non-bridge machine the installer self-skips. No stale
-`com.valor.reflection-worker.plist` can exist yet (new label), so no cleanup needed
-on first deploy; the stale-removal path is for future role changes.
+**Migration for existing installations:** on the next `/update` on any machine that
+runs the worker, the new worker code (no in-process scheduler) lands, the worker
+restarts, then `install_reflection_worker.sh` bootstraps the new plist. No manual step.
+On a machine that owns no project (`has_worker_role()` false) the installer self-skips.
+No stale `com.valor.reflection-worker.plist` can exist yet (new label), so no cleanup
+needed on first deploy; the stale-removal path is for future role changes.
 
 **Logs:** add `logs/reflection_worker.log` / `logs/reflection_worker_error.log` to the
 same `logs/` dir the log-rotate plist already covers (verify the glob covers the new
@@ -600,9 +788,9 @@ files; if it enumerates explicitly, add them).
 
 **No `.env` secret additions required** — the subprocess uses the existing Redis /
 GitHub creds sourced from `.env` (or env-injected) exactly as the worker does.
-`SCHEDULER_TICK_INTERVAL` and any new stale-threshold constant are optional with safe
-defaults; if surfaced as env, add to `.env.example` with a comment line above each
-(completeness-check requirement).
+`SCHEDULER_TICK_INTERVAL`, the new stale-threshold constant, and the crash-loop
+restart-count threshold are optional with safe defaults; if surfaced as env, add to
+`.env.example` with a comment line above each (completeness-check requirement).
 
 ## Agent Integration
 
@@ -630,9 +818,12 @@ defaults; if surfaced as env, add to `.env.example` with a comment line above ea
   scheduler moved out of the worker (freeze-isolation / crash-domain decoupling, the
   #1816 Fix #5 lineage), the `reflections/__main__.py` entry, the
   `com.valor.reflection-worker.plist` (`KeepAlive`+`ThrottleInterval`) lifecycle, the
-  `has_bridge_role()` install gate + self-skip, the cutover ordering
-  (worker-restart-then-install; zero-window-not-double), the `data/last_reflection_tick`
-  heartbeat + `/dashboard.json` `reflection_scheduler` surface, and the moved
+  **`has_worker_role()`** install gate + self-skip (and why worker-role not bridge-role,
+  citing the #1379 over-narrow-gating precedent), the cutover ordering
+  (worker-restart-then-install via `launchctl kickstart -k` hard restart;
+  zero-window-not-double), the two operator signals — `data/last_reflection_tick`
+  (tick freshness) + `data/reflection_worker_starts` (restart count / crash-loop) —
+  and the `/dashboard.json` `reflection_scheduler` surface, and the moved
   config-copy/machine-filter ownership. State it is the continuation of
   `worker-fault-containment.md` (#1816).
 - [ ] Add an entry to `docs/features/README.md` index table.
@@ -645,8 +836,10 @@ defaults; if surfaced as env, add to `.env.example` with a comment line above ea
   `python -m reflections --dry-run`.
 
 ### Inline Documentation
-- [ ] Comment the `VALOR_LAUNCHD=1` requirement + `data/last_reflection_tick`
-  heartbeat rationale in `reflections/__main__.py`.
+- [ ] Comment the `VALOR_LAUNCHD=1` requirement + the two heartbeat files in
+  `reflections/__main__.py`: `data/last_reflection_tick` (per-tick freshness) and
+  `data/reflection_worker_starts` (restart counter — why a crash loop needs a signal
+  the fresh tick can't provide).
 - [ ] Comment the cutover-ordering requirement at the `run.py` install call site
   (worker-first).
 - [ ] Comment the moved config-copy block in `install_reflection_worker.sh` (why it
@@ -666,9 +859,13 @@ defaults; if surfaced as env, add to `.env.example` with a comment line above ea
 - [ ] **Long-lived supervised lifecycle:** `grep -c "KeepAlive"
   com.valor.reflection-worker.plist > 0` and `grep -c "ThrottleInterval"
   com.valor.reflection-worker.plist > 0` (NOT `StartInterval`).
-- [ ] **Role-gated + self-healing install:** `grep -c "has_bridge_role"
-  scripts/install_reflection_worker.sh > 0` and the script bootout+rm's a stale plist
-  on a non-bridge machine (test).
+- [ ] **Worker-role-gated + self-healing install (NOT bridge-role):**
+  `grep -c "has_worker_role" scripts/install_reflection_worker.sh > 0` and
+  `grep -c "get(\"telegram\")\|proj.get('telegram')" scripts/install_reflection_worker.sh
+  == 0` (the Telegram clause is dropped), and the script bootout+rm's a stale plist on a
+  machine owning no project (test). Wiring is NOT under `if has_bridge:` —
+  `grep -B2 "install_reflection_worker" scripts/update/run.py` shows no `has_bridge`
+  guard on the call.
 - [ ] **Wired into /update:** `grep -c "install_reflection_worker"
   scripts/update/service.py > 0` and `grep -c "install_reflection_worker"
   scripts/update/run.py > 0`, called after the worker install block.
@@ -676,10 +873,17 @@ defaults; if surfaced as env, add to `.env.example` with a comment line above ea
   `reflection_machine_filter` block is present in `install_reflection_worker.sh` and
   removed from `install_worker.sh` — `grep -c "reflection_machine_filter"
   scripts/install_worker.sh == 0` and `> 0` in the new installer.
-- [ ] **Operator-visible heartbeat:** `grep -c "last_reflection_tick"
-  reflections/__main__.py > 0` and `grep -c "reflection_scheduler" ui/app.py > 0`
-  (dashboard block), so a dead/crash-looping scheduler is visible via
-  `localhost:8500/dashboard.json`.
+- [ ] **Operator-visible heartbeat (tick + restart-count):**
+  `grep -c "last_reflection_tick" reflections/__main__.py > 0`,
+  `grep -c "reflection_worker_starts" reflections/__main__.py > 0` (crash-loop signal),
+  and `grep -c "reflection_scheduler" ui/app.py > 0` (dashboard block) — so a dead OR
+  crash-looping scheduler is visible via `localhost:8500/dashboard.json`.
+- [ ] **Live dashboard endpoint surfaces the fields:** with the web UI running,
+  `curl -s localhost:8500/dashboard.json | python3 -c "import json,sys;
+  d=json.load(sys.stdin); b=d.get('reflection_scheduler') or
+  d['health'].get('reflection_scheduler'); print(b)"` prints a block containing
+  `status`, `tick_age_s`, and `restart_count` (not KeyError / None). Proves the surface
+  is wired end-to-end, not just present as a string.
 - [ ] **No Popoto schema change:** no new model field / migration entry.
 - [ ] Tests pass (`/do-test`) — new unit + integration tests green, existing
   reflection + worker-supervisor tests still green.
@@ -697,14 +901,16 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
   config-copy; Agent Type: builder; Resume: true.
 - **Builder (dashboard)** — Name: dash-builder; Role: `_get_reflection_scheduler_health()`
   + `/dashboard.json` additive block; Agent Type: builder; Resume: true.
-- **Validator** — Name: refl-validator; Role: verify success criteria + failure-path +
-  cutover-ordering + role-gate matrix; Agent Type: validator; Resume: true.
+- **Validator** — Name: refl-validator; Role: verify success criteria (incl. live
+  endpoint) + failure-path + cutover-ordering + worker-role gate matrix +
+  crash-loop/restart-count visibility + dry-run env parity; Agent Type: validator;
+  Resume: true.
 - **Documentarian** — Name: refl-doc; Role: feature doc + README index + CLAUDE.md
   service table + forward-links; Agent Type: documentarian; Resume: true.
 
 ## Step by Step Tasks
 
-### 1. Create the subprocess entry + heartbeat
+### 1. Create the subprocess entry + heartbeat + restart-counter
 - **Task ID**: build-subprocess
 - **Depends On**: none
 - **Validates**: tests/unit/test_reflections_main.py (create)
@@ -713,9 +919,11 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Parallel**: false
 - Create `reflections/__main__.py` (`python -m reflections`) reusing
   `ReflectionScheduler` verbatim: `--dry-run` (load + `format_status` + exit 0), clean
-  SIGTERM/SIGINT shutdown, and a `data/last_reflection_tick` heartbeat written each
-  tick (wrap `scheduler.tick` in `__main__`, do NOT modify the class). Heartbeat
-  OSError is logged, never fatal.
+  SIGTERM/SIGINT shutdown, a `data/last_reflection_tick` heartbeat written each tick
+  (wrap `scheduler.tick` in `__main__`, do NOT modify the class), and a
+  `data/reflection_worker_starts` restart counter bumped once on boot (crash-loop
+  signal — see Data Flow; corrupt/absent file resets to count=1). Both writes log
+  OSError, never fatal.
 
 ### 2. Delete the in-worker scheduler
 - **Task ID**: delete-worker-block
@@ -728,7 +936,7 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
   cancel). No flag, no comment stub. Confirm `grep -rc "ReflectionScheduler" worker/
   == 0` and the worker still boots (`python -m worker --dry-run`).
 
-### 3. Create the plist + role-gated installer + move config prep
+### 3. Create the plist + worker-role-gated installer + move config prep
 - **Task ID**: build-install
 - **Depends On**: build-subprocess
 - **Validates**: tests/integration/test_install_reflection_worker.py (create)
@@ -737,10 +945,13 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Parallel**: false
 - Create `com.valor.reflection-worker.plist` from `com.valor.worker.plist`
   (`KeepAlive=true` + `ThrottleInterval`, `VALOR_LAUNCHD=1`, `-m reflections`, logs to
-  `logs/reflection_worker*.log`).
+  `logs/reflection_worker*.log`). `ProgramArguments` sources `.env` via the
+  sdlc-reflection idiom (`set -a; source .env; set +a; exec ... -m reflections`).
 - Create `scripts/install_reflection_worker.sh` from `install_sdlc_reflection.sh` +
-  the `has_bridge_role()` gate (verbatim from `install_nightly_tests.sh`) +
-  `-m reflections --dry-run` verify + bootout/bootstrap.
+  a `has_worker_role()` gate (adapted from `has_bridge_role()` in
+  `install_nightly_tests.sh` by DROPPING the `if proj.get("telegram")` clause) +
+  a `VALOR_LAUNCHD=1 -m reflections --dry-run` verify run AFTER `source .env`
+  (env parity) + bootout/bootstrap + self-skip/stale-plist-removal.
 - MOVE the `reflections.yaml` copy + `reflection_machine_filter` block from
   `install_worker.sh:47-62` into the new installer; delete it from `install_worker.sh`.
 
@@ -751,10 +962,12 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `service.install_reflection_worker()` (modeled on `install_nightly_tests`) and
-  call it in `run.py` **after** the worker install/restart block, under `if has_bridge:`.
-  Comment the worker-first cutover-ordering rule at the call site.
+  call it in `run.py` **after** the worker install/restart block, **unconditionally**
+  (NOT under `if has_bridge:` — the shell self-gates on `has_worker_role()`, and the
+  subprocess must install everywhere the worker does). Comment the worker-first
+  cutover-ordering rule at the call site.
 
-### 5. Dashboard heartbeat surface
+### 5. Dashboard heartbeat + restart-count surface
 - **Task ID**: build-dashboard
 - **Depends On**: build-subprocess
 - **Validates**: tests/unit/test_reflection_scheduler_health.py (create)
@@ -762,8 +975,10 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_get_reflection_scheduler_health()` (mirror `_get_worker_health()`,
-  `ui/app.py:341`) reading `data/last_reflection_tick`; add an additive
-  `reflection_scheduler` block to `/dashboard.json` (`:514-541`).
+  `ui/app.py:340`) reading BOTH `data/last_reflection_tick` (tick freshness) and
+  `data/reflection_worker_starts` (restart count / crash-loop); add an additive
+  `reflection_scheduler` block to `/dashboard.json` (`ui/app.py:517-541`) carrying
+  `{status, tick_age_s, restart_count, last_start_age_s}`.
 
 ### 6. Validate
 - **Task ID**: validate-all
@@ -771,8 +986,11 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Assigned To**: refl-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run new + existing tests; verify every Success Criteria grep; verify the role-gate
-  install/skip matrix and the worker-first cutover ordering.
+- Run new + existing tests; verify every Success Criteria grep (including the
+  live-endpoint `curl` row); verify the `has_worker_role()` install/skip matrix
+  (non-Telegram-project machine installs — the #1379-avoidance case), the crash-loop
+  restart-count visibility, the dry-run env parity, and the worker-first cutover
+  ordering.
 
 ### 7. Documentation
 - **Task ID**: document
@@ -797,32 +1015,43 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 | Restart-storm cap | `grep -c "ThrottleInterval" com.valor.reflection-worker.plist` | > 0 |
 | NOT a cron lifecycle | `grep -c "StartInterval" com.valor.reflection-worker.plist` | 0 |
 | Installer exists | `test -f scripts/install_reflection_worker.sh && echo ok` | ok |
-| Role gate present | `grep -c "has_bridge_role" scripts/install_reflection_worker.sh` | > 0 |
+| Worker-role gate present (NOT bridge) | `grep -c "has_worker_role" scripts/install_reflection_worker.sh` | > 0 |
+| Telegram clause dropped from gate | `grep -c "telegram" scripts/install_reflection_worker.sh` | 0 |
+| Wiring NOT bridge-gated | `grep -B3 "install_reflection_worker" scripts/update/run.py \| grep -c "has_bridge"` | 0 |
 | Stale-plist self-removal present | `grep -c "rm -f" scripts/install_reflection_worker.sh` | > 0 |
 | Update service wrapper | `grep -c "install_reflection_worker" scripts/update/service.py` | > 0 |
 | Update run.py call | `grep -c "install_reflection_worker" scripts/update/run.py` | > 0 |
 | Config prep moved OUT of worker installer | `grep -c "reflection_machine_filter" scripts/install_worker.sh` | 0 |
 | Config prep moved INTO reflection installer | `grep -c "reflection_machine_filter" scripts/install_reflection_worker.sh` | > 0 |
-| Heartbeat written | `grep -c "last_reflection_tick" reflections/__main__.py` | > 0 |
+| Tick heartbeat written | `grep -c "last_reflection_tick" reflections/__main__.py` | > 0 |
+| Restart-count (crash-loop) signal written | `grep -c "reflection_worker_starts" reflections/__main__.py` | > 0 |
 | Dashboard surface | `grep -c "reflection_scheduler" ui/app.py` | > 0 |
+| Restart-count on dashboard | `grep -c "restart_count" ui/app.py` | > 0 |
+| Dry-run env parity in installer | `grep -c "VALOR_LAUNCHD=1 .*-m reflections --dry-run\|VALOR_LAUNCHD=1.*reflections" scripts/install_reflection_worker.sh` | > 0 |
+| Live endpoint surfaces block (UI running) | `curl -s localhost:8500/dashboard.json \| grep -c "reflection_scheduler"` | > 0 |
 | Lint clean | `python -m ruff check reflections/ worker/ ui/` | exit code 0 |
 | Format clean | `python -m ruff format --check reflections/ worker/ ui/` | exit code 0 |
 | No Popoto migration added | `git diff --name-only main -- scripts/update/migrations.py \| wc -l` | 0 |
 
 ## Open Questions
 
-1. **Bridge-role vs worker-role gate.** The issue says "only bridge machines that run
-   the worker run the reflection subprocess" and "follow the existing bridge-role
-   launchd gating pattern," so the plan uses `has_bridge_role()`. But a dev workstation
-   runs the worker WITHOUT a `telegram` project (per `CLAUDE.md`: "Dev workstations run
-   [the worker] instead of the bridge"), so under this gate those machines stop running
-   reflections that the in-process scheduler runs today (Risk 3). **Confirm** that
-   concentrating reflections on bridge machines is intended (single-machine-ownership
-   already scopes project audits). If exact behavior preservation is required, swap the
-   gate for a worker-role check (machine has any assigned project) — a one-function
-   change isolated to `install_reflection_worker.sh`.
-2. **Plist creds delivery — source `.env` vs env-inject.** The sdlc-reflection plist
-   sources `.env` in `ProgramArguments`; the worker plist env-injects at install time
-   (TCC-safe). Both work under `VALOR_LAUNCHD=1`. Recommend sourcing `.env` (simpler,
-   matches sdlc-reflection) unless the builder finds a launchd `.env`-read hang — then
-   fall back to env-injection. Confirm the simpler path is acceptable.
+_None blocking._ The two questions from the prior revision are resolved in-plan:
+
+**RESOLVED — gate on worker presence, not bridge-role.** The prior draft's OQ1 asked
+whether to concentrate reflections on bridge machines. That framing risked the #1379
+over-narrow-gating failure (which gated calendar on `session.slug` and DROPPED all
+non-slug work). Grounding: the worker installs on every /update machine, ungated by
+role (`run.py:1341` guarded only by `plist.exists()`; `install_worker.sh` has no
+machine gate). To run reflections exactly where the worker runs, the installer gates
+on **`has_worker_role()`** — `has_bridge_role()` with the `if proj.get("telegram")`
+clause dropped (qualify if the host owns ANY project). This preserves current behavior
+and keeps the self-skip + stale-plist-removal hygiene. Reflected in Solution, Update
+System, Risk 3, Success Criteria, and Verification. No PM confirmation needed.
+
+**RESOLVED — plist sources `.env` in `ProgramArguments`.** Chosen over install-time
+env-injection: it matches the `com.valor.sdlc-reflection.plist:11` idiom, is TCC-safe
+under `VALOR_LAUNCHD=1` (no vault/iCloud read), keeps the plist self-contained, and
+makes the installer's `--dry-run` env parity trivial (the installer sources the same
+`.env` and exports `VALOR_LAUNCHD=1` before probing — Technical Approach steps 3-4). If
+a build-time launchd `.env`-read hang appears, fall back to the worker's env-injection
+pattern (`install_worker.sh`) — a localized installer change, no plan-level dependency.
