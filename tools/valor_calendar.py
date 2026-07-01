@@ -143,7 +143,6 @@ _TECH_JARGON = frozenset(
         "bug",
         "bugfix",
         "task",
-        "wip",
     }
 )
 
