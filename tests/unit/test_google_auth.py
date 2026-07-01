@@ -343,6 +343,98 @@ class TestGetCredentials:
             get_credentials()
 
 
+class TestHttpTimeouts:
+    """Tests for the bounded HTTP transport (API calls + token refresh)."""
+
+    def test_timed_request_session_enforces_timeout(self):
+        """_timed_request mounts a default-timeout adapter for both schemes."""
+        from tools.google_workspace.auth import (
+            _HTTP_TIMEOUT_SECONDS,
+            _timed_request,
+            _TimeoutHTTPAdapter,
+        )
+
+        req = _timed_request()
+        session = req.session
+        for scheme in ("https://", "http://"):
+            adapter = session.get_adapter(scheme)
+            assert isinstance(adapter, _TimeoutHTTPAdapter)
+            assert adapter._timeout == _HTTP_TIMEOUT_SECONDS
+
+    def test_timeout_adapter_injects_default_timeout(self):
+        """The adapter fills in the default timeout only when none is given."""
+        from tools.google_workspace.auth import _TimeoutHTTPAdapter
+
+        captured = {}
+
+        class _Probe(_TimeoutHTTPAdapter):
+            def send(self, request, **kwargs):  # type: ignore[override]
+                # Capture what the base adapter would receive without doing IO.
+                if kwargs.get("timeout") is None:
+                    kwargs["timeout"] = self._timeout
+                captured.update(kwargs)
+                return MagicMock()
+
+        adapter = _Probe(timeout=8.0)
+        adapter.send(MagicMock(), timeout=None)
+        assert captured["timeout"] == 8.0
+        adapter.send(MagicMock(), timeout=2.0)
+        assert captured["timeout"] == 2.0
+
+    def test_get_service_builds_with_bounded_http(self, tmp_path):
+        """get_service wraps creds in AuthorizedHttp on a timed httplib2.Http."""
+        from google_auth_httplib2 import AuthorizedHttp
+
+        from tools.google_workspace.auth import _HTTP_TIMEOUT_SECONDS, get_service
+
+        mock_creds = MagicMock()
+        captured = {}
+
+        def _fake_build(api, version, http=None, **kwargs):
+            captured["api"] = api
+            captured["version"] = version
+            captured["http"] = http
+            captured["credentials"] = kwargs.get("credentials")
+            return MagicMock()
+
+        with (
+            patch("tools.google_workspace.auth.get_credentials", return_value=mock_creds),
+            patch("tools.google_workspace.auth.build", side_effect=_fake_build),
+        ):
+            get_service("calendar", "v3")
+
+        # No bare credentials= path; transport carries the creds.
+        assert captured["credentials"] is None
+        assert isinstance(captured["http"], AuthorizedHttp)
+        assert captured["http"].http.timeout == _HTTP_TIMEOUT_SECONDS
+
+    def test_refresh_uses_timed_request(self, tmp_path):
+        """get_credentials refreshes through the timeout-enforcing transport."""
+        token_file = tmp_path / "token.json"
+        token_file.write_text(json.dumps({"token": "t", "client_id": "c", "client_secret": "s"}))
+
+        mock_creds = MagicMock()
+        mock_creds.expired = True
+        mock_creds.refresh_token = "refresh"
+        mock_creds.valid = False
+        mock_creds.to_json.return_value = '{"token": "new"}'
+
+        with (
+            patch("tools.google_workspace.auth.TOKEN_PATH", token_file),
+            patch(
+                "tools.google_workspace.auth.Credentials.from_authorized_user_file",
+                return_value=mock_creds,
+            ),
+        ):
+            get_credentials()
+
+        passed_request = mock_creds.refresh.call_args[0][0]
+        adapter = passed_request.session.get_adapter("https://")
+        from tools.google_workspace.auth import _TimeoutHTTPAdapter
+
+        assert isinstance(adapter, _TimeoutHTTPAdapter)
+
+
 class TestClearTokens:
     """Tests for clear_tokens() function."""
 

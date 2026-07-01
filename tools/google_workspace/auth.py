@@ -18,15 +18,55 @@ import platform
 import subprocess
 from pathlib import Path
 
+import httplib2
+import requests
 from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google_auth_httplib2 import AuthorizedHttp
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
+from requests.adapters import HTTPAdapter
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling on every Google HTTP round-trip (API calls AND token refresh).
+# Without this, the httplib2 transport used by googleapiclient inherits the
+# process socket default (None = infinite) and the requests transport used for
+# token refresh defaults to 120s -- both far too long for a hook running on a
+# 15s budget. Overridable via env so short-lived callers (the calendar hook)
+# can tighten it further.
+_HTTP_TIMEOUT_SECONDS = float(os.getenv("GWS_HTTP_TIMEOUT", "30"))
+
+
+class _TimeoutHTTPAdapter(HTTPAdapter):
+    """requests adapter that applies a default per-request timeout.
+
+    requests Sessions have no native default timeout; this enforces one so the
+    token-refresh path (google.auth.transport.requests.Request) cannot hang
+    longer than _HTTP_TIMEOUT_SECONDS.
+    """
+
+    def __init__(self, *args, timeout: float, **kwargs):
+        self._timeout = timeout
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self._timeout
+        return super().send(request, **kwargs)
+
+
+def _timed_request() -> Request:
+    """Build a google.auth Request whose underlying session enforces a timeout."""
+    session = requests.Session()
+    adapter = _TimeoutHTTPAdapter(timeout=_HTTP_TIMEOUT_SECONDS)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return Request(session=session)
+
 
 # Resolve credentials directory: env var override or settings default (~/Desktop/Valor/)
 _env_dir = os.getenv("GOOGLE_CREDENTIALS_DIR")
@@ -192,7 +232,7 @@ def get_credentials() -> Credentials:
 
     if creds and creds.expired and creds.refresh_token:
         try:
-            creds.refresh(Request())
+            creds.refresh(_timed_request())
         except RefreshError as e:
             raise GoogleAuthError(
                 "Token revoked or expired. Re-authentication required.",
@@ -230,11 +270,17 @@ _service_cache: dict[tuple[str, str], Resource] = {}
 
 
 def get_service(api: str, version: str) -> Resource:
-    """Build and cache a Google API service client."""
+    """Build and cache a Google API service client.
+
+    The service is built on an httplib2 transport with an explicit timeout so
+    no API call can hang indefinitely. AuthorizedHttp also carries the
+    credentials and performs any lazy refresh over the same bounded transport.
+    """
     key = (api, version)
     if key not in _service_cache:
         creds = get_credentials()
-        _service_cache[key] = build(api, version, credentials=creds)
+        authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=_HTTP_TIMEOUT_SECONDS))
+        _service_cache[key] = build(api, version, http=authed_http)
     return _service_cache[key]
 
 

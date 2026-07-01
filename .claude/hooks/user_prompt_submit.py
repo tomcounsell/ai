@@ -15,6 +15,7 @@ All operations fail silently -- memory errors never block prompt submission.
 
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -27,8 +28,122 @@ sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
 from hook_utils.constants import read_hook_input  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# Hard wall-clock deadline for the memory work (ingest + prefetch) combined.
+#
+# The Claude Code harness discards a UserPromptSubmit hook's output if it does
+# not return within 15s ("hook timed out after 15s -- output discarded"). The
+# memory path talks to Redis; a degraded Redis (5s-per-op socket timeout, no
+# enforced retry budget) can stack ingest + prefetch socket waits past that
+# harness budget. None of the memory ops self-impose a path-level deadline --
+# they only warn-log on slowness.
+#
+# This SIGALRM-based guard hard-kills a hung Redis socket well under the harness
+# limit. The hook is a short-lived, single-threaded Unix/macOS process, so
+# SIGALRM on the main thread is clean. On deadline we abort the memory work,
+# emit NO additionalContext (prefetch contributes nothing that turn), and let
+# the rest of main() proceed. Losing a fire-and-forget ingest on a slow turn is
+# acceptable.
+# ---------------------------------------------------------------------------
+MEMORY_HOOK_DEADLINE_SECONDS = 8
+
+
+class _MemoryDeadlineExceeded(BaseException):
+    """Raised by the SIGALRM handler when memory work exceeds the deadline.
+
+    Subclasses ``BaseException`` (not ``Exception``) deliberately: the memory
+    ops in ``memory_bridge`` wrap their bodies in broad ``except Exception``
+    blocks that would otherwise swallow this signal and defeat the deadline.
+    """
+
+
+def _raise_memory_deadline(signum, frame):  # noqa: ARG001 -- signal handler signature
+    raise _MemoryDeadlineExceeded()
+
+
+def _run_memory_work_with_deadline(prompt: str, cwd: str, session_id: str) -> None:
+    """Run ingest + prefetch under a hard SIGALRM wall-clock deadline.
+
+    Emits the prefetch ``hookSpecificOutput`` JSON on stdout on the happy
+    path. On deadline (or any failure) emits nothing and returns. Never
+    raises -- a deadline must never block prompt submission.
+    """
+    deadline_armed = False
+    previous_handler = None
+    try:
+        previous_handler = signal.signal(signal.SIGALRM, _raise_memory_deadline)
+        signal.alarm(MEMORY_HOOK_DEADLINE_SECONDS)
+        deadline_armed = True
+    except (ValueError, OSError, AttributeError):
+        # signal.alarm only works on the main thread of a Unix process. If we
+        # cannot arm it (non-main thread, unsupported platform), degrade to the
+        # pre-existing fail-silent behavior with no hard deadline.
+        deadline_armed = False
+
+    try:
+        # Ingest into memory (quality filter and dedup handled inside)
+        try:
+            from hook_utils.memory_bridge import ingest
+
+            ingest(prompt, cwd=cwd)
+        except Exception:
+            pass  # Silent failure -- never block prompt submission
+
+        # Prefetch memories matching the prompt and emit as additionalContext.
+        # This runs before any tool call so the agent has memory context on
+        # the very first turn. Gates short / trivial prompts and strips PM
+        # boilerplate internally; returns None when no thoughts to surface.
+        if session_id:
+            try:
+                from hook_utils.memory_bridge import prefetch
+
+                prefetch_result = prefetch(session_id, prompt, cwd=cwd)
+                if prefetch_result:
+                    # Use the explicit hookSpecificOutput shape (matches the
+                    # form used in agent/health_check.py for PostToolUse).
+                    payload = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "UserPromptSubmit",
+                            "additionalContext": prefetch_result,
+                        }
+                    }
+                    print(json.dumps(payload))
+            except Exception:
+                pass  # Silent failure -- never block prompt submission
+    except _MemoryDeadlineExceeded:
+        # Deadline hit a hung Redis socket. Abort gracefully: emit NO
+        # additionalContext (we never reached a clean prefetch result) and
+        # let the rest of main() proceed. This is an ADDITIONAL guard on top
+        # of the per-op fail-silent handling, never a replacement.
+        pass
+    finally:
+        if deadline_armed:
+            # Always cancel the alarm and restore the prior handler so the
+            # deadline cannot fire during the non-memory work below.
+            try:
+                signal.alarm(0)
+            except (ValueError, OSError):
+                pass
+            if previous_handler is not None:
+                try:
+                    signal.signal(signal.SIGALRM, previous_handler)
+                except (ValueError, OSError, TypeError):
+                    pass
+
 
 def main():
+    # Best-effort: give this short-lived hook process the same resilient Redis
+    # client (retry / backoff / health-check / bounded timeouts) the bridge and
+    # worker use. Without it the hook runs on a bare Popoto client with no
+    # enforced retry budget. Idempotent and a no-op under pytest; never crash
+    # if the module is unavailable in a foreign checkout.
+    try:
+        from config.redis_bootstrap import configure_resilient_redis
+
+        configure_resilient_redis()
+    except Exception:
+        pass  # Silent -- resilient Redis is an optimization, not a requirement
+
     hook_input = read_hook_input()
     if not hook_input:
         return
@@ -42,35 +157,9 @@ def main():
     cwd = hook_input.get("cwd", "")
     session_id = hook_input.get("session_id", "")
 
-    # Ingest into memory (quality filter and dedup handled inside)
-    try:
-        from hook_utils.memory_bridge import ingest
-
-        ingest(prompt, cwd=cwd)
-    except Exception:
-        pass  # Silent failure -- never block prompt submission
-
-    # Prefetch memories matching the prompt and emit as additionalContext.
-    # This runs before any tool call so the agent has memory context on
-    # the very first turn. Gates short / trivial prompts and strips PM
-    # boilerplate internally; returns None when no thoughts to surface.
-    if session_id:
-        try:
-            from hook_utils.memory_bridge import prefetch
-
-            prefetch_result = prefetch(session_id, prompt, cwd=cwd)
-            if prefetch_result:
-                # Use the explicit hookSpecificOutput shape (matches the
-                # form used in agent/health_check.py for PostToolUse).
-                payload = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": prefetch_result,
-                    }
-                }
-                print(json.dumps(payload))
-        except Exception:
-            pass  # Silent failure -- never block prompt submission
+    # Memory work (ingest + prefetch) runs under a hard wall-clock deadline so a
+    # degraded Redis can never push the hook past the harness's 15s budget.
+    _run_memory_work_with_deadline(prompt, cwd, session_id)
 
     # Capture TUI interaction patterns (slash commands, mid-run steering) for
     # subconscious-memory recall (#1540, Pillar 3 of epic #1536). Fail-silent.

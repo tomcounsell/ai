@@ -34,6 +34,95 @@ CODE_EXTENSIONS = {".py", ".js", ".ts"}
 # Quality commands to track in the SDLC state
 QUALITY_COMMANDS = ("pytest", "ruff", "ruff-format")
 
+# ---------------------------------------------------------------------------
+# Cheap sidecar access (perf: avoid importing memory_bridge on hot paths)
+#
+# Importing ``hook_utils.memory_bridge`` transitively pulls
+# ``config.memory_defaults`` -> ``from popoto import Defaults`` -> redis/popoto
+# at module load (~200-300ms warm, up to ~2s cold). This hook runs on EVERY
+# tool call, so paying that cost just to read a JSON sidecar or bump a counter
+# is the dominant hook-latency cost.
+#
+# The helpers below read/write the exact same sidecar files that
+# ``memory_bridge._get_sidecar_dir`` targets, computing the repo root from
+# THIS file's location the same way memory_bridge does (resolve() + walk up),
+# so the path is identical regardless of ``CLAUDE_PROJECT_DIR``. They let the
+# common paths early-exit (or bump the recall counter) WITHOUT importing the
+# popoto-heavy module; the genuinely heavy branches still import lazily.
+#
+# ``_RECALL_WINDOW_SIZE`` / ``_RECALL_BUFFER_SIZE`` MUST stay in sync with
+# ``hook_utils.memory_bridge.WINDOW_SIZE`` / ``BUFFER_SIZE`` — they are
+# duplicated here only so the counter-only fast path can mirror recall()'s
+# non-query branch byte-for-byte. recall() remains the source of truth; the
+# WINDOW_SIZE-th call delegates to it for the real BM25/bloom work.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_RECALL_WINDOW_SIZE = 3
+_RECALL_BUFFER_SIZE = 9
+
+
+def _sidecar_dir(session_id: str) -> Path:
+    """Return the per-session sidecar directory (mirrors memory_bridge)."""
+    return _REPO_ROOT / "data" / "sessions" / session_id
+
+
+def _load_agent_session_sidecar(session_id: str) -> dict:
+    """Read the agent_session.json sidecar directly.
+
+    Behaviour-identical to ``memory_bridge.load_agent_session_sidecar`` but
+    with no module-level imports — returns {} if missing/corrupt.
+    """
+    path = _sidecar_dir(session_id) / "agent_session.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _load_memory_buffer(session_id: str) -> dict:
+    """Read the memory_buffer.json sidecar directly.
+
+    Behaviour-identical to ``memory_bridge._load_sidecar`` — returns the
+    {count, buffer, injected} shape, resetting to defaults on missing/corrupt.
+    """
+    path = _sidecar_dir(session_id) / "memory_buffer.json"
+    if not path.exists():
+        return {"count": 0, "buffer": [], "injected": []}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {"count": 0, "buffer": [], "injected": []}
+        return {
+            "count": data.get("count", 0),
+            "buffer": data.get("buffer", []),
+            "injected": data.get("injected", []),
+        }
+    except (json.JSONDecodeError, OSError):
+        return {"count": 0, "buffer": [], "injected": []}
+
+
+def _save_memory_buffer(session_id: str, data: dict) -> None:
+    """Atomically persist the memory_buffer.json sidecar.
+
+    Behaviour-identical to ``memory_bridge._save_sidecar`` (tmp + rename).
+    """
+    sidecar_dir = _sidecar_dir(session_id)
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    path = sidecar_dir / "memory_buffer.json"
+    tmp_path = path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f)
+        tmp_path.rename(path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
 
 def is_code_file(file_path: str) -> bool:
     """Return True if the file path has a code extension (.py, .js, .ts)."""
@@ -278,12 +367,32 @@ def _run_memory_recall(hook_input: dict) -> str | None:
     Fails silently -- memory errors never block tool execution.
     """
     try:
-        from hook_utils.memory_bridge import recall
-
         session_id = hook_input.get("session_id", "unknown")
         tool_name = hook_input.get("tool_name", "")
         tool_input = hook_input.get("tool_input", {})
         cwd = hook_input.get("cwd", "")
+
+        # Cheap fast path: only every WINDOW_SIZE-th tool call actually queries
+        # memory. The other (WINDOW_SIZE - 1) calls just bump the sliding-window
+        # counter and append to the buffer. Mirror recall()'s non-query branch
+        # inline here so those calls avoid importing the popoto-heavy
+        # memory_bridge module. The WINDOW_SIZE-th call (and any read failure)
+        # falls through to the real recall(), which re-reads the sidecar and
+        # performs the increment + BM25/bloom query itself (no double-count,
+        # since this branch does not write on delegation).
+        state = _load_memory_buffer(session_id)
+        next_count = state.get("count", 0) + 1
+        if next_count % _RECALL_WINDOW_SIZE != 0:
+            state["count"] = next_count
+            buffer = state.get("buffer", [])
+            buffer.append({"tool_name": tool_name, "tool_input": tool_input})
+            if len(buffer) > _RECALL_BUFFER_SIZE:
+                buffer = buffer[-_RECALL_BUFFER_SIZE:]
+            state["buffer"] = buffer
+            _save_memory_buffer(session_id, state)
+            return None
+
+        from hook_utils.memory_bridge import recall
 
         return recall(session_id, tool_name, tool_input, cwd=cwd)
     except Exception:
@@ -349,9 +458,10 @@ def _update_agent_session(hook_input: dict) -> None:
         if not session_id:
             return
 
-        from hook_utils.memory_bridge import load_agent_session_sidecar
-
-        sidecar = load_agent_session_sidecar(session_id)
+        # Read the sidecar directly (cheap JSON read) so we can early-exit
+        # WITHOUT importing the popoto-heavy memory_bridge / models stack when
+        # there is no agent_session_id (e.g. local CLI sessions).
+        sidecar = _load_agent_session_sidecar(session_id)
         agent_session_id = sidecar.get("agent_session_id")
         if not agent_session_id:
             return

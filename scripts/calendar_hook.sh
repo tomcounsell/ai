@@ -1,109 +1,19 @@
 #!/bin/bash
-# Calendar heartbeat hook for Claude Code sessions.
-# Rate-limited: only calls valor-calendar if 10+ minutes since last call.
-# Reads project slug from directory name of cwd passed via stdin JSON.
+# Stop calendar heartbeat hook (thin wrapper).
+#
+# Extends the current feature's calendar event at session-stop. All logic lives
+# in tools/valor_calendar.py behind `valor-calendar --hook --event stop`; this
+# wrapper forwards the Claude Code hook JSON (stdin) and returns immediately.
+#
+# See docs/features/calendar-work-logging.md.
 
-set +e  # Hooks must never fail noisily
+set +e  # a calendar hook must never fail the session
 
-LOCKDIR="$HOME/Desktop/Valor"
-STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
-SESSIONFILE="$LOCKDIR/.calendar_hook_session"
-SLUGFILE="$LOCKDIR/.calendar_hook_slug"
-INTERVAL=600  # 10 minutes in seconds
+REPO_DIR="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}"
+CAL="$REPO_DIR/.venv/bin/valor-calendar"
+[ ! -x "$CAL" ] && CAL="$(command -v valor-calendar 2>/dev/null)"
+[ -z "$CAL" ] && exit 0
 
-# Read stdin JSON from Claude Code hook
-INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-
-# Every local Claude Code session in a calendar-mapped project is tracked.
-# Scope is enforced downstream: the EXCLUDED_PROJECTS denylist below plus
-# valor-calendar's own skip for projects absent from calendar_config.json.
-
-# Skip excluded projects (too noisy for calendar tracking)
-EXCLUDED_PROJECTS="valor"
-PROJECTS_JSON_CHECK="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-if [ -f "$PROJECTS_JSON_CHECK" ]; then
-    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
-        .projects | to_entries[]
-        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
-        | .key
-    ' "$PROJECTS_JSON_CHECK" 2>/dev/null || true)
-    for excluded in $EXCLUDED_PROJECTS; do
-        if [ "$CURRENT_PROJECT" = "$excluded" ]; then
-            exit 0
-        fi
-    done
-fi
-
-# Reuse slug from prompt hook if available (keeps slug consistent within session)
-SAVED_SLUG=""
-if [ -f "$SLUGFILE" ]; then
-    SAVED_SLUG=$(cat "$SLUGFILE" 2>/dev/null || echo "")
-fi
-
-# Resolve project key and slug from projects.json
-PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
-SLUG=$(basename "$PWD")
-PROJECT=""
-
-# Reuse project from prompt hook if available (keeps project consistent within session)
-if [ -f "$LOCKDIR/.calendar_hook_project" ]; then
-    PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
-fi
-
-if [ -n "$SAVED_SLUG" ]; then
-    SLUG="$SAVED_SLUG"
-elif [ -f "$PROJECTS_JSON" ]; then
-    MATCH_KEY=$(jq -r --arg cwd "$PWD" --arg home "$HOME" '
-        .projects | to_entries[]
-        | select((.value.working_directory | gsub("^~"; $home)) == $cwd)
-        | .key
-    ' "$PROJECTS_JSON" 2>/dev/null || true)
-    if [ -n "$MATCH_KEY" ]; then
-        SLUG="$MATCH_KEY"
-        [ -z "$PROJECT" ] && PROJECT="$MATCH_KEY"
-    fi
-fi
-
-# Rate limit: skip if same session and called within the last INTERVAL seconds
-# A new session always bypasses the rate limit
-SAME_SESSION=false
-if [ -n "$SESSION_ID" ] && [ -f "$SESSIONFILE" ]; then
-    PREV_SESSION=$(cat "$SESSIONFILE" 2>/dev/null || echo "")
-    if [ "$SESSION_ID" = "$PREV_SESSION" ]; then
-        SAME_SESSION=true
-    fi
-fi
-
-if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
-    LAST=$(cat "$STAMPFILE" 2>/dev/null || echo 0)
-    NOW=$(date +%s)
-    ELAPSED=$((NOW - LAST))
-    if [ "$ELAPSED" -lt "$INTERVAL" ]; then
-        exit 0
-    fi
-fi
-
-# Update stamp/session and fire heartbeat
-mkdir -p "$LOCKDIR"
-date +%s > "$STAMPFILE"
-[ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
-VENV_CAL="$CLAUDE_PROJECT_DIR/.venv/bin/valor-calendar"
-SYS_CAL="$HOME/Library/Python/3.12/bin/valor-calendar"
-CAL="${VENV_CAL}"
-[ ! -x "$CAL" ] && CAL="$SYS_CAL"
-
-HOOK_LOG="${CLAUDE_PROJECT_DIR:-$HOME/src/ai}/logs/hooks.log"
-if [ -n "$PROJECT" ]; then
-    "$CAL" --project "$PROJECT" "$SLUG" 2>/tmp/cal_hook_err || {
-        ERR=$(cat /tmp/cal_hook_err)
-        [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_hook - ERROR - $ERR" >> "$HOOK_LOG"
-        true
-    }
-else
-    "$CAL" "$SLUG" 2>/tmp/cal_hook_err || {
-        ERR=$(cat /tmp/cal_hook_err)
-        [ -n "$ERR" ] && echo "$(date -u '+%Y-%m-%d %H:%M:%S') - calendar_hook - ERROR - $ERR" >> "$HOOK_LOG"
-        true
-    }
-fi
+INPUT="$(cat)"
+( printf '%s' "$INPUT" | "$CAL" --hook --event stop >/dev/null 2>&1 ) &
+exit 0

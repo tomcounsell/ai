@@ -12,11 +12,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/calendar_prompt_hook.sh",
-            "timeout": 15
-          },
-          {
-            "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/user_prompt_submit.py || true",
             "timeout": 15
           }
@@ -136,11 +131,6 @@
       {
         "matcher": "",
         "hooks": [
-          {
-            "type": "command",
-            "command": "./scripts/calendar_hook.sh || true",
-            "timeout": 15
-          },
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop.py --chat || true",
