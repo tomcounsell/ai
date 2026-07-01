@@ -211,6 +211,37 @@ class TestClass6SilentNoProgressTail(unittest.TestCase):
 
 
 # ===========================================================================
+# Golden-recorder output is consumable by the replay-and-mutate path
+# ===========================================================================
+class TestRecordedFixtureIsConsumable(unittest.TestCase):
+    """The golden-recorder's real ollama capture feeds the Substrate A path.
+
+    Task 4 commits ``recorded_session.frames`` (captured from a real
+    ollama-backed ``claude`` session — trust dialog, welcome box, model reply,
+    stop-hook paint). This proves that recorded fixture is consumable by the
+    same replay-and-mutate machinery the hand-authored seeds use: it carries
+    the load-bearing idle bar, and the mutation removes it.
+    """
+
+    def test_recorded_frames_carry_the_idle_bar(self) -> None:
+        frames = scenarios.load_fixture("recorded_session.frames")
+        self.assertIsNotNone(
+            IDLE_BAR.search(frames),
+            "the recorded golden fixture must carry the bypass-permissions bar "
+            "(the load-bearing idle signal Substrate A mutates)",
+        )
+
+    def test_remove_idle_bar_mutation_neutralizes_recorded_frames(self) -> None:
+        frames = scenarios.load_fixture("recorded_session.frames")
+        mutated = scenarios.remove_idle_bar(frames)
+        self.assertIsNone(
+            IDLE_BAR.search(mutated),
+            "the mutation must strip the bar from the real recording too — "
+            "recorded fixtures are consumable by the same mutate path as seeds",
+        )
+
+
+# ===========================================================================
 # Harness invariants — coverage + no orphan processes
 # ===========================================================================
 class TestHarnessInvariants(unittest.TestCase):
