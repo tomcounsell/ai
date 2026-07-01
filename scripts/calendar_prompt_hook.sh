@@ -7,7 +7,7 @@
 # forwards the Claude Code hook JSON (stdin) and returns immediately; the work
 # runs detached so calendar logging never delays the user's prompt.
 #
-# See docs/features/calendar-work-logging.md.
+# See docs/features/google-calendar-integration.md.
 
 set +e  # a calendar hook must never fail the session
 

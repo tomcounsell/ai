@@ -5,7 +5,7 @@
 # in tools/valor_calendar.py behind `valor-calendar --hook --event stop`; this
 # wrapper forwards the Claude Code hook JSON (stdin) and returns immediately.
 #
-# See docs/features/calendar-work-logging.md.
+# See docs/features/google-calendar-integration.md.
 
 set +e  # a calendar hook must never fail the session
 
