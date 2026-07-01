@@ -70,7 +70,7 @@ so every file:line pointer was re-verified against `9d47033e` and drift correcte
 - **CancelledError handler at `agent_session_queue.py:1496-1514`** — re-verified: the `except asyncio.CancelledError` branch logs *"session interrupted, will be re-queued by startup recovery"*, sets `session_completed = True`, and **re-raises** to exit the worker loop, deliberately NOT finalizing (so startup recovery re-queues). **This is the handler Blocker 1 must disambiguate** — a progress-deadline cancel must NOT be misclassified as worker-shutdown-interrupt. `finalized_by_execute` flag is at `:1487` (set True only on non-exceptional return of `_execute_agent_session`); the outer `finally` at `:1583-1659` runs `_complete_agent_session` + `semaphore.release()` only when `not session_completed and not finalized_by_execute`.
 - `agent/agent_session_queue.py` release sites — **12 confirmed**: `:1349,1354,1360,1398,1403,1419,1424,1438,1443,1463,1473,1658`. **5 acquire sites confirmed**: `:1330,1392,1413,1430,1455`. **Every one uses the local `semaphore` variable** (assigned from `_global_session_semaphore` at `:1328`), NOT the module global directly — so a `_global_session_semaphore` grep does **not** catch them (Concern 1). The re-acquire sites (`:1392/1413/1430/1455`) live on the drain/standalone/bridge/fallback branches, each with its own release-on-None/exception guard.
 - `agent/session_health.py:2560-2613` — leaked-slot fingerprint — **re-verified and drift corrected: it is NESTED inside `for entry in pending_sessions:` (loop at `:2553`) and runs ONLY when `worker_alive` is True (`:2560`).** A literal in-place edit would run the reap N-times-per-tick and skip it entirely on a drained queue (Blocker 2). The enclosing function `_agent_session_health_check` begins at `:2330`; `now = time.time()` is at `:2380`; the SIGKILL-escalation drain runs `:2385-2409` before the RUNNING scan (`:2418`). The reap must be hoisted to a single top-of-tick pass here.
-- **Out-of-band `no_progress` decision path** — re-verified: the running-session scan classifies `reason_kind` at `:2526-2529` (`no_progress` when `worker_alive` but `not _has_progress`, `:2506-2517`; `worker_dead` when the worker future is dead, `:2482-2494`) and delegates to `_apply_recovery_transition` (`:2537`). The `DISABLE_PROGRESS_KILL` gate is at `:1994`; the Tier-2 reprieve (active-children / compaction) is at `:1962-1991` and is gated on `reason_kind == "no_progress"`. `_apply_recovery_transition` already cancels `handle.task` at `:2019-2024` when a registry handle is populated. **The `worker_dead` branch cannot be owned by Fix #3** (an in-scope watcher is dead if the worker loop is dead); **the worker-alive `no_progress` branch is exactly what Fix #3 supersedes** (see OQ3 resolution).
+- **Out-of-band `no_progress` decision path** — re-verified: the running-session scan classifies `reason_kind` at `:2526-2529` (`no_progress` when `worker_alive` but `not _has_progress`, `:2506-2517`; `worker_dead` when the worker future is dead, `:2482-2494`) and delegates to `_apply_recovery_transition` (`:2537`). The `DISABLE_PROGRESS_KILL` gate is at `:1994`; the Tier-2 reprieve (active-children / compaction) is at `:1962-1991` and is gated on `reason_kind == "no_progress"`. `_apply_recovery_transition` already cancels `handle.task` at `:2019-2024` when a registry handle is populated (`TASK_CANCEL_TIMEOUT=0.25` at `:243`) — **this is the seam Fix #3 wires `exec_task` into via `handle.task = exec_task`** (Blocker 1 root fix). **Second `no_progress` producer (round-2 correction):** `reason_kind="no_progress"` is ALSO emitted by the never-started-past-grace recovery at `:3308-3314` (`:3311`), NOT only by the running scan — so deleting the running-scan `elif` does not make the reprieve block dead; the reprieve decision is extracted into a shared `_should_kill_no_progress` that both `_apply_recovery_transition` (never-started path) and Fix #3 call (see OQ3 resolution). **The `worker_dead` branch cannot be owned by Fix #3** (an in-scope watcher is dead if the worker loop is dead); **the worker-alive running-scan `no_progress` branch is exactly what Fix #3 supersedes**.
 - Tool-timeout loop — `_agent_session_tool_timeout_loop` at `:3450` (interval `TOOL_TIMEOUT_LOOP_INTERVAL=30s`), check at `_agent_session_tool_timeout_check` (`:3223`), finalizes via `_apply_recovery_transition(reason_kind="tool_timeout")` (`:3308`). Covers per-tool-tier wedges at finer cadence than Fix #3.
 - Progress signals — `models/agent_session.py:505` (`last_tool_use_at`), `:523` (`last_turn_at`), bumped in `agent/hooks/liveness_writers.py:76/158` (5s cooldown) — confirmed present and already consumed by the health loop + tool-timeout loop.
 - `_apply_recovery_transition` (`session_health.py:1848`) — the common out-of-band kill path — confirmed it transitions the DB row and **never touches the semaphore** (the leak).
@@ -118,7 +118,8 @@ No relevant external findings needed — this is an internal concurrency refacto
 building on documented primitives (#1815/#1816) and stdlib `asyncio`. The external
 precedents named in the issue (k8s Lease + node eviction; Go `context.WithDeadline`;
 omnigent `HOST_LIVENESS_TTL`) are conceptual and already captured in the issue body;
-they inform the lease-with-deadline shape and the reclaim-on-terminal-owner rule.
+they inform the owned-lease shape and the reclaim-on-terminal-owner rule (the Fix #3
+progress deadline is progress-fed, not the k8s wall-clock TTL — see Blocker 2).
 
 ## Data Flow
 
@@ -142,9 +143,12 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
    entirely (old Risk 2 / Race 2 removed).
 3. **Bind (single site):** once a non-None `session` is resolved and about to run
    (just before the `try: await _execute_agent_session(session)` at `:1493`), call
-   `registry.bind(session.agent_session_id, deadline)` — synchronous, no await
-   between the resolving pop and this bind. The lease now records
-   `(owner_session_id, acquired_at, deadline=acquired_at + SLOT_LEASE_TTL_S)`.
+   `registry.bind(session.agent_session_id)` — synchronous, no await between the
+   resolving pop and this bind. The lease records `(owner_session_id, acquired_at)`.
+   `acquired_at` is retained purely as the progress-timestamp fallback for Fix #3's
+   watcher (`_session_progress_ts` = `max(last_tool_use_at, last_turn_at, acquired_at)`);
+   the lease carries **no reclaim deadline** — the reaper keys on owner-terminal only
+   (Blocker 2).
 4. **Normal release:** the worker loop's `finally` at `:1658` calls
    `registry.release(session.agent_session_id)` (idempotent) instead of
    `semaphore.release()`.
@@ -152,11 +156,18 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
    (`_agent_session_health_check`, 300s), a SINGLE top-of-tick pass (hoisted ABOVE
    the pending-sessions loop, independent of `worker_alive`, gated only by
    `SLOT_LEASE_REAP_DISABLED`) iterates a snapshot `list(registry.leases())`; for
-   any lease whose `owner_session_id` (re-read fresh) is in `TERMINAL_STATUSES`
-   **or** whose `deadline` has passed, call `registry.reclaim(owner)` — releases the
-   permit, drops the lease, increments the `slot_reclaims` counter, logs at WARNING.
-   The counter (and a zero-reclaim heartbeat) is emitted **unconditionally** every
-   tick, even when the queue is drained (the parked-worker/empty-queue starvation
+   any lease whose `owner_session_id` (re-read fresh) is in `TERMINAL_STATUSES`,
+   call `registry.reclaim(owner)` — releases the permit, drops the lease, increments
+   the `slot_reclaims` counter, logs at WARNING. **The reap fires on terminal-owner
+   ONLY — there is no wall-clock `now > lease.deadline` arm** (Blocker 2, round 2): a
+   fixed `acquired_at + SLOT_LEASE_TTL_S` deadline never resets on progress, so
+   reclaiming a still-`running`, progressing owner would strip its permit while
+   `exec_task` keeps running → semaphore over-admission (concurrent > max) and re-impose
+   exactly the wall-clock duration cap #1172 deliberately removed. Live-but-stuck
+   sessions are already covered by Fix #3 (progress-deadline, worker-alive),
+   `tool_timeout`, and the `worker_dead` scan — none of which need a bare wall-clock
+   reclaim. The counter (and a zero-reclaim heartbeat) is emitted **unconditionally**
+   every tick, even when the queue is drained (the parked-worker/empty-queue starvation
    case Acceptance #1 targets).
 6. **Prompt reclaim:** `_apply_recovery_transition` (the out-of-band killer) also
    calls `registry.reclaim(session_id)` immediately after flipping the row, so the
@@ -168,7 +179,11 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
 killer for worker-alive RUNNING sessions; see OQ3 resolution):
 1. **Entry point:** `agent_session_queue.py:1494`. New: run execution as an owned
    child task — `exec_task = asyncio.create_task(_execute_agent_session(session))` —
-   and a `deadline_cancelled = False` flag in loop scope.
+   and a `deadline_cancelled = False` flag in loop scope. **Immediately wire
+   `handle.task = exec_task`** (Blocker 1 root fix) so the out-of-band killers that
+   cancel `handle.task` (`_apply_recovery_transition`, `session_health.py:2019-2024`)
+   cancel THIS awaitable instead of a stale one — this alone prevents the
+   `tool_timeout` / `worker_dead` cancel paths from orphaning the SDK subprocess/PTY.
 2. **Deadline watch:** a small on-loop watcher computes
    `last_progress = max(last_tool_use_at, last_turn_at, acquired_at)` for the session
    and, if `now - last_progress > SESSION_PROGRESS_DEADLINE_S` while `exec_task` is
@@ -179,19 +194,25 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
 3. **On expiry (gate says kill):** set `deadline_cancelled = True`; **finalize FIRST**
    — (a) fd-level PTY kill (scoped process-group teardown of the session's granite
    slot via the `container.py` `os.killpg` path from #1816); (b)
-   `registry.reclaim(session.agent_session_id)`; (c) transition to terminal via the
-   shared `_apply_recovery_transition` semantics (`reason_kind="progress_deadline"`,
-   idempotent) — THEN `exec_task.cancel()` and `await exec_task`.
-4. **CancelledError disambiguation (Blocker 1):** the `except asyncio.CancelledError`
-   branch at `:1496` inspects `deadline_cancelled`. If `True` → the session is already
-   finalized + reclaimed; **swallow** the `CancelledError` (no "will be re-queued"
-   log, no re-raise) so it never reaches the worker-shutdown classifier and the
-   session is NOT re-queued into an infinite loop. If `False` → the existing
-   worker-shutdown path runs (log "interrupted, will be re-queued", set
-   `session_completed=True`, re-raise). Reconcile with `finalized_by_execute` (#898):
-   because Fix #3 finalizes via `_apply_recovery_transition` before the cancel, the
-   outer `finally` sees a terminal row and its terminal-status idempotency prevents a
-   double transition.
+   `registry.reclaim(session.agent_session_id)`; (c) `did_finalize = await
+   _apply_recovery_transition(reason_kind="progress_deadline")`; (c') if `did_finalize`
+   is False (recovery declined — MAX_RECOVERY_ATTEMPTS / OOM-defer), force
+   `transition_status(session, "cancelled")` so the row is deterministically terminal;
+   (c'') set `finalized_by_execute=True` so the outer `finally` is skipped — THEN
+   `exec_task.cancel()` and `await exec_task`.
+4. **CancelledError disambiguation (Blocker 1, round 1):** the `except
+   asyncio.CancelledError` branch at `:1496` inspects `deadline_cancelled`. If `True` →
+   the session is already finalized + reclaimed; **swallow** the `CancelledError` (no
+   "will be re-queued" log, no re-raise) so it never reaches the worker-shutdown
+   classifier and the session is NOT re-queued into an infinite loop. If `False` → the
+   worker-shutdown path runs, **now hardened**: `exec_task.cancel()` + bounded
+   `await asyncio.wait_for(exec_task, TASK_CANCEL_TIMEOUT)` to tear down the orphaned
+   subprocess/PTY (Blocker 1, round 2 — `asyncio.wait` does not cancel its watched task
+   when the waiter is cancelled), then log "interrupted, will be re-queued", set
+   `session_completed=True`, re-raise. The deadline path sets `finalized_by_execute=True`
+   (step c''), so the outer `finally` — which runs only when `not session_completed and
+   not finalized_by_execute` — is skipped entirely; it never calls
+   `_complete_agent_session` on the killed row (Concern 1).
 5. **Output:** the parked session is finalized, its slot freed, its PTY dead — all
    from the scope that owned the task, and the deadline-cancel is never confused with
    a worker shutdown.
@@ -203,7 +224,7 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
   `_global_session_semaphore: asyncio.Semaphore` with a `SlotLeaseRegistry`
   instance (new class, likely `agent/slot_lease.py`) that *wraps* an
   `asyncio.Semaphore` for backpressure and adds `acquire()`, `release_unbound()`,
-  `bind(owner, deadline)`, `release(owner)`, `reclaim(owner)`, `leases()`,
+  `bind(owner)`, `release(owner)`, `reclaim(owner)`, `leases()`,
   `permits_free()`. The **5 `semaphore.acquire()` and 12 `semaphore.release()` sites**
   in `agent_session_queue.py` (all via the local `semaphore` var, `:1328`) and the
   `_sem._value` read in `session_health.py` migrate to registry methods. **No legacy
@@ -264,17 +285,19 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
 
 - **`SlotLeaseRegistry`** (`agent/slot_lease.py`, referenced from
   `agent/session_state.py`): wraps an `asyncio.Semaphore(max)` for backpressure
-  and records a `{owner_session_id: Lease(owner_session_id, acquired_at, deadline)}`
+  and records a `{owner_session_id: Lease(owner_session_id, acquired_at)}`
   map. A lease exists **only after `bind()`** — there is no separate unbound-permit
-  tally. Methods: `acquire()` (awaits the wrapped semaphore, records nothing),
-  `release_unbound()` (raw `semaphore.release()` for a permit released before bind),
-  `bind(owner_session_id, deadline)`, `release(owner_session_id)` (idempotent),
-  `reclaim(owner_session_id)` (idempotent), `leases()`, `permits_free()`.
+  tally, and the lease carries **no reclaim deadline**. Methods: `acquire()` (awaits
+  the wrapped semaphore, records nothing), `release_unbound()` (raw `semaphore.release()`
+  for a permit released before bind), `bind(owner_session_id)`,
+  `release(owner_session_id)` (idempotent), `reclaim(owner_session_id)` (idempotent),
+  `leases()`, `permits_free()`.
 - **Fingerprint → reclaim, hoisted** (`session_health.py`): the logging-only block
   currently nested in the pending loop is REMOVED from that loop and replaced by a
   single top-of-tick reap pass over a snapshot of `registry.leases()`, reclaiming
-  leases whose owner is terminal or whose deadline expired — runs unconditionally
-  every tick, independent of `worker_alive` and of any pending session.
+  leases whose owner is **terminal** — runs unconditionally every tick, independent of
+  `worker_alive` and of any pending session. There is **no wall-clock reclaim arm**
+  (Blocker 2).
 - **Prompt reclaim in the killer** (`_apply_recovery_transition`): reclaim the
   slot immediately when an out-of-band kill flips the row.
 - **Progress-deadline cancel scope** (`agent_session_queue.py:1494`): own the
@@ -284,24 +307,25 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
   re-queuing. This is the single authoritative killer for worker-alive running
   sessions (the out-of-band worker-alive `no_progress` branch is deleted; OQ3).
 - **Env kill-switches** (all NAMED, env-overridable, conservative-provisional):
-  `SESSION_PROGRESS_DEADLINE_S`, `SLOT_LEASE_TTL_S` (absolute lease TTL backstop,
-  distinct from the progress deadline), `SLOT_LEASE_REAP_DISABLED`, reuse
-  `DISABLE_PROGRESS_KILL` for the Fix #3 cancel.
+  `SESSION_PROGRESS_DEADLINE_S`, `PROGRESS_POLL_S`, `SLOT_LEASE_REAP_DISABLED`, reuse
+  `DISABLE_PROGRESS_KILL` for the Fix #3 cancel. (`SLOT_LEASE_TTL_S` was **removed** in
+  round 2 — it only ever fed the reaper's wall-clock deadline arm, which is deleted per
+  Blocker 2. OQ2's "bound the acquire wait?" question, if ever adopted, would introduce
+  its own distinct constant.)
 
 ### Flow
 
 Worker loop → `await registry.acquire()` → pop session (None/exception →
-`registry.release_unbound()`) → `registry.bind(session_id, deadline)` → run
-`exec_task` under the progress-deadline watcher →
+`registry.release_unbound()`) → `registry.bind(session_id)` → wire
+`handle.task = exec_task` → run `exec_task` under the progress-deadline watcher →
 **normal completion** → `registry.release(session_id)` /
 **no progress past deadline** → fd-PTY-kill → `registry.reclaim(session_id)` →
 finalize (`_apply_recovery_transition`) → set `deadline_cancelled` → cancel
 `exec_task` → `CancelledError` handler swallows (no requeue).
 
 Independently, health tick → single top-of-tick pass iterates `registry.leases()`
-→ any owner terminal or
-deadline expired → `registry.reclaim(owner)` (this is the leaked-permit safety net
-that needs no restart).
+→ any owner **terminal** → `registry.reclaim(owner)` (this is the leaked-permit safety
+net that needs no restart; terminal-owner only — no wall-clock arm).
 
 ### Technical Approach
 
@@ -329,10 +353,10 @@ calls `release_unbound()`).
   (backpressure is legitimate; the reaper guarantees liberation — see OQ2).
 - `release_unbound()` = raw `semaphore.release()` for a permit acquired but never
   bound (pop returned None / raised). No lease bookkeeping.
-- `bind(owner_session_id, deadline)` records `_held[owner] = Lease(owner,
-  acquired_at, deadline=acquired_at + SLOT_LEASE_TTL_S)`. Called once, synchronously,
-  right before the `try: await _execute_agent_session(session)` block (`:1493`),
-  where a non-None `session` is resolved with no intervening await.
+- `bind(owner_session_id)` records `_held[owner] = Lease(owner, acquired_at)`
+  (`acquired_at = time.time()`; no reclaim deadline — Blocker 2). Called once,
+  synchronously, right before the `try: await _execute_agent_session(session)` block
+  (`:1493`), where a non-None `session` is resolved with no intervening await.
 - `release(owner_session_id)`: if `owner in _held`, pop it and `semaphore.release()`;
   else **no-op**. The lease map is the single source of truth gating the underlying
   release, so a double-release or unknown-owner release can never over-release the
@@ -362,8 +386,9 @@ calls `release_unbound()`).
   time.time()` at `:2380`, alongside the SIGKILL-escalation drain, ABOVE the RUNNING
   scan at `:2418`), a single reap pass: for each `lease in list(registry.leases())`
   (snapshot), if `lease.owner_session_id` (re-read fresh, terminal-status-guarded like
-  the existing tool-timeout path) is in `TERMINAL_STATUSES` or `now > lease.deadline`,
-  `registry.reclaim(owner)` + increment `{project_key}:session-health:slot_reclaims`.
+  the existing tool-timeout path) is in `TERMINAL_STATUSES` — **and only that; no
+  `now > lease.deadline` wall-clock arm** (Blocker 2) — `registry.reclaim(owner)` +
+  increment `{project_key}:session-health:slot_reclaims`.
   The pass is **independent of `worker_alive`** (so it fires on a drained queue —
   the exact parked-worker starvation case Acceptance #1 targets), gated **only** by
   `SLOT_LEASE_REAP_DISABLED`, and emits the `slot_reclaims` counter (plus a
@@ -383,6 +408,15 @@ calls `release_unbound()`).
   ```
   deadline_cancelled = False
   exec_task = asyncio.create_task(_execute_agent_session(session))
+  # ROOT FIX (Blocker 1) — wire the owned task into the registry handle so the
+  # out-of-band killers that cancel `handle.task` (`_apply_recovery_transition`,
+  # session_health.py:2019-2024) actually cancel THIS awaitable, not a stale one.
+  # Without this, tool_timeout / worker_dead cancels flip the DB row but orphan the
+  # SDK subprocess/PTY. One assignment covers both the tool_timeout-cancel path AND
+  # the worker-shutdown-cancel path.
+  handle = _active_sessions.get(session.agent_session_id)
+  if handle is not None:
+      handle.task = exec_task
   try:
       while not exec_task.done():
           done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
@@ -392,15 +426,24 @@ calls `release_unbound()`).
           if last is not None and (time.time() - last) > SESSION_PROGRESS_DEADLINE_S:
               if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
                   break  # kill-switch: let it run
-              if not _should_kill_no_progress(session):  # Tier-2 reprieve gate
+              if not _should_kill_no_progress(session):  # Tier-2 reprieve gate (moved here — OQ3)
                   continue  # active children / compaction — reprieve, keep watching
               deadline_cancelled = True
               # FINALIZE FIRST — at the watcher scope, before cancel reaches :1496:
               _fd_pty_kill(session)                      # scoped os.killpg (#1816)
               registry.reclaim(session.agent_session_id) # free the slot
-              await _apply_recovery_transition(          # terminal-guarded, idempotent
+              did_finalize = await _apply_recovery_transition(  # terminal-guarded, idempotent
                   session, reason="progress deadline exceeded",
                   reason_kind="progress_deadline", handle=..., worker_key=worker_key)
+              if not did_finalize:
+                  # _apply_recovery_transition can DECLINE without transitioning
+                  # (MAX_RECOVERY_ATTEMPTS / OOM-defer paths → returns False, row
+                  # stays `running`). Force a deterministic terminal state so the
+                  # killed session is never left running and can never be mislabeled
+                  # "completed" by the outer finally (Concern 1 / Consistency Auditor).
+                  transition_status(session, "cancelled",
+                                    reason="progress deadline exceeded (recovery declined)")
+              finalized_by_execute = True  # row is now terminal — SKIP the outer finally
               exec_task.cancel()
               break
       await exec_task  # propagate result / CancelledError
@@ -411,46 +454,118 @@ calls `release_unbound()`).
           # re-queued", do NOT re-raise. Prevents the requeue-loop (Blocker 1).
           pass
       else:
+          # Worker shutdown/restart cancelled the *waiter*. asyncio.wait does NOT
+          # cancel exec_task when the waiter is cancelled, so the SDK subprocess/PTY
+          # is still running (orphan). Tear it down BEFORE re-raising, or startup
+          # recovery re-queues a still-live `running` row → double execution
+          # (Blocker 1, round 2).
+          if not exec_task.done():
+              exec_task.cancel()
+              try:
+                  await asyncio.wait_for(exec_task, timeout=TASK_CANCEL_TIMEOUT)
+              except (TimeoutError, asyncio.CancelledError):
+                  pass
           ... existing worker-shutdown path (log "interrupted", session_completed=True, raise)
+  finally:
+      # Belt-and-suspenders: if control leaves the owned-task region for any reason
+      # (non-Cancelled exception) with exec_task still pending, cancel it so no
+      # subprocess/PTY is orphaned.
+      if not exec_task.done():
+          exec_task.cancel()
   ```
   This keeps the loop ticking (bumping `last_loop_tick`) while watching progress —
-  it is NOT a wall-clock cap and resets on any tool/turn activity.
-- **Blocker 1 — CancelledError disambiguation.** `deadline_cancelled` is set `True`
-  immediately before `exec_task.cancel()`. The existing `except asyncio.CancelledError`
+  it is NOT a wall-clock cap and resets on any tool/turn activity. `TASK_CANCEL_TIMEOUT`
+  is the bounded-await constant the health loop already uses for the same subprocess
+  teardown (`session_health.py:243`, applied at `:2019-2024`).
+- **Blocker 1 (round 1) — CancelledError disambiguation.** `deadline_cancelled` is set
+  `True` immediately before `exec_task.cancel()`. The existing `except asyncio.CancelledError`
   at `:1496` (which today unconditionally logs "session interrupted, will be
   re-queued by startup recovery", sets `session_completed=True`, and re-raises)
   is split on the flag: `deadline_cancelled` True → the session is already terminal +
   reclaimed, so swallow (no requeue log, no re-raise, no re-raise into the
-  worker-loop handler at `:1496-1514`); False → the existing worker-shutdown path is
-  unchanged. Because Fix #3 finalizes **before** `await exec_task`, the terminal
-  transition is committed before any `CancelledError` propagates, so a requeue can
-  never re-land the session before finalize. Reconcile with `finalized_by_execute`
-  (#898): the deadline path leaves `finalized_by_execute=False` but the row is already
-  terminal, so the outer `finally` (`:1583`) — which runs only when `not
-  session_completed and not finalized_by_execute` — hits `_apply_recovery_transition`'s
-  terminal-status idempotency and does NOT double-finalize or double-reclaim.
+  worker-loop handler at `:1496-1514`); False → the existing worker-shutdown path,
+  **now hardened** (see below).
+- **Blocker 1 (round 2) — ROOT fix: wire `handle.task = exec_task`.** The primary,
+  most-complete fix for the orphan-subprocess regression is a single assignment. The
+  out-of-band killers cancel `handle.task` (`_apply_recovery_transition` at
+  `session_health.py:2019-2024`), but after Fix #3 the registry handle still points at
+  the OLD awaitable, not the new `exec_task = asyncio.create_task(...)`. So the SDK
+  subprocess/PTY is orphaned on **both** the worker-shutdown-cancel path **and** the
+  surviving `tool_timeout` / `worker_dead` cancel path. Set `handle.task = exec_task`
+  immediately after `create_task(...)` (guarded on `handle is not None`) — this single
+  wiring makes every existing `handle.task.cancel()` cancel the live awaitable, covering
+  both cancel paths and the `tool_timeout`-path orphan the shutdown-branch cancel alone
+  would miss. `handle.task` semantics re-verified at `session_health.py:2019-2024`.
+- **Blocker 1 (round 2) — belt-and-suspenders: shutdown-branch cancel.** Converting the
+  directly-`await`ed coroutine into a detached `exec_task` watched by `asyncio.wait`
+  introduced a regression: `asyncio.wait` does **not** cancel the task it watches when
+  the *waiter itself* is cancelled. So on a normal worker shutdown/restart — the
+  `deadline_cancelled=False` branch, which today only logs + re-raises — `exec_task`
+  would keep running, its SDK subprocess/PTY survive the worker exit, and startup
+  recovery re-queue the still-`running` row → **double execution**. The inline `await`
+  did not have this problem (worker cancel propagated straight into the coroutine).
+  Fix: in the `else` (shutdown) branch, before re-raising, `exec_task.cancel()` and
+  bounded-`await` it (`asyncio.wait_for(exec_task, timeout=TASK_CANCEL_TIMEOUT)`,
+  suppressing `TimeoutError`/`CancelledError`) so the subprocess/PTY is confirmed torn
+  down first. `session_completed=True` and the re-raise are preserved so startup
+  recovery still re-queues — but only after teardown. A `finally` around the owned-task
+  region also cancels `exec_task` if it is still pending on any non-Cancelled exit path.
+  Shutdown path re-verified against `agent_session_queue.py:1496-1514`.
+- **Concern 1 (round 2) — deterministic finalize; skip the outer finally; correct
+  citation.** The round-1 text claimed the outer `finally` was safe via
+  `_apply_recovery_transition`'s terminal-status idempotency, but the outer `finally`
+  (`agent_session_queue.py:1583-1659`) actually calls
+  `await _complete_agent_session(session, failed=session_failed)` (`:1646/1655`, impl
+  `agent/session_completion.py:86`), **not** `_apply_recovery_transition`. In the
+  deadline path both `session_completed` and `finalized_by_execute` are False, so its
+  guard (`not session_completed and not finalized_by_execute`) is True and it would run
+  `_complete_agent_session` — mislabeling a killed session as "completed". Worse,
+  `_apply_recovery_transition` can return `False` **without transitioning** (its
+  docstring names the MAX_RECOVERY_ATTEMPTS and OOM-defer decline paths — confirmed at
+  `session_health.py:1848`), leaving the row `running`. Fix (as in the sketch): capture
+  `did_finalize = await _apply_recovery_transition(...)`; on decline force
+  `transition_status(session, "cancelled", ...)`; then set `finalized_by_execute=True`
+  so the outer `finally` is **skipped entirely** — no reliance on cross-function
+  idempotency, and a declined recovery can never fall through to `_complete_agent_session`.
 - On expiry the order is fixed: (a) fd-level PTY kill via the granite container's
   scoped process-group teardown (`container.py` `os.killpg` path, #1816) for the
   session's slot; (b) `registry.reclaim(session.agent_session_id)`; (c) finalize via
-  `_apply_recovery_transition` (`reason_kind="progress_deadline"`); (d) cancel +
-  await. Steps a-c reuse terminal-status idempotency so an out-of-band killer racing
-  the same session is harmless.
+  `_apply_recovery_transition` (`reason_kind="progress_deadline"`), capturing the
+  return; (c') if it declined (`False`), force `transition_status(session, "cancelled")`;
+  (c'') set `finalized_by_execute=True` to skip the outer finally; (d) cancel + await.
+  Steps a-c reuse terminal-status idempotency so an out-of-band killer racing the same
+  session is harmless.
 - Reuse `DISABLE_PROGRESS_KILL=1` as the kill-switch (parity with the tool-timeout
   loop).
 - **OQ3 resolution — single authoritative killer per running session.** Fix #3
   becomes the sole no-progress killer for **worker-alive** RUNNING sessions. In the
   same change, DELETE the out-of-band worker-alive `no_progress` branch
-  (`session_health.py:2506-2517`, the `elif ... not _has_progress(entry)` arm and its
-  `_reason_kind = "no_progress"` classification at `:2526-2527`). To preserve the
-  Tier-2 reprieve semantics that branch provided, EXTRACT the reprieve decision
-  (`_has_progress` + `_tier2_reprieve_signal`, currently `_apply_recovery_transition:
-  1962-1991`) into a shared predicate `_should_kill_no_progress(session)` that Fix #3
-  consults before cancelling — so a `waiting_for_children` PM with no own tool/turn
-  activity is reprieved, not killed. The reprieve gate is evaluated **once** — by the
-  watcher via `_should_kill_no_progress` before cancelling; `_apply_recovery_transition`
-  invoked with `reason_kind="progress_deadline"` SKIPS its own internal reprieve block
-  (which was gated on `reason_kind == "no_progress"`, a kind no scan now produces) so
-  the reprieve telemetry is not double-counted. **Residual ownership (no overlap):**
+  (`session_health.py:2506-2517`, the `elif ... not _has_progress(entry)` arm; after
+  deletion the shared classifier at `:2526-2529` collapses to `worker_dead` only within
+  the running scan).
+  **Correction (round 2): `reason_kind="no_progress"` has a SECOND producer** — the
+  never-started-past-grace recovery at `session_health.py:3308-3314` (`reason_kind=
+  "no_progress"` at `:3311`). So deleting the running-scan `elif` does **not** make the
+  reprieve block dead; the never-started path still needs it. Therefore, instead of
+  "moving out and leaving nothing," **EXTRACT the reprieve decision + its telemetry into
+  a shared predicate `_should_kill_no_progress(session, handle)`** (the `_has_progress`
+  + `_tier2_reprieve_signal(handle, entry)` decision, the `tier1_flagged_total` /
+  `tier2_reprieve_total:{reprieve}` counter increments, and the `reprieve_count` save,
+  currently inlined at the `session_health.py:1962` reprieve block) and have **BOTH**
+  callers invoke it: (a) `_apply_recovery_transition`, for the still-live never-started
+  `no_progress` path, replaces its inline `if reason_kind == "no_progress":` block with
+  a call to `_should_kill_no_progress`; (b) Fix #3's watcher calls it before cancelling.
+  This is a genuine MOVE (the reprieve logic exists in exactly one place — the shared
+  predicate — with no inline copy left in `_apply_recovery_transition` and no parallel
+  reprieve policy), satisfying NO-LEGACY / the Rabbit Hole below, while remaining correct
+  for the never-started producer. Telemetry is emitted once per consultation and exactly
+  one killer fires per session, so no double-count. A `waiting_for_children` PM with no
+  own tool/turn activity is reprieved, not killed, on either path. **Deterministic
+  verification greps (NIT, round 2 — no baseline-relative check):** the deleted
+  running-scan classification is gone → `grep -c '_reason_kind = "no_progress"'
+  agent/session_health.py == 0`; the reprieve decision lives in exactly one place →
+  `grep -c "_tier2_reprieve_signal" agent/session_health.py == 1` (the sole call site is
+  inside `_should_kill_no_progress`). **Residual ownership (no overlap):**
 
   | Killer | Owns | Cadence | Why it can't be Fix #3 |
   |--------|------|---------|------------------------|
@@ -497,8 +612,8 @@ calls `release_unbound()`).
   requeue.
 
 ### Error State Rendering
-- [ ] A reclaimed slot emits a WARNING naming the owner + reason (terminal vs
-  deadline) so `logs/worker.log` explains the recovery. Test captures it.
+- [ ] A reclaimed slot emits a WARNING naming the owner (terminal-owner reclaim) so
+  `logs/worker.log` explains the recovery. Test captures it.
 - [ ] A progress-deadline cancel emits a CRITICAL/WARNING with the stall age before
   killing. Test captures it.
 
@@ -510,11 +625,13 @@ calls `release_unbound()`).
 - [ ] `tests/integration/test_worker_wedge_pending.py` (health-check-cannot-escalate case) — REPLACE: this asserts the health check can only *nudge*, not recover, a leaked slot (the old logging-only behavior). Rewrite as the **acceptance-criterion regression guard**: an orphaned/terminal-owner lease is *reclaimed* by the reap pass and the worker unblocks — no restart. This is the inversion of the documented-bug test.
 - [ ] Any test reading `_global_session_semaphore` / `_sem._value` directly — UPDATE to the registry accessor. Confirmed affected: `tests/integration/test_worker_concurrency.py` (10 refs at `:131,135,173,182,187,189,197,244,246,261,304,306,326,364,366,377,418,420,436`) and `tests/integration/test_worker_wedge_pending.py` (`:197,204,292,350,356,400,424,457`) all set/read `_global_session_semaphore` directly — retarget to `SlotLeaseRegistry` init + `permits_free()`.
 - [ ] Any test asserting the out-of-band worker-alive `no_progress` kill (reason_kind `no_progress` from the running-session scan) — UPDATE/REPLACE: that branch is deleted (OQ3); the equivalent kill is now Fix #3's in-scope watcher (`test_progress_deadline_cancel.py`). The `worker_dead` and `tool_timeout` recovery tests are unaffected.
+- [ ] Any test asserting a reap reclaims on a wall-clock/`SLOT_LEASE_TTL_S` deadline — DELETE: the wall-clock reclaim arm is removed (Blocker 2); the reap reclaims on terminal-owner only. If no such test exists yet, none is added.
+- [ ] Any test for the never-started `no_progress` recovery reprieve (`session_health.py:3308-3314`) — UPDATE: the reprieve decision now routes through the extracted `_should_kill_no_progress`; assert reprieve still fires for that path (the second `no_progress` producer must keep its reprieve).
 
 New tests (greenfield):
-- `tests/unit/test_slot_lease_registry.py` — acquire/bind/release/reclaim happy path; double-reclaim idempotency (no over-release); `acquire()`+`release_unbound()` leaves no lease and restores `permits_free`; terminal-owner reclaim; deadline-expired reclaim; `permits_free` accounting.
-- `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**.
-- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation) — **acceptance criterion #2**.
+- `tests/unit/test_slot_lease_registry.py` — acquire/bind/release/reclaim happy path; double-reclaim idempotency (no over-release); `acquire()`+`release_unbound()` leaves no lease and restores `permits_free`; terminal-owner reclaim; `permits_free` accounting. (No deadline-expired reclaim test — the wall-clock arm was removed, Blocker 2.)
+- `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**. ALSO assert a still-`running`, progressing owner whose lease is old is NOT reclaimed (Blocker 2 regression guard: no over-admission of a healthy long session).
+- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **`handle.task` is wired to the owned `exec_task`** so a `tool_timeout`/`worker_dead` cancel tears down the subprocess (Blocker 1 root fix); a **worker-shutdown cancel** (`deadline_cancelled=False`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**.
 
 ## Rabbit Holes
 
@@ -561,6 +678,15 @@ reclaim.
 **Mitigation:** Both converge on terminal-status-guarded
 `_apply_recovery_transition` (already idempotent — `_TERMINAL_STATUSES` guard) and
 idempotent `reclaim`. Whichever wins, the other no-ops. Test concurrent fire.
+
+> **Note — wall-clock reclaim arm removed (Blocker 2, round 2).** A previous revision
+> had the reaper reclaim any lease past `acquired_at + SLOT_LEASE_TTL_S`. That absolute,
+> never-reset deadline would strip the permit from a still-`running`, progressing owner
+> while `exec_task` kept executing → semaphore over-admission (concurrent > max) and
+> re-imposition of exactly the wall-clock duration cap #1172 removed. It is **deleted**:
+> the reap reclaims on terminal-owner ONLY. Live-but-stuck sessions are handled by Fix #3
+> (progress-fed, which finalizes the session), `tool_timeout`, and `worker_dead` — none
+> of which need a bare slot reclaim under a live owner. `SLOT_LEASE_TTL_S` is removed.
 
 > **Note — old "acquire-before-bind window" risk removed.** With the Concern-2
 > simplification (lease recorded only at `bind()`; reaper iterates bound leases
@@ -619,8 +745,15 @@ cancelled (shutdown/restart), which propagates into the same handler.
 **Mitigation:** the handler branches on `deadline_cancelled`: `True` → swallow (row
 already terminal + reclaimed; no requeue log, no re-raise) so the deadline-kill never
 reaches the worker-shutdown classifier and can never loop forever via requeue; `False`
-→ the unchanged worker-shutdown path (log, `session_completed=True`, re-raise). This
-is the mitigation Blocker 1 requires. Test both sources hit the correct branch.
+→ the **hardened** worker-shutdown path: `exec_task.cancel()` + bounded
+`await asyncio.wait_for(exec_task, TASK_CANCEL_TIMEOUT)` to tear down the orphaned
+subprocess/PTY (Blocker 1 round 2 — `asyncio.wait` does not cancel its watched task when
+the waiter is cancelled), THEN log, `session_completed=True`, re-raise so startup
+recovery re-queues — but only after teardown. The `handle.task = exec_task` wiring (root
+fix) additionally means an out-of-band `tool_timeout`/`worker_dead` cancel targets the
+live awaitable, so neither cancel source leaves a subprocess orphaned. Test all three
+sources (deadline, worker-shutdown, out-of-band tool_timeout) hit the correct branch and
+leave no orphan.
 
 > **Note — old "acquire/bind interleaving" race removed.** Dissolved by the
 > Concern-2 simplification (see Risks note); the reaper never observes an unbound
@@ -635,48 +768,66 @@ is the mitigation Blocker 1 requires. Test both sources hit the correct branch.
 - [SEPARATE-SLUG #1821] Persisting the lease registry across worker restarts. Not
   needed — startup recovery re-queues running sessions and the registry rebuilds
   fresh; cross-process lease visibility is #1821's concern.
-- [ORDERED] Final tuning of `SESSION_PROGRESS_DEADLINE_S` / `SLOT_LEASE_TTL_S` to
-  production-observed values — the defaults ship conservative; tightening waits on
-  observed stall/leak histograms on the live bridge machine (same posture as
-  #1815's threshold tuning).
+- [ORDERED] Final tuning of `SESSION_PROGRESS_DEADLINE_S` to production-observed
+  values — the defaults ship conservative; tightening waits on observed stall
+  histograms on the live bridge machine (same posture as #1815's threshold tuning).
 
 ## Update System
 
 No update-script or migration changes required. The `SlotLeaseRegistry` replaces an
 in-memory module global (`_global_session_semaphore`) with another in-memory module
 global — it is **not** a Popoto model, so no `scripts/update/migrations.py` entry.
-The new env vars (`SESSION_PROGRESS_DEADLINE_S`, `SLOT_LEASE_TTL_S`,
-`PROGRESS_POLL_S`, `SLOT_LEASE_REAP_DISABLED`) are all optional with safe
-defaults; add them to `.env.example` with a comment line above each (completeness-
-check requirement) only for operator discoverability — no `.env` propagation is
-required. (`SLOT_LEASE_BIND_GRACE_S` was dropped — the unbound-permit apparatus it
-guarded no longer exists.) The worker is restarted by the standard
+The new env vars (`SESSION_PROGRESS_DEADLINE_S`, `PROGRESS_POLL_S`,
+`SLOT_LEASE_REAP_DISABLED`) are all optional with safe defaults; add them to
+`.env.example` with a comment line above each (completeness-check requirement) only
+for operator discoverability — no `.env` propagation is required.
+(`SLOT_LEASE_BIND_GRACE_S` was dropped when the unbound-permit apparatus was removed;
+`SLOT_LEASE_TTL_S` was dropped in round 2 with the reaper's wall-clock arm — Blocker 2.)
+The worker is restarted by the standard
 `./scripts/valor-service.sh worker-restart` after merge — no new deploy step in
 `scripts/update/run.py`.
 
 ## Agent Integration
 
-No agent integration required — this is a worker-internal concurrency change. No new
-CLI entry point in `pyproject.toml [project.scripts]`, no MCP surface, and the
+No new CLI entry point in `pyproject.toml [project.scripts]`, no MCP surface, and the
 bridge does not import the new code. The dashboard's running-count is derived from
 `AgentSession` status queries and the slot accounting; the registry preserves the
-same `permits_free`/`held_count` semantics the fingerprint already reads, so the
-dashboard contract is unchanged. (The bridge-side consumer of the lease registry is
-the deferred Fix #5 in #1821 — out of scope here.)
+same `permits_free`/`held_count` semantics the fingerprint already reads.
+
+**Operator surface for the self-heal (NIT, round 2).** The fixed incident (#1537/#1808)
+was a *silent* wedge that required a human to notice and restart, and the new
+`slot_reclaims` Redis counter is otherwise write-only. Surface it so operators can see
+recovery fired and catch a reclaim spike (which would signal an underlying leak the
+recovery is merely papering over): the reap emits
+`{project_key}:session-health:slot_reclaims` every tick; expose that count (and the
+last reclaim's owner/reason, plus the zero-reclaim heartbeat timestamp) in the existing
+`localhost:8500/dashboard.json` payload — read it in `_get_worker_health()` (`ui/app.py`,
+consumed by the `/dashboard.json` route at `ui/app.py:507`) next to the
+running-count/`permits_free` fields, adding a `slot_reclaims` field to the `worker`
+health block. This is an additive field on an existing payload — no new surface — so the
+rest of the dashboard contract is unchanged. (The bridge-side consumer of the lease
+registry is the deferred Fix #5 in #1821 — out of scope here.)
 
 ## Documentation
 
 ### Feature Documentation
 - [ ] Create `docs/features/slot-lease-ownership.md` describing: the ownerless-
   semaphore leak class, the `SlotLeaseRegistry` (lease recorded at `bind()` only;
-  owner+acquired_at+deadline), the hoisted top-of-tick reap pass (fingerprint→reclaim),
-  the prompt reclaim wired into `_apply_recovery_transition`, the progress-deadline
-  cancel scope + `deadline_cancelled` disambiguation + fd-PTY-kill, the single-
+  owner+acquired_at, no reclaim deadline), the hoisted top-of-tick reap pass
+  (fingerprint→reclaim, **terminal-owner only**), the prompt reclaim wired into
+  `_apply_recovery_transition`, the progress-deadline cancel scope + `deadline_cancelled`
+  disambiguation + `handle.task = exec_task` wiring + fd-PTY-kill, the single-
   authoritative-killer division (Fix #3 for worker-alive; `worker_dead` and
-  `tool_timeout` for the disjoint residuals) with the shared reprieve gate, the env
-  constants with provisional defaults, and the k8s-Lease / Go-context precedents. State it is the continuation of `worker-liveness-recovery.md` (#1815)
+  `tool_timeout` for the disjoint residuals) with the shared `_should_kill_no_progress`
+  reprieve gate (also called by `_apply_recovery_transition` for the never-started
+  producer), the env constants with provisional defaults, and the k8s-Lease / Go-context
+  precedents. State it is the continuation of `worker-liveness-recovery.md` (#1815)
   and that #1821 (fixes #5/#6) builds on the registry. (Acceptance criterion of #1815.)
 - [ ] Add entry to `docs/features/README.md` index table.
+- [ ] Document the `slot_reclaims` dashboard field (NIT): note in
+  `docs/features/slot-lease-ownership.md` (Observability section) that
+  `localhost:8500/dashboard.json` surfaces `slot_reclaims` in the `worker` health block,
+  and that a rising count signals a recurring leak worth root-causing.
 - [ ] Forward-link from `docs/features/worker-wedge-investigation.md` (the
   logging-only write-up) and `docs/features/worker-liveness-recovery.md` to this
   doc — describe the new status quo (the fingerprint now reclaims), per the
@@ -705,18 +856,38 @@ the deferred Fix #5 in #1821 — out of scope here.)
   "semaphore\.acquire(" agent/agent_session_queue.py == 0` and same for `.release(`.
 - [ ] A progress-deadline cancel is finalized in-scope and **NOT re-queued**
   (`deadline_cancelled` swallow path) — the `CancelledError` handler no longer
-  misclassifies it as a worker-shutdown interrupt (Blocker 1).
+  misclassifies it as a worker-shutdown interrupt (Blocker 1, round 1).
+- [ ] **No orphaned subprocess on cancel (Blocker 1, round 2):** `handle.task =
+  exec_task` is wired immediately after `create_task`, so `tool_timeout` / `worker_dead`
+  cancels tear down the live subprocess; and on a worker-shutdown cancel the
+  `deadline_cancelled=False` branch cancels + bounded-awaits `exec_task` before
+  re-raising, so no session's SDK subprocess/PTY survives the worker exit to be
+  double-executed by startup recovery.
+- [ ] **No wall-clock reclaim arm (Blocker 2):** the reap reclaims IFF the owner is
+  terminal — `grep -c "lease.deadline" agent/session_health.py == 0` and
+  `grep -rc "SLOT_LEASE_TTL_S" agent/ worker/ == 0`; a healthy long-progressing session
+  is never slot-stripped, so concurrency never exceeds `max`.
+- [ ] **Deterministic finalize on recovery decline (Concern 1):** the deadline path
+  captures `did_finalize`, forces `transition_status(..., "cancelled")` on decline, and
+  sets `finalized_by_execute=True` so the outer `finally` never runs
+  `_complete_agent_session` on the killed row (no "completed" mislabel).
 - [ ] Exactly one authoritative no-progress killer per running session (OQ3): the
-  out-of-band worker-alive `no_progress` branch is deleted; `worker_dead` and
-  `tool_timeout` remain for the disjoint cases Fix #3 cannot reach; Tier-2 reprieve
-  is preserved via the shared `_should_kill_no_progress` gate.
+  running-scan worker-alive `no_progress` `elif` is deleted (`grep -c
+  '_reason_kind = "no_progress"' == 0`); `worker_dead` and `tool_timeout` remain for the
+  disjoint cases Fix #3 cannot reach; the Tier-2 reprieve decision lives in exactly one
+  place — the shared `_should_kill_no_progress` gate (`grep -c "_tier2_reprieve_signal"
+  == 1`), called by BOTH Fix #3 and `_apply_recovery_transition` (never-started path).
 - [ ] `_apply_recovery_transition` reclaims the slot on out-of-band kill (prompt
   recovery, not 300s-tick-only).
 - [ ] The reap pass runs once per health tick, independent of `worker_alive` and of
   any pending session, and reclaims on a drained queue (Blocker 2).
 - [ ] `release`/`reclaim` are idempotent (double-fire never over-releases) —
   `tests/unit/test_slot_lease_registry.py`.
-- [ ] The dashboard running-count/`permits_free` contract is unchanged.
+- [ ] **Self-heal is operator-visible (NIT):** `slot_reclaims` is surfaced in the
+  `worker` block of `localhost:8500/dashboard.json` (`grep -c "slot_reclaims" ui/app.py
+  > 0`) so a reclaim event / spike is observable without a log dig.
+- [ ] The dashboard running-count/`permits_free` contract is otherwise unchanged
+  (additive `slot_reclaims` field only).
 - [ ] Kill-switches work: `SLOT_LEASE_REAP_DISABLED=1` disables reclaim (detect-only);
   `DISABLE_PROGRESS_KILL=1` disables the Fix #3 cancel.
 - [ ] Tests pass (`/do-test`).
@@ -769,10 +940,11 @@ lead NEVER builds directly.
 - **Assigned To**: lease-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `agent/slot_lease.py` (`Lease` dataclass + `SlotLeaseRegistry` with
+- Create `agent/slot_lease.py` (`Lease` dataclass `(owner_session_id, acquired_at)` —
+  no reclaim deadline (Blocker 2) — + `SlotLeaseRegistry` with
   `acquire`/`release_unbound`/`bind`/`release`/`reclaim`/`leases`/`permits_free`;
   idempotent release/reclaim; lease recorded ONLY at `bind()` — no token/unbound
-  sub-system, no bind-grace).
+  sub-system, no bind-grace, no `SLOT_LEASE_TTL_S`).
 - Swap `session_state.py:76` to `_slot_registry`; init at `worker/__main__.py:649`;
   update the `agent_session_queue.py:126` re-export.
 - Migrate ALL slot sites (Concern 1): 5 acquire sites (`:1330,1392,1413,1430,1455`)
@@ -784,10 +956,13 @@ lead NEVER builds directly.
 - Hoist the `session_health.py:2560-2613` fingerprint OUT of the pending loop into a
   single top-of-tick reap pass in `_agent_session_health_check` (after `:2380`,
   independent of `worker_alive`, `SLOT_LEASE_REAP_DISABLED` gate, snapshot
-  `list(registry.leases())`, reclaim terminal/expired leases, emit `slot_reclaims` +
-  zero-reclaim heartbeat unconditionally). Move the healthy-backpressure INFO line
-  into this pass too.
+  `list(registry.leases())`, reclaim **terminal-owner leases ONLY — no wall-clock
+  `now > lease.deadline` arm** (Blocker 2), emit `slot_reclaims` + zero-reclaim
+  heartbeat unconditionally). Move the healthy-backpressure INFO line into this pass too.
 - Wire `registry.reclaim(session_id)` into `_apply_recovery_transition`.
+- Surface `slot_reclaims` (NIT): add the counter to the `worker` health block of
+  `dashboard.json` — read `{project_key}:session-health:slot_reclaims` in
+  `_get_worker_health()` (`ui/app.py`, route at `:507`); additive field only.
 
 ### 2. Build the progress-deadline cancel scope (Fix #3)
 - **Task ID**: build-progress-deadline
@@ -799,15 +974,28 @@ lead NEVER builds directly.
 - At `agent_session_queue.py:1494`, run `_execute_agent_session` as an owned task
   under a progress-deadline watcher (`_session_progress_ts` = max of
   `last_tool_use_at`/`last_turn_at`/`acquired_at`) with a `deadline_cancelled` flag.
+- **Blocker 1 root fix:** immediately after `exec_task = asyncio.create_task(...)`, set
+  `handle.task = exec_task` (guarded on `handle is not None`) so the out-of-band killers
+  that cancel `handle.task` cancel the live awaitable — fixes the `tool_timeout` /
+  `worker_dead` subprocess-orphan too, not just the shutdown path.
 - On expiry (reprieve gate `_should_kill_no_progress` says kill): finalize FIRST —
-  fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim → finalize via
-  `_apply_recovery_transition` (reason `progress_deadline`) — THEN `exec_task.cancel()`.
+  fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim →
+  `did_finalize = await _apply_recovery_transition(reason "progress_deadline")` → if
+  `not did_finalize` force `transition_status(session, "cancelled")` → set
+  `finalized_by_execute=True` (skip outer finally) — THEN `exec_task.cancel()`.
 - Blocker 1: split the `except asyncio.CancelledError` handler at `:1496` on
-  `deadline_cancelled` — True → swallow (no requeue log/re-raise); False → unchanged
-  worker-shutdown path. Reconcile with `finalized_by_execute` (terminal idempotency).
-- OQ3: extract the Tier-2 reprieve into shared `_should_kill_no_progress`; DELETE the
-  out-of-band worker-alive `no_progress` branch (`session_health.py:2506-2517` +
-  `:2526-2527` classification). Keep `worker_dead` and `tool_timeout`.
+  `deadline_cancelled` — True → swallow (no requeue log/re-raise); False → hardened
+  worker-shutdown path (`exec_task.cancel()` + bounded `wait_for(..., TASK_CANCEL_TIMEOUT)`
+  to tear down the orphaned subprocess, then log/`session_completed=True`/re-raise). Add
+  a `finally` that cancels a still-pending `exec_task` on any non-Cancelled exit.
+- OQ3: extract the Tier-2 reprieve + telemetry into shared
+  `_should_kill_no_progress(session, handle)`; DELETE the running-scan worker-alive
+  `no_progress` `elif` (`session_health.py:2506-2517`). Note `reason_kind="no_progress"`
+  has a SECOND live producer (never-started path, `:3308-3314`), so
+  `_apply_recovery_transition` must CALL `_should_kill_no_progress` (not keep an inline
+  copy) — reprieve logic in exactly one place. Keep `worker_dead` and `tool_timeout`.
+  Deterministic greps: `grep -c '_reason_kind = "no_progress"' == 0`;
+  `grep -c "_tier2_reprieve_signal" == 1`.
 - Reuse `DISABLE_PROGRESS_KILL` kill-switch; add `SESSION_PROGRESS_DEADLINE_S`
   (≥ max tool tier) / `PROGRESS_POLL_S` constants (provisional, commented).
 
@@ -858,8 +1046,14 @@ lead NEVER builds directly.
 | Reap emits the reclaim counter | `grep -c "slot_reclaims" agent/session_health.py` | output > 0 |
 | Deadline-cancel disambiguation present (Blocker 1) | `grep -c "deadline_cancelled" agent/agent_session_queue.py` | output > 0 |
 | Progress-deadline cancel present | `grep -c "SESSION_PROGRESS_DEADLINE_S" agent/agent_session_queue.py` | output > 0 |
-| Single-killer: worker-alive no_progress branch deleted (OQ3) | `grep -c "no_progress" agent/session_health.py` | fewer than baseline (branch + reason_kind removed) |
+| Single-killer: running-scan no_progress classification deleted (OQ3, deterministic) | `grep -c '_reason_kind = "no_progress"' agent/session_health.py` | == 0 |
+| Reprieve decision lives in exactly one place (OQ3, no dead/parallel copy) | `grep -c "_tier2_reprieve_signal" agent/session_health.py` | == 1 (sole call in `_should_kill_no_progress`) |
 | Shared reprieve gate extracted (OQ3) | `grep -c "_should_kill_no_progress" agent/session_health.py` | output > 0 |
+| No wall-clock reclaim arm in the reap (Blocker 2) | `grep -c "lease.deadline" agent/session_health.py` | == 0 |
+| `SLOT_LEASE_TTL_S` fully removed (Blocker 2) | `grep -rc "SLOT_LEASE_TTL_S" agent/ worker/` | match count == 0 |
+| Owned task wired into the registry handle (Blocker 1 root fix) | `grep -c "handle.task = exec_task" agent/agent_session_queue.py` | output > 0 |
+| Deadline decline forces terminal, skips outer finally (Concern 1) | `grep -c "did_finalize" agent/agent_session_queue.py` | output > 0 |
+| `slot_reclaims` surfaced on the dashboard (NIT) | `grep -c "slot_reclaims" ui/app.py` | output > 0 |
 | fd-PTY-kill uses scoped teardown (not machine pkill) | `grep -c "pkill" agent/agent_session_queue.py` | match count == 0 |
 
 ## Critique Results
@@ -873,6 +1067,13 @@ lead NEVER builds directly.
 | CONCERN | Scope & Value (User) | OQ3 keep-both vs replace out-of-band progress-kill — design fork unresolved | Resolved into Fix #3 Technical Approach (residual-ownership table) + OQ3 moved to resolved | Fix #3 single authoritative killer for worker-alive sessions; delete worker-alive `no_progress` branch; keep `worker_dead`+`tool_timeout`; reprieve preserved via shared gate |
 | NIT | Scope & Value (Simplifier) | Fix #2/#3 bundled into one Large PR | Appetite → PR strategy | Split: Fix #2 first (Acceptance #1), Fix #3 follow-up against stable registry |
 | NIT | History & Consistency | Duplicate verification grep (fingerprint vs killer rows) | Verification table | Killer row retargeted to `grep -A40 "_apply_recovery_transition" ... \| grep -c reclaim` |
+| **BLOCKER (r2)** | Risk & Robustness (Adversary) | Detached `exec_task` orphaned on worker shutdown (`asyncio.wait` doesn't cancel its watched task) → subprocess survives → startup recovery re-queues → double execution | Fix #3 code sketch + Data Flow step 1/4 + Race 3 + Step task 2 | **Root fix:** `handle.task = exec_task` right after `create_task` (covers tool_timeout/worker_dead orphan too). **Belt-and-suspenders:** shutdown branch `exec_task.cancel()` + bounded `wait_for(TASK_CANCEL_TIMEOUT)` before re-raise; owned-region `finally` cancels a still-pending task |
+| **BLOCKER (r2)** | ALL THREE | Reaper's wall-clock `now > lease.deadline` arm strips the permit from a live progressing owner → over-admission (concurrent > max) → re-imposes the #1172 wall-clock cap | Data Flow step 5 + Technical Approach reap + Key Elements + Flow + Risks note + Success Criteria + Test Impact | Reap reclaims IFF owner ∈ `TERMINAL_STATUSES`; wall-clock arm deleted; `SLOT_LEASE_TTL_S` removed; `deadline` dropped from the `Lease`; greps `lease.deadline == 0` / `SLOT_LEASE_TTL_S == 0` |
+| **CONCERN (r2)** | Skeptic + Consistency | Outer `finally` calls `_complete_agent_session` (not `_apply_recovery_transition`); deadline path can be mislabeled "completed", and `_apply_recovery_transition` can decline (MAX_RECOVERY_ATTEMPTS/OOM) without transitioning | Fix #3 code sketch + Blocker-1/Concern-1 prose + Data Flow step 3 + Step task 2 | Capture `did_finalize`; force `transition_status(..., "cancelled")` on decline; set `finalized_by_execute=True` to skip the outer finally; citation corrected to `_complete_agent_session` (`session_completion.py:86`) |
+| **CONCERN (r2)** | Consistency Auditor | OQ3 "SKIPS" leaves dead reprieve code parallel to `_should_kill_no_progress` (NO-LEGACY violation) | Fix #3 OQ3 resolution + resolved-OQ3 block + freshness bullet + Verification | Reprieve decision+telemetry **MOVED** into `_should_kill_no_progress`; corrected: `no_progress` has a 2nd live producer (never-started `:3308-3314`), so `_apply_recovery_transition` **calls** the shared gate (no inline copy). Deterministic greps `_reason_kind = "no_progress" == 0` / `_tier2_reprieve_signal == 1` |
+| **NIT (r2)** | Scope & Value | Self-heal has no operator-facing surface; `slot_reclaims` counter write-only | Agent Integration + Documentation + Success Criteria + Verification | Surface `slot_reclaims` in the `worker` block of `dashboard.json` (`_get_worker_health`, `ui/app.py:507`); additive field only |
+| **NIT (r2)** | Coordinator | `bind()` deadline ambiguity (caller-supplied vs internally computed) | Resolved by Blocker 2 | `deadline` dropped from `Lease`/`bind` entirely; Fix #3's watcher computes its own progress deadline from `_session_progress_ts` — no ambiguity |
+| **NIT (r2)** | Coordinator | OQ3 verification grep non-deterministic ("fewer than baseline") | Verification table + OQ3 resolution | Replaced with exact zero/one checks: `_reason_kind = "no_progress" == 0`, `_tier2_reprieve_signal == 1` |
 
 ---
 
@@ -884,20 +1085,24 @@ lead NEVER builds directly.
    distinct from the parked worker loop, which is the real requirement). Confirm
    this satisfies the intent, or do we want a `loop.call_soon_threadsafe` bridge
    from the #1815 watchdog thread as well?
-2. **Bound the lease acquire?** Should `registry.acquire()` be bounded by
-   `wait_for(SLOT_LEASE_TTL_S)` (a worker loop can't wait forever for a slot), or
-   is unbounded backpressure correct (the reaper guarantees slots free up)? Plan
-   assumes unbounded acquire + reaper-guaranteed liberation; a bound would add a
-   loud "pool wedged" signal at the cost of a new failure mode. (Note: `SLOT_LEASE_TTL_S`
-   is still used as the bound lease's absolute-deadline backstop for the reaper —
-   this question is only about whether to *also* bound the `acquire()` wait.)
+2. **Bound the lease acquire?** Should `registry.acquire()` be bounded by a
+   `wait_for(...)` timeout (a worker loop can't wait forever for a slot), or is
+   unbounded backpressure correct (the reaper guarantees slots free up)? Plan assumes
+   unbounded acquire + reaper-guaranteed liberation; a bound would add a loud "pool
+   wedged" signal at the cost of a new failure mode. If adopted, the bound would
+   introduce its own dedicated constant (e.g. `SLOT_ACQUIRE_TIMEOUT_S`) — note
+   `SLOT_LEASE_TTL_S` no longer exists (removed with the reaper's wall-clock arm,
+   Blocker 2), so it is NOT a candidate value here.
 
 > **Resolved (was OQ3) — Fix #3 primacy vs the out-of-band progress-kill.**
 > **Decision: Fix #3 is the single authoritative no-progress killer for worker-alive
 > RUNNING sessions; the out-of-band worker-alive `no_progress` branch
 > (`session_health.py:2506-2517`) is DELETED in the same change.** Tier-2 reprieve is
-> preserved by extracting the reprieve decision into a shared
-> `_should_kill_no_progress` gate that Fix #3 consults before cancelling. The two
+> preserved by extracting the reprieve decision + telemetry into a shared
+> `_should_kill_no_progress` gate that Fix #3 consults before cancelling **and that
+> `_apply_recovery_transition` also calls** for the still-live never-started
+> `no_progress` producer (`session_health.py:3308-3314`) — the reprieve logic lives in
+> exactly one place, no inline copy or dead branch remains. The two
 > survivors own provably disjoint cases Fix #3 cannot reach: `worker_dead` (the
 > in-scope watcher is dead when the worker loop is dead) and `tool_timeout` (finer
 > per-tool-tier cadence; `SESSION_PROGRESS_DEADLINE_S ≥ max tool tier` so it always
