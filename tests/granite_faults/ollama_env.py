@@ -105,7 +105,7 @@ def pick_ollama_model(names: list[str] | None = None) -> str | None:
     return usable[0]
 
 
-def ollama_substrate_reachable(model: str | None = None, probe_timeout_s: float = 90.0) -> bool:
+def ollama_substrate_reachable(model: str | None = None, probe_timeout_s: float = 240.0) -> bool:
     """Mirror ``test_granite_container_loop._model_reachable`` for the ollama substrate.
 
     True only when the ``claude`` binary is on PATH AND a tool-capable ollama
