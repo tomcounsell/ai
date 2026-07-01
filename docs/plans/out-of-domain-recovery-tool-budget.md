@@ -6,7 +6,7 @@ owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1821
 last_comment_id:
-revision_applied: false
+revision_applied: true
 ---
 
 # Out-of-Domain Recovery + Per-Tool Budget Backstop (wedge fixes #5/#6)
@@ -57,13 +57,21 @@ loop's health.
    frozen loop halts; there is no inline per-call ceiling.
 
 **Desired outcome:**
-1. A leaked slot (terminal owner, still-held permit) is detected and recovered
-   from the **bridge process** — a genuinely separate failure domain — via a
-   Redis-mediated reclaim signal drained by the worker's on-loop reaper, without a
-   process restart, and the slot-lease/liveness state is surfaced on the
-   dashboard. When the loop is confirmed wedged, the bridge actor records the
-   detection and defers the kill to the single existing killer — it never runs a
-   second kill ladder.
+1. Fix #5 is PRIMARILY a **detection + operator-surface** capability: a bridge-process
+   actor reads the worker's Redis-published loop beacon + lease snapshot, records
+   `loop_wedged` when the loop is stale, surfaces the slot-lease/liveness state on the
+   dashboard, and DEFERS all process recovery to the single existing killer (it never
+   runs a second kill ladder). The SECONDARY, narrow lever is a Redis-mediated
+   reclaim-request: for a terminal-owner lease held under a *live* loop, the bridge
+   pushes a reclaim-request drained by the worker's on-loop reaper — a restart-free,
+   targeted reclamation. This request path is deliberately narrow (see the resolved
+   OQ2 below): when the loop is alive #1820's autonomous reaper already reclaims
+   terminal owners, so the request's *unique* value is (a) it is the reclaim path that
+   still fires under `SLOT_LEASE_REAP_DISABLED=1` (where the autonomous action is gated
+   off), and (b) it is what makes Acceptance #1 — "recovery runs from a non-worker
+   process" — provable. Being transparent: `registry.reclaim()` itself always runs on
+   the worker loop (loop-affinity physics); only the *trigger* crosses the process
+   boundary.
 2. A per-tool-call budget (`MAX_TOOL_CALLS_PER_SESSION`, session cost cap) is
    enforced **synchronously in the PreToolUse dispatch path**, so it denies the
    call inline even when every background loop is frozen.
@@ -73,6 +81,18 @@ loop's health.
 **Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045`
 **Issue filed at:** 2026-06-29 (deferred from #1815)
 **Disposition:** Clean — no drift on referenced files since recon.
+**Revision re-check (post-CRITIQUE, touched anchors re-verified against HEAD):**
+- `monitoring/session_watchdog.py` — `watchdog_loop` at `:173`; `_apply_stall_reaction`
+  at `:531` (the deny-surfacing precedent Fix #6 mirrors — atomic `SET NX EX` dedup +
+  reaction-queue write). Confirmed.
+- `agent/hooks/pre_tool_use.py` — `pre_tool_use_hook` at `:371`. Confirmed.
+- `.claude/hooks/pre_tool_use.py` — `main()` wrapped by a module-level
+  `except Exception` at `:88-91` (`log_hook_error` → exit 0). Confirmed this catches
+  `Exception` (not `BaseException`), so a `SystemExit(2)` deny propagates while a
+  check-internal bug fails open (concern #6 grounding).
+- `.claude/hooks/post_tool_use.py` — sidecar resolve at `:464` (`_load_agent_session_sidecar`),
+  `AgentSession.get_by_id` at `:476`, `tool_call_count` bump at `:493` (the exact
+  no-session-vs-infra path Fix #6 reuses, concern #5). Confirmed.
 
 **⚠️ HARD DEPENDENCY — #1820 lease registry (NOT yet merged).** Fix #5 consumes
 the `SlotLeaseRegistry` that #1820 (`docs/plans/slot-lease-progress-deadline.md`,
@@ -191,6 +211,32 @@ it drives the Redis-mediated contract below.
 
 ## Data Flow
 
+### Fix #5 — scope (OQ2 resolved)
+
+Fix #5 is framed **primarily as detection + operator-surface**, with the
+reclaim-request as a **narrow secondary lever**. The rationale (previously OQ2):
+when the worker loop is alive, #1820's autonomous on-loop reaper already reclaims
+every terminal-owner lease each tick, so a bridge reclaim-request is *redundant* in
+the common case; and when the loop is truly wedged, the request cannot be drained at
+all. The request therefore has exactly **two** justified roles, and no others:
+
+1. **The only reclaim lever under `SLOT_LEASE_REAP_DISABLED=1`.** #1820 gates its
+   *autonomous* terminal-owner reclaim behind that flag (detection/log/heartbeat still
+   run; the reclaim *action* is suppressed — confirmed in the #1820 plan). The bridge
+   drain is a DISTINCT code path, so it remains a working reclaim lever exactly when the
+   autonomous one is disabled.
+2. **The mechanism that makes Acceptance #1 provable** — recovery driven from a
+   non-worker process (the acceptance test pushes the request from the test process,
+   not the loop).
+
+Everything else in Fix #5 is detection + surfacing: the bridge records `loop_wedged`,
+increments counters, writes the action log, and shows lease/liveness state on the
+dashboard — and **defers every kill** to the existing killers. The reclaim TRIGGER
+crosses the process boundary; `registry.reclaim()` still runs on the worker loop
+(loop-affinity physics). This is the resolved scope; the reclaim-request is retained
+precisely because of roles (1) and (2), not because it beats the on-loop reaper in the
+live-loop common case.
+
 ### Fix #5 — the Redis-mediated cross-process contract (THE central design)
 
 The bridge process **cannot** touch the worker's in-memory `SlotLeaseRegistry`
@@ -220,9 +266,12 @@ TTL'd so a dead worker's records expire):
    `now − loop_beacon.wall_ts ≤ BRIDGE_WORKER_BEACON_STALE_S` (loop alive) AND
    `BRIDGE_SLOT_RECLAIM_ENABLED` is set, push `owner` onto the Redis list
    **`worker:slot:reclaim_requests:{host}`** (dedup via a short-TTL `SET NX` marker
-   per owner) and append an entry to the **`worker:watchdog:actions:{host}`**
-   operator log (capped list). This is the out-of-domain reclaim TRIGGER; the
-   actual `registry.reclaim()` runs on the worker loop (physics requirement).
+   per owner) — then **`LTRIM` the list to `RECLAIM_REQUESTS_MAX` entries**
+   (default 256, mirroring the `worker:watchdog:actions` bound) so a multi-owner leak
+   burst under a slow-but-not-wedged tick cannot grow the list unboundedly (Race 4).
+   Also append an entry to the **`worker:watchdog:actions:{host}`** operator log
+   (capped `LPUSH`+`LTRIM`). This is the out-of-domain reclaim TRIGGER; the actual
+   `registry.reclaim()` runs on the worker loop (physics requirement).
 4. **Beacon stale (loop wedged/worker down):** append a `loop_wedged` detection to
    `worker:watchdog:actions:{host}` and increment
    `{host}:worker-watchdog:loop_wedged_detected`. **Take NO kill action** — defer
@@ -239,6 +288,12 @@ TTL'd so a dead worker's records expire):
    `SLOT_LEASE_REAP_DISABLED=1` gates the autonomous path — giving the bridge a
    genuine lever the on-loop reaper alone does not provide. Idempotent
    `registry.reclaim()` means the two paths converge harmlessly when both are on.
+   **Mixed-version detectability (new-worker/old-bridge):** if the worker observes a
+   terminal-owner leak but the reclaim-request channel has been empty for a sustained
+   window (an old bridge never pushes), it emits `bridge_contract_stale` (action-log
+   + counter) so the contract gap is operator-visible rather than a silent drop; the
+   autonomous #1820 reaper still reclaims the leak (unless `SLOT_LEASE_REAP_DISABLED=1`),
+   so no slot is lost.
 
 **Output:** `permits_free` recovers without a restart; the reclaim decision +
 trigger provably ran in the bridge process (Acceptance #1); the lease/liveness
@@ -260,14 +315,38 @@ state is visible on the dashboard.
    `{"decision":"block","reason":<verdict.reason>}`; the CLI hook writes the reason
    to stderr and exits `2` (Claude Code's block convention). On a deny, increment
    `{project_key}:tool-budget:tripped` once per session (dedup `SET NX`).
-4. **Output:** the tool call is denied inline, at dispatch, regardless of whether
+4. **Surface the deny to the human (auto-continue requirement).** A budget deny is a
+   NEW stopping point — under this codebase's auto-continue design, a silent
+   tool-call deny would strand the session with no human-visible signal. So on the
+   FIRST deny per session (guarded by the same `SET NX` dedup as the counter), the
+   evaluator's caller ALSO:
+   (a) transitions/annotates the `AgentSession` into a human-legible state —
+       set a `budget_tripped` flag + a status note (e.g. `paused` with reason
+       "per-session tool budget reached: <dimension> <value>") via the model's
+       normal `save(update_fields=...)`, so the dashboard and `valor-session status`
+       show it; AND
+   (b) queues a user-visible Telegram signal on the originating message — mirroring
+       `monitoring/session_watchdog.py::_apply_stall_reaction` (write a reaction/steer
+       payload to the bridge's reaction queue with the same atomic `SET NX EX` dedup
+       pattern), so the human sees "this session hit its budget" without reading
+       `logs/worker.log`.
+   Both (a) and (b) are fail-quiet: a surfacing error must NEVER turn a legitimate
+   allow into a deny, nor a deny into a crash — the deny itself (block/exit 2) always
+   proceeds; only the *notification* is best-effort. The deny is NOT merely a log
+   line + dashboard counter.
+5. **Output:** the tool call is denied inline, at dispatch, regardless of whether
    any background loop is running — so a runaway session is capped even under a
-   frozen health loop.
+   frozen health loop, AND the human is notified that the cap was hit.
 
 ## Architectural Impact
 
 - **New dependencies:** none (stdlib `asyncio`, `time`, `json`; existing Redis via
   `POPOTO_REDIS_DB`).
+- **Config location (not a defect):** the new env vars read via raw
+  `os.environ.get()` at module scope, NOT through `config/settings.py`. This matches
+  the sibling precedent — `WORKER_HEARTBEAT_INTERVAL` and the #1815/#1820 threshold
+  constants use the same raw-`os.environ` pattern — so no `config/settings.py` entry
+  is required or expected.
 - **New module:** `agent/tool_budget.py` (Fix #6 shared evaluator).
 - **Interface changes (Fix #5):** `_write_worker_heartbeat()` gains a Redis
   beacon-publish side effect; the #1820 reap pass gains a lease-snapshot publish +
@@ -299,12 +378,25 @@ small, self-contained inline gate. 1 PM check-in, 1-2 review rounds.
 - Review rounds: 1-2 (cross-process correctness of Fix #5; the block-on-both-hook-
   surfaces correctness of Fix #6).
 
-**PR strategy (split).** Fix #6 (inline budget) is independent of #1820 and lands
-**first** as its own small PR — it needs no prerequisite and satisfies
-Acceptance #2. [ORDERED] Fix #5 lands as a second PR sequenced **after #1820
-merges** (the `SlotLeaseRegistry` it extends must exist first), satisfying
-Acceptance #1. This unblocks the independent, higher-confidence half immediately
-and isolates the cross-process change behind the merged registry.
+**PR strategy (split into two independent sub-pipelines).** Fix #6 and Fix #5 are
+**two dependency-disjoint pipelines**, each with its own build → validate → docs
+arc — NOT one linear chain:
+
+- **Sub-pipeline A — Fix #6 (inline budget):** dependency-free, builds **first**,
+  and lands as its own small PR satisfying Acceptance #2. It does NOT wait on Fix #5
+  or #1820. Its validation asserts only Acceptance #2 + the Fix #6 failure paths.
+- **Sub-pipeline B — Fix #5 (out-of-domain recovery):** [ORDERED] BUILD-gated on
+  **#1820 merged** (the `SlotLeaseRegistry` it extends must exist first), lands as a
+  second PR satisfying Acceptance #1. Its validation asserts Acceptance #1 + the
+  Fix #5 failure paths + the four race scenarios.
+
+The two sub-pipelines share only the documentarian and the final validation sweep
+(which runs once both PRs have landed). This unblocks the independent,
+higher-confidence half (A) immediately and isolates the cross-process change (B)
+behind the merged registry. The **Step by Step** task graph below reflects exactly
+this: `validate-tool-budget` depends ONLY on `build-tool-budget`;
+`validate-recovery` depends ONLY on `build-out-of-domain-recovery` (+ #1820); the
+final `validate-all` sweep depends on both.
 
 ## Prerequisites
 
@@ -341,11 +433,12 @@ blocked until #1820 merges** — the `SlotLeaseRegistry`, the on-loop reap pass,
   — pure, synchronous ALLOW/DENY on `tool_call_count` / `total_cost_usd`, called
   from BOTH PreToolUse hooks; blocks inline.
 - **Operator surface:** `worker:watchdog:actions:{host}` action log +
-  `bridge_reclaims` / `loop_wedged_detected` / `tool-budget:tripped` counters,
-  surfaced in the `worker` block of `localhost:8500/dashboard.json`
-  (`_get_worker_health`, `ui/app.py:340`).
+  `bridge_reclaims` / `loop_wedged_detected` / `bridge_contract_stale` /
+  `tool-budget:tripped` counters, surfaced in the `worker` block of
+  `localhost:8500/dashboard.json` (`_get_worker_health`, `ui/app.py:340`).
 - **Env kill-switches (all NAMED, env-overridable, conservative-provisional):**
   `BRIDGE_SLOT_RECLAIM_ENABLED`, `BRIDGE_WORKER_BEACON_STALE_S`,
+  `RECLAIM_REQUESTS_MAX` (list-cap for `worker:slot:reclaim_requests`, Race 4),
   `TOOL_BUDGET_ENABLED`, `MAX_TOOL_CALLS_PER_SESSION`, `SESSION_COST_CAP_USD`.
 
 ### Flow
@@ -398,7 +491,8 @@ beacon → log `loop_wedged` + defer to existing killer.
   function.)
 - **Operator surface.** Extend `_get_worker_health()` (`ui/app.py:340`) to read
   `worker:slot:leases` (`permits_free`/`held`), the `bridge_reclaims` /
-  `loop_wedged_detected` counters, and the last few `worker:watchdog:actions`
+  `loop_wedged_detected` / `bridge_contract_stale` / `tool_budget_tripped` /
+  `tool_budget_resolution_errors` counters, and the last few `worker:watchdog:actions`
   entries — additive fields on the existing `worker` block only.
 
 **Fix #6 — synchronous per-tool budget (BUILD independently, first):**
@@ -432,18 +526,59 @@ beacon → log `loop_wedged` + defer to existing killer.
   ```
   Pure and synchronous — no await, no background timer. This is the omnigent
   ALLOW/DENY model.
+- **Fail-open MUST distinguish "no session" from "infra error"** (both hooks). The
+  budget's fail-open posture is a backstop that must never brick the agent — but an
+  unconditional fail-open conflates two very different cases and would let the
+  backstop go **silently blind during exactly the partially-wedged Redis conditions
+  it exists to guard**. Split them:
+  - **Genuine no-session** (`AGENT_SESSION_ID` unset / sidecar has no
+    `agent_session_id` / `get_by_id` returns `None` with no exception) → legitimately
+    ALLOW, silently. Local CLI / non-agent sessions have no budget to enforce; this
+    is the normal path and needs no log noise.
+  - **Infra / resolution error** (Redis raised, `get_by_id` threw, JSON decode of the
+    sidecar failed) → the backstop is going blind. ALLOW (still fail-open — a
+    resolution failure must not brick tool calls) but **log LOUDLY at WARNING** with
+    the error and an explicit "tool-budget backstop is BLIND this call" message, and
+    increment a `{project_key}:tool-budget:resolution_errors` counter surfaced on the
+    dashboard. A rising counter means the budget cannot see sessions — an operator
+    signal, not a silent no-op.
+  Implement the split by catching the resolution exception separately from the
+  no-session branch (two distinct code paths), not one blanket `except: allow`.
 - **SDK hook.** At the TOP of `agent/hooks/pre_tool_use.py::pre_tool_use_hook`
   (before the write-capable filter so it covers ALL tools), resolve the session via
-  `AGENT_SESSION_ID` (as `_handle_skill_tool_start` already does at `:360`), call
-  `evaluate_tool_budget`; on deny return `{"decision":"block","reason":...}` and
-  increment `{project_key}:tool-budget:tripped` (dedup `SET NX` per session).
+  `AGENT_SESSION_ID` (as `_handle_skill_tool_start` already does at `:360`), applying
+  the no-session-vs-infra-error split above; call `evaluate_tool_budget`; on deny
+  return `{"decision":"block","reason":...}`, increment
+  `{project_key}:tool-budget:tripped` (dedup `SET NX` per session), and surface to the
+  human (Data Flow step 4).
 - **CLI hook.** At the top of `.claude/hooks/pre_tool_use.py::main`, resolve the
   session via the sidecar (the exact `_load_agent_session_sidecar` →
   `AgentSession.get_by_id` path used in `.claude/hooks/post_tool_use.py:464-476`),
-  call `evaluate_tool_budget`; on deny print the reason to stderr and
-  `sys.exit(2)` (Claude Code's block convention). Fail-open on any resolution
-  error (a hook exception must never wedge the session — the budget is a backstop,
-  not a gate that can itself brick the agent).
+  applying the same no-session-vs-infra-error split; call `evaluate_tool_budget`; on
+  deny print the reason to stderr and `sys.exit(2)` (Claude Code's block convention)
+  and surface to the human (Data Flow step 4). Fail-open on a resolution error (log
+  loudly per the split above); a genuine no-session allows silently — the budget is a
+  backstop, not a gate that can itself brick the agent.
+- **CLI-hook fail-open granularity (exit-2 must propagate; a check bug must fail
+  open).** Ground in `.claude/hooks/pre_tool_use.py`: `main()` is wrapped by a
+  module-level `try/except Exception` at the bottom (`if __name__ == "__main__":`
+  → `except Exception as e: log_hook_error(...)`), which exits 0 on a swallowed
+  error. Two facts make this the correct wrapper granularity, and the plan relies on
+  them explicitly:
+  1. A genuine deny is raised as `sys.exit(2)` → `SystemExit`, which is NOT a
+     subclass of `Exception`, so the module-level `except Exception` does **not**
+     catch it — the exit-2 propagates and the tool is denied. (Verified against HEAD:
+     the wrapper catches `Exception`, not `BaseException`.)
+  2. A bug *inside* the budget check raises a normal `Exception` → caught by the
+     module-level wrapper → logged via `log_hook_error` → process exits 0 → tool
+     ALLOWED (fails open). This is the desired direction.
+  Therefore the budget check is placed **inside `main()`**, and the deny path uses
+  `sys.exit(2)` (never a caught-and-swallowed `return`). Do NOT wrap the budget
+  check in its own `try/except` that would catch `SystemExit` (e.g. a bare
+  `except:` or `except BaseException:`), which would invert the semantics and swallow
+  a real deny. The no-session-vs-infra split (above) is a plain `if`/`try` on the
+  *resolution* only, returning normally (allow) — it never intercepts the exit-2 that
+  the deny branch raises AFTER a successful resolution.
 - **Which surface is load-bearing.** The interactive granite-PTY path uses the CLI
   hook; the headless SDK path uses the SDK hook. Fix #6 wires BOTH so the ceiling
   holds regardless of harness — the shared evaluator guarantees identical
@@ -465,6 +600,19 @@ beacon → log `loop_wedged` + defer to existing killer.
 - [ ] Fix #6 evaluator + hooks must **fail open** — any session-resolution or Redis
   error results in `allow` (the budget never bricks a session). Test injects a
   resolution error, asserts the tool call proceeds.
+- [ ] Fix #6 fail-open must **distinguish no-session from infra error**: a genuine
+  no-session (unset `AGENT_SESSION_ID` / no sidecar) allows **silently**; a
+  resolution/Redis **exception** allows but logs at WARNING ("backstop BLIND") and
+  increments `tool-budget:resolution_errors`. Test both paths separately: assert the
+  no-session path is silent, and the infra-error path logs loudly + increments.
+- [ ] CLI-hook exit-2 must **propagate through the module-level `except Exception`**
+  (SystemExit is not an Exception) while a check-internal bug is **swallowed →
+  exit 0 → allow**. Test: a forced deny yields exit code 2; a forced check bug
+  yields exit code 0 (fail-open).
+- [ ] Budget deny **surfaces to the human**: on first deny per session the session
+  is annotated (flag + status note) AND a Telegram reaction/steer is queued; a
+  surfacing error is fail-quiet and never flips the deny to allow or crashes. Test
+  the surfacing fires once (dedup) and a surfacing exception does not block the deny.
 - [ ] No new `except Exception: pass` — every swallow emits a `logger.warning` with
   the owner/session id. Test captures the record.
 
@@ -481,6 +629,13 @@ beacon → log `loop_wedged` + defer to existing killer.
 - [ ] Double reclaim-request for the same owner (bridge re-pushes before the worker
   drains) → the worker `registry.reclaim` is idempotent; `permits_free` unchanged
   after the first. Test.
+- [ ] A burst of > `RECLAIM_REQUESTS_MAX` **distinct** owners pushed before a drain
+  keeps `worker:slot:reclaim_requests` bounded (LTRIM cap, Race 4); a
+  dropped-then-re-terminal owner is re-requested next tick and still reclaimed. Test.
+- [ ] New-worker / old-bridge direction: the worker drains an always-empty request
+  list, detects the contract gap, and emits `bridge_contract_stale` (action-log +
+  counter) rather than silently dropping. Test the marker fires after the stale
+  window with no bridge pushes.
 
 ### Error State Rendering
 - [ ] A bridge-triggered reclaim emits a WARNING naming the owner + `bridge_reclaims`
@@ -521,7 +676,11 @@ New tests (greenfield):
   both proceed for an under-budget session; the deny path fires **with no
   background loop running** (the loop-independence property — construct the verdict
   and invoke the hook directly, asserting the block without any health/timeout loop
-  task alive). **Acceptance #2.**
+  task alive). ALSO: the fail-open split (no-session → silent allow; injected infra
+  error → allow + loud WARNING + `resolution_errors` increment); the CLI exit-2
+  propagation vs. check-bug fail-open (exit 2 vs exit 0); and the deny-surfacing
+  (session annotated + Telegram signal queued once, surfacing error fail-quiet).
+  **Acceptance #2.**
 - `tests/integration/test_out_of_domain_reclaim.py` (Fix #5, after #1820) — orphan a
   slot (bind a lease to a session, transition it terminal without releasing);
   publish a fresh `worker:loop_beacon` + a `worker:slot:leases` snapshot; run
@@ -531,7 +690,10 @@ New tests (greenfield):
   process — Acceptance #1.** ALSO: a **stale** beacon → `loop_wedged` action logged,
   NO reclaim-request, NO kill signal (assert no `worker:watchdog:critical` written).
   ALSO: `BRIDGE_SLOT_RECLAIM_ENABLED=0` → detection/logging still runs, no
-  reclaim-request pushed.
+  reclaim-request pushed. ALSO: a burst of > `RECLAIM_REQUESTS_MAX` distinct owners
+  keeps the list bounded (Race 4 LTRIM); a new-worker/old-bridge scenario (worker
+  drains an always-empty list) emits `bridge_contract_stale` rather than silently
+  dropping.
 - `tests/unit/test_worker_liveness_beacon_publish.py` (Fix #5) — `_write_worker_heartbeat`
   publishes a wall-clock `worker:loop_beacon` (assert `wall_ts` is `time.time()`-
   shaped, NOT a monotonic value) with the correct TTL; a Redis error is swallowed
@@ -627,6 +789,24 @@ destructive action — it only logs + defers to the existing killer, so a false
 positive is observability noise, not a bad kill. Tune after observing real tick
 cadence.
 
+### Race 4: Unbounded `reclaim_requests` growth under a multi-owner leak burst
+**Location:** bridge push to `worker:slot:reclaim_requests:{host}` vs the worker
+drain cadence.
+**Trigger:** many distinct owners leak at once while the worker tick is
+slow-but-not-wedged (the loop still ticks, so the beacon stays fresh and the bridge
+keeps pushing). The per-owner `SET NX` dedup prevents *duplicate* entries for the
+same owner but does NOT bound the list across *distinct* owners — so, absent a cap,
+the list could grow to (leaked owners × unexpired dedup windows).
+**Data prerequisite:** unlike `worker:watchdog:actions` (explicitly `LTRIM`'d), the
+round-1 reclaim-request list had NO list-level cap.
+**Mitigation:** after each `LPUSH`, `LTRIM worker:slot:reclaim_requests:{host} 0
+RECLAIM_REQUESTS_MAX-1` (default 256, mirroring the `worker:watchdog:actions`
+bound), and set a TTL so a dead worker's backlog expires. Oldest requests drop
+first; because the worker drain re-reads owner status fresh and `registry.reclaim()`
+is idempotent, a dropped-then-re-requested owner is harmless (a still-terminal owner
+is simply re-requested next tick). Test: a burst of > `RECLAIM_REQUESTS_MAX` distinct
+owners keeps the list length bounded.
+
 ## No-Gos (Out of Scope)
 
 - [ORDERED] Fix #5 BUILD before #1820 merges — the `SlotLeaseRegistry` /
@@ -648,17 +828,39 @@ cadence.
 No update-script or migration changes required. All new state is in-memory or
 TTL'd Redis keys — no Popoto model, so no `scripts/update/migrations.py` entry.
 The new env vars (`BRIDGE_SLOT_RECLAIM_ENABLED`, `BRIDGE_WORKER_BEACON_STALE_S`,
-`TOOL_BUDGET_ENABLED`, `MAX_TOOL_CALLS_PER_SESSION`, `SESSION_COST_CAP_USD`) are
+`RECLAIM_REQUESTS_MAX`, `TOOL_BUDGET_ENABLED`, `MAX_TOOL_CALLS_PER_SESSION`,
+`SESSION_COST_CAP_USD`) are
 all optional with safe defaults; add each to `.env.example` with a comment line
 above (completeness-check requirement) for operator discoverability only — no
 `.env` propagation needed. Both the **bridge** and the **worker** are restarted by
 the standard `./scripts/valor-service.sh restart` after merge (Fix #5 touches both
 processes: worker publishes/drains, bridge reads) — no new deploy step in
-`scripts/update/run.py`. **Operational note for the builder:** because Fix #5
-spans the bridge and worker, both must be running the new code for the contract to
-function; a mixed-version deploy degrades gracefully (an old worker simply
-publishes no beacon → the bridge logs `loop_wedged` and defers, taking no
-destructive action).
+`scripts/update/run.py`. **Operational note for the builder — both mixed-version
+directions:** because Fix #5 spans the bridge and worker, both must run the new code
+for the contract to function. Each direction degrades safely, and BOTH must be
+detectable — a silent drop is not acceptable:
+
+- **Old worker / new bridge:** the old worker publishes no beacon and no lease
+  snapshot → the new bridge sees "no beacon" → records `loop_wedged` and defers,
+  taking no destructive action. Detectable: the `loop_wedged_detected` counter rises
+  on the dashboard.
+- **New worker / old bridge:** the new worker publishes the beacon + lease snapshot
+  and drains `worker:slot:reclaim_requests`, but the old bridge never *pushes*
+  requests — so the drain is a harmless no-op (empty list). This direction is
+  otherwise the silent one, so the **worker emits an operator-visible signal when it
+  detects a leak it would expect a bridge request for but the request channel has
+  been empty for a sustained window**: the worker publishes a
+  `bridge_contract_stale` marker (age since the last drained request vs. observed
+  terminal-owner leaks) into `worker:watchdog:actions` + a
+  `bridge_contract_stale` counter surfaced on the dashboard. This makes a
+  never-draining request channel (old bridge, or a bridge that stopped pushing)
+  detectable rather than a silent drop. The autonomous #1820 reaper still reclaims
+  the leak in this direction (unless `SLOT_LEASE_REAP_DISABLED=1`), so no slot is
+  lost — the signal exists so the *contract gap* is visible.
+
+(The contract is intentionally NOT hard version-gated — an explicit version field
+would add a migration surface for no safety gain, since both directions already
+degrade safely; the requirement satisfied here is *detectability*, per the concern.)
 
 ## Agent Integration
 
@@ -673,10 +875,14 @@ new `check_worker_liveness_and_slots` call needs no new wiring beyond that loop.
 **Operator surface (both fixes).** Surface the recovery/budget state on the
 existing `localhost:8500/dashboard.json` `worker` block (additive fields only,
 `_get_worker_health` at `ui/app.py:340`): `permits_free`/`held` (from
-`worker:slot:leases`), `bridge_reclaims`, `loop_wedged_detected`, and
-`tool_budget_tripped` counters, plus the last few `worker:watchdog:actions`
-entries. A rising `bridge_reclaims` signals a recurring leak the on-loop reaper
-isn't catching; a rising `tool_budget_tripped` signals sessions hitting the cap.
+`worker:slot:leases`), `bridge_reclaims`, `loop_wedged_detected`,
+`bridge_contract_stale`, `tool_budget_tripped`, `tool_budget_resolution_errors`
+counters, plus the last few `worker:watchdog:actions` entries. A rising
+`bridge_reclaims` signals a recurring leak the on-loop reaper isn't catching; a
+rising `tool_budget_tripped` signals sessions hitting the cap; a rising
+`bridge_contract_stale` signals a mixed-version deploy (new worker / old bridge); a
+rising `tool_budget_resolution_errors` signals the budget backstop is going blind on
+session resolution.
 
 **Integration test wiring.** `test_tool_budget_enforcement.py` verifies the agent's
 own PreToolUse dispatch is actually gated (both hook surfaces block over-budget);
@@ -691,8 +897,11 @@ own PreToolUse dispatch is actually gated (both hook surfaces block over-budget)
   cannot touch the in-memory registry or read `last_loop_tick`, the four-actor
   recovery ownership boundary (on-loop reaper / dead-man's-switch / `worker_watchdog.py`
   / bridge `session_watchdog`) with the no-second-kill rule, the synchronous
-  per-tool budget (omnigent ALLOW/DENY model, both hook surfaces, fail-open), the
-  env kill-switches with provisional defaults, and the dashboard operator surface.
+  per-tool budget (omnigent ALLOW/DENY model, both hook surfaces, the
+  no-session-vs-infra-error fail-open split, the human deny-surfacing, the CLI exit-2
+  propagation), the mixed-version-deploy detectability in both directions
+  (`bridge_contract_stale`), the `reclaim_requests` LTRIM cap (Race 4), the env
+  kill-switches with provisional defaults, and the dashboard operator surface.
   State it is the continuation of `worker-liveness-recovery.md` (#1815) and
   `slot-lease-ownership.md` (#1820).
 - [ ] Add an entry to `docs/features/README.md` index table.
@@ -739,7 +948,14 @@ own PreToolUse dispatch is actually gated (both hook surfaces block over-budget)
   `test_tool_budget_enforcement.py`.
 - [ ] Kill-switches work: `BRIDGE_SLOT_RECLAIM_ENABLED=0` → detect/log only, no
   reclaim-request; `TOOL_BUDGET_ENABLED=false` → always allow.
-- [ ] Operator surface: `grep -Ec "bridge_reclaims|loop_wedged_detected|tool_budget_tripped|permits_free" ui/app.py > 0`.
+- [ ] Fix #6 fail-open distinguishes no-session (silent allow) from infra error
+  (loud WARNING + `tool_budget_resolution_errors` increment) — asserted in
+  `test_tool_budget_enforcement.py`.
+- [ ] Budget deny surfaces to the human (session annotated + Telegram signal queued,
+  fail-quiet) — asserted in `test_tool_budget_enforcement.py`.
+- [ ] `reclaim_requests` list is capped (Race 4 LTRIM) and new-worker/old-bridge
+  emits `bridge_contract_stale` — asserted in `test_out_of_domain_reclaim.py`.
+- [ ] Operator surface: `grep -Ec "bridge_reclaims|loop_wedged_detected|bridge_contract_stale|tool_budget_tripped|tool_budget_resolution_errors|permits_free" ui/app.py > 0`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`): `docs/features/out-of-domain-recovery.md`
   exists.
@@ -771,7 +987,11 @@ lead NEVER builds directly.
 
 - **Validator (resilience)**
   - Name: resilience-validator
-  - Role: Verify both acceptance criteria + failure-path + race tests.
+  - Role: Runs the two independent sub-pipeline validations then the final sweep —
+    `validate-tool-budget` (Acceptance #2, fail-open split, deny-surfacing, exit-2
+    propagation) gated only on the Fix #6 build; `validate-recovery` (Acceptance #1,
+    Fix #5 failure paths, four race scenarios) gated only on the Fix #5 build; then
+    `validate-all` once both PRs land.
   - Agent Type: validator
   - Resume: true
 
@@ -795,13 +1015,22 @@ lead NEVER builds directly.
   `MAX_TOOL_CALLS_PER_SESSION` / `SESSION_COST_CAP_USD` / `TOOL_BUDGET_ENABLED`
   (provisional, commented).
 - Wire the SDK hook (`agent/hooks/pre_tool_use.py::pre_tool_use_hook`, top, before
-  the write-capable filter): resolve via `AGENT_SESSION_ID`, deny → `{"decision":
-  "block","reason":...}`, increment `{project_key}:tool-budget:tripped` (dedup).
+  the write-capable filter): resolve via `AGENT_SESSION_ID` with the
+  **no-session-vs-infra-error split** (no-session → silent allow; infra exception →
+  allow + loud WARNING + `tool-budget:resolution_errors` increment), deny →
+  `{"decision":"block","reason":...}`, increment `{project_key}:tool-budget:tripped`
+  (dedup), and **surface the deny to the human** (session flag/status note + queued
+  Telegram signal, fail-quiet — Data Flow step 4).
 - Wire the CLI hook (`.claude/hooks/pre_tool_use.py::main`, top): resolve via the
-  sidecar path (`_load_agent_session_sidecar` → `AgentSession.get_by_id`), deny →
-  stderr + `sys.exit(2)`. **Fail open** on any resolution/Redis error.
+  sidecar path (`_load_agent_session_sidecar` → `AgentSession.get_by_id`) with the
+  same no-session-vs-infra split; deny → stderr + `sys.exit(2)`; surface to the
+  human (Data Flow step 4). The budget check lives **inside `main()`** so a genuine
+  deny (`SystemExit(2)`) propagates through the module-level `except Exception`
+  wrapper while a check-internal bug is swallowed → exit 0 → **fails open**. Do NOT
+  wrap the deny in an `except BaseException`/bare `except`.
 - Verify: `grep -c "evaluate_tool_budget"` in both hooks `> 0`; no
-  `asyncio/Thread/sleep` in `agent/tool_budget.py`.
+  `asyncio/Thread/sleep` in `agent/tool_budget.py`; the fail-open split and exit-2
+  propagation are covered by `test_tool_budget_enforcement.py`.
 
 ### 2. Build the out-of-domain recovery (Fix #5 — AFTER #1820 merges)
 - **Task ID**: build-out-of-domain-recovery
@@ -817,43 +1046,62 @@ lead NEVER builds directly.
   `agent/session_health.py::_write_worker_heartbeat` (`:3001`); add the
   `worker:slot:leases:{host}` snapshot publish + the `worker:slot:reclaim_requests:{host}`
   drain (→ fresh-status re-read → `registry.reclaim` → `bridge_reclaims` counter) to
-  the #1820 on-loop reap pass. All fail-quiet, all TTL'd.
+  the #1820 on-loop reap pass. Emit `bridge_contract_stale` (action-log + counter)
+  when terminal-owner leaks are observed but the request channel has been empty for a
+  sustained window (new-worker/old-bridge detectability, concern #3). All fail-quiet,
+  all TTL'd.
 - Bridge: add `check_worker_liveness_and_slots()` to
   `monitoring/session_watchdog.py`; call it from `watchdog_loop` (own try/except).
-  Fresh beacon + terminal-owner lease → push reclaim-request + action-log entry
+  Fresh beacon + terminal-owner lease → push reclaim-request (`LPUSH` +
+  `LTRIM ... 0 RECLAIM_REQUESTS_MAX-1`, Race 4) + action-log entry
   (gated `BRIDGE_SLOT_RECLAIM_ENABLED`); stale/missing beacon → `loop_wedged`
   action + counter, **NO kill**. No `os.kill`/`launchctl`/`critical` key.
 - Dashboard: extend `_get_worker_health()` (`ui/app.py:340`) with `permits_free`/
-  `held`/`bridge_reclaims`/`loop_wedged_detected`/`tool_budget_tripped` + recent
-  actions (additive only).
+  `held`/`bridge_reclaims`/`loop_wedged_detected`/`bridge_contract_stale`/
+  `tool_budget_tripped`/`tool_budget_resolution_errors` + recent actions (additive
+  only).
 
-### 3. Validate both fixes
-- **Task ID**: validate-resilience
-- **Depends On**: build-tool-budget, build-out-of-domain-recovery
+### 3. Validate Fix #6 (sub-pipeline A)
+- **Task ID**: validate-tool-budget
+- **Depends On**: build-tool-budget
 - **Assigned To**: resilience-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run new + updated tests; verify both acceptance criteria, all failure-path items,
-  and the three race scenarios. Confirm no regression in the existing watchdog /
-  concurrency / deadman / liveness-writer tests.
+- Run the Fix #6 tests only; verify **Acceptance #2** (both hook surfaces block
+  over-budget with no loop running), the fail-open no-session-vs-infra split, the
+  deny-surfacing to the human, and the CLI-hook exit-2 propagation. Confirm no
+  regression in `test_pre_tool_use_liveness_writes.py`. **Independent of Fix #5 /
+  #1820 — runs as soon as `build-tool-budget` lands.**
 
-### 4. Documentation
+### 4. Validate Fix #5 (sub-pipeline B)
+- **Task ID**: validate-recovery
+- **Depends On**: build-out-of-domain-recovery
+- **Assigned To**: resilience-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Run the Fix #5 tests only; verify **Acceptance #1** (recovery driven from a
+  non-worker process), all Fix #5 failure-path items, and the **four** race
+  scenarios (including the Race 4 `reclaim_requests` LTRIM cap). Confirm no
+  regression in the existing watchdog / concurrency / deadman / liveness-writer
+  tests. **Gated on #1820 merged (inherited from `build-out-of-domain-recovery`).**
+
+### 5. Documentation
 - **Task ID**: document-feature
-- **Depends On**: validate-resilience
+- **Depends On**: validate-tool-budget, validate-recovery
 - **Assigned To**: recovery-doc
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/out-of-domain-recovery.md`; add the README index entry;
   forward-link the #1815 and #1820 docs.
 
-### 5. Final Validation
+### 6. Final Validation (both sub-pipelines landed)
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: resilience-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the full verification table; confirm the doc deliverable exists; generate the
-  final report.
+- Run the full verification table across BOTH fixes; confirm the doc deliverable
+  exists; generate the final report.
 
 ## Verification
 
@@ -872,7 +1120,7 @@ lead NEVER builds directly.
 | Bridge runs NO kill ladder (no-parallel-systems) | `sed -n '/def check_worker_liveness_and_slots/,/^def /p' monitoring/session_watchdog.py \| grep -Ec "os\.kill\|launchctl\|SIGABRT\|watchdog:critical"` | == 0 |
 | Beacon publish is wall-clock | `pytest tests/unit/test_worker_liveness_beacon_publish.py -q` | exit code 0 |
 | Out-of-domain reclaim acceptance test passes | `pytest tests/integration/test_out_of_domain_reclaim.py -q` | exit code 0 |
-| Operator surface additive fields present | `grep -Ec "bridge_reclaims\|loop_wedged_detected\|tool_budget_tripped\|permits_free" ui/app.py` | output > 0 |
+| Operator surface additive fields present | `grep -Ec "bridge_reclaims\|loop_wedged_detected\|bridge_contract_stale\|tool_budget_tripped\|tool_budget_resolution_errors\|permits_free" ui/app.py` | output > 0 |
 | Lint clean | `python -m ruff check agent/ monitoring/ ui/ .claude/hooks/pre_tool_use.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/ monitoring/ ui/` | exit code 0 |
 | Feature doc exists | `test -f docs/features/out-of-domain-recovery.md && echo ok` | ok |
@@ -886,13 +1134,14 @@ lead NEVER builds directly.
    TUI (vs. the headless SDK path)? The plan wires BOTH surfaces to be safe;
    confirm at build time which is authoritative and that the CLI block path works
    end-to-end in the granite PTY. (PM/builder verify.)
-2. **Reclaim-request value vs. #1820's autonomous reaper.** When the loop is alive,
-   #1820's autonomous reaper already reclaims terminal-owner leases every tick, so
-   the bridge request is redundant EXCEPT under `SLOT_LEASE_REAP_DISABLED=1` (where
-   it is the only reclaim path) — and when the loop is wedged, the request can't be
-   drained at all. Is the bridge reclaim-request worth the coupling, or should
-   Fix #5 be **detection + operator-surface only** (record the leak/wedge, defer ALL
-   recovery to the on-loop reaper + existing killers)? The plan keeps the
-   reclaim-request because it is the mechanism that lets the acceptance test prove
-   "recovery from a non-worker process" AND it adds a genuine lever under
-   `SLOT_LEASE_REAP_DISABLED=1`; confirm this is the intended scope with PM.
+2. **RESOLVED — Fix #5 scope: detection + operator-surface primary, reclaim-request
+   as a narrow secondary lever.** (Was: is the reclaim-request worth the coupling given
+   the on-loop reaper already covers the live-loop case?) Resolved in favor of framing
+   Fix #5 primarily as detection + operator-surface (beacon/lease read → `loop_wedged`
+   record → dashboard → DEFER kill), with the reclaim-request retained ONLY for its two
+   unique roles: (a) it is the sole reclaim lever under `SLOT_LEASE_REAP_DISABLED=1`
+   (the autonomous reclaim action is gated off there — confirmed against the #1820
+   plan), and (b) it makes Acceptance #1 ("recovery from a non-worker process")
+   provable. The request is deliberately NOT positioned as beating the on-loop reaper
+   in the live-loop common case. See the "Fix #5 — scope (OQ2 resolved)" block in
+   **## Data Flow** for the full resolution.

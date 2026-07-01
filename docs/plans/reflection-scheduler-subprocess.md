@@ -48,8 +48,14 @@ has a HARD no-parallel-migrations rule). The worker loop then hosts only session
 execution + liveness monitors. Because the scheduler is now out-of-process, its
 health must remain **operator-visible** (a crash-looping or silently-dead scheduler
 must not become invisible) — surfaced by BOTH a per-tick freshness heartbeat AND a
-process-start / restart-count signal (so a crash-restart loop, which keeps the tick
-heartbeat fresh, stays visible — see Data Flow).
+process-start signal. Dashboard `status` is derived **purely from tick freshness**
+(mirroring `_get_worker_health`); the crash-loop indicator is derived from
+`last_start_age_s` staying persistently near-zero (a healthy long-lived scheduler's
+start-age climbs unboundedly; a crash-looping one keeps resetting to ~0). The raw
+`restart_count` is surfaced as **informational-only** context and is explicitly NOT an
+alarm source — every `/update` bootout→bootstrap increments it, so a lifetime
+cumulative counter climbs forever on normal machines and cannot distinguish deploys
+from crashes (see Data Flow).
 
 The subprocess runs **exactly where the worker runs**. `scripts/install_worker.sh`
 and `service.install_worker` install the worker on **every machine that runs
@@ -151,10 +157,20 @@ same over-narrow-gating failure class as **issue #1379** (which gated calendar o
   `KeepAlive`+`ThrottleInterval`, a scheduler that boots, writes the tick heartbeat,
   then crashes — repeatedly — keeps `data/last_reflection_tick` looking FRESH, masking
   exactly the crash-loop failure this feature exists to make visible. The plan
-  therefore adds a SECOND signal: a **process-start timestamp + restart counter**
-  written once at subprocess boot (`data/reflection_worker_starts`), surfaced on
-  `/dashboard.json`. A rising restart count / churning start-time reveals a crash loop
-  even when tick freshness looks healthy.
+  therefore adds a SECOND signal: a **process-start timestamp** written once at
+  subprocess boot (`data/reflection_worker_starts`, `{count, last_start_ts}`), surfaced
+  on `/dashboard.json` as `last_start_age_s`. A healthy long-lived scheduler's
+  `last_start_age_s` climbs unboundedly (one boot, then it just ticks); a crash-looping
+  one keeps resetting to ~0 as launchd respawns it. The operator crash-loop signal is
+  therefore **`last_start_age_s` persistently near-zero** — computable from a single
+  snapshot, immune to benign deploy restarts (a deploy bumps `count` once and then the
+  start-age climbs again). The `count` field is surfaced as **informational-only**
+  context, NOT an alarm source: it is a lifetime cumulative counter that every
+  `/update` bootout→bootstrap increments, so on a normal machine it climbs forever and
+  cannot distinguish a deploy from a crash. There is deliberately **no windowed-rate
+  classifier** — a rolling-window rate is NOT computable from a single cumulative
+  `{count, last_start_ts}` snapshot (no time-series is persisted), and launchd already
+  tracks per-restart history via `launchctl print` if a forensic rate is ever needed.
 - Data dir today: `data/last_worker_connected`, `data/last_connected` — the
   file-freshness heartbeat convention the new scheduler heartbeat mirrors.
 
@@ -206,8 +222,8 @@ worker/__main__.py:_run_worker
 launchd (com.valor.reflection-worker, KeepAlive=true)
   → python -m reflections   (reflections/__main__.py, VALOR_LAUNCHD=1)
       → ON BOOT (once per process start):
-          → write data/reflection_worker_starts  (append/increment a restart counter
-            + record the boot timestamp)  ← crash-loop signal (survives fresh ticks)
+          → atomically rewrite data/reflection_worker_starts  ({count, last_start_ts};
+            temp-file + os.replace)  ← crash-loop signal (survives fresh ticks)
       → ReflectionScheduler().start()   [same class, same tick loop]
           → each tick: write data/last_reflection_tick  (heartbeat file, mtime)
           → reads config/reflections.yaml (local copy; VALOR_LAUNCHD skips vault)
@@ -220,21 +236,32 @@ worker/__main__.py:_run_worker
 
 ui/app.py /dashboard.json
   → _get_reflection_scheduler_health()  reads BOTH heartbeat files:
-      • data/last_reflection_tick freshness → {status, tick_age_s}   (is it ticking?)
-      • data/reflection_worker_starts       → {restart_count, last_start_age_s}
-        (is it crash-looping? a rising count / churning start-age = crash loop even
-         when tick_age_s looks fresh)
-  → surfaces a reflection_scheduler block in the payload  ← NEW operator surface
+      • data/last_reflection_tick freshness → status + tick_age_s   (is it ticking?)
+        (status derived PURELY from tick freshness, mirroring _get_worker_health)
+      • data/reflection_worker_starts       → restart_count + last_start_age_s
+        (crash-loop indicator = last_start_age_s persistently near-zero; restart_count
+         is informational-only, NOT an alarm source — deploys inflate it)
+  → flattens these fields into the health dict alongside worker/bridge/email
+    (health.reflection_scheduler_status, .reflection_scheduler_tick_age_s,
+     .reflection_scheduler_restart_count, .reflection_scheduler_last_start_age_s)
+    ← NEW operator surface, matching the _get_worker_health flatten convention
 ```
 
-**Crash-loop detection semantics:** the tick heartbeat answers "is a scheduler
-currently ticking?"; the restart counter answers "is the scheduler process stable, or
-is launchd respawning it?". A healthy scheduler shows a fresh tick AND a stable
-restart count (start-age climbing steadily, count flat). A crash loop shows a fresh
-tick (each short-lived process writes one before dying) BUT a restart count that keeps
-incrementing and a start-age that keeps resetting to near-zero. The dashboard flags
-the crash loop when the restart count rises faster than a small threshold over a
-rolling window (constant provisional, tuned after observing real restart rates).
+**Crash-loop detection semantics (single-snapshot, no windowed classifier):** the tick
+heartbeat answers "is a scheduler currently ticking?"; the start-timestamp answers "is
+the scheduler process stable, or is launchd respawning it?". A healthy scheduler shows
+a fresh tick AND a `last_start_age_s` that climbs unboundedly (booted once, now just
+ticking). A crash loop shows a fresh tick (each short-lived process writes one before
+dying) BUT a `last_start_age_s` that keeps resetting to near-zero as launchd respawns.
+The crash-loop indicator is therefore **`last_start_age_s` persistently near-zero** —
+derivable from a single `{count, last_start_ts}` snapshot, with no time-series and no
+rolling-window rate. It is immune to benign deploy restarts (a deploy bumps `count`
+once, then `last_start_age_s` climbs again). `restart_count` is surfaced as
+informational-only context (it is a lifetime cumulative counter that every deploy
+inflates), NOT an alarm trigger. A windowed restart-rate classifier is deliberately NOT
+built: it is not computable from the persisted cumulative snapshot (would require a
+second time-series subsystem), and launchd already records per-restart history via
+`launchctl print` for the rare forensic case.
 
 **Key invariants preserved:** the scheduler↔worker seam is *already* Redis
 `Reflection`/`AgentSession` records — moving the scheduler to a sibling process
@@ -252,10 +279,11 @@ reflection.
   `supervise()` respawn for the scheduler — launchd is now the supervisor.
 - **Interface changes:** `worker/__main__.py` loses ~20 lines (construction + cancel).
   New `reflections/__main__.py` (thin entry: build scheduler, install signal handlers,
-  `asyncio.run(scheduler.start())`, per-tick heartbeat + on-boot restart-counter write).
-  New `ui/app.py` `_get_reflection_scheduler_health()` + one additive
-  `reflection_scheduler` block on `/dashboard.json` (both tick-freshness and
-  restart-count fields).
+  `asyncio.run(scheduler.start())`, per-tick heartbeat + on-boot atomic start-timestamp write).
+  New `ui/app.py` `_get_reflection_scheduler_health()` + additive
+  `reflection_scheduler_*` fields flattened into the `/dashboard.json` `health` dict
+  (matching the `_get_worker_health` flatten convention: tick-freshness `status`,
+  `tick_age_s`, informational `restart_count`, crash-loop `last_start_age_s`).
 - **No Popoto schema change** — communication is via existing `Reflection` records.
 - **Ownership move:** the `config/reflections.yaml` copy + `reflection_machine_filter`
   step moves from `install_worker.sh` into `install_reflection_worker.sh` (the new
@@ -267,6 +295,23 @@ reflection.
 
 **Size:** Medium
 
+**Why now / expected payoff (knowing choice).** #1816 Fixes #1–#4 already removed the
+acute *critical-path starvation* risk (bounded reflection thread pool + `supervise()`
+respawn), so this is deliberately NOT an emergency fix. The Medium appetite — which
+carries non-trivial deploy-wiring cost (new launchd service, worker-role gate,
+multi-machine `/update` wiring, cutover ordering) — is spent knowingly for two residual
+gains: (1) **true crash-domain / freeze isolation** — the scheduler no longer shares the
+worker's event loop, memory space, and crash domain with customer-facing session
+execution, so a reflection memory-leak / CPU-spin / synchronous freeze can no longer
+degrade the worker; and (2) **operator visibility** — a first-class dead-OR-crash-looping
+signal (`data/last_reflection_tick` freshness + `last_start_age_s`) that does not exist
+today. **Honest scope caveat:** the isolation payoff (1) is a structural property, not
+directly unit-testable; the merge-time behavioral check validates the *visibility
+surface* (2) — the `/dashboard.json` `reflection_scheduler_*` fields — not the isolation
+itself, which is verified by inspection (the scheduler runs in a separate PID) rather
+than by an automated assertion. If the deploy-wiring cost is judged not worth the
+isolation gain, the correct move is to defer, not to half-build.
+
 **Team:** Solo dev. This is a *relocation* of an unchanged class plus a new
 launchd install (well-trodden pattern) and a small dashboard surface — lower
 blast-radius than the parent slug's in-loop refactors, but touches deploy wiring
@@ -277,7 +322,7 @@ across machines (careful role-gating + cutover ordering required).
   in-plan toward worker-presence gating (see Solution); no open confirmation is
   required to proceed.
 - Review rounds: 1–2 (cutover ordering / double-vs-zero-scheduler; worker-role
-  gate self-skip; heartbeat + restart-count surface).
+  gate self-skip; tick-freshness + `last_start_age_s` crash-loop surface).
 
 **PR strategy:** single PR. The delete + add + install + heartbeat are one atomic
 cutover (no-parallel-migration rule forbids splitting the delete from the add).
@@ -306,17 +351,26 @@ Builds on #1816 primitives, already merged.
   worker --dry-run` so the installer can validate before bootstrapping.
 - **Heartbeat surface (two signals)** — (1) the scheduler writes
   `data/last_reflection_tick` (write `time.time()`) at the top of every `tick()`;
-  (2) on process boot, `reflections/__main__.py` bumps a **restart counter + start
-  timestamp** in `data/reflection_worker_starts` (read prior count, increment, write
-  back `{count, last_start_ts}`; a corrupt/absent file resets to count=1). The tick
-  file answers "is it ticking?"; the starts file answers "is it crash-looping?" —
-  because a scheduler that crashes right after each tick keeps the tick file fresh but
-  drives the restart count up (see Data Flow). Both are `data/` files (mtime/content),
-  never a DB row. Implementation options for the tick hook: (a) a thin wrapper in
-  `reflections/__main__.py` that wraps `scheduler.tick`, or (b) a `heartbeat_path` hook
-  on `ReflectionScheduler`. **Prefer (a)** — keeps the class free of process-specific
-  I/O (the class is also imported by tests and, historically, the worker). The
-  restart-counter write lives only in `__main__` boot, never in the class.
+  (2) on process boot, `reflections/__main__.py` writes a **start timestamp + boot
+  counter** to `data/reflection_worker_starts` (`{count, last_start_ts}`). The tick
+  file answers "is it ticking?"; the starts file's `last_start_age_s` answers "is it
+  crash-looping?" — because a scheduler that crashes right after each tick keeps the
+  tick file fresh but keeps resetting `last_start_ts` to ~now (see Data Flow). The
+  crash-loop indicator is `last_start_age_s` staying near-zero; `count` is
+  informational-only (deploys inflate it). **Absent vs corrupt distinction:** an absent
+  file is first boot → start at `count=1`. A **corrupt** file (bad JSON / partial write)
+  is NOT silently zeroed — the prior count is preserved when parseable, and an
+  unparseable file is flagged (logged WARNING, `count` continues from a best-effort
+  read; never silently reset to 1, which would zero the very signal a crash storm
+  needs). **Atomic write:** the file is written via temp-file + `os.replace()` (atomic
+  rename), NOT a bare `write_text` — a SIGKILL mid-write during a crash storm must not
+  truncate the file and destroy the signal during the exact failure it targets. Both are
+  `data/` files (mtime/content), never a DB row. Implementation options for the tick
+  hook: (a) a thin wrapper in `reflections/__main__.py` that wraps `scheduler.tick`, or
+  (b) a `heartbeat_path` hook on `ReflectionScheduler`. **Prefer (a)** — keeps the class
+  free of process-specific I/O (the class is also imported by tests and, historically,
+  the worker). The start-timestamp write lives only in `__main__` boot, never in the
+  class.
 - **`com.valor.reflection-worker.plist`** — long-lived launchd agent modeled on
   `com.valor.worker.plist`: `RunAtLoad=true`, `KeepAlive=true`, `ThrottleInterval`
   (restart-storm cap), `VALOR_LAUNCHD=1` (skip iCloud/TCC config paths),
@@ -344,9 +398,16 @@ Builds on #1816 primitives, already merged.
   install/restart block** (cutover ordering — see below).
 - **Dashboard surface** — `ui/app.py` `_get_reflection_scheduler_health()` reads BOTH
   `data/last_reflection_tick` freshness AND `data/reflection_worker_starts`
-  (restart count + last-start age); `/dashboard.json` gains an additive
-  `reflection_scheduler` health block carrying `{status, tick_age_s, restart_count,
-  last_start_age_s}` so a crash loop is visible even when tick freshness looks healthy.
+  (`last_start_age_s` + informational `restart_count`). It returns `{status,
+  tick_age_s, restart_count, last_start_age_s}` where `status` is derived **purely from
+  tick freshness** (mirroring `_get_worker_health`), NOT from the counter. Following the
+  `_get_worker_health` flatten convention (its `{status, age_s}` become
+  `health.worker`/`health.worker_last_seen_s`), these fields are flattened into the
+  `health` dict on `/dashboard.json` as `reflection_scheduler_status`,
+  `reflection_scheduler_tick_age_s`, `reflection_scheduler_restart_count`, and
+  `reflection_scheduler_last_start_age_s`. A crash loop is visible via
+  `reflection_scheduler_last_start_age_s` staying near-zero even when tick freshness
+  looks healthy.
 
 ### Flow
 
@@ -364,41 +425,57 @@ alive and not crash-looping.
 **1. `reflections/__main__.py` (new).**
 ```python
 # python -m reflections   → long-lived launchd process (KeepAlive)
-import argparse, asyncio, json, logging, signal, time
+import argparse, asyncio, json, logging, os, signal, time
 from pathlib import Path
 from agent.reflection_scheduler import ReflectionScheduler
 
 _DATA = Path(__file__).parent.parent / "data"
 _HEARTBEAT = _DATA / "last_reflection_tick"
-_STARTS = _DATA / "reflection_worker_starts"   # crash-loop signal
+_STARTS = _DATA / "reflection_worker_starts"   # crash-loop signal (last_start_age_s)
+_log = logging.getLogger("reflections")
 
 def _write_heartbeat() -> None:
     try:
         _HEARTBEAT.parent.mkdir(exist_ok=True)
         _HEARTBEAT.write_text(str(time.time()))
     except OSError as e:
-        logging.getLogger("reflections").warning("heartbeat write failed: %s", e)
+        _log.warning("heartbeat write failed: %s", e)
 
-def _bump_restart_counter() -> None:
-    """Increment the restart counter + record boot time, once per process start.
-    A crash-restart loop keeps last_reflection_tick fresh but drives this count up,
-    so the dashboard can distinguish 'ticking' from 'crash-looping'."""
+def _record_boot() -> None:
+    """Record boot timestamp + bump the boot counter, once per process start, ATOMICALLY.
+
+    The operator crash-loop signal is last_start_age_s staying near-zero — a
+    crash-restart loop keeps last_reflection_tick fresh but keeps resetting
+    last_start_ts to ~now. `count` is informational-only (deploys inflate it).
+
+    ABSENT file  → first boot, count starts at 1.
+    CORRUPT file → preserve the prior count if partially readable; if unparseable,
+                   log a WARNING and continue from a best-effort read — NEVER silently
+                   reset to 1 (that would zero the signal during the crash storm it
+                   targets).
+    ATOMIC write → temp-file + os.replace(): a SIGKILL mid-write must not truncate the
+                   file and destroy the signal (a bare write_text would)."""
     try:
         _STARTS.parent.mkdir(exist_ok=True)
         prior = 0
-        try:
-            prior = int(json.loads(_STARTS.read_text()).get("count", 0))
-        except (OSError, ValueError, json.JSONDecodeError):
-            prior = 0  # corrupt/absent → reset to 1 below
-        _STARTS.write_text(json.dumps({"count": prior + 1, "last_start_ts": time.time()}))
+        if _STARTS.exists():
+            try:
+                prior = int(json.loads(_STARTS.read_text()).get("count", 0))
+            except (ValueError, json.JSONDecodeError):
+                _log.warning("reflection_worker_starts corrupt; preserving best-effort count")
+                # keep prior=0 only if truly unreadable; do NOT treat corrupt as first-boot
+        payload = json.dumps({"count": prior + 1, "last_start_ts": time.time()})
+        tmp = _STARTS.with_suffix(".tmp")
+        tmp.write_text(payload)
+        os.replace(tmp, _STARTS)          # atomic rename — never a truncated file
     except OSError as e:
-        logging.getLogger("reflections").warning("restart-counter write failed: %s", e)
+        _log.warning("start-record write failed: %s", e)
 
 async def _run(dry_run: bool) -> None:
     scheduler = ReflectionScheduler()
     if dry_run:
         scheduler.load(); print(scheduler.format_status()); return
-    _bump_restart_counter()   # once per boot, before the tick loop
+    _record_boot()   # once per boot, before the tick loop (atomic start-timestamp write)
     # wrap tick to emit the heartbeat without polluting the class
     _orig_tick = scheduler.tick
     async def _tick_with_heartbeat():
@@ -439,9 +516,11 @@ change Label to `__SERVICE_LABEL__` (→ `com.valor.reflection-worker`), keep `R
 provisional, commented as tunable), set `VALOR_LAUNCHD=1` in `EnvironmentVariables`,
 redirect logs to `logs/reflection_worker.log` / `_error.log`. **Creds delivery: source
 `.env` in `ProgramArguments`** via the sdlc-reflection idiom
-(`com.valor.sdlc-reflection.plist:11`): `ProgramArguments` = `["/bin/zsh", "-lc",
+(`com.valor.sdlc-reflection.plist:9-11` — verified `/bin/bash` + `-c`, NOT `zsh -l`):
+`ProgramArguments` = `["/bin/bash", "-c",
 "set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python -m
-reflections"]`. This is TCC-safe under `VALOR_LAUNCHD=1` (no iCloud/vault read) and
+reflections"]`. Using `/bin/bash -c` (not `zsh -l`) avoids login-profile sourcing under
+launchd where there is no TTY. This is TCC-safe under `VALOR_LAUNCHD=1` (no iCloud/vault read) and
 keeps the plist self-contained (no install-time env-injection). It also makes the
 installer's `--dry-run` env parity trivial (the installer sources the same `.env`
 before probing — step 4).
@@ -518,17 +597,21 @@ before probing — step 4).
 
 **7. Operator surface (heartbeat + restart-count → dashboard).**
 - `data/last_reflection_tick` written every tick (step 1); `data/reflection_worker_starts`
-  bumped once per process boot (step 1, `_bump_restart_counter`).
+  written once per process boot (step 1, `_record_boot`, atomic temp-file + `os.replace`).
 - `ui/app.py`: add `_get_reflection_scheduler_health()` mirroring
   `_get_worker_health()` (`ui/app.py:340`) — read `last_reflection_tick` mtime, compute
-  `tick_age_s`, flag `status` (`ok`/`running`/`error`) against a stale threshold
-  (≈ 2× `SCHEDULER_TICK_INTERVAL`, provisional constant, commented as tunable); ALSO
-  read `reflection_worker_starts` for `restart_count` + `last_start_age_s`. Add a
-  `reflection_scheduler` block to the `/dashboard.json` `health`/payload
-  (`ui/app.py:517-541`) carrying `{status, tick_age_s, restart_count,
-  last_start_age_s}`. Additive fields only — the rest of the dashboard contract is
-  unchanged. A crash loop reads as fresh `tick_age_s` + a climbing `restart_count` /
-  near-zero `last_start_age_s`.
+  `tick_age_s`, flag `status` (`ok`/`running`/`error`) derived **purely from tick
+  freshness** against a stale threshold (≈ 2× `SCHEDULER_TICK_INTERVAL`, provisional
+  constant, commented as tunable), NOT from the counter; ALSO read
+  `reflection_worker_starts` for `restart_count` (informational) + `last_start_age_s`
+  (crash-loop indicator). **Flatten** these into the `health` dict at `ui/app.py:517-541`
+  — mirroring how `_get_worker_health`'s `{status, age_s}` become
+  `health.worker`/`health.worker_last_seen_s` — as `reflection_scheduler_status`,
+  `reflection_scheduler_tick_age_s`, `reflection_scheduler_restart_count`, and
+  `reflection_scheduler_last_start_age_s`. Additive fields only — the rest of the
+  dashboard contract is unchanged. A crash loop reads as fresh
+  `reflection_scheduler_tick_age_s` + a near-zero `reflection_scheduler_last_start_age_s`
+  (with an informational climbing `restart_count`).
 
 ## Failure Path Test Strategy
 
@@ -546,10 +629,14 @@ before probing — step 4).
   project WITHOUT a `telegram` block → **install** (the #1379-avoidance case);
   machine owning no project → skip + remove stale plist; missing config → fail-open
   install.
-- [ ] Restart-counter write is resilient: a corrupt/absent `data/reflection_worker_starts`
-  resets to `count=1` (never raises); an OSError on write is logged, not fatal. Test:
-  seed a garbage file, boot `_bump_restart_counter`, assert count resets and no
-  exception escapes.
+- [ ] Boot start-record write is resilient AND atomic: an ABSENT
+  `data/reflection_worker_starts` starts at `count=1`; a CORRUPT file does NOT silently
+  reset to 1 (logs a WARNING, preserves the best-effort count) — so the signal survives
+  the crash storm it targets; the write goes through temp-file + `os.replace()` so a
+  SIGKILL mid-write never truncates the file; an OSError on write is logged, not fatal.
+  Test: (a) absent file → count=1; (b) seed a garbage file → WARNING logged, NOT reset
+  to 1, `last_start_ts` refreshed; (c) assert the write path uses `os.replace` (atomic),
+  and no exception escapes.
 
 ### Empty/Invalid Input Handling
 - [ ] `python -m reflections --dry-run` with an empty/absent `config/reflections.yaml`
@@ -568,10 +655,12 @@ before probing — step 4).
   `_get_reflection_scheduler_health()` reports `status="error"` with the age, and
   `/dashboard.json` shows the stale block. Test the health helper with a stale mtime.
 - [ ] A crash-LOOPING scheduler is VISIBLE even with a fresh tick: with a fresh
-  `data/last_reflection_tick` but a high `restart_count` + near-zero `last_start_age_s`
-  in `data/reflection_worker_starts`, `_get_reflection_scheduler_health()` surfaces the
-  rising `restart_count`. Test the helper with a fresh-tick + churning-start fixture,
-  asserting the restart fields expose the loop.
+  `data/last_reflection_tick` but a near-zero `last_start_age_s` in
+  `data/reflection_worker_starts`, `_get_reflection_scheduler_health()` surfaces
+  `reflection_scheduler_last_start_age_s` near zero (the crash-loop indicator) while
+  `status` stays freshness-derived. Test the helper with a fresh-tick + near-zero-start
+  fixture, asserting `last_start_age_s` exposes the loop and that a benign single deploy
+  bump (one `restart_count` increment with a climbing start-age) does NOT read as a loop.
 - [ ] The subprocess logs a startup line naming the tick interval and entry count
   (existing `ReflectionScheduler.start()` log) to `logs/reflection_worker.log` so
   operators can confirm it came up. Assert the log line on start.
@@ -597,13 +686,18 @@ before probing — step 4).
 New tests (greenfield):
 - `tests/unit/test_reflections_main.py` — `python -m reflections --dry-run` exits 0
   and prints status; heartbeat is written each tick; a heartbeat OSError is swallowed
-  with a WARNING; the restart counter increments on boot and resets from a corrupt
-  file; SIGTERM triggers clean shutdown.
+  with a WARNING; `_record_boot()` starts at `count=1` on an ABSENT file, does NOT
+  reset to 1 on a CORRUPT file (logs a WARNING, preserves best-effort count) and writes
+  a fresh `last_start_ts`; the write is atomic (temp-file + `os.replace`, so a
+  mid-write failure never truncates the file); SIGTERM triggers clean shutdown.
 - `tests/unit/test_reflection_scheduler_health.py` — `_get_reflection_scheduler_health()`
-  reports `ok`/`running` for a fresh `data/last_reflection_tick` and `error` for an old
-  or absent file; surfaces `restart_count`/`last_start_age_s`; distinguishes a healthy
-  scheduler (fresh tick, flat count) from a crash loop (fresh tick, climbing count);
-  `/dashboard.json` includes the additive `reflection_scheduler` block.
+  derives `status` PURELY from tick freshness: `ok`/`running` for a fresh
+  `data/last_reflection_tick` and `error` for an old or absent file; surfaces
+  `restart_count` (informational) and `last_start_age_s`; distinguishes a healthy
+  scheduler (fresh tick, `last_start_age_s` climbing) from a crash loop (fresh tick,
+  `last_start_age_s` near-zero) — and confirms `status` stays `ok` under a benign deploy
+  bump (a single `restart_count` increment must NOT flip status); `/dashboard.json`
+  `health` dict includes the flattened `reflection_scheduler_*` fields.
 - `tests/integration/test_install_reflection_worker.py` (or a shell-level fixture test)
   — `has_worker_role()` install/skip matrix: machine owning a non-Telegram project
   installs (the #1379-avoidance case), machine owning no project skips and removes a
@@ -675,8 +769,22 @@ question remains.
 vault `reflections.yaml`/`.env` hangs.
 **Mitigation:** Set `VALOR_LAUNCHD=1` in the plist (skips the vault path,
 `reflection_scheduler.py:90`), rely on the local `config/reflections.yaml` the
-installer copies, and source `.env` in the plist `ProgramArguments` (or env-inject
-like `install_worker.sh`) so Redis/GitHub creds are present without a runtime iCloud read.
+installer copies, and source `.env` in the plist `ProgramArguments` (`/bin/bash -c`, the
+verified `com.valor.sdlc-reflection.plist:9-11` idiom) so Redis/GitHub creds are present
+without a runtime iCloud read.
+
+### Risk 5: Crash-loop signal self-destructs during the failure it targets
+**Impact:** A naive `_STARTS.write_text(...)` is non-atomic — a SIGKILL mid-write during
+a crash storm truncates the file; a recovery path that treats a corrupt file as
+first-boot would reset the counter and zero `last_start_age_s`'s history exactly when
+the crash loop is happening, blinding the operator to the failure the signal exists for.
+**Mitigation:** Write via temp-file + `os.replace()` (atomic rename — a partial write is
+never observable). On read, distinguish ABSENT (first boot → `count=1`) from CORRUPT (log
+a WARNING, preserve the best-effort count, never silently reset to 1). Because the
+operator crash-loop indicator is `last_start_age_s` (each boot refreshes `last_start_ts`
+to ~now, so a loop keeps the age near-zero regardless of `count`), the signal survives
+even a wholly unreadable counter — it is the timestamp, not the count, that reveals the
+loop. `restart_count` is informational-only and never an alarm source.
 
 ## Race Conditions
 
@@ -716,10 +824,14 @@ that exists today. Global reflections' idempotency (Race 1) covers the rest.
 - **A Popoto schema change or migration.** Redis-record contract unchanged.
 - **A bespoke reflection watchdog process.** launchd `KeepAlive` + dashboard
   heartbeat only.
-- **[ORDERED] Tuning `ThrottleInterval` / the heartbeat stale-threshold / the
-  crash-loop restart-count threshold** to production-observed values — ships
-  conservative, tuned after observing real restart rates on the live machine (same
+- **[ORDERED] Tuning `ThrottleInterval` / the tick stale-threshold / the
+  `last_start_age_s` "near-zero" crash-loop threshold** to production-observed values —
+  ships conservative, tuned after observing real restart rates on the live machine (same
   posture as #1815's threshold tuning).
+- **A windowed restart-rate classifier.** Explicitly NOT built: a rolling-window rate is
+  not computable from the persisted cumulative `{count, last_start_ts}` snapshot (no
+  time-series), the single-snapshot `last_start_age_s` indicator suffices, and
+  `launchctl print` already holds per-restart history for the rare forensic case.
 - **[SEPARATE] Cross-machine reflection failover / warm standby** — out of scope;
   single-machine-ownership stands.
 
@@ -788,9 +900,10 @@ files; if it enumerates explicitly, add them).
 
 **No `.env` secret additions required** — the subprocess uses the existing Redis /
 GitHub creds sourced from `.env` (or env-injected) exactly as the worker does.
-`SCHEDULER_TICK_INTERVAL`, the new stale-threshold constant, and the crash-loop
-restart-count threshold are optional with safe defaults; if surfaced as env, add to
-`.env.example` with a comment line above each (completeness-check requirement).
+`SCHEDULER_TICK_INTERVAL`, the new tick stale-threshold constant, and the
+`last_start_age_s` near-zero crash-loop threshold are optional with safe defaults; if
+surfaced as env, add to `.env.example` with a comment line above each
+(completeness-check requirement).
 
 ## Agent Integration
 
@@ -822,8 +935,10 @@ restart-count threshold are optional with safe defaults; if surfaced as env, add
   citing the #1379 over-narrow-gating precedent), the cutover ordering
   (worker-restart-then-install via `launchctl kickstart -k` hard restart;
   zero-window-not-double), the two operator signals — `data/last_reflection_tick`
-  (tick freshness) + `data/reflection_worker_starts` (restart count / crash-loop) —
-  and the `/dashboard.json` `reflection_scheduler` surface, and the moved
+  (tick freshness, drives `status`) + `data/reflection_worker_starts`
+  (`last_start_age_s` = crash-loop indicator; `restart_count` = informational,
+  deploy-inflated, NOT an alarm; no windowed classifier) — and the `/dashboard.json`
+  `health.reflection_scheduler_*` flattened surface, and the moved
   config-copy/machine-filter ownership. State it is the continuation of
   `worker-fault-containment.md` (#1816).
 - [ ] Add an entry to `docs/features/README.md` index table.
@@ -837,9 +952,10 @@ restart-count threshold are optional with safe defaults; if surfaced as env, add
 
 ### Inline Documentation
 - [ ] Comment the `VALOR_LAUNCHD=1` requirement + the two heartbeat files in
-  `reflections/__main__.py`: `data/last_reflection_tick` (per-tick freshness) and
-  `data/reflection_worker_starts` (restart counter — why a crash loop needs a signal
-  the fresh tick can't provide).
+  `reflections/__main__.py`: `data/last_reflection_tick` (per-tick freshness, drives
+  `status`) and `data/reflection_worker_starts` (`{count, last_start_ts}`, atomic write —
+  why the crash-loop signal is `last_start_age_s` near-zero, not the counter, and why the
+  write must use `os.replace` + preserve a corrupt file rather than reset it).
 - [ ] Comment the cutover-ordering requirement at the `run.py` install call site
   (worker-first).
 - [ ] Comment the moved config-copy block in `install_reflection_worker.sh` (why it
@@ -873,17 +989,21 @@ restart-count threshold are optional with safe defaults; if surfaced as env, add
   `reflection_machine_filter` block is present in `install_reflection_worker.sh` and
   removed from `install_worker.sh` — `grep -c "reflection_machine_filter"
   scripts/install_worker.sh == 0` and `> 0` in the new installer.
-- [ ] **Operator-visible heartbeat (tick + restart-count):**
+- [ ] **Operator-visible heartbeat (tick freshness + crash-loop start-age):**
   `grep -c "last_reflection_tick" reflections/__main__.py > 0`,
-  `grep -c "reflection_worker_starts" reflections/__main__.py > 0` (crash-loop signal),
-  and `grep -c "reflection_scheduler" ui/app.py > 0` (dashboard block) — so a dead OR
-  crash-looping scheduler is visible via `localhost:8500/dashboard.json`.
+  `grep -c "reflection_worker_starts" reflections/__main__.py > 0` (start-timestamp
+  signal), `grep -c "os.replace" reflections/__main__.py > 0` (atomic write), and
+  `grep -c "last_start_age_s" ui/app.py > 0` (crash-loop indicator on the dashboard) —
+  so a dead scheduler (stale tick) OR a crash-looping one (near-zero `last_start_age_s`
+  despite a fresh tick) is visible via `localhost:8500/dashboard.json`. `status` is
+  derived purely from tick freshness; `restart_count` is informational-only.
 - [ ] **Live dashboard endpoint surfaces the fields:** with the web UI running,
   `curl -s localhost:8500/dashboard.json | python3 -c "import json,sys;
-  d=json.load(sys.stdin); b=d.get('reflection_scheduler') or
-  d['health'].get('reflection_scheduler'); print(b)"` prints a block containing
-  `status`, `tick_age_s`, and `restart_count` (not KeyError / None). Proves the surface
-  is wired end-to-end, not just present as a string.
+  h=json.load(sys.stdin)['health']; print(h['reflection_scheduler_status'],
+  h['reflection_scheduler_tick_age_s'], h['reflection_scheduler_restart_count'],
+  h['reflection_scheduler_last_start_age_s'])"` prints the four flattened `health`
+  fields (not KeyError / None). Proves the surface is wired end-to-end into the `health`
+  dict, not just present as a string.
 - [ ] **No Popoto schema change:** no new model field / migration entry.
 - [ ] Tests pass (`/do-test`) — new unit + integration tests green, existing
   reflection + worker-supervisor tests still green.
@@ -902,8 +1022,9 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Builder (dashboard)** — Name: dash-builder; Role: `_get_reflection_scheduler_health()`
   + `/dashboard.json` additive block; Agent Type: builder; Resume: true.
 - **Validator** — Name: refl-validator; Role: verify success criteria (incl. live
-  endpoint) + failure-path + cutover-ordering + worker-role gate matrix +
-  crash-loop/restart-count visibility + dry-run env parity; Agent Type: validator;
+  endpoint + flattened `health.reflection_scheduler_*` fields) + failure-path +
+  cutover-ordering + worker-role gate matrix + crash-loop `last_start_age_s` visibility
+  (atomic-write, absent-vs-corrupt) + dry-run env parity; Agent Type: validator;
   Resume: true.
 - **Documentarian** — Name: refl-doc; Role: feature doc + README index + CLAUDE.md
   service table + forward-links; Agent Type: documentarian; Resume: true.
@@ -921,8 +1042,11 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
   `ReflectionScheduler` verbatim: `--dry-run` (load + `format_status` + exit 0), clean
   SIGTERM/SIGINT shutdown, a `data/last_reflection_tick` heartbeat written each tick
   (wrap `scheduler.tick` in `__main__`, do NOT modify the class), and a
-  `data/reflection_worker_starts` restart counter bumped once on boot (crash-loop
-  signal — see Data Flow; corrupt/absent file resets to count=1). Both writes log
+  `data/reflection_worker_starts` `{count, last_start_ts}` written once on boot via
+  `_record_boot` — the crash-loop signal is `last_start_age_s` near-zero (see Data
+  Flow), NOT the counter. Write ATOMICALLY (temp-file + `os.replace`); ABSENT file →
+  `count=1`, CORRUPT file → log a WARNING and preserve best-effort count (do NOT reset
+  to 1 — that would zero the signal during the crash storm it targets). Both writes log
   OSError, never fatal.
 
 ### 2. Delete the in-worker scheduler
@@ -967,7 +1091,7 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
   subprocess must install everywhere the worker does). Comment the worker-first
   cutover-ordering rule at the call site.
 
-### 5. Dashboard heartbeat + restart-count surface
+### 5. Dashboard heartbeat + crash-loop (last_start_age_s) surface
 - **Task ID**: build-dashboard
 - **Depends On**: build-subprocess
 - **Validates**: tests/unit/test_reflection_scheduler_health.py (create)
@@ -975,10 +1099,13 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `_get_reflection_scheduler_health()` (mirror `_get_worker_health()`,
-  `ui/app.py:340`) reading BOTH `data/last_reflection_tick` (tick freshness) and
-  `data/reflection_worker_starts` (restart count / crash-loop); add an additive
-  `reflection_scheduler` block to `/dashboard.json` (`ui/app.py:517-541`) carrying
-  `{status, tick_age_s, restart_count, last_start_age_s}`.
+  `ui/app.py:340`) reading BOTH `data/last_reflection_tick` (tick freshness → `status`)
+  and `data/reflection_worker_starts` (`last_start_age_s` = crash-loop indicator;
+  `restart_count` = informational). Derive `status` PURELY from tick freshness (NOT the
+  counter). **Flatten** the fields into the `health` dict (`ui/app.py:517-541`, mirroring
+  the `_get_worker_health` flatten) as `reflection_scheduler_status`,
+  `reflection_scheduler_tick_age_s`, `reflection_scheduler_restart_count`,
+  `reflection_scheduler_last_start_age_s` — additive only.
 
 ### 6. Validate
 - **Task ID**: validate-all
@@ -989,8 +1116,9 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 - Run new + existing tests; verify every Success Criteria grep (including the
   live-endpoint `curl` row); verify the `has_worker_role()` install/skip matrix
   (non-Telegram-project machine installs — the #1379-avoidance case), the crash-loop
-  restart-count visibility, the dry-run env parity, and the worker-first cutover
-  ordering.
+  `last_start_age_s` visibility (fresh tick + near-zero start-age reads as a loop; a
+  single deploy bump does NOT), the atomic-write / absent-vs-corrupt start-record
+  behavior, the dry-run env parity, and the worker-first cutover ordering.
 
 ### 7. Documentation
 - **Task ID**: document
@@ -1016,7 +1144,7 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 | NOT a cron lifecycle | `grep -c "StartInterval" com.valor.reflection-worker.plist` | 0 |
 | Installer exists | `test -f scripts/install_reflection_worker.sh && echo ok` | ok |
 | Worker-role gate present (NOT bridge) | `grep -c "has_worker_role" scripts/install_reflection_worker.sh` | > 0 |
-| Telegram clause dropped from gate | `grep -c "telegram" scripts/install_reflection_worker.sh` | 0 |
+| Telegram clause dropped from gate | `grep -c "get(\"telegram\")\|proj.get('telegram')" scripts/install_reflection_worker.sh` | 0 |
 | Wiring NOT bridge-gated | `grep -B3 "install_reflection_worker" scripts/update/run.py \| grep -c "has_bridge"` | 0 |
 | Stale-plist self-removal present | `grep -c "rm -f" scripts/install_reflection_worker.sh` | > 0 |
 | Update service wrapper | `grep -c "install_reflection_worker" scripts/update/service.py` | > 0 |
@@ -1024,11 +1152,13 @@ The lead agent orchestrates via Task tools and NEVER builds directly.
 | Config prep moved OUT of worker installer | `grep -c "reflection_machine_filter" scripts/install_worker.sh` | 0 |
 | Config prep moved INTO reflection installer | `grep -c "reflection_machine_filter" scripts/install_reflection_worker.sh` | > 0 |
 | Tick heartbeat written | `grep -c "last_reflection_tick" reflections/__main__.py` | > 0 |
-| Restart-count (crash-loop) signal written | `grep -c "reflection_worker_starts" reflections/__main__.py` | > 0 |
+| Start-timestamp (crash-loop) signal written | `grep -c "reflection_worker_starts" reflections/__main__.py` | > 0 |
+| Atomic start-record write (not truncatable) | `grep -c "os.replace" reflections/__main__.py` | > 0 |
 | Dashboard surface | `grep -c "reflection_scheduler" ui/app.py` | > 0 |
-| Restart-count on dashboard | `grep -c "restart_count" ui/app.py` | > 0 |
+| Crash-loop indicator on dashboard | `grep -c "last_start_age_s" ui/app.py` | > 0 |
+| Restart-count (informational) on dashboard | `grep -c "restart_count" ui/app.py` | > 0 |
 | Dry-run env parity in installer | `grep -c "VALOR_LAUNCHD=1 .*-m reflections --dry-run\|VALOR_LAUNCHD=1.*reflections" scripts/install_reflection_worker.sh` | > 0 |
-| Live endpoint surfaces block (UI running) | `curl -s localhost:8500/dashboard.json \| grep -c "reflection_scheduler"` | > 0 |
+| Live endpoint surfaces flattened fields (UI running) | `curl -s localhost:8500/dashboard.json \| python3 -c "import json,sys; print('reflection_scheduler_status' in json.load(sys.stdin)['health'])"` | True |
 | Lint clean | `python -m ruff check reflections/ worker/ ui/` | exit code 0 |
 | Format clean | `python -m ruff format --check reflections/ worker/ ui/` | exit code 0 |
 | No Popoto migration added | `git diff --name-only main -- scripts/update/migrations.py \| wc -l` | 0 |
@@ -1049,7 +1179,7 @@ and keeps the self-skip + stale-plist-removal hygiene. Reflected in Solution, Up
 System, Risk 3, Success Criteria, and Verification. No PM confirmation needed.
 
 **RESOLVED — plist sources `.env` in `ProgramArguments`.** Chosen over install-time
-env-injection: it matches the `com.valor.sdlc-reflection.plist:11` idiom, is TCC-safe
+env-injection: it matches the `com.valor.sdlc-reflection.plist:9-11` `/bin/bash -c` idiom, is TCC-safe
 under `VALOR_LAUNCHD=1` (no vault/iCloud read), keeps the plist self-contained, and
 makes the installer's `--dry-run` env parity trivial (the installer sources the same
 `.env` and exports `VALOR_LAUNCHD=1` before probing — Technical Approach steps 3-4). If
