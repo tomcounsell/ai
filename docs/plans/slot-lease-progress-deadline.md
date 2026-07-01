@@ -433,9 +433,18 @@ calls `release_unbound()`).
   # Without this, tool_timeout / worker_dead cancels flip the DB row but orphan the
   # SDK subprocess/PTY. One assignment covers both the tool_timeout-cancel path AND
   # the worker-shutdown-cancel path.
-  handle = _active_sessions.get(session.agent_session_id)
-  if handle is not None:
-      handle.task = exec_task
+  #
+  # CRITICAL (r3 CONCERN — Risk & Robustness): the handle MUST be pre-registered
+  # HERE, in the worker loop. `create_task` only SCHEDULES the coroutine, so
+  # `_execute_agent_session`'s own `_active_sessions[sid] = SessionHandle(task=None)`
+  # (session_executor.py:702) has NOT run yet at this point — a bare
+  # `_active_sessions.get(sid)` would return None and the wiring would silently
+  # no-op, making this entire root fix dead code. Pre-register with the task set,
+  # and change session_executor.py:702 to `setdefault(...)` so the executor mutates
+  # (never clobbers) the pre-registered handle.
+  handle = _active_sessions.setdefault(
+      session.agent_session_id, SessionHandle(task=exec_task))
+  handle.task = exec_task  # idempotent whether pre-registered here or already present
   try:
       while not exec_task.done():
           done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
@@ -524,11 +533,18 @@ calls `release_unbound()`).
   `session_health.py:2019-2024`), but after Fix #3 the registry handle still points at
   the OLD awaitable, not the new `exec_task = asyncio.create_task(...)`. So the SDK
   subprocess/PTY is orphaned on **both** the worker-shutdown-cancel path **and** the
-  surviving `tool_timeout` / `worker_dead` cancel path. Set `handle.task = exec_task`
-  immediately after `create_task(...)` (guarded on `handle is not None`) — this single
-  wiring makes every existing `handle.task.cancel()` cancel the live awaitable, covering
-  both cancel paths and the `tool_timeout`-path orphan the shutdown-branch cancel alone
-  would miss. `handle.task` semantics re-verified at `session_health.py:2019-2024`.
+  surviving `tool_timeout` / `worker_dead` cancel path. **The wiring must PRE-REGISTER
+  the handle in the worker loop** — `_active_sessions.setdefault(sid, SessionHandle(
+  task=exec_task))` immediately after `create_task(...)`, and change the executor's own
+  registration at `session_executor.py:702` from `_active_sessions[sid] =
+  SessionHandle(task=None)` to `setdefault(...)`. This is load-bearing (r3 CONCERN):
+  `create_task` only schedules the coroutine, so a bare `_active_sessions.get(sid)`
+  right after it returns `None` (the executor body has not run) and the wiring would
+  silently no-op — making this root fix dead code. Pre-registering makes every existing
+  `handle.task.cancel()` cancel the live awaitable, covering both cancel paths and the
+  `tool_timeout`-path orphan the shutdown-branch cancel alone would miss. `handle.task`
+  and the `:702` registration semantics re-verified at `session_health.py:2019-2024` /
+  `session_executor.py:702`.
 - **Blocker 1 (round 2) — belt-and-suspenders: shutdown-branch cancel.** Converting the
   directly-`await`ed coroutine into a detached `exec_task` watched by `asyncio.wait`
   introduced a regression: `asyncio.wait` does **not** cancel the task it watches when
@@ -1027,10 +1043,13 @@ lead NEVER builds directly.
 - At `agent_session_queue.py:1494`, run `_execute_agent_session` as an owned task
   under a progress-deadline watcher (`_session_progress_ts` = max of
   `last_tool_use_at`/`last_turn_at`/`acquired_at`) with a `deadline_cancelled` flag.
-- **Blocker 1 root fix:** immediately after `exec_task = asyncio.create_task(...)`, set
-  `handle.task = exec_task` (guarded on `handle is not None`) so the out-of-band killers
-  that cancel `handle.task` cancel the live awaitable — fixes the `tool_timeout` /
-  `worker_dead` subprocess-orphan too, not just the shutdown path.
+- **Blocker 1 root fix:** immediately after `exec_task = asyncio.create_task(...)`,
+  PRE-REGISTER the handle in the worker loop — `handle = _active_sessions.setdefault(sid,
+  SessionHandle(task=exec_task)); handle.task = exec_task` — and change the executor's own
+  registration at `session_executor.py:702` to `setdefault(...)`. A bare `.get(sid)` here
+  no-ops (the coroutine body hasn't run yet), so pre-registration is required (r3 CONCERN).
+  This makes the out-of-band killers that cancel `handle.task` cancel the live awaitable —
+  fixes the `tool_timeout` / `worker_dead` subprocess-orphan too, not just the shutdown path.
 - On expiry (reprieve gate `_should_kill_no_progress` says kill): finalize FIRST —
   fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim →
   `did_finalize = await _apply_recovery_transition(reason "progress_deadline",
@@ -1117,6 +1136,7 @@ lead NEVER builds directly.
 | No wall-clock reclaim arm in the reap (Blocker 2) | `grep -c "lease.deadline" agent/session_health.py` | == 0 |
 | `SLOT_LEASE_TTL_S` fully removed (Blocker 2) | `grep -rc "SLOT_LEASE_TTL_S" agent/ worker/` | match count == 0 |
 | Owned task wired into the registry handle (Blocker 1 root fix) | `grep -c "handle.task = exec_task" agent/agent_session_queue.py` | output > 0 |
+| Handle pre-registered in the worker loop, executor no longer clobbers (no-op guard) | `grep -c "_active_sessions.setdefault" agent/agent_session_queue.py agent/session_executor.py` | output ≥ 2 (one per file) |
 | Deadline decline forces terminal, skips outer finally (Concern 1) | `grep -c "did_finalize" agent/agent_session_queue.py` | output > 0 |
 | `slot_reclaims` surfaced on the dashboard (NIT) | `grep -c "slot_reclaims" ui/app.py` | output > 0 |
 | fd-PTY-kill uses scoped teardown (not machine pkill) | `grep -c "pkill" agent/agent_session_queue.py` | match count == 0 |
