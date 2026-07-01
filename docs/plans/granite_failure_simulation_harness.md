@@ -6,6 +6,7 @@ owner: Valor
 created: 2026-07-02
 tracking: https://github.com/tomcounsell/ai/issues/1837
 last_comment_id:
+revision_applied: true
 ---
 
 # Granite Failure-Simulation Test Harness
@@ -51,7 +52,11 @@ ANTHROPIC_AUTH_TOKEN=ollama
 ANTHROPIC_API_KEY=""
 ```
 
-Permission prompts and permission rules remain operational (the TUI renders normally). Local models → free/unlimited. This is the **exact inverse** of production's `_build_env()` blanking (`pty_driver.py:272-311`), which blanks `ANTHROPIC_BASE_URL` to force the real endpoint. Informs the whole Substrate B design: granite already owns these three vars, so pointing them at ollama is the entire "free test backend" switch.
+Permission prompts and permission rules remain operational (the TUI renders normally). Local models → free/unlimited.
+
+**Precise `_build_env()` behavior (`pty_driver.py:272-311`) — corrected per critique:** it blanks **all three** `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` vars to force the real endpoint, **and conditionally forwards `CLAUDE_CODE_OAUTH_TOKEN`** into the child when present. `PTYDriver.spawn()` applies the per-session `_extra_env` overlay *after* `_build_env()` via `env.update(self._extra_env)` — an overlay only adds/overwrites the keys it carries; it never removes an already-present key.
+
+**Consequence for Substrate B (blocker fix):** overlaying just the three ollama vars is **not** a clean inversion — a forwarded `CLAUDE_CODE_OAUTH_TOKEN` survives, and on any machine already logged in for production granite that reproduces the documented PR #1612 failure ("issue with the selected model": OAuth login present **and** `ANTHROPIC_BASE_URL` pointed at ollama simultaneously), silently invalidating the canary. The Substrate B fixture and golden-recorder MUST explicitly `env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)` alongside setting the three ollama vars, with a pre-`spawn()` assertion that the child env carries no OAuth token.
 
 **Caveat (informs known gaps):** the doc does not explicitly guarantee the trust/permission/login dialogs render byte-identically to the Anthropic-backed binary — hence the mandatory fidelity check (Success Criteria #5). Endpoint-specific behaviors (OAuth expiry, real `/login` OAuth flow, 429s) are not reproducible via ollama and belong in Substrate A seam injection.
 
@@ -84,17 +89,21 @@ A `FaultScenario` support module that generalizes the existing piecemeal mocks i
 | Process hang / U-state | stub PTY child that blocks `os.read` | bounded-read + respawn fires (per #1767/#1815); no unbounded block |
 | Loop / non-convergence | scripted PM/classifier always emitting `[/dev]` | `DEFAULT_MAX_TURNS`/wrap-up guard terminates with a user-facing message |
 | Crash | killed ollama classifier / corrupt JSONL / `send_cb` raises | fail-loud (`exception` exit + anomaly event), not silent |
-| Silent no-progress tail | stub emits N frames then goes quiet | a make-silent-failures-loud detector hook fires within N (test asserts the *seam* exists and is observable; the detector itself is downstream) |
+| Silent no-progress tail | stub emits N frames then goes quiet | **silence is observable via the existing seam** — `read_until_idle()` returns `IdleResult(saw_idle=False, elapsed_ms > N)`; the test asserts the elapsed-since-last-frame signal is surfaced, and wiring an actual detector on it is out of scope (#1688 / No-Gos) |
+
+**Incident anchoring (nit fix).** Turn-detection wedge maps to the stated Problem; process-hang cites #1767/#1815. The remaining two: **loop/non-convergence** reproduces the `pm_no_user_message` / canned-fallback regression class (#1647/#1719 — PM routing `[/dev]` forever and never emitting `[/user]`); **crash** reproduces the ollama-degradation (#1816) and OAuth/classifier-failure classes. Class 6 (silent no-progress tail) is explicitly **preventive** coverage for the unenumerated tail, asserted only at the existing seam.
 
 These reuse `IdleResult` and `MagicMock(spec=PTYDriver)` patterns; deterministic, sub-second, run in the default unit suite.
 
 ### Substrate B — ollama-backed real Claude Code E2E (free, unlimited, high-fidelity)
 
-A fixture that launches the **real** `claude` binary with the three ollama env vars set (inverting `_build_env()`), behind a new `GRANITE_OLLAMA_SMOKE=1` env gate alongside the existing `GRANITE_LIVE_SMOKE` guard in `conftest.py`. Runs real PTY + TUI + startup dialogs + hooks against a free local model. Asserts a session completes without wedging and surfaces the real exit reason. Doubles as a **canary for new `claude` binary releases** — the exact thing that breaks production.
+A fixture **placed under `tests/integration/`** (alongside the existing `test_granite_container_loop.py`, and matching the Substrate B verification command) that launches the **real** `claude` binary with the three ollama env vars set **and `CLAUDE_CODE_OAUTH_TOKEN` explicitly popped** (see blocker fix in Research), with a pre-`spawn()` assertion that no OAuth token leaks into the child env. The fixture self-skips unless `GRANITE_OLLAMA_SMOKE=1` **and** ollama is reachable (mirroring `_model_reachable()`). It runs real PTY + TUI + startup dialogs + hooks against a free local model, asserts a session completes without wedging, and surfaces the real exit reason. Doubles as a **canary for new `claude` binary releases** — the exact thing that breaks production.
+
+**Gate placement (concern-3 fix):** the `tests/unit/granite_container/conftest.py` autouse spawn-guard covers only the unit directory and only checks `GRANITE_LIVE_SMOKE`; it is NOT edited. Substrate B lives in `tests/integration/` (not covered by that guard) and self-gates on `GRANITE_OLLAMA_SMOKE=1` within its own fixture — so the gate location and the test location are consistent.
 
 ### Golden-recorder
 
-A small tool/fixture that runs a Substrate B session and captures the frame stream + JSONL transcript + hook events into `tests/granite_faults/fixtures/`. Those recordings become the inputs the Substrate A replay+mutate tests consume — record real, replay-and-mutate deterministic.
+A small tool/fixture that runs a Substrate B session (same `CLAUDE_CODE_OAUTH_TOKEN`-popped, no-token-leak env as the Substrate B fixture) and captures the frame stream + JSONL transcript + hook events into `tests/granite_faults/fixtures/`. Those recordings become the inputs the Substrate A replay+mutate tests consume — record real, replay-and-mutate deterministic.
 
 ### Nightly wiring + canary
 
@@ -112,8 +121,8 @@ This plan *is* a failure-path test strategy — but its own failure paths must a
 ## Test Impact
 
 - [ ] `tests/unit/granite_container/test_container.py` — UPDATE: extract `_mock_driver()` / `_idle_result()` into the shared `tests/granite_faults/` support module and re-import, so both the existing tests and the new injectors share one source. Behavior of existing tests unchanged.
-- [ ] `tests/unit/granite_container/conftest.py` — UPDATE: add the `GRANITE_OLLAMA_SMOKE` gate alongside the existing `GRANITE_LIVE_SMOKE` spawn guard (additive; default-off preserves current behavior).
-- [ ] `scripts/nightly_regression_tests.py` — UPDATE: register the ollama-backed suite as an isolated subprocess with self-skip on unreachable ollama.
+- [ ] `tests/unit/granite_container/conftest.py` — NO CHANGE (concern-3 fix): the unit-dir spawn guard stays as-is on `GRANITE_LIVE_SMOKE`. Substrate B lives in `tests/integration/` and self-gates on `GRANITE_OLLAMA_SMOKE=1` inside its own fixture, so no unit-conftest edit is needed.
+- [ ] `scripts/nightly_regression_tests.py` — UPDATE: register the ollama-backed suite as an isolated subprocess with self-skip on unreachable ollama. **Self-skip is verified by monkeypatching the reachability probe** (mirror `_model_reachable()`, `tests/integration/test_granite_container_loop.py:41-77`) to return `False` and asserting the ollama suite is skipped with a logged reason — NOT via `--dry-run` (which only suppresses the Telegram send and still runs the full subprocesses).
 - New test modules under `tests/unit/granite_container/` (Substrate A) and `tests/integration/` (Substrate B) are net-new — no existing tests replaced or deleted.
 
 ## Rabbit Holes
@@ -168,7 +177,7 @@ No agent integration required. This is test-only infrastructure — no new CLI e
 2. Create `tests/granite_faults/` support package; extract `_mock_driver()` / `_idle_result()` from `test_container.py` into it and re-point existing imports.
 3. Build the `FaultScenario` injectors (Substrate A), one per failure class, red-first then green.
 4. Build the golden-recorder and capture an initial fixture set under `tests/granite_faults/fixtures/`.
-5. Build the Substrate B ollama-backed E2E fixture + `GRANITE_OLLAMA_SMOKE` gate in `conftest.py`.
+5. Build the Substrate B ollama-backed E2E fixture **under `tests/integration/`**, self-gated on `GRANITE_OLLAMA_SMOKE=1` + ollama-reachable, with the `CLAUDE_CODE_OAUTH_TOKEN` pop + no-token-leak pre-`spawn()` assertion (blocker fix).
 6. Extend `scripts/nightly_regression_tests.py` with the ollama suite (self-skip + version-pinned canary).
 7. Write docs (`docs/features/granite-failure-simulation-harness.md`, `tests/README.md` entry, cross-link).
 8. Verify: full unit suite green, no orphan PIDs, existing granite tests unchanged.
@@ -181,9 +190,22 @@ No agent integration required. This is test-only infrastructure — no new CLI e
 | Existing granite tests unchanged | `pytest tests/unit/granite_container/ -n0 -k "not fault"` | exit 0 |
 | Substrate B E2E (ollama machine) | `GRANITE_OLLAMA_SMOKE=1 pytest tests/integration/ -k ollama` | real session completes, no wedge |
 | No leaked processes | `scripts/pytest-clean.sh tests/unit/granite_container/ && ps -o pid,comm \| grep -c claude` | no orphan `claude`/xdist PIDs |
-| Nightly self-skips cleanly | `python scripts/nightly_regression_tests.py --dry-run` | ollama suite listed, skips when unreachable |
+| Nightly self-skips cleanly | unit test monkeypatches the reachability probe (`_model_reachable`-style) to `False` | ollama suite skipped with a logged reason (not run) |
+| No OAuth token leaks to Substrate B child | fixture asserts `CLAUDE_CODE_OAUTH_TOKEN` absent from child env pre-`spawn()` | assertion holds; no #1612 "issue with the selected model" |
 
 Additionally: each Substrate A injector is demonstrated **red-first** (temporarily break the recovery path, see the test fail) in the PR description, and the dialog-fidelity note is recorded in the feature doc.
+
+## Critique Results
+
+FULL war room (3 critics: Risk & Robustness, Scope & Value, History & Consistency). Verdict: **NEEDS REVISION** → revised. All 3/3 critics completed (no dropped background findings).
+
+| # | Severity | Finding | Resolution |
+|---|----------|---------|------------|
+| 1 | BLOCKER (2 critics) | `_build_env()` forwards `CLAUDE_CODE_OAUTH_TOKEN`; overlaying only the 3 ollama vars leaves it in place → reproduces PR #1612 "issue with the selected model" and silently invalidates the canary | Substrate B fixture + golden-recorder now `env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)` with a pre-`spawn()` no-leak assertion; Research corrected to describe all-3-blanked + OAuth-forward |
+| 2 | CONCERN | Class 6 asserted a detector-hook that is a No-Go / has no seam | Reworded to assert silence is observable via the existing `IdleResult(saw_idle=False, elapsed_ms>N)` seam; detector wiring explicitly out of scope |
+| 3 | CONCERN | Nightly `--dry-run` doesn't preview; runs full subprocesses | Self-skip now verified by monkeypatching the reachability probe to `False`; `--dry-run` removed from the verification |
+| 4 | CONCERN | `GRANITE_OLLAMA_SMOKE` gate in unit conftest but Substrate B verification targets `tests/integration/` | Substrate B pinned to `tests/integration/`, self-gating in its own fixture; unit conftest NOT edited |
+| 5 | NIT | loop/crash injectors lacked cited incidents | Anchored loop→#1647/#1719, crash→#1816/OAuth; class 6 framed as explicitly preventive |
 
 ## Resolved Decisions
 
