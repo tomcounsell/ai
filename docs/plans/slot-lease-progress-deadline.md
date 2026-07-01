@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1820
 last_comment_id:
+revision_applied: true
 ---
 
 # Lease-Based Slot Ownership + Progress-Deadline Cancel Scope (wedge fixes #2/#3)
@@ -154,11 +155,17 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
    `semaphore.release()`.
 5. **Reaper reclaim (the new recovery path):** on **each** health-check tick
    (`_agent_session_health_check`, 300s), a SINGLE top-of-tick pass (hoisted ABOVE
-   the pending-sessions loop, independent of `worker_alive`, gated only by
-   `SLOT_LEASE_REAP_DISABLED`) iterates a snapshot `list(registry.leases())`; for
-   any lease whose `owner_session_id` (re-read fresh) is in `TERMINAL_STATUSES`,
-   call `registry.reclaim(owner)` — releases the permit, drops the lease, increments
-   the `slot_reclaims` counter, logs at WARNING. **The reap fires on terminal-owner
+   the pending-sessions loop, independent of `worker_alive`) iterates a snapshot
+   `list(registry.leases())`. **Detection always runs; only the reclaim action is
+   kill-switch-gated (Operator CONCERN, round 2):** the pass **unconditionally**
+   computes and logs the leaked-slot fingerprint (WARNING when `permits_free==0 AND
+   running<max`; INFO on healthy backpressure) and emits the zero-reclaim heartbeat —
+   so `SLOT_LEASE_REAP_DISABLED=1` still preserves the old detect-and-log behavior
+   exactly, never regressing to no-visibility. Then, for any lease whose
+   `owner_session_id` (re-read fresh) is in `TERMINAL_STATUSES`, **and only when
+   `SLOT_LEASE_REAP_DISABLED` is unset**, it calls `registry.reclaim(owner)` —
+   releases the permit, drops the lease, increments the `slot_reclaims` counter, logs
+   at WARNING. **The reap fires on terminal-owner
    ONLY — there is no wall-clock `now > lease.deadline` arm** (Blocker 2, round 2): a
    fixed `acquired_at + SLOT_LEASE_TTL_S` deadline never resets on progress, so
    reclaiming a still-`running`, progressing owner would strip its permit while
@@ -166,9 +173,10 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
    exactly the wall-clock duration cap #1172 deliberately removed. Live-but-stuck
    sessions are already covered by Fix #3 (progress-deadline, worker-alive),
    `tool_timeout`, and the `worker_dead` scan — none of which need a bare wall-clock
-   reclaim. The counter (and a zero-reclaim heartbeat) is emitted **unconditionally**
-   every tick, even when the queue is drained (the parked-worker/empty-queue starvation
-   case Acceptance #1 targets).
+   reclaim. The fingerprint log, heartbeat, and `slot_reclaims` counter are emitted
+   **unconditionally** every tick (the counter increments only when a reclaim actually
+   fires; the pass still runs and logs when disabled), even when the queue is drained
+   (the parked-worker/empty-queue starvation case Acceptance #1 targets).
 6. **Prompt reclaim:** `_apply_recovery_transition` (the out-of-band killer) also
    calls `registry.reclaim(session_id)` immediately after flipping the row, so the
    slot frees within the health/tool-timeout cadence instead of waiting for the
@@ -294,10 +302,13 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
   `leases()`, `permits_free()`.
 - **Fingerprint → reclaim, hoisted** (`session_health.py`): the logging-only block
   currently nested in the pending loop is REMOVED from that loop and replaced by a
-  single top-of-tick reap pass over a snapshot of `registry.leases()`, reclaiming
-  leases whose owner is **terminal** — runs unconditionally every tick, independent of
-  `worker_alive` and of any pending session. There is **no wall-clock reclaim arm**
-  (Blocker 2).
+  single top-of-tick reap pass over a snapshot of `registry.leases()`. **Detection
+  (the fingerprint WARNING/INFO + heartbeat) runs unconditionally every tick,
+  independent of `worker_alive`, of any pending session, AND of the kill-switch;
+  only the `reclaim()` action is gated on `SLOT_LEASE_REAP_DISABLED`** — so the
+  kill-switch reverts to true detect-only, never no-visibility (Operator CONCERN).
+  It reclaims leases whose owner is **terminal** — there is **no wall-clock reclaim
+  arm** (Blocker 2).
 - **Prompt reclaim in the killer** (`_apply_recovery_transition`): reclaim the
   slot immediately when an out-of-band kill flips the row.
 - **Progress-deadline cancel scope** (`agent_session_queue.py:1494`): own the
@@ -384,17 +395,23 @@ calls `release_unbound()`).
   DELETE the logging-only fingerprint block from inside `for entry in pending_sessions:`
   (`:2560-2613`). Add, near the top of `_agent_session_health_check` (after `now =
   time.time()` at `:2380`, alongside the SIGKILL-escalation drain, ABOVE the RUNNING
-  scan at `:2418`), a single reap pass: for each `lease in list(registry.leases())`
-  (snapshot), if `lease.owner_session_id` (re-read fresh, terminal-status-guarded like
-  the existing tool-timeout path) is in `TERMINAL_STATUSES` — **and only that; no
-  `now > lease.deadline` wall-clock arm** (Blocker 2) — `registry.reclaim(owner)` +
-  increment `{project_key}:session-health:slot_reclaims`.
-  The pass is **independent of `worker_alive`** (so it fires on a drained queue —
-  the exact parked-worker starvation case Acceptance #1 targets), gated **only** by
-  `SLOT_LEASE_REAP_DISABLED`, and emits the `slot_reclaims` counter (plus a
-  zero-reclaim heartbeat) **unconditionally** every tick. The healthy-backpressure
-  INFO line (`permits_free==0 AND running>=max`) is computed once in this top-of-tick
-  pass too — decoupled from pending iteration.
+  scan at `:2418`), a single reap pass over a snapshot `list(registry.leases())`.
+  **Two phases, only the second kill-switch-gated (Operator CONCERN, round 2):**
+  (1) **Detection — always runs:** compute and log the leaked-slot fingerprint
+  (WARNING when `permits_free==0 AND running<max`; INFO on healthy backpressure) and
+  emit the zero-reclaim heartbeat. This phase is **never** gated, so
+  `SLOT_LEASE_REAP_DISABLED=1` preserves the old detect-and-log behavior of the
+  deleted `:2560-2613` fingerprint exactly — the kill-switch disables *reclaim*, not
+  *visibility* (the plan must not regress to no-detection). (2) **Reclaim — gated on
+  `not SLOT_LEASE_REAP_DISABLED`:** for each lease whose `owner_session_id` (re-read
+  fresh, terminal-status-guarded like the existing tool-timeout path) is in
+  `TERMINAL_STATUSES` — **and only that; no `now > lease.deadline` wall-clock arm**
+  (Blocker 2) — call `registry.reclaim(owner)` + increment
+  `{project_key}:session-health:slot_reclaims`.
+  The whole pass is **independent of `worker_alive`** (so it fires on a drained queue —
+  the exact parked-worker starvation case Acceptance #1 targets). The deleted
+  `:2560-2613` block's detect-and-log role moves wholesale into phase (1), so no
+  parallel/dead copy remains.
 - `_apply_recovery_transition`: after the transition, call
   `registry.reclaim(session_id)` (idempotent) so out-of-band kills free the slot
   promptly. This is the wiring that makes acceptance criterion #1 fire on the
@@ -434,7 +451,13 @@ calls `release_unbound()`).
               registry.reclaim(session.agent_session_id) # free the slot
               did_finalize = await _apply_recovery_transition(  # terminal-guarded, idempotent
                   session, reason="progress deadline exceeded",
-                  reason_kind="progress_deadline", handle=..., worker_key=worker_key)
+                  # handle=None (NIT): Fix #3 OWNS the cancel scope — it calls
+                  # exec_task.cancel() itself below. Passing the registry handle would
+                  # make _apply_recovery_transition ALSO run handle.task.cancel() +
+                  # await asyncio.wait_for(handle.task, TASK_CANCEL_TIMEOUT) internally,
+                  # blocking up to TASK_CANCEL_TIMEOUT on a task we are about to cancel
+                  # anyway (double-cancel). None keeps a single, unambiguous cancel path.
+                  reason_kind="progress_deadline", handle=None, worker_key=worker_key)
               if not did_finalize:
                   # _apply_recovery_transition can DECLINE without transitioning
                   # (MAX_RECOVERY_ATTEMPTS / OOM-defer paths → returns False, row
@@ -558,9 +581,17 @@ calls `release_unbound()`).
   This is a genuine MOVE (the reprieve logic exists in exactly one place — the shared
   predicate — with no inline copy left in `_apply_recovery_transition` and no parallel
   reprieve policy), satisfying NO-LEGACY / the Rabbit Hole below, while remaining correct
-  for the never-started producer. Telemetry is emitted once per consultation and exactly
-  one killer fires per session, so no double-count. A `waiting_for_children` PM with no
-  own tool/turn activity is reprieved, not killed, on either path. **Deterministic
+  for the never-started producer. **Telemetry cadence (Simplifier implementation note,
+  round 2):** Fix #3's watcher consults `_should_kill_no_progress` on **every**
+  `PROGRESS_POLL_S` tick once the deadline is exceeded, so the counter increments must
+  NOT fire on the reprieve-check-and-continue path — otherwise a long-reprieved session
+  inflates `tier1_flagged_total` / `tier2_reprieve_total` once per poll. The gate
+  therefore returns a pure kill/no-kill boolean; its `tier1_flagged_total` and
+  `tier2_reprieve_total:{reprieve}` counter increments (and the `reprieve_count` save)
+  fire **exactly once per session** — on the first kill-*decision*, not on every poll
+  reprieve. Because exactly one killer fires per session, there is no cross-killer
+  double-count. A `waiting_for_children` PM with no own tool/turn activity is reprieved,
+  not killed, on either path. **Deterministic
   verification greps (NIT, round 2 — no baseline-relative check):** the deleted
   running-scan classification is gone → `grep -c '_reason_kind = "no_progress"'
   agent/session_health.py == 0`; the reprieve decision lives in exactly one place →
@@ -630,7 +661,7 @@ calls `release_unbound()`).
 
 New tests (greenfield):
 - `tests/unit/test_slot_lease_registry.py` — acquire/bind/release/reclaim happy path; double-reclaim idempotency (no over-release); `acquire()`+`release_unbound()` leaves no lease and restores `permits_free`; terminal-owner reclaim; `permits_free` accounting. (No deadline-expired reclaim test — the wall-clock arm was removed, Blocker 2.)
-- `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**. ALSO assert a still-`running`, progressing owner whose lease is old is NOT reclaimed (Blocker 2 regression guard: no over-admission of a healthy long session).
+- `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**. ALSO assert a still-`running`, progressing owner whose lease is old is NOT reclaimed (Blocker 2 regression guard: no over-admission of a healthy long session). ALSO (`disabled_still_logs` case — Operator CONCERN): with `SLOT_LEASE_REAP_DISABLED=1`, the reap pass still logs the leaked-slot WARNING (detection preserved) but reclaims NO permit and does NOT increment `slot_reclaims` — the kill-switch is detect-only, never no-visibility.
 - `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **`handle.task` is wired to the owned `exec_task`** so a `tool_timeout`/`worker_dead` cancel tears down the subprocess (Blocker 1 root fix); a **worker-shutdown cancel** (`deadline_cancelled=False`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**.
 
 ## Rabbit Holes
@@ -890,6 +921,12 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   (additive `slot_reclaims` field only).
 - [ ] Kill-switches work: `SLOT_LEASE_REAP_DISABLED=1` disables reclaim (detect-only);
   `DISABLE_PROGRESS_KILL=1` disables the Fix #3 cancel.
+- [ ] **Kill-switch preserves detection (Operator CONCERN):** with
+  `SLOT_LEASE_REAP_DISABLED=1`, the reap pass still runs phase 1 — it logs the
+  leaked-slot fingerprint (WARNING/INFO) and emits the heartbeat every tick, only the
+  `reclaim()` + `slot_reclaims` increment are suppressed. No regression to
+  no-visibility; `test_slot_lease_reclaim.py` asserts the WARNING is emitted (and no
+  permit reclaimed) under the disabled flag.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`): `docs/features/slot-lease-ownership.md` exists.
 
@@ -955,10 +992,14 @@ lead NEVER builds directly.
   `grep -c "semaphore\.(acquire|release)(" == 0`.
 - Hoist the `session_health.py:2560-2613` fingerprint OUT of the pending loop into a
   single top-of-tick reap pass in `_agent_session_health_check` (after `:2380`,
-  independent of `worker_alive`, `SLOT_LEASE_REAP_DISABLED` gate, snapshot
-  `list(registry.leases())`, reclaim **terminal-owner leases ONLY — no wall-clock
-  `now > lease.deadline` arm** (Blocker 2), emit `slot_reclaims` + zero-reclaim
-  heartbeat unconditionally). Move the healthy-backpressure INFO line into this pass too.
+  independent of `worker_alive`, snapshot `list(registry.leases())`). **Two phases,
+  only phase 2 kill-switch-gated (Operator CONCERN):** phase 1 — ALWAYS compute+log
+  the fingerprint (WARNING when `permits_free==0 AND running<max`; INFO on healthy
+  backpressure) + zero-reclaim heartbeat, so `SLOT_LEASE_REAP_DISABLED=1` keeps
+  detect-only visibility and never regresses to no-detection; phase 2 (gated on
+  `not SLOT_LEASE_REAP_DISABLED`) — reclaim **terminal-owner leases ONLY — no
+  wall-clock `now > lease.deadline` arm** (Blocker 2), increment `slot_reclaims`.
+  Move the healthy-backpressure INFO line into phase 1.
 - Wire `registry.reclaim(session_id)` into `_apply_recovery_transition`.
 - Surface `slot_reclaims` (NIT): add the counter to the `worker` health block of
   `dashboard.json` — read `{project_key}:session-health:slot_reclaims` in
@@ -980,9 +1021,14 @@ lead NEVER builds directly.
   `worker_dead` subprocess-orphan too, not just the shutdown path.
 - On expiry (reprieve gate `_should_kill_no_progress` says kill): finalize FIRST —
   fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim →
-  `did_finalize = await _apply_recovery_transition(reason "progress_deadline")` → if
-  `not did_finalize` force `transition_status(session, "cancelled")` → set
-  `finalized_by_execute=True` (skip outer finally) — THEN `exec_task.cancel()`.
+  `did_finalize = await _apply_recovery_transition(reason "progress_deadline",
+  handle=None)` → if `not did_finalize` force `transition_status(session, "cancelled")`
+  → set `finalized_by_execute=True` (skip outer finally) — THEN `exec_task.cancel()`.
+  **Pass `handle=None` (NIT):** Fix #3 owns the cancel scope (it calls
+  `exec_task.cancel()` itself), so passing the registry handle would make
+  `_apply_recovery_transition` also run `handle.task.cancel()` + bounded
+  `wait_for(handle.task)` internally — a redundant double-cancel that blocks up to
+  `TASK_CANCEL_TIMEOUT`. `None` keeps a single unambiguous cancel path.
 - Blocker 1: split the `except asyncio.CancelledError` handler at `:1496` on
   `deadline_cancelled` — True → swallow (no requeue log/re-raise); False → hardened
   worker-shutdown path (`exec_task.cancel()` + bounded `wait_for(..., TASK_CANCEL_TIMEOUT)`
@@ -996,6 +1042,12 @@ lead NEVER builds directly.
   copy) — reprieve logic in exactly one place. Keep `worker_dead` and `tool_timeout`.
   Deterministic greps: `grep -c '_reason_kind = "no_progress"' == 0`;
   `grep -c "_tier2_reprieve_signal" == 1`.
+- **Telemetry cadence (Simplifier NIT):** `_should_kill_no_progress` is a pure
+  kill/no-kill predicate; its `tier1_flagged_total` / `tier2_reprieve_total:{reprieve}`
+  counter increments and `reprieve_count` save fire **exactly once per session** on the
+  first kill-*decision* — NOT on the reprieve-check-and-continue path, which the watcher
+  re-runs every `PROGRESS_POLL_S` tick while past the deadline (firing per-poll would
+  inflate the metric).
 - Reuse `DISABLE_PROGRESS_KILL` kill-switch; add `SESSION_PROGRESS_DEADLINE_S`
   (≥ max tool tier) / `PROGRESS_POLL_S` constants (provisional, commented).
 
@@ -1055,6 +1107,8 @@ lead NEVER builds directly.
 | Deadline decline forces terminal, skips outer finally (Concern 1) | `grep -c "did_finalize" agent/agent_session_queue.py` | output > 0 |
 | `slot_reclaims` surfaced on the dashboard (NIT) | `grep -c "slot_reclaims" ui/app.py` | output > 0 |
 | fd-PTY-kill uses scoped teardown (not machine pkill) | `grep -c "pkill" agent/agent_session_queue.py` | match count == 0 |
+| Kill-switch preserves detection (Operator CONCERN) | `pytest tests/integration/test_slot_lease_reclaim.py -k disabled_still_logs -q` | exit code 0 (WARNING logged, no reclaim under `SLOT_LEASE_REAP_DISABLED=1`) |
+| Fix #3 finalize passes `handle=None` (NIT) | `grep -c "handle=None" agent/agent_session_queue.py` | output > 0 |
 
 ## Critique Results
 
@@ -1074,6 +1128,9 @@ lead NEVER builds directly.
 | **NIT (r2)** | Scope & Value | Self-heal has no operator-facing surface; `slot_reclaims` counter write-only | Agent Integration + Documentation + Success Criteria + Verification | Surface `slot_reclaims` in the `worker` block of `dashboard.json` (`_get_worker_health`, `ui/app.py:507`); additive field only |
 | **NIT (r2)** | Coordinator | `bind()` deadline ambiguity (caller-supplied vs internally computed) | Resolved by Blocker 2 | `deadline` dropped from `Lease`/`bind` entirely; Fix #3's watcher computes its own progress deadline from `_session_progress_ts` — no ambiguity |
 | **NIT (r2)** | Coordinator | OQ3 verification grep non-deterministic ("fewer than baseline") | Verification table + OQ3 resolution | Replaced with exact zero/one checks: `_reason_kind = "no_progress" == 0`, `_tier2_reprieve_signal == 1` |
+| **CONCERN (r3)** | Risk & Robustness (Operator) | `SLOT_LEASE_REAP_DISABLED=1` deletes the fingerprint AND its WARNING → kill-switch regresses from detect-only to **no-visibility**; leaked slots accumulate silently | Data Flow step 5 + Technical Approach reap (two-phase) + Key Elements + Step task 1 + Success Criteria + Verification + Test Impact | Reap split into two phases: phase 1 (fingerprint WARNING/INFO + heartbeat) runs **unconditionally**; only phase 2 (`reclaim()` + `slot_reclaims` increment) is gated on `not SLOT_LEASE_REAP_DISABLED`. New `disabled_still_logs` test asserts detection under the flag |
+| **NIT (r3)** | Scope & Value (Simplifier) | Fix #3 watcher's `_apply_recovery_transition` call passes `handle=...` (unspecified) → subtle double-cancel / internal `wait_for` block left to builder | Fix #3 code sketch + Data Flow step 3 + Step task 2 + Verification | Pass `handle=None` — Fix #3 owns the cancel scope (`exec_task.cancel()` itself); passing the handle would double-cancel and block up to `TASK_CANCEL_TIMEOUT`. Grep `handle=None > 0` |
+| **NIT (r3)** | Scope & Value (Simplifier, impl-note) | Extracted reprieve gate could fire `tier1_flagged_total`/`tier2_reprieve_total` counters every `PROGRESS_POLL_S` poll (inflated metric) | OQ3 resolution (telemetry cadence) + Step task 2 | `_should_kill_no_progress` is a pure predicate; counters + `reprieve_count` save fire **exactly once per session** on first kill-decision, not on the reprieve-and-continue path |
 
 ---
 
