@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1825
 last_comment_id:
+revision_applied: true
 ---
 
 # Durable Secondary Store — Periodic AgentSession Export to SQLite
