@@ -209,7 +209,7 @@ def _run_container_with_poll(
         patch.object(c, "_spawn_pair"),
         patch.object(c, "_close_pair"),
         patch.object(c, "_prime_session"),
-        patch.object(c, "_run_pkill_fallback"),
+        patch.object(c, "_close_pair_and_reap"),
         patch.object(c, "_run_wrapup_guard"),
         patch(
             "agent.granite_container.container.last_assistant_text",

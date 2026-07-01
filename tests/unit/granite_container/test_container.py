@@ -20,41 +20,17 @@ from agent.granite_container.container import (
     _make_sandbox_cwd,
     result_to_json,
 )
-from agent.granite_container.pty_driver import IdleResult, PTYDriver
+from agent.granite_container.pty_driver import PTYDriver
 
-
-def _idle_result(buffer_text: str = "fake buffer", saw_idle: bool = True) -> IdleResult:
-    return IdleResult(
-        saw_idle=saw_idle,
-        buffer=buffer_text,
-        idle_marker="bypass permissions on",
-        elapsed_ms=100,
-    )
-
-
-def _mock_driver(
-    buffer_text: str = "fake", saw_idle: bool = True, session_id: str = "mock-session-pm"
-) -> MagicMock:
-    """Build a mock PTYDriver."""
-    mock = MagicMock(spec=PTYDriver)
-    mock.read_until_idle.return_value = _idle_result(buffer_text, saw_idle)
-    mock.last_resume_uuid.return_value = None
-    mock.isalive.return_value = True
-    # Set _session_id so _transcript_path produces a non-None value,
-    # allowing last_assistant_text to be called in the container run path.
-    # PM and Dev get different session IDs so stubs can discriminate.
-    mock._session_id = session_id
-    return mock
-
-
-def _mock_pm(buffer_text: str = "fake", saw_idle: bool = True) -> MagicMock:
-    """Build a mock PM PTYDriver."""
-    return _mock_driver(buffer_text, saw_idle, session_id="mock-session-pm")
-
-
-def _mock_dev(buffer_text: str = "fake", saw_idle: bool = True) -> MagicMock:
-    """Build a mock Dev PTYDriver."""
-    return _mock_driver(buffer_text, saw_idle, session_id="mock-session-dev")
+# The mock-driver builders (_idle_result / _mock_driver / _mock_pm / _mock_dev)
+# now live in the shared harness support package so the Substrate A fault
+# injectors and these container-loop tests share one source (plan Task 2).
+# Signatures and defaults are preserved exactly — behavior is unchanged.
+from tests.granite_faults.mocks import (
+    _idle_result,
+    _mock_dev,
+    _mock_pm,
+)
 
 
 class TestMakeSandboxCwd(unittest.TestCase):
@@ -151,7 +127,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
             patch.object(c, "_spawn_pair") as spawn,
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -235,7 +211,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # no user_facing callback
             patch(
                 "agent.granite_container.container.last_assistant_text",
@@ -323,7 +299,7 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload callback
             patch(
                 "agent.granite_container.container.last_assistant_text",
@@ -401,7 +377,7 @@ class TestContainerUserAddress(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -487,7 +463,7 @@ class TestContainerMaxTurns(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # patched out; tested separately
             patch(
                 "agent.granite_container.container.last_assistant_text",
@@ -532,7 +508,7 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch("agent.granite_container.container.STARTUP_HARD_CEILING_S", 0.05),
             # Disable plateau detector so we hit the pure ceiling exit path.
             patch("agent.granite_container.container.STARTUP_PLATEAU_CYCLES", 10_000_000),
@@ -593,7 +569,7 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload
             patch(
                 "agent.granite_container.container.last_assistant_text",
@@ -728,7 +704,6 @@ class TestContainerSpawnPairReusesPrewarmed(unittest.TestCase):
     """
 
     def test_prewarmed_pair_skips_spawn(self) -> None:
-        from agent.granite_container.pty_driver import PTYDriver
 
         prewarmed_pm = MagicMock(spec=PTYDriver)
         prewarmed_dev = MagicMock(spec=PTYDriver)
@@ -764,7 +739,6 @@ class TestContainerSpawnPairReusesPrewarmed(unittest.TestCase):
     def test_close_pair_skips_pool_owned_ptys(self) -> None:
         """PTYs marked _released_to_pool=True are not closed by
         Container._close_pair (the pool's __aexit__ owns them)."""
-        from agent.granite_container.pty_driver import PTYDriver
 
         c = Container(user_message="hello", max_turns=2)
         pool_pm = MagicMock(spec=PTYDriver)
@@ -826,7 +800,7 @@ class TestContainerOnTurnHook(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload
             patch(
                 "agent.granite_container.container.last_assistant_text",
@@ -872,7 +846,7 @@ class TestContainerHang(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -1016,7 +990,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # no on_complete_payload
             patch(
                 "agent.granite_container.container.last_assistant_text",
@@ -1076,7 +1050,7 @@ class TestPrimeTurnRelay(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -1165,7 +1139,7 @@ class TestWrapupGuard(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -1250,7 +1224,7 @@ class TestWrapupGuard(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -1329,7 +1303,7 @@ class TestWrapupGuard(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -1403,7 +1377,7 @@ class TestWrapupGuard(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -1462,7 +1436,7 @@ class TestWrapupGuard(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch(
                 "agent.granite_container.container.last_assistant_text",
                 side_effect=_lat_stub,
@@ -1614,7 +1588,7 @@ class TestPerTurnContractReminder(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            patch.object(c, "_close_pair_and_reap"),
             patch.object(c, "_run_wrapup_guard"),  # no on_user_payload callback
             patch(
                 "agent.granite_container.container.last_assistant_text",
