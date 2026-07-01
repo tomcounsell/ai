@@ -269,7 +269,7 @@ PM check-in, 2 review rounds.
 lower-risk half — it should land as its own PR first, against which the concurrency
 tests and `test_slot_lease_reclaim.py` stabilize. Fix #3 (progress-deadline cancel
 scope + Blocker-1 CancelledError disambiguation + OQ3 branch deletion) then lands as
-a follow-up PR against the stable registry, satisfying **Acceptance #2**. This keeps
+a follow-up PR [ORDERED] against the stable registry, satisfying **Acceptance #2**. This keeps
 each PR reviewable and isolates the highest-blast-radius change (the worker-loop
 cancel scope) behind an already-merged, tested registry. The Step-by-Step tasks are
 already ordered Fix #2 → Fix #3 to support this split; if the builder chooses one PR,
@@ -355,8 +355,10 @@ Race 2, `SLOT_LEASE_BIND_GRACE_S`, and the bind-grace reclaim** (all removed bel
 and simplifies the re-acquire handling of Concern 1 (each None/exception branch just
 calls `release_unbound()`).
 
-- Add `agent/slot_lease.py`: `Lease` dataclass `(owner_session_id, acquired_at,
-  deadline)` + `SlotLeaseRegistry`. The registry holds one `asyncio.Semaphore` so
+- Add `agent/slot_lease.py`: `Lease` dataclass `(owner_session_id, acquired_at)`
+  (no reclaim `deadline` — Blocker 2; `acquired_at` is only Fix #3's progress-ts
+  fallback, never read by the reaper) + `SlotLeaseRegistry`. The registry holds one
+  `asyncio.Semaphore` so
   the worker loop still blocks at `acquire()` when full — the counting-semaphore
   backpressure contract is preserved exactly. All mutation is on-loop (no lock
   needed beyond the loop's cooperative scheduling; document this).
@@ -443,8 +445,11 @@ calls `release_unbound()`).
           if last is not None and (time.time() - last) > SESSION_PROGRESS_DEADLINE_S:
               if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
                   break  # kill-switch: let it run
-              if not _should_kill_no_progress(session):  # Tier-2 reprieve gate (moved here — OQ3)
+              if not _should_kill_no_progress(session, handle):  # Tier-2 reprieve gate (moved here — OQ3)
                   continue  # active children / compaction — reprieve, keep watching
+              # NOTE: pass `handle` (in scope from the `handle.task = exec_task` wiring
+              # above) so `_tier2_reprieve_signal(handle, entry)` sees active children;
+              # omitting it would falsely cancel a `waiting_for_children` PM session.
               deadline_cancelled = True
               # FINALIZE FIRST — at the watcher scope, before cancel reaches :1496:
               _fd_pty_kill(session)                      # scoped os.killpg (#1816)
@@ -459,13 +464,18 @@ calls `release_unbound()`).
                   # anyway (double-cancel). None keeps a single, unambiguous cancel path.
                   reason_kind="progress_deadline", handle=None, worker_key=worker_key)
               if not did_finalize:
-                  # _apply_recovery_transition can DECLINE without transitioning
-                  # (MAX_RECOVERY_ATTEMPTS / OOM-defer paths → returns False, row
-                  # stays `running`). Force a deterministic terminal state so the
-                  # killed session is never left running and can never be mislabeled
-                  # "completed" by the outer finally (Concern 1 / Consistency Auditor).
-                  transition_status(session, "cancelled",
-                                    reason="progress deadline exceeded (recovery declined)")
+                  # _apply_recovery_transition returns False in TWO cases: (1) it
+                  # DECLINED (MAX_RECOVERY_ATTEMPTS / OOM-defer → row stays `running`),
+                  # or (2) the row is ALREADY terminal because a concurrent killer
+                  # (tool_timeout / worker_dead) won the race inside the await yield.
+                  # Re-read fresh and only force a terminal state in case (1); forcing
+                  # "cancelled" in case (2) would overwrite the winning killer's valid
+                  # terminal state ("killed"/"abandoned"). Mirrors the nudge-guard at
+                  # agent_session_queue.py:1288-1307. (Concern 1 + R&R round-3.)
+                  fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
+                  if fresh and fresh.status not in TERMINAL_STATUSES:
+                      transition_status(session, "cancelled",
+                                        reason="progress deadline exceeded (recovery declined)")
               finalized_by_execute = True  # row is now terminal — SKIP the outer finally
               exec_task.cancel()
               break
@@ -554,7 +564,9 @@ calls `release_unbound()`).
   scoped process-group teardown (`container.py` `os.killpg` path, #1816) for the
   session's slot; (b) `registry.reclaim(session.agent_session_id)`; (c) finalize via
   `_apply_recovery_transition` (`reason_kind="progress_deadline"`), capturing the
-  return; (c') if it declined (`False`), force `transition_status(session, "cancelled")`;
+  return; (c') if it returned `False`, re-read the row fresh and force
+  `transition_status(session, "cancelled")` ONLY if not already terminal (a concurrent
+  killer may have won the race — don't overwrite its terminal state);
   (c'') set `finalized_by_execute=True` to skip the outer finally; (d) cancel + await.
   Steps a-c reuse terminal-status idempotency so an out-of-band killer racing the same
   session is harmless.
@@ -1022,7 +1034,8 @@ lead NEVER builds directly.
 - On expiry (reprieve gate `_should_kill_no_progress` says kill): finalize FIRST —
   fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim →
   `did_finalize = await _apply_recovery_transition(reason "progress_deadline",
-  handle=None)` → if `not did_finalize` force `transition_status(session, "cancelled")`
+  handle=None)` → if `not did_finalize`, re-read fresh and force
+  `transition_status(session, "cancelled")` only if the row is not already terminal
   → set `finalized_by_execute=True` (skip outer finally) — THEN `exec_task.cancel()`.
   **Pass `handle=None` (NIT):** Fix #3 owns the cancel scope (it calls
   `exec_task.cancel()` itself), so passing the registry handle would make
