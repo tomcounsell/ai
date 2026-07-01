@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -185,8 +185,10 @@ No agent integration required. This is test-only infrastructure — no new CLI e
 
 Additionally: each Substrate A injector is demonstrated **red-first** (temporarily break the recovery path, see the test fail) in the PR description, and the dialog-fidelity note is recorded in the feature doc.
 
-## Open Questions
+## Resolved Decisions
 
-1. **Model tag for Substrate B** — `gemma3`, `gemma2`, or another small local model? (Resolved in Task 0; any small instruct model that the `claude` binary accepts over the ollama endpoint is fine — reasoning quality is irrelevant, we test the interface.)
-2. **Should the nightly ollama canary run on bridge machines or only the skills/dev machine?** Leaning skills/dev only (bridge machines shouldn't spend cycles on it), which keeps the `/update` change to zero. Confirm.
-3. **Fixture storage** — commit golden fixtures to the repo (reproducible, reviewable) vs. regenerate on demand? Leaning commit, with a documented re-record step. Confirm.
+1. **Model tag for Substrate B** — resolved in Task 0. Any small instruct model the `claude` binary accepts over the ollama endpoint is acceptable (reasoning quality is irrelevant — we test the interface). Default target: `gemma3`, falling back to whatever tag is locally available.
+2. **Nightly ollama canary placement** — skills/dev machine only. Bridge machines do not spend cycles on it, which keeps the `/update` change to zero (bridge-role gating mirrors `install_nightly_tests.sh`).
+3. **Fixture storage** — commit golden fixtures to the repo (reproducible, reviewable in PRs) with a documented re-record step. Mutation-based assertions in Substrate A bound the brittleness.
+
+No open questions block the build. These are recorded so the critique and build stages inherit the settled decisions.
