@@ -422,6 +422,27 @@ class GraniteSettings(BaseModel):
         ),
     )
 
+    # --- Per-role transport hedge (plan #1842) ---
+    pm_transport: str = Field(
+        default="pty",
+        description=(
+            "Global default transport for the PM role: ``pty`` (interactive TUI "
+            "over a PTY, flat-billed on the subscription) or ``headless`` "
+            "(one ``claude -p`` subprocess per turn, metered against the Agent "
+            "SDK credit pool). A per-project ``transport.pm`` block in "
+            "projects.json overrides this. Default ``pty`` reproduces today's "
+            "behavior exactly. Override via GRANITE__PM_TRANSPORT."
+        ),
+    )
+    dev_transport: str = Field(
+        default="pty",
+        description=(
+            "Global default transport for the Dev role: ``pty`` or ``headless``. "
+            "See ``pm_transport``. A per-project ``transport.dev`` block in "
+            "projects.json overrides this. Override via GRANITE__DEV_TRANSPORT."
+        ),
+    )
+
     # --- Hook-driven turn returns (plan #1688) ---
     hook_driven_turn_end: bool = Field(
         default=True,

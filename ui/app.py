@@ -458,6 +458,18 @@ def create_app() -> FastAPI:
             "total_output_tokens": s.total_output_tokens,
             "total_cache_read_tokens": s.total_cache_read_tokens,
             "total_cost_usd": s.total_cost_usd,
+            # Per-role transport hedge (plan #1842). ``role_transports`` labels
+            # which transport each role ran on; the metered_* fields are the
+            # DISJOINT headless-leg accounting (tailer owns total_*). The
+            # combined view sums both so operators see grand-total spend.
+            # getattr with defaults so pre-feature records never KeyError.
+            "role_transports": getattr(s, "role_transports", None),
+            "metered_input_tokens": getattr(s, "metered_input_tokens", 0) or 0,
+            "metered_output_tokens": getattr(s, "metered_output_tokens", 0) or 0,
+            "metered_cache_read_tokens": getattr(s, "metered_cache_read_tokens", 0) or 0,
+            "metered_cost_usd": getattr(s, "metered_cost_usd", 0.0) or 0.0,
+            "total_cost_usd_combined": (float(s.total_cost_usd or 0.0))
+            + (float(getattr(s, "metered_cost_usd", 0.0) or 0.0)),
             # In-flight visibility (issue #1172, Pillar A). Operators see
             # what the agent is doing right now without inferring from
             # staleness. ``last_evidence_at`` is the max of every evidence

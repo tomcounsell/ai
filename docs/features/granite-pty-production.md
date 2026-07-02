@@ -11,9 +11,14 @@ PTYs, with a local `granite4.1:3b` model routing between them. A bounded
 `PTYPool` caps the number of concurrent interactive pairs the worker holds open.
 
 This is the production cutover of the container first landed in PR #1570
-(see [`granite-interactive-tui.md`](granite-interactive-tui.md)). The
-cutover is **all-or-nothing**: there is no runtime fallback flag. If a
-regression lands on `main`, the change is reverted (see
+(see [`granite-interactive-tui.md`](granite-interactive-tui.md)). All bridge
+sessions route through `Container`; **the transport per role is
+config-selectable** (plan #1842): each of PM / Dev runs on an interactive PTY
+(the default, flat-billed) or headless `claude -p` (metered). The default —
+both roles on PTY — reproduces the original cutover behavior exactly. See
+[`per-role-transport.md`](per-role-transport.md) for the selector, the headless
+role driver, cost surfacing, and the flip runbook. A regression in the PTY path
+is still reverted (see
 [Reverting the granite cutover](#reverting-the-granite-cutover)).
 
 ## Why

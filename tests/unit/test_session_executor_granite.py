@@ -124,7 +124,9 @@ class TestExecutorGraniteWiring:
         bridge_called = []
 
         async def _fake_run(self, user_message, working_dir):
-            bridge_called.append((user_message, working_dir))
+            # Capture the role_transports the adapter was constructed with
+            # (plan #1842). The default (no config) must be both-PTY.
+            bridge_called.append((user_message, working_dir, dict(self._role_transports)))
             return ""
 
         # The pool singleton needs to exist; build a fresh one and
@@ -139,19 +141,22 @@ class TestExecutorGraniteWiring:
 
         assert bridge_called, "BridgeAdapter.run was not called"
         # The user message is the constructed harness turn input.
-        user_message, working_dir = bridge_called[0]
+        user_message, working_dir, role_transports = bridge_called[0]
         assert "hello granite" in user_message
         # working_dir is subject to worktree validation (falls back to
         # project root when outside the allowed root), so we only assert
         # it's a non-empty string — the routing is what matters.
         assert isinstance(working_dir, str) and working_dir
+        # Plan #1842: the default (no transport config) resolves to both-PTY.
+        assert role_transports == {"pm": "pty", "dev": "pty"}
 
     @pytest.mark.asyncio
-    async def test_executor_does_not_call_get_response_via_harness(self, redis_test_db):
-        """The harness path is no longer reached. The all-or-nothing
-        cutover means there is no fallback flag — if BridgeAdapter.run
-        is unreachable (e.g. import error), the executor should fail
-        loud, not silently route to the harness."""
+    async def test_executor_does_not_call_harness_under_default_pty_config(self, redis_test_db):
+        """Under the DEFAULT (both-PTY) config the executor never reaches the
+        harness (plan #1842). The harness is now reachable ONLY through the
+        headless role driver, which the default config does not select — the
+        executor routes to ``BridgeAdapter.run`` with both roles on PTY, so
+        ``get_response_via_harness`` must not be called from this path."""
         session = _make_session(working_dir="/tmp")
 
         # Spy on the harness function. If it's called, the test fails.
@@ -171,9 +176,47 @@ class TestExecutorGraniteWiring:
             await _execute_agent_session(session)
 
         assert not harness_called, (
-            "get_response_via_harness was called — the harness path must "
-            "not be reachable from _execute_agent_session after the cutover"
+            "get_response_via_harness was called under default both-PTY config — "
+            "the harness path is only reachable via a headless-configured role"
         )
+
+    @pytest.mark.asyncio
+    async def test_headless_config_persists_and_routes(self, redis_test_db):
+        """Counterpart (plan #1842): a session whose project config selects a
+        headless role persists ``role_transports`` and routes it into
+        ``BridgeAdapter`` — the headless leg is selected (and thus the harness
+        becomes reachable via the HeadlessRoleDriver; the driver→harness call
+        is proven in test_headless_role_driver.py)."""
+        session = _make_session(working_dir="/tmp")
+        # Inject a project config selecting headless for the Dev role.
+        session.project_config = {
+            "_key": "test",
+            "working_directory": "/tmp",
+            "name": "test",
+            "transport": {"pm": "pty", "dev": "headless"},
+        }
+        session.save(update_fields=["project_config"])
+
+        captured = []
+
+        async def _fake_run(self, user_message, working_dir):
+            captured.append(dict(self._role_transports))
+            return ""
+
+        pool = await _make_initialized_pool(size=1)
+        with (
+            patch("agent.granite_container.pty_pool._pty_pool", pool),
+            patch.object(BridgeAdapter, "run", _fake_run),
+        ):
+            await _execute_agent_session(session)
+
+        assert captured, "BridgeAdapter.run was not called"
+        assert captured[0] == {"pm": "pty", "dev": "headless"}
+        # The resolved map is persisted on the AgentSession for immutability
+        # (Race 2) and dashboard/analytics visibility.
+        session.refresh_from_db() if hasattr(session, "refresh_from_db") else None
+        reloaded = AgentSession.query.filter(session_id=session.session_id).all()[0]
+        assert reloaded.role_transports == {"pm": "pty", "dev": "headless"}
 
 
 class TestExecutorGranitePathErrors:

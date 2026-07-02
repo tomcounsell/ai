@@ -54,6 +54,21 @@ def _sum_cost_and_turns(sessions: list) -> tuple[float, int]:
     return (sum_cost, sum_turns)
 
 
+def _sum_metered_cost(sessions: list) -> float:
+    """Sum the disjoint metered_cost_usd across AgentSession rows (plan #1842).
+
+    Per-record errors (non-numeric, missing attr on pre-feature rows) are
+    skipped via getattr defaults.
+    """
+    total = 0.0
+    for s in sessions:
+        try:
+            total += float(getattr(s, "metered_cost_usd", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 def get_analytics_summary() -> dict[str, Any]:
     """Get analytics summary for dashboard.json.
 
@@ -79,6 +94,8 @@ def get_analytics_summary() -> dict[str, Any]:
         week_sessions = _query_completed_sessions_in_window(days=7)
         cost_today, turns_today = _sum_cost_and_turns(today_sessions)
         cost_7d, turns_7d = _sum_cost_and_turns(week_sessions)
+        metered_cost_today = _sum_metered_cost(today_sessions)
+        metered_cost_7d = _sum_metered_cost(week_sessions)
 
         # Average turns per completed session (avoid division by zero)
         turns_avg_today = (
@@ -98,6 +115,8 @@ def get_analytics_summary() -> dict[str, Any]:
             "sessions_completed_7d": sessions_completed_7d,
             "cost_today_usd": cost_today,
             "cost_7d_usd": cost_7d,
+            "metered_cost_today_usd": metered_cost_today,
+            "metered_cost_7d_usd": metered_cost_7d,
             "turns_today": float(turns_today),
             "turns_7d": float(turns_7d),
             "turns_avg_today": turns_avg_today,
@@ -116,6 +135,8 @@ def get_analytics_summary() -> dict[str, Any]:
             "sessions_completed_7d": 0,
             "cost_today_usd": 0.0,
             "cost_7d_usd": 0.0,
+            "metered_cost_today_usd": 0.0,
+            "metered_cost_7d_usd": 0.0,
             "turns_today": 0.0,
             "turns_7d": 0.0,
             "turns_avg_today": 0.0,

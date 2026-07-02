@@ -161,5 +161,99 @@ class TestOllamaSessionReachesCleanExit(unittest.TestCase):
         self.assertTrue(meta.model)
 
 
+@unittest.skipUnless(_OLLAMA_REACHABLE, _SKIP_REASON)
+class TestHeadlessTurnEndProbe(unittest.TestCase):
+    """Plan #1842 (per-role-transport-hedge) Task 0 HARD GATE — Probe A.
+
+    A single-shot ``claude -p`` invocation runs exactly one turn and exits.
+    This test empirically determines whether the #1688 ``Stop``/``TURN_END``
+    hook envelope lands in the per-session NDJSON edge file BEFORE the
+    subprocess exits — the fact that selects the headless leg's turn-end
+    authority (envelope-exclusive vs. envelope-preferred/result-fallback) for
+    the ``HeadlessRoleDriver`` built in plan #1842 Task 2.
+
+    This test does not assert a particular outcome either way (a `-p`
+    process legitimately might flush post-exit) — it asserts the envelope
+    lands *at all* (proving the hook fires under `-p`, the harder failure
+    mode) and records the pre/post-exit timing as a diagnostic for humans
+    reading the test output / plan notes.
+    """
+
+    def test_stop_hook_fires_under_print_mode(self) -> None:
+        from tests.granite_faults.headless_hook_probe import run_headless_turn_end_probe
+
+        result = run_headless_turn_end_probe()
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"headless turn-end probe subprocess exited non-zero: "
+            f"stderr_tail={result.stderr_tail!r} result={result}",
+        )
+        self.assertTrue(
+            result.turn_end_landed,
+            "no Stop/TURN_END envelope landed in the edge file at all — the "
+            f"hook does not fire under `claude -p`. result={result}",
+        )
+        self.assertEqual(result.turn_end_payload.get("session_id"), result.session_id)
+        # Diagnostic-only: prints the empirical pre/post-exit finding into the
+        # test log for the Task 0 build note (see per-role-transport-hedge.md).
+        print(
+            f"\n[Task 0 Probe A] envelope_landed_pre_exit={result.envelope_landed_pre_exit} "
+            f"elapsed_s={result.elapsed_s} model={result.model}"
+        )
+
+
+@unittest.skipUnless(_OLLAMA_REACHABLE, _SKIP_REASON)
+class TestPrimeResolutionProbe(unittest.TestCase):
+    """Plan #1842 (per-role-transport-hedge) Task 0 HARD GATE — Probe B.
+
+    Verifies whether ``/granite:prime-pm-role``, passed as the first prompt
+    to ``claude -p``, actually resolves and primes the PM persona (as it does
+    in the interactive TUI) or is treated as a literal string with no
+    slash-command expansion. The RESOLUTION oracle is the PM persona's own
+    routing-token convention (``[/dev]``/``[/user]``/``[/complete]``)
+    appearing in the reply at all — an unprimed model has no reason to emit
+    it. The stricter production contract (token alone on its own line) is
+    reported as a separate substrate-fidelity diagnostic, not asserted: the
+    weak ollama substrate was observed (Task 0, 2026-07-02) to emit
+    ``[/user] Sounds good — talk soon.`` on one line — persona loaded, line
+    discipline imperfect.
+
+    First verified: claude 2.1.198 / qwen3.6:35b-a3b-coding-nvfp4 (2026-07-02).
+    """
+
+    def test_prime_pm_role_resolves_under_print_mode(self) -> None:
+        from tests.granite_faults.headless_hook_probe import run_prime_resolution_probe
+
+        result = run_prime_resolution_probe(role="pm")
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"prime resolution probe subprocess exited non-zero: "
+            f"stderr_tail={result.stderr_tail!r} result={result}",
+        )
+        self.assertTrue(
+            result.result_text,
+            f"headless turn produced no result text at all. result={result}",
+        )
+        # Diagnostic-only: prints the empirical resolution finding into the
+        # test log for the Task 0 build note.
+        print(
+            f"\n[Task 0 Probe B] routing_token_present={result.routing_token_present} "
+            f"strict_token_line={result.strict_token_line} "
+            f"elapsed_s={result.elapsed_s} model={result.model} "
+            f"result_text={result.result_text!r}"
+        )
+        self.assertTrue(
+            result.routing_token_present,
+            "the PM persona's routing-token convention "
+            "([/dev]/[/user]/[/complete]) did not surface in the reply to a "
+            "trivial-ack task — /granite:prime-pm-role does NOT resolve "
+            f"under `claude -p`. result={result}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
