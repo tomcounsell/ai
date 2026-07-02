@@ -64,6 +64,7 @@ import json
 import logging
 import os
 import signal
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -179,6 +180,20 @@ class PTYPool:
         self._slots: list[_Slot] = [_Slot(idx=i) for i in range(pool_size)]
         # Track spawned pids for orphan kill at worker startup.
         self._spawned_pids: set[int] = set()
+        # Guards every `_spawned_pids` mutation and the `_persist_pids`
+        # snapshot. The crash-resume callbacks (`register_pid`/
+        # `unregister_pid`) fire from the container's session thread
+        # (a `asyncio.to_thread` worker), while the pool's own spawn
+        # sites (`_spawn_slot`, `_spawn_session_pair`) mutate the same
+        # set from the pool's event-loop thread. Without this lock, a
+        # `.add()`/`.discard()` racing `_persist_pids`'s `sorted(...)`
+        # iteration raises an uncaught `RuntimeError: Set changed size
+        # during iteration`. NON-REENTRANT: `_persist_pids()` must
+        # NEVER be called while `_pids_lock` is held by the same
+        # thread — every call site guards only the bare mutation, then
+        # calls `_persist_pids()` as a separate statement after the
+        # `with` block closes.
+        self._pids_lock = threading.Lock()
         self._pid_registry_path = pid_registry_path
         self._respawn_tasks: list[asyncio.Task] = []
         self._initialized = False
@@ -203,7 +218,38 @@ class PTYPool:
         return set(self._spawned_pids)
 
     def clear_spawned_pids(self) -> None:
-        self._spawned_pids.clear()
+        with self._pids_lock:
+            self._spawned_pids.clear()
+        self._persist_pids()
+
+    def register_pid(self, pid: int) -> None:
+        """Add `pid` to the tracked/persisted spawned-pid set.
+
+        This is the crash-resume caller's entry point (wired by
+        `BridgeAdapter` as `Container(on_pty_spawn=pool.register_pid)`):
+        a crash-resumed PTY spawns OUTSIDE the pool's own spawn paths,
+        so it must register through this method rather than writing
+        `data/granite_pty_pids.json` directly — routing through the
+        pool avoids a second writer racing `_persist_pids`. Plain sync
+        and safe to call from any thread (guarded by `_pids_lock`); the
+        crash-resume callback fires from the container's session
+        thread, not the pool's event-loop thread.
+        """
+        with self._pids_lock:
+            self._spawned_pids.add(int(pid))
+        self._persist_pids()
+
+    def unregister_pid(self, pid: int) -> None:
+        """Discard `pid` from the tracked/persisted spawned-pid set.
+
+        Counterpart to `register_pid`, wired as
+        `Container(on_pty_despawn=pool.unregister_pid)`. Called by
+        crash-resume to drop the dead PID it replaced once the dead
+        PTY's process is confirmed closed. Plain sync and
+        cross-thread-safe via `_pids_lock` — see `register_pid`.
+        """
+        with self._pids_lock:
+            self._spawned_pids.discard(int(pid))
         self._persist_pids()
 
     # -- Lifecycle --------------------------------------------------------
@@ -258,18 +304,40 @@ class PTYPool:
             return
         try:
             data = json.loads(path.read_text())
-            for pid in data.get("pids", []):
-                self._spawned_pids.add(int(pid))
+            with self._pids_lock:
+                for pid in data.get("pids", []):
+                    self._spawned_pids.add(int(pid))
         except (OSError, ValueError, json.JSONDecodeError) as e:
             logger.warning("[pty-pool] could not read pid registry %s: %s", path, e)
 
     def _persist_pids(self) -> None:
-        """Write the spawned-pid set to the registry file. Best-effort."""
+        """Write the spawned-pid set to the registry file. Best-effort.
+
+        Takes the `sorted(...)` snapshot INSIDE `_pids_lock` so no other
+        thread can mutate `_spawned_pids` mid-iteration (the source of the
+        `RuntimeError: Set changed size during iteration` this lock
+        exists to prevent), then writes the JSON from that snapshot
+        OUTSIDE the lock so the write's I/O latency doesn't hold the
+        lock. `_pids_lock` is non-reentrant, and this method is itself
+        called by `register_pid`/`unregister_pid` and the pool's own
+        add-then-persist sites AFTER their `with self._pids_lock:` block
+        has closed — never call `_persist_pids()` while holding
+        `_pids_lock`, or the snapshot acquire below self-deadlocks.
+        """
+        with self._pids_lock:
+            snapshot = sorted(self._spawned_pids)
         path = Path(self._pid_registry_path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"pids": sorted(self._spawned_pids)}))
+            path.write_text(json.dumps({"pids": snapshot}))
         except OSError as e:
+            # Kept narrow at OSError (not broadened to Exception): the
+            # snapshot above is taken under `_pids_lock`, so no thread can
+            # mutate `_spawned_pids` mid-iteration and the
+            # `RuntimeError: Set changed size during iteration` this lock
+            # exists to prevent cannot reach this except clause. Only
+            # genuine OS/file errors remain here; swallowing anything
+            # wider would silently hide future bugs.
             logger.warning("[pty-pool] could not persist pid registry %s: %s", path, e)
 
     @staticmethod
@@ -517,7 +585,8 @@ class PTYPool:
                     except Exception:
                         pass
                     if old_pid is not None:
-                        self._spawned_pids.discard(old_pid)
+                        with self._pids_lock:
+                            self._spawned_pids.discard(old_pid)
                 slot.pty_pair = None
             cwd = spec.cwd if spec.cwd is not None else self._cwd
             # Per-role transport (plan #1842): spawn a PTYDriver only for roles
@@ -547,12 +616,13 @@ class PTYPool:
                 )
                 dev.spawn()
             slot.pty_pair = (pm, dev)
-            for pty in (pm, dev):
-                if pty is None:
-                    continue
-                pid = getattr(getattr(pty, "_child", None), "pid", None)
-                if pid is not None:
-                    self._spawned_pids.add(pid)
+            with self._pids_lock:
+                for pty in (pm, dev):
+                    if pty is None:
+                        continue
+                    pid = getattr(getattr(pty, "_child", None), "pid", None)
+                    if pid is not None:
+                        self._spawned_pids.add(pid)
             self._persist_pids()
         logger.info(
             "[pty-pool] slot %d: spawned per-session pair (cwd=%s, env_keys=%d, pm_model=%s)",
@@ -623,10 +693,11 @@ class PTYPool:
                 # Record pids for orphan kill.
                 pm_pid = pm._child.pid if pm._child is not None else None
                 dev_pid = dev._child.pid if dev._child is not None else None
-                if pm_pid is not None:
-                    self._spawned_pids.add(pm_pid)
-                if dev_pid is not None:
-                    self._spawned_pids.add(dev_pid)
+                with self._pids_lock:
+                    if pm_pid is not None:
+                        self._spawned_pids.add(pm_pid)
+                    if dev_pid is not None:
+                        self._spawned_pids.add(dev_pid)
                 self._persist_pids()
             slot.state = "idle"
             slot.event.set()

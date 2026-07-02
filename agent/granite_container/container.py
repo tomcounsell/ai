@@ -748,6 +748,8 @@ class Container:
         session_env: dict[str, str] | None = None,
         agent_session_id: str | None = None,
         headless_harness_fn: Callable[..., Any] | None = None,
+        on_pty_spawn: Callable[[int], None] | None = None,
+        on_pty_despawn: Callable[[int], None] | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -774,6 +776,16 @@ class Container:
         # Test seam: inject a fake harness_fn so the headless dispatch can be
         # driven end-to-end through the container without a real subprocess.
         self._headless_harness_fn = headless_harness_fn
+        # Crash-resume PID registration seam (plan #1851). `_resume_crashed_pty`
+        # spawns a fresh PTYDriver OUTSIDE the pool's own spawn paths, so its
+        # new OS PID is invisible to the worker-startup orphan sweep unless
+        # something registers it. `BridgeAdapter` wires these to
+        # `pool.register_pid`/`pool.unregister_pid` (the established
+        # injection seam, mirroring `on_turn`/`on_pty_read`) — Container stays
+        # pool-agnostic so the self-spawned/test/CLI path (no PTYPool) is
+        # unaffected; both default to None there.
+        self._on_pty_spawn = on_pty_spawn
+        self._on_pty_despawn = on_pty_despawn
         # Constructed once on the first headless Dev turn and reused across turns
         # so the captured claude_session_id enables ``--resume`` (plan #1842 B3).
         self._dev_role_driver: HeadlessRoleDriver | None = None
@@ -1467,10 +1479,25 @@ class Container:
         # recovery (#1815/#1823/#1728) can see the container already owns this
         # EOF's --resume and no-op rather than issue a competing resume/kill.
         self._crash_resume_in_flight = True
+        # PID-registration bookkeeping (plan #1851). `dead_pid` and
+        # `closed_ok` are initialized here — before `dead_pty.close()` —
+        # so both are in scope for the outer `finally` below, which is
+        # the ONLY placement that fires on every exit path (success,
+        # spawn-fail `return None`, and close-ok/write-fail `return
+        # None`). Dropping the dead PID only after a successful swap
+        # would strand a confirmed-dead PID in the registry forever on
+        # the write-fail path.
+        dead_pid = getattr(getattr(dead_pty, "_child", None), "pid", None)
+        closed_ok = False
         try:
             try:
                 dead_pty.close(force=True)
+                closed_ok = True
             except Exception:
+                # Close failed/swallowed: the old process may still be
+                # alive. Leave `closed_ok` False so the outer `finally`
+                # KEEPS `dead_pid` registered — the sweep must still be
+                # able to reap it.
                 pass
             try:
                 new_pty = PTYDriver(
@@ -1482,6 +1509,22 @@ class Container:
                     resume_uuid=resume_uuid,
                 )
                 new_pty.spawn()
+                # Register the new PID immediately after `spawn()` returns
+                # and BEFORE `write()`. The OS process is already live at
+                # this point; `write()` below can raise, and registering
+                # only after a successful write would leak a live,
+                # unregistered `claude` process on the spawn-ok/write-fail
+                # path (this exact path returns `None` two lines down).
+                if self._on_pty_spawn is not None:
+                    new_pid = getattr(getattr(new_pty, "_child", None), "pid", None)
+                    if new_pid is not None:
+                        try:
+                            self._on_pty_spawn(new_pid)
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_pty_spawn during crash-resume raised: %s",
+                                e,
+                            )
                 new_pty.write(CRASH_RESUME_CONTINUE)
             except Exception as e:
                 logger.error("[granite-container] %s crash-resume spawn failed: %s", role, e)
@@ -1511,6 +1554,19 @@ class Container:
             # Cleared after the re-spawn completes (success or failure); the
             # window is intentionally narrow — just the re-spawn itself.
             self._crash_resume_in_flight = False
+            # Drop the dead PID here (not after the successful swap) so
+            # this fires on EVERY exit path — including the close-ok/
+            # write-fail `return None` above. Gated on `closed_ok`: a
+            # swallowed close failure means the old process may still be
+            # alive, so it must stay registered for the sweep to reap it.
+            if closed_ok and dead_pid is not None and self._on_pty_despawn is not None:
+                try:
+                    self._on_pty_despawn(dead_pid)
+                except Exception as e:
+                    logger.warning(
+                        "[granite-container] on_pty_despawn during crash-resume raised: %s",
+                        e,
+                    )
 
     def _needs_human_message(self, edge: HookEdge) -> str:
         """Build the human-facing text for a needs-human edge (best effort).
