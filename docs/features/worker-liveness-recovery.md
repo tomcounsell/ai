@@ -225,14 +225,19 @@ large values (e.g., `86400`) to effectively disable the timeouts without removin
   session transitions to failed/re-queued.
 - Force-recycle events: logged at WARNING level from `_force_recycle_slot`.
 
-## Deferred Work
+## Status Quo
 
-This landing covers fix #1 (dead-man's-switch) and fix #4 (bounded PTY waits).
+This landing covered fix #1 (dead-man's-switch) and fix #4 (bounded PTY waits).
+Both deferred follow-ups have since shipped:
 
-- Issue #1820: fix #2 (lease semaphore to decouple global slot holds from PTY wait
-  duration) + fix #3 (progress-deadline cancel scope inside the executor).
-- Issue #1821: fix #5 (out-of-domain session recovery) + fix #6 (per-tool budget
-  backstop).
+- Issue #1820 — fix #2 (lease semaphore to decouple global slot holds from PTY
+  wait duration) + fix #3 (progress-deadline cancel scope inside the
+  executor). See [Slot-Lease Ownership](slot-lease-ownership.md).
+- Issue #1821 — fix #5 (out-of-domain session recovery) + fix #6 (per-tool
+  budget backstop). The beacon this doc publishes is now also read
+  cross-process by a bridge-domain watchdog, which drives restart-free slot
+  reclamation without ever touching the worker's in-memory state or sending
+  it a kill signal. See [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md).
 
 ## See Also
 
@@ -242,6 +247,11 @@ This landing covers fix #1 (dead-man's-switch) and fix #4 (bounded PTY waits).
 - [Bridge Self-Healing](bridge-self-healing.md) — worker watchdog and escalation ladder
 - [Granite PTY Container: Production Path](granite-pty-production.md) — PTY pool design
   and session execution path
+- [Slot-Lease Ownership](slot-lease-ownership.md) — the lease registry and reap
+  pass built on top of this dead-man's-switch (#1820)
+- [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md) —
+  the bridge-domain reclaim trigger built on top of this beacon, plus the
+  synchronous per-tool budget (#1821)
 - `agent/session_state.py` — beacon globals and accessors
 - `worker/__main__.py` — tick task, watchdog thread, and dead-man's-switch constants
 - `agent/granite_container/pty_pool.py` — bounded awaits and force-recycle
