@@ -87,22 +87,20 @@ def pick_ollama_model(names: list[str] | None = None) -> str | None:
     Claude Code always sends tool definitions, so the substrate model MUST
     support tools (``gemma*`` chat models return HTTP 400
     "does not support tools" and are unusable here — observed in Task 0).
-    We prefer, in order: a qwen coding tag, gpt-oss, then any non-embedding
-    tag. Returns ``None`` when nothing usable is served.
+
+    Pinned to ``qwen`` only. Qwen coding tags are the sole ollama models that
+    back Claude Code correctly today; gpt-oss and granite were dropped from the
+    fallback chain because a subtly-wrong backend produces misleading E2E
+    results — a clean self-skip (return ``None``) is preferable to running the
+    canary against an inappropriate model. Revisit when the new ``ornith`` model
+    ships: it is expected to be the next appropriate backend and should be added
+    to the preference list here once available.
     """
     names = _list_ollama_models() if names is None else names
     if not names:
         return None
-    # gemma/embedding tags are known-unusable for the tool-carrying claude
-    # substrate; drop them before ranking.
-    usable = [n for n in names if not n.startswith(("gemma", "nomic"))]
-    if not usable:
-        return None
-    for prefix in ("qwen", "gpt-oss", "granite"):
-        pick = next((n for n in usable if n.startswith(prefix)), None)
-        if pick:
-            return pick
-    return usable[0]
+    # Only qwen is appropriate for backing Claude Code until ``ornith`` lands.
+    return next((n for n in names if n.startswith("qwen")), None)
 
 
 def ollama_substrate_reachable(model: str | None = None, probe_timeout_s: float = 240.0) -> bool:
