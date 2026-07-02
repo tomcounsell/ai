@@ -385,7 +385,19 @@ def create_app() -> FastAPI:
             return {"status": "error", "logged_in": False, "auth_method": None}
 
     def _get_email_health() -> dict:
-        """Check email bridge health: process liveness first, then Redis heartbeat age."""
+        """Check email bridge health: process liveness first, then Redis heartbeat age.
+
+        Also surfaces two operator alert keys set by the IMAP poll loop
+        (issue #1817): ``email:auth_failed`` (A3 — a permanent IMAP auth
+        failure, e.g. a revoked app password) and ``email:resolver_unavailable``
+        (A2 — the customer resolver has failed persistently, e.g. an expired
+        OAuth token). Either alert, if armed, downgrades status to "error"
+        regardless of heartbeat freshness, since a fresh poll timestamp can
+        coexist with every inbound customer email failing to resolve. Reuses
+        this existing health field/surface rather than inventing a new one —
+        both keys are cleared by the bridge on the first successful poll/resolve
+        after the outage.
+        """
         import subprocess
 
         proc_running = bool(
@@ -395,6 +407,9 @@ def create_app() -> FastAPI:
             ).stdout.strip()
         )
 
+        alert: str | None = None
+        alert_detail: str | None = None
+        age_s: int | None = None
         try:
             import os
 
@@ -404,22 +419,38 @@ def create_app() -> FastAPI:
                 os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
                 decode_responses=True,
             )
+            auth_failed = r.get("email:auth_failed")
+            resolver_unavailable = r.get("email:resolver_unavailable")
+            if auth_failed:
+                alert = "auth_failed"
+                alert_detail = auth_failed
+            elif resolver_unavailable:
+                alert = "resolver_unavailable"
+                alert_detail = resolver_unavailable
+
             ts = r.get("email:last_poll_ts")
             if ts:
                 age_s = round(time.time() - float(ts))
-                if not proc_running:
-                    return {"status": "error", "age_s": age_s}
-                if age_s < 120:
-                    return {"status": "ok", "age_s": age_s}
-                elif age_s < 300:
-                    return {"status": "running", "age_s": age_s}
-                else:
-                    return {"status": "error", "age_s": age_s}
         except Exception:
             pass
+
+        # An armed alert always downgrades to "error", independent of ts/proc
+        # freshness — a fresh poll timestamp can coexist with every resolve
+        # call failing, and the alert itself is the loud signal here.
+        if alert:
+            return {"status": "error", "age_s": age_s, "alert": alert, "alert_detail": alert_detail}
+        if age_s is not None:
+            if not proc_running:
+                return {"status": "error", "age_s": age_s, "alert": None, "alert_detail": None}
+            if age_s < 120:
+                return {"status": "ok", "age_s": age_s, "alert": None, "alert_detail": None}
+            elif age_s < 300:
+                return {"status": "running", "age_s": age_s, "alert": None, "alert_detail": None}
+            else:
+                return {"status": "error", "age_s": age_s, "alert": None, "alert_detail": None}
         if not proc_running:
-            return {"status": "error", "age_s": None}
-        return {"status": "running", "age_s": None}
+            return {"status": "error", "age_s": None, "alert": None, "alert_detail": None}
+        return {"status": "running", "age_s": None, "alert": None, "alert_detail": None}
 
     def _session_to_json(s) -> dict:
         """Serialize a PipelineProgress to JSON dict for the dashboard API."""
@@ -551,6 +582,8 @@ def create_app() -> FastAPI:
                     "worker_last_seen_s": worker["age_s"],
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
+                    "email_alert": email.get("alert"),
+                    "email_alert_detail": email.get("alert_detail"),
                     "claude_auth": claude_auth["status"],
                     "claude_auth_logged_in": claude_auth["logged_in"],
                     "claude_auth_method": claude_auth["auth_method"],
@@ -584,6 +617,8 @@ def create_app() -> FastAPI:
                 "worker_last_seen_s": worker["age_s"],
                 "email": email["status"],
                 "email_last_seen_s": email["age_s"],
+                "email_alert": email.get("alert"),
+                "email_alert_detail": email.get("alert_detail"),
                 "claude_auth": claude_auth["status"],
                 "claude_auth_logged_in": claude_auth["logged_in"],
                 "claude_auth_method": claude_auth["auth_method"],

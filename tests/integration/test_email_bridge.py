@@ -265,6 +265,152 @@ class TestProcessInboundEmail:
 
 
 # ---------------------------------------------------------------------------
+# Tests: resolver-unavailable vs. definitively-not-a-customer (issue #1817 A2)
+# ---------------------------------------------------------------------------
+
+
+def _resolver_project_config(key: str) -> dict:
+    """A project config with a customer_resolver declared (any resolver type;
+    resolve_customer itself is mocked in these tests)."""
+    cfg = _project_config(key)
+    cfg["customer_resolver"] = {"type": "subprocess", "command": ["echo", "unused"]}
+    return cfg
+
+
+class TestResolverUnavailable:
+    """A ResolverUnavailable from resolve_customer() must never be treated as
+    "not a customer" — the message is left unseen (un-marked) so the next
+    IMAP poll retries it, and a PERSISTENTLY unavailable resolver arms the
+    email:resolver_unavailable operator alert (cleared on the first
+    successful resolve — see test_customer_resolver.py for that half)."""
+
+    @pytest.mark.asyncio
+    async def test_resolver_unavailable_leaves_message_unseen_and_skips_enqueue(self, caplog):
+        import logging
+
+        import bridge.routing as routing
+        from bridge.email_bridge import _process_inbound_email
+        from bridge.routing import ResolverUnavailable
+
+        project_key = "cs-unavailable"
+        project = _resolver_project_config(project_key)
+        config = _projects_json(project_key)
+        config["projects"][project_key]["customer_resolver"] = project["customer_resolver"]
+
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        test_r = _test_redis()
+        try:
+            routing.EMAIL_TO_PROJECT["alice@example.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+
+            mock_enqueue = AsyncMock()
+            mock_unmark = AsyncMock()
+            with (
+                patch("agent.agent_session_queue.enqueue_agent_session", mock_enqueue),
+                patch("bridge.email_bridge._get_redis", return_value=test_r),
+                patch(
+                    "bridge.routing.resolve_customer",
+                    AsyncMock(side_effect=ResolverUnavailable("token expired")),
+                ),
+                patch("bridge.email_bridge._unmark_seen", mock_unmark),
+                caplog.at_level(logging.WARNING),
+            ):
+                await _process_inbound_email(
+                    _parsed_email(),
+                    config,
+                    imap_uid=b"77",
+                    imap_config={
+                        "host": "imap.example.com",
+                        "port": 993,
+                        "user": "t@example.com",
+                        "password": "secret",
+                        "ssl": True,
+                    },
+                )
+        finally:
+            test_r.close()
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+        # NOT a "not a customer" drop — never enqueued, but never \Seen-dropped either.
+        mock_enqueue.assert_not_called()
+        mock_unmark.assert_called_once()
+        assert "Resolver unavailable" in caplog.text
+        assert "Leaving message unseen for retry" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_resolver_unavailable_arms_alert_once_threshold_crossed(self):
+        import bridge.routing as routing
+        from bridge.email_bridge import (
+            EMAIL_RESOLVER_ALERT_AFTER,
+            REDIS_RESOLVER_UNAVAILABLE_KEY,
+            _process_inbound_email,
+        )
+        from bridge.routing import ResolverUnavailable
+
+        project_key = "cs-persistent"
+        project = _resolver_project_config(project_key)
+        config = _projects_json(project_key)
+        config["projects"][project_key]["customer_resolver"] = project["customer_resolver"]
+
+        original_email_map = routing.EMAIL_TO_PROJECT.copy()
+        original_active = routing.ACTIVE_PROJECTS[:]
+        test_r = _test_redis()
+        try:
+            routing.EMAIL_TO_PROJECT["bob@example.com"] = project
+            if project_key not in routing.ACTIVE_PROJECTS:
+                routing.ACTIVE_PROJECTS.append(project_key)
+            test_r.delete(REDIS_RESOLVER_UNAVAILABLE_KEY)
+            test_r.delete(f"resolver:failures:{project_key}")
+
+            with (
+                patch("agent.agent_session_queue.enqueue_agent_session", AsyncMock()),
+                patch("bridge.email_bridge._get_redis", return_value=test_r),
+                patch("bridge.routing._get_redis", return_value=test_r),
+                patch(
+                    "bridge.routing.resolve_customer",
+                    AsyncMock(side_effect=ResolverUnavailable("token expired")),
+                ),
+                patch("bridge.email_bridge._unmark_seen", AsyncMock()),
+            ):
+                # Below threshold: resolve_customer itself is mocked, so the
+                # real _on_resolver_failure() counter increment never runs —
+                # drive the counter directly to isolate the arming gate.
+                test_r.set(f"resolver:failures:{project_key}", "1")
+                await _process_inbound_email(
+                    _parsed_email(from_addr="bob@example.com", message_id="<below@x>"),
+                    config,
+                    imap_uid=b"1",
+                    imap_config={"host": "h", "port": 993, "user": "u", "password": "p"},
+                )
+                assert test_r.get(REDIS_RESOLVER_UNAVAILABLE_KEY) is None, (
+                    "Alert must not arm below EMAIL_RESOLVER_ALERT_AFTER"
+                )
+
+                # At threshold: arms, value carries the triggering message id.
+                test_r.set(f"resolver:failures:{project_key}", str(EMAIL_RESOLVER_ALERT_AFTER))
+                await _process_inbound_email(
+                    _parsed_email(from_addr="bob@example.com", message_id="<at-threshold@x>"),
+                    config,
+                    imap_uid=b"2",
+                    imap_config={"host": "h", "port": 993, "user": "u", "password": "p"},
+                )
+                armed = test_r.get(REDIS_RESOLVER_UNAVAILABLE_KEY)
+                assert armed is not None
+                assert "<at-threshold@x>" in armed
+        finally:
+            test_r.delete(REDIS_RESOLVER_UNAVAILABLE_KEY)
+            test_r.delete(f"resolver:failures:{project_key}")
+            test_r.close()
+            routing.EMAIL_TO_PROJECT.clear()
+            routing.EMAIL_TO_PROJECT.update(original_email_map)
+            routing.ACTIVE_PROJECTS[:] = original_active
+
+
+# ---------------------------------------------------------------------------
 # Tests: domain-routed inbound email → outbound SMTP reply
 # ---------------------------------------------------------------------------
 
@@ -752,6 +898,117 @@ class TestHealthTimestamp:
         # Cleanup
         test_r.delete(REDIS_LAST_POLL_KEY)
         test_r.close()
+
+
+# ---------------------------------------------------------------------------
+# Tests: permanent IMAP auth failure classification + alert (issue #1817 A3)
+# ---------------------------------------------------------------------------
+
+
+class TestPermanentAuthFailureAlert:
+    """A permanent IMAP4.error (matching a known auth-failure signature) arms
+    email:auth_failed + logger.critical and stops doubling the backoff; a
+    transient IMAP4.error keeps the existing exponential backoff unchanged."""
+
+    @pytest.mark.asyncio
+    async def test_permanent_auth_failure_arms_alert_and_freezes_backoff(self, caplog):
+        import imaplib
+        import logging
+
+        from bridge.email_bridge import IMAP_POLL_INTERVAL, REDIS_AUTH_FAILED_KEY, _email_inbox_loop
+
+        test_r = _test_redis()
+        test_r.delete(REDIS_AUTH_FAILED_KEY)
+
+        imap_config = {
+            "host": "imap.example.com",
+            "port": 993,
+            "user": "test@example.com",
+            "password": "secret",
+            "ssl": True,
+        }
+        seen_backoffs = []
+
+        async def _sleep_capture(seconds):
+            seen_backoffs.append(seconds)
+            if len(seen_backoffs) >= 3:
+                raise _BreakLoopError("stop")
+
+        try:
+            with (
+                patch(
+                    "bridge.email_bridge._poll_imap",
+                    new_callable=AsyncMock,
+                    side_effect=imaplib.IMAP4.error(
+                        "b'AUTHENTICATIONFAILED' Invalid credentials (Failure)"
+                    ),
+                ),
+                patch("bridge.email_bridge._get_redis", return_value=test_r),
+                patch("bridge.email_bridge.asyncio.sleep", side_effect=_sleep_capture),
+                caplog.at_level(logging.CRITICAL),
+            ):
+                await _email_inbox_loop(imap_config, config={})
+        except _BreakLoopError:
+            pass
+
+        try:
+            armed = test_r.get(REDIS_AUTH_FAILED_KEY)
+            assert armed is not None
+            assert "AUTHENTICATIONFAILED" in armed
+            assert "Permanent IMAP auth failure" in caplog.text
+            # Backoff never escalates past the initial interval (no doubling).
+            assert seen_backoffs, "Expected at least one sleep() call"
+            assert all(b == IMAP_POLL_INTERVAL for b in seen_backoffs)
+        finally:
+            test_r.delete(REDIS_AUTH_FAILED_KEY)
+            test_r.close()
+
+    @pytest.mark.asyncio
+    async def test_transient_imap_error_keeps_exponential_backoff_and_no_alert(self):
+        import imaplib
+
+        from bridge.email_bridge import IMAP_POLL_INTERVAL, REDIS_AUTH_FAILED_KEY, _email_inbox_loop
+
+        test_r = _test_redis()
+        test_r.delete(REDIS_AUTH_FAILED_KEY)
+
+        imap_config = {
+            "host": "imap.example.com",
+            "port": 993,
+            "user": "test@example.com",
+            "password": "secret",
+            "ssl": True,
+        }
+        seen_backoffs = []
+
+        async def _sleep_capture(seconds):
+            seen_backoffs.append(seconds)
+            if len(seen_backoffs) >= 2:
+                raise _BreakLoopError("stop")
+
+        try:
+            with (
+                patch(
+                    "bridge.email_bridge._poll_imap",
+                    new_callable=AsyncMock,
+                    side_effect=imaplib.IMAP4.error("Temporary failure, please try again"),
+                ),
+                patch("bridge.email_bridge._get_redis", return_value=test_r),
+                patch("bridge.email_bridge.asyncio.sleep", side_effect=_sleep_capture),
+            ):
+                await _email_inbox_loop(imap_config, config={})
+        except _BreakLoopError:
+            pass
+
+        try:
+            assert test_r.get(REDIS_AUTH_FAILED_KEY) is None
+            assert len(seen_backoffs) >= 2
+            # backoff doubles BEFORE the first sleep, so the first observed
+            # value is already 2x the initial IMAP_POLL_INTERVAL.
+            assert seen_backoffs[0] == IMAP_POLL_INTERVAL * 2
+            assert seen_backoffs[1] > seen_backoffs[0]  # exponential doubling preserved
+        finally:
+            test_r.close()
 
 
 # ---------------------------------------------------------------------------
