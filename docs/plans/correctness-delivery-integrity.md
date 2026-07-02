@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1817
 last_comment_id:
+revision_applied: true
 ---
 
 # Correctness & Delivery-Integrity Hardening (lost steers, double-exec, TUI scrape, silent drops)
@@ -54,7 +55,7 @@ not four separate plans.
 
 **Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045`
 **Issue filed at:** 2026-06-29T09:22:54Z
-**Disposition:** Minor drift (line numbers moved; one finding — B1 — Revised because the code changed materially since filing). Post-critique: five findings revised in place against the same baseline — see "Post-critique re-verification" below and the Critique Results table.
+**Disposition:** Minor drift (line numbers moved; one finding — B1 — Revised because the code changed materially since filing). Post-critique round 1: five findings revised in place against the same baseline. Post-critique round 2 (2026-07-02, HEAD `3514ed1b`): B2 blocker resolved + A1 anchors re-verified after further drift (`session_executor.py` `:1584→:1675`, `:2012→:2106`, `:647→:679`, `:1595→:1686`; `agent_session.py` methods `2015/2054→2046/2085`; `bridge_adapter.py` `:536→:624`) — see "Post-critique re-verification" below and the Critique Results table.
 
 All Findings citations were HEAD-of-writing (2026-06-29). Five sibling resilience
 PRs merged in the 2-day window before planning, moving many line numbers and
@@ -64,8 +65,8 @@ changing the landscape for B1 and D3. Every citation was re-verified against
 | Finding | Cited | Verified @ `b99e2958` | Status |
 |---|---|---|---|
 | A1 primitive | `agent/steering.py` RPUSH/LPOP | `push_steering_message`@72, `pop_all_steering_messages`@100 | OK |
-| A1 non-atomic pop | `session_executor.py:1528` | `agent/session_executor.py:1584` (bound instance loaded @1051-1060) | DRIFT |
-| A1 model field/methods | `agent_session.py:225,2027-2066` | field @225; `push_steering_message`@2015, `pop_steering_messages`@2054 | OK (name is `push_steering_message`, colliding with the module fn) |
+| A1 non-atomic pop | `session_executor.py:1528` | `agent/session_executor.py:1675` (bound instance; re-verified 2026-07-02 @HEAD `3514ed1b`, was `:1584`) | DRIFT |
+| A1 model field/methods | `agent_session.py:225,2027-2066` | field @225; `push_steering_message`@2046, `pop_steering_messages`@2085 (re-verified 2026-07-02 @HEAD `3514ed1b`, was @2015/2054) | OK (name is `push_steering_message`, colliding with the module fn) |
 | A2 resolver | `routing.py:1404` | def @1404, `return None`@1490; `\Seen`@`email_bridge.py:1416`, drop@1189 | OK |
 | A3 IMAP | `email_bridge.py:1490-1496` | `except imaplib.IMAP4.error`@1490, shared backoff@1496 | OK |
 | B1 claim | *(new claim)* | **dedup ALREADY EXISTS** — `bridge/dedup.py`+`models/dedup.py`, wired via `bridge/dispatch.py:146` | **REVISED** |
@@ -103,7 +104,7 @@ changing the landscape for B1 and D3. Every citation was re-verified against
 - D4 blocker: `socket_timeout=None`@`agent_session_queue.py:851`; spurious-timeout rationale comment @822-828; conceded 300s-backstop drift @834-835; subscribe-time NUMSUB self-check @857-895.
 - B1 recovery bypass: `dispatch.py:15-18` docstring; catchup enqueue@257 / record@276 (pre-check `is_duplicate_message`@176); reconciler enqueue@239 / record@254 (pre-check@176).
 - C1 finalize contract: non-fatal parent-finalize swallow `[lifecycle] Parent finalization failed (non-fatal)`@451; `_finalize_parent_sync`@687 idempotent no-op on missing@721 / terminal@727-732.
-- A1 steering model: non-atomic sequential-LPOP + single-consumer docstring @`steering.py:83-84` (range 80-109); multiple per-session consumers (`session_executor.py:2012`, `session_pickup.py:182`, `health_check.py:507`, `bridge_adapter.py:536`).
+- A1 steering model: non-atomic sequential-LPOP + single-consumer docstring @`steering.py:83-84` (range 80-109); multiple per-session consumers (`session_executor.py:2106/2108`, `session_pickup.py:182`, `health_check.py:507`, `bridge_adapter.py:624`) — the leftover-drain and bridge-adapter anchors re-verified 2026-07-02 @HEAD `3514ed1b` (were `:2012` / `:536`).
 - C2 heal re-save: `record.save()`@`agent_session.py:1029` inside `_heal_future_updated_at` (function-scoped grep returns 1 at baseline — its own red-state).
 - D1 native install: `~/.local/bin/claude` → `~/.local/share/claude/versions/2.1.197` (native installer symlink, NOT npm `node_modules`; not in `MANAGED_PACKAGES`).
 
@@ -114,7 +115,7 @@ changing the landscape for B1 and D3. Every citation was re-verified against
 - **#1408 (merged)** — introduced `bridge/dedup.py` `LastProcessedRecord` cursor + the `DedupRecord` membership set. Directly relevant to B1: the dedup infrastructure exists; B1 hardens it.
 - **#950 (merged)** — the origin of `queued_steering_messages` partial-save (`update_fields`) to "avoid clobbering status on stale worker references." A1 supersedes this half-measure: partial-save narrowed the clobber but did not make the RMW atomic; routing through the Redis list removes the RMW entirely.
 - **#1192 (merged)** — `chat_message_log` inbound append in `dispatch.py`; shows the dispatch wrapper is the right seam for B1's claim.
-- **#1271 (merged)** — `register_worker_pid` Redis PID key; B2's singleton guard builds on it.
+- **#1271 (merged)** — `register_worker_pid` Redis PID key; B2's observability-only, liveness-gated pid probe builds on it (a refuse-guard would wedge the launchd respawn loop — see Blocker B2).
 - Existing atomic idioms to reuse (no new machinery): `agent/steering.py` RPUSH/LPOP (A1); `_R.set(key,"1",nx=True,ex=…)` in `agent/session_health.py:1530,1658,1776` and `agent/messenger.py:319` (B1); the atomic temp-rename in `session_health.py:3009-3011` (C4).
 
 ## Research
@@ -133,7 +134,7 @@ decision and its durable record with a Redis-atomic op, or surface the silent br
 
 **A1 — steering inbox (make the turn-boundary read atomic):**
 1. Human reply arrives → `bridge/telegram_bridge.py:947` `push_steering_message(session_id, text, …)` **RPUSHes to the Redis list** (already atomic today) — AND redundantly `agent_session.push_steering_message(text)` @946 appends to the `queued_steering_messages` ListField (the racy path).
-2. Worker turn boundary → `session_executor.py:1584` pops the **ListField** on a bound-at-start instance (`agent_session.pop_steering_messages()`) — a stale-instance RMW that saves `[]` over a concurrently-pushed steer.
+2. Worker turn boundary → `session_executor.py:1675` pops the **ListField** on a bound-at-start instance (`agent_session.pop_steering_messages()`) — a stale-instance RMW that saves `[]` over a concurrently-pushed steer.
 3. **Fix:** the turn-boundary read pops the **Redis list** via `pop_all_steering_messages(session_id)`
    — a *non-atomic* sequential-LPOP drain (see `agent/steering.py:80-109`, whose own docstring
    states this). It is safe NOT because the drain is atomic but because of a **single-consumer
@@ -163,7 +164,7 @@ decision and its durable record with a Redis-atomic op, or surface the silent br
 **B2 — pending→running claim (WATCH/MULTI):**
 1. Worker (or `valor-session` CLI / catchup / reflections) picks a pending session → `session_lifecycle.py:604-648` re-reads + compares status in Python → saves `running`.
 2. Two actors both pass the compare → both run the session.
-3. **Fix:** the transition executes inside a Redis `WATCH`/`MULTI` (or a `SET NX` claim key) so exactly one actor wins; `register_worker_pid` gains a singleton guard.
+3. **Fix:** the transition executes inside a Redis `WATCH`/`MULTI` (or a `SET NX` claim key) so exactly one actor wins (this alone guarantees one actor per session). `register_worker_pid` gains only an observability-only, liveness-gated log-and-supersede probe — never a refuse-guard (a refuse would wedge the launchd respawn loop on a dead pid's residual TTL'd key).
 
 **C1 — parent/child finalize (preserve child-independence; idempotent sweep):**
 1. `finalize_session` @221 finalizes the parent best-effort (`_finalize_parent_sync`@440-451, wrapped in a non-fatal try/except by design) and saves the child @474; the child ALWAYS finalizes even if the parent finalize raises.
@@ -247,7 +248,8 @@ Run via `python scripts/check_prerequisites.py docs/plans/correctness-delivery-i
   AND both recovery enqueue sites; only the winner enqueues.
 - **B2 — Atomic pending→running claim** (`models/session_lifecycle.py`,
   `agent/session_health.py`): Redis `WATCH`/`MULTI` (or SETNX claim key) replaces the
-  Python CAS; `register_worker_pid` gains a singleton guard.
+  Python CAS — this is the double-exec fix. `register_worker_pid` gains an observability-only,
+  liveness-gated log-and-supersede probe (never refuse/exit) so it cannot wedge the launchd respawn loop.
 - **C1 — Child-independent finalize + idempotent sweep** (`models/session_lifecycle.py`,
   `worker/__main__.py`): preserve the best-effort, child-independent parent finalize (no
   coupling); startup sweep re-invokes the idempotent `_finalize_parent_sync` for stranded parents.
@@ -277,18 +279,18 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
 (TTLs, thresholds) are named env-overridable with a grain-of-salt comment.
 
 **A1 — route the steering inbox through the atomic primitive (and delete the racy path):**
-- Turn-boundary read: `session_executor.py:1584` — replace `agent_session.pop_steering_messages()`
+- Turn-boundary read: `session_executor.py:1675` — replace `agent_session.pop_steering_messages()`
   with `from agent.steering import pop_all_steering_messages; pop_all_steering_messages(session.session_id)`
   (LPOP; instance-independent, so a bound stale instance is irrelevant). The leftover-drain
-  path already uses this at `:2012` — the two now agree.
+  path already uses this at `:2106/2108` — the two now agree.
 - Writers: delete the ListField dual-write at `telegram_bridge.py:946` (`agent_session.push_steering_message(text)`),
-  `session_executor.py:647` and `:1595` (`session.push_steering_message(...)`), and
+  `session_executor.py:679` and `:1686` (`session.push_steering_message(...)` / `agent_session.push_steering_message(_remaining)`), and
   `health_check.py:573` — the co-located `push_steering_message(session_id, …)` module call already RPUSHes.
 - Resume path `tools/valor_session.py:725-728`: drop the `queued_steering_messages` full-save
   clobber; if resume must inject a steer, RPUSH via `push_steering_message(session_id, …)`.
   Also `:916,:950` (status dumps) — read via the module's `peek`/`has_steering_messages`.
 - Delete `queued_steering_messages = ListField(...)` @`agent_session.py:225` and the
-  `push_steering_message`/`pop_steering_messages` methods @2015/2054. Remove the field
+  `push_steering_message`/`pop_steering_messages` methods @2046/2085. Remove the field
   from the `agent_session_queue.py:182` serialization list.
 - **Popoto migration** (`scripts/update/migrations.py`): idempotent field-drop for existing
   records (see Update System). Any un-drained ListField content at migration time is
@@ -299,8 +301,8 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
 - **Preserve + test the single-consumer invariant.** `pop_all_steering_messages` is a NON-atomic
   sequential-LPOP loop (`agent/steering.py:80-109`); its safety depends on exactly one consumer
   draining a given session's list at a time. Today there are several *call sites*
-  (`session_executor.py:2012` leftover-drain, `session_pickup.py:182`, `health_check.py:507`,
-  `granite_container/bridge_adapter.py:536`) but they are single-consumer *per session* — no two
+  (`session_executor.py:2106/2108` leftover-drain, `session_pickup.py:182`, `health_check.py:507`,
+  `granite_container/bridge_adapter.py:624`) but they are single-consumer *per session* — no two
   run against the same `session_id` concurrently. A1 makes this list the SOLE steering inbox, so
   the invariant becomes load-bearing. Add a regression test asserting that under two concurrent
   drainers of the SAME session_id, the union of popped messages equals the pushed set with no
@@ -361,7 +363,7 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
   in-line and update the `dispatch.py` docstring to note that recovery paths now also claim
   (the bypass is about the wrapper, not about skipping the concurrency gate).
 
-**B2 — atomic pending→running claim + singleton pid guard:**
+**B2 — atomic pending→running claim (the real double-exec fix) + an observability-only pid probe:**
 - Replace the Python CAS in `session_lifecycle.py:604-648` with either (a) a Redis
   `WATCH`/`MULTI` on the session-status field, or (b) a `SET NX` run-claim key
   `session:runclaim:{session_id}` (simpler, matches the existing SETNX idiom). Prefer (b)
@@ -369,9 +371,41 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
   The loser raises `StatusConflictError` (existing) so callers already handle it.
 - **No parallel system:** the WATCH/MULTI (or SETNX) claim REPLACES the re-read+compare;
   delete the Python compare once the atomic gate lands.
-- `register_worker_pid` (`session_health.py:2981`): add a singleton guard — refuse (or
-  log-and-supersede) a second live worker pid for the same host role, so two workers can't
-  both believe they own execution.
+- **`register_worker_pid` is NOT a second concurrency gate (Blocker B2 resolution).** The atomic
+  pending→running status claim above is the real and sufficient double-exec fix: it guarantees
+  exactly one actor per session regardless of how many worker processes are alive. The prior
+  plan text proposed a `register_worker_pid` singleton guard that would *refuse* (or
+  log-and-supersede) a second live worker pid. **That "refuse" is withdrawn — it is fleet-hazardous.**
+  Under launchd `KeepAlive`, an unclean worker exit leaves the dead pid's TTL'd key present until
+  its TTL expires; a refuse-guard would then block the *healthy respawned worker* for the entire
+  remaining TTL window, defeating the self-healing respawn the system depends on. A guard that
+  can wedge the respawn loop trades a race the status-claim already closes for an availability
+  outage — the wrong trade.
+- **What B2 actually does with the pid key (log-and-supersede ONLY, liveness-gated, never refuse):**
+  `register_worker_pid` (`session_health.py:2981`) keeps its additive `_R.set` write and gains an
+  *observability-only* probe with strict liveness gating — it never `sys.exit`s, never refuses to
+  start, and never treats key presence alone as a conflict:
+  - Scope the comparison to the **same host + role** (a different machine or a different role
+    legitimately owns its own worker pid — those are not conflicts).
+  - **Exclude `os.getpid()`** so a worker never flags itself (re-registration on the same pid,
+    or a stale key it is about to overwrite, is not a conflict).
+  - Before logging anything, **liveness-check the competitor pid** via `os.kill(pid, 0)` AND a
+    heartbeat-freshness check (reuse `HEARTBEAT_FRESHNESS_WINDOW`). A pid that fails the liveness
+    check is a dead-worker residue (the exact launchd-respawn case) — it is silently superseded
+    (overwrite the key), NOT reported as a conflict.
+  - Only when a competitor pid on the same host+role is *confirmed live* (passes `os.kill(pid, 0)`
+    and has a fresh heartbeat) does the probe emit a `logger.warning` ("second live worker for
+    host/role — superseding pid registration") and supersede the key. Even then it does not exit
+    or block; the status-claim, not the pid key, arbitrates who executes each session.
+  - This makes the pid key a diagnostic signal (visible surprise: two live workers on one
+    host/role) without ever being able to wedge the respawn loop or refuse a healthy worker.
+- **Why the guard is safe to keep at all (vs. dropping it entirely):** both critics noted the guard
+  is largely redundant with the atomic status claim. Keeping it *only* as a liveness-gated,
+  supersede-only diagnostic preserves the operator signal (a genuinely-duplicated live worker is
+  worth a WARNING) while removing every wedge/refuse hazard. If review prefers zero risk of any
+  behavioral surprise, the fallback is to drop the pid-key probe from B2 entirely and rely solely
+  on the atomic status claim — that is an acceptable and equivalent-correctness outcome, since the
+  status claim is the load-bearing fix.
 
 **C1 — preserve child-independent finalize; fix the crash-window orphan with an idempotent sweep
 (NOT by coupling the two writes):**
@@ -559,6 +593,7 @@ in-code comment already rejected.
 - [ ] `tests/**/test_catchup*.py` and `tests/**/test_reconciler*.py` — UPDATE/ADD: assert the recovery enqueue sites also call `claim_message` and skip enqueue on a lost claim; a message already claimed by the live path is not double-enqueued by a racing catchup/reconciler scan (B1, Concern 1).
 - [ ] `tests/**/test_*steering*.py` and any test asserting `queued_steering_messages` / `agent_session.pop_steering_messages()` — REPLACE: rewrite against `agent/steering.py` LPOP; the ListField and its methods are deleted (A1). Grep `grep -rln "queued_steering_messages\|\.pop_steering_messages(\|\.push_steering_message(" tests/` to enumerate before deletion. ADD a single-consumer-invariant test (two concurrent drainers of one session_id → disjoint split, no dup/loss) that documents why the non-atomic drain is safe.
 - [ ] `tests/**/test_session_lifecycle*.py` (pending→running claim) — UPDATE: assert the atomic claim (WATCH/MULTI or SETNX) admits exactly one actor; two concurrent claimants → one `StatusConflictError` (B2).
+- [ ] `tests/**/test_session_health*.py` (`register_worker_pid`) — ADD: assert respawn-safety — a stale/dead pid key (failed `os.kill(pid, 0)` or stale heartbeat) is silently superseded and does NOT block registration of a launchd-respawned worker; the worker never flags `os.getpid()` against itself; cross-host/cross-role pids are not conflicts; only a confirmed-live same-host+role duplicate logs a WARNING; assert `register_worker_pid` never calls `sys.exit`/`raise …Conflict` (B2 blocker resolution).
 - [ ] `tests/**/test_*finalize*.py` / `waiting_for_children` tests — UPDATE: assert the child ALWAYS finalizes independently even when parent finalize raises (child-independent contract preserved, NOT coupled) and that a startup sweep re-finalizes a parent stranded by a crash after the child save (C1).
 - [ ] `tests/**/test_session_health*.py` freshness/heal tests — UPDATE: assert `_heal_future_updated_at` no longer re-saves; relative-age staleness under simulated skew does not flag fresh sessions (C2).
 - [ ] `tests/**/test_routing*.py` / email tests — UPDATE: `resolve_customer` raises on infra error; `_process_inbound_email` unseen-on-unavailable (A2); config loader last-known-good (C4).
@@ -601,6 +636,10 @@ disposition then becomes ADD. No test is DELETE-only except those asserting the 
 **Impact:** More `StatusConflictError`s surface where the Python CAS silently double-ran.
 **Mitigation:** Callers already handle `StatusConflictError`. The loud conflict is the *correct* outcome (it was a silent double-run before). Assert existing handlers cover it.
 
+### Risk 3b: B2 `register_worker_pid` probe wedges the launchd respawn loop (Blocker B2)
+**Impact:** A pid guard that *refuses* a second live worker pid on key presence would, after an unclean worker exit under launchd `KeepAlive`, block the healthy respawned worker for the dead pid's entire residual TTL — a self-inflicted availability outage, since the dead pid's key still exists.
+**Mitigation:** The refuse-guard is withdrawn. The atomic pending→running status claim (not the pid key) is the real one-actor-per-session guarantee. The pid key becomes an observability-only, liveness-gated log-and-supersede probe: it excludes `os.getpid()`, scopes to host+role, liveness-checks the competitor via `os.kill(pid, 0)` + heartbeat freshness, silently supersedes any dead/stale pid (the exact respawn case), and WARNS + supersedes only on a confirmed-live duplicate — never `sys.exit`/refuse. A respawn-safety test asserts a stale-pid key does not block registration. Dropping the probe entirely is an acceptable fallback with equivalent correctness.
+
 ### Risk 4: D1 contract-check false-positive blocks worker startup
 **Impact:** A benign CLI update the probe misreads refuses to start the worker fleet-wide.
 **Mitigation:** Gate the hard-fail behind an env flag (`CLAUDE_CONTRACT_CHECK_ENFORCE`, default warn-then-start for the first release, then flip to enforce). Pin the version so updates are deliberate; the probe becomes a change-detector, not a gatekeeper, until proven.
@@ -612,7 +651,7 @@ disposition then becomes ADD. No test is DELETE-only except those asserting the 
 ## Race Conditions
 
 ### Race 1: Steer pushed between the turn-boundary drain and the next turn (A1)
-**Location:** `session_executor.py:1584` sequential-LPOP drain (`pop_all_steering_messages`) vs `push_steering_message` RPUSH.
+**Location:** `session_executor.py:1675` sequential-LPOP drain (`pop_all_steering_messages`) vs `push_steering_message` RPUSH.
 **Trigger:** Human steers exactly as the worker drains the list.
 **Data prerequisite:** The Redis list is the single source of truth (post-A1).
 **State prerequisite:** The drain is a NON-atomic loop of individual LPOPs (`agent/steering.py:80-109`), but each individual LPOP is atomic vs. a concurrent RPUSH, and the **single-consumer invariant** holds (only one process drains a given session_id at a time). A steer arriving after the drain sits in the list for the next boundary.
@@ -723,7 +762,7 @@ Mostly bridge/worker-internal. Specific surfaces:
 - [ ] **A2:** A simulated resolver/OAuth error leaves the customer email **unseen** and logged; only a definitively-resolved non-customer is `\Seen`-dropped.
 - [ ] **A3:** A permanent `IMAP4.error` stops the infinite backoff and raises an operator alert (visible on the dashboard/alert surface); transient errors still back off.
 - [ ] **B1:** Two concurrent dispatches of the same `(chat_id, message_id)` result in exactly one enqueue (atomic `SET NX` claim), verified under a simulated config-sync-lag test — on the live path AND across the catchup/reconciler recovery paths (a message claimed on any path is not double-enqueued by a racing recovery scan).
-- [ ] **B2:** Two concurrent pending→running claimants result in exactly one `running` transition; the loser gets `StatusConflictError`. The Python re-read+compare is deleted. `register_worker_pid` refuses/supersedes a duplicate live worker.
+- [ ] **B2:** Two concurrent pending→running claimants result in exactly one `running` transition; the loser gets `StatusConflictError`. The Python re-read+compare is deleted. `register_worker_pid` never refuses or exits on a duplicate pid key: a dead/stale pid (failed `os.kill(pid, 0)` or stale heartbeat) is silently superseded so a launchd-respawned worker is never blocked; only a *confirmed-live* second worker on the same host+role emits a WARNING and supersedes. A test asserts a stale-pid key does NOT block registration (respawn-safety), the worker never flags `os.getpid()` against itself, and cross-host/cross-role pids are not treated as conflicts.
 - [ ] **C1:** A crash injected after the child save (parent still `waiting_for_children`) leaves no permanently-stranded parent — the idempotent startup sweep re-finalizes it. The child-independent finalize contract is preserved: a parent-finalize failure never blocks or rolls back the child finalize (no pipeline coupling).
 - [ ] **C2:** Under simulated clock skew (reader ≥90s ahead), fresh sessions are NOT flagged stale and `_heal_future_updated_at` does not re-save/reshuffle the index.
 - [ ] **C3:** `query.filter()` over an index with a ghost member returns only live records; email subject-coalescing cannot attach to a non-existent session.
@@ -788,8 +827,8 @@ else is parallel-safe. Cheapest high-value first: **PR8 (C4)** and **PR3 (B1)**.
 - **Assigned To**: steering-builder
 - **Agent Type**: builder — Domain: redis-popoto, async-concurrency
 - **Parallel**: true
-- Repoint `session_executor.py:1584` to `pop_all_steering_messages(session.session_id)`; delete ListField dual-writes @telegram_bridge:946, session_executor:647/1595, health_check:573; fix resume path valor_session:725-728/916/950.
-- Delete `queued_steering_messages` field + methods (agent_session.py:225/2015/2054); remove from agent_session_queue.py:182 serialization.
+- Repoint `session_executor.py:1675` to `pop_all_steering_messages(session.session_id)`; delete ListField dual-writes @telegram_bridge:946, session_executor:679/1686, health_check:573; fix resume path valor_session:725-728/916/950.
+- Delete `queued_steering_messages` field + methods (agent_session.py:225/2046/2085); remove from agent_session_queue.py:182 serialization.
 - Add idempotent Popoto migration (RPUSH residual → drop field) in `scripts/update/migrations.py`.
 
 ### 2. A2+A3 — Email intake classification + alert (PR2)
@@ -819,7 +858,7 @@ else is parallel-safe. Cheapest high-value first: **PR8 (C4)** and **PR3 (B1)**.
 - **Assigned To**: claims-builder
 - **Agent Type**: builder — Domain: redis-popoto, async-concurrency
 - **Parallel**: true (coordinate merge order with task 5)
-- Replace Python CAS @604-648 with WATCH/MULTI or SETNX run-claim; delete the compare; add singleton guard to `register_worker_pid`.
+- Replace Python CAS @604-648 with WATCH/MULTI or SETNX run-claim; delete the compare. For `register_worker_pid` @session_health:2981 add ONLY an observability-only, liveness-gated log-and-supersede probe (scope to host+role, exclude `os.getpid()`, liveness-check the competitor via `os.kill(pid, 0)` + heartbeat freshness, silently supersede a dead/stale pid, WARNING only on a confirmed-live duplicate) — NEVER refuse/`sys.exit` on key presence, so a launchd-respawned worker is never wedged by a dead pid's residual TTL'd key. Dropping the probe entirely is an acceptable fallback (the status claim is the load-bearing fix).
 
 ### 5. C1 — Atomic finalize + sweep (PR5)
 - **Task ID**: build-c1-finalize
@@ -929,7 +968,8 @@ else is parallel-safe. Cheapest high-value first: **PR8 (C4)** and **PR3 (B1)**.
 | B1: claim gates dispatch | `grep -c "claim_message" bridge/dispatch.py` | output > 0 |
 | B1: claim gates recovery paths | `grep -c "claim_message" bridge/catchup.py bridge/reconciler.py` | output > 0 |
 | B2: atomic claim replaces CAS | `grep -cE "watch\|multi\|nx=True" models/session_lifecycle.py` | output > 0 |
-| B2: pid singleton guard | `grep -c "singleton\|already.*registered\|supersede" agent/session_health.py` | output > 0 |
+| B2: pid probe supersede-only (liveness-gated) | `grep -cE "supersede\|os\.kill\|liveness" agent/session_health.py` | output > 0 |
+| B2: pid probe never refuses/exits (anti-criterion) | `sed -n '/def register_worker_pid/,/^def [a-zA-Z_]/p' agent/session_health.py \| grep -cE "sys\.exit\|raise .*Conflict\|refuse"` | output == 0 |
 | C1: idempotent finalize sweep on startup | `grep -cE "waiting_for_children" worker/__main__.py` | output > 0 |
 | C1: child-independent finalize preserved (no coupling) | `grep -c "Parent finalization failed (non-fatal)" models/session_lifecycle.py` | output > 0 |
 | C2: heal no longer re-saves (anti-criterion, function-scoped) | `sed -n '/def _heal_future_updated_at/,/^    def [a-zA-Z_]/p' models/agent_session.py \| grep -c "record.save()"` | output == 0 |
@@ -946,8 +986,10 @@ else is parallel-safe. Cheapest high-value first: **PR8 (C4)** and **PR3 (B1)**.
 
 Note: the `grep -c claude` row is a presence sanity check, not a strict anti-criterion; the
 builder tunes the exact expected count to the final diff. The anti-criteria (expected 0 or, for
-`socket_timeout=None`, expected-preserved) are: A1 no-stray-refs; C2 heal function-scoped no-save;
-D1a not-in-MANAGED_PACKAGES; D4 finite-socket_timeout-not-reintroduced (the `socket_timeout=None`
+`socket_timeout=None`, expected-preserved) are: A1 no-stray-refs; B2 pid-probe-never-refuses (the
+`register_worker_pid` function-scoped grep for `sys.exit`/`raise …Conflict`/`refuse` must be 0 —
+the probe is supersede-only, so it can never wedge the launchd respawn loop); C2 heal function-scoped
+no-save; D1a not-in-MANAGED_PACKAGES; D4 finite-socket_timeout-not-reintroduced (the `socket_timeout=None`
 row asserts the deliberate design at `agent_session_queue.py:851` is preserved — see Blocker D4);
 and no-#1820-lease. For each expected-0 anti-criterion, demonstrate it FAILS against a
 deliberately-violating input first (red-state proof) and paste the FAIL output into the PR
@@ -955,6 +997,16 @@ description. The C2 row already returns 1 against the current HEAD (the pre-fix 
 at `models/agent_session.py:1029` exists), so its red-state is the baseline itself.
 
 ## Critique Results
+
+### Round 2 (2026-07-02, FULL critique @HEAD `3514ed1b` → NEEDS REVISION → revised)
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| Blocker | Critique | B2 `register_worker_pid` singleton guard "refuse (or log-and-supersede) a second live worker pid" is fleet-hazardous: after an unclean worker exit under launchd `KeepAlive`, the dead pid's TTL'd key still exists, so a refuse-guard blocks the healthy respawned worker for the full TTL window — defeating the self-healing respawn. Both critics also note the guard is largely redundant with the atomic pending→running status claim (`session_lifecycle.py:604-648`), which already guarantees one actor per session. | Solution B2, Data Flow B2, Technical Approach B2, Risk 3b, Test Impact, Success Criteria B2, Verification (2 rows + anti-criteria note), Build task 4, Prior Art #1271 | Dropped "refuse". The atomic status claim is named as the real double-exec fix. `register_worker_pid` keeps ONLY an observability-only, liveness-gated log-and-supersede probe: scope to host+role, exclude `os.getpid()`, liveness-check the competitor via `os.kill(pid, 0)` + heartbeat freshness, silently supersede any dead/stale pid (the exact launchd-respawn case), WARN + supersede only on a confirmed-live duplicate — never `sys.exit`/refuse on key presence. Anti-criterion added: function-scoped grep for `sys.exit`/`raise …Conflict`/`refuse` in `register_worker_pid` must be 0. Dropping the probe entirely is recorded as an acceptable equivalent-correctness fallback. |
+| Concern×4 | Critique | Four implementation-detail concerns on the B2 pid probe (relayed as "embed the implementation notes into the plan body"): (1) scope the comparison to host+role so cross-machine/cross-role pids are not conflicts; (2) exclude `os.getpid()` so a worker never flags itself; (3) liveness-check the competitor (`os.kill(pid, 0)` + heartbeat freshness) before treating it as a conflict; (4) never treat key presence alone as a conflict — supersede dead/stale pids silently. | Technical Approach B2 (five liveness-gating bullets), Success Criteria B2, Test Impact (`test_session_health*`), Verification | All four embedded verbatim into the B2 Technical Approach as explicit gating rules and into the Success Criteria + respawn-safety test. NOTE: the round-2 critique run artifact was garbage-collected before this revision, so the four concerns are recorded as relayed by the supervisor; each maps to a concrete gating rule now in the plan body. |
+| Nit | Critique | Anchor drift contradicts the plan's "re-verified" Freshness claim: A1 anchors moved (`session_executor.py` `:1584→:1675`, `:2012→:2106`; also `:647→:679`, `:1595→:1686`; `agent_session.py` methods `2015/2054→2046/2085`; `bridge_adapter.py` `:536→:624`). | Freshness Check (table + disposition + post-critique re-verification), Data Flow A1, Technical Approach A1, Race 1, Build task 1 | Re-verified every A1 citation against HEAD `3514ed1b` and corrected all occurrences throughout the plan. B2 CAS region `:604-648` and valor_session `:725-728/916/950` re-confirmed unchanged. |
+
+### Round 1 (2026-07-01, FULL critique → NEEDS REVISION → revised)
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
