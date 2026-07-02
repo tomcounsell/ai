@@ -625,6 +625,79 @@ def _resume_deferred_granite_sessions() -> None:
         logger.warning("Could not set worker:recovering flag for granite recovery: %s", e)
 
 
+def _any_pty_role_configured() -> bool:
+    """D1b (issue #1817): True if at least one role (globally or per-project)
+    resolves to PTY transport, anywhere across the fleet.
+
+    Runs at worker startup, before any specific session/project is known, so
+    this scans EVERY project's ``transport.pm``/``transport.dev`` override in
+    projects.json in addition to the global default
+    (``settings.granite.pm_transport`` / ``dev_transport``). A single
+    project overriding to "pty" while the global default is "headless" (or
+    vice versa) still counts — the D1b contract-check only needs ONE
+    PTY-transport role anywhere in the fleet to become load-bearing; a fully
+    headless fleet must not be hard-failed by a check that only matters for
+    the interactive TUI (#1842 — a headless role's ``claude -p`` one-shot
+    carries no PTY bytes and is immune to TUI-marker drift by construction).
+
+    Fails OPEN (returns True) on any config-read error: a false "no PTY role
+    configured" would silently disarm a load-bearing contract-check, which
+    is worse than running one extra fingerprint check unnecessarily.
+    """
+    from config.settings import settings
+
+    if settings.granite.pm_transport == "pty" or settings.granite.dev_transport == "pty":
+        return True
+
+    try:
+        from bridge.routing import load_config  # noqa: PLC0415
+
+        cfg = load_config()
+        projects_cfg = cfg.get("projects", {}) if isinstance(cfg, dict) else {}
+        for project in projects_cfg.values():
+            if not isinstance(project, dict):
+                continue
+            transport = project.get("transport")
+            if not isinstance(transport, dict):
+                continue
+            if transport.get("pm") == "pty" or transport.get("dev") == "pty":
+                return True
+    except Exception as e:
+        logger.debug(
+            "[worker-startup] projects.json transport scan failed (fail-open, "
+            "assuming a PTY role IS configured): %s",
+            e,
+        )
+        return True
+
+    return False
+
+
+def _evaluate_contract_check_gate(contract_ok: bool, pty_configured: bool, enforce: bool) -> str:
+    """Pure decision function for the D1b startup contract-check gate (issue #1817).
+
+    Separated from `_run_worker`'s I/O (logging, sys.exit) so the branching
+    logic is directly unit-testable without mocking worker startup.
+
+    Returns one of:
+      - "pass": markers matched their golden sample — nothing to report.
+      - "skip_headless": markers mismatched, but no PTY-transport role is
+        configured (fully headless fleet) — a headless `claude -p` one-shot
+        carries no PTY bytes and is immune to TUI-marker drift by
+        construction (#1842), so this is NOT an operator-actionable failure.
+      - "warn": markers mismatched, a PTY-transport role IS configured, but
+        CLAUDE_CONTRACT_CHECK_ENFORCE is not set — log CRITICAL and continue.
+      - "hard_fail": markers mismatched, a PTY-transport role IS configured,
+        AND CLAUDE_CONTRACT_CHECK_ENFORCE=1 — the caller must refuse to
+        start (sys.exit) rather than let sessions silently hang to timeout.
+    """
+    if contract_ok:
+        return "pass"
+    if not pty_configured:
+        return "skip_headless"
+    return "hard_fail" if enforce else "warn"
+
+
 async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
@@ -735,6 +808,55 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         sys.exit(1)
 
     logger.info("CLI harness 'claude' found on PATH")
+
+    # D1b (issue #1817): startup contract-check on the scraped TUI markers
+    # the PTY driver depends on for idle detection (IDLE_BAR, PROMPT_GLYPH,
+    # SPINNER_EVIDENCE_RE, the trust-folder prompt pattern). A routine
+    # `claude` auto-update that rewords one of these strings is otherwise a
+    # SILENT fleet-wide outage — every PTY session hangs to timeout instead
+    # of detecting idle, with no exception and no crash. This converts that
+    # into a loud, operator-visible signal. See `_evaluate_contract_check_gate`
+    # for the (independently unit-testable) decision logic.
+    try:
+        from agent.granite_container.pty_driver import verify_tui_marker_contract
+
+        _contract_ok, _failed_markers = verify_tui_marker_contract()
+        _pty_configured = True if _contract_ok else _any_pty_role_configured()
+        _enforce = os.environ.get("CLAUDE_CONTRACT_CHECK_ENFORCE") == "1"
+        _decision = _evaluate_contract_check_gate(_contract_ok, _pty_configured, _enforce)
+
+        if _decision == "pass":
+            logger.info("CLI harness contract-check passed (TUI markers OK)")
+        elif _decision == "skip_headless":
+            logger.info(
+                "CLI harness contract-check: marker(s) %s mismatched, but no "
+                "PTY-transport role is configured (fully headless fleet) — "
+                "skipping. Headless turns carry no PTY bytes and are immune "
+                "to TUI-marker drift by construction.",
+                ", ".join(_failed_markers),
+            )
+        elif _decision == "warn":
+            logger.critical(
+                "CLI harness contract-check FAILED — scraped TUI marker(s) "
+                "%s no longer match their golden sample and a PTY-transport "
+                "role is configured. A stale marker means every interactive "
+                "session silently hangs to timeout instead of detecting idle "
+                "(issue #1817 D1b). Continuing anyway — set "
+                "CLAUDE_CONTRACT_CHECK_ENFORCE=1 to refuse startup on this "
+                "condition.",
+                ", ".join(_failed_markers),
+            )
+        else:  # "hard_fail"
+            logger.critical(
+                "CLI harness contract-check FAILED — scraped TUI marker(s) "
+                "%s no longer match their golden sample and a PTY-transport "
+                "role is configured. Refusing to start "
+                "(CLAUDE_CONTRACT_CHECK_ENFORCE=1).",
+                ", ".join(_failed_markers),
+            )
+            sys.exit(1)
+    except Exception as e:
+        logger.warning(f"CLI harness contract-check error (non-fatal): {e}")
 
     # Under launchd (VALOR_LAUNCHD=1), skip the subprocess smoke test entirely.
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions

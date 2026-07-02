@@ -531,6 +531,145 @@ class TestSpawnOnAcquire(unittest.TestCase):
             asyncio.run(_run())
 
 
+class _PidTrackingDriver:
+    """Fake PTYDriver for D2 pid-persist tests (issue #1817): allocates a
+    unique pid per instance on spawn(), optionally raising for one role to
+    simulate a dev.spawn() failure after a successful pm.spawn()."""
+
+    _pid_counter = [20000]
+    fail_role: str | None = None  # set per-test in setUp
+
+    class _FakeChild:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+    def __init__(
+        self,
+        role: str = "pm",
+        cwd: str | None = None,
+        model: str | None = None,
+        env: dict | None = None,
+        session_id: str | None = None,
+        settings_path: str | None = None,
+    ) -> None:
+        self.role = role
+        self.cwd = cwd
+        self._child = None
+        self.closed = False
+
+    def spawn(self) -> None:
+        if _PidTrackingDriver.fail_role == self.role:
+            raise RuntimeError(f"simulated {self.role} spawn failure")
+        pid = _PidTrackingDriver._pid_counter[0]
+        _PidTrackingDriver._pid_counter[0] += 1
+        self._child = _PidTrackingDriver._FakeChild(pid)
+
+    def isalive(self) -> bool:
+        return True
+
+    def close(self, force: bool = True) -> None:
+        self.closed = True
+
+
+class TestD2ImmediatePidPersist(unittest.TestCase):
+    """D2 (issue #1817): `_spawn_session_pair` persists each child's pid
+    IMMEDIATELY after its own spawn() returns, not batched after both roles
+    spawn — so a dev.spawn() failure after a successful pm.spawn() doesn't
+    strand pm's pid unreapable. A headless role (#1842) leaves `pty` as
+    None — no PTY process, correctly nothing to record."""
+
+    def setUp(self) -> None:
+        _PidTrackingDriver.fail_role = None
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        self.registry_path = tmp.name
+
+    def tearDown(self) -> None:
+        try:
+            os.unlink(self.registry_path)
+        except OSError:
+            pass
+
+    def _read_registry(self) -> list[int]:
+        with open(self.registry_path) as f:
+            return json.load(f).get("pids", [])
+
+    def test_pm_and_dev_pids_both_persisted_on_success(self) -> None:
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                await pool._spawn_session_pair(slot, spec)
+            pm, dev = slot.pty_pair
+            self.assertIn(pm._child.pid, pool.get_spawned_pids())
+            self.assertIn(dev._child.pid, pool.get_spawned_pids())
+            self.assertEqual(set(self._read_registry()), pool.get_spawned_pids())
+
+        asyncio.run(_run())
+
+    def test_dev_spawn_failure_leaves_pm_pid_persisted(self) -> None:
+        """The whole point of D2: a dev.spawn() failure after a successful
+        pm.spawn() must not strand pm's pid unpersisted/unreapable."""
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        _PidTrackingDriver.fail_role = "dev"
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                with self.assertRaises(RuntimeError):
+                    await pool._spawn_session_pair(slot, spec)
+            self.assertEqual(len(pool.get_spawned_pids()), 1)
+            self.assertEqual(set(self._read_registry()), pool.get_spawned_pids())
+
+        asyncio.run(_run())
+
+    def test_headless_pair_records_empty_pid_set_and_persists(self) -> None:
+        """A fully-headless spec spawns no PTY process; the registry is
+        still explicitly persisted with an empty pid set (not skipped)."""
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        # Seed stale content to prove the empty-set write actually happens.
+        with open(self.registry_path, "w") as f:
+            json.dump({"pids": [99999]}, f)
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x", pm_transport="headless", dev_transport="headless")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                await pool._spawn_session_pair(slot, spec)
+            pm, dev = slot.pty_pair
+            self.assertIsNone(pm)
+            self.assertIsNone(dev)
+            self.assertEqual(pool.get_spawned_pids(), set())
+
+        asyncio.run(_run())
+        self.assertEqual(self._read_registry(), [])
+
+    def test_mixed_pty_pm_headless_dev_persists_only_pm(self) -> None:
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x", dev_transport="headless")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                await pool._spawn_session_pair(slot, spec)
+            pm, dev = slot.pty_pair
+            self.assertIsNotNone(pm)
+            self.assertIsNone(dev)
+            self.assertEqual(pool.get_spawned_pids(), {pm._child.pid})
+            self.assertEqual(self._read_registry(), [pm._child.pid])
+
+        asyncio.run(_run())
+
+
 class TestNoSleepPollWait(unittest.TestCase):
     """PR #1612 review nit: `_wait_for_idle_slot` must not busy-poll
     with `asyncio.sleep` while all slots are locked — it waits on the

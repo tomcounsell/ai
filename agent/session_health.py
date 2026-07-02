@@ -47,8 +47,21 @@ logger = logging.getLogger(__name__)
 
 # === Cross-process orphan reaper constants (issue #1271) ===
 #
-# Compiled cmdline regex patterns. Two signatures match:
-#   - Claude CLI (``claude_agent_sdk/_bundled/claude``)
+# Compiled cmdline regex patterns. Three signatures match:
+#   - Claude CLI SDK bundle (``claude_agent_sdk/_bundled/claude``)
+#   - The native/PTY granite TUI process (D2, issue #1817): a bare or
+#     absolute-path ``claude`` invocation carrying ``--permission-mode
+#     bypassPermissions`` (see ``agent/granite_container/pty_driver.py``'s
+#     ``spawn()`` argv) that is NOT a one-shot. The two leading negative
+#     lookaheads exclude any cmdline containing a standalone ``-p`` token or
+#     ``--print`` — those are headless ``claude -p`` one-shot turns
+#     (``agent/granite_container/role_driver.py``'s ``HeadlessRoleDriver``,
+#     also carrying ``--permission-mode bypassPermissions``), which are
+#     ALREADY governed by the separate, narrower, age-gated
+#     ``_is_stale_print_oneshot`` matcher below. Overlapping the two would
+#     let this broader regex fast-track-match (via ``is_claude``) an
+#     in-flight headless turn before its own one-shot matcher's age gate
+#     even applies — do not remove the lookaheads.
 #   - Any MCP server module under ``mcp_servers/``
 #
 # The worker pattern (``python -m worker``) is INTENTIONALLY EXCLUDED:
@@ -57,7 +70,10 @@ logger = logging.getLogger(__name__)
 # signature + PPID==1 filter would match every live worker. As an additional
 # defense-in-depth layer, the reaper builds a positive-ID skip-set from
 # ``worker:registered_pid:*`` Redis keys.
-_CLAUDE_CMDLINE_RE = re.compile(r"claude_agent_sdk/_bundled/claude\b")
+_CLAUDE_CMDLINE_RE = re.compile(
+    r"claude_agent_sdk/_bundled/claude\b"
+    r"|^(?!.*(?:^|\s)-p(?:\s|$))(?!.*--print(?:\s|$)).*\bclaude\b.*--permission-mode\s+bypassPermissions"
+)
 _MCP_SERVER_CMDLINE_RE = re.compile(r"mcp_servers/[\w_]+\.py\b")
 
 # Heartbeat-freshness threshold for the per-PID gate (30 minutes).

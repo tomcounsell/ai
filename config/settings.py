@@ -14,6 +14,8 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.models import PINNED_CLAUDE_VERSION
+
 
 class LogLevel(StrEnum):
     """Supported logging levels."""
@@ -640,6 +642,50 @@ class Settings(BaseSettings):
             "Consecutive resolver failures (per project) before the "
             "email:resolver_unavailable operator alert arms. "
             "Provisional/tunable. Env: EMAIL_RESOLVER_ALERT_AFTER."
+        ),
+    )
+
+    # Correctness & delivery-integrity hardening (issue #1817). Documented
+    # here as the typed catalog entry; the runtime checks
+    # (scripts/update/verify.py, worker/__main__.py,
+    # agent/agent_session_queue.py) read these via `os.environ.get(...)`
+    # directly rather than through this `settings` singleton, so a value
+    # changed after process startup (e.g. via test monkeypatching) takes
+    # effect immediately instead of requiring a fresh Settings() instance.
+    # The version default itself lives in config/models.py
+    # (PINNED_CLAUDE_VERSION) as the single source of truth shared with the
+    # nightly ollama canary (scripts/nightly_regression_tests.py).
+    pinned_claude_version: str = Field(
+        default=PINNED_CLAUDE_VERSION,
+        description=(
+            "D1a: pinned claude CLI version the D1b scraped-TUI-marker "
+            "contract was last verified against (native installer: "
+            "~/.local/bin/claude -> "
+            "~/.local/share/claude/versions/<version>/). PROVISIONAL — "
+            "bumping requires re-verifying the D1b markers against the new "
+            "version's actual TUI output first; see "
+            "docs/features/deployment.md. Env: PINNED_CLAUDE_VERSION."
+        ),
+    )
+    claude_contract_check_enforce: bool = Field(
+        default=False,
+        description=(
+            "D1a/D1b: shared enforce flag for the claude-CLI-contract checks "
+            "(version pin drift in scripts/update/verify.py, TUI-marker "
+            "contract-check in worker/__main__.py). Default off (warn-only, "
+            "non-blocking). Env: CLAUDE_CONTRACT_CHECK_ENFORCE=1."
+        ),
+    )
+    notify_healthcheck_interval: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "D4: interval (seconds) for the session-notify pubsub liveness "
+            "watchdog in agent/agent_session_queue.py — a periodic PUBSUB "
+            "NUMSUB probe on a SEPARATE short-lived Redis connection (never "
+            "the listen() connection) that detects a silently-dropped "
+            "subscription and forces a resubscribe. Provisional/tunable. "
+            "Env: NOTIFY_HEALTHCHECK_INTERVAL."
         ),
     )
 

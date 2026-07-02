@@ -595,6 +595,13 @@ class PTYPool:
             # a 2-tuple so slot semantics / release lifecycle are unchanged.
             pm: PTYDriver | None = None
             dev: PTYDriver | None = None
+            # D2 (issue #1817): persist each child's pid IMMEDIATELY after its
+            # own spawn() returns, not batched after both roles spawn. Before
+            # this, a dev.spawn() failure after a successful pm.spawn() left
+            # pm's pid unpersisted and unreapable as an orphan. Guarded with
+            # `pty is not None and pty._child is not None` because a #1842
+            # headless role leaves `pty` as None — no PTY process, correctly
+            # nothing to record.
             if spec.pm_transport != "headless":
                 pm = PTYDriver(
                     role="pm",
@@ -605,6 +612,12 @@ class PTYPool:
                     settings_path=spec.pm_settings_path,
                 )
                 pm.spawn()
+                if pm is not None and pm._child is not None:
+                    pm_pid = getattr(pm._child, "pid", None)
+                    if pm_pid is not None:
+                        with self._pids_lock:
+                            self._spawned_pids.add(pm_pid)
+                        self._persist_pids()
             if spec.dev_transport != "headless":
                 dev = PTYDriver(
                     role="dev",
@@ -615,7 +628,20 @@ class PTYPool:
                     settings_path=spec.dev_settings_path,
                 )
                 dev.spawn()
+                if dev is not None and dev._child is not None:
+                    dev_pid = getattr(dev._child, "pid", None)
+                    if dev_pid is not None:
+                        with self._pids_lock:
+                            self._spawned_pids.add(dev_pid)
+                        self._persist_pids()
             slot.pty_pair = (pm, dev)
+            # D2's per-spawn blocks above already durably persisted each pid the
+            # instant it was known (so a dev.spawn() failure after pm.spawn()
+            # can't strand pm's pid). This consolidated pass re-adds under
+            # `_pids_lock` as idempotent belt-and-suspenders and, because the
+            # trailing `_persist_pids()` is unconditional, also writes the
+            # correct empty-set state for a fully-headless pair (nothing spawned,
+            # nothing to reap) rather than silently skipping the write.
             with self._pids_lock:
                 for pty in (pm, dev):
                     if pty is None:
