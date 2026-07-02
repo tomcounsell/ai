@@ -2397,9 +2397,9 @@ def _reap_slot_leases() -> None:
       same pattern as the tool-timeout loop) and, iff the owner is terminal
       (or its record no longer exists), calls ``registry.reclaim(owner)``
       and increments the project-scoped ``slot_reclaims`` counter.
-      **Terminal-owner only — there is deliberately no wall-clock
-      ``now > lease.deadline`` arm** (see agent/slot_lease.py's "no reclaim
-      deadline" note): reclaiming a still-running, progressing owner would
+      **Terminal-owner only — there is deliberately no wall-clock elapsed-time
+      reclaim arm** (see agent/slot_lease.py's "no reclaim deadline" note):
+      reclaiming a still-running, progressing owner would
       strip its permit mid-execution, allowing semaphore over-admission
       (concurrently-running sessions > max) and re-imposing exactly the
       wall-clock duration cap issue #1172 removed.

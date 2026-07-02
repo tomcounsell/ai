@@ -36,7 +36,7 @@ because of the structure of the worker loop:
 
 **No reclaim deadline.** ``Lease`` deliberately carries no
 ``deadline``/TTL field. An earlier revision of this design reclaimed any
-lease older than ``acquired_at + SLOT_LEASE_TTL_S``. That is wrong: a fixed,
+lease older than a fixed "acquired-at plus TTL" cutoff. That is wrong: a fixed,
 never-reset wall-clock deadline would strip the permit from a still-running,
 *progressing* owner while its execution task keeps running, causing
 semaphore over-admission (concurrently-running sessions > max) and
