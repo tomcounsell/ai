@@ -427,11 +427,30 @@ def run_ollama_suite(dry_run: bool = False) -> None:
     version-pinned claude canary and runs the E2E as an isolated subprocess
     (``GRANITE_OLLAMA_SMOKE=1``), then surfaces failures as Telegram alerts.
     """
+    # Per-suite expected-machine gate (issue #1841, mirrors #1740's
+    # NIGHTLY_MODEL_EXPECTED pattern). This is intentionally a SEPARATE var from
+    # NIGHTLY_MODEL_EXPECTED: PR #1840 pinned the ollama backend to qwen-only
+    # tags with no fallback, so ollama reachability is now decoupled from
+    # anthropic-model reachability — a bridge machine can have
+    # NIGHTLY_MODEL_EXPECTED=1 (anthropic model reachable) while having no qwen
+    # tag at all. Reusing NIGHTLY_MODEL_EXPECTED here would alert-storm every
+    # bridge machine every night. Set NIGHTLY_OLLAMA_EXPECTED=1 ONLY on the one
+    # machine designated to actually run the ollama canary (do NOT add it to
+    # the shared com.valor.nightly-tests.plist).
+    ollama_expected = bool(os.environ.get("NIGHTLY_OLLAMA_EXPECTED", "").strip())
+
     if not ollama_reachable_for_nightly():
         log(
             "Ollama-backed granite suite skipped: ollama/model unreachable "
             "(self-skip, no subprocess spawned)."
         )
+        if ollama_expected:
+            send_telegram(
+                "Nightly granite ollama suite: did not run — ollama/model unreachable "
+                "on the expected canary machine (NIGHTLY_OLLAMA_EXPECTED=1). Check "
+                "ollama status and the pinned qwen tag.",
+                dry_run=dry_run,
+            )
         return
 
     # Version-pinned canary: alert on drift, but still run the suite.
@@ -470,12 +489,24 @@ def run_ollama_suite(dry_run: bool = False) -> None:
         return
     except Exception as exc:  # noqa: BLE001
         log(f"ERROR: ollama suite subprocess failed: {exc}")
+        if ollama_expected:
+            send_telegram(
+                f"Nightly granite ollama suite: subprocess failed on the expected "
+                f"canary machine (NIGHTLY_OLLAMA_EXPECTED=1): {exc}",
+                dry_run=dry_run,
+            )
         return
 
     try:
         report = json.loads(Path(PYTEST_JSON_OLLAMA_TMP).read_text())
     except (FileNotFoundError, json.JSONDecodeError) as exc:
         log(f"ERROR: Failed to parse ollama suite JSON report: {exc}")
+        if ollama_expected:
+            send_telegram(
+                f"Nightly granite ollama suite: JSON report unparseable on the "
+                f"expected canary machine (NIGHTLY_OLLAMA_EXPECTED=1): {exc}",
+                dry_run=dry_run,
+            )
         return
 
     summary = report.get("summary", {})
