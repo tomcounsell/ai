@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -198,8 +198,13 @@ class TestRunOllamaSuiteSelfSkip:
     """Plan Task 6 verification: unreachable ollama self-skips with a logged
     reason and spawns NO subprocess (never hard-fails the nightly run)."""
 
-    def test_unreachable_skips_with_logged_reason_and_no_subprocess(self, tmp_path: Path) -> None:
+    def test_unreachable_skips_with_logged_reason_and_no_subprocess(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         nrt.LOG_FILE = tmp_path / "nightly.log"
+        # Deterministically exercise the unexpected-machine case regardless of
+        # ambient env (issue #1841 added an expected-machine alert branch).
+        monkeypatch.delenv("NIGHTLY_OLLAMA_EXPECTED", raising=False)
         logged: list[str] = []
         with (
             patch.object(nrt, "ollama_reachable_for_nightly", return_value=False),
@@ -222,6 +227,122 @@ class TestRunOllamaSuiteSelfSkip:
         with patch.dict("sys.modules", {"tests.granite_faults.ollama_env": None}):
             # Importing a None module raises ImportError → swallowed to False.
             assert nrt.ollama_reachable_for_nightly() is False
+
+
+class TestRunOllamaSuiteExpectedMachine:
+    """Issue #1841: NIGHTLY_OLLAMA_EXPECTED gates Telegram alerts on the three
+    previously-silent failure paths (self-skip, subprocess exception, JSON
+    report parse failure). Intentionally a SEPARATE var from
+    NIGHTLY_MODEL_EXPECTED (#1740) — PR #1840 pinned the ollama backend to
+    qwen-only tags with no fallback, decoupling ollama reachability from
+    anthropic-model reachability.
+    """
+
+    def test_self_skip_expected_machine_alerts_with_skip_reason(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        monkeypatch.setenv("NIGHTLY_OLLAMA_EXPECTED", "1")
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=False),
+            patch.object(nrt, "subprocess") as mock_subprocess,
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        mock_subprocess.run.assert_not_called()
+        mock_telegram.assert_called_once()
+        (msg,), kwargs = mock_telegram.call_args
+        assert "unreachable" in msg.lower()
+        assert kwargs.get("dry_run") is True
+
+    def test_subprocess_exception_expected_machine_alerts_with_exception_text(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        monkeypatch.setenv("NIGHTLY_OLLAMA_EXPECTED", "1")
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=True),
+            patch.object(nrt, "claude_canary_alert", return_value=None),
+            patch.object(nrt.subprocess, "run", side_effect=RuntimeError("boom subprocess")),
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        mock_telegram.assert_called_once()
+        (msg,), _kwargs = mock_telegram.call_args
+        assert "boom subprocess" in msg
+
+    def test_subprocess_exception_unexpected_machine_no_alert(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        monkeypatch.delenv("NIGHTLY_OLLAMA_EXPECTED", raising=False)
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=True),
+            patch.object(nrt, "claude_canary_alert", return_value=None),
+            patch.object(nrt.subprocess, "run", side_effect=RuntimeError("boom subprocess")),
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        mock_telegram.assert_not_called()
+
+    def test_json_parse_failure_expected_machine_alerts_with_parse_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        monkeypatch.setattr(
+            nrt, "PYTEST_JSON_OLLAMA_TMP", str(tmp_path / "does_not_exist_report.json")
+        )
+        monkeypatch.setenv("NIGHTLY_OLLAMA_EXPECTED", "1")
+        fake_result = MagicMock(returncode=0)
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=True),
+            patch.object(nrt, "claude_canary_alert", return_value=None),
+            patch.object(nrt.subprocess, "run", return_value=fake_result),
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        mock_telegram.assert_called_once()
+        (msg,), _kwargs = mock_telegram.call_args
+        assert "unparseable" in msg.lower() or "parse" in msg.lower()
+
+    def test_json_parse_failure_unexpected_machine_no_alert(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        monkeypatch.setattr(
+            nrt, "PYTEST_JSON_OLLAMA_TMP", str(tmp_path / "does_not_exist_report.json")
+        )
+        monkeypatch.delenv("NIGHTLY_OLLAMA_EXPECTED", raising=False)
+        fake_result = MagicMock(returncode=0)
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=True),
+            patch.object(nrt, "claude_canary_alert", return_value=None),
+            patch.object(nrt.subprocess, "run", return_value=fake_result),
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        mock_telegram.assert_not_called()
+
+    def test_empty_string_env_treated_as_falsy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirrors the .strip() truthiness idiom used by NIGHTLY_MODEL_EXPECTED."""
+        nrt.LOG_FILE = tmp_path / "nightly.log"
+        monkeypatch.setenv("NIGHTLY_OLLAMA_EXPECTED", "")
+        with (
+            patch.object(nrt, "ollama_reachable_for_nightly", return_value=False),
+            patch.object(nrt, "subprocess") as mock_subprocess,
+            patch.object(nrt, "send_telegram") as mock_telegram,
+        ):
+            nrt.run_ollama_suite(dry_run=True)
+
+        mock_subprocess.run.assert_not_called()
+        mock_telegram.assert_not_called()
 
 
 class TestClaudeCanaryAlert:
