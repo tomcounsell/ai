@@ -428,7 +428,7 @@ Work is DONE when:
 | **Abandoned** | Unfinished work, auto-revived |
 | **Complete** | Work done, signaled by 👍 reaction or `mark_work_done()` |
 
-See also: `docs/features/session-lifecycle.md` for the full 13-state reference (including `paused`, `paused_circuit`, `superseded`, `waiting_for_children`, and all terminal states).
+See also: `docs/features/session-lifecycle.md` for the full 14-state reference (including `paused`, `paused_circuit`, `paused_budget`, `superseded`, `waiting_for_children`, and all terminal states).
 
 - Fresh messages create new sessions (scoped by Telegram thread ID or local session ID)
 - Reply-to messages resume the original session and its context

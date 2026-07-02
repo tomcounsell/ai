@@ -2,7 +2,7 @@
 
 How sessions transition between states via the consolidated lifecycle module (`models/session_lifecycle.py`).
 
-## Session States (13 total)
+## Session States (14 total)
 
 ### Non-terminal (use `transition_status()`)
 
@@ -16,6 +16,7 @@ How sessions transition between states via the consolidated lifecycle module (`m
 | `superseded` | A newer session for the same session_id has taken over |
 | `paused_circuit` | Paused by api-health-gate when Anthropic circuit breaker is OPEN; resumed by bridge-watchdog sustainability drip |
 | `paused` | Paused mid-execution due to auth/API failure; resumed by bridge-watchdog session-resume-drip |
+| `paused_budget` | Paused by the per-tool budget backstop (#1821) when a session exhausts its tool-call/cost budget, only under `TOOL_BUDGET_AUTO_PAUSE` (default off); NON-drip, human-only recovery — never re-queued by `session_recovery_drip`. See [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md). |
 
 ### Terminal (use `finalize_session()`)
 
@@ -29,7 +30,7 @@ How sessions transition between states via the consolidated lifecycle module (`m
 
 ### Dashboard Iconography
 
-All 8 non-terminal states render with distinct glyphs in the dashboard row template (`ui/templates/_partials/sessions_table.html`) — including specific glyphs for `paused` (⏸), `paused_circuit` (⛌), `superseded` (→), `waiting_for_children`, `running`, `pending`, `dormant`, and `active`. Non-terminal rows additionally surface a row-level freshness chip (age since `last_evidence_at`) and a ghost badge when the harness PID probe reports a dead process. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
+Of the 9 non-terminal states, most render with distinct glyphs in the dashboard row template (`ui/templates/_partials/sessions_table.html`) — including specific glyphs for `paused` (⏸), `paused_circuit` (⛌), `superseded` (→), `waiting_for_children`, `running`, `pending`, `dormant`, and `active`. `paused_budget` has no dedicated glyph yet — it falls through to the template's default branch and renders as plain status text. Non-terminal rows additionally surface a row-level freshness chip (age since `last_evidence_at`) and a ghost badge when the harness PID probe reports a dead process. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
 
 ## Lifecycle Module
 
