@@ -466,6 +466,24 @@ calls `release_unbound()`).
 
 **Fix #3 — progress-deadline cancel scope:**
 
+- **CONCERN (r5) — anchors are baseline-relative and SHIFT after Fix #2 lands first.**
+  Per the PR strategy (Fix #2 → Fix #3, ORDERED), Fix #2 edits `agent_session_queue.py`
+  *above* the execution point before Fix #3 is written: it migrates the 5 acquire /
+  11 pre-bind release sites (`:1330–:1474`), renames `_semaphore_acquired → _slot_acquired`,
+  and **inserts the single `registry.bind(session.agent_session_id)` call at `:1493`** (one
+  line above `:1494`). So every `agent_session_queue.py` line anchor Fix #3 cites — the
+  execute point (`:1494`), the `CancelledError` handler (`:1496`), the outer `finally`
+  (`:1583–1659`), the outer worker-popping handler (`:1674`/`:1676`), and the nudge-guard
+  mirror (`:1288–1307`) — is stated against the **pre-Fix-#2 baseline** and will be pushed
+  down by the net lines Fix #2 inserts (≈ +1 for the `bind` call, plus any acquire/release
+  reshaping). **The builder must locate these seams STRUCTURALLY, not by literal line
+  number:** the `try:`/`await _execute_agent_session(session)` block, the
+  `except asyncio.CancelledError:` handler that follows it, the outer `finally`, and the
+  outer `except asyncio.CancelledError` that pops the worker from `_active_workers`. The
+  `session_health.py` and `session_executor.py` anchors are NOT affected (Fix #2 does not
+  touch the execute-scope of those files beyond the hoisted reap, which is above the RUNNING
+  scan). If a single-PR builder does Fix #2 and Fix #3 together, resolve the seams after the
+  Fix #2 edits settle.
 - Near `agent_session_queue.py:1494`, replace `await _execute_agent_session(session)`
   with an owned-task pattern that carries a `deadline_cancelled` flag and **finalizes
   before it cancels** (Blocker 1):
@@ -493,7 +511,6 @@ calls `release_unbound()`).
   # normally — no CancelledError reaches this loop, the worker survives. Fix #3's OWN
   # deadline cancel targets `exec_task` directly (local var) and kills the SDK
   # subprocess itself via the fd-PTY-kill below; it never touches the handle.
-  handle = _active_sessions.get(session.agent_session_id)  # pid read for the reprieve gate
   try:
       while not exec_task.done():
           done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
@@ -503,13 +520,28 @@ calls `release_unbound()`).
           if last is not None and (time.time() - last) > SESSION_PROGRESS_DEADLINE_S:
               if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
                   break  # kill-switch: let it run
+              # BLOCKER (r5) — read the #1039 registry handle INSIDE the loop, each
+              # poll, immediately before the reprieve gate. `asyncio.create_task(...)`
+              # only SCHEDULES `_execute_agent_session`; the handle is populated inside
+              # it (`_active_sessions[sid] = SessionHandle(...)`, session_executor.py:734)
+              # and cannot exist until the first `await asyncio.wait(...)` above yields
+              # control to the event loop. A read hoisted before the loop is therefore
+              # `None` on EVERY poll (there is no intervening await between
+              # `create_task` and a pre-loop read), which deterministically defeats the
+              # active-children Tier-2 reprieve and falsely cancels a
+              # `waiting_for_children` PM. Re-fetching per poll lets the handle populate
+              # once execution has actually begun.
+              handle = _active_sessions.get(session.agent_session_id)  # pid for the reprieve gate
               if not _should_kill_no_progress(session, handle):  # Tier-2 reprieve gate (moved here — OQ3)
                   continue  # active children / compaction — reprieve, keep watching
-              # NOTE: pass `handle` (the #1039 registry handle, read above) so
-              # `_tier2_reprieve_signal(handle, entry)` can read the pid for the
-              # active-children gate; without it a `waiting_for_children` PM session
-              # would be falsely cancelled. A stale None handle just means "no reprieve
-              # signal", which the exceeded deadline already justifies killing.
+              # NOTE: `_should_kill_no_progress` forwards `handle` to
+              # `_tier2_reprieve_signal(handle, entry)`, which reads the pid for the
+              # active-children gate. Because the handle is re-fetched each poll (above),
+              # it is populated for any session that has started executing, so a
+              # `waiting_for_children` PM is correctly reprieved rather than cancelled.
+              # (NIT r5 — the prior "a stale None handle just means no reprieve signal,
+              # which the exceeded deadline already justifies killing" justification was
+              # removed: it rationalized the always-None read this blocker fixes.)
               deadline_cancelled = True
               # FINALIZE FIRST — at the watcher scope, before cancel reaches :1496:
               _fd_pty_kill(session)                      # scoped os.killpg (#1816)
@@ -678,9 +710,23 @@ calls `release_unbound()`).
 - **OQ3 resolution — single authoritative killer per running session.** Fix #3
   becomes the sole no-progress killer for **worker-alive** RUNNING sessions. In the
   same change, DELETE the out-of-band worker-alive `no_progress` branch
-  (`session_health.py:2506-2517`, the `elif ... not _has_progress(entry)` arm; after
-  deletion the shared classifier at `:2526-2529` collapses to `worker_dead` only within
-  the running scan).
+  (`session_health.py:2506-2517`, the `elif ... not _has_progress(entry)` arm).
+  **CONCERN (r5) — the deletion MUST ALSO physically collapse the classifier, not just
+  the `elif`.** Deleting the `elif` alone leaves the classifier block at `:2519-2529`
+  intact, and its `if "no progress signal" in reason: _reason_kind = "no_progress"`
+  branch at **`:2527`** still contains the literal string `_reason_kind = "no_progress"`
+  — so the plan's own verification grep `grep -c '_reason_kind = "no_progress"'
+  agent/session_health.py == 0` would FAIL (the string survives as now-unreachable dead
+  code). Because the running scan's only remaining `should_recover=True` producers are
+  the `if not worker_alive:` worker-dead branches (`:2482-2494`), `"no progress signal"`
+  can never appear in `reason` after the `elif` is gone. Therefore **collapse the
+  classifier**: remove the `if "no progress signal" in reason: … else:` two-way split and
+  set `_reason_kind = "worker_dead"` unconditionally inside `if should_recover:` (deleting
+  the `_reason_kind = "no_progress"` line at `:2527`). This satisfies NO-LEGACY (the dead
+  `no_progress` branch is gone, not merely unreachable) and makes the `== 0` grep hold
+  exactly. Confirmed the only `_reason_kind = "no_progress"` occurrence in the file is
+  `:2527`; the never-started producer at `:3311` uses the kwarg `reason_kind="no_progress"`
+  (no leading `_`, no spaces), which the grep does not match.
   **Correction (round 2): `reason_kind="no_progress"` has a SECOND producer** — the
   never-started-past-grace recovery at `session_health.py:3308-3314` (`reason_kind=
   "no_progress"` at `:3311`). So deleting the running-scan `elif` does **not** make the
@@ -1034,8 +1080,10 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   sets `finalized_by_execute=True` so the outer `finally` never runs
   `_complete_agent_session` on the killed row (no "completed" mislabel).
 - [ ] Exactly one authoritative no-progress killer per running session (OQ3): the
-  running-scan worker-alive `no_progress` `elif` is deleted (`grep -c
-  '_reason_kind = "no_progress"' == 0`); `worker_dead` and `tool_timeout` remain for the
+  running-scan worker-alive `no_progress` `elif` is deleted **and its classifier is
+  collapsed** so the `_reason_kind = "no_progress"` line (`:2527`) is physically removed
+  (`grep -c '_reason_kind = "no_progress"' == 0` — r5 CONCERN); `worker_dead` and
+  `tool_timeout` remain for the
   disjoint cases Fix #3 cannot reach; the Tier-2 reprieve decision lives in exactly one
   place — the shared `_should_kill_no_progress` gate (`grep -c "_tier2_reprieve_signal(handle"
   == 1` — the call-site grep; the bare name counts 5), called by BOTH Fix #3 and
@@ -1183,11 +1231,16 @@ lead NEVER builds directly.
   `exec_task` on any non-Cancelled exit.
 - OQ3: extract the Tier-2 reprieve + telemetry into shared
   `_should_kill_no_progress(session, handle)`; DELETE the running-scan worker-alive
-  `no_progress` `elif` (`session_health.py:2506-2517`). Note `reason_kind="no_progress"`
-  has a SECOND live producer (never-started path, `:3308-3314`), so
-  `_apply_recovery_transition` must CALL `_should_kill_no_progress` (not keep an inline
-  copy) — reprieve logic in exactly one place. Keep `worker_dead` and `tool_timeout`.
-  Deterministic greps: `grep -c '_reason_kind = "no_progress"' == 0`;
+  `no_progress` `elif` (`session_health.py:2506-2517`) **AND collapse the classifier at
+  `:2519-2529`** — remove the `if "no progress signal" in reason … else` split and set
+  `_reason_kind = "worker_dead"` unconditionally, physically deleting the
+  `_reason_kind = "no_progress"` line at `:2527` (r5 CONCERN — deleting only the `elif`
+  leaves that string as dead code and fails the `== 0` grep). Note
+  `reason_kind="no_progress"` has a SECOND live producer (never-started path, `:3308-3314`,
+  kwarg form), so `_apply_recovery_transition` must CALL `_should_kill_no_progress` (not
+  keep an inline copy) — reprieve logic in exactly one place. Keep `worker_dead` and
+  `tool_timeout`. Deterministic greps: `grep -c '_reason_kind = "no_progress"' == 0`
+  (only `:2527` matches today; the `:3311` kwarg does not);
   `grep -c "_tier2_reprieve_signal(handle" == 1` (call-site grep — the bare name counts 5).
 - **Telemetry cadence (Simplifier NIT):** `_should_kill_no_progress` is a pure
   kill/no-kill predicate; its `tier1_flagged_total` / `tier2_reprieve_total:{reprieve}`
@@ -1284,6 +1337,10 @@ lead NEVER builds directly.
 | **CONCERN (r4)** | Risk & Robustness | Verification grep `_tier2_reprieve_signal == 1` can never pass — `grep -c` counts 5 lines today (def + docstrings + call) | Verification table + OQ3 resolution + Success Criteria + Step task 2 | Retargeted every occurrence to the single-call-site grep `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py == 1` |
 | **NIT (r4)** | Scope & Value | Agent Integration parenthetical ("last reclaim's owner/reason, plus zero-reclaim heartbeat timestamp") exceeds the tested `slot_reclaims` scope | Agent Integration | Tightened to expose just the `slot_reclaims` count field (the only thing the `grep -c "slot_reclaims" ui/app.py > 0` check covers) |
 | **NIT (r4)** | History & Consistency | Stale `session_executor.py:702` anchor at the Blocker-1 prose | Blocker-r4 prose + Freshness | Corrected to `:734` (registration) / `:1891` (task-ref population) throughout |
+| **BLOCKER (r5)** | Risk & Robustness | Reprieve-gate `handle` read too early — the `handle = _active_sessions.get(...)` read sat before the `while` loop with no intervening await after `create_task`, so the handle (populated inside `_execute_agent_session` at `session_executor.py:734`, which cannot run until the first `await asyncio.wait(...)`) is `None` on EVERY poll → active-children Tier-2 reprieve deterministically defeated → a `waiting_for_children` PM is falsely cancelled (contradicts Risk 3 / OQ3 "reprieve preserved") | Fix #3 code sketch | Moved the `handle = _active_sessions.get(...)` read INSIDE the `while` loop, immediately before the `_should_kill_no_progress` gate, so it re-fetches every poll and populates once execution begins |
+| **CONCERN (r5)** | History & Consistency | Fix #3 `agent_session_queue.py` line anchors (`:1494`/`:1496`/`:1583-1659`/`:1674`/`:1288-1307`) shift after Fix #2's PR-split rename lands first (migrated acquire/release sites + `_slot_acquired` rename + inserted `registry.bind` at `:1493`) → stale anchors for the Fix #3 builder | Fix #3 Technical Approach (anchor annotation) | Added an explicit note that the anchors are pre-Fix-#2 baseline-relative and WILL shift; builder must locate the seams STRUCTURALLY (the `try:`/`await _execute_agent_session` block, the `except asyncio.CancelledError` handler, the outer `finally`, the outer worker-popping handler) — not by literal line number |
+| **CONCERN (r5)** | Consistency Auditor | OQ3 deletion of the `:2506-2517` `elif` alone leaves the classifier's `_reason_kind = "no_progress"` string at `:2527` as dead code → the plan's own `grep -c '_reason_kind = "no_progress"' == 0` verification FAILS | OQ3 resolution + Step task 2 + Success Criteria | Deletion now ALSO collapses the classifier at `:2519-2529` (remove the `if "no progress signal" … else` split; set `_reason_kind = "worker_dead"` unconditionally), physically deleting `:2527` so the `== 0` grep holds and NO-LEGACY is satisfied. Confirmed `:2527` is the sole match; the `:3311` kwarg `reason_kind="no_progress"` does not match the grep |
+| **NIT (r5)** | Risk & Robustness | Code-sketch comment rationalized the always-`None` handle read ("a stale None handle just means no reprieve signal, which the exceeded deadline already justifies killing") — the exact buggy justification the r5 BLOCKER exposes | Fix #3 code sketch | Removed the misleading justification sentence; replaced with a note that the handle is now re-fetched per poll so a `waiting_for_children` PM is correctly reprieved |
 
 ---
 
