@@ -475,6 +475,21 @@ async def _pop_agent_session(
         if chosen is None:
             return None
 
+        # Narrow SETNX run-claim (issue #1817 B2): gates ONLY this
+        # pending->running acquisition against other actors (CLI resume,
+        # catchup/reflections drip) that may independently target the same
+        # session_id. The generic CAS inside transition_status() is left
+        # completely untouched -- see the comment above
+        # models.session_lifecycle.claim_pending_run for the full rationale.
+        from models.session_lifecycle import claim_pending_run
+
+        if not claim_pending_run(chosen.session_id, worker_id=worker_key):
+            logger.info(
+                f"[worker:{worker_key}] Lost run-claim for session {chosen.id} "
+                f"(session {chosen.session_id}) -- another actor is handling it, skipping"
+            )
+            return None
+
         # Direct field mutation -- status is an IndexedField, not a KeyField,
         # so save() correctly updates the secondary index.
         logger.info(
@@ -609,6 +624,19 @@ async def _pop_agent_session_with_fallback(
             break
 
         if chosen is None:
+            return None
+
+        # Narrow SETNX run-claim (issue #1817 B2) -- same shared key as the
+        # async path above, so the two paths (and any other actor) contend
+        # for the SAME claim per session_id. See
+        # models.session_lifecycle.claim_pending_run for the full rationale.
+        from models.session_lifecycle import claim_pending_run
+
+        if not claim_pending_run(chosen.session_id, worker_id=worker_key):
+            logger.info(
+                f"[worker:{worker_key}] Sync fallback: lost run-claim for session {chosen.id} "
+                f"(session {chosen.session_id}) -- another actor is handling it, skipping"
+            )
             return None
 
         # Direct field mutation -- status is an IndexedField, not a KeyField.

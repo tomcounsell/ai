@@ -14,8 +14,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from models.session_lifecycle import (
+    RUN_CLAIM_TTL_SECONDS,
     StatusConflictError,
+    claim_pending_run,
     finalize_session,
+    transition_status,
 )
 
 
@@ -302,3 +305,149 @@ class TestFinalizeSessionRejectFromTerminal:
             finalize_session(session, "killed")
 
         session.save.assert_not_called()
+
+
+# ===================================================================
+# claim_pending_run — narrow SETNX gate for pending->running (issue #1817 B2)
+# ===================================================================
+
+
+class TestClaimPendingRun:
+    """Tests for the narrow pending->running run-claim.
+
+    Uses the real Redis client (matching the existing SETNX-idiom test style
+    elsewhere, e.g. tests/unit/test_dedup.py::TestMessageClaim) since
+    claim_pending_run is a thin, real-Redis SETNX wrapper -- mocking it would
+    just re-test the mock.
+    """
+
+    def _cleanup(self, session_id):
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.delete(f"session:runclaim:{session_id}")
+
+    def teardown_method(self):
+        self._cleanup("test-runclaim-fresh")
+        self._cleanup("test-runclaim-contested")
+
+    def test_claim_fresh_session_succeeds(self):
+        assert claim_pending_run("test-runclaim-fresh", worker_id="worker-A") is True
+
+    def test_second_claim_on_same_session_fails(self):
+        """Two concurrent claimants on the SAME session_id: exactly one wins."""
+        first = claim_pending_run("test-runclaim-contested", worker_id="worker-A")
+        second = claim_pending_run("test-runclaim-contested", worker_id="worker-B")
+        assert first is True
+        assert second is False
+
+    def test_claim_fails_open_on_redis_error(self):
+        """A Redis error must fail OPEN (return True), not starve the queue."""
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.side_effect = RuntimeError("redis down")
+            result = claim_pending_run("test-runclaim-fresh", worker_id="worker-A")
+        assert result is True
+
+    def test_ttl_is_short(self):
+        """RUN_CLAIM_TTL_SECONDS must be short -- only needs to cover the
+        query -> transition_status window, not a long-lived lock."""
+        assert isinstance(RUN_CLAIM_TTL_SECONDS, int)
+        assert 0 < RUN_CLAIM_TTL_SECONDS <= 120
+
+
+class TestConcurrentPendingRunClaim:
+    """End-to-end (within this module) proof that the run-claim + generic CAS
+    together guarantee exactly one actor transitions a pending session to
+    running (issue #1817 B2).
+    """
+
+    def _cleanup(self, session_id):
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        _R.delete(f"session:runclaim:{session_id}")
+
+    def teardown_method(self):
+        self._cleanup("test-runclaim-e2e-1")
+        self._cleanup("test-runclaim-e2e-2")
+
+    def test_two_claimants_exactly_one_wins_and_transitions(self):
+        """Winner transitions to running; loser is stopped by the run-claim
+        alone (never even attempts transition_status)."""
+        session_id = "test-runclaim-e2e-1"
+        session = _make_session(session_id=session_id, status="pending")
+
+        winner_claim = claim_pending_run(session_id, worker_id="worker-A")
+        loser_claim = claim_pending_run(session_id, worker_id="worker-B")
+        assert winner_claim is True
+        assert loser_claim is False
+
+        # Only the winner proceeds to call transition_status -- mirrors the
+        # real call-site pattern in agent/session_pickup.py.
+        with patch("models.session_lifecycle.get_authoritative_session") as mock_cas:
+            mock_fresh = MagicMock()
+            mock_fresh.status = "pending"
+            mock_cas.return_value = mock_fresh
+
+            transition_status(session, "running", reason="worker picked up session")
+
+        assert session.status == "running"
+        session.save.assert_called()
+
+    def test_claim_bypass_still_blocked_by_generic_cas(self):
+        """Anti-criterion (round-4 BLOCKER): even if a caller somehow bypasses
+        the run-claim, the generic CAS inside transition_status() -- the
+        ``on_disk_status != current_status`` compare -- remains a second line
+        of defense and rejects the stale-status transition.
+        """
+        session_id = "test-runclaim-e2e-2"
+        # Caller's in-memory snapshot still says "pending", but the on-disk
+        # record (as re-read by transition_status's CAS) already says
+        # "running" -- e.g. a peer won and completed the transition first.
+        stale_session = _make_session(session_id=session_id, status="pending")
+
+        with patch("models.session_lifecycle.get_authoritative_session") as mock_cas:
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+
+            with pytest.raises(StatusConflictError) as exc_info:
+                transition_status(stale_session, "running", reason="stale bypass attempt")
+
+        assert exc_info.value.expected_status == "pending"
+        assert exc_info.value.actual_status == "running"
+        stale_session.save.assert_not_called()
+
+
+class TestGenericCasStillGovernsWaitingForChildren:
+    """Anti-criterion (round-4 BLOCKER): the generic CAS compare must still be
+    present in models/session_lifecycle.py and still govern C1's
+    waiting_for_children transition. An earlier plan draft proposed deleting
+    this compare; a critique round flagged that as a BLOCKER because it
+    would strip optimistic-concurrency protection from every non-terminal
+    status edge in the system, not just pending->running.
+    """
+
+    def test_cas_compare_present_in_source(self):
+        import inspect
+
+        import models.session_lifecycle as lifecycle_module
+
+        source = inspect.getsource(lifecycle_module)
+        assert "on_disk_status != current_status" in source, (
+            "the generic optimistic-concurrency CAS compare must remain in "
+            "transition_status() -- see the BLOCKER rationale in "
+            "docs/plans/correctness-delivery-integrity.md"
+        )
+
+    def test_finalize_parent_sync_still_calls_transition_status_for_waiting_for_children(self):
+        """C1's waiting_for_children transition still routes through
+        transition_status() (and therefore through the generic CAS), rather
+        than through some bypass path added alongside the new run-claim."""
+        import inspect
+
+        import models.session_lifecycle as lifecycle_module
+
+        source = inspect.getsource(lifecycle_module._finalize_parent_sync)
+        assert 'transition_status(parent, "waiting_for_children"' in source, (
+            "C1's parent transition must still call the shared transition_status() "
+            "helper so the generic CAS applies to it"
+        )
