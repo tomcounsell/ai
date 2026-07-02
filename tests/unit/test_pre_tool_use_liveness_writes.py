@@ -8,15 +8,43 @@ the hook.
 
 A per-session 5s in-memory cooldown bounds Redis write rate under tight tool
 loops. The cooldown is best-effort: writes are coalesced, never reordered.
+
+Issue #1843 (Gap A) added a SECOND path that writes the same fields: the
+**CLI hooks** (``.claude/hooks/pre_tool_use.py`` / ``post_tool_use.py``) that
+granite's PM/Dev PTY children run. Those hooks resolve the AgentSession via
+the on-disk sidecar (``AGENT_SESSION_ID`` is unset in the granite child env),
+not via ``agent.hooks.liveness_writers.record_tool_boundary``. The test below
+covers that CLI-hook path; the full CLI-hook test suite lives in
+``tests/unit/granite_container/test_cli_hook_liveness_writes.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
 
 import pytest
 
 from models.agent_session import AgentSession, SessionType
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _write_agent_session_sidecar(cli_session_id: str, agent_session_id: str) -> None:
+    """Write the minimal ``agent_session.json`` sidecar the CLI hooks read.
+
+    Mirrors ``hook_utils.memory_bridge.save_agent_session_sidecar`` but
+    without importing the popoto-heavy module.
+    """
+    sidecar_dir = REPO_ROOT / "data" / "sessions" / cli_session_id
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    (sidecar_dir / "agent_session.json").write_text(
+        json.dumps({"agent_session_id": agent_session_id})
+    )
 
 
 @pytest.fixture
@@ -154,3 +182,35 @@ def test_clear_false_still_respects_cooldown(liveness_session):
     # current_tool_name reflects only the first write.
     refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
     assert refreshed[0].current_tool_name == "Read"
+
+
+def test_cli_hook_writes_current_tool_name_and_datetime(liveness_session):
+    """Issue #1843 (Gap A): the CLI PreToolUse hook (used by granite's PM/Dev
+    PTY children, where ``AGENT_SESSION_ID`` is unset) resolves the
+    AgentSession via the on-disk sidecar and stamps ``current_tool_name`` /
+    ``last_tool_use_at`` directly — NOT via ``record_tool_boundary``.
+    """
+    hooks_dir = str(REPO_ROOT / ".claude" / "hooks")
+    if hooks_dir not in sys.path:
+        sys.path.insert(0, hooks_dir)
+    import pre_tool_use as cli_pre_tool_use
+
+    cli_session_id = f"cli-liveness-{liveness_session.id}"
+    sidecar_dir = REPO_ROOT / "data" / "sessions" / cli_session_id
+    _write_agent_session_sidecar(cli_session_id, liveness_session.agent_session_id)
+    try:
+        cli_pre_tool_use._record_tool_start(
+            {
+                "session_id": cli_session_id,
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+            }
+        )
+
+        refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+        assert len(refreshed) == 1
+        assert refreshed[0].current_tool_name == "Bash"
+        # Regression guard (CONCERN 4): must be a real datetime, not time.time().
+        assert isinstance(refreshed[0].last_tool_use_at, datetime)
+    finally:
+        shutil.rmtree(sidecar_dir, ignore_errors=True)
