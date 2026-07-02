@@ -69,6 +69,44 @@ class TestSteeringQueue:
     def test_pop_all_empty_queue(self):
         assert pop_all_steering_messages("nonexistent_session") == []
 
+    def test_concurrent_drainers_split_disjointly(self):
+        """Two concurrent drainers of one session_id partition the queue with no loss/dup.
+
+        A1 acceptance criterion: the turn-boundary drain is sequential-LPOP (not a
+        single atomic multi-pop), which is safe only because each LPOP is atomic. Two
+        drainers racing on the same session_id must each pop every message at most once
+        and together pop every message exactly once — no message lost, none duplicated.
+        This locks the single-consumer safety model against a future refactor that might
+        silently invalidate it (e.g. an LRANGE-then-trim drain that could double-count).
+        """
+        import threading
+
+        session_id = "test_concurrent_drainers"
+        n = 200
+        for i in range(n):
+            push_steering_message(session_id, f"msg-{i}", "Tom")
+
+        collected: list[dict] = []
+        lock = threading.Lock()
+
+        def drain():
+            got = pop_all_steering_messages(session_id)
+            with lock:
+                collected.extend(got)
+
+        threads = [threading.Thread(target=drain) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        texts = [m["text"] for m in collected]
+        # No loss, no duplication: the union is exactly the pushed set.
+        assert len(texts) == n, f"expected {n} messages across both drainers, got {len(texts)}"
+        assert sorted(texts) == sorted(f"msg-{i}" for i in range(n))
+        # Queue fully drained.
+        assert pop_all_steering_messages(session_id) == []
+
     def test_clear_steering_queue(self):
         session_id = "test_session_clear"
         push_steering_message(session_id, "msg1", "Tom")

@@ -41,7 +41,7 @@ Message arrives (no reply-to)
 Check in-memory coalescing guard (_recent_session_by_chat)
     |
     v
-Recent session for this chat? --YES--> Push to queued_steering_messages + ack
+Recent session for this chat? --YES--> Push to the Redis steering list + ack
     |
     NO
     v
@@ -76,7 +76,7 @@ When semantic routing matches an unthreaded message to a session that is current
 
 | Session Status | Match Confidence | Action |
 |---|---|---|
-| running/active | >= 0.80 | Push to `queued_steering_messages` via `push_steering_message()`, send ack |
+| running/active | >= 0.80 | Push to the Redis steering list via `push_steering_message()`, send ack |
 | dormant | >= 0.80 | Resume session using `session_id` (existing behavior) |
 | any | < 0.80 | Create new session (existing behavior) |
 
@@ -148,7 +148,7 @@ The in-memory coalescing guard (`_recent_session_by_chat`) bridges the Redis vis
 
 1. A module-level dict `_recent_session_by_chat: dict[str, tuple[str, float]]` maps `chat_id` to `(session_id, timestamp)`.
 2. Just before `enqueue_agent_session()`, the dict is set with the new session_id and current timestamp.
-3. When the next message arrives, the dict is checked first (before Redis). If a recent session exists within `PENDING_MERGE_WINDOW_SECONDS` (8s), the message is pushed to `queued_steering_messages` on the existing session.
+3. When the next message arrives, the dict is checked first (before Redis). If a recent session exists within `PENDING_MERGE_WINDOW_SECONDS` (8s), the message is pushed to the Redis steering list for the existing session.
 4. Stale entries (older than the merge window) are lazily cleaned up on each check.
 5. If the `AgentSession` doesn't exist in Redis yet (Race 2), a single retry after 200ms is attempted. If still missing, falls through to normal session creation.
 

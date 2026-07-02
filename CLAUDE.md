@@ -358,7 +358,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - **Eng Session** (`session_type="eng"`) - Handles both SDLC work and conversational responses, full permissions, engineer persona
 - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona. Bash is open, audit-logged with `[teammate-audit]`. Writes restricted in code to `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta files, and `~/work-vault/`; source-code writes get a redirect to spawn an Eng session. See [`docs/features/teammate-session-permissions.md`](docs/features/teammate-session-permissions.md).
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
-- **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
+- **Session Steering** (see `docs/features/session-steering.md`): the Redis steering list (`agent/steering.py`) is the sole steering inbox — any process writes messages via `push_steering_message()`, the worker drains them at the turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 
 **Subconscious Memory** (see `docs/features/subconscious-memory.md`):
 - Human Telegram messages are saved as Memory records on receipt (importance=6.0)

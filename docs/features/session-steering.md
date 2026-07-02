@@ -1,13 +1,13 @@
 # Session Steering
 
-**Scope:** Turn-boundary inbox (`AgentSession.queued_steering_messages`) consumed by the worker executor. Used by `valor-session steer` and `scripts/steer_child.py`.
+**Scope:** Turn-boundary inbox (the Redis steering list, `agent/steering.py`) consumed by the worker executor. Used by `valor-session steer` and `scripts/steer_child.py`.
 
 **See also:**
 - [Mid-Session Steering](mid-session-steering.md) — Telegram reply-thread flow (user-facing)
 - [Steering Queue: Historical Spec](steering-implementation-spec.md) — Original Redis list design and bridge coalescing
 - [PM Final Delivery](pm-final-delivery.md) — SDLC terminal-turn protocol. Fan-out completion invokes the completion-turn runner directly; it does not go through the steering inbox. The `[PIPELINE_COMPLETE]` content marker historically referenced in earlier docs was retired in issue #1058.
 
-External steering for `AgentSession` via `queued_steering_messages`. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
+External steering for `AgentSession` via the Redis steering list. Any process — the PM, a CLI user, another agent — can write messages to a running session's inbox. The worker injects them at the next turn boundary.
 
 ## Problem
 
@@ -17,24 +17,28 @@ Before this feature, the only steering mechanism was the hardcoded nudge loop in
 
 ### Steering Inbox
 
-`AgentSession.queued_steering_messages` (a `ListField`, already on the model) is the canonical steering inbox. Any process can write to it; the worker consumes at turn boundaries.
+The Redis list at key `steering:{session_id}` (`agent/steering.py`) is the sole steering inbox. Any process can write to it; the worker consumes at turn boundaries.
 
-- **Cap**: `STEERING_QUEUE_MAX = 10` messages per session
-- **Storage**: Popoto `ListField` persisted in Redis
-- **Atomicity**: Write via `push_steering_message()`, read via `pop_steering_messages()`
+- **Cap**: none enforced at the queue level; the worker drains the full list each turn boundary
+- **Storage**: Redis List (`RPUSH`/`LPUSH` to add, `LPOP` to consume), JSON-encoded entries
+- **Atomicity**: Write via `push_steering_message(session_id, text, sender, ...)`, drain via `pop_all_steering_messages(session_id)` (sequential atomic `LPOP`s), or peek non-destructively via `peek_steering_messages(session_id)`
 
 ### Turn Boundary Check
 
-At the start of each agent turn in `_execute_agent_session()`, the worker checks the session's `queued_steering_messages`. If messages are pending, the first is popped and used as the user input for that turn (replacing the original message text). Remaining messages are re-queued for future turns.
+At the start of each agent turn in `_execute_agent_session()` (`agent/session_executor.py`), the worker drains the session's Redis steering list via `pop_all_steering_messages()`. If messages are pending, the first is used as the user input for that turn (replacing the original message text). Remaining messages are re-pushed onto the list for future turns.
 
 ```python
 # Inside _execute_agent_session(), before do_work():
-steering_msgs = agent_session.pop_steering_messages()
+from agent.steering import pop_all_steering_messages, push_steering_message
+
+steering_msgs = pop_all_steering_messages(session.session_id)
 if steering_msgs:
-    _turn_input = steering_msgs[0]
-    # Re-queue remaining for future turns
+    _turn_input = steering_msgs[0]["text"]
+    # Re-push remaining messages for future turns
     for msg in steering_msgs[1:]:
-        agent_session.push_steering_message(msg)
+        push_steering_message(
+            session.session_id, msg["text"], msg["sender"], is_abort=msg.get("is_abort", False)
+        )
 ```
 
 ### Output Router
@@ -49,9 +53,9 @@ The `send_to_chat()` callback in the executor calls `route_session_output()` and
 
 ### Public Steering API
 
-`agent/agent_session_queue.py` exports:
+`agent/session_executor.py` exports:
 
-- `steer_session(session_id, message)` — writes to `queued_steering_messages`, validates non-terminal status, wakes worker
+- `steer_session(session_id, message)` — pushes to the Redis steering list via `agent.steering.push_steering_message()`, validates non-terminal status, wakes worker
 - `re_enqueue_session(session, ...)` — public wrapper for `_enqueue_nudge`, encapsulates re-enqueue logic
 
 ## Data Flow
@@ -59,13 +63,13 @@ The `send_to_chat()` callback in the executor calls `route_session_output()` and
 ```
 External caller (CLI, PM, agent)
   → steer_session(session_id, "Stop after critique")
-    → AgentSession.push_steering_message()  [Redis write]
+    → push_steering_message()               [Redis RPUSH]
     → _ensure_worker()                      [wake worker]
 
 Worker loop
   → _execute_agent_session()
-    → agent_session.pop_steering_messages() [Redis read]
-    → if messages: use first as turn input
+    → pop_all_steering_messages()           [Redis LPOP drain]
+    → if messages: use first as turn input, re-push the rest
     → get_agent_response_sdk(_turn_input, ...)
     → send_to_chat() callback
       → route_session_output()              [output_router.py]
@@ -202,13 +206,13 @@ When the per-tool timeout sub-loop (mechanism 10 in `session-recovery-mechanisms
    - Embeds the user's original request verbatim
    - Instructs the model to skip the hung tool and answer using available context
 
-2. `entry.push_steering_message(..., front=True)` prepends the message at index 0 of `queued_steering_messages`.
+2. `push_steering_message(entry.session_id, ..., front=True)` prepends the message at index 0 of the Redis steering list.
 
 3. On re-pickup, the worker's turn-boundary drain pops this message first and uses it as the turn input.
 
 ### Why prepend, not append
 
-`queued_steering_messages` is a FIFO queue. Any previously queued messages would run first if the tool-skip instruction were appended. Prepending via `front=True` ensures the skip instruction is the first thing the model sees on re-pickup, before any human-authored or watchdog-authored messages that were already in the queue.
+The Redis steering list is a FIFO queue. Any previously queued messages would run first if the tool-skip instruction were appended. Prepending via `front=True` ensures the skip instruction is the first thing the model sees on re-pickup, before any human-authored or watchdog-authored messages that were already in the queue.
 
 The `front=True` parameter on `push_steering_message` trims from the back of the list (preserving the new message at index 0 and the oldest existing messages). The default `front=False` behavior (append, trim from head) is unchanged.
 
@@ -243,7 +247,7 @@ python scripts/steer_child.py --session-id <child_id> --message "focus on tests"
 Script validates: child exists, is an Eng session (is_eng), parent_agent_session_id matches, status is "running"
     |
     +-- non-abort --> steer_session(session_id, message)
-    |                   → AgentSession.queued_steering_messages (turn-boundary inbox)
+    |                   → Redis steering list (turn-boundary inbox)
     |                   → child consumes at its next turn boundary
     |
     +-- --abort -----> push_steering_message(session_id, text, sender="pm", is_abort=True)
@@ -251,7 +255,7 @@ Script validates: child exists, is an Eng session (is_eng), parent_agent_session
                           via additionalContext injection
 ```
 
-The non-abort path uses the turn-boundary inbox (`queued_steering_messages`) via `steer_session()`, which works for both SDK-harness and CLI-harness sessions. The abort path uses the Redis list (`push_steering_message(..., is_abort=True)`) so the watchdog hook can deliver the stop signal immediately rather than waiting for a turn boundary.
+The non-abort path uses the turn-boundary inbox (the Redis steering list) via `steer_session()`, which works for both SDK-harness and CLI-harness sessions. The abort path uses the same Redis list (`push_steering_message(..., is_abort=True)`) so the watchdog hook can deliver the stop signal immediately rather than waiting for a turn boundary.
 
 ### CLI Usage
 
@@ -286,11 +290,11 @@ All validation failures exit with non-zero code and print an error to stderr.
 | Caller | Telegram user (via reply thread) | Parent Eng session (via bash script) |
 | Entry point | `bridge/telegram_bridge.py` | `scripts/steer_child.py` |
 | Validation | Session ID match + running status | Parent-child relationship (`is_eng` + `parent_agent_session_id`) + running status |
-| Non-abort path | Turn-boundary inbox (`queued_steering_messages`) | Turn-boundary inbox (`queued_steering_messages`) via `steer_session()` |
+| Non-abort path | Turn-boundary inbox (Redis steering list) | Turn-boundary inbox (Redis steering list) via `steer_session()` |
 | Abort path | n/a | Redis abort queue via `push_steering_message(..., is_abort=True)` |
 | Sender field | User's name | `"pm"` (abort path) |
 
-The non-abort path converges on `steer_session()` in `agent/agent_session_queue.py` and the same turn-boundary inbox documented above. The abort path uses `push_steering_message()` in `agent/steering.py` with `sender="pm"`.
+The non-abort path converges on `steer_session()` in `agent/session_executor.py` and the same turn-boundary inbox documented above. The abort path uses `push_steering_message()` in `agent/steering.py` with `sender="pm"`.
 
 ## No-Gos
 
