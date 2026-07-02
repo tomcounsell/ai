@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import logging
 import os
 import signal
@@ -95,7 +96,7 @@ GRANITE_BREAKER_COOLDOWN_S: float = float(os.environ.get("GRANITE_BREAKER_COOLDO
 # Grain of salt: defaults below are PROVISIONAL / conservative — tune after
 # observing real respawn cadence in logs/worker.log.
 # Max number of restarts within WORKER_SUPERVISOR_WINDOW_S before the storm
-# cap fires and recycles the process via SIGABRT. Erring toward NOT killing
+# cap fires and recycles the process via SIGKILL. Erring toward NOT killing
 # legitimate work — a task that crashes once every few minutes is fine.
 WORKER_SUPERVISOR_MAX_RESTARTS: int = int(os.environ.get("WORKER_SUPERVISOR_MAX_RESTARTS", "5"))
 # Rolling window (seconds) for the restart-count denominator.
@@ -109,12 +110,25 @@ WORKER_SUPERVISOR_BASE_BACKOFF_S: float = float(
 
 
 def _self_kill() -> None:
-    """Kill this process via SIGABRT so launchd can respawn it.
+    """Hard-kill this process (uncatchable, signal-based) so launchd respawns it.
 
-    Extracted as a seam so unit tests can assert the call without aborting
-    the test process.
+    Dumps all thread stacks to stderr first — a real production wedge then leaves
+    forensic evidence in logs/worker_error.log (better than the macOS .ips C-frame
+    report for a Python-level wedge; see #1808). Then delivers SIGKILL: equally
+    unswallowable as the former abort-based kill, but produces NO macOS crash-report
+    dialog and NO Python-*.ips file. Extracted as a seam so unit tests can assert the
+    call without killing the test process.
+
+    The dump is best-effort; the SIGKILL is in a `finally` so it fires even if the
+    dump raises (e.g. stderr closed/monkeypatched) — otherwise, inside the storm-cap
+    asyncio done-callback the exception would be swallowed and the guard would
+    silently fail to recycle, the exact trap the subprocess test exists to catch.
     """
-    os.abort()
+    try:
+        faulthandler.dump_traceback(all_threads=True)
+        sys.stderr.flush()
+    finally:
+        os.kill(os.getpid(), signal.SIGKILL)
 
 
 def supervise(
@@ -131,15 +145,15 @@ def supervise(
     respawns the task on unexpected death (any exit that is not a cancellation).
     Restart timestamps are tracked in a rolling window; if the task crashes more
     than ``max_restarts`` times within ``window_s`` seconds, the process is
-    recycled unconditionally via ``_self_kill()`` (SIGABRT) so launchd can
+    recycled unconditionally via ``_self_kill()`` (SIGKILL) so launchd can
     respawn it clean.
 
     Backoff: the first respawn waits ``base_backoff_s``, the second waits
     ``base_backoff_s * 2``, and so on (capped at ``window_s / 2``).
 
-    Storm-cap recycle is UNCONDITIONAL ``os.abort()`` via ``_self_kill()`` —
-    the same SIGABRT seam used by the dead-man's-switch (#1815). Never a bare
-    ``sys.exit(1)``: a ``SystemExit`` raised inside an asyncio done-callback is
+    Storm-cap recycle is an UNCONDITIONAL ``_self_kill()`` (a faulthandler thread
+    dump then SIGKILL) — the same seam used by the dead-man's-switch (#1815).
+    Never a bare ``sys.exit(1)``: a ``SystemExit`` raised inside an asyncio done-callback is
     swallowed by the event loop's callback-exception handler, so the process
     would keep running and the cap would silently fail to recycle.
 
@@ -178,16 +192,16 @@ def supervise(
         if len(restart_times) >= max_restarts:
             logger.critical(
                 "[supervisor] Task %r hit storm cap (%d restarts in %.0fs) — "
-                "recycling process via SIGABRT so launchd can respawn clean.",
+                "recycling process via SIGKILL so launchd can respawn clean.",
                 name,
                 max_restarts,
                 window_s,
             )
-            # _self_kill() IS os.abort() — every branch reaches this, no exceptions.
+            # _self_kill() dumps threads then SIGKILLs — every branch reaches this, no exceptions.
             # Never sys.exit(1): a SystemExit in a done-callback is swallowed by the
             # event loop so the process would keep running with the cap silently failed.
             _self_kill()
-            return  # Unreachable — os.abort() terminates the process.
+            return  # Unreachable — _self_kill() (SIGKILL) terminates the process.
 
         # Exponential backoff: 1s, 2s, 4s … capped at window_s/2.
         backoff = min(base_backoff_s * (2 ** len(restart_times)), window_s / 2)
@@ -275,7 +289,7 @@ def _heartbeat_cycle(
       forever, since ``None`` is never stale).
     - **Armed:** if ``now - tick <= WORKER_DEADMAN_STALENESS_THRESHOLD`` the loop
       is ticking → write green + low-cadence beacon-age audit. Otherwise the loop
-      is synchronously frozen → CRITICAL + ``_self_kill`` (SIGABRT) so launchd
+      is synchronously frozen → CRITICAL + ``_self_kill`` (SIGKILL) so launchd
       respawns a healthy worker.
 
     ``WORKER_DEADMAN_ENABLED=false`` is the rollback kill switch: stale/None-past-
@@ -352,7 +366,7 @@ def _heartbeat_thread_main() -> None:
     When the on-loop beacon (last_loop_tick) is fresh, writes the green
     heartbeat as before. When the beacon goes stale beyond
     WORKER_DEADMAN_STALENESS_THRESHOLD (or never ticks past the startup grace
-    ceiling), logs a CRITICAL and self-kills via SIGABRT so launchd can respawn
+    ceiling), logs a CRITICAL and self-kills via SIGKILL so launchd can respawn
     a healthy worker.
 
     WORKER_DEADMAN_ENABLED=false restores the unconditional green-write
@@ -903,7 +917,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     # Start _granite_reprobe_loop as a supervised background task — it doubles as the
     # circuit breaker, toggling granite_available as the model appears/disappears.
-    # supervise() respawns with exponential backoff; storm cap → _self_kill() SIGABRT.
+    # supervise() respawns with exponential backoff; storm cap → _self_kill() SIGKILL.
     reprobe_task = supervise("granite-reprobe", _granite_reprobe_loop)
 
     # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
@@ -1009,7 +1023,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     # Start health monitor as a supervised background task (#1816 Fix #4).
     # supervise() respawns on unexpected death with exponential backoff;
-    # storm cap exceeds → _self_kill() SIGABRT so launchd can respawn clean.
+    # storm cap exceeds → _self_kill() SIGKILL so launchd can respawn clean.
     health_task = supervise("session-health-monitor", _agent_session_health_loop)
 
     # Start per-tool timeout sub-loop (issue #1270) — supervised.

@@ -4,7 +4,7 @@ Covers:
 - test_supervise_respawns_on_crash: supervise() respawns a task that exits unexpectedly
 - test_supervise_no_respawn_on_cancel: cancelled tasks are NOT respawned
 - test_supervise_backoff_grows: backoff delay grows exponentially with each restart
-- test_storm_cap_kills_process: exceeding max_restarts → process dies via SIGABRT (real subprocess)
+- test_storm_cap_kills_process: exceeding max_restarts → process dies via SIGKILL (real subprocess)
 - test_supervise_no_respawn_when_shutdown: shutdown flag suppresses respawn
 """
 
@@ -208,15 +208,16 @@ async def test_supervise_no_respawn_when_shutdown():
 
 
 def test_storm_cap_kills_process():
-    """Storm cap fires os.abort() (SIGABRT) — assert REAL process death.
+    """Storm cap fires _self_kill() (SIGKILL) — assert REAL process death.
 
     This test spawns a child Python process that exercises supervise() with a
     very low max_restarts (2) and a factory that always crashes.  When the cap
-    fires the child must die with SIGABRT, NOT keep running.
+    fires the child must die with SIGKILL, NOT keep running.
 
     A log-only assertion would falsely pass if _self_kill() used sys.exit(1)
-    instead of os.abort(), because sys.exit inside a done-callback is swallowed
-    by the event loop.  This test asserts the exit signal directly.
+    instead of SIGKILL, because sys.exit inside a done-callback is swallowed
+    by the event loop.  This test asserts the exit signal directly and confirms
+    the faulthandler thread dump landed on stderr before the kill.
     """
     import os
     import tempfile
@@ -226,7 +227,7 @@ def test_storm_cap_kills_process():
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     # The child script: runs supervise() with max_restarts=2 and a factory that
-    # always raises. When the cap fires, _self_kill() → os.abort() → SIGABRT.
+    # always raises. When the cap fires, _self_kill() → thread dump → SIGKILL.
     child_script = textwrap.dedent(f"""
         import asyncio
         import os
@@ -279,20 +280,17 @@ def test_storm_cap_kills_process():
 
     os.unlink(script_path)
 
-    # On POSIX, SIGABRT (signal 6) → returncode = -6.
-    # On macOS/Linux: os.abort() raises SIGABRT → the process exits with signal 6.
-    # On Windows: os.abort() exits with code 3 (no signal concept).
-    if sys.platform == "win32":
-        assert result.returncode == 3, (
-            f"Expected exit code 3 (os.abort on Windows); got {result.returncode}.\n"
-            f"stdout={result.stdout.decode()!r}\n"
-            f"stderr={result.stderr.decode()!r}"
-        )
-    else:
-        # -signal.SIGABRT == -6 on POSIX.
-        expected = -signal.SIGABRT
-        assert result.returncode == expected, (
-            f"Expected exit by SIGABRT (rc={expected}); got rc={result.returncode}.\n"
-            f"stdout={result.stdout.decode()!r}\n"
-            f"stderr={result.stderr.decode()!r}"
-        )
+    # macOS/launchd-only worker → POSIX SIGKILL (signal 9) → returncode = -9.
+    # os.kill(getpid(), SIGKILL) delivers the signal; the process exits with -9.
+    expected = -signal.SIGKILL
+    stderr_text = result.stderr.decode()
+    assert result.returncode == expected, (
+        f"Expected exit by SIGKILL (rc={expected}); got rc={result.returncode}.\n"
+        f"stdout={result.stdout.decode()!r}\n"
+        f"stderr={stderr_text!r}"
+    )
+    # The faulthandler thread dump must land on stderr before the kill so a real
+    # production wedge leaves forensic evidence in logs/worker_error.log.
+    assert "Current thread" in stderr_text or "Thread 0x" in stderr_text, (
+        f"Expected a faulthandler thread dump on stderr; got stderr={stderr_text!r}"
+    )
