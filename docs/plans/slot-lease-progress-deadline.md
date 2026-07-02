@@ -5,7 +5,8 @@ appetite: Large
 owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1820
-last_comment_id:
+last_comment_id: IC_kwDOEYGa088AAAABIc-JCQ
+last_comment_rest_id: 4862216457
 revision_applied: true
 ---
 
@@ -223,16 +224,37 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
    (`:1942`) returns without propagating CancelledError into the worker loop — the worker
    survives. Fix #3's own deadline cancel targets `exec_task` directly (it holds the
    local reference) and fd-PTY-kills the SDK subprocess itself.
-2. **Deadline watch:** a small on-loop watcher computes
-   `last_progress = max(last_tool_use_at, last_turn_at, acquired_at)` for the session
+2. **Deadline watch (transport-aware progress signal — Granite deconfliction, comment
+   4862216457):** a small on-loop watcher computes `last_progress = _session_progress_ts(session)`
    and, if `now - last_progress > SESSION_PROGRESS_DEADLINE_S` while `exec_task` is
    not done, consults the shared no-progress kill gate (the extracted Tier-2 reprieve
    predicate — active-children/compaction — so a `waiting_for_children` PM is NOT
-   falsely killed). The deadline is fed by **progress**, never wall-clock (a session
-   making tool calls resets it).
+   falsely killed). The deadline is fed by **progress**, never wall-clock (any activity
+   resets it). **Which fields count as progress depends on the transport:**
+   - **SDK path:** `max(last_tool_use_at, last_turn_at, acquired_at)` — the in-process
+     SDK hooks bump `last_tool_use_at`/`last_turn_at`.
+   - **Granite PTY path:** those SDK fields are **structurally dead** — granite children
+     run the CLI hooks, which bump only `updated_at`+`tool_call_count`, never
+     `last_tool_use_at`/`last_turn_at`/`current_tool_name`. Re-deriving staleness from
+     them would make **every** granite session look stale the instant it crosses the
+     deadline (only `acquired_at` would be non-None), a deterministic false kill. Instead
+     the granite branch consumes the existing #1724 PTY-liveness signal
+     `last_pty_activity_at` (`models/agent_session.py:392`, diff-gate-stamped by the PTY
+     read-loop callback at `bridge_adapter.py:952-975`; the sibling quiescence gate lives
+     at `session_health.py:390-464`): `last_progress = max(last_pty_activity_at,
+     acquired_at)`. The granite session is discriminated exactly as
+     `_pty_quiescent_long_enough` discriminates it — `last_pty_read_loop_at is not None`.
+   `_session_progress_ts` is therefore the max over all **present** progress signals
+   (`last_tool_use_at`, `last_turn_at`, `last_pty_activity_at`, `acquired_at`), so it is
+   correct for whichever transport is live and needs no hard dependency on #1843 fix 2 —
+   if that lands first and makes the CLI hooks additionally populate the standard SDK
+   fields, they simply become fresh too and the max picks the freshest; if it has NOT
+   landed, `last_pty_activity_at` still carries granite liveness. **The plan does not
+   DEPEND on #1843 fix 2.**
 3. **On expiry (gate says kill):** set `deadline_cancelled = True`; **finalize FIRST**
    — (a) fd-level PTY kill (scoped process-group teardown of the session's granite
-   slot via the `container.py` `os.killpg` path from #1816); (b)
+   slot via the `container.py` `os.killpg` path from #1816 — see the Granite kill-scope
+   note below); (b)
    `registry.reclaim(session.agent_session_id)`; (c) `did_finalize = await
    _apply_recovery_transition(reason_kind="progress_deadline")`; (c') if `did_finalize`
    is False (recovery declined — MAX_RECOVERY_ATTEMPTS / OOM-defer), force
@@ -268,6 +290,25 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
 5. **Output:** the parked session is finalized, its slot freed, its PTY dead — all
    from the scope that owned the task, and the deadline-cancel is never confused with
    a worker shutdown.
+
+**Granite kill-scope note (comment 4862216457, fact b — this fix owns the gap).**
+`_apply_recovery_transition`'s process kill is a SIGTERM→SIGKILL escalation against the
+recorded `claude_pid` (`session_health.py:2039-2051`), and `claude_pid` is set **only on
+the SDK path** (`session_executor.py:1425`). A granite session runs the container on a
+worker thread via `await asyncio.to_thread(container.run)` (`bridge_adapter.py:695`), so it
+records **no** `claude_pid` and a task-cancel cannot stop the OS thread — today's recovery
+transitions the row terminal but leaves the granite **PTY children alive** until the orphan
+reaper sweeps them. Fix #3's `_fd_pty_kill(session)` closes exactly this gap: for a granite
+session it performs the scoped **process-group** teardown the container already implements —
+`os.killpg` against the per-PTY pgids the container captures (`container.py:1027-1052`,
+mirrored at `:1701-1706`) — so the PTY children die synchronously with the logical kill
+rather than lingering. This is the fd-level PTY kill named in Fix #3's Desired Outcome #2,
+now with the granite path made explicit. **Coordination with #1843 fix 1
+(`granite_wedged` → recovery):** that fix is scoped to route the `granite_wedged` verdict
+(`session_stall_classifier.py:298`) **through this cancel scope** rather than adding a fourth
+kill ladder. Fix #3 owns the single granite PTY-child kill path; #1843 fix 1 wires the
+trigger into it. Do NOT duplicate a granite kill ladder here or there — reference #1843 and
+share this scope.
 
 ## Architectural Impact
 
@@ -361,6 +402,12 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
   `deadline_cancelled` flag so the `CancelledError` handler swallows instead of
   re-queuing. This is the single authoritative killer for worker-alive running
   sessions (the out-of-band worker-alive `no_progress` branch is deleted; OQ3).
+  **Transport-aware (Granite deconfliction, comment 4862216457):** the progress
+  timestamp `_session_progress_ts` consumes the granite #1724 signal
+  `last_pty_activity_at` for PTY sessions (the SDK fields `last_tool_use_at`/
+  `last_turn_at`/`current_tool_name` are structurally dead there), and `_fd_pty_kill`
+  covers the granite PTY-child pgid kill that `_apply_recovery_transition`'s
+  `claude_pid` SIGKILL misses — shared with #1843 fix 1, no fourth kill ladder.
 - **Env kill-switches** (all NAMED, env-overridable, conservative-provisional):
   `SESSION_PROGRESS_DEADLINE_S`, `PROGRESS_POLL_S`, `SLOT_LEASE_REAP_DISABLED`, reuse
   `DISABLE_PROGRESS_KILL` for the Fix #3 cancel. (`SLOT_LEASE_TTL_S` was **removed** in
@@ -373,9 +420,11 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
 Worker loop → `await registry.acquire()` → pop session (None/exception →
 `registry.release_unbound()`) → `registry.bind(session_id)` → run `exec_task =
 create_task(_execute_agent_session(...))` under the progress-deadline watcher
-(`handle.task` stays the inner SDK task per #1039 — NOT rewired) →
+(`handle.task` stays the inner SDK task per #1039 — NOT rewired; progress read via
+transport-aware `_session_progress_ts` — `last_pty_activity_at` for granite) →
 **normal completion** → `registry.release(session_id)` /
-**no progress past deadline** → fd-PTY-kill → `registry.reclaim(session_id)` →
+**no progress past deadline** → fd-PTY-kill (granite: `os.killpg` on the container's
+PTY-child pgids) → `registry.reclaim(session_id)` →
 finalize (`_apply_recovery_transition`) → set `deadline_cancelled` → cancel
 `exec_task` → `CancelledError` handler swallows (no requeue).
 
@@ -516,7 +565,10 @@ calls `release_unbound()`).
           done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
           if exec_task in done:
               break
-          last = _session_progress_ts(session)  # max(last_tool_use_at, last_turn_at, acquired_at)
+          last = _session_progress_ts(session)  # transport-aware: SDK → max(last_tool_use_at,
+          #   last_turn_at, acquired_at); granite PTY → max(last_pty_activity_at, acquired_at)
+          #   (the SDK fields are structurally dead for granite; #1724 signal, comment 4862216457).
+          #   Implemented as max over all PRESENT signals so it needs no #1843-fix-2 dependency.
           if last is not None and (time.time() - last) > SESSION_PROGRESS_DEADLINE_S:
               if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
                   break  # kill-switch: let it run
@@ -544,7 +596,10 @@ calls `release_unbound()`).
               # removed: it rationalized the always-None read this blocker fixes.)
               deadline_cancelled = True
               # FINALIZE FIRST — at the watcher scope, before cancel reaches :1496:
-              _fd_pty_kill(session)                      # scoped os.killpg (#1816)
+              _fd_pty_kill(session)                      # scoped os.killpg on the per-PTY pgids
+              #   the container captures (container.py:1027-1052) — closes the granite kill-scope
+              #   gap (_apply_recovery_transition SIGKILLs claude_pid, which is None for granite;
+              #   comment 4862216457, fact b). Shared with #1843 fix 1 — no fourth kill ladder.
               registry.reclaim(session.agent_session_id) # free the slot
               did_finalize = await _apply_recovery_transition(  # terminal-guarded, idempotent
                   session, reason="progress deadline exceeded",
@@ -705,6 +760,33 @@ calls `release_unbound()`).
   (c'') set `finalized_by_execute=True` to skip the outer finally; (d) cancel + await.
   Steps a-c reuse terminal-status idempotency so an out-of-band killer racing the same
   session is harmless.
+- **Granite deconfliction (comment 4862216457) — two transport-specific facts Fix #3
+  MUST honor:**
+  1. **Progress signal (fact a).** `_session_progress_ts` must NOT re-derive granite
+     staleness from `last_turn_at`/`last_tool_use_at`/`current_tool_name`: those fields
+     are written only by the in-process SDK hooks, which granite's PTY children never run
+     (they run the CLI hooks, bumping only `updated_at`+`tool_call_count`). Consuming them
+     for granite would leave `acquired_at` as the sole non-None signal → every granite
+     session false-kills the instant it crosses `SESSION_PROGRESS_DEADLINE_S`. The granite
+     branch consumes the existing #1724 signal `last_pty_activity_at`
+     (`models/agent_session.py:392`; diff-gate-stamped by the PTY read-loop callback at
+     `bridge_adapter.py:952-975`; sibling quiescence gate at `session_health.py:390-464`,
+     `_pty_quiescent_long_enough`). Implement `_session_progress_ts(session)` as the max over
+     all **present** progress fields (`last_tool_use_at`, `last_turn_at`,
+     `last_pty_activity_at`, `acquired_at`) so it is correct for either transport with **no
+     hard dependency on #1843 fix 2**: if #1843 fix 2 lands first and makes the CLI hooks
+     also populate the SDK fields, both signals are fresh and the max still picks the
+     freshest; if it has not landed, `last_pty_activity_at` carries granite liveness alone.
+  2. **Kill scope (fact b).** `_apply_recovery_transition` SIGKILLs `claude_pid`
+     (`session_health.py:2039-2051`), set only on the SDK path
+     (`session_executor.py:1425`). Granite runs via `await asyncio.to_thread(container.run)`
+     (`bridge_adapter.py:695`) with no `claude_pid` and no task-cancel reach into the OS
+     thread, so recovery leaves granite PTY children alive until the orphan reaper. Fix #3's
+     `_fd_pty_kill` is the fix: scoped `os.killpg` on the per-PTY pgids the container captures
+     (`container.py:1027-1052` / `:1701-1706`). **#1843 fix 1 (`granite_wedged` → recovery,
+     `session_stall_classifier.py:298`) routes through THIS cancel scope — it wires the
+     trigger, Fix #3 owns the single kill path. Do NOT add a fourth kill ladder in either
+     place.**
 - Reuse `DISABLE_PROGRESS_KILL=1` as the kill-switch (parity with the tool-timeout
   loop).
 - **OQ3 resolution — single authoritative killer per running session.** Fix #3
@@ -825,7 +907,7 @@ calls `release_unbound()`).
 New tests (greenfield):
 - `tests/unit/test_slot_lease_registry.py` — acquire/bind/release/reclaim happy path; double-reclaim idempotency (no over-release); `acquire()`+`release_unbound()` leaves no lease and restores `permits_free`; terminal-owner reclaim; `permits_free` accounting. (No deadline-expired reclaim test — the wall-clock arm was removed, Blocker 2.)
 - `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**. ALSO assert a still-`running`, progressing owner whose lease is old is NOT reclaimed (Blocker 2 regression guard: no over-admission of a healthy long session). ALSO (`disabled_still_logs` case — Operator CONCERN): with `SLOT_LEASE_REAP_DISABLED=1`, the reap pass still logs the leaked-slot WARNING (detection preserved) but reclaims NO permit and does NOT increment `slot_reclaims` — the kill-switch is detect-only, never no-visibility.
-- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **an out-of-band `tool_timeout`/`worker_dead` cancel of the inner SDK task (`handle.task = task._task`, #1039) tears down the subprocess AND does NOT tear down the worker** — the worker survives and picks up the next session (Blocker r4; assert the worker loop is still alive and `_active_workers` still holds it after the kill); the Branch-2 backstop — an already-terminal row receiving a bubbled CancelledError is swallowed, not re-queued; a **worker-shutdown cancel** (Branch 3, `deadline_cancelled=False`, row still `running`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**.
+- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **an out-of-band `tool_timeout`/`worker_dead` cancel of the inner SDK task (`handle.task = task._task`, #1039) tears down the subprocess AND does NOT tear down the worker** — the worker survives and picks up the next session (Blocker r4; assert the worker loop is still alive and `_active_workers` still holds it after the kill); the Branch-2 backstop — an already-terminal row receiving a bubbled CancelledError is swallowed, not re-queued; a **worker-shutdown cancel** (Branch 3, `deadline_cancelled=False`, row still `running`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**. **Granite cases (comment 4862216457):** a granite PTY session with a **fresh `last_pty_activity_at`** but **None `last_tool_use_at`/`last_turn_at`** past the deadline is NOT killed (fact a — `_session_progress_ts` reads the PTY signal); a **quiescent** granite session (stale `last_pty_activity_at`) IS killed AND its PTY children are torn down via the container's `os.killpg` pgid path (fact b — assert the `killpg` seam fires; `claude_pid` is None). These two cases must pass whether or not #1843 fix 2 has populated the SDK fields.
 
 ## Rabbit Holes
 
@@ -1018,7 +1100,11 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   (fingerprint→reclaim, **terminal-owner only**), the prompt reclaim wired into
   `_apply_recovery_transition`, the progress-deadline cancel scope + three-branch
   `deadline_cancelled`/fresh-status `CancelledError` disambiguation + fd-PTY-kill + the
-  #1039 contract (why `handle.task` stays the inner SDK task, NOT `exec_task`), the single-
+  #1039 contract (why `handle.task` stays the inner SDK task, NOT `exec_task`), the
+  **transport-aware progress signal** (granite consumes `last_pty_activity_at` (#1724),
+  not the structurally-dead SDK fields) and the **granite PTY-child kill scope** (scoped
+  `os.killpg` on the container pgids, closing the `claude_pid`-is-None gap; shared with
+  #1843 fix 1, no fourth kill ladder), the single-
   authoritative-killer division (Fix #3 for worker-alive; `worker_dead` and
   `tool_timeout` for the disjoint residuals) with the shared `_should_kill_no_progress`
   reprieve gate (also called by `_apply_recovery_transition` for the never-started
@@ -1059,6 +1145,17 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
 - [ ] A progress-deadline cancel is finalized in-scope and **NOT re-queued**
   (`deadline_cancelled` swallow path) — the `CancelledError` handler no longer
   misclassifies it as a worker-shutdown interrupt (Blocker 1, round 1).
+- [ ] **Granite progress signal (comment 4862216457, fact a):** `_session_progress_ts`
+  consumes `last_pty_activity_at` for granite PTY sessions — a granite session making
+  PTY-visible progress past `SESSION_PROGRESS_DEADLINE_S` (fresh `last_pty_activity_at`,
+  no `last_tool_use_at`/`last_turn_at`) is **NOT** false-killed; a genuinely quiescent one
+  IS killed. `grep -c "last_pty_activity_at" agent/agent_session_queue.py` (or the module
+  holding `_session_progress_ts`) `> 0`. No hard dependency on #1843 fix 2.
+- [ ] **Granite kill scope (comment 4862216457, fact b):** `_fd_pty_kill` performs the
+  scoped `os.killpg` PTY-child teardown for granite sessions (whose `claude_pid` is None),
+  so no granite PTY children survive a progress-deadline kill to be swept later by the
+  orphan reaper. `test_progress_deadline_cancel.py` asserts the `killpg` seam fires for a
+  granite session. #1843 fix 1 routes through this scope — no fourth kill ladder.
 - [ ] **No healthy-worker teardown on out-of-band cancel (Blocker r4):** the
   `handle.task = exec_task` wiring is NOT present (`grep -c "handle.task = exec_task"
   agent/agent_session_queue.py == 0`); `handle.task` stays the inner SDK task per #1039,
@@ -1193,8 +1290,21 @@ lead NEVER builds directly.
 - **Agent Type**: builder
 - **Parallel**: false
 - At `agent_session_queue.py:1494`, run `_execute_agent_session` as an owned task
-  under a progress-deadline watcher (`_session_progress_ts` = max of
-  `last_tool_use_at`/`last_turn_at`/`acquired_at`) with a `deadline_cancelled` flag.
+  under a progress-deadline watcher (`_session_progress_ts` = max over all present
+  progress signals) with a `deadline_cancelled` flag.
+- **Granite deconfliction (comment 4862216457) — TWO transport-specific requirements:**
+  (a) `_session_progress_ts` must include `last_pty_activity_at` (`models/agent_session.py:392`,
+  #1724) so granite PTY sessions have a live progress signal — the SDK fields
+  `last_tool_use_at`/`last_turn_at`/`current_tool_name` are structurally dead for granite
+  (its children run CLI hooks that bump only `updated_at`+`tool_call_count`), so relying on
+  them alone false-kills every granite session at the deadline. Do NOT depend on #1843 fix 2:
+  the max-over-present-signals form is correct whether or not it lands.
+  (b) `_fd_pty_kill` must kill the granite PTY children via `os.killpg` on the container's
+  captured per-PTY pgids (`container.py:1027-1052`) — `_apply_recovery_transition`'s
+  `claude_pid` SIGKILL (`session_health.py:2039-2051`) is a no-op for granite (`claude_pid`
+  is SDK-path-only, `session_executor.py:1425`; granite runs `asyncio.to_thread(container.run)`
+  at `bridge_adapter.py:695`). #1843 fix 1 (`granite_wedged` → recovery) routes through THIS
+  cancel scope — do NOT add a fourth kill ladder; reference #1843 and share the scope.
 - **Blocker r4 — HONOR #1039; do NOT rewire the handle.** Do NOT add
   `handle.task = exec_task` and do NOT change `session_executor.py:734`/`:1891`. Wiring
   `handle.task = exec_task` (the withdrawn prior root fix) would (1) tear down the whole
@@ -1311,6 +1421,8 @@ lead NEVER builds directly.
 | fd-PTY-kill uses scoped teardown (not machine pkill) | `grep -c "pkill" agent/agent_session_queue.py` | match count == 0 |
 | Kill-switch preserves detection (Operator CONCERN) | `pytest tests/integration/test_slot_lease_reclaim.py -k disabled_still_logs -q` | exit code 0 (WARNING logged, no reclaim under `SLOT_LEASE_REAP_DISABLED=1`) |
 | Fix #3 finalize passes `handle=None` (NIT) | `grep -c "handle=None" agent/agent_session_queue.py` | output > 0 |
+| Granite progress signal consumed (comment 4862216457, fact a) | `grep -c "last_pty_activity_at" agent/agent_session_queue.py` | output > 0 |
+| Granite PTY-child kill via scoped killpg (comment 4862216457, fact b) | `grep -c "killpg" agent/granite_container/container.py` | output > 0 (the pgid teardown Fix #3 reuses) |
 
 ## Critique Results
 
@@ -1341,6 +1453,8 @@ lead NEVER builds directly.
 | **CONCERN (r5)** | History & Consistency | Fix #3 `agent_session_queue.py` line anchors (`:1494`/`:1496`/`:1583-1659`/`:1674`/`:1288-1307`) shift after Fix #2's PR-split rename lands first (migrated acquire/release sites + `_slot_acquired` rename + inserted `registry.bind` at `:1493`) → stale anchors for the Fix #3 builder | Fix #3 Technical Approach (anchor annotation) | Added an explicit note that the anchors are pre-Fix-#2 baseline-relative and WILL shift; builder must locate the seams STRUCTURALLY (the `try:`/`await _execute_agent_session` block, the `except asyncio.CancelledError` handler, the outer `finally`, the outer worker-popping handler) — not by literal line number |
 | **CONCERN (r5)** | Consistency Auditor | OQ3 deletion of the `:2506-2517` `elif` alone leaves the classifier's `_reason_kind = "no_progress"` string at `:2527` as dead code → the plan's own `grep -c '_reason_kind = "no_progress"' == 0` verification FAILS | OQ3 resolution + Step task 2 + Success Criteria | Deletion now ALSO collapses the classifier at `:2519-2529` (remove the `if "no progress signal" … else` split; set `_reason_kind = "worker_dead"` unconditionally), physically deleting `:2527` so the `== 0` grep holds and NO-LEGACY is satisfied. Confirmed `:2527` is the sole match; the `:3311` kwarg `reason_kind="no_progress"` does not match the grep |
 | **NIT (r5)** | Risk & Robustness | Code-sketch comment rationalized the always-`None` handle read ("a stale None handle just means no reprieve signal, which the exceeded deadline already justifies killing") — the exact buggy justification the r5 BLOCKER exposes | Fix #3 code sketch | Removed the misleading justification sentence; replaced with a note that the handle is now re-fetched per poll so a `waiting_for_children` PM is correctly reprieved |
+| **RESOLVED (r6, comment 4852511143)** | Review/Patch (valorengels, 2026-07-01) | `handle.task = exec_task` misroutes an out-of-band cancel (`tool_timeout`/`worker_dead`) into the worker-shutdown branch → tears down the whole worker for one already-finalized session | Blocker r4 prose + Success Criteria + Verification + Step task 2 | **Already resolved by revision r4** — the `handle.task = exec_task` wiring was **WITHDRAWN** entirely; `handle.task` keeps pointing at the inner SDK task per the #1039 contract, whose cancel BackgroundTask absorbs, and the `:1496` handler gained the Branch-2 fresh-status-terminal swallow as the defensive backstop for any bubbled out-of-band CancelledError. This reconciliation pass CONFIRMS the wiring is not re-introduced (`grep -c "handle.task = exec_task" == 0`); no further change needed |
+| **RECONCILED (r6, comment 4862216457)** | Granite deconfliction (tomcounsell, 2026-07-02, per #1843) | Fix #3 (a) must NOT re-derive granite staleness from the structurally-dead SDK fields (`last_tool_use_at`/`last_turn_at`/`current_tool_name`) and (b) must own the granite PTY-child kill scope that `_apply_recovery_transition`'s `claude_pid` SIGKILL misses | Fix #3 Data Flow step 2/3 + Granite kill-scope note + Technical Approach Granite bullet + code sketch + Key Elements + Flow + Step task 2 + Success Criteria + Test Impact + Verification + Documentation | (a) `_session_progress_ts` consumes the #1724 `last_pty_activity_at` signal for granite PTY sessions (max over all present signals — no dependency on #1843 fix 2). (b) `_fd_pty_kill` performs scoped `os.killpg` on the container's captured per-PTY pgids (`container.py:1027-1052`); #1843 fix 1 (`granite_wedged` → recovery) routes through THIS cancel scope — no fourth kill ladder |
 
 ---
 
