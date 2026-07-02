@@ -689,3 +689,55 @@ async def test_quiescent_granite_pool_session_killed_via_pool_kill_orphans(
         mock_killpg.assert_not_called()
     finally:
         await _teardown_loop(loop_task, worker_key)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_granite_alive_pty_reprieved_at_deadline(monkeypatch, redis_test_db):
+    """A pool-backed granite session whose PTY read loop is alive/painting but
+    whose SDK + `last_pty_activity_at` progress signals are stale past the
+    deadline is REPRIEVED, not killed (issue #1820 note 2 — transport-aware
+    Tier-2 reprieve).
+
+    `claude_pid` is None, so the psutil "children"/"alive" gates in
+    `_tier2_reprieve_signal` are a structural no-op for granite. Without the
+    granite gate this legitimately-parked session (fresh `last_pty_read_loop_at`,
+    `mid_run_quiescent_since=None` → `_pty_quiescent_long_enough` reports the
+    PTY is alive) would be false-killed. The gate must reprieve it — while
+    `test_quiescent_granite_pool_session_killed_via_pool_kill_orphans` proves a
+    genuinely-quiescent granite session (no live read loop) is still killed.
+    """
+    worker_key = "test-pd-10"
+    session = _create_session(
+        "pd-granite-alive-pty-1",
+        last_tool_use_at=None,
+        last_turn_at=None,
+        last_pty_activity_at=None,  # stale — deadline driven by acquired_at
+        claude_pid=None,
+        pm_pid=55701,
+        dev_pid=55702,
+        last_pty_read_loop_at=datetime.now(UTC),  # read loop alive (< 90s)
+        mid_run_quiescent_since=None,  # PTY painting → alive, defer kill
+    )
+
+    apply_recovery_mock = AsyncMock()
+
+    loop_task = None
+    try:
+        with (
+            patch.object(_aq, "_apply_recovery_transition", apply_recovery_mock),
+            patch("agent.granite_container.pty_pool.PTYPool.kill_orphans") as mock_kill,
+        ):
+            loop_task = await _run_worker_loop(monkeypatch, worker_key, session, _hang_forever)
+            # Several deadline-exceeded polls elapse — each must reprieve.
+            await asyncio.sleep(0.6)
+
+        apply_recovery_mock.assert_not_called()
+        mock_kill.assert_not_called()
+        fresh = _fresh(session)
+        assert fresh is not None and fresh.status == "running"
+        assert (fresh.reprieve_count or 0) >= 1, (
+            "Expected the granite PTY-alive Tier-2 reprieve to have fired at least once"
+        )
+    finally:
+        await _teardown_loop(loop_task, worker_key)

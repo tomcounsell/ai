@@ -200,7 +200,21 @@ Fix #3's watcher and `_apply_recovery_transition`'s never-started
 `no_progress` path. The tier1/tier2 counters fire exactly once per session (on
 the first kill-decision, latched by `np_telemetry_emitted`), never once per
 `PROGRESS_POLL_S` tick for a long-reprieved session. A `waiting_for_children` PM
-with no own tool/turn activity is reprieved, not killed.
+is reprieved, not killed.
+
+The reprieve gate itself (`_tier2_reprieve_signal`) is transport-aware. On the
+SDK path it reprieves when the recorded `claude_pid` still has live child
+processes or a non-zombie status (psutil). A granite session records no
+`claude_pid`, so those psutil gates are a structural no-op for it — a granite
+`waiting_for_children` PM whose own PTY is momentarily quiet would otherwise be
+false-killed once its progress signals aged past the deadline. For a granite
+session (`claude_pid is None`) the gate derives the reprieve from the PTY
+read-loop liveness signal instead: `_pty_quiescent_long_enough` reports the PTY
+as alive/painting (defer the kill, reprieve as `"pty_alive"`) until it has been
+quiescent past the wedge-eligibility window, at which point the session is
+genuinely quiescent and is killed — the same "fresh PTY reprieves, quiescent PTY
+is killed" boundary the progress signal enforces, now applied to the reprieve
+decision as well.
 
 The running-scan `no_progress` elif is **narrowed** on the in-scope handle (not
 deleted), retaining the #944 shared-`worker_key` orphan net for worker-alive

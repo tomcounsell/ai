@@ -1234,6 +1234,12 @@ def _tier2_reprieve_signal(
                      ``last_compaction_ts`` on every successful backup. Added
                      for issue #1099 Mode 3 — prevents false kills on
                      sessions that are legitimately idle post-compaction.
+      "pty_alive"  — granite transport gate (issue #1820 note 2): the session
+                     has no ``claude_pid`` (granite PTY, not SDK) and
+                     ``_pty_quiescent_long_enough`` reports the PTY read loop is
+                     alive/painting (not yet wedge-eligible). Evaluated before
+                     the psutil gates, which are a no-op for a pid-less granite
+                     session. SDK sessions never match this gate.
       "children"   — ``psutil.Process(pid).children()`` is non-empty.
                      Strongest signal: tool-subprocess execution is actively
                      happening right now. Returned in preference to "alive".
@@ -1293,6 +1299,28 @@ def _tier2_reprieve_signal(
         except (TypeError, ValueError):
             # Defensive: malformed timestamp on the entry — skip this gate.
             pass
+
+    # Granite transport-aware reprieve (issue #1820 note 2). A granite PTY
+    # session records no ``claude_pid`` (SDK-path-only,
+    # ``session_executor.py:1425``), so ``handle.pid`` is None and the psutil
+    # "children"/"alive" gates below are a structural no-op for it. Without a
+    # transport-specific gate, a legitimately-parked granite session (e.g. a
+    # ``waiting_for_children`` PM) whose PTY read loop is alive but momentarily
+    # quiet would be falsely killed at the progress deadline. Derive the
+    # reprieve from the PTY-liveness signal instead: ``_pty_quiescent_long_enough``
+    # returns False while the granite PTY read loop is alive and painting
+    # (defer the kill) and True only once it has been quiescent past the
+    # wedge-eligibility window (proceed to kill) — the exact "genuinely
+    # quiescent granite IS killed" boundary the plan requires. For SDK sessions
+    # (``last_pty_read_loop_at is None``) it returns True, so this gate never
+    # reprieves an SDK session and cannot interfere with the psutil path below.
+    if getattr(entry, "claude_pid", None) is None:
+        try:
+            if not _pty_quiescent_long_enough(entry, datetime.now(UTC)):
+                return "pty_alive"
+        except Exception as e:
+            # Defensive: never crash the health check from a PTY-liveness edge case.
+            logger.debug("[session-health] pty-liveness reprieve probe failed: %s", e)
 
     pid = handle.pid if handle is not None else None
     if pid is not None:
