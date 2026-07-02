@@ -128,6 +128,52 @@ class TestSpawnTracking(unittest.TestCase):
             os.unlink(tmp.name)
 
 
+class TestRegisterUnregisterPid(unittest.TestCase):
+    """Crash-resume PID registration seam (plan #1851): the callback
+    entry points `PTYPool.register_pid`/`unregister_pid`, wired to
+    `Container(on_pty_spawn=..., on_pty_despawn=...)`."""
+
+    def test_register_pid_adds_and_persists(self) -> None:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        try:
+            pool = _make_pool(size=1, pid_registry=tmp.name)
+            pool.register_pid(54321)
+            self.assertIn(54321, pool.get_spawned_pids())
+            data = json.loads(Path(tmp.name).read_text())
+            self.assertIn(54321, data["pids"])
+        finally:
+            os.unlink(tmp.name)
+
+    def test_unregister_pid_discards_and_persists(self) -> None:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        try:
+            pool = _make_pool(size=1, pid_registry=tmp.name)
+            pool.register_pid(54321)
+            pool.unregister_pid(54321)
+            self.assertNotIn(54321, pool.get_spawned_pids())
+            data = json.loads(Path(tmp.name).read_text())
+            self.assertNotIn(54321, data["pids"])
+        finally:
+            os.unlink(tmp.name)
+
+    def test_unregister_pid_not_present_is_a_noop(self) -> None:
+        pool = _make_pool(size=1)
+        # Discarding a pid that was never registered must not raise.
+        pool.unregister_pid(99999)
+        self.assertNotIn(99999, pool.get_spawned_pids())
+
+    def test_register_pid_returns_without_hanging(self) -> None:
+        """Deadlock guard (round-2 BLOCKER): `_persist_pids` re-acquires
+        the non-reentrant `_pids_lock`. If `register_pid` ever called
+        `_persist_pids()` from inside its own `with self._pids_lock:`
+        block, this call would hang forever instead of returning."""
+        pool = _make_pool(size=1)
+        pool.register_pid(11111)  # must return promptly, not hang
+        self.assertIn(11111, pool.get_spawned_pids())
+
+
 class TestAcquireRelease(unittest.TestCase):
     def test_acquire_returns_pair(self) -> None:
         pool = _make_pool(size=2)
