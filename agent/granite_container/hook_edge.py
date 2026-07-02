@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import pathlib
+import threading
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def generate_hook_settings(
     *,
     forwarder_path: str | None = None,
     filename: str = "granite_hook_settings.json",
+    pre_authorize: bool = True,
 ) -> tuple[str, str]:
     """Write the per-session ``--settings`` file and return ``(settings, edge)``.
 
@@ -119,6 +121,17 @@ def generate_hook_settings(
     NDJSON edge file the forwarder appends to (its path is what
     :data:`EDGE_FILE_ENV` must carry in the child env). Every target hook is
     registered to ``python3 <forwarder>``.
+
+    ``pre_authorize`` (plan #1688 Task 3, companion): when True, the generated
+    settings also carry a ``permissions.defaultMode = "bypassPermissions"``
+    block. This pre-answers the steady-state permission bar via the settings
+    source (reinforcing the ``--permission-mode bypassPermissions`` spawn flag),
+    shrinking the ``startup_parser`` scrape surface. Honest limit: the
+    trust-folder dialog and the auto-update notice are governed by
+    ``~/.claude.json`` project-trust state and the auto-updater respectively,
+    NOT the ``--settings`` file, on the fleet's pinned ``claude`` — so
+    ``startup_parser`` retains those dismissals (shrink, not delete; plan
+    ## Rabbit Holes).
 
     The edge file's parent is created and the file is touched empty so its path
     is *reserved before the first PTY write* — a level-triggered consumer can
@@ -154,9 +167,114 @@ def generate_hook_settings(
         "PreCompact": all_events_entry,
         "SessionStart": all_events_entry,
     }
+    settings_obj: dict = {"hooks": hooks}
+    if pre_authorize:
+        # Task 3 startup pre-authorization (companion): reinforce the spawn-time
+        # --permission-mode bypassPermissions through the settings source so the
+        # permission bar is pre-answered and not scraped at startup.
+        settings_obj["permissions"] = {"defaultMode": "bypassPermissions"}
     settings_path = settings_dir / filename
-    settings_path.write_text(json.dumps({"hooks": hooks}, indent=2))
+    settings_path.write_text(json.dumps(settings_obj, indent=2))
     return (str(settings_path), str(edge_path))
+
+
+@dataclass(frozen=True)
+class PairHookPaths:
+    """The four filesystem paths provisioned for a PM+Dev hook pair.
+
+    ``pm_settings`` / ``dev_settings`` are passed to the respective PTYs via
+    ``claude --settings <path>``; ``pm_edge`` / ``dev_edge`` are the NDJSON edge
+    files each role's :class:`HookEdgeConsumer` tails.
+    """
+
+    pm_settings: str
+    pm_edge: str
+    dev_settings: str
+    dev_edge: str
+
+
+def generate_pair_hook_settings(
+    session_dir: str | os.PathLike[str],
+    *,
+    forwarder_path: str | None = None,
+    pre_authorize: bool = True,
+) -> PairHookPaths:
+    """Provision distinct hook settings + edge files for a PM/Dev PTY pair.
+
+    Both PTYs share one ``session_dir`` but get their own settings JSON and edge
+    file, so a parent ``Stop`` on the PM PTY never lands in the Dev edge file and
+    vice versa. Returns a :class:`PairHookPaths`. Used by both the production
+    (BridgeAdapter → PairSpawnSpec) and the self-spawn (Container._spawn_pair)
+    wiring so the two paths provision identically.
+    """
+    session_dir = pathlib.Path(session_dir)
+    pm_settings, pm_edge = generate_hook_settings(
+        session_dir,
+        session_dir / "pm_edge.ndjson",
+        forwarder_path=forwarder_path,
+        filename="pm_hook_settings.json",
+        pre_authorize=pre_authorize,
+    )
+    dev_settings, dev_edge = generate_hook_settings(
+        session_dir,
+        session_dir / "dev_edge.ndjson",
+        forwarder_path=forwarder_path,
+        filename="dev_hook_settings.json",
+        pre_authorize=pre_authorize,
+    )
+    return PairHookPaths(
+        pm_settings=pm_settings,
+        pm_edge=pm_edge,
+        dev_settings=dev_settings,
+        dev_edge=dev_edge,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fleet fallback signal (plan #1688 concern #3)
+# ---------------------------------------------------------------------------
+#
+# When the container waits out ``hook_turn_end_wait_s`` with the PTY still alive
+# and no ``Stop`` edge (the silent-hook failure mode), it falls back to the idle
+# heuristic AND records a fallback here. This is the observable signal that the
+# hook contract is degrading on the fleet's pinned ``claude`` version — a rising
+# count is the trigger to investigate before the idle fallback is ever removed
+# (plan No-Gos [ORDERED]).
+#
+# Honest scope: this counter is **process-local** (a module-level int guarded by
+# a lock), NOT durable across worker restarts or aggregated fleet-wide. A
+# durable/cross-process signal would need a Popoto model (out of scope here —
+# the plan keeps hook state as per-session file state, no new model). Callers
+# that need durability should additionally emit a session_events entry.
+_fallback_lock = threading.Lock()
+_fallback_count = 0
+
+
+def record_hook_fallback(session_id: str | None, reason: str) -> int:
+    """Record one hook→idle fallback event; return the new process-local count.
+
+    Fail-silent: never raises. ``reason`` is a short slug (e.g.
+    ``"stop_wait_timeout"``) surfaced in the warning log for triage.
+    """
+    global _fallback_count
+    try:
+        with _fallback_lock:
+            _fallback_count += 1
+            count = _fallback_count
+        logger.warning(
+            "[hook-edge] session=%s hook fallback recorded (reason=%s, process_count=%d)",
+            session_id,
+            reason,
+            count,
+        )
+        return count
+    except Exception:
+        return _fallback_count
+
+
+def hook_fallback_count() -> int:
+    """Return the process-local count of hook→idle fallbacks recorded so far."""
+    return _fallback_count
 
 
 @dataclass

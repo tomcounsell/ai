@@ -627,6 +627,7 @@ class _SpecFakeDriver:
         env: dict | None = None,
         append_system_prompt: str | None = None,
         session_id: str | None = None,
+        settings_path: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
@@ -634,6 +635,7 @@ class _SpecFakeDriver:
         self.env = env
         self.append_system_prompt = append_system_prompt
         self._session_id = session_id
+        self._settings_path = settings_path
         self._child = None  # treated as live by _pair_is_live
         self.closed = False
         _SpecFakeDriver.instances.append(self)
