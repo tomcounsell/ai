@@ -739,7 +739,8 @@ class TestBridgeAdapterSpawnOnAcquire(unittest.TestCase):
 
 
 class TestDeliverSyncReturnsBool(unittest.TestCase):
-    """_deliver_sync returns True on confirmed delivery, False on failure (concern C1, #1647)."""
+    """_deliver_sync returns True on delivery or outbox recovery, False on
+    failure (concern C1, #1647)."""
 
     def _make_adapter_with_sync_cb(self, cb):
         """Adapter with a sync send_cb (not a coroutine) for testing."""
@@ -783,16 +784,24 @@ class TestDeliverSyncReturnsBool(unittest.TestCase):
         result = adapter._deliver_sync(_failing_cb, 1, "hello", None, None, 5.0)
         self.assertFalse(result)
 
-    def test_no_loop_returns_false(self) -> None:
-        """No captured event loop → False."""
+    def test_no_loop_returns_outbox_recovery_result(self) -> None:
+        """No captured event loop → returns whatever _enqueue_to_outbox reports."""
 
         async def _async_cb(chat_id, payload, reply_to, session):
             pass
 
         adapter = self._make_adapter_with_sync_cb(_async_cb)
         adapter._loop = None  # No loop captured
-        result = adapter._deliver_sync(_async_cb, 1, "hello", None, None, 5.0)
+
+        with patch.object(adapter, "_enqueue_to_outbox", return_value=True) as mock_enqueue:
+            result = adapter._deliver_sync(_async_cb, 1, "hello", None, None, 5.0)
+        self.assertTrue(result)
+        mock_enqueue.assert_called_once_with(1, "hello", None)
+
+        with patch.object(adapter, "_enqueue_to_outbox", return_value=False) as mock_enqueue:
+            result = adapter._deliver_sync(_async_cb, 1, "hello", None, None, 5.0)
         self.assertFalse(result)
+        mock_enqueue.assert_called_once_with(1, "hello", None)
 
 
 class TestUserFacingRoutedPropagation(unittest.TestCase):
