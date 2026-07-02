@@ -72,6 +72,71 @@ class TestOllamaEnvContract(unittest.TestCase):
 
 
 @unittest.skipUnless(_OLLAMA_REACHABLE, _SKIP_REASON)
+class TestStopHookFidelityGate(unittest.TestCase):
+    """#1688 Task 0 HARD GATE: Stop/SubagentStop hooks fire under Substrate B.
+
+    The hook-driven turn-return design (plan
+    ``docs/plans/granite_hook_driven_turn_returns.md``) rests on one factual
+    assumption: the real ``claude`` binary fires ``Stop`` on parent turn-end
+    (payload carrying ``transcript_path``) and a *distinct* ``SubagentStop``
+    per Task-tool subagent (payload carrying ``agent_id``/``agent_type``),
+    even when the model backend is ollama. This test IS that gate, kept
+    durable so every new pinned ``claude`` release can be re-verified with
+    ``GRANITE_OLLAMA_SMOKE=1 pytest`` on this module.
+
+    First verified: claude 2.1.198 / qwen3.6:35b-a3b-coding-nvfp4 (2026-07-02).
+    """
+
+    def test_stop_and_subagent_stop_fire_with_required_fields(self) -> None:
+        # Import here so the pexpect-spawning module only loads on the smoke path.
+        from tests.granite_faults.hook_fidelity import run_hook_fidelity_probe
+
+        result = run_hook_fidelity_probe()
+
+        # --- Parent Stop: the turn-end edge -------------------------------
+        parent_stops = result.parent_stops
+        self.assertGreaterEqual(
+            len(parent_stops),
+            1,
+            "no parent Stop envelope landed — the hook-driven turn-return "
+            f"design is invalid under Substrate B. result={result}",
+        )
+        stop = parent_stops[-1]
+        self.assertTrue(
+            stop.get("transcript_path"),
+            f"parent Stop payload carries no transcript_path: {sorted(stop)}",
+        )
+        self.assertEqual(stop.get("session_id"), result.session_id)
+        # Native disambiguation (Practice 5): the parent Stop must NOT look
+        # like a subagent event.
+        self.assertIsNone(
+            stop.get("agent_id"),
+            "parent Stop unexpectedly carries agent_id — Stop/SubagentStop "
+            "are no longer distinguishable by payload shape",
+        )
+
+        # --- SubagentStop: the distinct child edge ------------------------
+        subagent_stops = result.subagent_stops
+        self.assertGreaterEqual(
+            len(subagent_stops),
+            1,
+            "the Task-bearing turn produced no SubagentStop envelope — "
+            "either the fan-out did not happen or the hook did not fire. "
+            f"result={result}",
+        )
+        sub = subagent_stops[-1]
+        self.assertTrue(
+            sub.get("agent_id"),
+            f"SubagentStop payload carries no agent_id: {sorted(sub)}",
+        )
+        self.assertTrue(
+            sub.get("agent_type"),
+            f"SubagentStop payload carries no agent_type: {sorted(sub)}",
+        )
+        self.assertEqual(sub.get("session_id"), result.session_id)
+
+
+@unittest.skipUnless(_OLLAMA_REACHABLE, _SKIP_REASON)
 class TestOllamaSessionReachesCleanExit(unittest.TestCase):
     """The real ollama-backed session completes without wedging."""
 
