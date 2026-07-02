@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Hook: PreToolUse - Log before tool execution."""
 
+import json
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 # Standalone script — sys.path mutation is safe (never imported as library)
 # Add utils to path
@@ -16,6 +19,136 @@ from hook_utils.constants import (
     get_session_id,
     read_hook_input,
 )
+
+# ---------------------------------------------------------------------------
+# Sidecar-resolved AgentSession liveness write (issue #1843, Gap A)
+#
+# Granite's PM/Dev `claude` PTY children run this CLI hook (not the SDK
+# in-process hooks in agent/hooks/pre_tool_use.py), so `AGENT_SESSION_ID` is
+# unset in their env — `agent.hooks.liveness_writers.record_tool_boundary`
+# would silently no-op. Resolve the AgentSession the same way
+# `post_tool_use.py::_update_agent_session` does: read the per-session
+# sidecar JSON directly (no popoto import needed for the sidecar itself),
+# then look up the AgentSession record via its `agent_session_id`.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Per-session cooldown window (seconds) bounding the AgentSession liveness
+# write rate. Mirrors agent/hooks/liveness_writers.COOLDOWN_WINDOW_SEC.
+_LIVENESS_COOLDOWN_SEC = 5.0
+
+
+def _sidecar_dir(session_id: str) -> Path:
+    """Return the per-session sidecar directory (mirrors post_tool_use.py)."""
+    return _REPO_ROOT / "data" / "sessions" / session_id
+
+
+def _liveness_cooldown_ok(session_id: str, now: float) -> bool:
+    """File-based per-session cooldown mirroring ``liveness_writers._is_in_cooldown``.
+
+    The CLI hooks run as a fresh process per tool call, so the SDK-path's
+    in-memory cooldown cannot coalesce writes across invocations. Persist the
+    last-write timestamp in the session sidecar dir so the 5s window bounds the
+    AgentSession Redis write rate for EVERY CLI-hook session, not just granite.
+    Without this gate the new pre-hook write would fire uncooled system-wide on
+    every tool call for every CLI-hook session.
+
+    Returns True if a write is allowed (and stamps the file), False if still
+    inside the cooldown window. Fail-open on IO error so a wedge is never masked
+    by a cooldown-file problem.
+    """
+    path = _sidecar_dir(session_id) / "tool_liveness_cooldown"
+    prev: float | None
+    try:
+        prev = float(path.read_text().strip())
+    except (OSError, ValueError):
+        prev = None
+    if prev is not None and (now - prev) < _LIVENESS_COOLDOWN_SEC:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(repr(now))
+    except OSError:
+        pass
+    return True
+
+
+def _load_agent_session_sidecar(session_id: str) -> dict:
+    """Read the agent_session.json sidecar directly.
+
+    Behaviour-identical to ``post_tool_use.py::_load_agent_session_sidecar`` —
+    returns {} if missing/corrupt.
+    """
+    path = _sidecar_dir(session_id) / "agent_session.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _record_tool_start(hook_input: dict) -> None:
+    """Stamp ``current_tool_name`` / ``last_tool_use_at`` on the sidecar-resolved
+    AgentSession so the #1270 tool-timeout tier loop arms for granite PM/Dev
+    PTY children (issue #1843, Gap A).
+
+    Mirrors ``post_tool_use.py::_update_agent_session``'s sidecar resolution —
+    NOT ``agent.hooks.liveness_writers.record_tool_boundary``, which resolves
+    via ``os.environ["AGENT_SESSION_ID"]`` (unset in the granite child env and
+    would silently no-op).
+
+    ``last_tool_use_at`` MUST be a ``datetime`` (never ``time.time()``) —
+    ``session_health.py::_check_tool_timeout`` gates on
+    ``isinstance(last_at, datetime)`` and silently no-ops on a float.
+
+    Fails silently (never blocks or crashes the tool call) but logs a
+    warning to stderr on any resolution/save failure.
+    """
+    session_id = hook_input.get("session_id", "")
+    if not session_id:
+        return
+    try:
+        sidecar = _load_agent_session_sidecar(session_id)
+        agent_session_id = sidecar.get("agent_session_id")
+        if not agent_session_id:
+            return
+
+        # Cooldown gate BEFORE the popoto import so coalesced calls stay cheap.
+        if not _liveness_cooldown_ok(session_id, time.time()):
+            return
+
+        from models.agent_session import AgentSession
+
+        agent_session = None
+        try:
+            agent_session = AgentSession.get_by_id(agent_session_id)
+        except Exception:
+            agent_session = None
+
+        if agent_session is None:
+            # Legacy fallback: reconstruct local-{session_id} for direct-CLI
+            # paths that still create local-* records.
+            local_sid = f"local-{session_id}"
+            try:
+                matches = list(AgentSession.query.filter(session_id=local_sid))
+            except Exception:
+                matches = []
+            if not matches:
+                return
+            agent_session = matches[0]
+
+        tool_name = hook_input.get("tool_name", "unknown")
+        agent_session.current_tool_name = tool_name
+        agent_session.last_tool_use_at = datetime.now(tz=UTC)
+        agent_session.save(update_fields=["current_tool_name", "last_tool_use_at"])
+    except Exception as e:
+        print(
+            f"HOOK WARNING: Failed to record tool-start liveness for {session_id}: {e}",
+            file=sys.stderr,
+        )
 
 
 def capture_git_baseline_once(hook_input: dict) -> None:
@@ -65,6 +198,11 @@ def main():
 
     # Capture git baseline on first tool call (for stop hook comparison)
     capture_git_baseline_once(hook_input)
+
+    # Liveness (issue #1843, Gap A): stamp current_tool_name/last_tool_use_at
+    # on the sidecar-resolved AgentSession so the #1270 tool-timeout tier loop
+    # arms for granite PM/Dev PTY children.
+    _record_tool_start(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)

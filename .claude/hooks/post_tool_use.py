@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Standalone script — sys.path mutation is safe (never imported as library)
@@ -451,7 +452,16 @@ def _update_agent_session(hook_input: dict) -> None:
     called by tests, leaving ``issue_url``/``pr_url`` permanently None in
     real data and the dashboard missing link cells).
 
-    Fails silently.
+    Also clears ``current_tool_name`` and refreshes ``last_tool_use_at`` on
+    every tool boundary (issue #1843, Gap A) — mirrors the Pre=set / Post=clear
+    contract of ``agent.hooks.liveness_writers.record_tool_boundary``, but
+    writes directly on this sidecar-resolved session (that helper resolves via
+    ``os.environ["AGENT_SESSION_ID"]``, which is unset in the granite child
+    env and would silently no-op). ``last_tool_use_at`` MUST be a ``datetime``
+    (never ``time.time()``) — ``session_health.py::_check_tool_timeout`` gates
+    on ``isinstance(last_at, datetime)`` and silently no-ops on a float.
+
+    Fails silently but logs a warning to stderr on any resolution/save failure.
     """
     try:
         session_id = hook_input.get("session_id", "")
@@ -491,7 +501,20 @@ def _update_agent_session(hook_input: dict) -> None:
 
         agent_session.updated_at = time.time()
         agent_session.tool_call_count = (agent_session.tool_call_count or 0) + 1
-        agent_session.save(update_fields=["updated_at", "tool_call_count"])
+        # Liveness (issue #1843, Gap A): clear the in-flight tool name and
+        # refresh the timestamp, mirroring record_tool_boundary's Post=clear
+        # contract. Saved atomically with the fields above (Race 1 mitigation
+        # in the plan — a cleared name always carries a fresh timestamp).
+        agent_session.current_tool_name = None
+        agent_session.last_tool_use_at = datetime.now(tz=UTC)
+        agent_session.save(
+            update_fields=[
+                "updated_at",
+                "tool_call_count",
+                "current_tool_name",
+                "last_tool_use_at",
+            ]
+        )
 
         # Capture GitHub links from gh Bash invocations.
         if hook_input.get("tool_name") == "Bash":
@@ -501,8 +524,12 @@ def _update_agent_session(hook_input: dict) -> None:
                 links = _extract_github_links(command, tool_output)
                 for kind, url in links.items():
                     agent_session.set_link(kind, url)
-    except Exception:
-        pass  # Silent failure -- never block tool execution
+    except Exception as e:
+        print(
+            f"HOOK WARNING: Failed to update AgentSession for "
+            f"{hook_input.get('session_id', 'unknown')}: {e}",
+            file=sys.stderr,
+        )
 
 
 def main():
