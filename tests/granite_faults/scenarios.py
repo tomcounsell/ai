@@ -311,9 +311,10 @@ SCENARIOS: tuple[FaultScenario, ...] = (
             "elapsed_ms surfacing the elapsed-since-last-frame wait. The "
             "read-loop-freshness dimension is now wired (#1843 Gap B): "
             "read_until_idle's per-iteration on_read_iteration callback stamps "
-            "last_pty_read_loop_at on every inner poll tick, so a wedge inside "
-            "this quiet tail refreshes liveness mid-turn. The granite_wedged → "
-            "recovery kill transition stays out of scope here (#1820 PTY reap)."
+            "last_pty_read_loop_at on inner poll ticks (throttled to <=1/sec), "
+            "so a wedge inside this quiet tail refreshes liveness mid-turn. The "
+            "granite_wedged → recovery kill transition stays out of scope here "
+            "(#1820 PTY reap)."
         ),
     ),
 )

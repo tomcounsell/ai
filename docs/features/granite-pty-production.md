@@ -630,6 +630,53 @@ suspects and emit a `WARNING: "stage-1 CONFIRMED SUSPECT"` log when
 [Never-Started Session Recovery](never_started_session_recovery.md) for the
 full Path-A / Path-B design.
 
+#### Wired silent-wedge signals (issue #1843)
+
+Two signals that the session-health machinery already computed but that never
+reached a granite session are now wired:
+
+- **CLI-hook tool liveness arms the #1270 tier loop.** Granite's PM/Dev
+  `claude` PTY children run the repo CLI hooks (`.claude/hooks/pre_tool_use.py`,
+  `post_tool_use.py`), where `AGENT_SESSION_ID` is unset, so the SDK
+  in-process `record_tool_boundary` writer no-ops for them. The CLI hooks now
+  resolve the `AgentSession` from the on-disk sidecar and stamp
+  `current_tool_name` + `last_tool_use_at` directly: the PreToolUse hook sets
+  the tool name, the PostToolUse hook clears it, and both refresh the
+  timestamp. `last_tool_use_at` is written as a `datetime`
+  (`datetime.now(tz=UTC)`), the type `session_health._check_tool_timeout`
+  requires (it gates on `isinstance(last_at, datetime)` and short-circuits on a
+  float). With these fields populated, the #1270 per-tool timeout tier loop
+  arms for granite sessions that stall inside a single tool call. A file-based
+  per-session cooldown (`tool_liveness_cooldown` in the sidecar dir, 5s window)
+  bounds the write rate, since each CLI-hook invocation is a fresh process and
+  cannot share the SDK path's in-memory cooldown; the gate fails open so a
+  cooldown-file problem never masks a wedge. Both writes are fail-silent — an
+  unresolvable sidecar exits the hook cleanly.
+- **Per-iteration PTY-read callback refreshes `last_pty_read_loop_at`
+  mid-turn.** `PTYDriver.read_until_idle` now takes an optional
+  `on_read_iteration` callback, invoked once per inner poll tick.
+  `Container._cycle_idle` threads a throttled wrapper of `self._fire_pty_read`
+  through it, so the bridge-adapter freshness writer stamps
+  `last_pty_read_loop_at` on inner poll iterations rather than only once per
+  `_cycle_idle` return. The wrapper coalesces to at most one stamp per second
+  (`PTY_READ_ITER_MIN_INTERVAL_S`), matching the 5s coalescing philosophy of
+  the SDK-path liveness writer so verbose output cannot produce an
+  AgentSession write storm while still sampling far finer than the
+  once-per-cycle boundary fire. A wedge inside a long idle-fallback turn now
+  refreshes liveness far sooner than the cycle window. The hook-driven
+  `_await_turn_end` path (#1688) already fires `_fire_pty_read` per poll-tick;
+  Gap B closes the same window on the idle-fallback read loop. The callback is
+  best-effort — a raising callback is caught and never breaks the read loop.
+
+The `granite_wedged` verdict already actuates recovery: `reflections/stall_advisory.py`
+builds the session timeline, calls `classify_session_stall`, and runs its
+`_maybe_recover` kill-and-recover ladder (#1768/#1773), gated by
+`stall_recovery_enabled` (dry-run by default, reversible per-machine `.env`).
+The residual — reaping the granite PTY *process group* rather than a single PID
+— is owned by #1820's progress-deadline cancel scope and the #1816
+`container` `killpg` seam. Issue #1843 adds no kill path and does not touch
+`session_health.py`.
+
 ### Startup hard ceiling
 
 The startup loop polls both PTYs on short (`STARTUP_CYCLE_TIMEOUT_S` = 3s)
