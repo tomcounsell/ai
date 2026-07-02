@@ -56,6 +56,7 @@ from agent.granite_container.hook_edge import (
     TURN_END,
     HookEdge,
     HookEdgeConsumer,
+    record_hook_fallback,
 )
 from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
@@ -821,6 +822,24 @@ class Container:
         # Deduped needs_human edges already routed to [/user] this run (keyed by
         # ts) so a re-poll never re-delivers the same prompt.
         self._needs_human_seen: set[float] = set()
+        # Concern #6 (resume-owner seam): True only while a crash-resume is
+        # actively re-spawning a dead PTY. The container owns the --resume for a
+        # crashed turn; external liveness-wedge recovery (#1815/#1823 granite
+        # liveness-wedge, #1728 stalled-session) that reacts to the SAME
+        # pexpect.EOF / !isalive signal must NOT also issue a --resume, or two
+        # systems fork one session. In-process callers (e.g. BridgeAdapter) can
+        # check crash_resume_in_flight() before acting; independently, the resume
+        # path bumps the liveness signals (on_turn → last_turn_at) so the
+        # cross-process wedge detector sees demonstrable progress and no-ops.
+        self._crash_resume_in_flight: bool = False
+
+    def crash_resume_in_flight(self) -> bool:
+        """Whether a crash-resume is actively re-spawning a dead PTY (concern #6).
+
+        The resume-owner seam: external liveness-wedge recovery should no-op
+        while this is True to avoid a double-resume/fork of one claude session.
+        """
+        return self._crash_resume_in_flight
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -1236,6 +1255,13 @@ class Container:
                     role,
                     self._hook_turn_end_wait_s,
                 )
+                # Concern #3: record the silent-hook fallback. This is the
+                # observable, fleet-wide signal that the hook contract is
+                # degrading on the pinned ``claude`` (alive + quiet + no Stop
+                # past the watchdog) — a rising count is the trigger to
+                # investigate before the idle fallback is ever removed (plan
+                # No-Gos [ORDERED]). Fail-silent (never raises).
+                record_hook_fallback(session_id, "stop_wait_timeout")
                 return TurnWaitResult(
                     saw_turn=False,
                     buffer=last_buffer,
@@ -1305,35 +1331,54 @@ class Container:
             resume_uuid = None
         if not resume_uuid:
             return None
+        # Concern #6: mark the resume-owner window so external liveness-wedge
+        # recovery (#1815/#1823/#1728) can see the container already owns this
+        # EOF's --resume and no-op rather than issue a competing resume/kill.
+        self._crash_resume_in_flight = True
         try:
-            dead_pty.close(force=True)
-        except Exception:
-            pass
-        try:
-            new_pty = PTYDriver(
-                role=role,
-                cwd=dead_pty.cwd,
-                model=dead_pty._explicit_model,
-                env=dead_pty._extra_env,
-                settings_path=dead_pty._settings_path,
-                resume_uuid=resume_uuid,
+            try:
+                dead_pty.close(force=True)
+            except Exception:
+                pass
+            try:
+                new_pty = PTYDriver(
+                    role=role,
+                    cwd=dead_pty.cwd,
+                    model=dead_pty._explicit_model,
+                    env=dead_pty._extra_env,
+                    settings_path=dead_pty._settings_path,
+                    resume_uuid=resume_uuid,
+                )
+                new_pty.spawn()
+                new_pty.write(CRASH_RESUME_CONTINUE)
+            except Exception as e:
+                logger.error("[granite-container] %s crash-resume spawn failed: %s", role, e)
+                return None
+            if role == "dev":
+                self._dev_pty = new_pty
+            else:
+                self._pm_pty = new_pty
+            # Concern #6: bump the liveness signal so the cross-process wedge
+            # detector (which reads last_turn_at / last_pty_activity_at from
+            # Redis, not this in-process flag) sees demonstrable progress across
+            # the resume and does not fire its own recovery. Fail-silent —
+            # liveness signaling must never crash the run (mirrors on_turn guard).
+            if self._on_turn is not None:
+                try:
+                    self._on_turn()
+                except Exception as e:
+                    logger.warning("[granite-container] on_turn during crash-resume raised: %s", e)
+            logger.info(
+                "[granite-container] %s resumed via --resume %s after crash; "
+                "verified `continue` submitted",
+                role,
+                resume_uuid,
             )
-            new_pty.spawn()
-            new_pty.write(CRASH_RESUME_CONTINUE)
-        except Exception as e:
-            logger.error("[granite-container] %s crash-resume spawn failed: %s", role, e)
-            return None
-        if role == "dev":
-            self._dev_pty = new_pty
-        else:
-            self._pm_pty = new_pty
-        logger.info(
-            "[granite-container] %s resumed via --resume %s after crash; "
-            "verified `continue` submitted",
-            role,
-            resume_uuid,
-        )
-        return new_pty
+            return new_pty
+        finally:
+            # Cleared after the re-spawn completes (success or failure); the
+            # window is intentionally narrow — just the re-spawn itself.
+            self._crash_resume_in_flight = False
 
     def _needs_human_message(self, edge: HookEdge) -> str:
         """Build the human-facing text for a needs-human edge (best effort).
