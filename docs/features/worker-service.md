@@ -78,8 +78,9 @@ Standalone mode is set automatically by `python -m worker`. In this mode, nudge 
 The `data/last_worker_connected` heartbeat file is no longer an unconditional process-liveness
 write. It is now loop-liveness-gated: the off-loop watchdog thread only writes "green"
 when it sees a fresh beacon from the on-loop tick task. If the event loop freezes (the
-tick task stops bumping the beacon), the watchdog declares the loop dead and aborts the
-process via `os.abort()`, letting launchd respawn it. See
+tick task stops bumping the beacon), the watchdog declares the loop dead, dumps an
+all-thread Python stack trace to stderr via `faulthandler`, and delivers `SIGKILL` to the
+process, letting launchd respawn it. See
 [Worker Liveness Recovery](worker-liveness-recovery.md) for the full design.
 
 Key env vars (all provisional, all env-overridable):

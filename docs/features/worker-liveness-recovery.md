@@ -27,14 +27,15 @@ sessions all wedged this way, the whole granite path deadlocked.
 The old design wrote "green" unconditionally from the off-loop watchdog thread every
 heartbeat cycle. The new design inverts this: the on-loop code must bump a beacon on
 every event-loop tick, and the off-loop watchdog writes "green" only when it sees a fresh
-beacon. If the beacon goes stale, the watchdog aborts the process via `os.abort()` (SIGABRT),
-and launchd's existing `KeepAlive=true` + `ThrottleInterval=10` respawns the worker.
-Worker startup recovery then re-queues the interrupted session.
+beacon. If the beacon goes stale, the watchdog dumps an all-thread Python stack trace via
+`faulthandler` and recycles the process with `SIGKILL`, and launchd's existing
+`KeepAlive=true` + `ThrottleInterval=10` respawns the worker. Worker startup recovery then
+re-queues the interrupted session.
 
 This is the same pattern as systemd's `WatchdogSec` + `sd_notify("WATCHDOG=1")`: live
 code must emit a keep-alive within the configured interval or the supervisor restarts.
 launchd has no native `WatchdogSec`, so the off-loop thread plays the supervisor-timer role
-(self-SIGABRT when the on-loop tick is stale) and launchd's `KeepAlive` provides the
+(self-SIGKILL when the on-loop tick is stale) and launchd's `KeepAlive` provides the
 respawn.
 
 ### On-Loop Beacon (`agent/session_state.py`)
@@ -67,7 +68,9 @@ proves the loop is not making progress.
 3. If armed and fresh (age below `WORKER_DEADMAN_STALENESS_THRESHOLD`): write
    `data/last_worker_connected` green and refresh the Redis PID record.
 4. If armed and stale (age at or above threshold): log a CRITICAL message and call
-   `_self_kill()`, which executes `os.abort()` to raise SIGABRT.
+   `_self_kill()`, which emits an all-thread Python stack dump via
+   `faulthandler.dump_traceback(all_threads=True)` to stderr and then delivers `SIGKILL`
+   to the process.
 
 An `armed` latch prevents false aborts during startup: the watchdog stays in the
 unarmed (green-write) path until `bump_loop_tick()` has fired at least once.
@@ -104,13 +107,27 @@ is intentionally large (5s vs 90s). Real on-loop sync work (awaiting Claude tool
 DB writes) should complete well within 90 seconds. The threshold is a freeze detector,
 not a latency budget.
 
-### Recovery After Abort
+### Recovery After Recycle
 
-`os.abort()` produces a core dump and exits with a non-zero status. launchd sees the
+`SIGKILL` exits the process immediately with a non-zero status and produces no macOS
+crash dialog or `.ips` report (unlike the earlier abort-based design). launchd sees the
 non-zero exit, applies `ThrottleInterval=10`, and respawns the process after 10 seconds.
 The worker's startup sequence (index rebuild, corrupted+orphan cleanup, dead-worker sweep,
-recovery) re-queues any session that was running at abort time. No manual intervention
+recovery) re-queues any session that was running at recycle time. No manual intervention
 is required.
+
+**Forensics moved from `.ips` to a Python stack dump (#1808):** the original design relied
+on a self-abort call specifically because macOS would capture a crash report
+(`Python-*.ips`) with a C-level frame dump of the process at abort time. In practice that
+report is not very
+diagnostic for the wedges this switch exists to catch — issue #1808 established that the
+freezes are event-loop-level (an `await` that never resumes, a synchronous call blocking
+the loop), which shows up far more clearly in a Python-level stack trace than in a C-frame
+snapshot. `_self_kill()` now calls `faulthandler.dump_traceback(all_threads=True)` before
+delivering SIGKILL, writing an all-thread Python traceback straight to stderr. The launchd
+plist (`com.valor.worker.plist`, `StandardErrorPath`) captures that stream into
+`logs/worker_error.log`, so the exact wedged frame across every thread is available for
+post-mortem without a macOS crash dialog or `.ips` file ever being produced.
 
 ## Fix 4: Bounded PTY-Pool Waits
 
@@ -196,8 +213,9 @@ large values (e.g., `86400`) to effectively disable the timeouts without removin
 
 - Dead-man's-switch status: `[deadman] beacon age=...` INFO lines in `logs/worker.log`
   (emitted roughly once per minute from the green-write path).
-- Abort events: CRITICAL log line from `_heartbeat_thread_main` immediately before
-  `os.abort()` fires.
+- Recycle events: CRITICAL log line from `_heartbeat_thread_main` immediately before
+  `_self_kill()` fires, followed by the `faulthandler` all-thread stack dump in
+  `logs/worker_error.log`.
 - PTY pool timeouts: `PTYPoolError` is logged at ERROR level with the session ID; the
   session transitions to failed/re-queued.
 - Force-recycle events: logged at WARNING level from `_force_recycle_slot`.

@@ -41,7 +41,7 @@ All thresholds are NAMED env-overridable constants with provisional/tunable comm
 
 - **`supervise(name, factory, *, max_restarts, window_s, base_backoff_s)`** helper (~90 lines): wraps `asyncio.create_task(factory())` with a done-callback that respawns on unexpected death.
 - **Exponential backoff**: first respawn waits `base_backoff_s` (default 1 s), second `2×`, and so on (capped at `window_s / 2`). Restart timestamps are tracked in a rolling window.
-- **Storm cap**: exceeding `WORKER_SUPERVISOR_MAX_RESTARTS` (default 5) within `WORKER_SUPERVISOR_WINDOW_S` (default 300 s) triggers **`_self_kill()` → `os.abort()` (SIGABRT)**. This is the same seam used by the dead-man's-switch (#1815). `sys.exit(1)` is explicitly avoided — a `SystemExit` raised inside an asyncio done-callback is swallowed by the event loop's callback-exception handler, so the process would keep running and the cap would silently fail.
+- **Storm cap**: exceeding `WORKER_SUPERVISOR_MAX_RESTARTS` (default 5) within `WORKER_SUPERVISOR_WINDOW_S` (default 300 s) triggers **`_self_kill()`**, which emits an all-thread Python stack dump via `faulthandler.dump_traceback(all_threads=True)` to stderr and then delivers `SIGKILL` to the process. This is the same seam used by the dead-man's-switch (#1815). SIGKILL replaced an earlier abort-based design that triggered the macOS crash reporter (a crash dialog plus a `Python-*.ips` file) on every recycle; SIGKILL is equally unswallowable but produces no dialog and no `.ips` file. `sys.exit(1)` is explicitly avoided — a `SystemExit` raised inside an asyncio done-callback is swallowed by the event loop's callback-exception handler, so the process would keep running and the cap would silently fail.
 - **Shutdown guard**: cancelled tasks and `_shutdown_requested=True` suppress respawn.
 - **Wrapped tasks**: `session-health-monitor`, `session-tool-timeout-monitor`, `reflection-scheduler`, `session-notify-listener`, `idle-sweeper`, `granite-reprobe` (Fix #1 re-probe loop).
 
@@ -68,7 +68,7 @@ All new constants are NAMED, env-overridable, and marked provisional/tunable in 
 - `tests/unit/granite_container/test_container_pkill_gating.py` — Fix #2: pkill deleted, process-group teardown, bystander survival, spawn-failure partial-child orphan reap
 - `tests/unit/test_reflection_pool_bulkhead.py` — Fix #3: dedicated pool, saturation isolation, event-loop responsiveness (redis_quality_audit off-loop)
 - `tests/unit/test_worker_granite_degradation.py` — Fix #1: degraded boot, flag flip, reprobe loop, breaker OPEN, pickup deferral
-- `tests/unit/test_worker_supervisor.py` — Fix #4: respawn on crash, no respawn on cancel, backoff grows, shutdown guard, **real subprocess SIGABRT assertion**
+- `tests/unit/test_worker_supervisor.py` — Fix #4: respawn on crash, no respawn on cancel, backoff grows, shutdown guard, **real subprocess SIGKILL assertion**
 
 ## Architecture Impact
 
