@@ -453,15 +453,21 @@ SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 
 
 def _get_active_projects() -> list[str]:
-    """Determine active projects for this machine from config."""
-    from bridge.routing import _resolve_config_path
+    """Determine active projects for this machine from config.
+
+    Uses the same guarded reader as `bridge.routing.load_config` so a
+    partial/corrupt config (e.g. mid-iCloud-write, racing a launchd
+    KeepAlive respawn) falls back to the last-known-good sidecar and logs,
+    instead of raising at import time (module-level call at
+    `ACTIVE_PROJECTS = _get_active_projects()` below).
+    """
+    from bridge.routing import _guarded_json_load, _resolve_config_path
 
     config_path = _resolve_config_path()
     if not config_path.exists():
         return ["valor"]
 
-    with open(config_path) as f:
-        config = json.load(f)
+    config = _guarded_json_load(config_path)
 
     # Get this machine's name (e.g. "Valor the Captain")
     try:
