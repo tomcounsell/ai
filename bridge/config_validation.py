@@ -390,6 +390,58 @@ async def validate_bot_live_flags(config: dict, resolver) -> tuple[set[int], str
     return (quarantine_ids, detail)
 
 
+_VALID_TRANSPORTS = frozenset({"pty", "headless"})
+_VALID_TRANSPORT_ROLES = frozenset({"pm", "dev"})
+
+
+def validate_transport(config: dict) -> None:
+    """Enforce that every project ``transport`` block is well-formed (plan #1842).
+
+    A project may declare an optional ``transport`` block selecting the
+    per-role session transport::
+
+        "transport": {"pm": "pty", "dev": "headless"}
+
+    Rules (each violation names the offending project key):
+      - ``transport`` must be a dict (mapping) when present.
+      - keys must be within ``{"pm", "dev"}``.
+      - values must be within ``{"pty", "headless"}``.
+
+    An absent ``transport`` block is valid (the role defaults to ``pty`` via
+    ``settings.granite``). Raises ``ConfigValidationError`` aggregating every
+    problem so the operator sees them all at once.
+    """
+    projects = config.get("projects", {})
+    errors: list[str] = []
+
+    for proj_key, proj_cfg in projects.items():
+        if not isinstance(proj_cfg, dict):
+            continue
+        if "transport" not in proj_cfg:
+            continue
+        transport = proj_cfg.get("transport")
+        if not isinstance(transport, dict):
+            errors.append(f"project '{proj_key}' has a non-dict 'transport' block: {transport!r}")
+            continue
+        for role, value in transport.items():
+            if role not in _VALID_TRANSPORT_ROLES:
+                errors.append(
+                    f"project '{proj_key}' transport has unknown role key '{role}' "
+                    f"(valid roles: {sorted(_VALID_TRANSPORT_ROLES)})"
+                )
+                continue
+            if value not in _VALID_TRANSPORTS:
+                errors.append(
+                    f"project '{proj_key}' transport.{role} has invalid value {value!r} "
+                    f"(valid transports: {sorted(_VALID_TRANSPORTS)})"
+                )
+
+    if errors:
+        raise ConfigValidationError(
+            "projects.json transport failed validation:\n  - " + "\n  - ".join(errors)
+        )
+
+
 def validate_projects_config(config: dict) -> None:
     """Run the full bridge-contact ownership validation suite.
 
@@ -404,6 +456,7 @@ def validate_projects_config(config: dict) -> None:
         validate_telegram_groups,
         validate_email_routing,
         validate_telegram_bots,
+        validate_transport,
     ):
         try:
             fn(config)

@@ -82,6 +82,38 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
     return fallback or None
 
 
+# Per-role transport hedge (plan #1842). The concept is named ``role_transports``
+# everywhere in code to avoid colliding with the existing *channel* ``transport``
+# (telegram/email) at session_executor.py:1083-1091 and BridgeAdapter(transport=).
+_VALID_ROLE_TRANSPORTS = ("pty", "headless")
+
+
+def _resolve_role_transports(project_config: dict | None) -> dict[str, str]:
+    """Resolve the per-role transport map from config precedence (plan #1842).
+
+    Precedence, closest wins:
+      1. project block ``projects.<key>.transport.{pm,dev}``
+      2. ``settings.granite.pm_transport`` / ``dev_transport``
+         (env ``GRANITE__PM_TRANSPORT`` / ``GRANITE__DEV_TRANSPORT``)
+      3. literal ``"pty"``
+
+    Returns ``{"pm": <transport>, "dev": <transport>}``. Config validation at
+    update time (``bridge/config_validation.py::validate_transport``) is the
+    primary gate; this resolver assumes validated config but tolerates a raw
+    projects.json read (returns whatever it finds — the executor applies a
+    defensive fail-loud backstop on the resolved values).
+    """
+    block = {}
+    if isinstance(project_config, dict):
+        raw = project_config.get("transport")
+        if isinstance(raw, dict):
+            block = raw
+    return {
+        "pm": block.get("pm") or settings.granite.pm_transport or "pty",
+        "dev": block.get("dev") or settings.granite.dev_transport or "pty",
+    }
+
+
 def _tick_backstop_check_compaction(
     session: AgentSession,
     agent_session: AgentSession | None,
@@ -1573,6 +1605,53 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 "name": session.project_key,
             }
 
+        # Per-role transport hedge (plan #1842). Resolve once at dispatch and
+        # persist onto the AgentSession so all later reads (dashboard, analytics,
+        # resume-handle tagging, worker recovery) use the persisted value — a
+        # config flip mid-flight never mutates an in-flight session (Race 2).
+        # A revived session that already has a persisted map reuses it verbatim.
+        if agent_session is not None and getattr(agent_session, "role_transports", None):
+            role_transports = dict(agent_session.role_transports)
+        else:
+            role_transports = _resolve_role_transports(project_config)
+            if agent_session is not None:
+                try:
+                    agent_session.role_transports = role_transports
+                    agent_session.save(update_fields=["role_transports", "updated_at"])
+                except Exception as _rt_err:  # noqa: BLE001
+                    logger.debug(
+                        f"[{session.project_key}] Failed to persist role_transports "
+                        f"(non-fatal): {_rt_err}"
+                    )
+        # Defensive fail-loud backstop: config validation at update time is the
+        # primary gate, but an invalid resolved value must never silently default.
+        _bad = [
+            f"{role}={val!r}"
+            for role, val in role_transports.items()
+            if val not in _VALID_ROLE_TRANSPORTS
+        ]
+        if _bad:
+            _rt_reason = (
+                f"invalid_role_transport: {', '.join(_bad)} (valid: {list(_VALID_ROLE_TRANSPORTS)})"
+            )
+            logger.error(
+                "[executor-guard] session %s: %s",
+                session.agent_session_id,
+                _rt_reason,
+            )
+            try:
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
+
+                finalize_session(session, "failed", reason=_rt_reason)
+            except StatusConflictError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[executor-guard] role_transport finalize raised: %s", exc)
+            return
+
         # Check queued_steering_messages before starting this agent turn.
         # If the session has pending steering messages (written by steer_session()
         # or the PM), pop the first one and use it as the user input for this turn.
@@ -1638,11 +1717,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     pass
             return
 
-        # All session types route to the granite PTY container (plan #1572).
-        # The CLI harness in `agent/sdk_client.py` is preserved for the
-        # follow-on issue (per the plan's No-Gos) but no longer called from
-        # this path. The cutover is all-or-nothing: no fallback flag, no
-        # feature gate.
+        # All session types route through the granite container (plan #1572),
+        # but each role's transport is now config-selectable (plan #1842):
+        # ``role_transports`` (resolved above) picks ``pty`` (interactive TUI
+        # over a PTY, driven by PTYRoleDriver — the default, byte-identical to
+        # #1572) or ``headless`` (one ``claude -p`` subprocess per turn via
+        # HeadlessRoleDriver, reusing the preserved harness in
+        # ``agent/sdk_client.py``). Both legs share the Container orchestration
+        # loop; only the actor-turn driver differs. See
+        # docs/features/per-role-transport.md.
         from agent.granite_container.bridge_adapter import BridgeAdapter
         from agent.granite_container.pty_pool import get_pty_pool
         from agent.sdk_client import (
@@ -1750,6 +1833,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_env=_harness_env,
             pm_model=_effective_model,
             session_type=_session_type,
+            role_transports=role_transports,
         )
 
         # The message the container receives. The container has no

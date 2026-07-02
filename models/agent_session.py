@@ -467,6 +467,37 @@ class AgentSession(Model):
     # counts — this tracks upstream pricing automatically.
     total_cost_usd = FloatField(default=0.0)
 
+    # === Per-role transport hedge (plan #1842) ===
+    # Resolved once at dispatch from config precedence
+    # (projects.<key>.transport.{pm,dev} > settings.granite.{pm,dev}_transport
+    # > "pty") and immutable for the session's lifetime. Shape:
+    # {"pm": "pty"|"headless", "dev": "pty"|"headless"}. Readers: dashboard,
+    # analytics, resume-handle tagging, and the worker recovery path (which
+    # MUST reuse this rather than re-resolving against a since-flipped config).
+    # Nullable — a pre-feature revived session with no persisted value degrades
+    # to the both-PTY default.
+    role_transports = DictField(null=True)
+
+    # Transport-agnostic resume handles (schema shared with #1721): a list of
+    # {"role", "claude_session_id", "transcript_path", "transport"} entries,
+    # persisted at spawn/first-turn capture for BOTH transports. This plan's
+    # DoD is "written and shaped correctly" only — CONSUMPTION (loop cursor,
+    # --resume re-entry, skip-priming) is #1721's scope.
+    resume_handles = ListField(null=True)
+
+    # === Metered-leg accounting (plan #1842) ===
+    # DISJOINT from the total_* scalars above. The transcript tailer writes the
+    # ABSOLUTE total_* scalars (PTY roles only); the headless leg writes these
+    # metered_* fields ADDITIVELY via accumulate_session_tokens(metered=True).
+    # Because the two writers target non-overlapping fields, mixed-transport
+    # accounting is non-clobbering by construction (Race 1). Displayed grand
+    # total = total_* + metered_*, summed at read time. Nullable/default 0 for
+    # forward-compat with pre-feature records.
+    metered_input_tokens = IntField(default=0)
+    metered_output_tokens = IntField(default=0)
+    metered_cache_read_tokens = IntField(default=0)
+    metered_cost_usd = FloatField(default=0.0)
+
     # Set by the worker's idle sweeper (`worker/idle_sweeper.py`) when a
     # dormant SDK-path session's persistent `ClaudeSDKClient` is proactively
     # torn down before the ~48h Anthropic idle-kill window. On resume, a
