@@ -273,41 +273,10 @@ class TestPromptContent:
         assert "{session_status}" in INTENT_CLASSIFICATION_PROMPT
 
 
-# =============================================================================
-# UNIT TESTS: AgentSession steering integration
-# =============================================================================
-
-
-class TestSessionSteeringIntegration:
-    """Verify AgentSession push/pop steering messages work correctly."""
-
-    def test_push_and_pop_steering_message(self):
-        from models.agent_session import AgentSession
-
-        session = AgentSession()
-        session.push_steering_message("test message 1")
-        session.push_steering_message("test message 2")
-
-        messages = session.pop_steering_messages()
-        assert messages == ["test message 1", "test message 2"]
-
-    def test_pop_empty_returns_empty_list(self):
-        from models.agent_session import AgentSession
-
-        session = AgentSession()
-        messages = session.pop_steering_messages()
-        assert messages == []
-
-    def test_pop_clears_queue(self):
-        from models.agent_session import AgentSession
-
-        session = AgentSession()
-        session.push_steering_message("hello")
-        session.pop_steering_messages()
-
-        # Second pop should be empty
-        messages = session.pop_steering_messages()
-        assert messages == []
+# Steering push/pop integration coverage lives in
+# tests/integration/test_steering.py (TestSteeringQueue) — it exercises the
+# Redis-list primitive in agent/steering.py, which is now the sole steering
+# inbox (issue #1817 A1 removed the AgentSession ListField equivalent).
 
 
 # =============================================================================

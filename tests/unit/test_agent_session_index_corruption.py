@@ -328,40 +328,11 @@ class TestStaleSaveThenKillOrphanPrevention:
             "set_link must not include 'status' in update_fields"
         )
 
-    def test_partial_save_on_push_steering_does_not_write_status(self):
-        """push_steering_message partial save: only queued_steering_messages + updated_at."""
-        from models.agent_session import AgentSession
-
-        session = MagicMock(spec=AgentSession)
-        session.session_id = "stale-save-test-002"
-        session.queued_steering_messages = []
-        session.status = "running"
-
-        AgentSession.push_steering_message(session, "test message")
-
-        session.save.assert_called_once()
-        call_kwargs = session.save.call_args.kwargs
-        assert "update_fields" in call_kwargs
-        assert "queued_steering_messages" in call_kwargs["update_fields"]
-        assert "status" not in call_kwargs["update_fields"]
-
-    def test_partial_save_on_pop_steering_does_not_write_status(self):
-        """pop_steering_messages partial save: only queued_steering_messages + updated_at."""
-        from models.agent_session import AgentSession
-
-        session = MagicMock(spec=AgentSession)
-        session.session_id = "stale-save-test-003"
-        session.queued_steering_messages = ["msg1", "msg2"]
-        session.status = "running"
-
-        messages = AgentSession.pop_steering_messages(session)
-
-        assert messages == ["msg1", "msg2"]
-        session.save.assert_called_once()
-        call_kwargs = session.save.call_args.kwargs
-        assert "update_fields" in call_kwargs
-        assert "queued_steering_messages" in call_kwargs["update_fields"]
-        assert "status" not in call_kwargs["update_fields"]
+    # push_steering_message/pop_steering_messages partial-save coverage was
+    # removed here — issue #1817 A1 deleted both AgentSession instance
+    # methods (and the queued_steering_messages ListField) in favor of the
+    # Redis-list primitive in agent/steering.py, which has no stale-save
+    # race to guard against (RPUSH/LPOP are independent of AgentSession.save()).
 
 
 # ---------------------------------------------------------------------------

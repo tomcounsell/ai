@@ -637,11 +637,12 @@ async def re_enqueue_session(
 
 
 def steer_session(session_id: str, message: str) -> dict:
-    """Write a steering message to a session's queued_steering_messages.
+    """Push a steering message onto a session's Redis steering queue.
 
     Any process can call this to inject a message into a running or pending
-    session. The worker checks queued_steering_messages between turns and
-    injects any pending messages as user input for the next SDK turn.
+    session. The worker drains the Redis steering list (agent.steering)
+    between turns and injects any pending messages as user input for the
+    next SDK turn.
 
     Args:
         session_id: The session_id of the target AgentSession.
@@ -676,7 +677,9 @@ def steer_session(session_id: str, message: str) -> dict:
                 "error": f"Session is in terminal status {current_status!r} — steering rejected",
             }
 
-        session.push_steering_message(message)
+        from agent.steering import push_steering_message as _push_steering_message
+
+        _push_steering_message(session.session_id, message, "pm")
         try:
             _call_ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
         except RuntimeError:
@@ -1664,17 +1667,30 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 logger.error("[executor-guard] role_transport finalize raised: %s", exc)
             return
 
-        # Check queued_steering_messages before starting this agent turn.
-        # If the session has pending steering messages (written by steer_session()
-        # or the PM), pop the first one and use it as the user input for this turn.
+        # Check the Redis steering queue before starting this agent turn. If the
+        # session has pending steering messages (written by steer_session() or
+        # the PM), pop the first one and use it as the user input for this turn.
         # This is the mechanism that replaces hardcoded nudge text — any process
-        # can write to queued_steering_messages to steer the session externally.
+        # can push to the Redis steering list (agent.steering) to steer the
+        # session externally.
+        #
+        # Single-consumer invariant: pop_all_steering_messages() drains via
+        # sequential LPOPs, not one atomic multi-pop. That is safe only because
+        # exactly one process drains a given session's list at a time (this
+        # turn-boundary read). Each individual LPOP is still atomic against a
+        # concurrent RPUSH, so a steer pushed mid-drain either lands in this
+        # pass or sits in the list for the next turn boundary — it is never
+        # silently lost. Do not assume whole-drain atomicity in future
+        # refactors, and do not add a second concurrent drainer for the same
+        # session_id without revisiting this invariant.
         _turn_input = enriched_text
         if agent_session:
             try:
-                steering_msgs = agent_session.pop_steering_messages()
+                from agent.steering import pop_all_steering_messages as _pop_all_steering
+
+                steering_msgs = _pop_all_steering(session.session_id)
                 if steering_msgs:
-                    _turn_input = steering_msgs[0]
+                    _turn_input = steering_msgs[0].get("text", "")
                     logger.info(
                         f"[{session.project_key}] Injecting steering message for session "
                         f"{session.session_id}: {_turn_input[:80]!r} "
@@ -1682,8 +1698,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     )
                     if len(steering_msgs) > 1:
                         # Re-queue remaining messages for future turns
+                        from agent.steering import push_steering_message as _push_steering
+
                         for _remaining in steering_msgs[1:]:
-                            agent_session.push_steering_message(_remaining)
+                            _push_steering(
+                                session.session_id,
+                                _remaining.get("text", ""),
+                                _remaining.get("sender", "unknown"),
+                                is_abort=_remaining.get("is_abort", False),
+                                target_agent=_remaining.get("target_agent"),
+                            )
             except Exception as _steer_err:
                 logger.debug(
                     f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}"

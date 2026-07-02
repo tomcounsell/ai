@@ -59,7 +59,6 @@ CHAT_LOG_MAX_ENTRIES = 50
 CHAT_LOG_DISPLAY_ENTRIES = 20
 
 HISTORY_MAX_ENTRIES = 20
-STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
@@ -220,9 +219,6 @@ class AgentSession(Model):
     # === Semantic routing fields ===
     context_summary = Field(null=True)  # What this session is about
     expectations = Field(null=True)  # What the agent needs from the human
-
-    # === Steering fields ===
-    queued_steering_messages = ListField(null=True)
 
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
@@ -2040,64 +2036,6 @@ class AgentSession(Model):
 
         sm = PipelineStateMachine(self)
         return sm.has_failed_stage()
-
-    # === Queued steering message helpers ===
-
-    def push_steering_message(self, text: str, front: bool = False) -> None:
-        """Buffer a human reply for the PM session.
-
-        Uses partial save (update_fields) to avoid clobbering status on stale
-        worker references. See #950.
-
-        Args:
-            text: The steering message text to enqueue.
-            front: When True, prepend to the queue (urgent advisory; trimmed
-                from the back so the new message is never dropped).  When
-                False (default), append as before (trimmed from the front).
-        """
-        current = self.queued_steering_messages
-        if not isinstance(current, list):
-            current = []
-        if front:
-            current.insert(0, text)
-            if len(current) > STEERING_QUEUE_MAX:
-                dropped = len(current) - STEERING_QUEUE_MAX
-                logger.warning(
-                    f"Steering queue overflow for session {self.session_id}: "
-                    f"dropping {dropped} oldest message(s) from back (front=True)"
-                )
-                current = current[:STEERING_QUEUE_MAX]
-        else:
-            current.append(text)
-            if len(current) > STEERING_QUEUE_MAX:
-                dropped = len(current) - STEERING_QUEUE_MAX
-                logger.warning(
-                    f"Steering queue overflow for session {self.session_id}: "
-                    f"dropping {dropped} oldest message(s)"
-                )
-                current = current[-STEERING_QUEUE_MAX:]
-        self.queued_steering_messages = current
-        try:
-            self.save(update_fields=["queued_steering_messages", "updated_at"])
-        except Exception as e:
-            logger.warning(f"Failed to save steering message for session {self.session_id}: {e}")
-
-    def pop_steering_messages(self) -> list[str]:
-        """Pop all buffered steering messages, clearing the queue.
-
-        Uses partial save (update_fields) to avoid clobbering status on stale
-        worker references. See #950.
-        """
-        current = self.queued_steering_messages
-        if not isinstance(current, list) or not current:
-            return []
-        messages = list(current)
-        self.queued_steering_messages = []
-        try:
-            self.save(update_fields=["queued_steering_messages", "updated_at"])
-        except Exception as e:
-            logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
-        return messages
 
     # === Session hierarchy helpers ===
 

@@ -5,8 +5,7 @@ routing branches in the bridge. It replaces six ad-hoc duplicated
 sequences (inline imports + is_abort detection + push + ack +
 log + record) with a single helper call.
 
-Tests cover both the steer and abort branches, the dual-push path
-(when ``agent_session`` is provided), the defensive try/except
+Tests cover both the steer and abort branches, the defensive try/except
 around ``set_reaction``, and the media-enrichment + auto-ingest
 branch added for issue #1215.
 """
@@ -35,7 +34,7 @@ def _make_event_message(
 
 
 class TestSteerBranch:
-    """Default steer path: non-abort text, no agent_session."""
+    """Default steer path: non-abort text pushed to the Redis steering list."""
 
     @pytest.mark.asyncio
     async def test_pushes_with_is_abort_false(self):
@@ -65,30 +64,6 @@ class TestSteerBranch:
         args, _ = react.await_args
         assert args[3] == "\U0001f440"  # 👀
         rec.assert_awaited_once_with(12345, 67890)
-
-    @pytest.mark.asyncio
-    async def test_does_not_call_agent_session_push(self):
-        client = MagicMock()
-        event, message = _make_event_message()
-        with (
-            patch("bridge.telegram_bridge.push_steering_message"),
-            patch("bridge.telegram_bridge.set_reaction", new_callable=AsyncMock),
-            patch(
-                "bridge.telegram_bridge.record_telegram_message_handled",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await _ack_steering_routed(
-                client,
-                event,
-                message,
-                session_id="sess-1",
-                sender_name="Alice",
-                text="hello",
-                log_context="[test]",
-                # agent_session omitted
-            )
-        # No assertion needed — the call simply must not raise.
 
 
 class TestAbortBranch:
@@ -145,48 +120,6 @@ class TestAbortBranch:
             )
         # is_abort should still be detected after strip + lower
         push.assert_called_once_with("sess-1", "  STOP  ", "Alice", is_abort=True)
-
-
-class TestDualPush:
-    """When agent_session is provided, the durable PM-visible push runs first."""
-
-    @pytest.mark.asyncio
-    async def test_agent_session_push_called_before_redis(self):
-        client = MagicMock()
-        event, message = _make_event_message()
-        agent_session = MagicMock()
-        agent_session.push_steering_message = MagicMock()
-        call_order = []
-
-        agent_session.push_steering_message.side_effect = lambda *a, **kw: call_order.append(
-            "popoto"
-        )
-
-        with (
-            patch(
-                "bridge.telegram_bridge.push_steering_message",
-                side_effect=lambda *a, **kw: call_order.append("redis"),
-            ),
-            patch("bridge.telegram_bridge.set_reaction", new_callable=AsyncMock),
-            patch(
-                "bridge.telegram_bridge.record_telegram_message_handled",
-                new_callable=AsyncMock,
-            ),
-        ):
-            await _ack_steering_routed(
-                client,
-                event,
-                message,
-                session_id="sess-1",
-                sender_name="Alice",
-                text="please update X",
-                log_context="[test]",
-                agent_session=agent_session,
-            )
-
-        # Durable Popoto write happens before the Redis push
-        assert call_order == ["popoto", "redis"]
-        agent_session.push_steering_message.assert_called_once_with("please update X")
 
 
 class TestDefensiveReaction:
