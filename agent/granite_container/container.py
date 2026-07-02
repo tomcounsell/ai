@@ -1082,20 +1082,20 @@ class Container:
         that don't populate `turn_buffer` (unit-test mocks).
         """
         result = pty.read_until_idle(
-            min_content_bytes=min_content_bytes, timeout_s=CYCLE_IDLE_TIMEOUT_S
+            min_content_bytes=min_content_bytes,
+            timeout_s=CYCLE_IDLE_TIMEOUT_S,
+            on_read_iteration=self._fire_pty_read,
         )
         buffer = result.turn_buffer or result.buffer
         # Fire the PTY read-loop hook (path-B mid-run wedge detector, #1724).
         # Called unconditionally on every _cycle_idle so the bridge-adapter can
         # stamp last_pty_read_loop_at and diff-gate last_pty_activity_at.
         # Exceptions are swallowed — liveness signaling must never crash the run.
-        # NOTE: on_pty_read fires once per _cycle_idle return (turn boundary), not
-        # per inner read_until_idle poll iteration (pty_driver.py). A session wedged
-        # mid-turn leaves last_pty_read_loop_at stale between _cycle_idle calls —
-        # stage-1 ABSTAINs for that interval rather than false-firing. Safe for
-        # observe-only stage-1; stamp the inner loop before stage-2 wires recovery
-        # (requires adding a per-iteration callback param to PTYDriver.read_until_idle
-        # and plumbing through Container + BridgeAdapter).
+        # The per-iteration callback is now wired via on_read_iteration=self._fire_pty_read
+        # (#1843 Gap B): every inner read_until_idle poll tick stamps last_pty_read_loop_at
+        # through the same bridge-adapter freshness writer, so a session wedged mid-turn on
+        # the idle-fallback path refreshes liveness far sooner than the _cycle_idle window.
+        # This turn-boundary fire remains as the final stamp for the completed cycle.
         if self._on_pty_read is not None:
             try:
                 self._on_pty_read(buffer)
