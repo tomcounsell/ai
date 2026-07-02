@@ -75,9 +75,18 @@ corrected inline: **`session_executor.py:702 → :734`** (the
 population `handle.task = task._task` is at `session_executor.py:1891` — both are the
 #1039 contract Fix #3 honors UNCHANGED, per Blocker r4) and
 **`worker/__main__.py:649 → :663`** (the
-`_global_session_semaphore = asyncio.Semaphore(_max_sessions)` init). The
-`container.py` `os.killpg` scoped-teardown seam Fix #3 reuses is still present
-(`:1046/1052/1703/1706`). The five commits touching referenced files since the
+`_global_session_semaphore = asyncio.Semaphore(_max_sessions)` init).
+**Granite kill-scope anchors re-verified (BLOCKER r6):** the `container.py` `os.killpg`
+scoped-teardown is present (`:1044/1052/1703/1706`) but runs **only inside**
+`if not self._uses_pool_pair():` (`container.py:1032`; `_uses_pool_pair` defined at
+`:999-1018`), i.e. self-spawned pairs only — it is **dead for the production PTYPool
+transport**, so Fix #3's `_fd_pty_kill` does NOT reuse it for pool pairs. The production
+kill path is the pool's PID-targeted `PTYPool.kill_orphans` (`pty_pool.py:276`) applied to the
+session's persisted `pm_pid`/`dev_pid` (`models/agent_session.py:310/312`, stamped
+`bridge_adapter.py:810-815`). All container/pty_pool/model anchors here are baseline-relative;
+the builder locates these seams structurally (the `_uses_pool_pair()` gate, the
+`kill_orphans` def, the `pm_pid`/`dev_pid` fields and their stamp site), not by literal line
+number. The five commits touching referenced files since the
 baseline are all granite-transport / worker-recycle work
 (`0297da0d` #1688 hook turn-returns, `f49781f4`/`e62dac76` #1843 wedge signals,
 `b624607b` #1842 per-role transport hedge, `a9616f27` #1844 worker recycle) —
@@ -210,8 +219,10 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
    300s reap tick.
 7. **Output:** `permits_free` recovers; the worker loop unblocks at `acquire()`.
 
-**Fix #3 — progress-deadline cancel scope** (the single authoritative no-progress
-killer for worker-alive RUNNING sessions; see OQ3 resolution):
+**Fix #3 — progress-deadline cancel scope** (the authoritative no-progress killer for
+the worker-alive RUNNING session the loop is actively executing — i.e. with a live
+in-scope handle; the #944 shared-`worker_key` orphan without a live handle stays with the
+narrowed running-scan elif — see OQ3 resolution):
 1. **Entry point:** `agent_session_queue.py:1494`. New: run execution as an owned
    child task — `exec_task = asyncio.create_task(_execute_agent_session(session))` —
    and a `deadline_cancelled = False` flag in loop scope. **The registry handle is NOT
@@ -252,9 +263,11 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
    landed, `last_pty_activity_at` still carries granite liveness. **The plan does not
    DEPEND on #1843 fix 2.**
 3. **On expiry (gate says kill):** set `deadline_cancelled = True`; **finalize FIRST**
-   — (a) fd-level PTY kill (scoped process-group teardown of the session's granite
-   slot via the `container.py` `os.killpg` path from #1816 — see the Granite kill-scope
-   note below); (b)
+   — (a) fd-level PTY kill via `_fd_pty_kill(session)` — for a **pool-backed** granite
+   session this is the PTYPool's **PID-targeted** kill of the session's persisted
+   `pm_pid`/`dev_pid` (`PTYPool.kill_orphans`, `pty_pool.py:276`), NOT the container's
+   self-spawned-only `os.killpg` (dead behind `_uses_pool_pair()`; BLOCKER r6) — see the
+   Granite kill-scope note below; (b)
    `registry.reclaim(session.agent_session_id)`; (c) `did_finalize = await
    _apply_recovery_transition(reason_kind="progress_deadline")`; (c') if `did_finalize`
    is False (recovery declined — MAX_RECOVERY_ATTEMPTS / OOM-defer), force
@@ -291,24 +304,59 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
    from the scope that owned the task, and the deadline-cancel is never confused with
    a worker shutdown.
 
-**Granite kill-scope note (comment 4862216457, fact b — this fix owns the gap).**
-`_apply_recovery_transition`'s process kill is a SIGTERM→SIGKILL escalation against the
-recorded `claude_pid` (`session_health.py:2039-2051`), and `claude_pid` is set **only on
-the SDK path** (`session_executor.py:1425`). A granite session runs the container on a
-worker thread via `await asyncio.to_thread(container.run)` (`bridge_adapter.py:695`), so it
-records **no** `claude_pid` and a task-cancel cannot stop the OS thread — today's recovery
+**Granite kill-scope note (comment 4862216457, fact b — this fix owns the gap; BLOCKER r6
+correction).** `_apply_recovery_transition`'s process kill is a SIGTERM→SIGKILL escalation
+against the recorded `claude_pid` (`session_health.py:2039-2051`), and `claude_pid` is set
+**only on the SDK path** (`session_executor.py:1425`). A granite session runs the container
+on a worker thread via `await asyncio.to_thread(container.run)` (`bridge_adapter.py:695`), so
+it records **no** `claude_pid` and a task-cancel cannot stop the OS thread — today's recovery
 transitions the row terminal but leaves the granite **PTY children alive** until the orphan
-reaper sweeps them. Fix #3's `_fd_pty_kill(session)` closes exactly this gap: for a granite
-session it performs the scoped **process-group** teardown the container already implements —
-`os.killpg` against the per-PTY pgids the container captures (`container.py:1027-1052`,
-mirrored at `:1701-1706`) — so the PTY children die synchronously with the logical kill
-rather than lingering. This is the fd-level PTY kill named in Fix #3's Desired Outcome #2,
-now with the granite path made explicit. **Coordination with #1843 fix 1
-(`granite_wedged` → recovery):** that fix is scoped to route the `granite_wedged` verdict
-(`session_stall_classifier.py:298`) **through this cancel scope** rather than adding a fourth
-kill ladder. Fix #3 owns the single granite PTY-child kill path; #1843 fix 1 wires the
-trigger into it. Do NOT duplicate a granite kill ladder here or there — reference #1843 and
-share this scope.
+reaper sweeps them. Fix #3's `_fd_pty_kill(session)` closes exactly this gap — but it MUST
+target the **production transport** correctly:
+
+- **The container's `os.killpg` seam is DEAD for the production path (BLOCKER r6).** The
+  container captures per-PTY pgids and `os.killpg`s them **only inside**
+  `if not self._uses_pool_pair():` (`container.py:1032`; the killpg calls are at
+  `:1044-1052`, mirrored at `:1701-1706`). That branch runs on the **self-spawned**
+  (test / ping-pong) path only. The production granite transport is **PTYPool-backed**
+  (`_uses_pool_pair()` True — `container.py:999-1018`), where `reap_pgids` stays empty and
+  the container **never** signals a pool pair's process group (its docstring, `:1020-1030`,
+  states this deliberately: "signalling their process groups races the pool's respawn, so
+  we never touch them"). So reusing the container's killpg for a real granite session kills
+  **nothing** where it matters — AC#2 "PTY fd-killed" would be unmet on the exact path it
+  targets. Worse, if `_fd_pty_kill` captured a pool pair's pgid and killpg'd it anyway, it
+  would **race the pool's background respawn** and could SIGKILL a pgid the pool has already
+  recycled for a **different** session's slot.
+- **`_fd_pty_kill` branches on the transport, delegating pool pairs to the pool's
+  PID-targeted kill.** The worker-loop scope does not hold a live container handle for a
+  wedged granite session (the container thread is stuck — that is *why* the fd kill is
+  needed), so it operates off the session's **persisted PTY-child PIDs**: the bridge adapter
+  stamps `session.pm_pid` / `session.dev_pid` (`models/agent_session.py:310/312`) from the
+  acquired pool pair at `bridge_adapter.py:810-815`. `_fd_pty_kill(session)` therefore:
+  1. **Granite pool-backed session** (`session.claude_pid is None` AND `pm_pid`/`dev_pid`
+     set): delegate to the PTYPool's **PID-targeted** kill —
+     `PTYPool.kill_orphans({session.pm_pid, session.dev_pid})` (`pty_pool.py:276`), a
+     best-effort SIGKILL of **exactly this session's captured PTY-child PIDs**. Because it
+     targets specific PIDs (never a whole process group), it can **never** kill a pgid the
+     pool already recycled for another session; the pool discards a respawned slot's old PID
+     from `_spawned_pids` (`pty_pool.py:520`), so its own orphan sweep does not double-target
+     either. This is the pool's own per-PID close/kill API — Fix #3 reuses it rather than
+     reaching around it.
+  2. **Self-spawned granite (tests / ping-pong)** and **SDK sessions**: no worker-loop
+     fd-kill is needed — the container's own `_close_pair_and_reap` killpg
+     (`container.py:1032-1052`) runs on close for a self-spawned pair, and the SDK path is
+     already covered by `_apply_recovery_transition`'s `claude_pid` SIGKILL escalation.
+     `_fd_pty_kill` is a no-op (logs and returns) when neither `pm_pid`/`dev_pid` (pool
+     granite) nor a self-spawned container it owns is present.
+
+  This makes the fd-kill fire on the path that actually matters (pool-backed production
+  granite) and removes the respawn-race the naive killpg reuse would introduce.
+- **Coordination with #1843 fix 1 (`granite_wedged` → recovery):** that fix routes the
+  `granite_wedged` verdict (`session_stall_classifier.py:298`) **through this cancel scope**
+  rather than adding a fourth kill ladder. Fix #3 owns the single granite PTY-child kill
+  path (`PTYPool.kill_orphans` on the session's `pm_pid`/`dev_pid`); #1843 fix 1 wires the
+  trigger into it. Do NOT duplicate a granite kill ladder here or there — reference #1843 and
+  share this scope.
 
 ## Architectural Impact
 
@@ -368,7 +416,7 @@ Builds on #1815/#1816 primitives, already merged.
 |-------------|---------------|---------|
 | Python ≥ 3.11 | `python -c "import sys; assert sys.version_info >= (3, 11)"` | Leak-safe `wait_for(Semaphore.acquire())` for bounded lease acquire |
 | #1815 beacon present | `grep -c "def get_loop_tick" agent/session_state.py` | Confirms the liveness foundation landed |
-| #1816 scoped teardown present | `grep -c "killpg" agent/granite_container/container.py` | Confirms the fd-level PTY kill API exists for Fix #3 |
+| PTYPool PID-targeted kill present | `grep -c "def kill_orphans" agent/granite_container/pty_pool.py` | Confirms the production granite fd-kill API `_fd_pty_kill` delegates to for pool pairs (the container `killpg` is self-spawned-only — BLOCKER r6) |
 
 Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-deadline.md`.
 
@@ -400,14 +448,19 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
   execution task; on no-progress-past-deadline (reprieve gate consulted) finalize
   (fd-PTY-kill + reclaim + terminal transition) then cancel, with a
   `deadline_cancelled` flag so the `CancelledError` handler swallows instead of
-  re-queuing. This is the single authoritative killer for worker-alive running
-  sessions (the out-of-band worker-alive `no_progress` branch is deleted; OQ3).
+  re-queuing. This is the authoritative killer for the worker-alive running session the
+  loop is actively executing (a live in-scope handle); the out-of-band worker-alive
+  `no_progress` branch is **narrowed** to `in_scope_handle is None`, retaining the #944
+  orphan net for sessions Fix #3 cannot reach — the two are disjoint (OQ3 + BLOCKER r6).
   **Transport-aware (Granite deconfliction, comment 4862216457):** the progress
   timestamp `_session_progress_ts` consumes the granite #1724 signal
   `last_pty_activity_at` for PTY sessions (the SDK fields `last_tool_use_at`/
   `last_turn_at`/`current_tool_name` are structurally dead there), and `_fd_pty_kill`
-  covers the granite PTY-child pgid kill that `_apply_recovery_transition`'s
-  `claude_pid` SIGKILL misses — shared with #1843 fix 1, no fourth kill ladder.
+  covers the granite PTY-child kill that `_apply_recovery_transition`'s `claude_pid`
+  SIGKILL misses — via the PTYPool's **PID-targeted** kill of the session's persisted
+  `pm_pid`/`dev_pid` (`PTYPool.kill_orphans`), NOT the container's self-spawned-only
+  `os.killpg` (dead behind `_uses_pool_pair()`; BLOCKER r6) — shared with #1843 fix 1,
+  no fourth kill ladder.
 - **Env kill-switches** (all NAMED, env-overridable, conservative-provisional):
   `SESSION_PROGRESS_DEADLINE_S`, `PROGRESS_POLL_S`, `SLOT_LEASE_REAP_DISABLED`, reuse
   `DISABLE_PROGRESS_KILL` for the Fix #3 cancel. (`SLOT_LEASE_TTL_S` was **removed** in
@@ -423,8 +476,9 @@ create_task(_execute_agent_session(...))` under the progress-deadline watcher
 (`handle.task` stays the inner SDK task per #1039 — NOT rewired; progress read via
 transport-aware `_session_progress_ts` — `last_pty_activity_at` for granite) →
 **normal completion** → `registry.release(session_id)` /
-**no progress past deadline** → fd-PTY-kill (granite: `os.killpg` on the container's
-PTY-child pgids) → `registry.reclaim(session_id)` →
+**no progress past deadline** → fd-PTY-kill (pool-backed granite: `PTYPool.kill_orphans`
+on the session's persisted `pm_pid`/`dev_pid` — PID-targeted, BLOCKER r6) →
+`registry.reclaim(session_id)` →
 finalize (`_apply_recovery_transition`) → set `deadline_cancelled` → cancel
 `exec_task` → `CancelledError` handler swallows (no requeue).
 
@@ -538,6 +592,8 @@ calls `release_unbound()`).
   before it cancels** (Blocker 1):
   ```
   deadline_cancelled = False
+  np_telemetry_emitted = False   # telemetry-once latch (CONCERN r6): tier1/tier2 counters fire
+  #   on the first deadline-exceeded poll only, never once per PROGRESS_POLL_S tick.
   exec_task = asyncio.create_task(_execute_agent_session(session))
   # #1039 CONTRACT HONORED (Blocker r4) — do NOT rewire the registry handle here.
   # `_execute_agent_session` keeps its own `_active_sessions[sid] = SessionHandle(
@@ -584,7 +640,11 @@ calls `release_unbound()`).
               # `waiting_for_children` PM. Re-fetching per poll lets the handle populate
               # once execution has actually begun.
               handle = _active_sessions.get(session.agent_session_id)  # pid for the reprieve gate
-              if not _should_kill_no_progress(session, handle):  # Tier-2 reprieve gate (moved here — OQ3)
+              # Telemetry-once (CONCERN r6): emit tier1/tier2 counters only on the FIRST
+              # deadline-exceeded poll, else a long-reprieved session inflates them per poll.
+              emit = not np_telemetry_emitted
+              np_telemetry_emitted = True
+              if not _should_kill_no_progress(session, handle, emit_telemetry=emit):  # Tier-2 reprieve gate (shared — OQ3)
                   continue  # active children / compaction — reprieve, keep watching
               # NOTE: `_should_kill_no_progress` forwards `handle` to
               # `_tier2_reprieve_signal(handle, entry)`, which reads the pid for the
@@ -596,10 +656,16 @@ calls `release_unbound()`).
               # removed: it rationalized the always-None read this blocker fixes.)
               deadline_cancelled = True
               # FINALIZE FIRST — at the watcher scope, before cancel reaches :1496:
-              _fd_pty_kill(session)                      # scoped os.killpg on the per-PTY pgids
-              #   the container captures (container.py:1027-1052) — closes the granite kill-scope
-              #   gap (_apply_recovery_transition SIGKILLs claude_pid, which is None for granite;
-              #   comment 4862216457, fact b). Shared with #1843 fix 1 — no fourth kill ladder.
+              _fd_pty_kill(session)                      # BLOCKER r6: transport-branched.
+              #   Pool-backed granite (session.claude_pid is None, pm_pid/dev_pid set) →
+              #   PTYPool.kill_orphans({session.pm_pid, session.dev_pid}) (pty_pool.py:276) —
+              #   PID-targeted, never a pgid, so it cannot race the pool respawn or kill a
+              #   recycled slot. The container's os.killpg (container.py:1032-1052) is DEAD for
+              #   pool pairs (gated behind `if not self._uses_pool_pair()`), so reusing it would
+              #   kill nothing on the production path. Self-spawned/SDK → no-op (container close
+              #   or claude_pid SIGKILL already covers them). Closes the granite kill-scope gap
+              #   (_apply_recovery_transition SIGKILLs claude_pid, None for granite; comment
+              #   4862216457, fact b). Shared with #1843 fix 1 — no fourth kill ladder.
               registry.reclaim(session.agent_session_id) # free the slot
               did_finalize = await _apply_recovery_transition(  # terminal-guarded, idempotent
                   session, reason="progress deadline exceeded",
@@ -777,85 +843,127 @@ calls `release_unbound()`).
      hard dependency on #1843 fix 2**: if #1843 fix 2 lands first and makes the CLI hooks
      also populate the SDK fields, both signals are fresh and the max still picks the
      freshest; if it has not landed, `last_pty_activity_at` carries granite liveness alone.
-  2. **Kill scope (fact b).** `_apply_recovery_transition` SIGKILLs `claude_pid`
-     (`session_health.py:2039-2051`), set only on the SDK path
+  2. **Kill scope (fact b — BLOCKER r6 correction).** `_apply_recovery_transition` SIGKILLs
+     `claude_pid` (`session_health.py:2039-2051`), set only on the SDK path
      (`session_executor.py:1425`). Granite runs via `await asyncio.to_thread(container.run)`
      (`bridge_adapter.py:695`) with no `claude_pid` and no task-cancel reach into the OS
      thread, so recovery leaves granite PTY children alive until the orphan reaper. Fix #3's
-     `_fd_pty_kill` is the fix: scoped `os.killpg` on the per-PTY pgids the container captures
-     (`container.py:1027-1052` / `:1701-1706`). **#1843 fix 1 (`granite_wedged` → recovery,
-     `session_stall_classifier.py:298`) routes through THIS cancel scope — it wires the
-     trigger, Fix #3 owns the single kill path. Do NOT add a fourth kill ladder in either
-     place.**
+     `_fd_pty_kill` is the fix, but it must target the **PTYPool-backed production transport**,
+     NOT the container's self-spawned-only killpg: the container's `os.killpg`
+     (`container.py:1044-1052` / `:1701-1706`) runs **only inside**
+     `if not self._uses_pool_pair():` (`:1032`), i.e. never for a pool pair, whose process
+     group the container refuses to signal to avoid racing the pool's respawn
+     (`container.py:1020-1030`). So `_fd_pty_kill` branches: for a pool-backed granite session
+     (`claude_pid is None`, `pm_pid`/`dev_pid` persisted at `bridge_adapter.py:810-815`,
+     `models/agent_session.py:310/312`) it delegates to the pool's **PID-targeted** kill
+     `PTYPool.kill_orphans({session.pm_pid, session.dev_pid})` (`pty_pool.py:276`) — specific
+     PIDs, never a pgid, so it cannot kill a slot the pool already recycled; for a self-spawned
+     container the container's own `_close_pair_and_reap` killpg still applies on close.
+     **#1843 fix 1 (`granite_wedged` → recovery, `session_stall_classifier.py:298`) routes
+     through THIS cancel scope — it wires the trigger, Fix #3 owns the single kill path. Do NOT
+     add a fourth kill ladder in either place.**
 - Reuse `DISABLE_PROGRESS_KILL=1` as the kill-switch (parity with the tool-timeout
   loop).
-- **OQ3 resolution — single authoritative killer per running session.** Fix #3
-  becomes the sole no-progress killer for **worker-alive** RUNNING sessions. In the
-  same change, DELETE the out-of-band worker-alive `no_progress` branch
-  (`session_health.py:2506-2517`, the `elif ... not _has_progress(entry)` arm).
-  **CONCERN (r5) — the deletion MUST ALSO physically collapse the classifier, not just
-  the `elif`.** Deleting the `elif` alone leaves the classifier block at `:2519-2529`
-  intact, and its `if "no progress signal" in reason: _reason_kind = "no_progress"`
-  branch at **`:2527`** still contains the literal string `_reason_kind = "no_progress"`
-  — so the plan's own verification grep `grep -c '_reason_kind = "no_progress"'
-  agent/session_health.py == 0` would FAIL (the string survives as now-unreachable dead
-  code). Because the running scan's only remaining `should_recover=True` producers are
-  the `if not worker_alive:` worker-dead branches (`:2482-2494`), `"no progress signal"`
-  can never appear in `reason` after the `elif` is gone. Therefore **collapse the
-  classifier**: remove the `if "no progress signal" in reason: … else:` two-way split and
-  set `_reason_kind = "worker_dead"` unconditionally inside `if should_recover:` (deleting
-  the `_reason_kind = "no_progress"` line at `:2527`). This satisfies NO-LEGACY (the dead
-  `no_progress` branch is gone, not merely unreachable) and makes the `== 0` grep hold
-  exactly. Confirmed the only `_reason_kind = "no_progress"` occurrence in the file is
-  `:2527`; the never-started producer at `:3311` uses the kwarg `reason_kind="no_progress"`
-  (no leading `_`, no spaces), which the grep does not match.
-  **Correction (round 2): `reason_kind="no_progress"` has a SECOND producer** — the
-  never-started-past-grace recovery at `session_health.py:3308-3314` (`reason_kind=
-  "no_progress"` at `:3311`). So deleting the running-scan `elif` does **not** make the
-  reprieve block dead; the never-started path still needs it. Therefore, instead of
-  "moving out and leaving nothing," **EXTRACT the reprieve decision + its telemetry into
-  a shared predicate `_should_kill_no_progress(session, handle)`** (the `_has_progress`
-  + `_tier2_reprieve_signal(handle, entry)` decision, the `tier1_flagged_total` /
-  `tier2_reprieve_total:{reprieve}` counter increments, and the `reprieve_count` save,
-  currently inlined at the `session_health.py:1962` reprieve block) and have **BOTH**
-  callers invoke it: (a) `_apply_recovery_transition`, for the still-live never-started
-  `no_progress` path, replaces its inline `if reason_kind == "no_progress":` block with
-  a call to `_should_kill_no_progress`; (b) Fix #3's watcher calls it before cancelling.
-  This is a genuine MOVE (the reprieve logic exists in exactly one place — the shared
-  predicate — with no inline copy left in `_apply_recovery_transition` and no parallel
-  reprieve policy), satisfying NO-LEGACY / the Rabbit Hole below, while remaining correct
-  for the never-started producer. **Telemetry cadence (Simplifier implementation note,
-  round 2):** Fix #3's watcher consults `_should_kill_no_progress` on **every**
-  `PROGRESS_POLL_S` tick once the deadline is exceeded, so the counter increments must
-  NOT fire on the reprieve-check-and-continue path — otherwise a long-reprieved session
-  inflates `tier1_flagged_total` / `tier2_reprieve_total` once per poll. The gate
-  therefore returns a pure kill/no-kill boolean; its `tier1_flagged_total` and
-  `tier2_reprieve_total:{reprieve}` counter increments (and the `reprieve_count` save)
-  fire **exactly once per session** — on the first kill-*decision*, not on every poll
-  reprieve. Because exactly one killer fires per session, there is no cross-killer
-  double-count. A `waiting_for_children` PM with no own tool/turn activity is reprieved,
-  not killed, on either path. **Deterministic
-  verification greps (NIT, round 2 — no baseline-relative check):** the deleted
-  running-scan classification is gone → `grep -c '_reason_kind = "no_progress"'
+- **OQ3 resolution — single authoritative killer per running session, WITH the #944
+  orphan net retained (BLOCKER r6).** Fix #3 becomes the authoritative no-progress killer
+  for the worker-alive RUNNING session **the current worker loop is actively executing** —
+  i.e. the session whose in-scope handle is populated (`_active_sessions.get(sid) is not
+  None`). It does **not** cover a worker-alive `running` row that no live worker is
+  executing.
+  **Do NOT delete the running-scan `no_progress` elif outright — NARROW it (BLOCKER r6).**
+  The prior revision deleted the `:2506-2517` elif entirely; that drops the **#944**
+  shared-`worker_key` orphan-recovery net. The comment there (`:2503-2505`) exists precisely
+  because PM and a project-keyed dev-without-slug **share a `worker_key`**, and `worker_alive`
+  derives from `_active_workers.get(worker_key)` (`:2473-2474`) — keyed by `worker_key`, NOT
+  by session. A dev row left `running` by a **crashed** worker whose `worker_key` then gets a
+  **respawned live** worker reads `worker_alive=True`, so the `if not worker_alive:`
+  worker-dead scan (`:2482-2494`) never fires for it, and Fix #3's watcher only guards the
+  session the current loop is executing — **not** this orphan. Deleting the elif leaves the
+  orphan with no killer, defeating "exactly one authoritative no-progress killer per running
+  session." **Fix: keep a NARROWED elif** gated on the **absence of a live in-scope handle**,
+  so it fires only for sessions Fix #3 provably cannot reach:
+  ```
+  in_scope_handle = _active_sessions.get(entry.agent_session_id)  # computed once, near worker_alive
+  ...
+  elif (
+      in_scope_handle is None            # NEW (BLOCKER r6): no live worker executing THIS session →
+      #   Fix #3's in-scope watcher cannot own it; it is a #944 shared-worker_key orphan.
+      and running_seconds is not None
+      and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
+      and not _has_progress(entry)
+  ):
+      should_recover = True
+      _reason_kind = "no_progress"       # set directly (no string-sniff classifier)
+      reason = f"no progress signal, orphaned running row (no in-scope handle, #944), {int(running_seconds)}s ..."
+  ```
+  The two killers are now **disjoint by construction**: Fix #3 owns worker-alive sessions
+  **with** a live handle (`_active_sessions.get(sid) is not None` — the one the loop
+  executes); the narrowed elif owns worker-alive sessions **without** one (the crashed-then-
+  respawned-worker_key orphan). No session has two killers.
+  **Collapse the string-sniff classifier (NO-LEGACY).** Replace the fragile
+  `if "no progress signal" in reason: _reason_kind = "no_progress" else: _reason_kind =
+  "worker_dead"` classifier (`:2519-2529`) with a `_reason_kind` set **directly in each
+  producing branch**: the `if not worker_alive:` branches set `_reason_kind = "worker_dead"`;
+  the narrowed elif sets `_reason_kind = "no_progress"`. This removes the brittle string
+  match and keeps exactly two reason kinds in the running scan, each set at its source.
+  **Reprieve extraction (unchanged intent, still required).** `reason_kind="no_progress"`
+  has a SECOND live producer — the never-started-past-grace recovery at
+  `session_health.py:3308-3314` (`reason_kind="no_progress"` at `:3311`) — AND now the
+  retained narrowed elif routes through `_apply_recovery_transition` (`:2537`) with
+  `reason_kind="no_progress"`, so the Tier-2 reprieve must stay reachable for both. **EXTRACT
+  the reprieve DECISION into a shared predicate `_should_kill_no_progress(session, handle,
+  *, emit_telemetry)`** (the `_has_progress` + `_tier2_reprieve_signal(handle, entry)`
+  decision, currently inlined at the `session_health.py:1962` reprieve block) and have all
+  callers invoke it: (a) `_apply_recovery_transition`, for the never-started **and** the
+  narrowed-elif `no_progress` paths, replaces its inline `if reason_kind == "no_progress":`
+  block with a call to the shared predicate; (b) Fix #3's watcher calls it before cancelling.
+  The reprieve logic lives in exactly one place — no inline copy, no parallel policy
+  (NO-LEGACY / the Rabbit Hole below).
+  **Telemetry-once — reconciled (CONCERN r6).** The predicate is NOT "pure": the tier1/tier2
+  telemetry (`tier1_flagged_total` / `tier2_reprieve_total:{reprieve}` increments + the
+  `reprieve_count` save) belongs with the reprieve decision, so it lives **inside**
+  `_should_kill_no_progress` but is emitted **only when the caller passes `emit_telemetry=
+  True`**. Each caller sets that flag True **exactly once per session**, so the counters
+  never inflate:
+  - `_apply_recovery_transition` (never-started + narrowed-elif paths) passes
+    `emit_telemetry=True` on its single per-recovery-decision call — the same cadence as
+    today's inline block.
+  - Fix #3's watcher re-invokes the predicate every `PROGRESS_POLL_S` tick while past the
+    deadline, so it passes `emit_telemetry=True` **only on the first deadline-exceeded poll**
+    (a loop-local `np_telemetry_emitted` latch), and `emit_telemetry=False` on every
+    subsequent poll. A long-reprieved session therefore emits tier1/tier2 telemetry once, not
+    once per poll.
+
+  This removes the earlier self-contradiction (a "pure predicate" that nonetheless
+  "increments counters"): the predicate owns the telemetry, the caller gates it to fire once.
+  Because exactly one killer fires per session, there is no cross-killer double-count. A
+  `waiting_for_children` PM with no own tool/turn activity is reprieved, not killed, on every
+  path. **Deterministic verification greps (no baseline-relative check):** the narrowed elif
+  gates on the in-scope handle → `grep -c "in_scope_handle is None" agent/session_health.py
+  == 1` (the sole such guard; the `handle = _active_sessions.get(...)` read at `:2531` has no
+  `is None`); the string-sniff classifier is gone → `grep -c '"no progress signal" in reason'
   agent/session_health.py == 0`; the reprieve decision lives in exactly one place →
-  `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py == 1` (the sole CALL
-  site is inside `_should_kill_no_progress`; the bare-name `grep -c
-  "_tier2_reprieve_signal"` counts 5 — def + docstrings + call — so it can never be `1`,
-  hence the `(handle`-qualified call-site grep). **Residual ownership (no overlap):**
+  `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py == 1` (the sole CALL site
+  is inside `_should_kill_no_progress`; the bare-name `grep -c "_tier2_reprieve_signal"`
+  counts 5 — def + docstrings + call — so it can never be `1`, hence the `(handle`-qualified
+  call-site grep). **Residual ownership (no overlap):**
 
   | Killer | Owns | Cadence | Why it can't be Fix #3 |
   |--------|------|---------|------------------------|
-  | Fix #3 in-scope watcher | worker-**alive** running session, no progress past deadline, reprieve gates failed | worker-loop poll (`PROGRESS_POLL_S`) | — (this IS Fix #3) |
-  | out-of-band `worker_dead` (`session_health.py:2482-2494`) | running session whose **worker loop is dead** | 300s health tick | an in-scope watcher is dead when the worker loop is dead |
+  | Fix #3 in-scope watcher | worker-**alive** running session **with a live in-scope handle** (`_active_sessions.get(sid) is not None` — the session the loop is executing), no progress past deadline, reprieve gates failed | worker-loop poll (`PROGRESS_POLL_S`) | — (this IS Fix #3) |
+  | narrowed running-scan `no_progress` elif (#944 net, `session_health.py:2506-2517`) | worker-**alive** running row **with NO live in-scope handle** (`_active_sessions.get(sid) is None`) — a crashed-then-respawned-`worker_key` orphan (PM/dev share a `worker_key`), no progress past the guard | 300s health tick | Fix #3's watcher only guards the session the loop is actively executing; it never sees an orphan no live worker is running |
+  | out-of-band `worker_dead` (`session_health.py:2482-2494`) | running session whose **worker loop is dead** (`_active_workers.get(worker_key)` done/missing) | 300s health tick | an in-scope watcher is dead when the worker loop is dead |
   | `tool_timeout` loop (`:3450`) | a **tool in flight** past its per-tier budget | 30s | finer per-tool granularity; distinct trigger (`current_tool_name` non-null) |
 
-  `SESSION_PROGRESS_DEADLINE_S` is set **≥ the maximum tool-timeout tier** so
-  `tool_timeout` always fires first for a tool-in-flight wedge and Fix #3 only catches
-  the residual (no tool in flight / model-inference stall / wedged between tool calls).
-  All three converge on idempotent `reclaim` + terminal-guarded
+  The Fix #3 and narrowed-elif rows partition the worker-alive running sessions on the
+  in-scope-handle test (`_active_sessions.get(sid) is not None` vs `is None`), so they are
+  **disjoint** — no session is owned by both. `SESSION_PROGRESS_DEADLINE_S` is set **≥ the
+  maximum tool-timeout tier** so `tool_timeout` always fires first for a tool-in-flight wedge
+  and Fix #3 only catches the residual (no tool in flight / model-inference stall / wedged
+  between tool calls). All four converge on idempotent `reclaim` + terminal-guarded
   `_apply_recovery_transition`, so any cross-boundary race is harmless. This satisfies
-  NO-LEGACY / no-parallel-systems: exactly one authoritative killer per running
-  session, with the two survivors owning provably disjoint cases Fix #3 cannot reach.
+  NO-LEGACY / no-parallel-systems: exactly one authoritative no-progress killer per running
+  session, with the survivors owning provably disjoint cases Fix #3 cannot reach.
 
 ## Failure Path Test Strategy
 
@@ -864,8 +972,9 @@ calls `release_unbound()`).
   worker loop — wrap the reap pass so a single bad lease logs and the loop
   continues. Test asserts a reclaim exception is logged, not propagated.
 - [ ] The fd-PTY-kill in Fix #3 must not raise into the cancel handler — a failed
-  `killpg` (already-dead pgid) logs and proceeds to reclaim+finalize. Test asserts
-  finalize still runs when the PTY kill errors.
+  `PTYPool.kill_orphans` (already-dead PID) or a missing `pm_pid`/`dev_pid` logs and proceeds
+  to reclaim+finalize. Test asserts finalize still runs when the PTY kill errors or the
+  session has no recorded PTY PIDs.
 - [ ] No new `except Exception: pass` — every swallow in the new code emits a
   `logger.warning` with the owner_session_id. Test captures the record.
 
@@ -900,14 +1009,15 @@ calls `release_unbound()`).
 - [ ] `tests/integration/test_worker_wedge_pending.py::TestWorkerLoopParksOnZeroSemaphore` — UPDATE: still valid (the loop parks when the registry is exhausted), but retarget to the registry's `permits_free`.
 - [ ] `tests/integration/test_worker_wedge_pending.py` (health-check-cannot-escalate case) — REPLACE: this asserts the health check can only *nudge*, not recover, a leaked slot (the old logging-only behavior). Rewrite as the **acceptance-criterion regression guard**: an orphaned/terminal-owner lease is *reclaimed* by the reap pass and the worker unblocks — no restart. This is the inversion of the documented-bug test.
 - [ ] Any test reading `_global_session_semaphore` / `_sem._value` directly — UPDATE to the registry accessor. Confirmed affected: `tests/integration/test_worker_concurrency.py` (10 refs at `:131,135,173,182,187,189,197,244,246,261,304,306,326,364,366,377,418,420,436`) and `tests/integration/test_worker_wedge_pending.py` (`:197,204,292,350,356,400,424,457`) all set/read `_global_session_semaphore` directly — retarget to `SlotLeaseRegistry` init + `permits_free()`.
-- [ ] Any test asserting the out-of-band worker-alive `no_progress` kill (reason_kind `no_progress` from the running-session scan) — UPDATE/REPLACE: that branch is deleted (OQ3); the equivalent kill is now Fix #3's in-scope watcher (`test_progress_deadline_cancel.py`). The `worker_dead` and `tool_timeout` recovery tests are unaffected.
+- [ ] Any test asserting the out-of-band worker-alive `no_progress` kill (reason_kind `no_progress` from the running-session scan) — UPDATE: that branch is **narrowed, not deleted** (OQ3 + BLOCKER r6) — it now fires only for a worker-alive row with NO live in-scope handle (`_active_sessions.get(sid) is None`, the #944 orphan). A test that killed a handle-present worker-alive session via this branch must move its assertion to Fix #3's in-scope watcher (`test_progress_deadline_cancel.py`); a test of the handle-absent orphan case keeps this branch (retarget to assert the `in_scope_handle is None` gate). The `worker_dead` and `tool_timeout` recovery tests are unaffected.
+- [ ] `tests/integration/test_worker_wedge_pending.py` (or wherever the #944 shared-`worker_key` orphan recovery is covered) — ADD/UPDATE: a worker-alive `running` row with NO live in-scope handle (crashed-then-respawned-`worker_key` orphan) past the guard with no progress is still recovered by the narrowed elif (BLOCKER r6 regression guard — the #944 net is retained). If no such test exists, add one so the retained net is proven.
 - [ ] Any test asserting a reap reclaims on a wall-clock/`SLOT_LEASE_TTL_S` deadline — DELETE: the wall-clock reclaim arm is removed (Blocker 2); the reap reclaims on terminal-owner only. If no such test exists yet, none is added.
 - [ ] Any test for the never-started `no_progress` recovery reprieve (`session_health.py:3308-3314`) — UPDATE: the reprieve decision now routes through the extracted `_should_kill_no_progress`; assert reprieve still fires for that path (the second `no_progress` producer must keep its reprieve).
 
 New tests (greenfield):
 - `tests/unit/test_slot_lease_registry.py` — acquire/bind/release/reclaim happy path; double-reclaim idempotency (no over-release); `acquire()`+`release_unbound()` leaves no lease and restores `permits_free`; terminal-owner reclaim; `permits_free` accounting. (No deadline-expired reclaim test — the wall-clock arm was removed, Blocker 2.)
 - `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**. ALSO assert a still-`running`, progressing owner whose lease is old is NOT reclaimed (Blocker 2 regression guard: no over-admission of a healthy long session). ALSO (`disabled_still_logs` case — Operator CONCERN): with `SLOT_LEASE_REAP_DISABLED=1`, the reap pass still logs the leaked-slot WARNING (detection preserved) but reclaims NO permit and does NOT increment `slot_reclaims` — the kill-switch is detect-only, never no-visibility.
-- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **an out-of-band `tool_timeout`/`worker_dead` cancel of the inner SDK task (`handle.task = task._task`, #1039) tears down the subprocess AND does NOT tear down the worker** — the worker survives and picks up the next session (Blocker r4; assert the worker loop is still alive and `_active_workers` still holds it after the kill); the Branch-2 backstop — an already-terminal row receiving a bubbled CancelledError is swallowed, not re-queued; a **worker-shutdown cancel** (Branch 3, `deadline_cancelled=False`, row still `running`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**. **Granite cases (comment 4862216457):** a granite PTY session with a **fresh `last_pty_activity_at`** but **None `last_tool_use_at`/`last_turn_at`** past the deadline is NOT killed (fact a — `_session_progress_ts` reads the PTY signal); a **quiescent** granite session (stale `last_pty_activity_at`) IS killed AND its PTY children are torn down via the container's `os.killpg` pgid path (fact b — assert the `killpg` seam fires; `claude_pid` is None). These two cases must pass whether or not #1843 fix 2 has populated the SDK fields.
+- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **an out-of-band `tool_timeout`/`worker_dead` cancel of the inner SDK task (`handle.task = task._task`, #1039) tears down the subprocess AND does NOT tear down the worker** — the worker survives and picks up the next session (Blocker r4; assert the worker loop is still alive and `_active_workers` still holds it after the kill); the Branch-2 backstop — an already-terminal row receiving a bubbled CancelledError is swallowed, not re-queued; a **worker-shutdown cancel** (Branch 3, `deadline_cancelled=False`, row still `running`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**. **Granite cases (comment 4862216457):** a granite PTY session with a **fresh `last_pty_activity_at`** but **None `last_tool_use_at`/`last_turn_at`** past the deadline is NOT killed (fact a — `_session_progress_ts` reads the PTY signal); a **quiescent** granite **pool-backed** session (stale `last_pty_activity_at`) IS killed AND its PTY children are torn down via the PTYPool's **PID-targeted** kill (fact b — assert `PTYPool.kill_orphans` fires with the session's `pm_pid`/`dev_pid`; `claude_pid` is None; the container's `os.killpg` is NOT the seam — it is dead behind `_uses_pool_pair()`, BLOCKER r6). These two cases must pass whether or not #1843 fix 2 has populated the SDK fields.
 
 ## Rabbit Holes
 
@@ -926,9 +1036,13 @@ New tests (greenfield):
 - **Do NOT store leases on the AgentSession Popoto model.** They are in-memory,
   rebuilt on restart. A model field would drag in a migration for zero benefit
   (startup recovery already re-queues running sessions).
-- **Do NOT machine-wide `pkill` for the fd-PTY-kill.** Use the scoped
-  process-group teardown from #1816 for the session's own slot only — machine-wide
-  pkill was the #1816 bug that matched the operator's personal `claude`.
+- **Do NOT machine-wide `pkill` for the fd-PTY-kill, and do NOT killpg a pool pair's
+  process group.** For the production (pool-backed) transport use the pool's **PID-targeted**
+  kill of the session's own `pm_pid`/`dev_pid` (`PTYPool.kill_orphans`) — never a whole
+  process group, which would race the pool's respawn and could kill a slot the pool already
+  recycled for another session (BLOCKER r6). Machine-wide pkill was the #1816 bug that matched
+  the operator's personal `claude`; the container's `os.killpg` path is self-spawned-only
+  (`if not self._uses_pool_pair()`), so it is not the production seam.
 - **Do NOT leave a legacy semaphore shim.** Fully remove
   `_global_session_semaphore`; migrate every reference. No parallel-run.
 - **Do NOT chase mid-flight cancellation of synchronous work.** `exec_task.cancel()`
@@ -1081,15 +1195,18 @@ same `permits_free`/`held_count` semantics the fingerprint already reads.
 was a *silent* wedge that required a human to notice and restart, and the new
 `slot_reclaims` Redis counter is otherwise write-only. Surface it so operators can see
 recovery fired and catch a reclaim spike (which would signal an underlying leak the
-recovery is merely papering over): the reap emits
-`{project_key}:session-health:slot_reclaims` every tick; expose that count as a
-`slot_reclaims` field in the existing
-`localhost:8500/dashboard.json` payload — read it in `_get_worker_health()` (`ui/app.py`,
-consumed by the `/dashboard.json` route at `ui/app.py:507`) next to the
-running-count/`permits_free` fields, adding a `slot_reclaims` field to the `worker`
-health block. This is an additive field on an existing payload — no new surface — so the
-rest of the dashboard contract is unchanged. (The bridge-side consumer of the lease
-registry is the deferred Fix #5 in #1821 — out of scope here.)
+recovery is merely papering over): the reap emits the per-project counter
+`{project_key}:session-health:slot_reclaims` every tick. **Placement (NIT r6 — tightened):**
+the slot registry is a single machine-wide worker primitive, but the counter is keyed per
+`project_key`, so `_get_worker_health()` must **sum** `slot_reclaims` across the project keys
+the worker serves (the same key set the function already iterates for its running-count /
+`permits_free` accounting) and expose the total as **one integer** `slot_reclaims` field in
+the `worker` health block — NOT a per-project map, and NOT a new top-level key. It sits
+directly beside the existing `permits_free`/running-count fields inside the `worker` block
+that `_get_worker_health()` returns (consumed by the `/dashboard.json` route at `ui/app.py:507`).
+This is an additive scalar on an existing block — no new surface, no schema break — so the rest
+of the dashboard contract is unchanged. (The bridge-side consumer of the lease registry is the
+deferred Fix #5 in #1821 — out of scope here.)
 
 ## Documentation
 
@@ -1102,9 +1219,13 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   `deadline_cancelled`/fresh-status `CancelledError` disambiguation + fd-PTY-kill + the
   #1039 contract (why `handle.task` stays the inner SDK task, NOT `exec_task`), the
   **transport-aware progress signal** (granite consumes `last_pty_activity_at` (#1724),
-  not the structurally-dead SDK fields) and the **granite PTY-child kill scope** (scoped
-  `os.killpg` on the container pgids, closing the `claude_pid`-is-None gap; shared with
-  #1843 fix 1, no fourth kill ladder), the single-
+  not the structurally-dead SDK fields) and the **granite PTY-child kill scope** (the
+  PTYPool's PID-targeted `kill_orphans` on the session's persisted `pm_pid`/`dev_pid`, NOT the
+  container's self-spawned-only `os.killpg` which is dead behind `_uses_pool_pair()`, closing
+  the `claude_pid`-is-None gap; shared with #1843 fix 1, no fourth kill ladder), the
+  **#944 shared-`worker_key` orphan net retained** (the running-scan `no_progress` elif is
+  NARROWED on the in-scope handle, not deleted — it owns worker-alive orphans Fix #3 cannot
+  reach), the single-
   authoritative-killer division (Fix #3 for worker-alive; `worker_dead` and
   `tool_timeout` for the disjoint residuals) with the shared `_should_kill_no_progress`
   reprieve gate (also called by `_apply_recovery_transition` for the never-started
@@ -1151,14 +1272,25 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   no `last_tool_use_at`/`last_turn_at`) is **NOT** false-killed; a genuinely quiescent one
   IS killed. `grep -c "last_pty_activity_at" agent/agent_session_queue.py` (or the module
   holding `_session_progress_ts`) `> 0`. No hard dependency on #1843 fix 2.
-- [ ] **Granite kill scope (comment 4862216457, fact b):** `_fd_pty_kill` performs the
-  scoped `os.killpg` PTY-child teardown for granite sessions (whose `claude_pid` is None),
-  so no granite PTY children survive a progress-deadline kill to be swept later by the
-  orphan reaper. `test_progress_deadline_cancel.py` asserts the `killpg` seam fires for a
-  granite session. #1843 fix 1 routes through this scope — no fourth kill ladder.
+- [ ] **Granite kill scope (comment 4862216457, fact b — BLOCKER r6):** for a **pool-backed**
+  granite session (whose `claude_pid` is None), `_fd_pty_kill` delegates to the PTYPool's
+  **PID-targeted** kill of the session's persisted `pm_pid`/`dev_pid` (`PTYPool.kill_orphans`),
+  so no granite PTY children survive a progress-deadline kill to be swept later by the orphan
+  reaper. It does **not** reuse the container's `os.killpg`, which is dead for pool pairs
+  (`if not self._uses_pool_pair()`, `container.py:1032`) and would race the pool respawn.
+  Verify the delegation, not the dead seam: `grep -c "kill_orphans" agent/agent_session_queue.py
+  > 0` (or the module holding `_fd_pty_kill`) AND that `_fd_pty_kill` reads `session.pm_pid` /
+  `session.dev_pid` (`grep -c "\.pm_pid" agent/agent_session_queue.py > 0`). A bare
+  `grep -c "killpg" agent/granite_container/container.py > 0` proves only that the
+  self-spawned code exists and is **NOT** evidence the production path is killed.
+  `test_progress_deadline_cancel.py` asserts the `kill_orphans` seam fires with the session's
+  `pm_pid`/`dev_pid` for a pool-backed granite session. #1843 fix 1 routes through this scope —
+  no fourth kill ladder.
 - [ ] **No healthy-worker teardown on out-of-band cancel (Blocker r4):** the
-  `handle.task = exec_task` wiring is NOT present (`grep -c "handle.task = exec_task"
-  agent/agent_session_queue.py == 0`); `handle.task` stays the inner SDK task per #1039,
+  `handle.task = exec_task` wiring is NOT present as a statement
+  (`grep -cE '^[[:space:]]*handle\.task = exec_task' agent/agent_session_queue.py == 0` —
+  anchored to a real assignment so an explanatory comment mentioning the string in prose
+  cannot false-fail it; CONCERN r6); `handle.task` stays the inner SDK task per #1039,
   so a `tool_timeout` / `worker_dead` cancel is absorbed by BackgroundTask and the worker
   survives. The `:1496` handler has a Branch-2 fresh-status-terminal swallow so any
   bubbled out-of-band CancelledError never re-raises into the outer handler that pops the
@@ -1176,15 +1308,22 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   captures `did_finalize`, forces `transition_status(..., "cancelled")` on decline, and
   sets `finalized_by_execute=True` so the outer `finally` never runs
   `_complete_agent_session` on the killed row (no "completed" mislabel).
-- [ ] Exactly one authoritative no-progress killer per running session (OQ3): the
-  running-scan worker-alive `no_progress` `elif` is deleted **and its classifier is
-  collapsed** so the `_reason_kind = "no_progress"` line (`:2527`) is physically removed
-  (`grep -c '_reason_kind = "no_progress"' == 0` — r5 CONCERN); `worker_dead` and
-  `tool_timeout` remain for the
-  disjoint cases Fix #3 cannot reach; the Tier-2 reprieve decision lives in exactly one
-  place — the shared `_should_kill_no_progress` gate (`grep -c "_tier2_reprieve_signal(handle"
-  == 1` — the call-site grep; the bare name counts 5), called by BOTH Fix #3 and
-  `_apply_recovery_transition` (never-started path).
+- [ ] Exactly one authoritative no-progress killer per running session (OQ3 + BLOCKER r6):
+  Fix #3 owns worker-alive sessions **with** a live in-scope handle; the running-scan
+  worker-alive `no_progress` `elif` is **NARROWED (not deleted)** to `in_scope_handle is None`
+  so it retains the #944 shared-`worker_key` orphan net for sessions Fix #3 cannot reach —
+  the two are disjoint on the handle test (`grep -c "in_scope_handle is None"
+  agent/session_health.py == 1`). The brittle string-sniff classifier is removed
+  (`grep -c '"no progress signal" in reason' agent/session_health.py == 0`); `worker_dead`
+  and `tool_timeout` remain for their disjoint cases; the Tier-2 reprieve decision lives in
+  exactly one place — the shared `_should_kill_no_progress` gate
+  (`grep -c "_tier2_reprieve_signal(handle" == 1` — the call-site grep; the bare name counts
+  5), called by Fix #3, the narrowed elif's `_apply_recovery_transition`, and the never-started
+  path.
+- [ ] **Telemetry-once (CONCERN r6):** the tier1/tier2 counters + `reprieve_count` save fire
+  exactly once per session — `_should_kill_no_progress` emits them only under
+  `emit_telemetry=True`, which Fix #3's watcher sets True only on the first deadline-exceeded
+  poll (loop-local latch), never once per `PROGRESS_POLL_S` tick.
 - [ ] `_apply_recovery_transition` reclaims the slot on out-of-band kill (prompt
   recovery, not 300s-tick-only).
 - [ ] The reap pass runs once per health tick, independent of `worker_alive` and of
@@ -1278,9 +1417,11 @@ lead NEVER builds directly.
   wall-clock `now > lease.deadline` arm** (Blocker 2), increment `slot_reclaims`.
   Move the healthy-backpressure INFO line into phase 1.
 - Wire `registry.reclaim(session_id)` into `_apply_recovery_transition`.
-- Surface `slot_reclaims` (NIT): add the counter to the `worker` health block of
-  `dashboard.json` — read `{project_key}:session-health:slot_reclaims` in
-  `_get_worker_health()` (`ui/app.py`, route at `:507`); additive field only.
+- Surface `slot_reclaims` (NIT r6 — tightened placement): in `_get_worker_health()`
+  (`ui/app.py`, route at `:507`), **sum** `{project_key}:session-health:slot_reclaims` across
+  the worker's served project keys and add the total as a single scalar `slot_reclaims` field
+  inside the existing `worker` health block beside `permits_free`/running-count — additive
+  scalar only, no per-project map, no new top-level key.
 
 ### 2. Build the progress-deadline cancel scope (Fix #3)
 - **Task ID**: build-progress-deadline
@@ -1299,12 +1440,18 @@ lead NEVER builds directly.
   (its children run CLI hooks that bump only `updated_at`+`tool_call_count`), so relying on
   them alone false-kills every granite session at the deadline. Do NOT depend on #1843 fix 2:
   the max-over-present-signals form is correct whether or not it lands.
-  (b) `_fd_pty_kill` must kill the granite PTY children via `os.killpg` on the container's
-  captured per-PTY pgids (`container.py:1027-1052`) — `_apply_recovery_transition`'s
-  `claude_pid` SIGKILL (`session_health.py:2039-2051`) is a no-op for granite (`claude_pid`
-  is SDK-path-only, `session_executor.py:1425`; granite runs `asyncio.to_thread(container.run)`
-  at `bridge_adapter.py:695`). #1843 fix 1 (`granite_wedged` → recovery) routes through THIS
-  cancel scope — do NOT add a fourth kill ladder; reference #1843 and share the scope.
+  (b) `_fd_pty_kill` must kill the granite PTY children on the **production (pool-backed)**
+  transport via the PTYPool's **PID-targeted** kill of the session's persisted `pm_pid`/`dev_pid`
+  — `PTYPool.kill_orphans({session.pm_pid, session.dev_pid})` (`pty_pool.py:276`; PIDs stamped
+  at `bridge_adapter.py:810-815`, `models/agent_session.py:310/312`). Do NOT reuse the
+  container's `os.killpg` (`container.py:1044-1052`): it is gated behind
+  `if not self._uses_pool_pair()` (`:1032`) and therefore **dead for pool pairs** (production
+  granite) — reusing it kills nothing where it matters and, if forced, races the pool's respawn
+  (BLOCKER r6). `_apply_recovery_transition`'s `claude_pid` SIGKILL (`session_health.py:2039-2051`)
+  is likewise a no-op for granite (`claude_pid` is SDK-path-only, `session_executor.py:1425`;
+  granite runs `asyncio.to_thread(container.run)` at `bridge_adapter.py:695`). #1843 fix 1
+  (`granite_wedged` → recovery) routes through THIS cancel scope — do NOT add a fourth kill
+  ladder; reference #1843 and share the scope.
 - **Blocker r4 — HONOR #1039; do NOT rewire the handle.** Do NOT add
   `handle.task = exec_task` and do NOT change `session_executor.py:734`/`:1891`. Wiring
   `handle.task = exec_task` (the withdrawn prior root fix) would (1) tear down the whole
@@ -1316,8 +1463,9 @@ lead NEVER builds directly.
   per the #1039 contract; BackgroundTask ABSORBS its cancellation, so out-of-band kills
   tear down the SDK subprocess (plus the #1537 SIGKILL escalation at `:2036`) WITHOUT
   reaching the worker loop. Fix #3's own cancel targets the local `exec_task` + fd-PTY-kill.
-  Verify `grep -c "handle.task = exec_task" agent/agent_session_queue.py == 0` and that
-  `session_executor.py:734`/`:1891` are untouched.
+  Verify `grep -cE '^[[:space:]]*handle\.task = exec_task' agent/agent_session_queue.py == 0`
+  (anchored to a real assignment so a comment mentioning the string cannot false-fail it —
+  CONCERN r6) and that `session_executor.py:734`/`:1891` are untouched.
 - On expiry (reprieve gate `_should_kill_no_progress` says kill): finalize FIRST —
   fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim →
   `did_finalize = await _apply_recovery_transition(reason "progress_deadline",
@@ -1339,25 +1487,37 @@ lead NEVER builds directly.
   `wait_for(..., TASK_CANCEL_TIMEOUT)` to tear down the orphaned subprocess, then
   log/`session_completed=True`/re-raise). Add a `finally` that cancels a still-pending
   `exec_task` on any non-Cancelled exit.
-- OQ3: extract the Tier-2 reprieve + telemetry into shared
-  `_should_kill_no_progress(session, handle)`; DELETE the running-scan worker-alive
-  `no_progress` `elif` (`session_health.py:2506-2517`) **AND collapse the classifier at
-  `:2519-2529`** — remove the `if "no progress signal" in reason … else` split and set
-  `_reason_kind = "worker_dead"` unconditionally, physically deleting the
-  `_reason_kind = "no_progress"` line at `:2527` (r5 CONCERN — deleting only the `elif`
-  leaves that string as dead code and fails the `== 0` grep). Note
-  `reason_kind="no_progress"` has a SECOND live producer (never-started path, `:3308-3314`,
-  kwarg form), so `_apply_recovery_transition` must CALL `_should_kill_no_progress` (not
-  keep an inline copy) — reprieve logic in exactly one place. Keep `worker_dead` and
-  `tool_timeout`. Deterministic greps: `grep -c '_reason_kind = "no_progress"' == 0`
-  (only `:2527` matches today; the `:3311` kwarg does not);
-  `grep -c "_tier2_reprieve_signal(handle" == 1` (call-site grep — the bare name counts 5).
-- **Telemetry cadence (Simplifier NIT):** `_should_kill_no_progress` is a pure
-  kill/no-kill predicate; its `tier1_flagged_total` / `tier2_reprieve_total:{reprieve}`
-  counter increments and `reprieve_count` save fire **exactly once per session** on the
-  first kill-*decision* — NOT on the reprieve-check-and-continue path, which the watcher
-  re-runs every `PROGRESS_POLL_S` tick while past the deadline (firing per-poll would
-  inflate the metric).
+- OQ3 (BLOCKER r6 — NARROW, do NOT delete): extract the Tier-2 reprieve into shared
+  `_should_kill_no_progress(session, handle, *, emit_telemetry)`. **Do NOT delete the
+  running-scan worker-alive `no_progress` `elif`** (`session_health.py:2506-2517`) — that
+  drops the #944 shared-`worker_key` orphan net (PM + project-keyed dev share a `worker_key`;
+  `worker_alive` is keyed by `worker_key`, not session, so a crashed-then-respawned-`worker_key`
+  orphan reads `worker_alive=True` and is missed by both the `worker_dead` scan and Fix #3's
+  in-scope watcher). **NARROW it** to gate on the absence of a live in-scope handle: compute
+  `in_scope_handle = _active_sessions.get(entry.agent_session_id)` once near `worker_alive`, and
+  make the elif `in_scope_handle is None AND running_seconds > MIN AND not _has_progress(entry)`
+  → `should_recover=True`, `_reason_kind = "no_progress"`. This is disjoint from Fix #3 (which
+  owns handle-present sessions). **Collapse the string-sniff classifier** at `:2519-2529`:
+  replace `if "no progress signal" in reason: … else:` with a `_reason_kind` set directly in
+  each producing branch (`worker_dead` in the `if not worker_alive:` branches; `no_progress` in
+  the narrowed elif). Note `reason_kind="no_progress"` has a SECOND live producer (never-started
+  path, `:3308-3314`, kwarg form) AND now the narrowed elif routes through
+  `_apply_recovery_transition`, so `_apply_recovery_transition` must CALL
+  `_should_kill_no_progress` (not keep an inline copy) — reprieve logic in exactly one place.
+  Keep `worker_dead` and `tool_timeout`. Deterministic greps:
+  `grep -c "in_scope_handle is None" agent/session_health.py == 1` (the narrowed guard);
+  `grep -c '"no progress signal" in reason' agent/session_health.py == 0` (string-sniff
+  classifier gone); `grep -c "_tier2_reprieve_signal(handle" == 1` (call-site grep — the bare
+  name counts 5).
+- **Telemetry-once (CONCERN r6):** `_should_kill_no_progress` returns the kill/reprieve
+  decision AND owns the tier1/tier2 telemetry (`tier1_flagged_total` /
+  `tier2_reprieve_total:{reprieve}` increments + `reprieve_count` save), emitting it **only
+  when the caller passes `emit_telemetry=True`**. `_apply_recovery_transition` passes True on
+  its single per-recovery call (unchanged cadence). Fix #3's watcher passes True **only on the
+  first deadline-exceeded poll** (loop-local `np_telemetry_emitted` latch) and False on every
+  subsequent poll, so a long-reprieved session emits the counters once, not once per
+  `PROGRESS_POLL_S` tick. This replaces the earlier self-contradictory "pure predicate that
+  increments counters" wording — the predicate owns the telemetry, the caller gates it once.
 - Reuse `DISABLE_PROGRESS_KILL` kill-switch; add `SESSION_PROGRESS_DEADLINE_S`
   (≥ max tool tier) / `PROGRESS_POLL_S` constants (provisional, commented).
 
@@ -1408,13 +1568,15 @@ lead NEVER builds directly.
 | Reap emits the reclaim counter | `grep -c "slot_reclaims" agent/session_health.py` | output > 0 |
 | Deadline-cancel disambiguation present (Blocker 1) | `grep -c "deadline_cancelled" agent/agent_session_queue.py` | output > 0 |
 | Progress-deadline cancel present | `grep -c "SESSION_PROGRESS_DEADLINE_S" agent/agent_session_queue.py` | output > 0 |
-| Single-killer: running-scan no_progress classification deleted (OQ3, deterministic) | `grep -c '_reason_kind = "no_progress"' agent/session_health.py` | == 0 |
+| #944 orphan net retained: running-scan no_progress elif NARROWED on the in-scope handle (OQ3 + BLOCKER r6) | `grep -c "in_scope_handle is None" agent/session_health.py` | == 1 (the narrowed guard; disjoint from Fix #3's handle-present ownership) |
+| String-sniff classifier removed (OQ3, NO-LEGACY) | `grep -c '"no progress signal" in reason' agent/session_health.py` | == 0 (`_reason_kind` set directly per producing branch) |
 | Reprieve decision lives in exactly one place (OQ3, no dead/parallel copy) | `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py` | == 1 (sole CALL site, inside `_should_kill_no_progress`; the bare-name count is 5) |
+| Telemetry-once flag threaded (CONCERN r6) | `grep -c "emit_telemetry" agent/session_health.py agent/agent_session_queue.py` | output > 0 (predicate param + caller latch) |
 | Shared reprieve gate extracted (OQ3) | `grep -c "_should_kill_no_progress" agent/session_health.py` | output > 0 |
 | No wall-clock reclaim arm in the reap (Blocker 2) | `grep -c "lease.deadline" agent/session_health.py` | == 0 |
 | `SLOT_LEASE_TTL_S` fully removed (Blocker 2) | `grep -rc "SLOT_LEASE_TTL_S" agent/ worker/` | match count == 0 |
-| #1039 contract honored — handle NOT rewired to exec_task (Blocker r4) | `grep -c "handle.task = exec_task" agent/agent_session_queue.py` | == 0 |
-| Executor registration/task-ref sites UNCHANGED (Blocker r4) | `grep -c "SessionHandle(task=None)" agent/session_executor.py` and `grep -c "handle.task = exec_task\|_active_sessions.setdefault" agent/session_executor.py` | first > 0 (`:734` intact); second == 0 (no setdefault swap) |
+| #1039 contract honored — handle NOT rewired to exec_task (Blocker r4; anchored per CONCERN r6) | `grep -cE '^[[:space:]]*handle\.task = exec_task' agent/agent_session_queue.py` | == 0 (anchored to a real assignment; a prose/comment mention of the string cannot false-fail it) |
+| Executor registration/task-ref sites UNCHANGED (Blocker r4) | `grep -c "SessionHandle(task=None)" agent/session_executor.py` and `grep -cE '^[[:space:]]*handle\.task = exec_task|_active_sessions.setdefault' agent/session_executor.py` | first > 0 (`:734` intact); second == 0 (no setdefault swap) |
 | Out-of-band CancelledError swallow on terminal re-read (Branch 2, Blocker r4) | `grep -c "TERMINAL_STATUSES" agent/agent_session_queue.py` | output > 0 (fresh-status re-read in the `:1496` handler) |
 | Deadline decline forces terminal, skips outer finally (Concern 1) | `grep -c "did_finalize" agent/agent_session_queue.py` | output > 0 |
 | `slot_reclaims` surfaced on the dashboard (NIT) | `grep -c "slot_reclaims" ui/app.py` | output > 0 |
@@ -1422,7 +1584,9 @@ lead NEVER builds directly.
 | Kill-switch preserves detection (Operator CONCERN) | `pytest tests/integration/test_slot_lease_reclaim.py -k disabled_still_logs -q` | exit code 0 (WARNING logged, no reclaim under `SLOT_LEASE_REAP_DISABLED=1`) |
 | Fix #3 finalize passes `handle=None` (NIT) | `grep -c "handle=None" agent/agent_session_queue.py` | output > 0 |
 | Granite progress signal consumed (comment 4862216457, fact a) | `grep -c "last_pty_activity_at" agent/agent_session_queue.py` | output > 0 |
-| Granite PTY-child kill via scoped killpg (comment 4862216457, fact b) | `grep -c "killpg" agent/granite_container/container.py` | output > 0 (the pgid teardown Fix #3 reuses) |
+| Granite PTY-child kill delegates to the pool's PID-targeted API (comment 4862216457, fact b — BLOCKER r6) | `grep -c "kill_orphans" agent/agent_session_queue.py` | output > 0 (`_fd_pty_kill` calls `PTYPool.kill_orphans` on the pool path) |
+| `_fd_pty_kill` targets the session's persisted PTY PIDs, not a pgid (BLOCKER r6) | `grep -c "\.pm_pid" agent/agent_session_queue.py` | output > 0 (reads `session.pm_pid`/`dev_pid`; the container `killpg` at `container.py:1032` is dead for pool pairs and is NOT proof the production path works) |
+| Pool's PID-targeted kill API exists (BLOCKER r6) | `grep -c "def kill_orphans" agent/granite_container/pty_pool.py` | output > 0 |
 
 ## Critique Results
 
@@ -1454,7 +1618,13 @@ lead NEVER builds directly.
 | **CONCERN (r5)** | Consistency Auditor | OQ3 deletion of the `:2506-2517` `elif` alone leaves the classifier's `_reason_kind = "no_progress"` string at `:2527` as dead code → the plan's own `grep -c '_reason_kind = "no_progress"' == 0` verification FAILS | OQ3 resolution + Step task 2 + Success Criteria | Deletion now ALSO collapses the classifier at `:2519-2529` (remove the `if "no progress signal" … else` split; set `_reason_kind = "worker_dead"` unconditionally), physically deleting `:2527` so the `== 0` grep holds and NO-LEGACY is satisfied. Confirmed `:2527` is the sole match; the `:3311` kwarg `reason_kind="no_progress"` does not match the grep |
 | **NIT (r5)** | Risk & Robustness | Code-sketch comment rationalized the always-`None` handle read ("a stale None handle just means no reprieve signal, which the exceeded deadline already justifies killing") — the exact buggy justification the r5 BLOCKER exposes | Fix #3 code sketch | Removed the misleading justification sentence; replaced with a note that the handle is now re-fetched per poll so a `waiting_for_children` PM is correctly reprieved |
 | **RESOLVED (r6, comment 4852511143)** | Review/Patch (valorengels, 2026-07-01) | `handle.task = exec_task` misroutes an out-of-band cancel (`tool_timeout`/`worker_dead`) into the worker-shutdown branch → tears down the whole worker for one already-finalized session | Blocker r4 prose + Success Criteria + Verification + Step task 2 | **Already resolved by revision r4** — the `handle.task = exec_task` wiring was **WITHDRAWN** entirely; `handle.task` keeps pointing at the inner SDK task per the #1039 contract, whose cancel BackgroundTask absorbs, and the `:1496` handler gained the Branch-2 fresh-status-terminal swallow as the defensive backstop for any bubbled out-of-band CancelledError. This reconciliation pass CONFIRMS the wiring is not re-introduced (`grep -c "handle.task = exec_task" == 0`); no further change needed |
-| **RECONCILED (r6, comment 4862216457)** | Granite deconfliction (tomcounsell, 2026-07-02, per #1843) | Fix #3 (a) must NOT re-derive granite staleness from the structurally-dead SDK fields (`last_tool_use_at`/`last_turn_at`/`current_tool_name`) and (b) must own the granite PTY-child kill scope that `_apply_recovery_transition`'s `claude_pid` SIGKILL misses | Fix #3 Data Flow step 2/3 + Granite kill-scope note + Technical Approach Granite bullet + code sketch + Key Elements + Flow + Step task 2 + Success Criteria + Test Impact + Verification + Documentation | (a) `_session_progress_ts` consumes the #1724 `last_pty_activity_at` signal for granite PTY sessions (max over all present signals — no dependency on #1843 fix 2). (b) `_fd_pty_kill` performs scoped `os.killpg` on the container's captured per-PTY pgids (`container.py:1027-1052`); #1843 fix 1 (`granite_wedged` → recovery) routes through THIS cancel scope — no fourth kill ladder |
+| **RECONCILED (r6, comment 4862216457)** | Granite deconfliction (tomcounsell, 2026-07-02, per #1843) | Fix #3 (a) must NOT re-derive granite staleness from the structurally-dead SDK fields (`last_tool_use_at`/`last_turn_at`/`current_tool_name`) and (b) must own the granite PTY-child kill scope that `_apply_recovery_transition`'s `claude_pid` SIGKILL misses | Fix #3 Data Flow step 2/3 + Granite kill-scope note + Technical Approach Granite bullet + code sketch + Key Elements + Flow + Step task 2 + Success Criteria + Test Impact + Verification + Documentation | (a) `_session_progress_ts` consumes the #1724 `last_pty_activity_at` signal for granite PTY sessions (max over all present signals — no dependency on #1843 fix 2). (b) `_fd_pty_kill` — see the r6 BLOCKER row below: the container `os.killpg` seam is dead for pool pairs; the kill delegates to `PTYPool.kill_orphans` on the session's `pm_pid`/`dev_pid` |
+| **BLOCKER (r6, critique round 4)** | Risk & Robustness | Fix #3's `_fd_pty_kill` reused the container's `os.killpg` (`container.py:1044-1052`), which is gated behind `if not self._uses_pool_pair()` (`:1032`) — it runs only on the self-spawned (test/ping-pong) path and NEVER on pool-backed pairs, which ARE the production granite transport. So for a real granite session `reap_pgids` stays empty and NO PTY child is killed (AC#2 unmet where it matters); forcing a killpg anyway would race the pool's respawn and could SIGKILL a pgid the pool already recycled for a different session | Granite kill-scope note + Data Flow step 3 + code sketch + Technical Approach Granite bullet (fact b) + Key Elements + Flow + Step task 2 + Success Criteria + Verification + Prerequisites + Test Impact + Documentation + Freshness + Rabbit Holes | `_fd_pty_kill` branches on `_uses_pool_pair()`: pool-backed granite (`claude_pid is None`, `pm_pid`/`dev_pid` stamped at `bridge_adapter.py:810-815`) delegates to the pool's **PID-targeted** kill `PTYPool.kill_orphans({session.pm_pid, session.dev_pid})` (`pty_pool.py:276`) — specific PIDs, never a pgid, so no respawn race; self-spawned/SDK is a no-op (container close / `claude_pid` SIGKILL already cover them). Success-criterion grep retargeted: `grep -c "kill_orphans" agent/agent_session_queue.py > 0` + reads `session.pm_pid`; the bare `grep -c "killpg" container.py > 0` is explicitly NOT evidence the production path works |
+| **BLOCKER (r6, critique round 4)** | Risk & Robustness | OQ3's outright deletion of the running-scan `worker_alive` `no_progress` elif (`session_health.py:2506-2517`) drops the #944 shared-`worker_key` orphan-recovery net: PM + project-keyed dev-without-slug share a `worker_key`, and `worker_alive` derives from `_active_workers.get(worker_key)` (keyed by worker_key, not session), so a row left `running` by a crashed worker whose worker_key gets a respawned live worker reads `worker_alive=True` — the `worker_dead` scan never fires and Fix #3's watcher only guards the session the current loop is executing, not the orphan. Deleting the elif leaves the orphan with no killer, defeating "exactly one authoritative no-progress killer per running session" | OQ3 resolution + Data Flow Fix #3 intro + residual-ownership table + code sketch (telemetry latch) + Step task 2 + Success Criteria + Verification + Test Impact + Documentation + resolved-OQ3 block | Retain a **NARROWED** elif gated on the absence of a live in-scope handle: `in_scope_handle is None AND running_seconds > MIN AND not _has_progress` → `_reason_kind="no_progress"`. Disjoint from Fix #3 (which owns handle-present sessions) by the `_active_sessions.get(sid)` test. The string-sniff classifier is collapsed (`_reason_kind` set directly per branch). Greps retargeted: `grep -c "in_scope_handle is None" == 1`, `grep -c '"no progress signal" in reason' == 0` (replaces the now-invalid `_reason_kind = "no_progress" == 0`, since that string is retained for the orphan) |
+| **CONCERN (r6, critique round 4)** | Scope & Value | Telemetry-once wording self-contradictory: `_should_kill_no_progress` called both a "pure kill/no-kill boolean" AND the owner of `tier1_flagged_total`/`tier2_reprieve_total` counter increments "once per session on the first kill-decision" (a pure predicate has no side effects, and once-per-first-kill-decision misses the reprieve-only telemetry) | OQ3 resolution (telemetry-once) + code sketch + Step task 2 + Success Criteria + Verification | Reconciled: the predicate is NOT pure — it owns the telemetry but emits only under `emit_telemetry=True`. `_apply_recovery_transition` passes True on its single per-recovery call; Fix #3's watcher passes True only on the first deadline-exceeded poll via a loop-local `np_telemetry_emitted` latch, False thereafter — so counters fire exactly once per session, never per `PROGRESS_POLL_S` tick |
+| **CONCERN (r6, critique round 4)** | History & Consistency | `grep -c "handle.task = exec_task" agent/agent_session_queue.py == 0` false-fails: the plan's own code-sketch comments contain the literal string, and any explanatory comment the builder pastes into the source would match it | Success Criteria + Verification + Blocker-r4 prose + Step task 2 | Retargeted every occurrence to the anchored statement pattern `grep -cE '^[[:space:]]*handle\.task = exec_task' agent/agent_session_queue.py == 0` — matches only a real assignment (leading whitespace then the LHS), so a `#`-comment or backtick-wrapped prose mention cannot false-fail it |
+| **NIT (r6, critique round 4)** | Scope & Value | Dashboard `slot_reclaims` placement under-specified (per-project counter vs machine-wide worker block) | Agent Integration + Step task 1 | Tightened: `_get_worker_health()` **sums** `{project_key}:session-health:slot_reclaims` across the worker's served project keys and exposes ONE scalar `slot_reclaims` field inside the existing `worker` block beside `permits_free` — no per-project map, no new top-level key |
+| **NIT (r6, critique round 4)** | History & Consistency | Line-anchor drift on the granite kill seam (`container.py:1027-1052` cited as the reuse target without the `_uses_pool_pair()` gate) | Freshness Check + all Granite kill-scope references | Corrected to `container.py:1044-1052` gated at `:1032`, noted as self-spawned-only and dead for pool pairs; added the production anchors (`pty_pool.py:276` `kill_orphans`, `models/agent_session.py:310/312` `pm_pid`/`dev_pid`, `bridge_adapter.py:810-815` stamp). Noted all such anchors are baseline-relative and the builder locates seams structurally |
 
 ---
 
@@ -1475,18 +1645,24 @@ lead NEVER builds directly.
    `SLOT_LEASE_TTL_S` no longer exists (removed with the reaper's wall-clock arm,
    Blocker 2), so it is NOT a candidate value here.
 
-> **Resolved (was OQ3) — Fix #3 primacy vs the out-of-band progress-kill.**
-> **Decision: Fix #3 is the single authoritative no-progress killer for worker-alive
-> RUNNING sessions; the out-of-band worker-alive `no_progress` branch
-> (`session_health.py:2506-2517`) is DELETED in the same change.** Tier-2 reprieve is
-> preserved by extracting the reprieve decision + telemetry into a shared
-> `_should_kill_no_progress` gate that Fix #3 consults before cancelling **and that
-> `_apply_recovery_transition` also calls** for the still-live never-started
-> `no_progress` producer (`session_health.py:3308-3314`) — the reprieve logic lives in
-> exactly one place, no inline copy or dead branch remains. The two
-> survivors own provably disjoint cases Fix #3 cannot reach: `worker_dead` (the
-> in-scope watcher is dead when the worker loop is dead) and `tool_timeout` (finer
-> per-tool-tier cadence; `SESSION_PROGRESS_DEADLINE_S ≥ max tool tier` so it always
-> fires first for a tool-in-flight wedge). This honors NO-LEGACY / no-parallel-systems
-> — exactly one authoritative killer per running session — see the Fix #3 Technical
-> Approach residual-ownership table for the full rationale.
+> **Resolved (was OQ3) — Fix #3 primacy vs the out-of-band progress-kill (BLOCKER r6
+> correction).** **Decision: Fix #3 is the authoritative no-progress killer for the
+> worker-alive RUNNING session the loop is actively executing (a live in-scope handle,
+> `_active_sessions.get(sid) is not None`). The out-of-band worker-alive `no_progress` branch
+> (`session_health.py:2506-2517`) is NOT deleted — it is NARROWED to `in_scope_handle is None`
+> so it retains the #944 shared-`worker_key` orphan-recovery net** for a worker-alive `running`
+> row that no live worker is executing (PM + project-keyed dev share a `worker_key`, so a
+> crashed-then-respawned-`worker_key` orphan reads `worker_alive=True` and is missed by both
+> the `worker_dead` scan and Fix #3's in-scope watcher). Fix #3 and the narrowed elif partition
+> worker-alive running sessions on the in-scope-handle test, so they are disjoint — exactly one
+> killer each. Tier-2 reprieve is preserved by extracting the reprieve decision into a shared
+> `_should_kill_no_progress(session, handle, *, emit_telemetry)` gate that Fix #3 consults
+> before cancelling **and that `_apply_recovery_transition` also calls** for the narrowed-elif
+> path and the still-live never-started `no_progress` producer
+> (`session_health.py:3308-3314`) — the reprieve logic lives in exactly one place, no inline
+> copy or dead branch remains. The other survivors own provably disjoint cases: `worker_dead`
+> (the in-scope watcher is dead when the worker loop is dead) and `tool_timeout` (finer
+> per-tool-tier cadence; `SESSION_PROGRESS_DEADLINE_S ≥ max tool tier` so it always fires first
+> for a tool-in-flight wedge). This honors NO-LEGACY / no-parallel-systems — exactly one
+> authoritative no-progress killer per running session — see the Fix #3 Technical Approach
+> residual-ownership table for the full rationale.
