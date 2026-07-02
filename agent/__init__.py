@@ -39,6 +39,7 @@ from .sdk_client import (
 from .steering import (
     clear_steering_queue,
     has_steering_messages,
+    peek_steering_messages,
     pop_all_steering_messages,
     pop_steering_message,
     push_steering_message,
@@ -79,4 +80,5 @@ __all__ = [
     "pop_all_steering_messages",
     "clear_steering_queue",
     "has_steering_messages",
+    "peek_steering_messages",
 ]
