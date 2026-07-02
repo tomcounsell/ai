@@ -42,7 +42,8 @@ state and drives a targeted, restart-free recovery.
 
 **Fix #6 — a per-tool budget that fires even when the health loop is frozen.**
 The only per-tool-call budget today is `_agent_session_tool_timeout_loop`
-(`agent/session_health.py`, `TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:309`) — a
+(`agent/session_health.py`, `TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:310`, function
+`_agent_session_tool_timeout_loop` at `:3686`) — a
 **background monitor** on the worker loop. When the loop freezes, it stops
 ticking, so a runaway session that keeps issuing tool calls (or racking up cost)
 against a partially-wedged harness has no ceiling. There is no **synchronous,
@@ -167,11 +168,11 @@ claim** that the bridge reclaim-request is the *only* reclaim lever under
   sidecar in `.claude/hooks/post_tool_use.py::_update_agent_session`
   (`:445-513`, `AgentSession.get_by_id` at `:486`); `tool_call_count` bumped at `:503`.
   Fix #6's load-bearing seam (blocks via exit code 2). Confirmed.
-- `agent/session_health.py:309-313` — `_agent_session_tool_timeout_loop`
-  (`TOOL_TIMEOUT_LOOP_INTERVAL=30`, tiers `:311-313`) — the **background** monitor
+- `agent/session_health.py` — `_agent_session_tool_timeout_loop` at `:3686`
+  (`TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:310`) — the **background** monitor
   Fix #6 must NOT be. Confirmed.
-- `models/agent_session.py` — `tool_call_count` `:176`, `total_input_tokens`
-  `:462`, `total_cost_usd` `:468`. Budget inputs present; Fix #6 only READS them.
+- `models/agent_session.py` — `tool_call_count` `:175`, `total_input_tokens`
+  `:458`, `total_cost_usd` `:461`. Budget inputs present; Fix #6 only READS them.
   Confirmed.
 - `ui/app.py:370` — `_get_worker_health()` (dashboard route `:508`) reads the disk
   heartbeat. Extend for the Fix #5 operator surface. Confirmed.
@@ -194,10 +195,11 @@ claim** that the bridge reclaim-request is the *only* reclaim lever under
 ## Prior Art
 
 - **#1815 / PR #1823 (merged)** — dead-man's-switch: an on-loop task bumps
-  `last_loop_tick`; an off-loop thread self-kills (SIGABRT) on a stale beacon so
-  launchd respawns. Fix #5 reuses the **off-loop publish cadence** (`_write_worker_
-  heartbeat`) to also emit a Redis wall-clock beacon, and treats the SIGABRT
-  self-kill as the single killer it defers to. Recovery = restart (lossy).
+  `last_loop_tick`; an off-loop thread self-kills (`_self_kill()`, SIGKILL — the
+  former SIGABRT, changed per #1808/#1816) on a stale beacon so launchd respawns.
+  Fix #5 reuses the **off-loop publish cadence** (`_write_worker_heartbeat`) to also
+  emit a Redis wall-clock beacon, and treats this `_self_kill()` self-recycle as the
+  single killer it defers to. Recovery = restart (lossy).
 - **#1820 (merged, PR #1867)** — `SlotLeaseRegistry` + on-loop reap pass
   (`_reap_slot_leases()`) + `registry.reclaim()`. Fix #5 reads its lease snapshot and drives a Redis
   reclaim-request drained by the same reap pass (targeted, lossless). **Hard
@@ -220,7 +222,7 @@ claim** that the bridge reclaim-request is the *only* reclaim lever under
 | Prior Fix | What It Did | Why It Is Incomplete for #1821 |
 |-----------|-------------|-------------------------------|
 | #1820 on-loop reap pass | Reclaims a terminal-owner leased slot via `registry.reclaim()` every health tick | **Runs on the loop it polices** — a frozen loop never runs it. Cannot satisfy "recovery from a process OTHER than the worker loop." |
-| #1815 dead-man's-switch | Off-loop thread SIGABRTs on a stale beacon → launchd respawn | **Lossy** — a restart re-queues all in-flight work; cannot do targeted, restart-free reclamation of a single leaked slot. |
+| #1815 dead-man's-switch | Off-loop thread `_self_kill()`s (SIGKILL) on a stale beacon → launchd respawn | **Lossy** — a restart re-queues all in-flight work; cannot do targeted, restart-free reclamation of a single leaked slot. |
 | `worker_watchdog.py` | Kills+respawns a dead/stale-heartbeat worker from launchd | **Lossy** and **coarse** (fresh process every 120s, disk-heartbeat only) — no per-slot lease visibility, no restart-free path. |
 | `_agent_session_tool_timeout_loop` | Kills a tool-wedged session after a per-tier timeout | **Background monitor on the worker loop** — halts when the loop freezes; provides no inline per-call ceiling. |
 
@@ -520,7 +522,7 @@ beacon → log `loop_wedged` + defer to existing killer.
   NEVER sends a signal to the worker process, NEVER runs `launchctl`, NEVER writes
   `worker:watchdog:critical`. Process recovery stays with the dead-man's-switch +
   `worker_watchdog.py`. The bridge owns detection + restart-free reclaim-trigger
-  only. (Verification greps assert no `os.kill`/`launchctl`/`SIGABRT` in the new
+  only. (Verification greps assert no `os.kill`/`launchctl`/`SIGKILL`/`SIGABRT` in the new
   function.)
 - **Operator surface.** Extend `_get_worker_health()` (`ui/app.py:370`) to read
   `worker:slot:leases` (`permits_free`/`held`), the `bridge_reclaims` /
@@ -741,7 +743,7 @@ New tests (greenfield):
   outside the worker. Publish a wall-clock beacon instead (Risk 1).
 - **Do NOT build a second kill ladder in the bridge.** Process recovery belongs to
   the dead-man's-switch + `worker_watchdog.py`. The bridge detects + reclaims +
-  defers; it never SIGABRTs, `launchctl`s, or writes `worker:watchdog:critical`.
+  defers; it never `os.kill`s (SIGKILL/SIGABRT), `launchctl`s, or writes `worker:watchdog:critical`.
 - **Do NOT make Fix #6 a background monitor.** The whole point is a synchronous
   in-path deny that fires when loops are frozen. The existing
   `_agent_session_tool_timeout_loop` is the background monitor; Fix #6 is the inline
@@ -968,7 +970,7 @@ own PreToolUse dispatch is actually gated (both hook surfaces block over-budget)
   `grep -c "worker:slot:reclaim_requests" agent/session_health.py > 0`.
 - [ ] The beacon is wall-clock, never monotonic cross-process:
   `test_worker_liveness_beacon_publish.py` asserts `wall_ts ≈ time.time()`.
-- [ ] The bridge check runs no kill: `grep -Ec "os\.kill|launchctl|SIGABRT|watchdog:critical"`
+- [ ] The bridge check runs no kill: `grep -Ec "os\.kill|launchctl|SIGKILL|SIGABRT|watchdog:critical"`
   over the new `check_worker_liveness_and_slots` function `== 0`.
 - [ ] The reclaim-request drain works under `SLOT_LEASE_REAP_DISABLED=1` (distinct
   path from autonomous reclaim) — asserted in `test_out_of_domain_reclaim.py`.
@@ -1152,7 +1154,7 @@ lead NEVER builds directly.
 | Lease snapshot published | `grep -c "worker:slot:leases" agent/session_health.py` | output > 0 |
 | Reclaim-request drain present | `grep -c "worker:slot:reclaim_requests" agent/session_health.py` | output > 0 |
 | Bridge out-of-domain check exists | `grep -c "def check_worker_liveness_and_slots" monitoring/session_watchdog.py` | output > 0 |
-| Bridge runs NO kill ladder (no-parallel-systems) | `sed -n '/def check_worker_liveness_and_slots/,/^def /p' monitoring/session_watchdog.py \| grep -Ec "os\.kill\|launchctl\|SIGABRT\|watchdog:critical"` | == 0 |
+| Bridge runs NO kill ladder (no-parallel-systems) | `sed -n '/def check_worker_liveness_and_slots/,/^def /p' monitoring/session_watchdog.py \| grep -Ec "os\.kill\|launchctl\|SIGKILL\|SIGABRT\|watchdog:critical"` | == 0 |
 | Beacon publish is wall-clock | `pytest tests/unit/test_worker_liveness_beacon_publish.py -q` | exit code 0 |
 | Out-of-domain reclaim acceptance test passes | `pytest tests/integration/test_out_of_domain_reclaim.py -q` | exit code 0 |
 | Operator surface additive fields present | `grep -Ec "bridge_reclaims\|loop_wedged_detected\|bridge_contract_stale\|tool_budget_tripped\|tool_budget_resolution_errors\|permits_free" ui/app.py` | output > 0 |
