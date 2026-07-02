@@ -1131,6 +1131,39 @@ def _never_started_past_grace(
         return False
 
 
+def _trusted_utc_now() -> datetime:
+    """Return "now" from Redis's own clock (the ``TIME`` command) rather than
+    this process's local wall-clock.
+
+    C2 (#1817): freshness checks in ``_has_progress`` compare a session's
+    last-write timestamp (``last_heartbeat_at``, ``last_tool_use_at``, ...)
+    against "now" to decide staleness. Using each reader's own local
+    wall-clock as "now" means a reader whose clock is skewed AHEAD of the
+    writer's can flag a genuinely fresh session as stale — a spurious
+    HEARTBEAT_FRESHNESS_WINDOW (90s) miss that triggers unnecessary
+    recovery/kill. Sourcing "now" from Redis's ``TIME`` command instead gives
+    every reader (across machines) the SAME shared reference clock, so an
+    individual reader's local clock skew drops out of the age computation
+    entirely — only the age relative to a single trusted source matters.
+
+    Falls back to local wall-clock on any Redis error (connection blip):
+    staleness evaluation must never hard-fail because the trusted-clock probe
+    itself failed. A rare fallback to local time on a Redis hiccup is no
+    worse than the pre-fix behavior it replaces.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        seconds, microseconds = POPOTO_REDIS_DB.time()
+        return datetime.fromtimestamp(seconds + microseconds / 1_000_000, tz=UTC)
+    except Exception as e:
+        logger.debug(
+            "[session-health] _trusted_utc_now: Redis TIME unavailable, using local clock: %s",
+            e,
+        )
+        return datetime.now(tz=UTC)
+
+
 def _has_progress(entry: AgentSession) -> bool:
     """Return True iff the session shows any signal that real work has begun.
 
@@ -1208,7 +1241,10 @@ def _has_progress(entry: AgentSession) -> bool:
     (``_agent_session_health_check``) then evaluates ``_tier2_reprieve_signal``
     before deciding to recover.
     """
-    now_utc = datetime.now(tz=UTC)
+    # C2 (#1817): sourced from Redis TIME, not local wall-clock, so a reader
+    # whose clock is skewed ahead of the writer's does not flag a fresh
+    # session as stale. See _trusted_utc_now() docstring.
+    now_utc = _trusted_utc_now()
 
     # Compute sdk_ever_output once — used by both sub-check A and the own-progress
     # field guard. True iff last_tool_use_at or last_turn_at has ever been written.

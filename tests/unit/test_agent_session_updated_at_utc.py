@@ -271,21 +271,17 @@ class TestSaveUpdatedAtOmissionAllowlist:
 
 
 class TestHealFutureUpdatedAt:
-    """_heal_future_updated_at() must clamp future-dated records to now."""
+    """_heal_future_updated_at() DETECTS future-dated records (C2, #1817).
 
-    def _build_records(self, records_spec):
-        """Build in-memory AgentSession instances from a list of (updated_at, created_at) pairs."""
-        sessions = []
-        for spec in records_spec:
-            s = _make_session_no_save()
-            s.updated_at = spec.get("updated_at")
-            s.created_at = spec.get("created_at")
-            s.id = spec.get("id", f"test-{id(s)}")
-            sessions.append(s)
-        return sessions
+    It no longer clamps or re-saves anything -- re-saving reshuffled the
+    created_at-based sorted index on every heal. See the function's
+    docstring in models/agent_session.py for the full rationale.
+    """
 
-    def test_heal_clamps_future_record(self):
-        """A session with updated_at 7h in the future must be healed."""
+    def test_heal_detects_future_record_without_saving(self):
+        """A session with updated_at 7h in the future is counted as
+        detected, but save() is never called and updated_at is left
+        untouched (still future-dated)."""
         now = datetime.now(UTC)
         future = now + timedelta(hours=7)
         past = now - timedelta(minutes=30)
@@ -297,13 +293,8 @@ class TestHealFutureUpdatedAt:
 
         save_calls = []
 
-        def mock_save(self, *args, update_fields=None, **kwargs):
-            # Simulate what our real save() does: stamp utc_now()
-            from bridge.utc import utc_now
-
-            if update_fields is None or "updated_at" in update_fields:
-                self.updated_at = utc_now()
-            save_calls.append(update_fields)
+        def mock_save(self, *args, **kwargs):
+            save_calls.append(True)
 
         with (
             patch.object(AgentSession, "query") as mock_query,
@@ -312,14 +303,15 @@ class TestHealFutureUpdatedAt:
             mock_query.all.return_value = [session]
             count = AgentSession._heal_future_updated_at()
 
-        assert count == 1, f"Expected 1 healed record, got {count}"
-        assert len(save_calls) == 1, "save() must be called once for the healed record"
-        assert session.updated_at <= datetime.now(UTC) + timedelta(seconds=2), (
-            f"updated_at should be near-now after heal, got {session.updated_at!r}"
+        assert count == 1, f"Expected 1 future-dated record detected, got {count}"
+        assert len(save_calls) == 0, "save() must never be called by the heal"
+        assert session.updated_at == future, (
+            "updated_at must be left untouched -- no clamp, no re-save "
+            f"(got {session.updated_at!r})"
         )
 
     def test_heal_skips_sane_records(self):
-        """Sessions with updated_at in the past must not be touched."""
+        """Sessions with updated_at in the past must not be counted or touched."""
         now = datetime.now(UTC)
         past = now - timedelta(hours=2)
 
@@ -340,9 +332,8 @@ class TestHealFutureUpdatedAt:
             mock_query.all.return_value = [session]
             count = AgentSession._heal_future_updated_at()
 
-        assert count == 0, "Sane record must not be counted as healed"
+        assert count == 0, "Sane record must not be counted as detected"
         assert len(save_calls) == 0, "save() must not be called for a sane record"
-        # updated_at must be unchanged
         assert session.updated_at == past
 
     def test_heal_skips_none_updated_at(self):
@@ -368,8 +359,11 @@ class TestHealFutureUpdatedAt:
         assert len(save_calls) == 0
         assert session.updated_at is None
 
-    def test_heal_is_idempotent(self):
-        """Running heal twice must produce count=0 on the second run."""
+    def test_heal_is_idempotent_repeated_calls_agree(self):
+        """Since nothing is mutated, repeated calls against an unchanged
+        future-dated record report the SAME detection count every time --
+        the new idempotency contract (no first-call-fixes-it / second-call-
+        finds-nothing-left behavior, since nothing is ever fixed)."""
         now = datetime.now(UTC)
         future = now + timedelta(hours=7)
 
@@ -378,11 +372,10 @@ class TestHealFutureUpdatedAt:
         session.created_at = now - timedelta(minutes=10)
         session.id = "idempotent-session"
 
-        def mock_save(self, *args, update_fields=None, **kwargs):
-            from bridge.utc import utc_now
+        save_calls = []
 
-            if update_fields is None or "updated_at" in update_fields:
-                self.updated_at = utc_now()
+        def mock_save(self, *args, **kwargs):
+            save_calls.append(True)
 
         with (
             patch.object(AgentSession, "query") as mock_query,
@@ -391,77 +384,11 @@ class TestHealFutureUpdatedAt:
             mock_query.all.return_value = [session]
 
             count1 = AgentSession._heal_future_updated_at()
-            # After first heal, updated_at is now near-current
-            # Second call should see updated_at <= now, skip it
             count2 = AgentSession._heal_future_updated_at()
 
-        assert count1 == 1, f"First heal should fix 1 record, got {count1}"
-        assert count2 == 0, f"Second heal should fix 0 records (idempotent), got {count2}"
-
-    def test_heal_handles_created_at_none_with_future_updated_at(self):
-        """created_at=None with future updated_at — heal must clamp to now."""
-        now = datetime.now(UTC)
-        future = now + timedelta(hours=5)
-
-        session = _make_session_no_save()
-        session.updated_at = future
-        session.created_at = None
-        session.id = "no-created-at-session"
-
-        def mock_save(self, *args, update_fields=None, **kwargs):
-            from bridge.utc import utc_now
-
-            if update_fields is None or "updated_at" in update_fields:
-                self.updated_at = utc_now()
-
-        with (
-            patch.object(AgentSession, "query") as mock_query,
-            patch.object(AgentSession, "save", mock_save),
-        ):
-            mock_query.all.return_value = [session]
-            count = AgentSession._heal_future_updated_at()
-
-        assert count == 1
-        assert session.updated_at <= datetime.now(UTC) + timedelta(seconds=2)
-
-    def test_heal_dual_future_case_invariant(self):
-        """Dual-future: both created_at and updated_at in the future.
-
-        After heal the invariant created_at <= updated_at <= now must hold.
-        """
-        now = datetime.now(UTC)
-        future_updated = now + timedelta(hours=7)
-        future_created = now + timedelta(hours=7)  # same offset — both naive-local stamped
-
-        session = _make_session_no_save()
-        session.updated_at = future_updated
-        session.created_at = future_created
-        session.id = "dual-future-session"
-
-        def mock_save(self, *args, update_fields=None, **kwargs):
-            from bridge.utc import utc_now
-
-            current_now = utc_now()
-            if update_fields is None or "updated_at" in update_fields:
-                self.updated_at = current_now
-            # created_at clamping is done before save() is called in the heal loop
-
-        with (
-            patch.object(AgentSession, "query") as mock_query,
-            patch.object(AgentSession, "save", mock_save),
-        ):
-            mock_query.all.return_value = [session]
-            count = AgentSession._heal_future_updated_at()
-
-        assert count == 1
-        # created_at was clamped to now by the heal loop before save()
-        real_now = datetime.now(UTC)
-        assert session.created_at <= real_now + timedelta(seconds=2), (
-            f"created_at should be clamped to ~now, got {session.created_at!r}"
-        )
-        assert session.updated_at <= real_now + timedelta(seconds=2), (
-            f"updated_at should be clamped to ~now, got {session.updated_at!r}"
-        )
+        assert count1 == 1
+        assert count2 == 1, "Repeated detection of an unmutated future record must agree"
+        assert len(save_calls) == 0
 
     def test_heal_returns_zero_on_query_failure(self, caplog):
         """If query.all() raises, heal must return 0 (fail-soft)."""
@@ -473,40 +400,36 @@ class TestHealFutureUpdatedAt:
         assert count == 0
         assert any("could not fetch sessions" in r.message for r in caplog.records)
 
-    def test_heal_skips_record_on_save_error(self, caplog):
-        """If a single record's save() raises, heal skips that record and continues."""
+    def test_heal_skips_record_on_per_record_error(self, caplog):
+        """If accessing a single record's fields raises, heal skips that
+        record and continues to the next -- one bad record must not abort
+        the whole detection pass."""
         now = datetime.now(UTC)
         future = now + timedelta(hours=7)
 
-        bad = _make_session_no_save()
-        bad.updated_at = future
-        bad.created_at = now - timedelta(minutes=5)
-        bad.id = "bad-save-session"
+        class _BoomOnAccess:
+            """A record whose updated_at raises when read (simulates a
+            corrupted/partial hash) instead of a normal save() failure,
+            since save() is no longer called by the heal at all."""
+
+            id = "bad-record"
+
+            @property
+            def updated_at(self):
+                raise RuntimeError("simulated corrupt field read")
+
+        bad = _BoomOnAccess()
 
         good = _make_session_no_save()
         good.updated_at = future
         good.created_at = now - timedelta(minutes=5)
-        good.id = "good-save-session"
+        good.id = "good-record"
 
-        call_count = [0]
-
-        def mock_save(self, *args, update_fields=None, **kwargs):
-            call_count[0] += 1
-            if self.id == "bad-save-session":
-                raise RuntimeError("Redis write error")
-            from bridge.utc import utc_now
-
-            if update_fields is None or "updated_at" in update_fields:
-                self.updated_at = utc_now()
-
-        with (
-            patch.object(AgentSession, "query") as mock_query,
-            patch.object(AgentSession, "save", mock_save),
-        ):
+        with patch.object(AgentSession, "query") as mock_query:
             mock_query.all.return_value = [bad, good]
             with caplog.at_level(logging.WARNING, logger="models.agent_session"):
                 count = AgentSession._heal_future_updated_at()
 
-        # Only the good record was successfully healed
+        # Only the good record was successfully detected.
         assert count == 1
         assert any("skipped" in r.message for r in caplog.records)
