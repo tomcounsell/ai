@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Tom Counsell
@@ -7,6 +7,7 @@ created: 2026-07-02
 tracking: https://github.com/tomcounsell/ai/issues/1842
 last_comment_id: none
 slug: per-role-transport-hedge
+revision_applied: true
 ---
 
 # Per-Role Transport Hedge: Config-Selectable PTY vs Headless `claude -p` per PM/Dev Role
@@ -43,7 +44,7 @@ The PTY path exists because interactive Claude Code sessions bill flat on the su
 
 **Cited sibling issues/PRs re-checked:**
 - #1721 — OPEN, plan `docs/plans/granite_lossless_checkpoint_resume.md` is `status: Ready, revision_applied: true` but not yet built. Its 2026-07-02 comments add the transport-agnostic, list-shaped resume-handle constraint (`{role, claude_session_id, transcript_path, transport}`) and flag that the loop-cursor half may be deferred pending the native-subagents prototype. Direct coordination point for this plan (see Technical Approach).
-- #1688 — OPEN (hook-driven turn boundaries). Independent; not blocking.
+- #1688 — OPEN (hook-driven turn boundaries), plan `docs/plans/granite_hook_driven_turn_returns.md`, currently building (its settings-field work is live in the tree). **Now a build prerequisite, not independent.** #1688 introduces the transport-agnostic turn-end seam this plan's headless leg must consume: a `HookEdgeConsumer` (keyed by `session_id`) emitting typed edges (`turn_end` from a parent `Stop`, `subagent_end`, `needs_human`, `compaction`), fed by a per-session append-only NDJSON edge file via `--settings`-injected hooks + a hook-forwarder + a durable cursor. Per the pipeline orchestrator, #1688 merges to main BEFORE this plan builds; BUILD rebases onto the landed hook-channel code and wires the headless leg's turn-end to `HookEdgeConsumer.turn_end` (see Technical Approach → "Turn-end authority" and Prerequisites).
 - #1837 — CLOSED, merged as PR #1839 (`tests/granite_faults/` harness + `tests/integration/test_granite_ollama_e2e.py`). Its patterns are the test substrate for AC5.
 
 **Commits on main since issue was filed (touching referenced files):** none — `git log --since=2026-07-02T04:27:58Z` on `agent/session_executor.py`, `agent/sdk_client.py`, `models/agent_session.py`, `agent/granite_container/` is empty.
@@ -54,7 +55,7 @@ The PTY path exists because interactive Claude Code sessions bill flat on the su
 
 - **#1546 (closed 2026-06-05)**: PoC — granite operator drives a real interactive Claude Code session via PTY (no `claude -p`). Origin of the PTY transport; established the billing asymmetry rationale.
 - **Plan #1572 (merged)**: granite PTY production cutover. Deliberately removed the harness from the dispatch path with an inline comment reserving a follow-on issue — this is that follow-on. The harness itself was preserved intact (its only remaining production caller is the completion drafter at `agent/session_completion.py:755,817`, which passes `session_id=None`).
-- **#1732 (closed 2026-06-18)**: omnigent reference map — demoted granite PTY frame-scraping to a liveness sensor, recommended hook/transcript-edge turn detection. Informs why the headless leg's deterministic `result`-event turn boundary is a feature, not a workaround.
+- **#1732 (closed 2026-06-18)**: omnigent reference map — demoted granite PTY frame-scraping to a liveness sensor, recommended hook/transcript-edge turn detection. This is exactly why #1688 builds the transport-agnostic hook channel this plan's headless leg consumes for turn-end (rather than the `result` event), and why the `result` event is demoted here to a content/liveness carrier.
 - **#1837 / PR #1839 (merged 2026-07-01)**: granite failure-simulation harness (Substrate A deterministic fault injectors + ollama-backed Substrate B E2E). Supplies the test patterns and fixtures this plan's routing/E2E tests reuse.
 - **#1128 (shipped)**: per-session token+cost accounting fields on `AgentSession` (`total_input_tokens`, `total_output_tokens`, `total_cache_read_tokens`, `total_cost_usd` at `models/agent_session.py:455-468`) already exposed per-session on `dashboard.json` (`ui/app.py:457-460`). The cost-surfacing half of this plan builds on that, it does not invent a new pipeline.
 - **#1245 (shipped)**: dashboard analytics aggregates derive cost/turns directly from AgentSession Popoto fields (`ui/data/analytics.py:41-54`), not the metrics ledger. Sets the precedent for how metered aggregate keys get added.
@@ -105,14 +106,14 @@ Three parallel code-read spikes were run at plan time (Explore agents over the d
 2. **Transport resolution (new)**: executor reads `project_config.get("transport", {})` (project block) with `settings.granite` defaults as fallback, producing `role_transports = {"pm": "pty"|"headless", "dev": "pty"|"headless"}`. Invalid values fail the session loud (`finalize_session(..., "failed")` with a clear reason) — but the primary gate is config validation at update time (`bridge/config_validation.py` via `scripts/update/verify.py:1113-1116`), so mid-session failure is a defensive backstop, not the UX.
 3. **Persist the choice (new)**: `role_transports` is written onto the `AgentSession` at dispatch, so the dashboard, analytics, and post-hoc debugging see which transport each role actually ran on (config flips affect only new sessions).
 4. **BridgeAdapter → PairSpawnSpec**: `role_transports` rides into `BridgeAdapter(...)` (`session_executor.py:1745-1753`) and onto `PairSpawnSpec` (`pty_pool.py:116-143`). `PTYPool.acquire_pair` still bounds concurrency (one slot per session pair) but `_spawn_session_pair` spawns a PTY only for roles with `pty`; headless roles get no PTY process.
-5. **Container loop**: `Container.run()` drives each actor through a role driver. PTY roles: today's `PTYDriver` frame-scrape path, unchanged. Headless roles (new `HeadlessRoleDriver`): each actor turn is one `claude -p` subprocess via the existing `_run_harness_subprocess` — first turn creates the Claude session (UUID captured from the `result` event), later turns pass `--resume <uuid>`; persona priming sends the same `/granite:prime-*` slash command as the first prompt. Turn end is the `result` event (deterministic). Steering drain, watchdog, turn hooks (`on_turn` → `last_turn_at` bump), and exit classification stay orchestration-owned and transport-agnostic.
-6. **Cost/telemetry capture**: at each headless turn end, the orchestration accumulates the result-event `usage` + `total_cost_usd` via `accumulate_session_tokens` and emits `record_metric("session.metered_cost_usd", cost_delta, {"role": ..., "project": ...})`. The transcript tailer tails PTY-role transcripts only (no double-count). Resume handles for both transports persist per-role in the transport-agnostic list shape agreed with #1721.
+5. **Container loop**: `Container.run()` drives each actor through a role driver. PTY roles: today's `PTYDriver` injection/liveness path, unchanged. Headless roles (new `HeadlessRoleDriver`): each actor turn is one `claude -p` subprocess via the existing `_run_harness_subprocess` — first turn creates the Claude session (UUID captured from the `result` event), later turns pass `--resume <uuid>`; persona priming sends the role's `/granite:prime-*` slash command as the first prompt (with an inlined-body fallback if slash resolution under `-p` is unconfirmed — see Technical Approach + gate task). **Turn-end authority is #1688's hook channel for BOTH transports:** the headless subprocess is spawned with the same `--settings`-injected hook set #1688 generates (Stop/SubagentStop/Notification/PermissionRequest/AskUserQuestion), writing to the same per-session NDJSON edge file; the container awaits the `HookEdgeConsumer.turn_end` edge (parent `Stop`) rather than treating the `result` event or subprocess exit as the boundary. The `result` event is retained only as the turn's content/usage carrier and as a crash-liveness signal (mirroring #1688's demotion of `read_until_idle`). Steering drain, watchdog, turn hooks (`on_turn` → `last_turn_at` bump), and exit classification stay orchestration-owned and transport-agnostic.
+6. **Cost/telemetry capture (transport-partitioned fields — no shared scalar)**: PTY-leg token totals continue to flow through the transcript tailer, which writes the **absolute** merged totals to the existing `total_input_tokens`/`total_output_tokens`/`total_cache_read_tokens` scalars (`bridge_adapter.py:1225-1229`) — tailing PTY-role transcripts only. The headless leg accumulates into a **disjoint** set of new fields — `metered_input_tokens`/`metered_output_tokens`/`metered_cache_read_tokens`/`metered_cost_usd` — through a single accumulation call (the one already inside `get_response_via_harness` at `sdk_client.py:2542`, routed to the metered fields via a new `metered=True` flag; NO second turn-end call is added). Because the tailer's absolute writes and the headless additive writes never touch the same field, the mixed-transport lost-update race is eliminated by construction (see Race 1). The metered ledger metric `record_metric("session.metered_cost_usd", cost_delta, {"role", "project"})` is emitted from that same single metered-accumulation point. Displayed grand totals = `total_* (PTY) + metered_* (headless)`, computed at read time by the serializer/analytics. Resume handles for both transports persist per-role in the transport-agnostic list shape agreed with #1721 (persistence only; consumption is #1721 — see Technical Approach).
 7. **Output**: `dashboard.json` per-session block shows `role_transports` + the existing token/cost fields (`ui/app.py:455-460` area); `ui/data/analytics.py` aggregate gains `metered_cost_today_usd`/`metered_cost_7d_usd`; `python -m tools.analytics export/summary` picks up `session.metered_cost_usd` automatically from the ledger.
 
 ## Architectural Impact
 
 - **New dependencies**: none. Reuses the existing harness subprocess machinery, Popoto fields pattern, metrics ledger, and dashboard serializers.
-- **Interface changes**: `BridgeAdapter.__init__` gains a `role_transports` parameter (distinct from the existing channel `transport`); `PairSpawnSpec` gains per-role transport fields; `Container` gains a role-driver seam (PTY driver extracted behind the same actor-turn surface a headless driver implements). `AgentSession` gains `role_transports` (JSON) and `resume_handles` (JSON list, schema shared with #1721).
+- **Interface changes**: `BridgeAdapter.__init__` gains a `role_transports` parameter (distinct from the existing channel `transport`); `PairSpawnSpec` gains per-role transport fields; `Container` gains a role-driver seam (PTY driver extracted behind the same actor-turn surface a headless driver implements) whose turn-end authority is #1688's `HookEdgeConsumer.turn_end` edge for both transports. `accumulate_session_tokens` and `get_response_via_harness` each gain a `metered: bool = False` keyword (default preserves every existing caller). `AgentSession` gains: `role_transports` (JSON), `resume_handles` (JSON list, schema shared with #1721), and four disjoint metered-accounting fields `metered_input_tokens`/`metered_output_tokens`/`metered_cache_read_tokens`/`metered_cost_usd` (nullable, default 0) that the transcript tailer never touches.
 - **Coupling**: decreases transport coupling — the container's orchestration loop (relay, steering, watchdog, exit classification) becomes transport-polymorphic at the actor-turn boundary instead of assuming PTY frames. The native-subagents future (one role) is a config simplification (`role_transports` with one key), not a schema break — this satisfies the issue's shaping constraint.
 - **Data ownership**: unchanged — BridgeAdapter still owns AgentSession writes during a run; the executor still owns terminal transitions.
 - **Reversibility**: high. Default config reproduces today's behavior exactly; removing the feature is deleting the branch + validator + two nullable fields.
@@ -136,18 +137,21 @@ The issue is deliberately thin: non-goals cut automation, SDK migration, and tmu
 | `claude` CLI on PATH | `command -v claude` | Headless leg execs `claude -p` |
 | Redis running | `redis-cli ping` | AgentSession persistence, metrics ledger live counters |
 | granite fault fixtures present | `test -d tests/granite_faults` | Routing/E2E tests reuse #1837 patterns |
+| **#1688 hook-channel merged to main** | `grep -rl "HookEdgeConsumer" agent/granite_container/` | **Build gate:** the headless leg's turn-end authority is #1688's `HookEdgeConsumer.turn_end` edge — the build MUST rebase onto the landed #1688 code before wiring the driver seam (mandate B) |
 
 Run all checks via `python scripts/check_prerequisites.py docs/plans/per-role-transport-hedge.md`.
+
+**Build sequencing (mandate B):** BUILD does not start until #1688's PR merges to main. The first build action is a rebase of `session/per-role-transport-hedge` onto the landed hook-channel code, so the `HookEdgeConsumer` seam, the `--settings`-injected hook set, and the per-session edge-file plumbing exist before this plan wires the headless role driver into them. If #1688 has NOT merged when this plan reaches BUILD, the pipeline holds — do not invent a bespoke headless turn-end signal to unblock.
 
 ## Solution
 
 ### Key Elements
 
 - **Transport config + validator**: an optional per-project `transport: {pm, dev}` block (values `pty`|`headless`), global defaults on `GraniteSettings`, validated fail-loud by a new `validate_transport()` registered in the `validate_projects_config` aggregator — which automatically puts it behind the update-time Step 4.6 gate.
-- **Role-driver seam in the container**: the PM↔Dev orchestration loop keeps owning relay, steering, watchdog, turn hooks, and exit classification; each actor's "send message, await settled reply" becomes transport-polymorphic. PTY roles keep today's driver untouched; headless roles get a thin driver that runs one `claude -p --resume` subprocess per turn via the existing `_run_harness_subprocess`.
+- **Role-driver seam in the container**: the PM↔Dev orchestration loop keeps owning relay, steering, watchdog, turn hooks, and exit classification; each actor's "send message, await settled reply" becomes transport-polymorphic. PTY roles keep today's driver untouched; headless roles get a thin driver that runs one `claude -p --resume` subprocess per turn via the existing `_run_harness_subprocess`. **Turn-end for both transports is #1688's `HookEdgeConsumer.turn_end` edge** (mandate A) — the headless leg registers the same `--settings`-injected hooks #1688 generates; no bespoke headless turn-end signal is invented.
 - **Selective PTY spawning**: the pool still bounds concurrency per session pair, but only spawns PTY processes for PTY-configured roles.
-- **Transport-agnostic resume handles**: per-role `{role, claude_session_id, transcript_path, transport}` entries persisted for both transports, in the exact list shape agreed on #1721 (2026-07-02 comment), so #1721's resume execution consumes them without migration.
-- **Metered-leg cost surfacing**: headless turn cost accumulates into the existing `total_cost_usd` field, emits a `session.metered_cost_usd` ledger metric, and shows up per-session (`role_transports` label + existing cost fields) on `dashboard.json` plus new aggregate keys in the analytics block.
+- **Transport-agnostic resume handles (minimal #1721 coordination)**: per-role `{role, claude_session_id, transcript_path, transport}` entries persisted for both transports, in the exact list shape agreed on #1721 (2026-07-02 comment). Written only from data this plan already captures at spawn/first-turn (zero extra capture cost); **consumption — loop cursor, `--resume` re-entry, reply-path — is explicitly deferred to #1721** (concern 3). If #1721 lands the field first, this plan writes into it (idempotent, additive nullable).
+- **Metered-leg cost surfacing (disjoint fields, single writer)**: headless turn usage/cost accumulates into the NEW `metered_*` fields (never the tailer-owned `total_*` scalars), via a single `metered=True` accumulation call inside `get_response_via_harness` (no second turn-end call — the duplicate-count blocker). It emits a `session.metered_cost_usd` ledger metric at that same point, and shows up per-session (`role_transports` label + `metered_cost_usd` + combined tokens) on `dashboard.json` plus new aggregate keys in the analytics block.
 - **Runbook**: a short flip procedure (edit config → validate → restart worker → watch) with post-flip checks, in the feature doc.
 
 ### Flow
@@ -160,11 +164,13 @@ Message arrives → executor resolves `role_transports` from config (default bot
 - **Config precedence**: project block `projects.<key>.transport.{pm,dev}` > `settings.granite.pm_transport`/`dev_transport` (env `GRANITE__PM_TRANSPORT`/`GRANITE__DEV_TRANSPORT`, mirroring the `pm_model`/`dev_model` pattern at `config/settings.py:403-423`) > literal `"pty"`. Validator: new `validate_transport(config)` in `bridge/config_validation.py`, registered in the aggregator tuple at `:402-409`; rejects any value outside `{"pty","headless"}` and non-dict shapes. It then runs automatically at `scripts/update/verify.py:1113-1116` (update Step 4.6) — that is the "fails loud at validation time" AC. The executor adds a defensive backstop: unknown resolved value → `finalize_session(session, "failed", reason=...)`, never a silent default.
 - **Dispatch seam** (`session_executor.py:1745-1753`): resolve `role_transports` right after `project_config` (`:1557-1574`), write it onto the AgentSession (`save(update_fields=[...])`), pass to `BridgeAdapter(role_transports=...)`. Both-PTY (the default) must produce byte-identical behavior to today.
 - **PairSpawnSpec + pool** (`pty_pool.py:116-143, 485-521`): add `pm_transport`/`dev_transport` (or a small mapping) to the spec; `_spawn_session_pair` spawns a `PTYDriver` only for `pty` roles and leaves `None` for headless roles; `acquire_pair` continues to hand out one slot per session (the slot is the concurrency unit — a mixed or headless session still occupies one, keeping the bound meaningful and the accounting simple).
-- **Role-driver seam in `Container`**: extract the actor-turn surface the loop already uses against `PTYDriver` (send message → await settled reply text; expose liveness/activity signals for the watchdog) into a minimal protocol. `PTYRoleDriver` wraps today's behavior with zero changes to frame-scraping/idle detection. `HeadlessRoleDriver` implements it as: first turn → prime by sending the role's `/granite:prime-*` slash command as the initial `claude -p` prompt (slash commands work in `-p` mode; same prime constants at `container.py:73-88`), capture `session_id_from_harness` from the result tuple; subsequent turns → `prior_uuid=<captured uuid>` so the harness assembles `--resume`. Reuse `get_response_via_harness`'s existing flag assembly, API-key strip, stale-UUID retry, and 16MB stream parsing — do not reimplement subprocess handling. Wire `on_sdk_started`/`on_stdout_event` to the same activity signals the watchdog reads for PTY roles, so hang detection stays meaningful for headless roles (the PTY-liveness gates from #1789/#1798 read PTY state; headless roles substitute stdout-event recency).
+- **Role-driver seam in `Container`, turn-end via #1688 (mandate A)**: extract the actor-turn surface the loop already uses against `PTYDriver` (send message → await settled reply text; expose liveness/activity signals for the watchdog) into a minimal protocol. `PTYRoleDriver` wraps today's injection/liveness behavior. `HeadlessRoleDriver` implements it as: first turn → prime with the role's `/granite:prime-*` (see prime-fallback bullet), capture `session_id_from_harness` from the result tuple; subsequent turns → `prior_uuid=<captured uuid>` so the harness assembles `--resume`. Reuse `get_response_via_harness`'s existing flag assembly, API-key strip, stale-UUID retry, and 16MB stream parsing — do not reimplement subprocess handling. **Turn-end authority is #1688's `HookEdgeConsumer.turn_end` edge for BOTH transports** — the headless subprocess is spawned with the same per-session `--settings` hook set #1688 generates (writing envelopes to the same per-session NDJSON edge file); the container awaits the consumer's `turn_end` (parent `Stop`) edge, exactly as the PTY leg does post-#1688. Do NOT invent a bespoke headless turn-end signal: the `result` event and subprocess exit are consumed only as the turn's content/usage carrier and as a crash-liveness signal (the headless analogue of #1688's `pexpect.EOF`/`!isalive()`). Wire `on_sdk_started`/`on_stdout_event` to the same watchdog activity signals PTY roles use (the PTY-liveness gates from #1789/#1798 read PTY state; headless roles substitute stdout-event recency), so a hung `claude -p` that never emits a `Stop` edge is caught by the bounded-wait watchdog #1688 already races the `turn_end` edge against.
+- **Prime-under-`-p` verification + fallback (concern 5)**: it is unconfirmed that a `/granite:prime-pm-role` / `/granite:prime-dev-role` slash command *resolves and primes* correctly when passed as the first prompt to `claude -p` (project skills resolve from `.claude/skills/`; slash resolution semantics may differ in print mode). Task 0 (gate) verifies this under Substrate B (`GRANITE_OLLAMA_SMOKE=1`, qwen-pinned, reusing #1837 fixtures): assert the primed persona surfaces in the first `result`. **Fallback if slash resolution fails in `-p`:** read the prime skill's SKILL.md body and inject it via `--append-system-prompt` (or as the literal first-message preamble), so priming never depends on unverified slash behavior. The driver selects the verified path at build time; the fallback is the documented contingency, not shipped speculatively.
 - **Lifecycle parity comes free from placement**: because headless roles run inside `Container.run()` under `BridgeAdapter`, the existing machinery — steering drain per turn (`bridge_adapter.py:532-543`), `on_turn` → `last_turn_at` (`:732-754`), exit summary/`exit_reason`/`user_facing_routed` (`:591-662`), executor terminal transitions (`session_executor.py:1875-1923`) — applies unchanged. This closes every gap identified in spike-2 without duplicating lifecycle code.
-- **Token/cost accounting, single-writer discipline**: transcript tailer registers PTY-role transcripts only. Headless roles accumulate tokens+cost at turn end from the result tuple via `accumulate_session_tokens` (`sdk_client.py:286`) — called from the orchestration sequentially, so it never races the tailer on the same fields (see Race 1). Also emit `record_metric("session.metered_cost_usd", cost_delta, {"role": role, "project": project_key})` at the same point.
+- **Token/cost accounting — disjoint fields, provably no clobber (blockers 1 + 2)**: the original "single-writer partition" was insufficient. The transcript tailer writes **absolute** merged totals to the shared `total_input_tokens`/`total_output_tokens`/`total_cache_read_tokens` scalars every tick (`bridge_adapter.py:1225-1229`); an additive headless write to those same scalars is deterministically clobbered on the next tick regardless of which transcripts the tailer folds. **Fix (blocker 1):** the headless leg writes a DISJOINT field set — new `metered_input_tokens`/`metered_output_tokens`/`metered_cache_read_tokens`/`metered_cost_usd` on `AgentSession` — that the tailer never reads or writes. `accumulate_session_tokens` (`sdk_client.py:286`) gains a `metered: bool = False` keyword: `metered=False` keeps today's `total_*` additive write (all existing callers — completion drafter, SDK path — unchanged); `metered=True` writes the `metered_*` fields additively and emits the `session.metered_cost_usd` ledger metric. On a mixed session the tailer's absolute `total_*` write and the headless additive `metered_*` write touch disjoint fields — no lost update, and the design is robust whether accounting is per-role or global (concern 4: the partition is by *transport/writer*, not by role, so per-role granularity is no longer the source of the race). **Fix (blocker 2):** `get_response_via_harness` already calls `accumulate_session_tokens(session_id, ...)` exactly once internally (`sdk_client.py:2542-2549`); this plan adds a `metered: bool` param that `get_response_via_harness` forwards to that single existing call, and adds **no** second turn-end accumulation. The `HeadlessRoleDriver` calls `get_response_via_harness(session_id=<sid>, metered=True, ...)`; that lone internal call is the sole metered accumulation, so headless cost is counted exactly once. Displayed grand totals = `total_* + metered_*` (summed by the serializer/analytics at read time); the metered-cost deliverable reads `metered_cost_usd` directly — on granite sessions `total_cost_usd` is always 0, so metered spend has its own dedicated field rather than an inferred slice of a shared scalar.
 - **Resume handles (coordination with #1721)**: add `resume_handles` JSON field to `AgentSession` holding a list of `{role, claude_session_id, transcript_path, transport}` — the exact schema from #1721's 2026-07-02 comment (correct under both the two-role present and one-role future). Write entries at spawn/first-turn for both transports: PTY roles from the UUIDs already generated at `bridge_adapter.py:505-506` + transcript paths from `_capture_pty_identity`; headless roles from the result-event UUID + the derivable `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` path. This plan persists handles only; resume *execution* (loop cursor, `--resume` re-entry, reply-path) remains #1721's scope. If #1721 builds first and lands the field, this plan writes into it; field definition is idempotent either way (additive nullable JSON — no Popoto migration needed, but see Update System).
-- **Dashboard + analytics**: `ui/app.py::_session_to_json` adds `role_transports` next to the existing cost fields (`:455-460`); `ui/data/analytics.py` adds `metered_cost_today_usd`/`metered_cost_7d_usd` by summing `total_cost_usd` over sessions whose `role_transports` include `headless` (per #1245 precedent, derived from Popoto fields); the ledger metric flows into `tools/analytics` export/summary with no CLI change.
+- **Dashboard + analytics**: `ui/app.py::_session_to_json` adds `role_transports`, the four `metered_*` fields, and a combined `total_cost_usd + metered_cost_usd` next to the existing cost fields (`:455-460`); `ui/data/analytics.py` adds `metered_cost_today_usd`/`metered_cost_7d_usd` by summing the dedicated `metered_cost_usd` field over sessions (per #1245 precedent, derived from Popoto fields — cleaner than inferring a slice of a shared scalar); the ledger metric flows into `tools/analytics` export/summary with no CLI change.
+- **Territory / composing with #1688 (mandate D)**: the build's primary edits are the dispatch seam (`session_executor.py` transport resolution + the `BridgeAdapter(...)` call site at `:1745-1753`) and the additive `metered=True` keyword on two `sdk_client.py` functions. Changes inside `container.py` / `pty_driver.py` / `bridge_adapter.py` are held to the minimum the dispatch and driver-seam require, and are designed to **compose with, not conflict with, #1688's landed changes**: the role-driver seam consumes #1688's `HookEdgeConsumer.turn_end` edge rather than adding a parallel turn-end path; the `--settings`/hook-forwarder plumbing is #1688's and is reused as-is for headless spawns; the tailer's `total_*` writes are left untouched (the headless leg only adds the disjoint `metered_*` writes). Since #1688 merges first, the build rebases onto it and extends its seam; it does not re-architect the container loop.
 - **Corrected line anchors vs the issue**: harness functions live at `sdk_client.py:2255` / `:2630` / `:3005` as the issue estimated; `harness_pid` per-session persistence for granite is actually `pm_pid`/`dev_pid` via `_publish_exit_summary` (`bridge_adapter.py:631-645`), not `session_executor.py:1394` — the plan uses the granite-era fields.
 
 ## Failure Path Test Strategy
@@ -190,9 +196,10 @@ Message arrives → executor resolves `role_transports` from config (default bot
 - [ ] `tests/unit/granite_container/test_container.py` — UPDATE: container construction/loop tests adapt to the role-driver seam (PTY behavior itself unchanged; fixtures may need the extracted driver type).
 - [ ] `tests/unit/granite_container/conftest.py` — UPDATE: shared fixtures building `PairSpawnSpec` gain the per-role transport fields (defaulted, so most tests are untouched).
 - [ ] `tests/unit/test_dm_whitelist_validation.py` — UPDATE: any test asserting the `validate_projects_config` aggregator's validator set/error aggregation must include `validate_transport`.
-- [ ] `tests/unit/test_dashboard_pillar_a_fields.py` — UPDATE: per-session serializer test extends to the new `role_transports` key.
-- [ ] `tests/integration/test_analytics_dashboard.py` — UPDATE: analytics summary shape gains `metered_cost_*` keys.
-- [ ] `tests/unit/granite_container/test_pty_driver.py`, `tests/integration/test_granite_pty_production.py`, `tests/integration/test_granite_ollama_e2e.py` — no changes expected (PTY path byte-identical under default config); re-run to confirm.
+- [ ] `tests/unit/test_dashboard_pillar_a_fields.py` — UPDATE: per-session serializer test extends to the new `role_transports` key, the four `metered_*` fields, and the combined `total_cost_usd + metered_cost_usd` view.
+- [ ] `tests/integration/test_analytics_dashboard.py` — UPDATE: analytics summary shape gains `metered_cost_today_usd`/`metered_cost_7d_usd` derived from the `metered_cost_usd` field.
+- [ ] `tests/unit/granite_container/test_pty_driver.py`, `tests/integration/test_granite_pty_production.py`, `tests/integration/test_granite_ollama_e2e.py` — no changes expected (PTY path byte-identical under default config); re-run to confirm. NOTE: these will also gain #1688's `--settings`/hook-edge assertions once #1688 merges — this plan rebases onto that state and does not conflict with it.
+- [ ] Mixed-transport accounting test (create, e.g. `tests/unit/granite_container/test_metered_accounting_partition.py`) — assert the tailer's absolute `total_*` write and the headless additive `metered_*` write never clobber each other (Race 1 / blocker 1), and that headless cost is accumulated exactly once (blocker 2 — a single `metered=True` call, no double count).
 
 ## Rabbit Holes
 
@@ -223,12 +230,11 @@ Message arrives → executor resolves `role_transports` from config (default bot
 
 ## Race Conditions
 
-### Race 1: Transcript tailer vs headless turn accumulation on token/cost fields
-**Location:** `agent/granite_container/bridge_adapter.py:1161-1248` (tailer tick writes token fields) vs the new headless turn-end `accumulate_session_tokens` call
-**Trigger:** Mixed-transport session — tailer task writes PTY-role token totals concurrently with a headless turn completing.
-**Data prerequisite:** Both writers use `save(update_fields=[...])` on overlapping fields → lost-update hazard.
-**State prerequisite:** Tailer merges PM+Dev transcript counters into absolute totals; a concurrent additive write from the headless leg would be clobbered.
-**Mitigation:** Partition sources: tailer registers and folds only PTY-role transcripts; headless usage accumulates only via the turn-end call, which runs sequentially inside the orchestration loop (same task as the turn await). No two writers touch the same counter for the same role. Test: mixed-transport unit test asserts final totals equal PTY-tailed + headless-result sums.
+### Race 1: Transcript tailer vs headless accumulation on token/cost fields (driver-CONFIRMED blocker — redesigned)
+**Location:** `agent/granite_container/bridge_adapter.py:1224-1232` (tailer tick writes token fields, **absolute** SET) vs the headless leg's `accumulate_session_tokens` call (`sdk_client.py:371-374`, **additive** ADD).
+**Trigger:** Mixed-transport session (e.g. PM=pty, Dev=headless) — tailer task writes PTY-role token totals concurrently with a headless turn completing.
+**Why the original mitigation failed:** the tailer's write is *absolute* (`session.total_input_tokens = merged_input`), not additive. Even if the tailer folds only PTY-role transcripts, its next tick overwrites the shared `total_*` scalar and discards any additive contribution the headless leg wrote to the same field — a deterministic clobber, not a timing-window race. "Partition the sources" is insufficient while both legs write the same scalar.
+**Mitigation (redesigned — partition the FIELDS, not just the sources):** the headless leg writes a disjoint field set (`metered_input_tokens`/`metered_output_tokens`/`metered_cache_read_tokens`/`metered_cost_usd`) via `accumulate_session_tokens(..., metered=True)`; the tailer keeps writing only the `total_*` scalars and never touches the `metered_*` fields. The two writers now target non-overlapping fields, so neither the absolute SET nor the additive ADD can clobber the other — the lost update is impossible by construction, independent of interleave or role granularity. Displayed grand total = `total_* + metered_*`, summed at read time. Test: mixed-transport unit test asserts `total_*` equals the PTY-tailed sum AND `metered_*` equals the headless-result sum AND the combined view equals their sum (AC5, now passable).
 
 ### Race 2: Config flip mid-flight
 **Location:** `session_executor.py` transport resolution vs a `projects.json` edit + worker restart
@@ -249,14 +255,14 @@ Message arrives → executor resolves `role_transports` from config (default bot
 - Automated switch-triggering (policy watchers, cost-threshold auto-flips) — rejected as over-engineering in the issue body, not deferred work: the trigger is rare, loudly announced, and human-observable; the switch is a config flip plus the runbook.
 - tmux `-CC` transport — rejected in the issue body after evaluation: adds a cleaner byte pipe but no turn-boundary semantics. (Anti-criterion row in Verification.)
 - [SEPARATE-SLUG #1721] Resume *execution*: loop cursor persistence, `--resume` re-entry on crash/reply, skip-priming on resume, auto-resume reflection changes. This plan persists transport-tagged resume handles in the agreed schema; #1721 owns consuming them.
-- [SEPARATE-SLUG #1688] Turn-boundary improvements for the PTY leg (Stop-hook signals, needs-input routing). The driver seam here must not touch PTY frame-scraping/idle detection.
+- [DEPENDS-ON #1688] Building the hook channel itself (per-session `--settings` injection, hook-forwarder, `HookEdgeConsumer`, durable cursor, needs-input routing) is #1688's scope. This plan **consumes** that landed seam for headless turn-end (mandate A) — it does not build or fork it, and it does not modify PTY frame-scraping/idle detection. BUILD rebases onto #1688 (mandate B).
 - [SEPARATE-SLUG #43333 in anthropics/claude-code] Upstream billing-attribution behavior of `claude -p` under OAuth — external product behavior we consume, not change. (Tagged for completeness; validator note: this is an upstream repo's issue, cited for context.)
 - `ClaudeSDKClient` migration of the hand-rolled `_run_harness_subprocess` — rejected in the issue body as a separable follow-up; the hedge uses the harness that exists and works today. No issue filed yet by design (the issue's non-goals section is the record).
 
 ## Update System
 
 - **Config validation propagates automatically**: the new `validate_transport()` registers in `validate_projects_config`, which `scripts/update/run.py` Step 4.6 already gates on (`scripts/update/verify.py:1113-1116`). A malformed `transport` block blocks the bridge restart on update — no new wiring needed.
-- **No Popoto migration required**: `role_transports` and `resume_handles` are additive nullable/defaulted fields; Popoto self-heals absent fields on old records (precedent: #1721 plan note on additive nullable fields, `_heal_descriptor_pollution` #1099/#1172). No entry in `scripts/update/migrations.py`.
+- **No Popoto migration required**: `role_transports`, `resume_handles`, and the four `metered_*` accounting fields (`metered_input_tokens`/`metered_output_tokens`/`metered_cache_read_tokens`/`metered_cost_usd`, default 0) are additive nullable/defaulted fields; Popoto self-heals absent fields on old records (precedent: #1721 plan note on additive nullable fields, `_heal_descriptor_pollution` #1099/#1172). No entry in `scripts/update/migrations.py`.
 - **No new dependencies**: no packages, no new binaries (`claude` CLI is already required everywhere).
 - **Config propagation**: `projects.json` is iCloud-synced and per-machine; the `transport` key is optional with a both-PTY default, so machines that never add it see zero behavior change. `.env.example` gains commented `GRANITE__PM_TRANSPORT`/`GRANITE__DEV_TRANSPORT` placeholders (with the required comment line above each) and `config/settings.py` gains the two `GraniteSettings` fields.
 
@@ -287,10 +293,10 @@ Not applicable — this repo has no Sphinx/MkDocs site.
 
 - [ ] Per-role transport config exists with PTY default; `validate_projects_config` rejects invalid blocks with actionable errors (AC1).
 - [ ] Default (no config) behavior is unchanged: routing test proves `BridgeAdapter.run` is called and the harness is not, exactly as today (AC1).
-- [ ] A headless-routed role completes a real session end-to-end with correct AgentSession lifecycle: terminal status via the shared orchestration path, `last_turn_at` bumps, steering drain, `exit_reason`, and a persisted transport-tagged resume handle (AC2) — proven by the deterministic E2E dispatch-routing test using #1837 patterns.
-- [ ] Metered-leg cost visible per session (`dashboard.json`: `role_transports` + `total_cost_usd`) and in analytics (`session.metered_cost_usd` in export; `metered_cost_today_usd`/`metered_cost_7d_usd` in the dashboard aggregate) (AC3).
+- [ ] A headless-routed role completes a real session end-to-end with correct AgentSession lifecycle: terminal status via the shared orchestration path, `last_turn_at` bumps, steering drain, `exit_reason`, turn-end from #1688's `HookEdgeConsumer.turn_end` edge, and a persisted transport-tagged resume handle (AC2) — proven by the deterministic E2E dispatch-routing test using #1837 patterns.
+- [ ] Metered-leg cost visible per session (`dashboard.json`: `role_transports` + dedicated `metered_cost_usd`) and in analytics (`session.metered_cost_usd` in export; `metered_cost_today_usd`/`metered_cost_7d_usd` in the dashboard aggregate) — cost counted exactly once, no double-count (blocker 2) (AC3).
 - [ ] Runbook exists in `docs/features/per-role-transport.md` with flip procedure + post-flip checks (AC4).
-- [ ] Unit routing matrix covers all four transport combinations plus invalid config; mixed transport (PM=pty, Dev=headless) exercised in unit routing tests; headless leg has a deterministic dispatch-routing test (AC5).
+- [ ] Unit routing matrix covers all four transport combinations plus invalid config; mixed transport (PM=pty, Dev=headless) exercised in unit routing tests AND passes token/cost accounting with the tailer (`total_*`) and headless (`metered_*`) writers proven non-clobbering (blocker 1 / Race 1); headless leg has a deterministic dispatch-routing test (AC5).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -339,6 +345,18 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ## Step by Step Tasks
 
+### 0. Build gate: rebase onto #1688 + verify prime-under-`-p` (HARD GATE)
+- **Task ID**: gate-rebase-and-prime
+- **Depends On**: #1688 PR merged to main (mandate B)
+- **Validates**: manual gate + `tests/integration/test_granite_ollama_e2e.py` (new prime-under-`-p` case)
+- **Informed By**: #1688 `HookEdgeConsumer` seam; concern 5 (prime slash-resolution unconfirmed)
+- **Assigned To**: headless-driver-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Confirm #1688 has merged (`grep -rl "HookEdgeConsumer" agent/granite_container/`); rebase `session/per-role-transport-hedge` onto landed main.
+- Verify `/granite:prime-pm-role` / `/granite:prime-dev-role` resolve and prime under `claude -p` (Substrate B, `GRANITE_OLLAMA_SMOKE=1`, qwen-pinned): spawn one headless turn with the prime slash command as the first prompt; assert the primed persona surfaces in the first `result`.
+- **If slash resolution fails in `-p`:** switch the driver to the fallback — inject the prime SKILL.md body via `--append-system-prompt` / first-message preamble. Record which path was verified in this task's notes.
+
 ### 1. Config schema, validator, settings, executor resolution
 - **Task ID**: build-transport-config
 - **Depends On**: none
@@ -350,20 +368,21 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Add `validate_transport()` to `bridge/config_validation.py`; register in the aggregator tuple
 - Add `pm_transport`/`dev_transport` fields to `GraniteSettings` (`config/settings.py:348-423` pattern), default `"pty"`; add `.env.example` placeholders with comment lines
 - In `session_executor.py`, resolve `role_transports` (project block > settings > `"pty"`) after project_config load (`:1557-1574`); persist onto the AgentSession; defensive fail-loud backstop for invalid resolved values
-- Add `role_transports` JSON field + `resume_handles` JSON list field to `models/agent_session.py` (nullable, no migration; coordinate field name with #1721's plan if it landed first)
+- Add `role_transports` JSON field + `resume_handles` JSON list field + four `metered_*` accounting fields (`metered_input_tokens`/`metered_output_tokens`/`metered_cache_read_tokens`/`metered_cost_usd`, default 0) to `models/agent_session.py` (nullable/defaulted, no migration; coordinate `resume_handles` shape with #1721's plan if it landed first)
 
 ### 2. Role-driver seam + headless driver
 - **Task ID**: build-headless-driver
-- **Depends On**: build-transport-config
+- **Depends On**: gate-rebase-and-prime, build-transport-config
 - **Validates**: tests/unit/granite_container/test_headless_role_driver.py (create), tests/unit/granite_container/test_container.py
-- **Informed By**: spike-1 (PairSpawnSpec/pool anchors), spike-2 (harness 8-tuple, resume-per-turn, liveness callbacks; lifecycle stays orchestration-owned)
+- **Informed By**: spike-1 (PairSpawnSpec/pool anchors), spike-2 (harness 8-tuple, resume-per-turn, liveness callbacks; lifecycle stays orchestration-owned), #1688 (`HookEdgeConsumer.turn_end` seam)
 - **Assigned To**: headless-driver-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Extract the actor-turn protocol from the container loop's use of `PTYDriver`; wrap existing PTY behavior unchanged (`PTYRoleDriver`)
-- Implement `HeadlessRoleDriver`: prime-as-first-prompt, per-turn `get_response_via_harness` with `prior_uuid` resume, result-event turn end, `on_stdout_event` wired to watchdog activity
+- Implement `HeadlessRoleDriver`: prime (verified path from Task 0), per-turn `get_response_via_harness` with `prior_uuid` resume, **turn-end via #1688's `HookEdgeConsumer.turn_end` edge for both transports (mandate A — no bespoke headless turn-end)**, `result` event consumed as content/usage + crash-liveness, `on_stdout_event` wired to watchdog activity
+- Spawn headless subprocesses with #1688's `--settings`-injected hook set writing to the same per-session edge file (reuse #1688 plumbing; do not fork it — mandate D)
 - Widen `PairSpawnSpec` with per-role transports; `_spawn_session_pair` spawns PTYs only for PTY roles; slot semantics unchanged
-- Thread `role_transports` through `BridgeAdapter.__init__` → spawn spec → `Container`; persist transport-tagged `resume_handles` entries on capture (both transports)
+- Thread `role_transports` through `BridgeAdapter.__init__` → spawn spec → `Container`; persist transport-tagged `resume_handles` entries on capture (both transports); consumption deferred to #1721 (concern 3)
 
 ### 3. Cost surfacing
 - **Task ID**: build-cost-surfacing
@@ -373,9 +392,9 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: cost-surfacing-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Accumulate headless turn usage/cost via `accumulate_session_tokens` at turn end (single-writer partition vs tailer per Race 1)
-- Emit `record_metric("session.metered_cost_usd", cost_delta, {"role", "project"})`
-- Add `role_transports` to `_session_to_json` (`ui/app.py:455-460`); add `metered_cost_today_usd`/`metered_cost_7d_usd` to `ui/data/analytics.py`
+- Add `metered: bool = False` to `accumulate_session_tokens` (`metered=True` → writes disjoint `metered_*` fields + emits the ledger metric) and forward it from `get_response_via_harness`; the `HeadlessRoleDriver` calls `get_response_via_harness(session_id=<sid>, metered=True)` so cost is accumulated exactly ONCE via the existing internal call (blockers 1 + 2 — disjoint fields, no second turn-end call)
+- Ledger metric `record_metric("session.metered_cost_usd", cost_delta, {"role", "project"})` emitted from the metered-accumulation branch
+- Add `role_transports` + four `metered_*` fields + combined `total_cost_usd + metered_cost_usd` to `_session_to_json` (`ui/app.py:455-460`); add `metered_cost_today_usd`/`metered_cost_7d_usd` (summed from the `metered_cost_usd` field) to `ui/data/analytics.py`
 
 ### 4. Routing matrix + fault tests + deterministic E2E
 - **Task ID**: build-transport-tests
@@ -387,8 +406,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: false
 - REPLACE `test_executor_does_not_call_get_response_via_harness` per Test Impact; UPDATE `test_executor_calls_bridge_adapter_run`
 - Routing matrix: pty/pty (default + explicit), pty/headless, headless/pty, headless/headless, invalid-config backstop
-- Headless fault tests: hung subprocess (no result event) killed + classified; nonzero exit propagates `exit_reason`; empty result hits the empty-output guard
-- Deterministic E2E dispatch-routing test for the headless leg; mixed-transport token/cost partition assertion (Race 1)
+- Headless fault tests: hung subprocess (no `turn_end` edge from #1688's consumer + no `result`) killed + classified by the bounded-wait watchdog; nonzero exit propagates `exit_reason`; empty result hits the empty-output guard
+- Deterministic E2E dispatch-routing test for the headless leg (turn-end via `HookEdgeConsumer.turn_end`); mixed-transport accounting assertion: `total_*` (tailer) and `metered_*` (headless) do not clobber (blocker 1 / Race 1) AND headless cost counted exactly once (blocker 2)
 
 ### 5. Validation
 - **Task ID**: validate-transport
@@ -426,15 +445,27 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 | Routing matrix exists | `pytest tests/unit/test_transport_routing_matrix.py -q` | exit code 0 |
 | Dashboard exposes transports | `grep -c "role_transports" ui/app.py` | output > 0 |
 | Metered metric emitted | `grep -rc "session.metered_cost_usd" agent/ ui/ \| grep -v ':0'` | output > 0 |
+| Disjoint metered fields exist | `grep -c "metered_input_tokens\|metered_cost_usd" models/agent_session.py` | output > 1 |
+| Headless turn-end via #1688 seam | `grep -rn "HookEdgeConsumer\|turn_end" agent/granite_container/ \| wc -l` | match count > 0 |
 | Runbook exists | `grep -ci "runbook\|flip" docs/features/per-role-transport.md` | output > 0 |
 | Anti-criterion: no tmux transport | `grep -rn "tmux" agent/granite_container/ agent/session_executor.py \| wc -l` | match count == 0 |
 | Anti-criterion: no auto-switching | `grep -rn "auto_flip\|auto_switch\|policy_watcher" agent/ bridge/ config/ \| wc -l` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict **NEEDS REVISION** (2026-07-02). Revision pass addressed all findings + supervisor-mandated additions below.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | 3 critics (confirmed) | Race-1 token-field lost update: tailer ABSOLUTE write vs headless ADDITIVE write on the same session-level scalars → deterministic clobber; AC5 unpassable | Disjoint `metered_*` fields | Headless leg writes `metered_input/output/cache_read_tokens` + `metered_cost_usd`; tailer keeps `total_*`; fields never overlap. Data Flow §6, Technical Approach, Race 1, AC5. |
+| BLOCKER | driver-confirmed | Double-counted headless cost: `get_response_via_harness` already calls `accumulate_session_tokens` internally (`sdk_client.py:2542`); adding a turn-end call 2x-inflates | Single accumulation via `metered=True` flag | `metered` param forwarded to the ONE existing internal call; no second turn-end accumulation. Technical Approach (blocker 2), task 3. |
+| CONCERN 3 | — | `resume_handles` persisted but never consumed (scope creep) | Trim + explicit defer | Write only from already-captured data (zero extra cost); consumption (loop cursor, `--resume`) explicitly deferred to #1721. Solution Key Elements, task 2. |
+| CONCERN 4 | — | Per-role granularity is the sole source of Race 1 | Field partition by transport | Accounting partitioned by *transport/writer*, not role → robust either way; per-role granularity no longer the race source. Race 1, Technical Approach. |
+| CONCERN 5 | — | Unverified `/granite:prime-*` behavior under headless `claude -p` | Task 0 gate + fallback | Substrate B verification; fallback injects SKILL.md body via `--append-system-prompt`. Technical Approach, task 0. |
+| MANDATE A | orchestrator | Turn-end must come from #1688's hook channel for BOTH transports | `HookEdgeConsumer.turn_end` | Headless leg consumes #1688's `turn_end` edge; `result` event demoted to content/liveness. Data Flow §5, Technical Approach, task 2. |
+| MANDATE B | orchestrator | BUILD runs only after #1688 merges; rebase onto landed hook-channel | Build gate + prerequisite row | Prerequisites row + Build sequencing note + task 0. |
+| MANDATE C | orchestrator | Resume-handle schema `{role, claude_session_id, transcript_path, transport}` verbatim, transport-agnostic | Schema adopted verbatim | Solution Key Elements + Risk 4; no PTY-specific field names. |
+| MANDATE D | orchestrator | Keep container/pty_driver/bridge_adapter changes minimal; compose with #1688 | Territory note | Technical Approach → "Territory / composing with #1688"; primary edits at dispatch seam + additive `metered` kwarg. |
 
 ---
 
