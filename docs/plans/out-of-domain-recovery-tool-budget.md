@@ -23,8 +23,8 @@ monitor that a frozen loop also stops running.**
 reaper introduced by #1820 (`_agent_session_health_check`, the hoisted
 top-of-tick reap pass) reclaims a leaked concurrency permit by calling
 `registry.reclaim()` — but it runs **on the worker event loop** (the reap pass
-`_reap_slot_leases()` at `agent/session_health.py:2459`, driven by
-`_agent_session_health_loop` at `:3256`). When the loop is
+`_reap_slot_leases()` at `agent/session_health.py:2485`, driven by
+`_agent_session_health_loop` at `:3405`). When the loop is
 synchronously frozen, the reaper task never runs, so the very recovery meant to
 liberate a leaked slot is itself wedged. The acceptance criterion from #1815
 demands that recovery be **verified to run from a process OTHER than the worker
@@ -42,8 +42,8 @@ state and drives a targeted, restart-free recovery.
 
 **Fix #6 — a per-tool budget that fires even when the health loop is frozen.**
 The only per-tool-call budget today is `_agent_session_tool_timeout_loop`
-(`agent/session_health.py`, `TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:310`, function
-`_agent_session_tool_timeout_loop` at `:3686`) — a
+(`agent/session_health.py`, `TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:336`, function
+`_agent_session_tool_timeout_loop` at `:3835`) — a
 **background monitor** on the worker loop. When the loop freezes, it stops
 ticking, so a runaway session that keeps issuing tool calls (or racking up cost)
 against a partially-wedged harness has no ceiling. There is no **synchronous,
@@ -82,19 +82,35 @@ loop's health.
 
 ## Freshness Check
 
-**Baseline commit (revision 4):** `bdb77c100cde0f8b113a0172b795f5bfc97f6e29`
+**Baseline commit (revision 5):** `2d1cf419` (true HEAD as of 2026-07-03; the prior
+revision-4 baseline `bdb77c10` was superseded when **PR #1870** (`705136e7`,
+"atomic per-message + pending→running claims") merged, adding +149 lines to
+`agent/session_health.py` and shifting its anchors non-uniformly).
 **Issue filed at:** 2026-06-29 (deferred from #1815)
-**Disposition:** Minor drift — line numbers moved under the #1820 merge; all claims
-still hold; refs corrected below.
+**Disposition:** Minor drift — line numbers moved under the #1820 merge and then
+again under PR #1870; all claims still hold; **every** `agent/session_health.py` /
+`.claude/hooks/pre_tool_use.py` / `monitoring/session_watchdog.py` / `ui/app.py`
+anchor was re-grepped against HEAD `2d1cf419` and corrected below.
+**Revision 5 re-check (post-#1870-merge, 2026-07-03).** PR #1870 shifted the lower
+half of `agent/session_health.py` by +149 lines and moved the reap pass by +26;
+corrected anchors: `_reap_slot_leases()` `:2459`→`:2485` (called from
+`_agent_session_health_check` at `:2679`), Phase-1 detection ends `:2574`, the
+`if reap_disabled: return` early-gate is `:2577-2578`, the `SLOT_LEASE_REAP_DISABLED`
+read `:2533`, the None-as-terminal reclaim branch `:2585`, `_write_worker_heartbeat`
+`:3237`→`:3386`, `register_worker_pid` `:3217`→`:3243`, `_agent_session_health_loop`
+`:3256`→`:3405`, `_agent_session_tool_timeout_loop` `:3686`→`:3835`,
+`TOOL_TIMEOUT_LOOP_INTERVAL` `:310`→`:336`. `ui/app.py::_get_worker_health` stayed at
+`:370` (the `/dashboard.json` route moved to `:590`); `session_watchdog.py` +
+`pre_tool_use.py` + `post_tool_use.py` anchors are unchanged (verified below).
 **Revision 4 re-check (post-#1820-merge, 2026-07-03).** #1820 (the hard dependency)
 merged 2026-07-02 (PR #1867, `72ba5d50`). All Fix #5 dependency surfaces re-verified
-against the merged code at HEAD `bdb77c10` (see the ✅ HARD DEPENDENCY SATISFIED block
+against the merged code at HEAD `2d1cf419` (see the ✅ HARD DEPENDENCY SATISFIED block
 above): `SlotLeaseRegistry.{leases,permits_free,reclaim}` present in
 `agent/slot_lease.py`, the reap pass is the named `_reap_slot_leases()`
-(`agent/session_health.py:2459`), and `SLOT_LEASE_REAP_DISABLED=1` gates only the
+(`agent/session_health.py:2485`), and `SLOT_LEASE_REAP_DISABLED=1` gates only the
 autonomous Phase-2 reclaim — confirming the bridge drain is the sole reclaim lever
 under that flag. `scripts/check_prerequisites.py` reports all 4 prerequisites PASS.
-**Fix #6 anchors re-verified against HEAD `bdb77c10` (line numbers corrected):**
+**Fix #6 anchors re-verified against HEAD `2d1cf419` (line numbers corrected):**
 - `monitoring/session_watchdog.py` — `watchdog_loop` at `:173`; `_apply_stall_reaction`
   at `:531` (the deny-surfacing precedent Fix #6 mirrors — atomic `SET NX EX` dedup +
   reaction-queue write). Confirmed, no drift.
@@ -115,23 +131,23 @@ under that flag. `scripts/check_prerequisites.py` reports all 4 prerequisites PA
 `SlotLeaseRegistry` #1820 introduced in `agent/slot_lease.py` (replacing the
 ownerless `_global_session_semaphore`; the registry singleton is
 `agent/session_state.py:88` `_slot_registry`). **API re-verified against the
-merged code (HEAD `bdb77c10`):** `SlotLeaseRegistry.leases() -> list[Lease]`
+merged code (HEAD `2d1cf419`):** `SlotLeaseRegistry.leases() -> list[Lease]`
 (`agent/slot_lease.py:186`), `permits_free() -> int` (`:190`, reads
 `_semaphore._value`), and `reclaim(owner_session_id)` (`:166`, idempotent,
-WARNING-logged) all exist exactly as this plan assumed. `Lease` (`:73`) carries
+WARNING-logged) all exist exactly as this plan assumed. `Lease` (`:74`) carries
 `owner_session_id` + `acquired_at` (a **wall-clock** `time.time()` value, `:147`)
 — so the lease-snapshot JSON's `acquired_at_wall_ts` maps straight onto
 `Lease.acquired_at` with no conversion. The on-loop reap pass is the named
-function `_reap_slot_leases()` (`agent/session_health.py:2459`, called from
-`_agent_session_health_check` at `:2653`); its autonomous Phase-2 terminal-owner
-reclaim is gated on `os.environ.get("SLOT_LEASE_REAP_DISABLED") != "1"` (`:2507`,
-`:2550`) while Phase-1 detection always runs — **confirming the plan's central
+function `_reap_slot_leases()` (`agent/session_health.py:2485`, called from
+`_agent_session_health_check` at `:2679`); its autonomous Phase-2 terminal-owner
+reclaim is gated on `os.environ.get("SLOT_LEASE_REAP_DISABLED") != "1"` (`:2533`,
+`:2577`) while Phase-1 detection always runs — **confirming the plan's central
 claim** that the bridge reclaim-request is the *only* reclaim lever under
 `SLOT_LEASE_REAP_DISABLED=1`. **Fix #5 BUILD is therefore UNBLOCKED.** Fix #6 has
 **no** dependency on #1820 and may build independently. See **## Prerequisites**
 (all four now PASS).
 
-**File:line references re-verified against HEAD `bdb77c10` (revision 4, post-#1820-merge):**
+**File:line references re-verified against HEAD `2d1cf419` (revision 4, post-#1820-merge):**
 - `monitoring/session_watchdog.py` — `watchdog_loop` at `:173`; launched **in the
   bridge process** at `bridge/telegram_bridge.py:3053-3055` (`from
   monitoring.session_watchdog import watchdog_loop` → `asyncio.create_task`). Owns only
@@ -146,12 +162,12 @@ claim** that the bridge reclaim-request is the *only* reclaim lever under
   _write_worker_heartbeat`; `_heartbeat_cycle` `:271` computes
   `beacon_age = now_monotonic - get_loop_tick()`; `_heartbeat_thread_main`
   `:357` runs off-loop every `WORKER_HEARTBEAT_INTERVAL=30s` (`:51`). Confirmed.
-- `agent/session_health.py:3237` — `_write_worker_heartbeat()` writes
-  `data/last_worker_connected` + calls `register_worker_pid()` (`:3217`, writes a
+- `agent/session_health.py:3386` — `_write_worker_heartbeat()` writes
+  `data/last_worker_connected` + calls `register_worker_pid()` (`:3243`, writes a
   Redis PID key) on every off-loop tick. **This is the publish seam for Fix #5's
   Redis wall-clock beacon.** The on-loop reap pass (from #1820, the named function
-  `_reap_slot_leases()` at `agent/session_health.py:2459`, called from
-  `_agent_session_health_check` at `:2653`) is the publish seam for the lease-table
+  `_reap_slot_leases()` at `agent/session_health.py:2485`, called from
+  `_agent_session_health_check` at `:2679`) is the publish seam for the lease-table
   snapshot.
   Confirmed.
 - `monitoring/worker_watchdog.py` — **existing** out-of-domain recovery (separate
@@ -166,15 +182,15 @@ claim** that the bridge reclaim-request is the *only* reclaim lever under
 - `.claude/hooks/pre_tool_use.py` — CLI PreToolUse hook (the interactive `claude`
   TUI / granite-PTY path), currently logging-only. Session resolves via the
   sidecar in `.claude/hooks/post_tool_use.py::_update_agent_session`
-  (`:445-513`, `AgentSession.get_by_id` at `:486`); `tool_call_count` bumped at `:503`.
+  (`:444-513`, `AgentSession.get_by_id` at `:486`); `tool_call_count` bumped at `:503`.
   Fix #6's load-bearing seam (blocks via exit code 2). Confirmed.
-- `agent/session_health.py` — `_agent_session_tool_timeout_loop` at `:3686`
-  (`TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:310`) — the **background** monitor
+- `agent/session_health.py` — `_agent_session_tool_timeout_loop` at `:3835`
+  (`TOOL_TIMEOUT_LOOP_INTERVAL=30` at `:336`) — the **background** monitor
   Fix #6 must NOT be. Confirmed.
 - `models/agent_session.py` — `tool_call_count` `:175`, `total_input_tokens`
   `:458`, `total_cost_usd` `:461`. Budget inputs present; Fix #6 only READS them.
   Confirmed.
-- `ui/app.py:370` — `_get_worker_health()` (dashboard route `:508`) reads the disk
+- `ui/app.py:370` — `_get_worker_health()` (dashboard route now `/dashboard.json` at `:590`) reads the disk
   heartbeat. Extend for the Fix #5 operator surface. Confirmed.
 
 **Cited sibling issues/PRs re-checked:**
@@ -312,20 +328,34 @@ TTL'd so a dead worker's records expire):
    dedup markers so a future re-leak re-triggers.
 
 **Worker on-loop reaper (Fix #5 worker-side extension of #1820's reap pass):**
-6. At the top of each health tick, **drain** `worker:slot:reclaim_requests:{host}`
-   (atomic `LPOP` loop). For each drained `owner`, re-read its status fresh; if
-   terminal, `registry.reclaim(owner)` (idempotent) and increment
-   `{project_key}:session-health:bridge_reclaims`. **This drain is a DISTINCT code
+6. Inside `_reap_slot_leases()`, **drain** `worker:slot:reclaim_requests:{host}`
+   (atomic `LPOP` loop) **in the always-run region — AFTER Phase 1 detection ends
+   (`agent/session_health.py:2574`) and BEFORE the Phase-2 `if reap_disabled: return`
+   (`:2576-2578`, concern #5)**, never inside the flag-gated Phase-2 reclaim loop.
+   For each drained `owner`, re-read its status fresh; reclaim ONLY when the fresh
+   status is an EXPLICIT terminal value — `registry.reclaim(owner)` (idempotent) and
+   increment `{project_key}:session-health:bridge_reclaims`. **`get_by_id → None` (or
+   any lookup exception) is "unknown → SKIP, do not reclaim" (concern #2, #1868)** — a
+   DELIBERATE divergence from the autonomous reaper's None-as-terminal handling
+   (`:2585`), so a transient Redis lookup blip cannot make the drain strip a LIVE
+   session's permit (semaphore over-admission). **This drain is a DISTINCT code
    path from #1820's autonomous terminal-owner reclaim**, so it fires even when
    `SLOT_LEASE_REAP_DISABLED=1` gates the autonomous path — giving the bridge a
    genuine lever the on-loop reaper alone does not provide. Idempotent
    `registry.reclaim()` means the two paths converge harmlessly when both are on.
-   **Mixed-version detectability (new-worker/old-bridge):** if the worker observes a
-   terminal-owner leak but the reclaim-request channel has been empty for a sustained
-   window (an old bridge never pushes), it emits `bridge_contract_stale` (action-log
-   + counter) so the contract gap is operator-visible rather than a silent drop; the
-   autonomous #1820 reaper still reclaims the leak (unless `SLOT_LEASE_REAP_DISABLED=1`),
-   so no slot is lost.
+   **Mixed-version detectability (new-worker/old-bridge), right-sized (concern #5):**
+   the `bridge_contract_stale` signal is minimum-viable and **reuses the existing
+   `BRIDGE_WORKER_BEACON_STALE_S` threshold** — NO new staleness var (the mixed-version
+   window self-heals in seconds, so the beacon-stale window is a fine proxy; a dedicated
+   `BRIDGE_CONTRACT_STALE_S` was dropped per concern #5). The worker keeps ONE Redis
+   timestamp `worker:slot:last_reclaim_request_drain:{host}` (set whenever the drain
+   pops ≥1 request). On a tick where a terminal-owner leak is observed AND
+   `now − last_drain_ts > BRIDGE_WORKER_BEACON_STALE_S`, emit
+   `bridge_contract_stale` once (dedup `SET NX EX`, action-log + counter). No
+   per-owner bookkeeping, no separate detector loop — just the one timestamp compared
+   to the one threshold. The autonomous #1820 reaper still reclaims the leak (unless
+   `SLOT_LEASE_REAP_DISABLED=1`), so no slot is lost; the signal exists only to make
+   the contract gap operator-visible rather than a silent drop.
 
 **Output:** `permits_free` recovers without a restart; the reclaim decision +
 trigger provably ran in the bridge process (Acceptance #1); the lease/liveness
@@ -342,30 +372,77 @@ state is visible on the dashboard.
    and returns `deny` (with a reason) when `tool_call_count >=
    MAX_TOOL_CALLS_PER_SESSION` or `total_cost_usd >= SESSION_COST_CAP_USD`, else
    `allow`. Pure, synchronous, no await, no I/O beyond the session read the hook
-   already performs.
-3. **Surface adaptation:** the SDK hook returns
-   `{"decision":"block","reason":<verdict.reason>}`; the CLI hook writes the reason
-   to stderr and exits `2` (Claude Code's block convention). On a deny, increment
-   `{project_key}:tool-budget:tripped` once per session (dedup `SET NX`).
-4. **Surface the deny to the human (auto-continue requirement).** A budget deny is a
-   NEW stopping point — under this codebase's auto-continue design, a silent
-   tool-call deny would strand the session with no human-visible signal. So on the
-   FIRST deny per session (guarded by the same `SET NX` dedup as the counter), the
-   evaluator's caller ALSO:
-   (a) transitions/annotates the `AgentSession` into a human-legible state —
-       set a `budget_tripped` flag + a status note (e.g. `paused` with reason
-       "per-session tool budget reached: <dimension> <value>") via the model's
-       normal `save(update_fields=...)`, so the dashboard and `valor-session status`
-       show it; AND
-   (b) queues a user-visible Telegram signal on the originating message — mirroring
+   already performs. **The `total_cost_usd` branch is SDK/headless-path-only
+   (concern #1):** cost is populated only by `agent/sdk_client.py` (the SDK
+   `ResultMessage.total_cost_usd` path at `:426` and the headless `claude -p
+   stream-json` `result`-event path at `:2868`). The **load-bearing granite-PTY
+   interactive path never writes `total_cost_usd`** (nothing under
+   `agent/granite_container/` populates it — the interactive TUI transcript has no
+   cost line), so on granite `total_cost_usd` stays `0.0` and the cost branch is a
+   **permanent no-op there**. The operative granite backstop is therefore the
+   `tool_call_count` cap alone. The cost check is retained (it is live and correct on
+   the SDK/headless path) but is explicitly documented as SDK-path-only so the plan
+   does NOT imply a working cost ceiling on granite; the constant carries an inline
+   "SDK/headless-path-only — no-op on granite" comment.
+3. **Surface adaptation — the inline DENY fires by default.** A `deny` verdict
+   actuates a DENY on both surfaces (SDK `{"decision":"block","reason":<verdict.reason>}`
+   / CLI stderr + `exit 2`) whenever `TOOL_BUDGET_ENABLED` is on (the **default**) —
+   the backstop actually backstops (Acceptance #2), even under a frozen health loop.
+   On every deny, once per session (dedup `SET NX`): increment
+   `{project_key}:tool-budget:tripped`, log a WARNING, and set the race-free hook-owned
+   `budget_tripped` flag (step 4(a) — a field write, NOT a `status` change).
+   `TOOL_BUDGET_ENABLED=false` is the instant kill-switch if the cap misfires.
+   **Granite shared-counter caveat:** on the granite path `tool_call_count` sums PM +
+   Dev sub-agent tool calls (each sub-agent burns the same session counter, so the
+   effective per-role ceiling is ~half `MAX_TOOL_CALLS_PER_SESSION`), so a trip can deny
+   **both** PM and Dev mid-build — this is bounded by the conservative default (1000)
+   and the kill-switch and is a MAX-**tuning** consideration (granite may want a higher
+   `MAX`), NOT a reason to gate the deny off (which would leave Acceptance #2's backstop
+   inert by default). Only the DISRUPTIVE extras — the `status → paused_budget`
+   transition **and** the Telegram ping (step 4) — are gated behind the separate
+   `TOOL_BUDGET_AUTO_PAUSE` switch (DISTINCT from `TOOL_BUDGET_ENABLED`, default **off**).
+4. **Auto-pause + human surfacing — gated behind `TOOL_BUDGET_AUTO_PAUSE` (default
+   off).** A budget deny is a NEW stopping point; under this codebase's auto-continue
+   design a silent deny would strand the session. On EVERY deny (default included; see
+   step 3) the caller sets the race-free hook-owned flag:
+   (a) `budget_tripped = True` + `budget_tripped_reason = "per-session tool budget
+       reached: <dimension> <value>"`, written with a narrow
+       `save(update_fields=["budget_tripped", "budget_tripped_reason", "updated_at"])`.
+       **The hook NEVER writes `status`** (concern #2): on the load-bearing granite-PTY
+       path the `bridge_adapter` writes `AgentSession.status` through its own
+       partitioned `update_fields` saves (`agent/granite_container/bridge_adapter.py:385-391,
+       :804-845, :957`), and a hook-driven `status` write on another process/thread
+       would RACE and clobber it (last-writer-wins on the `status` field).
+       `budget_tripped` / `budget_tripped_reason` are fields NO other writer touches,
+       so they are always race-free and are the authoritative human-legible signal; the
+       dashboard, `valor-session status`, and the adapter/worker READ them.
+   Then, **only when `TOOL_BUDGET_AUTO_PAUSE` is set**, on the FIRST deny per session
+   (same `SET NX` dedup) the caller ALSO:
+   (b) transitions the session to **`paused_budget`** — a NEW **non-drip-eligible**
+       status added to `models/session_lifecycle.py` (`NON_TERMINAL_STATUSES` +
+       `RECOVERY_OWNERSHIP["paused_budget"] = "human"`). This is the BLOCKER fix:
+       `reflections/agents/session_recovery_drip.py` re-queues ONLY `status="paused"` /
+       `"paused_circuit"` sessions back to `pending` (verified: it filters exactly those
+       two and calls `transition_status(..., "pending")` one per tick), so setting bare
+       `paused` here would create a `pending→denied→paused→pending` runaway — the exact
+       loop the budget exists to stop, made worse because `tool_call_count`/
+       `total_cost_usd` are CUMULATIVE and never reset. `paused_budget` is never dripped
+       (its `RECOVERY_OWNERSHIP` is human-only), so no loop can form. To honor the
+       concern #2 no-hook-status-write rule, the transition is performed by the **status
+       owner** — the granite `bridge_adapter`/worker reads `budget_tripped` at its next
+       turn boundary and calls `transition_status(session, "paused_budget")`; on the
+       SDK/headless path (no competing status writer) the hook may transition directly.
+       Because `paused_budget` is non-drip, no status-write interleaving can produce a
+       flap; AND
+   (c) queues a user-visible Telegram signal on the originating message — mirroring
        `monitoring/session_watchdog.py::_apply_stall_reaction` (write a reaction/steer
        payload to the bridge's reaction queue with the same atomic `SET NX EX` dedup
        pattern), so the human sees "this session hit its budget" without reading
        `logs/worker.log`.
-   Both (a) and (b) are fail-quiet: a surfacing error must NEVER turn a legitimate
-   allow into a deny, nor a deny into a crash — the deny itself (block/exit 2) always
-   proceeds; only the *notification* is best-effort. The deny is NOT merely a log
-   line + dashboard counter.
+   All of (a)-(c) are fail-quiet: a surfacing error must NEVER turn a legitimate allow
+   into a deny, nor a deny into a crash — the deny itself (block/exit 2) always
+   proceeds; only the *notification* is best-effort. The deny is NOT merely a log line
+   + dashboard counter.
 5. **Output:** the tool call is denied inline, at dispatch, regardless of whether
    any background loop is running — so a runaway session is capped even under a
    frozen health loop, AND the human is notified that the cap was hit.
@@ -384,15 +461,26 @@ state is visible on the dashboard.
   beacon-publish side effect; the #1820 reap pass gains a lease-snapshot publish +
   a reclaim-request drain; `monitoring/session_watchdog.py` gains an out-of-domain
   worker-liveness/slot check (a new function called from `watchdog_loop`).
-- **Interface changes (Fix #6):** both PreToolUse hooks call
-  `evaluate_tool_budget`.
+- **Interface changes (Fix #6):** both PreToolUse hooks call `evaluate_tool_budget`;
+  the inline deny fires by default under `TOOL_BUDGET_ENABLED`, and the
+  `TOOL_BUDGET_AUTO_PAUSE` gate wraps only the status→paused_budget + Telegram extras.
+- **Model change (Fix #6, concern #2):** `models/agent_session.py` gains two
+  hook-owned fields — `budget_tripped` (bool, default `False`) and
+  `budget_tripped_reason` (str) — for deny-surfacing WITHOUT a `status` write (which
+  would race the granite `bridge_adapter` partitioned `update_fields` saves).
+  Additive, falsy-default, schema-on-read → no data migration (see Update System).
 - **Coupling:** the bridge watchdog depends on the worker's Redis-published
   contract only — never on any in-worker object. The reclaim-request drain adds a
   minimal, one-directional Redis coupling between bridge and worker loop.
 - **Data ownership:** all new Redis keys are per-host, TTL'd, and rebuilt each tick
-  — no Popoto model, no migration.
-- **Reversibility:** high. Kill-switches (`BRIDGE_SLOT_RECLAIM_ENABLED`,
-  `TOOL_BUDGET_ENABLED`) revert each fix to a no-op; the beacon/lease publish is
+  — no Popoto model for the contract; the only model touch is the two additive
+  `AgentSession` fields above (no migration).
+- **Reversibility:** high. Kill-switches revert each fix to a no-op:
+  `BRIDGE_SLOT_RECLAIM_ENABLED` (Fix #5 reclaim-trigger), `TOOL_BUDGET_ENABLED`
+  (Fix #6 evaluation + inline deny entirely). `TOOL_BUDGET_AUTO_PAUSE` defaults OFF,
+  so by default a tripped session is denied-inline + flagged + counted but is NOT
+  auto-paused and NOT pinged on Telegram — the disruptive extras stay opt-in until the
+  `tool-budget:tripped` histograms confirm a safe threshold. The beacon/lease publish is
   observability-only and harmless if unread.
 
 ## Appetite
@@ -442,7 +530,7 @@ final `validate-all` sweep depends on both.
 **Fix #6 has NO prerequisites** and may build immediately. **Fix #5 BUILD gate is
 now SATISFIED** — #1820 merged (PR #1867, 2026-07-02), so the `SlotLeaseRegistry`,
 the on-loop reap pass (`_reap_slot_leases()`), and `registry.reclaim()` all exist.
-All four prerequisite checks above PASS as of HEAD `bdb77c10`
+All four prerequisite checks above PASS as of HEAD `2d1cf419`
 (`scripts/check_prerequisites.py` confirms). Both sub-pipelines may now build.
 
 ## Solution
@@ -473,7 +561,11 @@ All four prerequisite checks above PASS as of HEAD `bdb77c10`
 - **Env kill-switches (all NAMED, env-overridable, conservative-provisional):**
   `BRIDGE_SLOT_RECLAIM_ENABLED`, `BRIDGE_WORKER_BEACON_STALE_S`,
   `RECLAIM_REQUESTS_MAX` (list-cap for `worker:slot:reclaim_requests`, Race 4),
-  `TOOL_BUDGET_ENABLED`, `MAX_TOOL_CALLS_PER_SESSION`, `SESSION_COST_CAP_USD`.
+  (`bridge_contract_stale` reuses the existing `BRIDGE_WORKER_BEACON_STALE_S`
+  threshold — no dedicated staleness var, concern #5),
+  `TOOL_BUDGET_ENABLED` (evaluate + inline deny; DEFAULT ON), `TOOL_BUDGET_AUTO_PAUSE`
+  (status→paused_budget + Telegram extras — DEFAULT OFF), `MAX_TOOL_CALLS_PER_SESSION`,
+  `SESSION_COST_CAP_USD` (SDK/headless-path-only — no-op on granite, concern #1).
 
 ### Flow
 
@@ -492,32 +584,60 @@ beacon → log `loop_wedged` + defer to existing killer.
 **Fix #5 — out-of-domain recovery (BUILD after #1820 merges):**
 
 - **Publish the loop beacon.** In `agent/session_health.py::_write_worker_heartbeat`
-  (`:3237`, off-loop cadence), after the disk write, also
+  (`:3386`, off-loop cadence), after the disk write, also
   `POPOTO_REDIS_DB.set("worker:loop_beacon:{host}", json.dumps({...}), ex=3*WORKER_HEARTBEAT_INTERVAL)`.
   The beacon age is computed the same way `_heartbeat_cycle` already does
   (`now_monotonic − get_loop_tick()`), but the **wall-clock** `time.time()` is what
   the bridge keys on — never a monotonic value (Risk 1). Fail-quiet (Redis error
   must never break the heartbeat).
 - **Publish the lease snapshot + drain reclaim-requests.** In the #1820 on-loop
-  reap pass (`_reap_slot_leases()` at `agent/session_health.py:2459`; access the
-  registry via `_session_state._slot_registry`, guard on `is None`), after computing
-  the fingerprint: (a) publish `worker:slot:leases:{host}` from the same
-  `list(registry.leases())` snapshot; (b) **drain** `worker:slot:reclaim_requests:{host}`
-  via an atomic `LPOP` loop, re-read each owner's status fresh, and
-  `registry.reclaim(owner)` for terminal owners (increment
-  `{project_key}:session-health:bridge_reclaims`). The drain is guarded
-  independently of `SLOT_LEASE_REAP_DISABLED` (that flag gates only the autonomous
-  terminal-owner reclaim, not an explicit bridge request). Both publish and drain
-  are fail-quiet.
+  reap pass (`_reap_slot_leases()` at `agent/session_health.py:2485`; access the
+  registry via `_session_state._slot_registry`, guard on `is None`):
+  (a) publish `worker:slot:leases:{host}` from the same `list(registry.leases())`
+  snapshot; (b) **drain** `worker:slot:reclaim_requests:{host}` via an atomic `LPOP`
+  loop, re-read each owner's status fresh, and `registry.reclaim(owner)` **only when
+  the fresh status is an EXPLICIT terminal value** in `_TERMINAL_STATUSES` (increment
+  `{project_key}:session-health:bridge_reclaims`).
+  **None-on-transient-error trap (concern #2, #1868) — DELIBERATE divergence:** the
+  autonomous Phase-2 reclaim at `agent/session_health.py:2585` treats
+  `AgentSession.get_by_id(owner) → None` as terminal (`if fresh is None or ... in
+  _TERMINAL_STATUSES`). The bridge-driven drain MUST NOT: a transient Redis lookup
+  failure returning `None` (or any lookup exception) is "unknown", and reclaiming on it
+  would strip a LIVE session's permit (semaphore over-admission). So the drain reclaims
+  ONLY on an explicit terminal `status`; `None` or an exception → **SKIP, do not
+  reclaim** (log at DEBUG, leave the request for a future tick to re-evaluate). This is
+  a conscious departure from the reaper's None-as-terminal handling — the drain is
+  request-driven and must not over-reclaim on a lookup blip.
+  **EXACT INSERTION POINT (concern #5) — the drain (b) MUST land in the ~2-line gap
+  AFTER Phase 1's detection `try/except` ends (currently
+  `agent/session_health.py:2574`, the `logger.exception("...detection phase failed")`
+  line) and BEFORE the Phase-2 early return `if reap_disabled: return` (currently
+  `:2576-2578`, HEAD `2d1cf419`).** Placed there, the drain runs on EVERY tick,
+  including under `SLOT_LEASE_REAP_DISABLED=1` — which is the whole point (the bridge
+  reclaim-request is the *only* reclaim lever when the flag gates the autonomous
+  Phase-2 reclaim off). Do NOT place the drain inside or after the Phase-2 `for lease
+  in leases_snapshot:` block (currently `:2580+`): that block is SKIPPED by the
+  `return` under the flag, so a drain there would never fire when reaping is disabled
+  — silently defeating the feature's headline capability. The lease-snapshot publish
+  (a) may sit anywhere in the always-run region (e.g. right after the Phase 1
+  fingerprint); only the drain has the hard before-the-return constraint. Both publish
+  and drain are fail-quiet.
 - **Bridge out-of-domain check.** Add `check_worker_liveness_and_slots()` to
   `monitoring/session_watchdog.py`; call it from `watchdog_loop` (`:185` loop
   body, wrapped in its own try/except like the existing `check_stalled_sessions`).
   It: reads `worker:loop_beacon` + `worker:slot:leases`; if the beacon is missing
   or `now − wall_ts > BRIDGE_WORKER_BEACON_STALE_S` → log a `loop_wedged` action +
   increment `loop_wedged_detected`, **return without any kill**; else, for each
-  lease owner terminal in the DB, push to `worker:slot:reclaim_requests` (dedup
-  `SET NX` per owner, short TTL) + append to `worker:watchdog:actions` (capped
-  `LPUSH`+`LTRIM`), gated on `BRIDGE_SLOT_RECLAIM_ENABLED`. Fail-quiet.
+  lease owner **whose DB status is an explicit terminal value** (a `None`/error read
+  is "unknown" → skip, mirroring the drain's #1868 posture), push to
+  `worker:slot:reclaim_requests` (dedup `SET NX` per owner, short TTL) + append to
+  `worker:watchdog:actions` (capped `LPUSH`+`LTRIM`), gated on
+  `BRIDGE_SLOT_RECLAIM_ENABLED`. **Non-blocking Redis (concern #4):** these per-owner
+  pushes run inside the async `watchdog_loop`, so they MUST use the **async Redis
+  client** OR be batched into a **single pipeline** — never N sequential sync
+  `POPOTO_REDIS_DB` calls (`socket_timeout=5`), which on a multi-owner leak burst could
+  block the single bridge event loop up to `N×5s`, starving Telegram delivery +
+  `check_stalled_sessions`. Fail-quiet.
 - **No second killer (no-parallel-systems).** `check_worker_liveness_and_slots`
   NEVER sends a signal to the worker process, NEVER runs `launchctl`, NEVER writes
   `worker:watchdog:critical`. Process recovery stays with the dead-man's-switch +
@@ -542,11 +662,32 @@ beacon → log `loop_wedged` + defer to existing killer.
   # Provisional, env-overridable — tune after observing real per-session
   # tool-call / cost distributions on the live bridge machine.
   MAX_TOOL_CALLS_PER_SESSION = int(os.environ.get("MAX_TOOL_CALLS_PER_SESSION", "1000"))
+  # SDK/headless-path-only — NO-OP on granite (concern #1). total_cost_usd is
+  # written solely by agent/sdk_client.py (SDK ResultMessage + headless
+  # `claude -p stream-json`); the granite-PTY interactive path never populates
+  # it, so on granite this cap can never fire. Kept for the SDK/headless path.
   SESSION_COST_CAP_USD = float(os.environ.get("SESSION_COST_CAP_USD", "50.0"))
+  # Master switch: enables the budget AND the inline DENY. DEFAULT ON — a deny
+  # verdict actuates the inline block/exit-2 by default, so the backstop actually
+  # backstops (Acceptance #2). TOOL_BUDGET_ENABLED=false is the instant kill-switch
+  # if the cap ever misfires in production.
   TOOL_BUDGET_ENABLED = os.environ.get("TOOL_BUDGET_ENABLED", "true").strip().lower() \
       not in ("", "0", "false", "no")
+  # Auto-pause switch (BLOCKER + concern #3/#6): gates ONLY the status-mutation +
+  # Telegram-surfacing a deny additionally performs. DEFAULT OFF. With it off, a
+  # deny still blocks the call inline + counts + logs + sets the budget_tripped
+  # flag, but the session `status` is LEFT UNTOUCHED — so nothing moves the session
+  # into a drip-eligible state and no runaway pending→denied→paused→pending loop can
+  # form. When opted in (=1), a deny ALSO transitions status → paused_budget (a
+  # NON-drip-eligible status; see models/session_lifecycle.py) and queues Telegram.
+  TOOL_BUDGET_AUTO_PAUSE = \
+      os.environ.get("TOOL_BUDGET_AUTO_PAUSE", "false").strip().lower() \
+      in ("1", "true", "yes")
 
   def evaluate_tool_budget(session) -> BudgetVerdict:
+      # Pure verdict only — decides deny/allow. The CALLER (hook) actuates the inline
+      # block on a deny (gated by TOOL_BUDGET_ENABLED) and, only when
+      # TOOL_BUDGET_AUTO_PAUSE is set, the status→paused_budget transition + Telegram.
       if not TOOL_BUDGET_ENABLED or session is None:
           return BudgetVerdict(allow=True)
       calls = int(getattr(session, "tool_call_count", 0) or 0)
@@ -554,13 +695,27 @@ beacon → log `loop_wedged` + defer to existing killer.
       if calls >= MAX_TOOL_CALLS_PER_SESSION:
           return BudgetVerdict(False, f"per-session tool-call budget reached "
                                       f"({calls}/{MAX_TOOL_CALLS_PER_SESSION})")
+      # Cost branch is dead on granite (cost stays 0.0); live only on SDK/headless.
       if cost >= SESSION_COST_CAP_USD:
           return BudgetVerdict(False, f"per-session cost cap reached "
                                       f"(${cost:.2f}/${SESSION_COST_CAP_USD:.2f})")
       return BudgetVerdict(allow=True)
   ```
   Pure and synchronous — no await, no background timer. This is the omnigent
-  ALLOW/DENY model.
+  ALLOW/DENY model. **The evaluator returns a verdict; the hook (caller) actuates
+  it.** On a `deny` verdict the caller ALWAYS (a) blocks the call inline (SDK
+  `{"decision":"block"}` / CLI `exit 2`), (b) increments `tool-budget:tripped`
+  (dedup `SET NX`), (c) logs a WARNING, and (d) sets the hook-owned `budget_tripped`
+  flag — this is the backstop and it fires by default under `TOOL_BUDGET_ENABLED`.
+  Only the additional **status-mutation + Telegram-surfacing** (Data Flow step 4) is
+  gated behind `TOOL_BUDGET_AUTO_PAUSE` (default off), because a `status` transition
+  and a user-facing ping are the disruptive parts. The **granite shared-counter
+  caveat** (PM + Dev sub-agents burn the same `tool_call_count`, so the effective
+  per-role ceiling is ~half `MAX_TOOL_CALLS_PER_SESSION`) is handled by the
+  conservative default (1000) and the `TOOL_BUDGET_ENABLED=false` kill-switch — a
+  tuning consideration (granite may want a higher `MAX`), NOT a reason to disable the
+  deny by default (which would leave Acceptance #2's backstop inert). Enforcement
+  policy lives in one place on each surface.
 - **Fail-open MUST distinguish "no session" from "infra error"** (both hooks). The
   budget's fail-open posture is a backstop that must never brick the agent — but an
   unconditional fail-open conflates two very different cases and would let the
@@ -582,18 +737,26 @@ beacon → log `loop_wedged` + defer to existing killer.
 - **SDK hook.** At the TOP of `agent/hooks/pre_tool_use.py::pre_tool_use_hook`
   (before the write-capable filter so it covers ALL tools), resolve the session via
   `AGENT_SESSION_ID` (as `_handle_skill_tool_start` already does at `:360`), applying
-  the no-session-vs-infra-error split above; call `evaluate_tool_budget`; on deny
-  return `{"decision":"block","reason":...}`, increment
-  `{project_key}:tool-budget:tripped` (dedup `SET NX` per session), and surface to the
-  human (Data Flow step 4).
+  the no-session-vs-infra-error split above; call `evaluate_tool_budget`. On a deny
+  verdict (under `TOOL_BUDGET_ENABLED`, default on) ALWAYS return
+  `{"decision":"block","reason":...}`, increment `{project_key}:tool-budget:tripped`
+  (dedup `SET NX` per session) + WARNING, and set the `budget_tripped` flag — the
+  inline block fires by default. **Only when `TOOL_BUDGET_AUTO_PAUSE` is set** does
+  the deny ALSO transition status → `paused_budget` + queue the Telegram signal (Data
+  Flow step 4).
 - **CLI hook.** At the top of `.claude/hooks/pre_tool_use.py::main`, resolve the
   session via the sidecar (the exact `_load_agent_session_sidecar` →
   `AgentSession.get_by_id` path used in `.claude/hooks/post_tool_use.py:474-486`),
-  applying the same no-session-vs-infra-error split; call `evaluate_tool_budget`; on
-  deny print the reason to stderr and `sys.exit(2)` (Claude Code's block convention)
-  and surface to the human (Data Flow step 4). Fail-open on a resolution error (log
-  loudly per the split above); a genuine no-session allows silently — the budget is a
-  backstop, not a gate that can itself brick the agent.
+  applying the same no-session-vs-infra-error split; call `evaluate_tool_budget`. On
+  a deny verdict (under `TOOL_BUDGET_ENABLED`, default on) ALWAYS print the reason to
+  stderr + `sys.exit(2)` (Claude Code's block convention), increment
+  `tool-budget:tripped` + WARNING, and set the `budget_tripped` flag — the inline
+  block fires by default on the load-bearing granite-PTY surface. **Only when
+  `TOOL_BUDGET_AUTO_PAUSE` is set** does the deny ALSO transition status →
+  `paused_budget` + queue Telegram (Data Flow step 4). The granite shared-counter
+  caveat is a MAX-tuning consideration, not a reason to gate the deny off. Fail-open
+  on a resolution error (log loudly per the split above); a genuine no-session allows
+  silently — the budget is a backstop, not a gate that can itself brick the agent.
 - **CLI-hook fail-open granularity (exit-2 must propagate; a check bug must fail
   open).** Ground in `.claude/hooks/pre_tool_use.py`: `main()` is wrapped by a
   module-level `try/except Exception` at the bottom (`if __name__ == "__main__":`
@@ -628,10 +791,17 @@ beacon → log `loop_wedged` + defer to existing killer.
 - [ ] `check_worker_liveness_and_slots` must never raise into `watchdog_loop` — a
   malformed beacon JSON or Redis error logs and the loop continues. Test feeds
   corrupt JSON, asserts no propagation.
-- [ ] The reclaim-request drain must re-read owner status fresh and only reclaim
-  terminal owners — a non-terminal owner in the request list is a no-op (never
-  strips a live owner's permit). Test asserts a still-`running` requested owner is
-  NOT reclaimed.
+- [ ] The reclaim-request drain must re-read owner status fresh and reclaim ONLY on
+  an explicit terminal status — a non-terminal owner is a no-op (never strips a live
+  owner's permit). Test asserts a still-`running` requested owner is NOT reclaimed.
+- [ ] The drain treats `get_by_id → None`/lookup-exception as **unknown → SKIP**
+  (concern #2, #1868), NOT terminal — a transient Redis blip must NOT reclaim a live
+  permit. Test: a requested owner whose `get_by_id` returns `None` (and one that
+  raises) is NOT reclaimed; `permits_free` unchanged.
+- [ ] Bridge push stays non-blocking (concern #4): `check_worker_liveness_and_slots`
+  pushes reclaim-requests via the async client / a single pipeline. **Bounded-wall-time
+  test:** a burst of many terminal-owner leases completes the push phase well under a
+  wall-clock bound (asserts NO `N×socket_timeout` serial-blocking of the async loop).
 - [ ] Fix #6 evaluator + hooks must **fail open** — any session-resolution or Redis
   error results in `allow` (the budget never bricks a session). Test injects a
   resolution error, asserts the tool call proceeds.
@@ -640,14 +810,31 @@ beacon → log `loop_wedged` + defer to existing killer.
   resolution/Redis **exception** allows but logs at WARNING ("backstop BLIND") and
   increments `tool-budget:resolution_errors`. Test both paths separately: assert the
   no-session path is silent, and the infra-error path logs loudly + increments.
+- [ ] **Inline deny by default + auto-pause gate:** with `TOOL_BUDGET_ENABLED` on
+  (default) an over-budget session is **denied** (SDK block / CLI exit 2), increments
+  `tool-budget:tripped`, WARNING-logs, and sets the `budget_tripped` flag — the
+  `status` is UNTOUCHED (no `paused_budget`, no Telegram) while `TOOL_BUDGET_AUTO_PAUSE`
+  is unset. With `TOOL_BUDGET_AUTO_PAUSE=1`, the deny ALSO transitions status →
+  `paused_budget` + queues Telegram. `TOOL_BUDGET_ENABLED=false` → always allow. Test
+  all three switch states on both hook surfaces.
+- [ ] **Drip-exclusion (BLOCKER):** `reflections/agents/session_recovery_drip.run()`
+  MUST NOT resume a budget-tripped session — assert it does NOT drip a `paused_budget`
+  session to `pending` (it filters only `paused`/`paused_circuit`), and does NOT touch
+  a flag-only `budget_tripped` session whose status is still `running`. This proves no
+  `pending→denied→paused→pending` runaway can form.
 - [ ] CLI-hook exit-2 must **propagate through the module-level `except Exception`**
   (SystemExit is not an Exception) while a check-internal bug is **swallowed →
-  exit 0 → allow**. Test: a forced deny yields exit code 2; a forced check bug
-  yields exit code 0 (fail-open).
-- [ ] Budget deny **surfaces to the human**: on first deny per session the session
-  is annotated (flag + status note) AND a Telegram reaction/steer is queued; a
-  surfacing error is fail-quiet and never flips the deny to allow or crashes. Test
-  the surfacing fires once (dedup) and a surfacing exception does not block the deny.
+  exit 0 → allow**. Test (budget enabled — the default): a forced deny yields exit code 2;
+  a forced check bug yields exit code 0 (fail-open).
+- [ ] Budget deny **surfaces to the human**: on EVERY deny (default) the hook writes
+  the race-free `budget_tripped` + `budget_tripped_reason` fields (NEVER a `status`
+  write from the hook — that would race the granite adapter's partitioned
+  `update_fields` saves, concern #2). **Only under `TOOL_BUDGET_AUTO_PAUSE`** does the
+  deny additionally transition status → `paused_budget` (via the status owner) + queue
+  a Telegram reaction/steer. All surfacing is fail-quiet — a surfacing error never
+  flips the deny to allow or crashes. Test: flag set on default deny; under AUTO_PAUSE
+  the `paused_budget` transition + Telegram fire once (dedup); a surfacing exception
+  does not block the deny.
 - [ ] No new `except Exception: pass` — every swallow emits a `logger.warning` with
   the owner/session id. Test captures the record.
 
@@ -700,6 +887,15 @@ beacon → log `loop_wedged` + defer to existing killer.
   the common path).
 - [ ] `.claude/hooks/pre_tool_use.py` has no dedicated test today — REPLACE/ADD: new
   greenfield tests below cover the CLI-hook budget block.
+- [ ] `models/session_lifecycle.py` — UPDATE: add `paused_budget` to
+  `NON_TERMINAL_STATUSES` + a human-only `RECOVERY_OWNERSHIP` entry. Any test that
+  enumerates `ALL_STATUSES` / `NON_TERMINAL_STATUSES` (e.g.
+  `tests/unit/test_session_lifecycle.py`) must tolerate the new status; UPDATE those
+  membership assertions rather than pinning an exact frozenset.
+- [ ] `tests/unit/test_session_recovery_drip.py` — UPDATE/ADD (**BLOCKER**): assert
+  `session_recovery_drip.run()` does NOT re-queue a `paused_budget` session (nor a
+  flag-only `budget_tripped` running session) to `pending` — the drip-exclusion that
+  closes the flapping loop.
 
 New tests (greenfield):
 - `tests/unit/test_tool_budget.py` — `evaluate_tool_budget` ALLOW/DENY matrix:
@@ -713,8 +909,10 @@ New tests (greenfield):
   and invoke the hook directly, asserting the block without any health/timeout loop
   task alive). ALSO: the fail-open split (no-session → silent allow; injected infra
   error → allow + loud WARNING + `resolution_errors` increment); the CLI exit-2
-  propagation vs. check-bug fail-open (exit 2 vs exit 0); and the deny-surfacing
-  (session annotated + Telegram signal queued once, surfacing error fail-quiet).
+  propagation vs. check-bug fail-open (exit 2 vs exit 0); the **inline deny fires by
+  default** (`TOOL_BUDGET_ENABLED` on, `TOOL_BUDGET_AUTO_PAUSE` unset → block + flag,
+  status UNTOUCHED); and, under `TOOL_BUDGET_AUTO_PAUSE=1`, the deny-surfacing
+  (status → `paused_budget` + Telegram queued once, surfacing error fail-quiet).
   **Acceptance #2.**
 - `tests/integration/test_out_of_domain_reclaim.py` (Fix #5, after #1820) — orphan a
   slot (bind a lease to a session, transition it terminal without releasing);
@@ -726,9 +924,11 @@ New tests (greenfield):
   NO reclaim-request, NO kill signal (assert no `worker:watchdog:critical` written).
   ALSO: `BRIDGE_SLOT_RECLAIM_ENABLED=0` → detection/logging still runs, no
   reclaim-request pushed. ALSO: a burst of > `RECLAIM_REQUESTS_MAX` distinct owners
-  keeps the list bounded (Race 4 LTRIM); a new-worker/old-bridge scenario (worker
-  drains an always-empty list) emits `bridge_contract_stale` rather than silently
-  dropping.
+  keeps the list bounded (Race 4 LTRIM) and completes the push under a wall-clock bound
+  (concern #4 non-blocking async push); a drained owner whose `get_by_id → None`/raises
+  is SKIPPED not reclaimed (concern #2/#1868); a new-worker/old-bridge scenario (worker
+  drains an always-empty list) emits `bridge_contract_stale` (keyed on the reused
+  `BRIDGE_WORKER_BEACON_STALE_S` threshold) rather than silently dropping.
 - `tests/unit/test_worker_liveness_beacon_publish.py` (Fix #5) — `_write_worker_heartbeat`
   publishes a wall-clock `worker:loop_beacon` (assert `wall_ts` is `time.time()`-
   shaped, NOT a monotonic value) with the correct TTL; a Redis error is swallowed
@@ -775,12 +975,17 @@ on-loop reaper autonomously reclaims X → double reclaim.
 guarantee) — the second call finds no lease and no-ops. `permits_free` is never
 over-released. Test concurrent fire.
 
-### Risk 3: Bridge reclaims a slot whose owner is not actually terminal
+### Risk 3: Bridge reclaims a slot whose owner is not actually terminal (incl. transient-None)
 **Impact:** A stale lease snapshot lists owner X as held; X's DB row is terminal in
-the snapshot but X was re-created/reused → wrong reclaim.
-**Mitigation:** The worker-side drain RE-READS owner status fresh before
-reclaiming (never trusts the bridge's terminal verdict). The bridge only
-*requests*; the worker *decides*. Test a non-terminal requested owner is skipped.
+the snapshot but X was re-created/reused → wrong reclaim. **Sharper variant
+(concern #2, #1868):** a transient Redis lookup failure makes `get_by_id(X) → None`;
+if `None` were treated as terminal (as the autonomous reaper does at `:2585`), the
+drain would reclaim a LIVE session's permit → semaphore over-admission.
+**Mitigation:** The worker-side drain RE-READS owner status fresh and reclaims ONLY on
+an EXPLICIT terminal status; `None` or a lookup exception is treated as "unknown →
+SKIP, do not reclaim" (a deliberate divergence from the reaper's None-handling). The
+bridge only *requests*; the worker *decides*. Test both a non-terminal requested owner
+AND a `get_by_id → None`/exception requested owner are skipped (permit NOT stripped).
 
 ### Risk 4: Budget false-positive kills a legitimate long session
 **Impact:** A legitimately large session (big refactor, many tool calls) hits the
@@ -861,14 +1066,28 @@ owners keeps the list length bounded.
 
 ## Update System
 
-No update-script or migration changes required. All new state is in-memory or
-TTL'd Redis keys — no Popoto model, so no `scripts/update/migrations.py` entry.
-The new env vars (`BRIDGE_SLOT_RECLAIM_ENABLED`, `BRIDGE_WORKER_BEACON_STALE_S`,
-`RECLAIM_REQUESTS_MAX`, `TOOL_BUDGET_ENABLED`, `MAX_TOOL_CALLS_PER_SESSION`,
+No update-script or data-migration changes required. All new cross-process state is
+TTL'd Redis keys — no Popoto model for the Redis contract. The new env vars
+(`BRIDGE_SLOT_RECLAIM_ENABLED`, `BRIDGE_WORKER_BEACON_STALE_S`,
+`RECLAIM_REQUESTS_MAX`, `TOOL_BUDGET_ENABLED`,
+`TOOL_BUDGET_AUTO_PAUSE`, `MAX_TOOL_CALLS_PER_SESSION`,
 `SESSION_COST_CAP_USD`) are
 all optional with safe defaults; add each to `.env.example` with a comment line
 above (completeness-check requirement) for operator discoverability only — no
-`.env` propagation needed. Both the **bridge** and the **worker** are restarted by
+`.env` propagation needed. **Two new `AgentSession` fields (concern #2):**
+`budget_tripped` (bool, default `False`) and `budget_tripped_reason` (str, default
+`""`/`None`) are added to `models/agent_session.py` as the hook-owned deny-surfacing
+fields (the hook-owned deny-surfacing signal). Because Popoto fields are schema-on-read
+and both default falsy, existing records read the default when the field is absent —
+**no data-backfill migration is required** and no `scripts/update/migrations.py` entry
+is needed; the fields simply appear on new saves. **A new lifecycle status
+`paused_budget` is ALSO added** to `models/session_lifecycle.py`
+(`NON_TERMINAL_STATUSES` + a human-only `RECOVERY_OWNERSHIP` entry) so the auto-pause
+path never lands a session in a drip-eligible state. This is a code-enum addition (a
+frozenset + dict literal), not a persisted-schema change — existing rows are unaffected
+and it carries no migration surface. **These ARE model/enum changes** (correcting any
+"zero model change" reading): two additive `AgentSession` fields plus one status-enum
+entry, all backward-compatible with no data migration. Both the **bridge** and the **worker** are restarted by
 the standard `./scripts/valor-service.sh restart` after merge (Fix #5 touches both
 processes: worker publishes/drains, bridge reads) — no new deploy step in
 `scripts/update/run.py`. **Operational note for the builder — both mixed-version
@@ -885,10 +1104,14 @@ detectable — a silent drop is not acceptable:
   requests — so the drain is a harmless no-op (empty list). This direction is
   otherwise the silent one, so the **worker emits an operator-visible signal when it
   detects a leak it would expect a bridge request for but the request channel has
-  been empty for a sustained window**: the worker publishes a
-  `bridge_contract_stale` marker (age since the last drained request vs. observed
-  terminal-owner leaks) into `worker:watchdog:actions` + a
-  `bridge_contract_stale` counter surfaced on the dashboard. This makes a
+  stayed empty past a concrete threshold** (concern #5): when a terminal-owner leak
+  is observed AND `now − worker:slot:last_reclaim_request_drain:{host} >
+  BRIDGE_WORKER_BEACON_STALE_S` (the existing beacon-freshness threshold — reused, no
+  new var), the worker
+  publishes a `bridge_contract_stale` marker (once, dedup `SET NX EX`) into
+  `worker:watchdog:actions` + a `bridge_contract_stale` counter surfaced on the
+  dashboard. It is one timestamp compared to one threshold — no per-owner bookkeeping
+  and no separate detector loop. This makes a
   never-draining request channel (old bridge, or a bridge that stopped pushing)
   detectable rather than a silent drop. The autonomous #1820 reaper still reclaims
   the leak in this direction (unless `SLOT_LEASE_REAP_DISABLED=1`), so no slot is
@@ -934,10 +1157,15 @@ own PreToolUse dispatch is actually gated (both hook surfaces block over-budget)
   recovery ownership boundary (on-loop reaper / dead-man's-switch / `worker_watchdog.py`
   / bridge `session_watchdog`) with the no-second-kill rule, the synchronous
   per-tool budget (omnigent ALLOW/DENY model, both hook surfaces, the
-  no-session-vs-infra-error fail-open split, the human deny-surfacing, the CLI exit-2
-  propagation), the mixed-version-deploy detectability in both directions
-  (`bridge_contract_stale`), the `reclaim_requests` LTRIM cap (Race 4), the env
-  kill-switches with provisional defaults, and the dashboard operator surface.
+  no-session-vs-infra-error fail-open split, the two-switch model —
+  `TOOL_BUDGET_ENABLED` fires the inline deny by default, `TOOL_BUDGET_AUTO_PAUSE`
+  (default off) gates only the `status → paused_budget` transition + Telegram — the
+  non-drip `paused_budget` status and why bare `paused` would flap via
+  `session_recovery_drip`, the human deny-surfacing, the CLI exit-2 propagation), the
+  drain's None-as-unknown skip (#1868), the mixed-version-deploy detectability in both
+  directions (`bridge_contract_stale`, keyed on the reused `BRIDGE_WORKER_BEACON_STALE_S`
+  threshold), the `reclaim_requests` LTRIM cap (Race 4), the env kill-switches with
+  provisional defaults, and the dashboard operator surface.
   State it is the continuation of `worker-liveness-recovery.md` (#1815) and
   `slot-lease-ownership.md` (#1820).
 - [ ] Add an entry to `docs/features/README.md` index table.
@@ -984,6 +1212,18 @@ own PreToolUse dispatch is actually gated (both hook surfaces block over-budget)
   `test_tool_budget_enforcement.py`.
 - [ ] Kill-switches work: `BRIDGE_SLOT_RECLAIM_ENABLED=0` → detect/log only, no
   reclaim-request; `TOOL_BUDGET_ENABLED=false` → always allow.
+- [ ] **Inline deny fires by default:** with `TOOL_BUDGET_ENABLED` on (default) and
+  `TOOL_BUDGET_AUTO_PAUSE` unset, an over-budget session is denied (block/exit 2) +
+  `budget_tripped` flag set, but `status` is UNTOUCHED — asserted in
+  `test_tool_budget_enforcement.py`.
+- [ ] **Drip-exclusion (BLOCKER):** `session_recovery_drip.run()` does NOT re-queue a
+  `paused_budget` (nor a flag-only `budget_tripped` running) session to `pending` —
+  `grep -c "paused_budget" models/session_lifecycle.py > 0` and asserted in
+  `test_session_recovery_drip.py`. No `pending→denied→paused→pending` loop.
+- [ ] Drain None-safety (concern #2/#1868): a `get_by_id → None`/error requested owner
+  is SKIPPED, not reclaimed — asserted in `test_out_of_domain_reclaim.py`.
+- [ ] Bridge push is non-blocking (concern #4): the multi-owner burst push completes
+  under a wall-clock bound — asserted in `test_out_of_domain_reclaim.py`.
 - [ ] Fix #6 fail-open distinguishes no-session (silent allow) from infra error
   (loud WARNING + `tool_budget_resolution_errors` increment) — asserted in
   `test_tool_budget_enforcement.py`.
@@ -1048,25 +1288,49 @@ lead NEVER builds directly.
 - **Parallel**: false
 - Create `agent/tool_budget.py` with `BudgetVerdict` + `evaluate_tool_budget`
   (pure, synchronous, fail-safe on `None`); constants
-  `MAX_TOOL_CALLS_PER_SESSION` / `SESSION_COST_CAP_USD` / `TOOL_BUDGET_ENABLED`
-  (provisional, commented).
+  `MAX_TOOL_CALLS_PER_SESSION` / `SESSION_COST_CAP_USD` (**SDK/headless-path-only —
+  no-op on granite**) / `TOOL_BUDGET_ENABLED` (**DEFAULT ON — gates the inline deny**) /
+  `TOOL_BUDGET_AUTO_PAUSE` (**DEFAULT OFF — gates only the status→paused_budget +
+  Telegram extras**) (all provisional, commented). The evaluator returns a pure
+  verdict; the caller actuates the inline deny (by default) and the auto-pause extras
+  (only when opted in).
+- Add the two hook-owned `AgentSession` fields `budget_tripped` (bool, default
+  `False`) + `budget_tripped_reason` (str) to `models/agent_session.py` (concern #2 —
+  additive, falsy-default, no data migration).
+- Add the `paused_budget` lifecycle status to `models/session_lifecycle.py`
+  (**BLOCKER**): include it in `NON_TERMINAL_STATUSES` and add
+  `RECOVERY_OWNERSHIP["paused_budget"] = "human"` (human-only — NO auto-drip owner).
+  Because `reflections/agents/session_recovery_drip.run()` re-queues only
+  `status="paused"`/`"paused_circuit"`, `paused_budget` is never auto-resumed — closing
+  the `pending→denied→paused→pending` runaway. Add
+  `tests/unit/test_session_recovery_drip.py` drip-exclusion coverage.
 - Wire the SDK hook (`agent/hooks/pre_tool_use.py::pre_tool_use_hook`, top, before
   the write-capable filter): resolve via `AGENT_SESSION_ID` with the
   **no-session-vs-infra-error split** (no-session → silent allow; infra exception →
-  allow + loud WARNING + `tool-budget:resolution_errors` increment), deny →
+  allow + loud WARNING + `tool-budget:resolution_errors` increment); on a deny verdict
+  on a deny verdict (under `TOOL_BUDGET_ENABLED`, default on) ALWAYS return
   `{"decision":"block","reason":...}`, increment `{project_key}:tool-budget:tripped`
-  (dedup), and **surface the deny to the human** (session flag/status note + queued
-  Telegram signal, fail-quiet — Data Flow step 4).
+  (dedup) + WARNING, and set the hook-owned `budget_tripped`/`budget_tripped_reason`
+  via `save(update_fields=[...])` — **NEVER a `status` write from the hook (concern
+  #2)**. **Only when `TOOL_BUDGET_AUTO_PAUSE` is set** does the deny ALSO drive the
+  status→`paused_budget` transition (via the status owner — adapter/worker on granite,
+  hook on SDK) + queue Telegram, fail-quiet — Data Flow step 4.
 - Wire the CLI hook (`.claude/hooks/pre_tool_use.py::main`, top): resolve via the
   sidecar path (`_load_agent_session_sidecar` → `AgentSession.get_by_id`) with the
-  same no-session-vs-infra split; deny → stderr + `sys.exit(2)`; surface to the
-  human (Data Flow step 4). The budget check lives **inside `main()`** so a genuine
-  deny (`SystemExit(2)`) propagates through the module-level `except Exception`
-  wrapper while a check-internal bug is swallowed → exit 0 → **fails open**. Do NOT
-  wrap the deny in an `except BaseException`/bare `except`.
-- Verify: `grep -c "evaluate_tool_budget"` in both hooks `> 0`; no
-  `asyncio/Thread/sleep` in `agent/tool_budget.py`; the fail-open split and exit-2
-  propagation are covered by `test_tool_budget_enforcement.py`.
+  same no-session-vs-infra split; on a deny verdict (under `TOOL_BUDGET_ENABLED`,
+  default on) ALWAYS print the reason to stderr + `sys.exit(2)`, increment
+  `tool-budget:tripped` + WARNING, and set the `budget_tripped` flag. **Only when
+  `TOOL_BUDGET_AUTO_PAUSE` is set** does the deny ALSO drive status→`paused_budget` +
+  Telegram (Data Flow step 4). The budget check lives **inside `main()`** so a genuine deny
+  (`SystemExit(2)`) propagates through the module-level `except Exception` wrapper
+  while a check-internal bug is swallowed → exit 0 → **fails open**. Do NOT wrap the
+  deny in an `except BaseException`/bare `except`.
+- Verify: `grep -c "evaluate_tool_budget"` in both hooks `> 0`; `grep -c
+  "TOOL_BUDGET_AUTO_PAUSE"` in both hooks `> 0`; `grep -c "paused_budget"
+  models/session_lifecycle.py > 0`; no `asyncio/Thread/sleep` in `agent/tool_budget.py`;
+  the inline-deny-by-default, auto-pause gate, drip-exclusion, fail-open split, and
+  exit-2 propagation are covered by `test_tool_budget_enforcement.py` +
+  `test_session_recovery_drip.py`.
 
 ### 2. Build the out-of-domain recovery (Fix #5 — #1820 merged, gate satisfied)
 - **Task ID**: build-out-of-domain-recovery
@@ -1078,18 +1342,26 @@ lead NEVER builds directly.
 - **Gate (now passing):** re-confirm the #1820 surfaces before starting —
   `grep -c "class SlotLeaseRegistry" agent/slot_lease.py > 0` (currently 1),
   `_reap_slot_leases()` + `registry.reclaim()` present in `agent/session_health.py`.
-  These pass as of HEAD `bdb77c10`; the guard remains only as a defensive re-check.
+  These pass as of HEAD `2d1cf419`; the guard remains only as a defensive re-check.
 - Worker publish: add the wall-clock `worker:loop_beacon:{host}` write to
-  `agent/session_health.py::_write_worker_heartbeat` (`:3237`); add the
+  `agent/session_health.py::_write_worker_heartbeat` (`:3386`); add the
   `worker:slot:leases:{host}` snapshot publish + the `worker:slot:reclaim_requests:{host}`
-  drain (→ fresh-status re-read → `registry.reclaim` → `bridge_reclaims` counter) to
-  the #1820 on-loop reap pass. Emit `bridge_contract_stale` (action-log + counter)
-  when terminal-owner leaks are observed but the request channel has been empty for a
-  sustained window (new-worker/old-bridge detectability, concern #3). All fail-quiet,
-  all TTL'd.
+  drain (→ fresh-status re-read → reclaim ONLY on explicit-terminal, treat `None`/error
+  as unknown→SKIP per concern #2/#1868 → `bridge_reclaims` counter) to the #1820 on-loop
+  reap pass `_reap_slot_leases()`. **The drain MUST be inserted in
+  the always-run region: AFTER Phase 1 detection ends (`:2574`) and BEFORE the
+  Phase-2 `if reap_disabled: return` (`:2576-2578`), NOT in/after the Phase-2 `for
+  lease in leases_snapshot:` block at `:2580+` (concern #5)** — otherwise the drain is
+  skipped exactly when `SLOT_LEASE_REAP_DISABLED=1`, defeating the feature's headline
+  capability. Emit `bridge_contract_stale` (action-log + counter, dedup `SET NX EX`)
+  when a terminal-owner leak is observed AND `now − last_reclaim_request_drain_ts >
+  BRIDGE_WORKER_BEACON_STALE_S` (the existing beacon-freshness threshold, reused — no
+  new staleness var, concern #5). All fail-quiet, all TTL'd.
 - Bridge: add `check_worker_liveness_and_slots()` to
   `monitoring/session_watchdog.py`; call it from `watchdog_loop` (own try/except).
-  Fresh beacon + terminal-owner lease → push reclaim-request (`LPUSH` +
+  Fresh beacon + explicit-terminal lease owner (None/error → skip) → push reclaim-request
+  via the **async Redis client or a single pipeline** (concern #4 — never N sequential
+  sync `socket_timeout=5` calls in the async loop) (`LPUSH` +
   `LTRIM ... 0 RECLAIM_REQUESTS_MAX-1`, Race 4) + action-log entry
   (gated `BRIDGE_SLOT_RECLAIM_ENABLED`); stale/missing beacon → `loop_wedged`
   action + counter, **NO kill**. No `os.kill`/`launchctl`/`critical` key.
