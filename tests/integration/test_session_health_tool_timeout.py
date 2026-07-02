@@ -171,7 +171,8 @@ async def test_mcp_tier_wedge_requeue_carries_prepended_steering(monkeypatch):
 
     End-to-end: create a real session wedged on an MCP tool with recovery_attempts=0
     so the sub-loop tick takes the requeue (pending) branch.  After the tick the
-    session must be ``pending`` and ``queued_steering_messages[0]`` must name the tool.
+    session must be ``pending`` and the first message on the Redis steering list
+    (``peek_steering_messages``) must name the tool.
     """
     monkeypatch.delenv("TOOL_TIMEOUT_TIERS_DISABLED", raising=False)
     monkeypatch.delenv("DISABLE_PROGRESS_KILL", raising=False)
@@ -212,11 +213,13 @@ async def test_mcp_tier_wedge_requeue_carries_prepended_steering(monkeypatch):
         # that's acceptable (the steering branch only fires on requeue), but then
         # we can't assert steering.  Only assert steering when status is pending.
         if refreshed.status == "pending":
-            msgs = refreshed.queued_steering_messages or []
+            from agent.steering import peek_steering_messages
+
+            msgs = peek_steering_messages(refreshed.session_id)
             assert len(msgs) >= 1, (
                 f"requeued session must carry at least one steering message; got {msgs!r}"
             )
-            assert mcp_tool in msgs[0], (
+            assert mcp_tool in msgs[0]["text"], (
                 f"first steering message must name the tool ({mcp_tool!r}); got {msgs[0]!r}"
             )
         else:
