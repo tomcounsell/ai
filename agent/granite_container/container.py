@@ -51,6 +51,13 @@ from agent.granite_container.granite_classifier import (
     ClassificationResult,
     classify_pm_prefix,
 )
+from agent.granite_container.hook_edge import (
+    NEEDS_HUMAN,
+    TURN_END,
+    HookEdge,
+    HookEdgeConsumer,
+    record_hook_fallback,
+)
 from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
     PTYDriver,
@@ -86,6 +93,46 @@ def _resolve_pm_prime_cmd(session_type: str | None) -> str:
     if session_type == "teammate":
         return TEAMMATE_PRIME_SLASH_CMD
     return PM_PRIME_SLASH_CMD
+
+
+# --- Hook-driven turn-return settings resolvers (plan #1688) ---
+# Each resolver takes an explicit override (used by tests / callers) and falls
+# back to settings.granite when None, with a hardcoded default if settings can
+# not be loaded (bare unit-test import). Kept as free functions so the wiring
+# has a single source of truth and stays testable without a Settings instance.
+
+
+def _resolve_hook_driven(override: bool | None) -> bool:
+    if override is not None:
+        return override
+    try:
+        from config.settings import settings
+
+        return bool(settings.granite.hook_driven_turn_end)
+    except Exception:
+        return True
+
+
+def _resolve_hook_turn_end_wait_s(override: float | None) -> float:
+    if override is not None:
+        return override
+    try:
+        from config.settings import settings
+
+        return float(settings.granite.hook_turn_end_wait_s)
+    except Exception:
+        return 600.0
+
+
+def _resolve_crash_resume_cap(override: int | None) -> int:
+    if override is not None:
+        return override
+    try:
+        from config.settings import settings
+
+        return int(settings.granite.hook_crash_resume_cap)
+    except Exception:
+        return 3
 
 
 # The trust-folder prompt dismissal (per the F-probe at
@@ -143,6 +190,13 @@ _STARTUP_FRAME_TOTAL_CAP = 6000
 # 12-hour ceiling only so a truly stuck loop cannot wait forever; the
 # recovery layer is expected to act long before this is reached.
 CYCLE_IDLE_TIMEOUT_S = 12 * 60 * 60.0  # 12 hours — sanity ceiling, not a hang signal
+
+# Per-poll interval for the hook-driven turn-end wait (plan #1688). Each tick
+# drains the hook edge file, then does a short liveness/badge read on the PTY
+# (read_until_idle with a tiny budget) so on_pty_read / byte accounting stay
+# live and a crash (EOF / !isalive) is observed promptly. Short enough that a
+# turn_end edge is picked up within ~1s of the Stop hook firing.
+HOOK_POLL_INTERVAL_S = 1.0
 
 # Per-cycle idle budget for the startup-phase poll loop. Short by
 # design: the loop's job is to detect transient startup events
@@ -288,6 +342,48 @@ PM_DEV_STEER_ACK = "Steering delivered to Dev; continuing."
 # steering message flagged is_abort. Delivered through on_user_payload BEFORE the
 # loop breaks (post-break output is dropped).
 STEER_ABORT_USER_MESSAGE = "Session stopped at your request."
+
+# --- Hook-driven turn returns (plan #1688) ---
+# The verified-submit nudge written to a resumed claude session after a
+# crash-during-turn (Practice 6, load-bearing minimum). A dropped `continue`
+# re-wedges the crash path, so it is written like any other turn body.
+CRASH_RESUME_CONTINUE = "continue"
+
+# User-facing escalation delivered when repeated crashes on a single turn
+# exhaust the crash-resume cap. Guarantees the human gets a terminal message
+# instead of an infinite resume loop (issue acceptance criterion).
+CRASH_ESCALATION_MESSAGE = (
+    "This task kept crashing mid-response and I couldn't recover it after "
+    "several attempts. Please try again or follow up."
+)
+
+
+@dataclass
+class TurnWaitResult:
+    """Result of a single hook-driven (or idle-fallback) turn-boundary wait.
+
+    ``saw_turn`` plays the role of the legacy ``saw_idle`` so the routing code
+    downstream is unchanged. The extra fields drive the two edges the hook
+    channel adds (plan #1688):
+
+    - ``needs_human`` — a ``Notification`` / ``PermissionRequest`` /
+      ``AskUserQuestion`` edge fired; the caller routes to ``[/user]``
+      deterministically (no classifier guess).
+    - ``escalated`` — repeated crashes exhausted the crash-resume cap; the
+      caller delivers the operator-terminal escalation message.
+    - ``transcript_path`` — the ``Stop`` payload's transcript path, the
+      flush-safe source of the final assistant message (may be None on the
+      idle-fallback path, where the caller uses its precomputed transcript).
+    """
+
+    saw_turn: bool
+    buffer: str = ""
+    idle_marker: str = ""
+    elapsed_ms: int = 0
+    needs_human: HookEdge | None = None
+    escalated: bool = False
+    transcript_path: str | None = None
+    accumulated_bytes: int = 0
 
 
 @dataclass
@@ -602,6 +698,13 @@ class Container:
         dev_pty: PTYDriver | None = None,
         session_type: str | None = None,
         poll_steering: Callable[[], list[dict]] | None = None,
+        pm_session_id: str | None = None,
+        dev_session_id: str | None = None,
+        pm_hook_edge_file: str | None = None,
+        dev_hook_edge_file: str | None = None,
+        hook_driven: bool | None = None,
+        hook_turn_end_wait_s: float | None = None,
+        crash_resume_cap: int | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -690,6 +793,53 @@ class Container:
         # Testability seam: tests inject a fake recover_login here to avoid
         # spawning a real BYOBClient subprocess / driving a real browser.
         self._recover_login = recover_login
+
+        # --- Hook-driven turn returns (plan #1688) ---
+        # The turn-boundary authority. When hook-driven (the default, gated by
+        # settings.granite.hook_driven_turn_end), the container waits on the
+        # Claude Code `Stop` hook edge (via a HookEdgeConsumer over the
+        # per-session edge file) instead of the PTY idle heuristic. The idle
+        # heuristic (read_until_idle) is demoted to a running/idle badge,
+        # liveness, and crash detection — its code is retained, not removed.
+        # When no edge file is supplied, or the flag is off, the container falls
+        # back to the pre-#1688 idle-completion path (the documented safety
+        # valve).
+        self._pm_session_id = pm_session_id
+        self._dev_session_id = dev_session_id
+        self._hook_driven = _resolve_hook_driven(hook_driven)
+        self._hook_turn_end_wait_s = _resolve_hook_turn_end_wait_s(hook_turn_end_wait_s)
+        self._crash_resume_cap = _resolve_crash_resume_cap(crash_resume_cap)
+        self._pm_consumer: HookEdgeConsumer | None = (
+            HookEdgeConsumer(pm_hook_edge_file, session_id=pm_session_id)
+            if (self._hook_driven and pm_hook_edge_file)
+            else None
+        )
+        self._dev_consumer: HookEdgeConsumer | None = (
+            HookEdgeConsumer(dev_hook_edge_file, session_id=dev_session_id)
+            if (self._hook_driven and dev_hook_edge_file)
+            else None
+        )
+        # Deduped needs_human edges already routed to [/user] this run (keyed by
+        # ts) so a re-poll never re-delivers the same prompt.
+        self._needs_human_seen: set[float] = set()
+        # Concern #6 (resume-owner seam): True only while a crash-resume is
+        # actively re-spawning a dead PTY. The container owns the --resume for a
+        # crashed turn; external liveness-wedge recovery (#1815/#1823 granite
+        # liveness-wedge, #1728 stalled-session) that reacts to the SAME
+        # pexpect.EOF / !isalive signal must NOT also issue a --resume, or two
+        # systems fork one session. In-process callers (e.g. BridgeAdapter) can
+        # check crash_resume_in_flight() before acting; independently, the resume
+        # path bumps the liveness signals (on_turn → last_turn_at) so the
+        # cross-process wedge detector sees demonstrable progress and no-ops.
+        self._crash_resume_in_flight: bool = False
+
+    def crash_resume_in_flight(self) -> bool:
+        """Whether a crash-resume is actively re-spawning a dead PTY (concern #6).
+
+        The resume-owner seam: external liveness-wedge recovery should no-op
+        while this is True to avoid a double-resume/fork of one claude session.
+        """
+        return self._crash_resume_in_flight
 
     # -- Lifecycle --------------------------------------------------------
 
@@ -956,6 +1106,328 @@ class Container:
                     "[granite-container] on_pty_read hook raised: %s", _pty_read_err
                 )
         return (result.saw_idle, buffer, result.idle_marker, result.elapsed_ms)
+
+    # -- Hook-driven turn boundary (plan #1688) ---------------------------
+
+    def _cycle_turn(
+        self,
+        pty: PTYDriver,
+        consumer: HookEdgeConsumer | None,
+        session_id: str | None,
+        *,
+        role: str,
+    ) -> TurnWaitResult:
+        """Wait for a single turn to complete — hook-driven or idle-fallback.
+
+        When hook-driven (the default) and a consumer is present, the
+        turn-completion authority is the Claude Code ``Stop`` hook edge (via
+        :meth:`_await_turn_end`), racing a crash/timeout watchdog. Otherwise
+        this is a thin wrapper over the idle heuristic (:meth:`_cycle_idle`) —
+        the documented fallback path (feature flag off, or no edge file).
+
+        Returns a :class:`TurnWaitResult` whose ``saw_turn`` plays the role of
+        the old ``saw_idle`` so the routing code downstream is unchanged; extra
+        fields (``needs_human``, ``escalated``, ``transcript_path``) drive the
+        needs-human route and the crash-escalation terminal state.
+        """
+        if not self._hook_driven or consumer is None:
+            saw, buf, marker, ms = self._cycle_idle(pty)
+            return TurnWaitResult(saw_turn=saw, buffer=buf, idle_marker=marker, elapsed_ms=ms)
+        return self._await_turn_end(pty, consumer, session_id, role=role)
+
+    def _await_turn_end(
+        self,
+        pty: PTYDriver,
+        consumer: HookEdgeConsumer,
+        session_id: str | None,
+        *,
+        role: str,
+    ) -> TurnWaitResult:
+        """Wait for the ``Stop`` edge, racing PTY EOF / crash and a timeout.
+
+        The wait is level-triggered against the append-only edge file (a Stop
+        written before the wait arms is still read — Race 1). On each tick:
+
+        1. Drain the edge file. A ``needs_human`` edge returns immediately
+           (the deterministic ``[/user]`` route). A ``turn_end`` (parent
+           ``Stop``, never ``SubagentStop`` — Practice 5) completes the turn;
+           the final message is read from the payload's ``transcript_path``.
+        2. Do a short liveness/badge read (``read_until_idle`` with a tiny
+           budget) so ``on_pty_read`` and byte accounting stay live.
+        3. If the PTY is dead, drain the edge file ONCE more (Race 2: a late
+           ``Stop`` preceding a clean EOF is honored as completion, not a
+           crash). A genuine crash (EOF, no ``turn_end``) resumes the session
+           via ``--resume`` + a verified ``continue`` (bounded by the
+           crash-resume cap → escalate).
+        4. Past the outer budget with the PTY alive but silent → ``saw_turn``
+           False (the caller reports ``pm_hang``); never an unbounded block.
+        """
+        start = time.monotonic()
+        deadline = start + self._hook_turn_end_wait_s
+        crash_attempts = 0
+        accumulated_bytes = 0
+        last_buffer = ""
+
+        while True:
+            # 1. Drain the edge file (level-triggered).
+            edges = consumer.poll()
+            needs = self._first_new_needs_human(edges, session_id)
+            if needs is not None:
+                return TurnWaitResult(
+                    saw_turn=False,
+                    buffer=last_buffer,
+                    idle_marker="",
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    needs_human=needs,
+                    accumulated_bytes=accumulated_bytes,
+                )
+            turn_edge = self._latest_turn_end(edges, session_id)
+            if turn_edge is not None:
+                return TurnWaitResult(
+                    saw_turn=True,
+                    buffer=last_buffer,
+                    idle_marker="",
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    transcript_path=turn_edge.transcript_path,
+                    accumulated_bytes=accumulated_bytes,
+                )
+
+            # 2. Liveness / badge pump (never the completion authority).
+            alive = self._pty_alive(pty)
+            idle = pty.read_until_idle(min_content_bytes=0, timeout_s=HOOK_POLL_INTERVAL_S)
+            last_buffer = idle.turn_buffer or idle.buffer or last_buffer
+            accumulated_bytes += len(idle.buffer)
+            self._fire_pty_read(last_buffer)
+
+            # 3. Crash detection with a Race-2 re-drain.
+            if not alive:
+                late = self._latest_turn_end(consumer.poll(), session_id)
+                if late is not None:
+                    return TurnWaitResult(
+                        saw_turn=True,
+                        buffer=last_buffer,
+                        idle_marker="",
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        transcript_path=late.transcript_path,
+                        accumulated_bytes=accumulated_bytes,
+                    )
+                crash_attempts += 1
+                if crash_attempts > self._crash_resume_cap:
+                    logger.error(
+                        "[granite-container] %s crashed %d times on one turn — "
+                        "escalating (crash-resume cap=%d)",
+                        role,
+                        crash_attempts,
+                        self._crash_resume_cap,
+                    )
+                    return TurnWaitResult(
+                        saw_turn=False,
+                        buffer=last_buffer,
+                        idle_marker="",
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        escalated=True,
+                        accumulated_bytes=accumulated_bytes,
+                    )
+                resumed = self._resume_crashed_pty(pty, role)
+                if resumed is None:
+                    logger.error(
+                        "[granite-container] %s crash-resume failed (no resume "
+                        "handle or spawn error) — escalating",
+                        role,
+                    )
+                    return TurnWaitResult(
+                        saw_turn=False,
+                        buffer=last_buffer,
+                        idle_marker="",
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        escalated=True,
+                        accumulated_bytes=accumulated_bytes,
+                    )
+                pty = resumed
+                deadline = time.monotonic() + self._hook_turn_end_wait_s  # re-arm
+                continue
+
+            # 4. Bounded timeout: alive + quiet + no Stop past the budget.
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "[granite-container] %s no Stop edge within %.0fs while PTY "
+                    "alive — reporting no-turn (idle-equivalent hang)",
+                    role,
+                    self._hook_turn_end_wait_s,
+                )
+                # Concern #3: record the silent-hook fallback. This is the
+                # observable, fleet-wide signal that the hook contract is
+                # degrading on the pinned ``claude`` (alive + quiet + no Stop
+                # past the watchdog) — a rising count is the trigger to
+                # investigate before the idle fallback is ever removed (plan
+                # No-Gos [ORDERED]). Fail-silent (never raises).
+                record_hook_fallback(session_id, "stop_wait_timeout")
+                return TurnWaitResult(
+                    saw_turn=False,
+                    buffer=last_buffer,
+                    idle_marker="",
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    accumulated_bytes=accumulated_bytes,
+                )
+
+    @staticmethod
+    def _pty_alive(pty: PTYDriver) -> bool:
+        try:
+            return bool(pty.isalive())
+        except Exception:
+            return False
+
+    def _fire_pty_read(self, buffer: str) -> None:
+        """Fire the on_pty_read liveness hook (fail-silent)."""
+        if self._on_pty_read is not None:
+            try:
+                self._on_pty_read(buffer)
+            except Exception as e:
+                logger.debug("[granite-container] on_pty_read hook raised: %s", e)
+
+    @staticmethod
+    def _latest_turn_end(edges: list[HookEdge], session_id: str | None) -> HookEdge | None:
+        """Return the last parent ``Stop`` edge for this session, or None.
+
+        Filters by ``session_id`` so a Dev/subagent Stop never ends a PM turn.
+        ``SubagentStop`` is a distinct edge kind and is never returned here
+        (Practice 5 — native disambiguation, no filtering heuristic).
+        """
+        matching = [
+            e
+            for e in edges
+            if e.kind == TURN_END and (session_id is None or e.session_id == session_id)
+        ]
+        return matching[-1] if matching else None
+
+    def _first_new_needs_human(
+        self, edges: list[HookEdge], session_id: str | None
+    ) -> HookEdge | None:
+        """Return the first not-yet-seen ``needs_human`` edge for this session."""
+        for e in edges:
+            if e.kind != NEEDS_HUMAN:
+                continue
+            if session_id is not None and e.session_id not in (None, session_id):
+                continue
+            if e.ts in self._needs_human_seen:
+                continue
+            self._needs_human_seen.add(e.ts)
+            return e
+        return None
+
+    def _resume_crashed_pty(self, dead_pty: PTYDriver, role: str) -> PTYDriver | None:
+        """Resume a crashed PTY's claude session and re-arm it for the turn.
+
+        Captures the ``--resume <uuid>`` handle from the dead PTY, spawns a
+        fresh PTYDriver resuming that session (same cwd / model / env / hook
+        settings), and verified-submits a ``continue`` nudge (Practice 6
+        minimum — a dropped ``continue`` re-wedges the crash path). Swaps the
+        container's PTY reference by role. Returns the new PTY, or None if no
+        resume handle was captured or the spawn failed (→ caller escalates).
+        """
+        try:
+            resume_uuid = dead_pty.last_resume_uuid()
+        except Exception:
+            resume_uuid = None
+        if not resume_uuid:
+            return None
+        # Concern #6: mark the resume-owner window so external liveness-wedge
+        # recovery (#1815/#1823/#1728) can see the container already owns this
+        # EOF's --resume and no-op rather than issue a competing resume/kill.
+        self._crash_resume_in_flight = True
+        try:
+            try:
+                dead_pty.close(force=True)
+            except Exception:
+                pass
+            try:
+                new_pty = PTYDriver(
+                    role=role,
+                    cwd=dead_pty.cwd,
+                    model=dead_pty._explicit_model,
+                    env=dead_pty._extra_env,
+                    settings_path=dead_pty._settings_path,
+                    resume_uuid=resume_uuid,
+                )
+                new_pty.spawn()
+                new_pty.write(CRASH_RESUME_CONTINUE)
+            except Exception as e:
+                logger.error("[granite-container] %s crash-resume spawn failed: %s", role, e)
+                return None
+            if role == "dev":
+                self._dev_pty = new_pty
+            else:
+                self._pm_pty = new_pty
+            # Concern #6: bump the liveness signal so the cross-process wedge
+            # detector (which reads last_turn_at / last_pty_activity_at from
+            # Redis, not this in-process flag) sees demonstrable progress across
+            # the resume and does not fire its own recovery. Fail-silent —
+            # liveness signaling must never crash the run (mirrors on_turn guard).
+            if self._on_turn is not None:
+                try:
+                    self._on_turn()
+                except Exception as e:
+                    logger.warning("[granite-container] on_turn during crash-resume raised: %s", e)
+            logger.info(
+                "[granite-container] %s resumed via --resume %s after crash; "
+                "verified `continue` submitted",
+                role,
+                resume_uuid,
+            )
+            return new_pty
+        finally:
+            # Cleared after the re-spawn completes (success or failure); the
+            # window is intentionally narrow — just the re-spawn itself.
+            self._crash_resume_in_flight = False
+
+    def _needs_human_message(self, edge: HookEdge) -> str:
+        """Build the human-facing text for a needs-human edge (best effort).
+
+        Prefers the hook payload's own message (Notification ``message``,
+        AskUserQuestion ``tool_input`` question); falls back to the PM's last
+        assistant text (the question it just asked) read from the edge's
+        transcript_path; then to a generic prompt. Never raises.
+        """
+        payload = edge.payload or {}
+        msg = payload.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+        tool_input = payload.get("tool_input")
+        if isinstance(tool_input, dict):
+            question = tool_input.get("question") or tool_input.get("prompt")
+            if isinstance(question, str) and question.strip():
+                return question.strip()
+        try:
+            if edge.transcript_path:
+                text = last_assistant_text(edge.transcript_path)
+                if text:
+                    return text
+        except Exception:
+            pass
+        return "This needs your input to continue — please reply."
+
+    def _deliver_needs_human(self, edge: HookEdge, result: ContainerResult) -> None:
+        """Route a needs-human edge to the human via the [/user] callback."""
+        message = self._needs_human_message(edge)
+        if self._on_user_payload is not None:
+            try:
+                self._on_user_payload(message)
+                result.user_facing_routed = True
+            except Exception as e:
+                logger.warning(
+                    "[granite-container] needs_human delivery via _on_user_payload failed: %s",
+                    e,
+                )
+        result.exit_message = message
+
+    def _deliver_crash_escalation(self, result: ContainerResult) -> None:
+        """Deliver the operator-terminal escalation after crash-resume exhaustion."""
+        if self._on_user_payload is not None:
+            try:
+                self._on_user_payload(CRASH_ESCALATION_MESSAGE)
+                result.user_facing_routed = True
+            except Exception as e:
+                logger.warning("[granite-container] crash escalation delivery failed: %s", e)
 
     # -- Startup phase ----------------------------------------------------
 
@@ -1323,21 +1795,30 @@ class Container:
             # entry this cycle (content-identity guard; immune to intra-turn
             # tool_use/tool_result writes that defeated the old mtime guard).
             pm_prime_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
-            pm_prime_idle, pm_prime_buf, pm_prime_marker, pm_prime_ms = self._cycle_idle(
-                self._pm_pty
+            prime_wait = self._cycle_turn(
+                self._pm_pty, self._pm_consumer, self._pm_session_id, role="pm"
             )
-            if not pm_prime_idle:
+            pm_prime_buf = prime_wait.buffer
+            if prime_wait.needs_human is not None:
+                self._deliver_needs_human(prime_wait.needs_human, result)
+                result.exit_reason = "pm_user"
+            elif prime_wait.escalated:
+                self._deliver_crash_escalation(result)
+                result.exit_reason = "exception"
+                result.exit_message = "crash-resume cap exhausted during prime turn"
+            elif not prime_wait.saw_turn:
                 result.exit_reason = "pm_hang"
                 result.exit_message = (
-                    f"PM did not reach idle after prime within {CYCLE_IDLE_TIMEOUT_S}s"
+                    f"PM did not reach turn-end after prime within {CYCLE_IDLE_TIMEOUT_S}s"
                 )
             else:
-                result.total_pm_pty_bytes += len(pm_prime_buf)
+                result.total_pm_pty_bytes += prime_wait.accumulated_bytes or len(pm_prime_buf)
                 # Read PM's last assistant text verbatim from the JSONL
                 # transcript (zero-LLM path: no classify on painted pm_buf).
+                prime_read_path = prime_wait.transcript_path or pm_transcript
                 pm_prime_text = (
-                    last_assistant_text(pm_transcript, baseline_text_count=pm_prime_baseline)
-                    if pm_transcript
+                    last_assistant_text(prime_read_path, baseline_text_count=pm_prime_baseline)
+                    if prime_read_path
                     else ""
                 )
                 if pm_prime_text:
@@ -1459,23 +1940,43 @@ class Container:
                     # NEW text-bearing entry this cycle (content-identity guard).
                     pm_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
 
-                    # Wait for PM idle.
-                    pm_idle, pm_buf, pm_marker, pm_ms = self._cycle_idle(self._pm_pty)
-                    if not pm_idle:
+                    # Wait for the PM turn to complete. Hook-driven (default):
+                    # the parent Stop edge is the authority (#1688); the idle
+                    # heuristic is the documented fallback. The needs-human and
+                    # crash-escalation edges are handled before classification.
+                    wait = self._cycle_turn(
+                        self._pm_pty, self._pm_consumer, self._pm_session_id, role="pm"
+                    )
+                    pm_buf = wait.buffer
+                    if wait.needs_human is not None:
+                        # Deterministic [/user] route — no classifier guess.
+                        self._deliver_needs_human(wait.needs_human, result)
+                        result.exit_reason = "pm_user"
+                        break
+                    if wait.escalated:
+                        self._deliver_crash_escalation(result)
+                        result.exit_reason = "exception"
+                        result.exit_message = "crash-resume cap exhausted"
+                        break
+                    if not wait.saw_turn:
                         result.exit_reason = "pm_hang"
                         result.exit_message = (
-                            f"PM did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
+                            f"PM did not reach turn-end within {CYCLE_IDLE_TIMEOUT_S}s"
                         )
                         break
 
-                    result.total_pm_pty_bytes += len(pm_buf)
+                    result.total_pm_pty_bytes += wait.accumulated_bytes or len(pm_buf)
 
                     # Read PM's last assistant text verbatim from the JSONL
                     # transcript (zero-LLM: classify on transcript, not
-                    # painted PTY buffer pm_buf).
+                    # painted PTY buffer pm_buf). The hook edge's transcript_path
+                    # (the Stop payload) is preferred — it is the flush-safe
+                    # source confirmed by the Stop; falls back to the precomputed
+                    # session transcript on the idle path.
+                    read_path = wait.transcript_path or pm_transcript
                     pm_text = (
-                        last_assistant_text(pm_transcript, baseline_text_count=pm_baseline)
-                        if pm_transcript
+                        last_assistant_text(read_path, baseline_text_count=pm_baseline)
+                        if read_path
                         else ""
                     )
                     if pm_text:

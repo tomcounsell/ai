@@ -422,6 +422,45 @@ class GraniteSettings(BaseModel):
         ),
     )
 
+    # --- Hook-driven turn returns (plan #1688) ---
+    hook_driven_turn_end: bool = Field(
+        default=True,
+        description=(
+            "Feature flag: when True (default), the granite container treats the "
+            "Claude Code ``Stop`` hook edge as the turn-completion authority and "
+            "reads the final assistant message from the hook payload's "
+            "transcript_path. The PTY idle heuristic (read_until_idle) is demoted "
+            "to a running/idle badge, liveness, and crash detection. When False, "
+            "the container falls back to the pre-#1688 idle-completion path (the "
+            "documented safety valve for a claude version that regresses the hook "
+            "contract). Override via GRANITE__HOOK_DRIVEN_TURN_END env var. "
+            "Plan #1688 / docs/features/granite-hook-driven-turn-returns.md."
+        ),
+    )
+    hook_turn_end_wait_s: float = Field(
+        default=600.0,
+        gt=0,
+        description=(
+            "Outer budget (seconds) the container waits for a ``Stop`` turn-end "
+            "edge before the crash/timeout watchdog trips. The wait is always a "
+            "race against PTY EOF / !isalive() — this bound only fires when the "
+            "PTY is alive but no Stop edge arrives (the silent-hook failure mode). "
+            "Override via GRANITE__HOOK_TURN_END_WAIT_S env var."
+        ),
+    )
+    hook_crash_resume_cap: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "Max crash-resume attempts on a single turn before the container "
+            "escalates with an operator-terminal message instead of looping "
+            "forever. Each crash (PTY EOF with no Stop edge) resumes the same "
+            "claude session via --resume <uuid> + a verified `continue` nudge. "
+            "Override via GRANITE__HOOK_CRASH_RESUME_CAP env var."
+        ),
+    )
+
     # --- Background-task supervisor (Fix #4, issue #1816) ---
     supervisor_max_restarts: int = Field(
         default=5,

@@ -333,6 +333,8 @@ class PTYDriver:
         env: dict[str, str] | None = None,
         append_system_prompt: str | None = None,
         session_id: str | None = None,
+        settings_path: str | None = None,
+        resume_uuid: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
@@ -361,6 +363,18 @@ class PTYDriver:
         # When set, the transcript path is deterministically known at spawn
         # time — no post-hoc UUID scraping required.
         self._session_id = session_id
+        # Per-session Claude Code settings file (plan #1688). When set,
+        # `spawn()` appends `--settings <path>`; the file registers the hook
+        # forwarder so turn-end (Stop) and needs-human edges land in the
+        # per-session edge file. None keeps the pre-#1688 spawn args (idle
+        # heuristic path — the documented fallback).
+        self._settings_path = settings_path
+        # Crash-resume handle (plan #1688). When set, `spawn()` resumes the
+        # existing claude session via `--resume <uuid>` instead of starting a
+        # fresh `--session-id <uuid>` — the crashed turn continues with full
+        # context. `--resume` and `--session-id` are mutually exclusive, so a
+        # resume spawn omits `--session-id`.
+        self._resume_uuid = resume_uuid
         self._child: pexpect.spawn | None = None
         self._spawned_at: float | None = None
         # Per-turn screen capture (raw, ANSI-laden). Accumulates every
@@ -396,8 +410,17 @@ class PTYDriver:
         model = self._explicit_model or _default_substrate_model(self.role)
 
         args = ["--model", model, "--permission-mode", "bypassPermissions"]
-        if self._session_id:
+        # `--resume <uuid>` (crash-resume, #1688) takes precedence over a fresh
+        # `--session-id`; the two flags are mutually exclusive.
+        if self._resume_uuid:
+            args += ["--resume", self._resume_uuid]
+        elif self._session_id:
             args += ["--session-id", self._session_id]
+        # Plan #1688: register the per-session hook forwarder via --settings so
+        # the Stop / needs-human edges are emitted deterministically. The
+        # --permission-mode bypassPermissions arg above is preserved.
+        if self._settings_path:
+            args += ["--settings", self._settings_path]
 
         env = _build_env()
         if self._extra_env:

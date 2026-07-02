@@ -440,8 +440,13 @@ def last_assistant_text(transcript_path: str, *, baseline_text_count: int | None
 
     Residual: an intermediate mid-turn aside (a text-bearing assistant entry
     flushed AFTER the baseline but BEFORE the turn's closing text) can still be
-    returned, because it does increment the count. The deterministic fix is the
-    hook-driven Stop signal in followup #1688.
+    returned, because it does increment the count. The deterministic fix shipped
+    in #1688: the hook-driven turn authority (``Container._await_turn_end`` via
+    ``hook_edge.HookEdgeConsumer``) only reads this transcript AFTER the parent
+    ``Stop`` hook edge fires — the Stop payload names the exact flush-safe
+    ``transcript_path``, so the closing text is guaranteed present. See
+    ``docs/features/granite-hook-driven-turn-returns.md``. This function remains
+    the reader on the idle-fallback path (feature flag off / no edge file).
     """
     texts = _text_bearing_assistant_texts(transcript_path)
     if baseline_text_count is not None and len(texts) <= baseline_text_count:

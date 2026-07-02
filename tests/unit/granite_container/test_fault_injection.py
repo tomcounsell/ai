@@ -79,6 +79,37 @@ class TestClass1TurnDetectionWedge(unittest.TestCase):
         result = driver.read_until_idle(min_content_bytes=400, timeout_s=0.5)
         self.assertFalse(result.saw_idle)
 
+    def test_hook_edge_resolves_the_wedge(self) -> None:
+        """#1688 green-swap: with the Stop hook edge present, turn-end is
+        detected even though the idle bar is stripped (read_until_idle wedges).
+
+        The idle heuristic remains wedged (asserted above); the hook edge
+        supplies the turn-end signal independent of the bar, so the container's
+        hook-driven authority no longer depends on the fragile bar glyph.
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from agent.granite_container.hook_edge import TURN_END, HookEdgeConsumer
+
+        with tempfile.TemporaryDirectory() as d:
+            edge = Path(d) / "edges.ndjson"
+            envelope = {
+                "ts": 1.0,
+                "event": "Stop",
+                "payload": {
+                    "hook_event_name": "Stop",
+                    "session_id": "sid",
+                    "transcript_path": "/t.jsonl",
+                },
+            }
+            edge.write_text(json.dumps(envelope) + "\n")
+            consumer = HookEdgeConsumer(edge, session_id="sid")
+            edges = consumer.poll()
+            self.assertEqual([e.kind for e in edges], [TURN_END])
+            self.assertEqual(edges[0].transcript_path, "/t.jsonl")
+
 
 # ===========================================================================
 # Class 2 — Startup-dialog / /login wedge

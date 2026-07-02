@@ -69,6 +69,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agent.granite_container.container import Container, ContainerResult
+from agent.granite_container.hook_edge import generate_hook_settings
 from agent.granite_container.pty_pool import PairSpawnSpec, PTYPool
 from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
@@ -329,6 +330,36 @@ def _transcript_path_from_spec(cwd: str, session_id: str) -> str:
     return os.path.join(home, ".claude", "projects", slug, f"{session_id}.jsonl")
 
 
+def _hook_driven_enabled() -> bool:
+    """Whether hook-driven turn returns are enabled (feature flag, default on).
+
+    Reads ``settings.granite.hook_driven_turn_end``; defaults to True if
+    settings can not be loaded. Plan #1688.
+    """
+    try:
+        from config.settings import settings
+
+        return bool(settings.granite.hook_driven_turn_end)
+    except Exception:
+        return True
+
+
+def _hook_edge_base_dir() -> str:
+    """Base directory for per-session hook settings + edge files.
+
+    ``<data_dir>/granite_hook_edges`` when settings are available, else a temp
+    dir. Per-session subdirs are created under it by ``_generate_hook_settings``.
+    """
+    try:
+        from config.settings import settings
+
+        return str(settings.paths.data_dir / "granite_hook_edges")
+    except Exception:
+        import tempfile
+
+        return os.path.join(tempfile.gettempdir(), "granite_hook_edges")
+
+
 def _exception_is_benign(result: ContainerResult) -> bool:
     """Return True for soft exceptions that don't warrant an ERROR-level alert.
 
@@ -475,6 +506,20 @@ class BridgeAdapter:
             self._on_user_payload = self._make_user_callback()
             self._on_complete_payload = self._make_complete_callback()
 
+    def _generate_hook_settings(self, role: str, session_id: str) -> tuple[str, str]:
+        """Generate a per-PTY settings file + edge file for the hook channel.
+
+        Returns ``(settings_path, edge_file_path)``. The edge file is per-PTY
+        (keyed by role + the PTY's session UUID) so PM and Dev — which share
+        one process env overlay — still write to separate per-session files;
+        the forwarder receives the edge path as its CLI argument (plan #1688).
+        """
+        session_key = str(getattr(self._agent_session, "session_id", "") or session_id)
+        base = os.path.join(_hook_edge_base_dir(), session_key)
+        settings_dir = os.path.join(base, role)
+        edge_file = os.path.join(base, f"{role}_hook_edges.ndjson")
+        return generate_hook_settings(settings_dir, edge_file)
+
     # -- Public API -------------------------------------------------------
 
     async def run(self, user_message: str, working_dir: str) -> str:
@@ -504,12 +549,38 @@ class BridgeAdapter:
         #   ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
         pm_session_id = str(uuid.uuid4())
         dev_session_id = str(uuid.uuid4())
+        # Plan #1688: generate per-PTY Claude Code settings registering the
+        # fail-silent hook forwarder so the turn-end (Stop) and needs-human
+        # edges land in per-session edge files. Gated by the feature flag
+        # (default on); on any failure the pair spawns without --settings and
+        # the container falls back to the idle-completion path.
+        pm_settings_path = dev_settings_path = None
+        pm_hook_edge_file = dev_hook_edge_file = None
+        hook_driven = _hook_driven_enabled()
+        if hook_driven:
+            try:
+                pm_settings_path, pm_hook_edge_file = self._generate_hook_settings(
+                    "pm", pm_session_id
+                )
+                dev_settings_path, dev_hook_edge_file = self._generate_hook_settings(
+                    "dev", dev_session_id
+                )
+            except Exception as e:
+                logger.warning(
+                    "[granite-bridge-adapter] hook settings generation failed; "
+                    "falling back to idle-completion path: %s",
+                    e,
+                )
+                pm_settings_path = dev_settings_path = None
+                pm_hook_edge_file = dev_hook_edge_file = None
         spawn_spec = PairSpawnSpec(
             cwd=working_dir,
             env=self._session_env,
             pm_model=self._pm_model,
             pm_session_id=pm_session_id,
             dev_session_id=dev_session_id,
+            pm_settings_path=pm_settings_path,
+            dev_settings_path=dev_settings_path,
         )
         async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev, pty_slot):
             # Hand the pool's pre-warmed pair to Container so it
@@ -553,6 +624,11 @@ class BridgeAdapter:
                 dev_pty=dev,
                 session_type=self._session_type,
                 poll_steering=_poll_steering,
+                pm_session_id=pm_session_id,
+                dev_session_id=dev_session_id,
+                pm_hook_edge_file=pm_hook_edge_file,
+                dev_hook_edge_file=dev_hook_edge_file,
+                hook_driven=hook_driven,
             )
             # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
             pm_path = _transcript_path_from_spec(working_dir, pm_session_id)

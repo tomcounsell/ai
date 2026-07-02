@@ -141,6 +141,12 @@ class PairSpawnSpec:
     # `claude --session-id <uuid>` sets the transcript basename to <uuid>.jsonl.
     pm_session_id: str | None = None
     dev_session_id: str | None = None
+    # Per-PTY Claude Code settings files (plan #1688). When set, each PTY is
+    # spawned with `--settings <path>` registering the hook forwarder so its
+    # turn-end (Stop) / needs-human edges land in the per-session edge file.
+    # None keeps the pre-#1688 spawn args (the idle-heuristic fallback path).
+    pm_settings_path: str | None = None
+    dev_settings_path: str | None = None
 
 
 class PTYPool:
@@ -512,6 +518,7 @@ class PTYPool:
                 model=spec.pm_model,
                 env=spec.env,
                 session_id=spec.pm_session_id,
+                settings_path=spec.pm_settings_path,
             )
             dev = PTYDriver(
                 role="dev",
@@ -519,6 +526,7 @@ class PTYPool:
                 model=spec.dev_model,
                 env=spec.env,
                 session_id=spec.dev_session_id,
+                settings_path=spec.dev_settings_path,
             )
             pm.spawn()
             dev.spawn()
