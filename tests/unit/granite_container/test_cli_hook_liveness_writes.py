@@ -208,3 +208,44 @@ def test_check_tool_timeout_arms_on_datetime_shortcircuits_on_float():
     assert _check_tool_timeout(float_entry) is None, (
         "a float last_tool_use_at must short-circuit (the tier loop stays unarmed)"
     )
+
+
+def test_pre_hook_cooldown_suppresses_rapid_second_write(granite_session):
+    """The file-based cooldown coalesces rapid pre-hook writes (builder note #1).
+
+    Without the gate the new pre-hook AgentSession write would fire uncooled on
+    every tool call for every CLI-hook session. The second call inside the 5s
+    window must be a no-op, so ``current_tool_name`` reflects only the first write.
+    """
+    pre_tool_use._record_tool_start(
+        {"session_id": granite_session.cli_session_id, "tool_name": "Read"}
+    )
+    assert _reload(granite_session.session.session_id).current_tool_name == "Read"
+
+    # Second call within the window → coalesced; field stays "Read", not "Edit".
+    pre_tool_use._record_tool_start(
+        {"session_id": granite_session.cli_session_id, "tool_name": "Edit"}
+    )
+    assert _reload(granite_session.session.session_id).current_tool_name == "Read"
+
+    # Clean up the cooldown sidecar file so the fixture's rmdir succeeds.
+    (granite_session.sidecar_dir / "tool_liveness_cooldown").unlink(missing_ok=True)
+
+
+def test_liveness_cooldown_ok_gate_window():
+    """``_liveness_cooldown_ok`` allows the first write, suppresses inside the
+    5s window, and re-allows past it — with an injected clock for determinism."""
+    sid = f"cooldown-unit-{id(object())}"
+    sidecar_dir = pre_tool_use._REPO_ROOT / "data" / "sessions" / sid
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        assert pre_tool_use._liveness_cooldown_ok(sid, 1000.0) is True  # first — stamps 1000
+        assert pre_tool_use._liveness_cooldown_ok(sid, 1002.0) is False  # within 5s
+        assert pre_tool_use._liveness_cooldown_ok(sid, 1004.9) is False  # still within 5s
+        assert pre_tool_use._liveness_cooldown_ok(sid, 1010.0) is True  # past window — re-allowed
+    finally:
+        (sidecar_dir / "tool_liveness_cooldown").unlink(missing_ok=True)
+        try:
+            sidecar_dir.rmdir()
+        except OSError:
+            pass
