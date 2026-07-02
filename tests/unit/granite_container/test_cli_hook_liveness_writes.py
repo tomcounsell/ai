@@ -27,6 +27,7 @@ already used by ``tests/unit/test_pre_tool_use_hook.py``.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -86,11 +87,7 @@ def granite_session():
         session.delete()
     except Exception:
         pass
-    try:
-        (sidecar_dir / "agent_session.json").unlink(missing_ok=True)
-        sidecar_dir.rmdir()
-    except Exception:
-        pass
+    shutil.rmtree(sidecar_dir, ignore_errors=True)
 
 
 def _reload(session_id: str) -> AgentSession:
@@ -109,6 +106,42 @@ def test_pre_hook_sets_tool_name_and_datetime_timestamp(granite_session):
     assert refreshed.last_tool_use_at is not None
     # CONCERN 4: the tier loop requires a datetime, never a float.
     assert isinstance(refreshed.last_tool_use_at, datetime)
+
+
+def test_pre_hook_cooldown_coalesces_rapid_writes(granite_session):
+    """The CLI hook runs as a fresh process per tool call, so the SDK path's
+    in-memory cooldown (``agent.hooks.liveness_writers``) cannot coalesce
+    writes across invocations. ``_record_tool_start`` persists a file-based
+    cooldown stamp in the sidecar dir instead — a second pre-hook call within
+    the cooldown window must be coalesced (no write), bounding the Redis
+    write rate for every CLI-hook session.
+    """
+    pre_tool_use._record_tool_start(
+        {"session_id": granite_session.cli_session_id, "tool_name": "Bash"}
+    )
+    assert _reload(granite_session.session.session_id).current_tool_name == "Bash"
+
+    # Second call within the cooldown window, different tool name — must be
+    # coalesced: current_tool_name stays "Bash".
+    pre_tool_use._record_tool_start(
+        {"session_id": granite_session.cli_session_id, "tool_name": "Edit"}
+    )
+    refreshed = _reload(granite_session.session.session_id)
+    assert refreshed.current_tool_name == "Bash", (
+        "second pre-hook call within the 5s cooldown window must be coalesced"
+    )
+
+
+def test_pre_hook_cooldown_fails_open_on_bad_stamp_file(granite_session):
+    """A corrupt/unreadable cooldown stamp must not block the liveness write
+    (fail-open — a wedge must never be masked by a cooldown-file problem)."""
+    cooldown_path = granite_session.sidecar_dir / "tool_liveness_cooldown"
+    cooldown_path.write_text("not-a-float")
+
+    pre_tool_use._record_tool_start(
+        {"session_id": granite_session.cli_session_id, "tool_name": "Bash"}
+    )
+    assert _reload(granite_session.session.session_id).current_tool_name == "Bash"
 
 
 def test_post_hook_clears_tool_name_and_refreshes_datetime(granite_session):
