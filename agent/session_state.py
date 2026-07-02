@@ -7,7 +7,10 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agent.slot_lease import SlotLeaseRegistry
 
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)
@@ -73,7 +76,16 @@ _starting_workers: set[str] = set()
 # across all chat_ids. Initialized in _run_worker() before any worker loop
 # starts, so it is always available when _worker_loop() first awaits it.
 # None sentinel means no ceiling (pre-initialization or testing).
-_global_session_semaphore: asyncio.Semaphore | None = None
+#
+# A SlotLeaseRegistry (agent/slot_lease.py), not a raw asyncio.Semaphore
+# (issue #1820). The raw semaphore was ownerless: a permit acquired by the
+# worker loop could only ever be released by that same loop's `finally`
+# block, so an out-of-band kill (health-check progress-kill, per-tool
+# timeout) that flipped a session's DB row terminal left its permit leaked
+# with nothing able to release it. The registry keys every held permit to
+# an owner_session_id so the reaper and out-of-band killers can reclaim it
+# idempotently. See agent/slot_lease.py for the full design rationale.
+_slot_registry: "SlotLeaseRegistry | None" = None
 
 # Loop-liveness beacon: bumped by an on-loop task; read by the off-loop
 # watchdog to distinguish "loop ticking" from "loop frozen". monotonic()

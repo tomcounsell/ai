@@ -337,24 +337,57 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
+    def _get_slot_reclaims_total() -> int:
+        """Sum the per-project ``slot_reclaims`` Redis counters for projects
+        this machine serves (issue #1820).
+
+        ``slot_reclaims`` is incremented by the slot-lease reap pass
+        (``agent/session_health.py::_reap_slot_leases``) and by
+        ``_apply_recovery_transition`` whenever a leaked concurrency slot is
+        auto-reclaimed without a worker restart. Surfacing the total makes the
+        self-heal operator-visible: a rising count signals a recurring leak
+        worth root-causing (see docs/features/slot-lease-ownership.md).
+        Fail-quiet — never blocks the health payload.
+        """
+        try:
+            import redis as redis_lib
+
+            from ui.data.machine import get_machine_project_keys
+
+            r = redis_lib.Redis.from_url(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            total = 0
+            for project_key in get_machine_project_keys():
+                val = r.get(f"{project_key}:session-health:slot_reclaims")
+                if val:
+                    total += int(val)
+            return total
+        except Exception:
+            return 0
+
     def _get_worker_health() -> dict:
         """Check worker health from last_worker_connected file freshness."""
 
         # TODO: migrate to _resolve_heartbeat_path if the UI ever runs from a worktree
         heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
+        # Additive scalar (issue #1820) — sits beside age_s in this same dict,
+        # not a new top-level key or a per-project map.
+        slot_reclaims = _get_slot_reclaims_total()
         try:
             if heartbeat_file.exists():
                 mtime = heartbeat_file.stat().st_mtime
                 age_s = round(time.time() - mtime)
                 if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
-                    return {"status": "ok", "age_s": age_s}
+                    return {"status": "ok", "age_s": age_s, "slot_reclaims": slot_reclaims}
                 elif age_s < WORKER_DOWN_THRESHOLD_S:
-                    return {"status": "running", "age_s": age_s}
+                    return {"status": "running", "age_s": age_s, "slot_reclaims": slot_reclaims}
                 else:
-                    return {"status": "error", "age_s": age_s}
+                    return {"status": "error", "age_s": age_s, "slot_reclaims": slot_reclaims}
         except OSError:
             pass
-        return {"status": "error", "age_s": None}
+        return {"status": "error", "age_s": None, "slot_reclaims": slot_reclaims}
 
     def _get_claude_auth_health() -> dict:
         """Check Claude Code subscription auth via `claude auth status`."""
@@ -580,6 +613,9 @@ def create_app() -> FastAPI:
                     "bridge_last_seen_s": bridge["age_s"],
                     "worker": worker["status"],
                     "worker_last_seen_s": worker["age_s"],
+                    # Additive-only (issue #1820): count of concurrency slots
+                    # auto-reclaimed from leaked leases without a worker restart.
+                    "worker_slot_reclaims": worker["slot_reclaims"],
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
                     "email_alert": email.get("alert"),
@@ -615,6 +651,7 @@ def create_app() -> FastAPI:
                 "bridge_last_seen_s": bridge["age_s"],
                 "worker": worker["status"],
                 "worker_last_seen_s": worker["age_s"],
+                "worker_slot_reclaims": worker["slot_reclaims"],
                 "email": email["status"],
                 "email_last_seen_s": email["age_s"],
                 "email_alert": email.get("alert"),

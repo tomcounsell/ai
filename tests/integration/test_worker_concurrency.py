@@ -23,6 +23,7 @@ from agent.agent_session_queue import (
     _pop_agent_session,
     _starting_workers,
 )
+from agent.slot_lease import SlotLeaseRegistry
 from config.enums import SessionType
 from models.agent_session import AgentSession
 
@@ -128,11 +129,11 @@ class TestGlobalSemaphore:
         import agent.session_state as _ss
 
         max_sessions = 2
-        original_semaphore = _ss._global_session_semaphore
+        original_semaphore = _ss._slot_registry
 
         try:
             # Set up a semaphore with a low ceiling for testing
-            _ss._global_session_semaphore = asyncio.Semaphore(max_sessions)
+            _ss._slot_registry = SlotLeaseRegistry(max_sessions)
 
             chat_id_a = "test-semaphore-chat-a"
             chat_id_b = "test-semaphore-chat-b"
@@ -170,7 +171,7 @@ class TestGlobalSemaphore:
                 f"MAX_CONCURRENT_SESSIONS={max_sessions}"
             )
         finally:
-            _ss._global_session_semaphore = original_semaphore
+            _ss._slot_registry = original_semaphore
             # Clean up workers
             for task in list(_active_workers.values()):
                 task.cancel()
@@ -179,14 +180,14 @@ class TestGlobalSemaphore:
 
     @pytest.mark.asyncio
     async def test_semaphore_none_allows_unlimited_sessions(self):
-        """When _global_session_semaphore is None, no ceiling applies.
+        """When _slot_registry is None, no ceiling applies.
 
         This is the backward-compatible mode before the worker initializes
         the semaphore (e.g., in tests that don't call _run_worker).
         """
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _queue._slot_registry
         try:
-            _queue._global_session_semaphore = None
+            _queue._slot_registry = None
             # Just verify the pop path doesn't crash when semaphore is None
             chat_id = "test-semaphore-none"
             _create_test_session(chat_id=chat_id, session_id="sess-no-sem")
@@ -194,7 +195,7 @@ class TestGlobalSemaphore:
             assert result is not None
             assert result.status == "running"
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _queue._slot_registry = original_semaphore
 
 
 class TestPerChatSerialization:
@@ -241,9 +242,9 @@ class TestPerChatSerialization:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _queue._slot_registry
         try:
-            _queue._global_session_semaphore = asyncio.Semaphore(3)  # Global ceiling
+            _queue._slot_registry = SlotLeaseRegistry(3)  # Global ceiling
 
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 _ensure_worker(chat_id)
@@ -258,7 +259,7 @@ class TestPerChatSerialization:
                 f"Expected 3 sessions to execute, got {len(execution_order)}: {execution_order}"
             )
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _queue._slot_registry = original_semaphore
             task = _active_workers.pop(chat_id, None)
             if task:
                 task.cancel()
@@ -301,9 +302,9 @@ class TestPerChatSerialization:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _ss._global_session_semaphore
+        original_semaphore = _ss._slot_registry
         try:
-            _ss._global_session_semaphore = asyncio.Semaphore(max_sessions)
+            _ss._slot_registry = SlotLeaseRegistry(max_sessions)
 
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 for cid in chat_ids:
@@ -323,7 +324,7 @@ class TestPerChatSerialization:
                 "hold time."
             )
         finally:
-            _ss._global_session_semaphore = original_semaphore
+            _ss._slot_registry = original_semaphore
             for cid in chat_ids:
                 task = _active_workers.pop(cid, None)
                 if task:
@@ -361,9 +362,9 @@ class TestPMProjectKeySerialization:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _queue._slot_registry
         try:
-            _queue._global_session_semaphore = asyncio.Semaphore(5)
+            _queue._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Both PM sessions should route to the same project-keyed worker
                 _ensure_worker(project_key, is_project_keyed=True)
@@ -374,7 +375,7 @@ class TestPMProjectKeySerialization:
                 "Project-keyed serialization is broken."
             )
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _queue._slot_registry = original_semaphore
             task = _active_workers.pop(project_key, None)
             if task:
                 task.cancel()
@@ -415,9 +416,9 @@ class TestDevWorktreeParallelism:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _queue._slot_registry
         try:
-            _queue._global_session_semaphore = asyncio.Semaphore(5)
+            _queue._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Each slugged dev session gets its own slug-keyed worker.
                 # Stagger starts so Worker A can pop its session before Worker B
@@ -433,7 +434,7 @@ class TestDevWorktreeParallelism:
                 "Slugged dev sessions should run in parallel."
             )
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _queue._slot_registry = original_semaphore
             for sl in slugs:
                 task = _active_workers.pop(sl, None)
                 if task:
@@ -475,9 +476,9 @@ class TestDevWorktreeParallelism:
             async with count_lock:
                 running_count[0] -= 1
 
-        original_semaphore = _queue._global_session_semaphore
+        original_semaphore = _queue._slot_registry
         try:
-            _queue._global_session_semaphore = asyncio.Semaphore(5)
+            _queue._slot_registry = SlotLeaseRegistry(5)
             with patch("agent.agent_session_queue._execute_agent_session", new=fake_execute):
                 # Each slugged dev session gets its own slug-keyed worker,
                 # regardless of shared chat_id.
@@ -492,7 +493,7 @@ class TestDevWorktreeParallelism:
                 "via slug-keyed workers (issue #1085)."
             )
         finally:
-            _queue._global_session_semaphore = original_semaphore
+            _queue._slot_registry = original_semaphore
             for sl in slugs:
                 task = _active_workers.pop(sl, None)
                 if task:

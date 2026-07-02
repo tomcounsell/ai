@@ -802,16 +802,25 @@ class TestRecoveryAttempts:
         The recovery transition logic was extracted from
         ``_agent_session_health_check`` into the shared helper
         ``_apply_recovery_transition`` by refactor #1270 (issue #1578); inspect
-        the helper where these references now live.
+        the helper where these references now live. ``reprieve_count`` itself
+        moved again by issue #1820 OQ3 — the Tier-2 reprieve decision AND its
+        telemetry (including the ``reprieve_count`` save) were extracted into
+        the shared ``_should_kill_no_progress`` predicate so every
+        ``no_progress``-shaped producer (never-started, the narrowed
+        running-scan elif, and Fix #3's progress-deadline watcher) shares one
+        reprieve policy instead of each carrying its own copy — so
+        ``reprieve_count`` is asserted against that helper instead.
         """
         import inspect
 
-        from agent.session_health import _apply_recovery_transition
+        from agent.session_health import _apply_recovery_transition, _should_kill_no_progress
 
         src = inspect.getsource(_apply_recovery_transition)
         assert "recovery_attempts" in src
         assert "MAX_RECOVERY_ATTEMPTS" in src
-        assert "reprieve_count" in src
+
+        reprieve_src = inspect.getsource(_should_kill_no_progress)
+        assert "reprieve_count" in reprieve_src
 
 
 class TestDisableProgressKill:
@@ -993,60 +1002,75 @@ class TestReprieveScopedToNoProgress:
         Exercises the gating structurally since the health-check function
         is a large async loop (testing it end-to-end requires a full Redis
         + worker harness).
+
+        Issue #1820 OQ3 moved the reprieve decision + its telemetry
+        (tier1_flagged_total, _tier2_reprieve_signal) OUT of
+        ``_apply_recovery_transition`` and into the shared
+        ``_should_kill_no_progress`` predicate — so every no_progress-shaped
+        producer (this caller, the narrowed running-scan elif, and Fix #3's
+        progress-deadline watcher) shares one reprieve policy instead of each
+        carrying its own copy. The gating assertion now has two parts: (1)
+        ``_apply_recovery_transition`` calls the shared predicate ONLY inside
+        the ``reason_kind == "no_progress"`` gate; (2) the predicate's own
+        source contains the Tier 1/Tier 2 logic.
         """
         import inspect
 
-        # The gate + Tier 1/Tier 2 reprieve logic was extracted from
-        # _agent_session_health_check into the shared helper
-        # _apply_recovery_transition by refactor #1270 (issue #1578). The gate
-        # now reads the `reason_kind` parameter (classified by the caller), so
-        # inspect the helper alone where the whole chain lives.
-        from agent.session_health import _apply_recovery_transition
+        from agent.session_health import _apply_recovery_transition, _should_kill_no_progress
 
         src = inspect.getsource(_apply_recovery_transition)
         assert 'reason_kind == "no_progress"' in src, (
-            "Expected Tier 1/Tier 2 block to be gated on reason_kind == 'no_progress' "
-            "(tech debt 1+2 from #1039 review)"
+            "Expected the shared reprieve predicate call to be gated on "
+            "reason_kind == 'no_progress' (tech debt 1+2 from #1039 review)"
         )
         # Confirm the gating sits between reason classification and kill path.
         # `reason_kind` is now a function parameter — its definition site is the
         # signature, which precedes the gate.
         idx_kind = src.find("reason_kind")
         idx_gate = src.find('reason_kind == "no_progress"')
-        idx_tier1_counter = src.find("tier1_flagged_total")
-        idx_reprieve = src.find("_tier2_reprieve_signal")
+        idx_shared_call = src.find("_should_kill_no_progress(")
         assert idx_kind < idx_gate, "reason_kind must be defined before it is gated"
-        assert idx_gate < idx_tier1_counter, (
-            "Tier 1 flagged counter must sit INSIDE the no_progress gate"
+        assert idx_gate < idx_shared_call, (
+            "The shared _should_kill_no_progress() call must sit INSIDE the no_progress gate"
         )
-        assert idx_gate < idx_reprieve, "Tier 2 reprieve call must sit INSIDE the no_progress gate"
+
+        # The Tier 1/Tier 2 logic itself now lives inside the extracted
+        # predicate (issue #1820 OQ3 — reprieve logic in exactly one place).
+        reprieve_src = inspect.getsource(_should_kill_no_progress)
+        assert "tier1_flagged_total" in reprieve_src
+        assert "_tier2_reprieve_signal" in reprieve_src
 
     def test_tier1_flagged_metric_only_increments_for_no_progress(self):
-        """Source audit: tier1_flagged_total increments inside the no_progress
-        branch only. This prevents timeout/worker_dead recoveries from
-        inflating the counter (tech debt 1+2)."""
+        """Source audit: tier1_flagged_total increments exactly once, inside
+        the shared reprieve predicate (issue #1820 OQ3) — and
+        ``_apply_recovery_transition`` calls that predicate ONLY inside its
+        ``no_progress`` gate. This prevents timeout/worker_dead recoveries
+        from inflating the counter (tech debt 1+2)."""
         import inspect
 
-        # Logic lives in the shared helper post-#1270 (issue #1578).
-        from agent.session_health import _apply_recovery_transition
+        from agent.session_health import _apply_recovery_transition, _should_kill_no_progress
 
-        src = inspect.getsource(_apply_recovery_transition)
+        # `_apply_recovery_transition` itself no longer references the counter
+        # directly — it delegates to the shared predicate.
+        caller_src = inspect.getsource(_apply_recovery_transition)
+        assert "tier1_flagged_total" not in caller_src, (
+            "tier1_flagged_total must live in the extracted _should_kill_no_progress "
+            "predicate, not be duplicated in _apply_recovery_transition (NO-LEGACY)"
+        )
+        gate_idx = caller_src.find('reason_kind == "no_progress"')
+        shared_call_idx = caller_src.find("_should_kill_no_progress(")
+        assert gate_idx != -1 and shared_call_idx != -1
+        assert gate_idx < shared_call_idx, (
+            "_should_kill_no_progress() must be called INSIDE the no_progress gate, not outside"
+        )
+
+        src = inspect.getsource(_should_kill_no_progress)
 
         # The counter must be referenced exactly once (single increment site).
         count_refs = src.count("tier1_flagged_total")
         assert count_refs == 1, (
             f"Expected tier1_flagged_total to be incremented once; found {count_refs} "
             "references — check the no_progress gating"
-        )
-
-        # Verify the single reference lives inside the no_progress gated block
-        # by checking the text between the gate and the kill path contains it.
-        gate_idx = src.find('reason_kind == "no_progress"')
-        kill_idx = src.find("DISABLE_PROGRESS_KILL")
-        assert gate_idx != -1 and kill_idx != -1
-        gated_section = src[gate_idx:kill_idx]
-        assert "tier1_flagged_total" in gated_section, (
-            "tier1_flagged_total must be inside the no_progress gate, not outside"
         )
 
     def test_no_progress_handle_none_debug_log_present(self):

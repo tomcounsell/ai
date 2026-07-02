@@ -7,6 +7,12 @@ addressed. See [Worker Liveness Recovery](worker-liveness-recovery.md) for the i
 solution: a dead-man's-switch heartbeat that aborts a frozen event loop (fix #1), and
 bounded PTY-pool waits with force-recycle that close the POOL-1 deadlock hazard (fix #4).
 
+**The slot-leak class this document analyzes is now self-healing.** The PENDING-WEDGE
+FINGERPRINT described here no longer only logs — see
+[Slot-Lease Ownership](slot-lease-ownership.md) (issue #1820): the ownerless concurrency
+semaphore is replaced by an owner-keyed `SlotLeaseRegistry`, and the fingerprint became a
+reclaim call that frees a leaked permit without a process restart.
+
 This document records the full findings of the `session/wedged-worker-pending-investigation`
 branch investigating issue #1808 ("Wedged-but-alive worker leaves sessions pending
 indefinitely despite 300s health backstop").

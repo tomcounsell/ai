@@ -55,3 +55,29 @@ def get_machine_projects() -> list[dict]:
     }
     rows.sort(key=lambda r: (r["project_name"].lower(), persona_order.get(r["persona"], 99)))
     return rows
+
+
+def get_machine_project_keys() -> list[str]:
+    """Return the ``project_key``s owned by this machine (``projects.<key>.machine`` match).
+
+    Used to scope machine-local Redis counter aggregation (e.g. the
+    ``slot_reclaims`` self-heal counter, issue #1820) to the projects this
+    worker actually serves — the same machine filter ``get_machine_projects()``
+    already applies, but returning raw project_key strings instead of exploded
+    per-Telegram-group rows.
+    """
+    config_path = Path("~/Desktop/Valor/projects.json").expanduser()
+    if not config_path.exists():
+        return []
+
+    try:
+        config = json.loads(config_path.read_text())
+    except Exception:
+        return []
+
+    machine = get_machine_name().lower()
+    return [
+        project_key
+        for project_key, project in config.get("projects", {}).items()
+        if project.get("machine", "").lower() == machine
+    ]

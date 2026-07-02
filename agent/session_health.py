@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
+import agent.session_state as _session_state
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -1233,6 +1234,12 @@ def _tier2_reprieve_signal(
                      ``last_compaction_ts`` on every successful backup. Added
                      for issue #1099 Mode 3 — prevents false kills on
                      sessions that are legitimately idle post-compaction.
+      "pty_alive"  — granite transport gate (issue #1820 note 2): the session
+                     has no ``claude_pid`` (granite PTY, not SDK) and
+                     ``_pty_quiescent_long_enough`` reports the PTY read loop is
+                     alive/painting (not yet wedge-eligible). Evaluated before
+                     the psutil gates, which are a no-op for a pid-less granite
+                     session. SDK sessions never match this gate.
       "children"   — ``psutil.Process(pid).children()`` is non-empty.
                      Strongest signal: tool-subprocess execution is actively
                      happening right now. Returned in preference to "alive".
@@ -1293,6 +1300,28 @@ def _tier2_reprieve_signal(
             # Defensive: malformed timestamp on the entry — skip this gate.
             pass
 
+    # Granite transport-aware reprieve (issue #1820 note 2). A granite PTY
+    # session records no ``claude_pid`` (SDK-path-only,
+    # ``session_executor.py:1425``), so ``handle.pid`` is None and the psutil
+    # "children"/"alive" gates below are a structural no-op for it. Without a
+    # transport-specific gate, a legitimately-parked granite session (e.g. a
+    # ``waiting_for_children`` PM) whose PTY read loop is alive but momentarily
+    # quiet would be falsely killed at the progress deadline. Derive the
+    # reprieve from the PTY-liveness signal instead: ``_pty_quiescent_long_enough``
+    # returns False while the granite PTY read loop is alive and painting
+    # (defer the kill) and True only once it has been quiescent past the
+    # wedge-eligibility window (proceed to kill) — the exact "genuinely
+    # quiescent granite IS killed" boundary the plan requires. For SDK sessions
+    # (``last_pty_read_loop_at is None``) it returns True, so this gate never
+    # reprieves an SDK session and cannot interfere with the psutil path below.
+    if getattr(entry, "claude_pid", None) is None:
+        try:
+            if not _pty_quiescent_long_enough(entry, datetime.now(UTC)):
+                return "pty_alive"
+        except Exception as e:
+            # Defensive: never crash the health check from a PTY-liveness edge case.
+            logger.debug("[session-health] pty-liveness reprieve probe failed: %s", e)
+
     pid = handle.pid if handle is not None else None
     if pid is not None:
         try:
@@ -1316,6 +1345,85 @@ def _tier2_reprieve_signal(
             logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
 
     return None
+
+
+def _should_kill_no_progress(
+    entry: AgentSession,
+    handle: "SessionHandle | None",
+    *,
+    emit_telemetry: bool,
+) -> bool:
+    """Shared Tier-2 reprieve gate for every ``no_progress``-shaped kill decision
+    (issue #1820 OQ3 — exactly one place this decision lives; NO-LEGACY).
+
+    Returns ``True`` if the session should be killed (no reprieve signal
+    applies), ``False`` if a Tier-2 reprieve (active children / compaction /
+    alive-but-quiet subprocess) applies and the caller must skip the kill.
+
+    This is a straight extraction of the reprieve decision that used to be
+    inlined in ``_apply_recovery_transition``'s ``reason_kind == "no_progress"``
+    branch — behavior is unchanged, only the call site moved, so every
+    ``no_progress``-shaped producer shares one reprieve policy instead of each
+    carrying its own copy:
+
+      * ``_apply_recovery_transition`` calls this for BOTH live ``no_progress``
+        producers — the never-started-past-grace path
+        (``session_health.py`` D0 branch) and the narrowed running-scan
+        ``no_progress`` elif (the #944 shared-``worker_key`` orphan net) —
+        passing ``emit_telemetry=True`` on its single per-recovery-decision
+        call (the same cadence the inlined block used before extraction).
+      * The progress-deadline cancel scope (issue #1820 Fix #3,
+        ``agent_session_queue.py``) re-invokes this every ``PROGRESS_POLL_S``
+        poll while a session is past its deadline, and passes
+        ``emit_telemetry=True`` ONLY on the first deadline-exceeded poll (a
+        loop-local latch) so a long-reprieved session's telemetry fires once,
+        not once per poll.
+
+    ``emit_telemetry=True`` increments the tier-1-flagged counter
+    unconditionally (the gate was evaluated), and — only when a reprieve
+    signal actually fires — increments ``tier2_reprieve_total:{reprieve}``,
+    saves the bumped ``entry.reprieve_count``, and logs the reprieve.
+    ``emit_telemetry=False`` still evaluates the gate (the kill/reprieve
+    decision itself is never skipped) but performs none of those side
+    effects — this predicate is
+    therefore NOT pure, but the caller fully controls when its side effects
+    fire (issue #1820 CONCERN r6).
+
+    Never raises — counter/save failures are logged and swallowed, matching
+    the pre-extraction inline block.
+    """
+    if emit_telemetry:
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
+        except Exception as _m_err:
+            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
+
+    reprieve = _tier2_reprieve_signal(handle, entry)
+    if reprieve is not None:
+        if emit_telemetry:
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
+            except Exception as _m_err:
+                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
+            try:
+                entry.reprieve_count = (entry.reprieve_count or 0) + 1
+                entry.save(update_fields=["reprieve_count"])
+            except Exception as _rc_err:
+                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
+            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
+            log_fn(
+                "[session-health] Tier 2 reprieve (%s) for session %s — "
+                "skipping kill (reprieve_count=%s)",
+                reprieve,
+                entry.agent_session_id,
+                entry.reprieve_count,
+            )
+        return False
+    return True
 
 
 # Total wall-clock budget for the SIGTERM->SIGKILL escalation in
@@ -1871,6 +1979,13 @@ async def _apply_recovery_transition(
         is the evidence (issue #1270). A tool that has not returned within its
         tier budget is wedged regardless of whether the parent SDK subprocess
         is still alive.
+      * ``"progress_deadline"`` — skip Tier 2 reprieve HERE; the caller (issue
+        #1820 Fix #3's progress-deadline cancel scope in
+        ``agent_session_queue.py``) already ran the shared reprieve gate
+        (``_should_kill_no_progress``) itself before deciding to cancel and
+        call this function — evaluating it a second time here would be a
+        redundant, stale re-check (the caller's decision already stands).
+        Always called with ``handle=None`` (Fix #3 owns its own cancel).
 
     Project-scoped Redis counter
     ``{project_key}:session-health:recoveries:{reason_kind}`` is incremented
@@ -1892,6 +2007,35 @@ async def _apply_recovery_transition(
             "[session-health] recovery counter increment failed (non-fatal): %s",
             _counter_err,
         )
+
+    def _reclaim_slot_lease() -> None:
+        """Prompt slot reclaim (issue #1820, Fix #2) — called ONLY on the
+        branches below that land ``entry``'s row TERMINAL (completed /
+        abandoned / failed), never on the ``pending`` requeue branch.
+
+        This is the wiring that makes acceptance criterion #1 (leaked-slot
+        auto-recovery) fire on the health/tool-timeout cadence instead of
+        waiting for the 300s reap-pass tick: an out-of-band kill (this
+        function) may flip the DB row terminal while the owning worker
+        loop's own ``finally`` release is stuck (e.g. a granite session
+        whose PTY container thread never returns) — this reclaims the slot
+        immediately. ``registry.reclaim()`` is idempotent, so it safely
+        no-ops if the owning worker loop's normal release already fired
+        first. Never raises into the caller — the reclaim is a self-heal,
+        not a load-bearing part of the recovery transition.
+        """
+        try:
+            registry = _session_state._slot_registry
+            if registry is not None:
+                registry.reclaim(entry.agent_session_id)
+                from popoto.redis_db import POPOTO_REDIS_DB as _SR
+
+                _SR.incr(f"{entry.project_key}:session-health:slot_reclaims")
+        except Exception:
+            logger.exception(
+                "[session-health] slot lease reclaim failed for %s (non-fatal)",
+                entry.agent_session_id,
+            )
 
     # AC4 narrow telemetry counter (issue #1614): track recoveries that match
     # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
@@ -1938,6 +2082,7 @@ async def _apply_recovery_transition(
                 "completed",
                 reason="health check: already delivered",
             )
+            _reclaim_slot_lease()  # row is now terminal (completed)
         except StatusConflictError as e:
             logger.info(
                 "[session-health] Skipping finalize for already-delivered session %s: %s",
@@ -1960,34 +2105,11 @@ async def _apply_recovery_transition(
             entry.agent_session_id,
         )
     if reason_kind == "no_progress":
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
-        except Exception as _m_err:
-            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
-
-        reprieve = _tier2_reprieve_signal(handle, entry)
-        if reprieve is not None:
-            try:
-                from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
-            except Exception as _m_err:
-                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
-            try:
-                entry.reprieve_count = (entry.reprieve_count or 0) + 1
-                entry.save(update_fields=["reprieve_count"])
-            except Exception as _rc_err:
-                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
-            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
-            log_fn(
-                "[session-health] Tier 2 reprieve (%s) for session %s — "
-                "skipping kill (reprieve_count=%s)",
-                reprieve,
-                entry.agent_session_id,
-                entry.reprieve_count,
-            )
+        # Reprieve decision + telemetry live in exactly one place — the shared
+        # predicate (issue #1820 OQ3, NO-LEGACY). This is the single
+        # per-recovery-decision call, so emit_telemetry=True unconditionally
+        # (same cadence as the pre-extraction inline block).
+        if not _should_kill_no_progress(entry, handle, emit_telemetry=True):
             return False
 
     # All Tier 2 gates failed (or skipped). Respect kill-switch.
@@ -2148,6 +2270,7 @@ async def _apply_recovery_transition(
                 skip_auto_tag=True,
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (abandoned)
             logger.info(
                 "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
                 entry.agent_session_id,
@@ -2172,6 +2295,7 @@ async def _apply_recovery_transition(
                 ),
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (failed, MAX_RECOVERY_ATTEMPTS)
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
@@ -2202,6 +2326,7 @@ async def _apply_recovery_transition(
                 ),
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (failed, subprocess not confirmed dead)
             logger.warning(
                 "[session-health] Escalated session %s to failed — subprocess "
                 "pid=%s not confirmed dead after cancel+SIGTERM+SIGKILL "
@@ -2331,6 +2456,129 @@ async def _apply_recovery_transition(
     return True
 
 
+def _reap_slot_leases() -> None:
+    """Top-of-tick slot-lease reap pass (issue #1820, Fix #2 — the reclaim
+    half of the ownerless-semaphore leak fix).
+
+    Hoisted OUT of the per-entry PENDING-session loop where the old
+    logging-only leaked-slot fingerprint used to live (nested inside
+    ``for entry in pending_sessions:``, gated on ``worker_alive``) into a
+    SINGLE pass, called once per health-check tick from the TOP of
+    ``_agent_session_health_check`` — independent of ``worker_alive``, of
+    whether there is any pending session at all, and (for phase 1) of the
+    kill-switch. A literal in-place edit of the old block would have run the
+    reap N-times-per-tick and skipped it entirely on a drained queue; this
+    hoisted single pass fires even with zero pending sessions, which is
+    exactly the parked-worker starvation case Acceptance #1 targets.
+
+    Two phases. Only phase 2 is gated on the kill-switch:
+
+      Phase 1 (detection) — ALWAYS runs, even when
+      ``SLOT_LEASE_REAP_DISABLED=1``. Computes and logs the leaked-slot
+      fingerprint (WARNING iff ``permits_free==0 AND running_count<max``;
+      INFO iff ``permits_free==0 AND running_count>=max`` — healthy
+      backpressure) plus a heartbeat. This replaces the deleted block's
+      detect-and-log role wholesale, so the kill-switch degrades to
+      detect-only — never to no-visibility (Operator CONCERN).
+
+      Phase 2 (reclaim) — gated on
+      ``os.environ.get("SLOT_LEASE_REAP_DISABLED") != "1"``. For each lease
+      in a SNAPSHOT of ``registry.leases()`` (mutation-during-iteration
+      safe), re-reads the owner's DB status fresh (terminal-status-guarded,
+      same pattern as the tool-timeout loop) and, iff the owner is terminal
+      (or its record no longer exists), calls ``registry.reclaim(owner)``
+      and increments the project-scoped ``slot_reclaims`` counter.
+      **Terminal-owner only — there is deliberately no wall-clock elapsed-time
+      reclaim arm** (see agent/slot_lease.py's "no reclaim deadline" note):
+      reclaiming a still-running, progressing owner would
+      strip its permit mid-execution, allowing semaphore over-admission
+      (concurrently-running sessions > max) and re-imposing exactly the
+      wall-clock duration cap issue #1172 removed.
+
+    Never raises into the health check — a single bad lease is logged and
+    the pass continues; the whole function is exception-wrapped.
+    """
+    try:
+        registry = _session_state._slot_registry
+        if registry is None:
+            return  # No ceiling configured (pre-init / unlimited-mode tests).
+
+        leases_snapshot = list(registry.leases())
+        reap_disabled = os.environ.get("SLOT_LEASE_REAP_DISABLED") == "1"
+
+        # === Phase 1: detection — ALWAYS runs (Operator CONCERN) ===
+        try:
+            _permits_free = registry.permits_free()
+            _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
+            _running_count = len(list(AgentSession.query.filter(status="running")))
+            if _permits_free == 0 and _running_count < _max_sessions:
+                logger.warning(
+                    "[session-health] SLOT-LEASE FINGERPRINT: leases_held=%d, "
+                    "permits_free=0 AND running_count=%d < max_sessions=%d. "
+                    "Slot(s) held by non-running session(s) (#1537 class). "
+                    "reap_disabled=%s. See docs/features/slot-lease-ownership.md.",
+                    len(leases_snapshot),
+                    _running_count,
+                    _max_sessions,
+                    reap_disabled,
+                )
+            elif _permits_free == 0:
+                logger.info(
+                    "[session-health] leases_held=%d, permits_free=0, "
+                    "running_count=%d >= max_sessions=%d (healthy backpressure; "
+                    "no leak signal).",
+                    len(leases_snapshot),
+                    _running_count,
+                    _max_sessions,
+                )
+            else:
+                # Zero-reclaim heartbeat — proves the reap pass is alive even
+                # when there is nothing to report.
+                logger.debug(
+                    "[session-health] slot-lease heartbeat: leases_held=%d, "
+                    "permits_free=%d, running_count=%d, max_sessions=%d, "
+                    "reap_disabled=%s",
+                    len(leases_snapshot),
+                    _permits_free,
+                    _running_count,
+                    _max_sessions,
+                    reap_disabled,
+                )
+        except Exception:
+            logger.exception("[session-health] slot-lease detection phase failed")
+
+        # === Phase 2: reclaim — gated on SLOT_LEASE_REAP_DISABLED ===
+        if reap_disabled:
+            return
+
+        for lease in leases_snapshot:
+            try:
+                fresh = AgentSession.get_by_id(lease.owner_session_id)
+                # A record that no longer exists is at least as terminal as
+                # one whose status field says so — reclaim either way.
+                if fresh is None or getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                    registry.reclaim(lease.owner_session_id)
+                    _project_key = getattr(fresh, "project_key", None) or "unknown"
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _SR
+
+                        _SR.incr(f"{_project_key}:session-health:slot_reclaims")
+                    except Exception:
+                        logger.debug(
+                            "[session-health] slot_reclaims counter increment failed "
+                            "(non-fatal) for owner=%s",
+                            lease.owner_session_id,
+                        )
+            except Exception:
+                logger.warning(
+                    "[session-health] slot-lease reap failed for owner=%s (non-fatal)",
+                    lease.owner_session_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.exception("[session-health] _reap_slot_leases failed (non-fatal)")
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -2341,13 +2589,22 @@ async def _agent_session_health_check() -> None:
     Scans both 'running' and 'pending' sessions:
 
     For RUNNING sessions:
-    1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover.
-    2. If worker appears alive but running > AGENT_SESSION_HEALTH_MIN_RUNNING AND
-       ``_has_progress(entry)`` is False (no own-progress fields, no fresh
-       heartbeats, no live children): evaluate Tier 2 reprieve gates and recover
-       only if every gate also fails. Slugless dev sessions share ``worker_key``
-       with co-running PM sessions, so ``worker_alive`` alone does not prove
-       the dev session is being handled (#944).
+    1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover
+       (``reason_kind="worker_dead"``).
+    2. **NARROWED (issue #1820 Fix #3 + OQ3 + BLOCKER r6):** if worker appears alive
+       but there is NO live in-scope handle for this session
+       (``_active_sessions.get(entry.agent_session_id) is None``) AND running
+       > AGENT_SESSION_HEALTH_MIN_RUNNING AND ``_has_progress(entry)`` is False:
+       evaluate Tier 2 reprieve gates (via the shared ``_should_kill_no_progress``
+       predicate) and recover only if every gate also fails
+       (``reason_kind="no_progress"``). This is the #944 shared-``worker_key``
+       orphan net — a row left ``running`` by a crashed worker whose
+       ``worker_key`` was later reused by a respawned LIVE worker reads
+       ``worker_alive=True`` even though no live task executes it. A
+       worker-alive session WITH a live in-scope handle is instead owned by
+       the progress-deadline cancel scope in ``agent_session_queue.py``
+       (Fix #3) — the two are disjoint by construction on the in-scope-handle
+       test, so no running session has two killers.
     3. Legacy sessions without started_at and no worker: recover.
 
     For PENDING sessions:
@@ -2385,6 +2642,15 @@ async def _agent_session_health_check() -> None:
     checked = 0
     recovered = 0
     workers_started = 0
+
+    # === Slot-lease reap pass (issue #1820, Fix #2) ===
+    # Single top-of-tick pass, independent of worker_alive and of whether
+    # there are any pending sessions — replaces the deleted logging-only
+    # fingerprint that used to be nested inside the PENDING-session loop
+    # below (gated on worker_alive, re-run per pending entry). See
+    # _reap_slot_leases()'s docstring for the two-phase (detect-always,
+    # reclaim-gated) design.
+    _reap_slot_leases()
 
     # === SIGKILL escalation drain (issue #1218) ===
     # Snapshot-then-clear: PIDs added to _pending_sigkill on the previous tick
@@ -2476,22 +2742,35 @@ async def _agent_session_health_check() -> None:
             worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
             worker_alive = worker is not None and not worker.done()
+            # Computed once, alongside worker_alive (issue #1820 OQ3 + BLOCKER
+            # r6): whether the CURRENT worker loop holds a live in-scope
+            # handle for THIS session. The progress-deadline cancel scope
+            # (Fix #3, agent_session_queue.py) is the authoritative
+            # no-progress killer for exactly the sessions where this is
+            # non-None — the narrowed elif below owns the disjoint residual
+            # (a worker-alive row with NO live in-scope handle: the #944
+            # shared-worker_key orphan, e.g. a crashed-then-respawned
+            # worker_key).
+            in_scope_handle = _active_sessions.get(entry.agent_session_id)
 
             started_ts = _ts(getattr(entry, "started_at", None))
             running_seconds = (now - started_ts) if started_ts else None
 
             should_recover = False
             reason = ""
+            _reason_kind: str | None = None
 
             if not worker_alive:
                 if started_ts is None:
                     should_recover = True
+                    _reason_kind = "worker_dead"
                     reason = "worker dead/missing, no started_at (legacy session)"
                 elif (
                     running_seconds is not None
                     and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
                 ):
                     should_recover = True
+                    _reason_kind = "worker_dead"
                     reason = (
                         f"worker dead/missing, running for "
                         f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard)"
@@ -2504,35 +2783,35 @@ async def _agent_session_health_check() -> None:
                         int(running_seconds) if running_seconds else "?",
                         AGENT_SESSION_HEALTH_MIN_RUNNING,
                     )
-            # Project-keyed dev sessions share worker_key with PM; without a
-            # progress signal, worker_alive alone doesn't prove the dev session
-            # is being handled (#944).
+            # NARROWED (issue #1820 OQ3 + BLOCKER r6): this elif is now
+            # disjoint-by-construction from Fix #3's in-scope progress-deadline
+            # watcher, which owns worker-alive sessions the current worker
+            # loop is actively executing (in_scope_handle is not None). This
+            # elif retains ONLY the #944 shared-worker_key orphan net: PM and
+            # a project-keyed dev-without-slug share a worker_key, so a row
+            # left `running` by a crashed worker whose worker_key was later
+            # reused by a respawned LIVE worker reads worker_alive=True even
+            # though no live task is executing it — no in-scope handle exists.
+            # Fix #3 cannot reach this orphan (it only watches the session its
+            # own owned task is executing), so this net must NOT be deleted —
+            # only narrowed to the case Fix #3 provably cannot cover.
             elif (
-                running_seconds is not None
+                in_scope_handle is None
+                and running_seconds is not None
                 and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
                 and not _has_progress(entry)
             ):
                 should_recover = True
+                _reason_kind = "no_progress"
                 reason = (
-                    f"no progress signal observed in last {int(running_seconds)}s "
+                    f"no progress signal, orphaned running row (no in-scope handle, #944), "
+                    f"{int(running_seconds)}s "
                     f"(>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, worker future not yet resolved, "
                     f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
                     f"claude_session_uuid={entry.claude_session_uuid!r})"
                 )
 
             if should_recover:
-                # Classify the recovery reason up front — referenced below to
-                # gate Tier 2 reprieve logic to no_progress recoveries only.
-                # worker_dead recoveries skip reprieve: a dead worker cannot
-                # be reprieved by an "active children" signal. The "timeout"
-                # reason kind was retired by #1172 along with the wall-clock
-                # cap — only "no_progress" and "worker_dead" remain.
-                if "no progress signal" in reason:
-                    _reason_kind = "no_progress"
-                else:
-                    _reason_kind = "worker_dead"
-
-                handle = _active_sessions.get(entry.agent_session_id)
                 # Delegate to shared recovery helper (issue #1270). Both this
                 # loop and `_agent_session_tool_timeout_loop` go through the
                 # same code path so MAX_RECOVERY_ATTEMPTS, the OOM defer, the
@@ -2542,7 +2821,7 @@ async def _agent_session_health_check() -> None:
                     entry,
                     reason=reason,
                     reason_kind=_reason_kind,
-                    handle=handle,
+                    handle=in_scope_handle,
                     worker_key=worker_key,
                 ):
                     recovered += 1
@@ -2562,59 +2841,12 @@ async def _agent_session_health_check() -> None:
             worker_alive = worker is not None and not worker.done()
 
             if worker_alive:
-                # Slot-exhaustion forensic line (Deliverable D, issue #1808).
-                # Logging-ONLY — the ``event.set(); continue`` recovery decision is
-                # unchanged. Detects the suspension-wedge that asyncio set_debug is
-                # blind to (C1 limitation): a worker loop parked at
-                # ``await semaphore.acquire()`` yields the event loop cleanly, so it
-                # executes no slow callback and emits no set_debug log.
-                #
-                # Trigger: actual permit depletion (``_global_session_semaphore._value``),
-                # NOT running-count. Running-count is the wrong signal because
-                # ``running ⟹ slot-held`` is not invertible — a session requeued to
-                # pending while its slot stays leaked (#1537 class) produces
-                # ``running_count < slots_held``, which a running-count trigger
-                # misses while over-firing on healthy saturation. ``_value`` is a
-                # private asyncio attr but the only accurate permit-depletion signal;
-                # access is guarded for a None semaphore (fail-quiet).
-                #
-                # WARNING  iff permits_free == 0 AND running < max — leaked-slot fingerprint
-                # INFO     iff permits_free == 0 AND running >= max — healthy backpressure
-                # (silent)  when permits_free > 0 — loop is not parked; different anomaly
-                try:
-                    import agent.session_state as _health_ss  # noqa: PLC0415
-
-                    _sem = _health_ss._global_session_semaphore
-                    if _sem is not None:
-                        _permits_free = _sem._value  # private asyncio attr; only accurate source
-                        _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
-                        _running_count = len(list(AgentSession.query.filter(status="running")))
-                        if _permits_free == 0 and _running_count < _max_sessions:
-                            logger.warning(
-                                "[session-health] PENDING-WEDGE FINGERPRINT: "
-                                "worker_key=%s session=%s — semaphore permits_free=0 "
-                                "AND running_count=%d < max_sessions=%d. "
-                                "Slot held by non-running session (#1537 class): "
-                                "worker loop is parked at await semaphore.acquire(). "
-                                "See docs/features/worker-wedge-investigation.md.",
-                                worker_key,
-                                entry.agent_session_id,
-                                _running_count,
-                                _max_sessions,
-                            )
-                        elif _permits_free == 0:
-                            logger.info(
-                                "[session-health] worker_key=%s session=%s — "
-                                "semaphore permits_free=0, running_count=%d >= "
-                                "max_sessions=%d (healthy backpressure; worker loop "
-                                "legitimately queued on full semaphore).",
-                                worker_key,
-                                entry.agent_session_id,
-                                _running_count,
-                                _max_sessions,
-                            )
-                except Exception:
-                    pass  # Fail-quiet: never raise in the forensic log branch
+                # The leaked-slot fingerprint that used to be logged HERE
+                # (nested in this loop, gated on worker_alive, re-run once
+                # per pending entry) is now a single top-of-tick pass —
+                # see _reap_slot_leases(), called once at the start of
+                # _agent_session_health_check (issue #1820, Fix #2). It
+                # detects AND reclaims; this branch stays nudge-only.
 
                 # Worker exists — nudge its event in case it missed the original
                 # notify (e.g. startup-recovery race: session put to pending before
