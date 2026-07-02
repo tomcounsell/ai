@@ -433,10 +433,18 @@ class BridgeAdapter:
         pm_system_prompt: str | None = None,
         pm_model: str | None = None,
         session_type: str | None = None,
+        role_transports: dict[str, str] | None = None,
     ) -> None:
         self._agent_session = agent_session
         self._project_key = project_key
         self._transport = transport
+        # Per-role transport map (plan #1842). "pty" (default) drives the role
+        # through a PTYDriver; "headless" drives it through HeadlessRoleDriver
+        # (one `claude -p` per turn). ``transport`` above is the unrelated
+        # *channel* (telegram/email) — do not conflate.
+        self._role_transports = (
+            dict(role_transports) if role_transports else {"pm": "pty", "dev": "pty"}
+        )
         self._pool = pool
         self._delivery_timeout_s = delivery_timeout_s
         # Per-session spawn requirements (PR #1612 review B1+B2). Env
@@ -573,6 +581,8 @@ class BridgeAdapter:
                 )
                 pm_settings_path = dev_settings_path = None
                 pm_hook_edge_file = dev_hook_edge_file = None
+        pm_transport = self._role_transports.get("pm", "pty")
+        dev_transport = self._role_transports.get("dev", "pty")
         spawn_spec = PairSpawnSpec(
             cwd=working_dir,
             env=self._session_env,
@@ -581,6 +591,8 @@ class BridgeAdapter:
             dev_session_id=dev_session_id,
             pm_settings_path=pm_settings_path,
             dev_settings_path=dev_settings_path,
+            pm_transport=pm_transport,
+            dev_transport=dev_transport,
         )
         async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev, pty_slot):
             # Hand the pool's pre-warmed pair to Container so it
@@ -629,10 +641,36 @@ class BridgeAdapter:
                 pm_hook_edge_file=pm_hook_edge_file,
                 dev_hook_edge_file=dev_hook_edge_file,
                 hook_driven=hook_driven,
+                role_transports=self._role_transports,
             )
-            # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
-            pm_path = _transcript_path_from_spec(working_dir, pm_session_id)
-            dev_path = _transcript_path_from_spec(working_dir, dev_session_id)
+            # Compute transcript paths for the tailer. Plan #1842 tailer
+            # invariant guard: populate a role's transcript path ONLY when that
+            # role runs on PTY. A headless role's tokens flow through the
+            # disjoint metered_* fields (accumulate_session_tokens(metered=True)),
+            # so folding its transcript into total_* would double-count and
+            # violate the non-clobbering partition (Race 1). Passing None keeps
+            # the tailer from ever reading a headless role's transcript.
+            pm_path = (
+                _transcript_path_from_spec(working_dir, pm_session_id)
+                if pm_transport == "pty"
+                else None
+            )
+            dev_path = (
+                _transcript_path_from_spec(working_dir, dev_session_id)
+                if dev_transport == "pty"
+                else None
+            )
+            # Persist transport-tagged resume handles for BOTH roles at spawn
+            # (plan #1842 / #1721 schema). DoD is "written and shaped correctly";
+            # consumption (re-entry, cursor) is #1721's scope. PTY roles capture
+            # the spawn-time UUID; headless roles capture the same derivable UUID
+            # (the container's HeadlessRoleDriver re-derives the transcript path
+            # from the actual first-turn UUID at capture time).
+            self._persist_resume_handles(
+                working_dir,
+                {"pm": pm_session_id, "dev": dev_session_id},
+                {"pm": pm_transport, "dev": dev_transport},
+            )
             # Start the tailer task before handing the container to the worker thread.
             # The tailer reads new bytes from both transcripts every ~5s, merges counters,
             # and persists them to agent_session (diff-gated to avoid spurious saves).
@@ -661,6 +699,62 @@ class BridgeAdapter:
             self._publish_exit_summary(result)
             self._maybe_publish_exit_anomaly(result)
         return ""
+
+    def _persist_resume_handles(
+        self,
+        working_dir: str,
+        session_ids: dict[str, str],
+        transports: dict[str, str],
+    ) -> None:
+        """Persist transport-tagged resume handles for both roles (plan #1842).
+
+        Schema (shared with #1721): a list of
+        ``{role, claude_session_id, transcript_path, transport}``. PTY roles
+        spawn with ``claude --session-id <uuid>`` so their UUID + transcript
+        path are known at spawn time and fully populated here (transcript path
+        via the real codebase slugging fn ``_transcript_path_from_spec``).
+        Headless roles do not pass ``--session-id``; their claude UUID is
+        assigned by ``claude -p`` at first turn, so the handle is written
+        shaped (role + transport) with a null UUID here — the HeadlessRoleDriver
+        captures and re-derives it at first turn.
+
+        DoD is "written and shaped correctly" only. Consumption (re-entry,
+        cursor replay, skip-priming) is #1721's scope. Fail-silent —
+        observability must never crash the run.
+        """
+        if self._agent_session is None:
+            return
+        try:
+            handles: list[dict] = []
+            for role in ("pm", "dev"):
+                transport = transports.get(role, "pty")
+                if transport == "pty":
+                    uuid_val = session_ids.get(role)
+                    handles.append(
+                        {
+                            "role": role,
+                            "claude_session_id": uuid_val,
+                            "transcript_path": (
+                                _transcript_path_from_spec(working_dir, uuid_val)
+                                if uuid_val
+                                else None
+                            ),
+                            "transport": transport,
+                        }
+                    )
+                else:
+                    handles.append(
+                        {
+                            "role": role,
+                            "claude_session_id": None,
+                            "transcript_path": None,
+                            "transport": transport,
+                        }
+                    )
+            self._agent_session.resume_handles = handles
+            self._agent_session.save(update_fields=["resume_handles", "updated_at"])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[bridge-adapter] resume_handles persist failed: %s", e)
 
     # -- Session events ---------------------------------------------------
 

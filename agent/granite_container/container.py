@@ -740,9 +740,18 @@ class Container:
         hook_driven: bool | None = None,
         hook_turn_end_wait_s: float | None = None,
         crash_resume_cap: int | None = None,
+        role_transports: dict[str, str] | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
+        # Per-role transport map (plan #1842). Default both-PTY reproduces the
+        # pre-#1842 loop exactly. A "headless" role is driven by
+        # HeadlessRoleDriver (one `claude -p` per turn) instead of a PTYDriver;
+        # the orchestration loop (relay, steering, watchdog, exit
+        # classification) stays transport-agnostic.
+        self._role_transports = (
+            dict(role_transports) if role_transports else {"pm": "pty", "dev": "pty"}
+        )
         self.user_message = user_message
         self.cwd = cwd
         self.max_turns = max_turns

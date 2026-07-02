@@ -147,6 +147,12 @@ class PairSpawnSpec:
     # None keeps the pre-#1688 spawn args (the idle-heuristic fallback path).
     pm_settings_path: str | None = None
     dev_settings_path: str | None = None
+    # Per-role transport (plan #1842). "pty" spawns a PTYDriver for that role;
+    # "headless" spawns NO PTY process (the role runs via HeadlessRoleDriver in
+    # the container, one `claude -p` per turn). Defaults keep both roles on PTY,
+    # so a spec that omits them reproduces the pre-#1842 spawn shape exactly.
+    pm_transport: str = "pty"
+    dev_transport: str = "pty"
 
 
 class PTYPool:
@@ -503,6 +509,8 @@ class PTYPool:
             old_pair = slot.pty_pair
             if old_pair is not None:
                 for pty in old_pair:
+                    if pty is None:
+                        continue
                     old_pid = getattr(getattr(pty, "_child", None), "pid", None)
                     try:
                         pty.close(force=True)
@@ -512,26 +520,36 @@ class PTYPool:
                         self._spawned_pids.discard(old_pid)
                 slot.pty_pair = None
             cwd = spec.cwd if spec.cwd is not None else self._cwd
-            pm = PTYDriver(
-                role="pm",
-                cwd=cwd,
-                model=spec.pm_model,
-                env=spec.env,
-                session_id=spec.pm_session_id,
-                settings_path=spec.pm_settings_path,
-            )
-            dev = PTYDriver(
-                role="dev",
-                cwd=cwd,
-                model=spec.dev_model,
-                env=spec.env,
-                session_id=spec.dev_session_id,
-                settings_path=spec.dev_settings_path,
-            )
-            pm.spawn()
-            dev.spawn()
+            # Per-role transport (plan #1842): spawn a PTYDriver only for roles
+            # configured "pty"; a "headless" role gets None (no PTY process) and
+            # runs via HeadlessRoleDriver in the container. The slot still holds
+            # a 2-tuple so slot semantics / release lifecycle are unchanged.
+            pm: PTYDriver | None = None
+            dev: PTYDriver | None = None
+            if spec.pm_transport != "headless":
+                pm = PTYDriver(
+                    role="pm",
+                    cwd=cwd,
+                    model=spec.pm_model,
+                    env=spec.env,
+                    session_id=spec.pm_session_id,
+                    settings_path=spec.pm_settings_path,
+                )
+                pm.spawn()
+            if spec.dev_transport != "headless":
+                dev = PTYDriver(
+                    role="dev",
+                    cwd=cwd,
+                    model=spec.dev_model,
+                    env=spec.env,
+                    session_id=spec.dev_session_id,
+                    settings_path=spec.dev_settings_path,
+                )
+                dev.spawn()
             slot.pty_pair = (pm, dev)
             for pty in (pm, dev):
+                if pty is None:
+                    continue
                 pid = getattr(getattr(pty, "_child", None), "pid", None)
                 if pid is not None:
                     self._spawned_pids.add(pid)
@@ -554,6 +572,8 @@ class PTYPool:
         if slot.pty_pair is not None:
             pm, dev = slot.pty_pair
             for pty in (pm, dev):
+                if pty is None:
+                    continue
                 try:
                     pty.close(force=True)
                 except Exception:
