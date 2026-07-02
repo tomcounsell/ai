@@ -123,11 +123,11 @@ from agent.session_state import (  # noqa: F401
     _active_events,
     _active_sessions,
     _active_workers,
-    _global_session_semaphore,
     _reaction_callbacks,
     _response_callbacks,
     _send_callbacks,
     _shutdown_requested,
+    _slot_registry,
     _starting_workers,
 )
 from config.enums import ClassificationType, SessionType
@@ -970,7 +970,7 @@ DRAIN_TIMEOUT = 1.5  # seconds
 
 # Mutable session-tracking globals live in agent.session_state (re-imported above).
 # _active_workers, _active_events, SessionHandle, _active_sessions, _starting_workers,
-# _global_session_semaphore, _shutdown_requested, _send_callbacks, _reaction_callbacks,
+# _slot_registry, _shutdown_requested, _send_callbacks, _reaction_callbacks,
 # _response_callbacks are all imported from there.
 
 
@@ -1322,12 +1322,17 @@ async def _worker_loop(
                 break
 
             # Acquire global concurrency slot BEFORE popping — ensures that
-            # transition_status("running") never occurs without a semaphore slot,
-            # keeping the dashboard running count accurate.
-            semaphore = _session_state._global_session_semaphore
-            if semaphore is not None:
-                await semaphore.acquire()
-            _semaphore_acquired = semaphore is not None
+            # transition_status("running") never occurs without a slot lease,
+            # keeping the dashboard running count accurate. acquire() records
+            # no lease (issue #1820 "lease-at-bind-only" — see
+            # agent/slot_lease.py): the permit is legitimately in-use during
+            # the pop gap below without being observable by the reaper, and
+            # every branch that fails to resolve a session releases it via
+            # release_unbound() before a lease ever exists.
+            registry = _session_state._slot_registry
+            if registry is not None:
+                await registry.acquire()
+            _slot_acquired = registry is not None
 
             try:
                 session = await _pop_agent_session(worker_key, is_project_keyed)
@@ -1344,20 +1349,22 @@ async def _worker_loop(
                     worker_key,
                     e,
                 )
-                if _semaphore_acquired:
-                    semaphore.release()
-                    _semaphore_acquired = False
+                if _slot_acquired:
+                    registry.release_unbound()
+                    _slot_acquired = False
                 continue
             except BaseException:
-                if _semaphore_acquired:
-                    semaphore.release()
+                if _slot_acquired:
+                    registry.release_unbound()
                 raise
 
             if session is None:
-                # No work found — release the semaphore slot before waiting.
-                if _semaphore_acquired:
-                    semaphore.release()
-                    _semaphore_acquired = False
+                # No work found — release the slot before waiting. No lease was
+                # ever bound for this permit (pop returned None), so give it
+                # back via release_unbound(), not release()/reclaim().
+                if _slot_acquired:
+                    registry.release_unbound()
+                    _slot_acquired = False
 
                 # Guard against event.set()/event.clear() race: if a notify fired
                 # while we were in _pop_agent_session (e.g. startup health check),
@@ -1386,61 +1393,61 @@ async def _worker_loop(
                     if _session_state._shutdown_requested:
                         logger.info(f"[worker:{worker_key}] Woke from wait, shutdown requested")
                         break
-                    # Re-acquire semaphore before retry pop
-                    if semaphore is not None:
-                        await semaphore.acquire()
-                        _semaphore_acquired = True
+                    # Re-acquire slot before retry pop
+                    if registry is not None:
+                        await registry.acquire()
+                        _slot_acquired = True
                     try:
                         session = await _pop_agent_session(worker_key, is_project_keyed)
                     except BaseException:
-                        if _semaphore_acquired:
-                            semaphore.release()
-                            _semaphore_acquired = False
+                        if _slot_acquired:
+                            registry.release_unbound()
+                            _slot_acquired = False
                         raise
                     if session is None:
-                        if _semaphore_acquired:
-                            semaphore.release()
-                            _semaphore_acquired = False
+                        if _slot_acquired:
+                            registry.release_unbound()
+                            _slot_acquired = False
                         continue
                 else:
                     # Bridge mode: timeout and exit if no work arrives
                     try:
                         await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
                         # Event fired — new work was enqueued
-                        # Re-acquire semaphore before retry pop
-                        if semaphore is not None:
-                            await semaphore.acquire()
-                            _semaphore_acquired = True
+                        # Re-acquire slot before retry pop
+                        if registry is not None:
+                            await registry.acquire()
+                            _slot_acquired = True
                         try:
                             session = await _pop_agent_session(worker_key, is_project_keyed)
                         except BaseException:
-                            if _semaphore_acquired:
-                                semaphore.release()
-                                _semaphore_acquired = False
+                            if _slot_acquired:
+                                registry.release_unbound()
+                                _slot_acquired = False
                             raise
                         if session is None:
-                            if _semaphore_acquired:
-                                semaphore.release()
-                                _semaphore_acquired = False
+                            if _slot_acquired:
+                                registry.release_unbound()
+                                _slot_acquired = False
                     except TimeoutError:
                         # Timeout — use sync fallback to bypass index visibility race
-                        # Re-acquire semaphore before fallback pop
-                        if semaphore is not None:
-                            await semaphore.acquire()
-                            _semaphore_acquired = True
+                        # Re-acquire slot before fallback pop
+                        if registry is not None:
+                            await registry.acquire()
+                            _slot_acquired = True
                         try:
                             session = await _pop_agent_session_with_fallback(
                                 worker_key, is_project_keyed
                             )
                         except BaseException:
-                            if _semaphore_acquired:
-                                semaphore.release()
-                                _semaphore_acquired = False
+                            if _slot_acquired:
+                                registry.release_unbound()
+                                _slot_acquired = False
                             raise
                         if session is None:
-                            if _semaphore_acquired:
-                                semaphore.release()
-                                _semaphore_acquired = False
+                            if _slot_acquired:
+                                registry.release_unbound()
+                                _slot_acquired = False
 
                 if session is not None:
                     logger.info(f"[worker:{worker_key}] Drain guard caught session")
@@ -1449,18 +1456,18 @@ async def _worker_loop(
                     continue
                 else:
                     # Bridge mode: exit-time safety check
-                    # Re-acquire semaphore for final fallback pop
-                    if semaphore is not None:
-                        await semaphore.acquire()
-                        _semaphore_acquired = True
+                    # Re-acquire slot for final fallback pop
+                    if registry is not None:
+                        await registry.acquire()
+                        _slot_acquired = True
                     try:
                         session = await _pop_agent_session_with_fallback(
                             worker_key, is_project_keyed
                         )
                     except BaseException:
-                        if _semaphore_acquired:
-                            semaphore.release()
-                            _semaphore_acquired = False
+                        if _slot_acquired:
+                            registry.release_unbound()
+                            _slot_acquired = False
                         raise
                     if session is not None:
                         logger.warning(
@@ -1468,9 +1475,9 @@ async def _worker_loop(
                             f"{session.agent_session_id} — processing instead of exiting"
                         )
                     else:
-                        if _semaphore_acquired:
-                            semaphore.release()
-                            _semaphore_acquired = False
+                        if _slot_acquired:
+                            registry.release_unbound()
+                            _slot_acquired = False
                         logger.info(f"[worker:{worker_key}] Queue empty, worker exiting")
                         if _check_restart_flag():
                             _trigger_restart()
@@ -1488,6 +1495,14 @@ async def _worker_loop(
             # Deadlock prevention lives in #1004's child-boost ordering
             # (sort_key at line 794) and force-deliver on waiting_for_children
             # (output_router.py). The swap trick was removed in #1021.
+
+            # Bind the lease NOW — synchronously, immediately before execution
+            # starts, with no intervening await between the resolving pop
+            # above and this call (issue #1820 "lease-at-bind-only"). `session`
+            # is guaranteed non-None here: every None branch above either
+            # `continue`s or `break`s the loop.
+            if registry is not None:
+                registry.bind(session.agent_session_id)
 
             try:
                 await _execute_agent_session(session)
@@ -1652,10 +1667,14 @@ async def _worker_loop(
                             guard_err,
                         )
                         await _complete_agent_session(session, failed=session_failed)
-                # Release the global concurrency slot after session is done
-                if _semaphore_acquired and semaphore is not None:
-                    semaphore.release()
-                    _semaphore_acquired = False
+                # Release the global concurrency slot after session is done.
+                # This is the normal (bound) release path — registry.release()
+                # is idempotent, so it silently no-ops if an out-of-band killer
+                # already reclaimed this session's lease (session_health.py
+                # _apply_recovery_transition / the hoisted reap pass).
+                if _slot_acquired and registry is not None:
+                    registry.release(session.agent_session_id)
+                    _slot_acquired = False
 
             # Clear the event after processing so the next drain wait starts fresh
             event.clear()

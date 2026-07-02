@@ -26,6 +26,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
+import agent.session_state as _session_state
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -1893,6 +1894,35 @@ async def _apply_recovery_transition(
             _counter_err,
         )
 
+    def _reclaim_slot_lease() -> None:
+        """Prompt slot reclaim (issue #1820, Fix #2) — called ONLY on the
+        branches below that land ``entry``'s row TERMINAL (completed /
+        abandoned / failed), never on the ``pending`` requeue branch.
+
+        This is the wiring that makes acceptance criterion #1 (leaked-slot
+        auto-recovery) fire on the health/tool-timeout cadence instead of
+        waiting for the 300s reap-pass tick: an out-of-band kill (this
+        function) may flip the DB row terminal while the owning worker
+        loop's own ``finally`` release is stuck (e.g. a granite session
+        whose PTY container thread never returns) — this reclaims the slot
+        immediately. ``registry.reclaim()`` is idempotent, so it safely
+        no-ops if the owning worker loop's normal release already fired
+        first. Never raises into the caller — the reclaim is a self-heal,
+        not a load-bearing part of the recovery transition.
+        """
+        try:
+            registry = _session_state._slot_registry
+            if registry is not None:
+                registry.reclaim(entry.agent_session_id)
+                from popoto.redis_db import POPOTO_REDIS_DB as _SR
+
+                _SR.incr(f"{entry.project_key}:session-health:slot_reclaims")
+        except Exception:
+            logger.exception(
+                "[session-health] slot lease reclaim failed for %s (non-fatal)",
+                entry.agent_session_id,
+            )
+
     # AC4 narrow telemetry counter (issue #1614): track recoveries that match
     # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
     # but sdk_ever_output=False — the confirmed Branch 2 failure mode).
@@ -1938,6 +1968,7 @@ async def _apply_recovery_transition(
                 "completed",
                 reason="health check: already delivered",
             )
+            _reclaim_slot_lease()  # row is now terminal (completed)
         except StatusConflictError as e:
             logger.info(
                 "[session-health] Skipping finalize for already-delivered session %s: %s",
@@ -2148,6 +2179,7 @@ async def _apply_recovery_transition(
                 skip_auto_tag=True,
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (abandoned)
             logger.info(
                 "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
                 entry.agent_session_id,
@@ -2172,6 +2204,7 @@ async def _apply_recovery_transition(
                 ),
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (failed, MAX_RECOVERY_ATTEMPTS)
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
@@ -2202,6 +2235,7 @@ async def _apply_recovery_transition(
                 ),
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (failed, subprocess not confirmed dead)
             logger.warning(
                 "[session-health] Escalated session %s to failed — subprocess "
                 "pid=%s not confirmed dead after cancel+SIGTERM+SIGKILL "
@@ -2331,6 +2365,129 @@ async def _apply_recovery_transition(
     return True
 
 
+def _reap_slot_leases() -> None:
+    """Top-of-tick slot-lease reap pass (issue #1820, Fix #2 — the reclaim
+    half of the ownerless-semaphore leak fix).
+
+    Hoisted OUT of the per-entry PENDING-session loop where the old
+    logging-only leaked-slot fingerprint used to live (nested inside
+    ``for entry in pending_sessions:``, gated on ``worker_alive``) into a
+    SINGLE pass, called once per health-check tick from the TOP of
+    ``_agent_session_health_check`` — independent of ``worker_alive``, of
+    whether there is any pending session at all, and (for phase 1) of the
+    kill-switch. A literal in-place edit of the old block would have run the
+    reap N-times-per-tick and skipped it entirely on a drained queue; this
+    hoisted single pass fires even with zero pending sessions, which is
+    exactly the parked-worker starvation case Acceptance #1 targets.
+
+    Two phases. Only phase 2 is gated on the kill-switch:
+
+      Phase 1 (detection) — ALWAYS runs, even when
+      ``SLOT_LEASE_REAP_DISABLED=1``. Computes and logs the leaked-slot
+      fingerprint (WARNING iff ``permits_free==0 AND running_count<max``;
+      INFO iff ``permits_free==0 AND running_count>=max`` — healthy
+      backpressure) plus a heartbeat. This replaces the deleted block's
+      detect-and-log role wholesale, so the kill-switch degrades to
+      detect-only — never to no-visibility (Operator CONCERN).
+
+      Phase 2 (reclaim) — gated on
+      ``os.environ.get("SLOT_LEASE_REAP_DISABLED") != "1"``. For each lease
+      in a SNAPSHOT of ``registry.leases()`` (mutation-during-iteration
+      safe), re-reads the owner's DB status fresh (terminal-status-guarded,
+      same pattern as the tool-timeout loop) and, iff the owner is terminal
+      (or its record no longer exists), calls ``registry.reclaim(owner)``
+      and increments the project-scoped ``slot_reclaims`` counter.
+      **Terminal-owner only — there is deliberately no wall-clock
+      ``now > lease.deadline`` arm** (see agent/slot_lease.py's "no reclaim
+      deadline" note): reclaiming a still-running, progressing owner would
+      strip its permit mid-execution, allowing semaphore over-admission
+      (concurrently-running sessions > max) and re-imposing exactly the
+      wall-clock duration cap issue #1172 removed.
+
+    Never raises into the health check — a single bad lease is logged and
+    the pass continues; the whole function is exception-wrapped.
+    """
+    try:
+        registry = _session_state._slot_registry
+        if registry is None:
+            return  # No ceiling configured (pre-init / unlimited-mode tests).
+
+        leases_snapshot = list(registry.leases())
+        reap_disabled = os.environ.get("SLOT_LEASE_REAP_DISABLED") == "1"
+
+        # === Phase 1: detection — ALWAYS runs (Operator CONCERN) ===
+        try:
+            _permits_free = registry.permits_free()
+            _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
+            _running_count = len(list(AgentSession.query.filter(status="running")))
+            if _permits_free == 0 and _running_count < _max_sessions:
+                logger.warning(
+                    "[session-health] SLOT-LEASE FINGERPRINT: leases_held=%d, "
+                    "permits_free=0 AND running_count=%d < max_sessions=%d. "
+                    "Slot(s) held by non-running session(s) (#1537 class). "
+                    "reap_disabled=%s. See docs/features/slot-lease-ownership.md.",
+                    len(leases_snapshot),
+                    _running_count,
+                    _max_sessions,
+                    reap_disabled,
+                )
+            elif _permits_free == 0:
+                logger.info(
+                    "[session-health] leases_held=%d, permits_free=0, "
+                    "running_count=%d >= max_sessions=%d (healthy backpressure; "
+                    "no leak signal).",
+                    len(leases_snapshot),
+                    _running_count,
+                    _max_sessions,
+                )
+            else:
+                # Zero-reclaim heartbeat — proves the reap pass is alive even
+                # when there is nothing to report.
+                logger.debug(
+                    "[session-health] slot-lease heartbeat: leases_held=%d, "
+                    "permits_free=%d, running_count=%d, max_sessions=%d, "
+                    "reap_disabled=%s",
+                    len(leases_snapshot),
+                    _permits_free,
+                    _running_count,
+                    _max_sessions,
+                    reap_disabled,
+                )
+        except Exception:
+            logger.exception("[session-health] slot-lease detection phase failed")
+
+        # === Phase 2: reclaim — gated on SLOT_LEASE_REAP_DISABLED ===
+        if reap_disabled:
+            return
+
+        for lease in leases_snapshot:
+            try:
+                fresh = AgentSession.get_by_id(lease.owner_session_id)
+                # A record that no longer exists is at least as terminal as
+                # one whose status field says so — reclaim either way.
+                if fresh is None or getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                    registry.reclaim(lease.owner_session_id)
+                    _project_key = getattr(fresh, "project_key", None) or "unknown"
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _SR
+
+                        _SR.incr(f"{_project_key}:session-health:slot_reclaims")
+                    except Exception:
+                        logger.debug(
+                            "[session-health] slot_reclaims counter increment failed "
+                            "(non-fatal) for owner=%s",
+                            lease.owner_session_id,
+                        )
+            except Exception:
+                logger.warning(
+                    "[session-health] slot-lease reap failed for owner=%s (non-fatal)",
+                    lease.owner_session_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.exception("[session-health] _reap_slot_leases failed (non-fatal)")
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -2385,6 +2542,15 @@ async def _agent_session_health_check() -> None:
     checked = 0
     recovered = 0
     workers_started = 0
+
+    # === Slot-lease reap pass (issue #1820, Fix #2) ===
+    # Single top-of-tick pass, independent of worker_alive and of whether
+    # there are any pending sessions — replaces the deleted logging-only
+    # fingerprint that used to be nested inside the PENDING-session loop
+    # below (gated on worker_alive, re-run per pending entry). See
+    # _reap_slot_leases()'s docstring for the two-phase (detect-always,
+    # reclaim-gated) design.
+    _reap_slot_leases()
 
     # === SIGKILL escalation drain (issue #1218) ===
     # Snapshot-then-clear: PIDs added to _pending_sigkill on the previous tick
@@ -2562,59 +2728,12 @@ async def _agent_session_health_check() -> None:
             worker_alive = worker is not None and not worker.done()
 
             if worker_alive:
-                # Slot-exhaustion forensic line (Deliverable D, issue #1808).
-                # Logging-ONLY — the ``event.set(); continue`` recovery decision is
-                # unchanged. Detects the suspension-wedge that asyncio set_debug is
-                # blind to (C1 limitation): a worker loop parked at
-                # ``await semaphore.acquire()`` yields the event loop cleanly, so it
-                # executes no slow callback and emits no set_debug log.
-                #
-                # Trigger: actual permit depletion (``_global_session_semaphore._value``),
-                # NOT running-count. Running-count is the wrong signal because
-                # ``running ⟹ slot-held`` is not invertible — a session requeued to
-                # pending while its slot stays leaked (#1537 class) produces
-                # ``running_count < slots_held``, which a running-count trigger
-                # misses while over-firing on healthy saturation. ``_value`` is a
-                # private asyncio attr but the only accurate permit-depletion signal;
-                # access is guarded for a None semaphore (fail-quiet).
-                #
-                # WARNING  iff permits_free == 0 AND running < max — leaked-slot fingerprint
-                # INFO     iff permits_free == 0 AND running >= max — healthy backpressure
-                # (silent)  when permits_free > 0 — loop is not parked; different anomaly
-                try:
-                    import agent.session_state as _health_ss  # noqa: PLC0415
-
-                    _sem = _health_ss._global_session_semaphore
-                    if _sem is not None:
-                        _permits_free = _sem._value  # private asyncio attr; only accurate source
-                        _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
-                        _running_count = len(list(AgentSession.query.filter(status="running")))
-                        if _permits_free == 0 and _running_count < _max_sessions:
-                            logger.warning(
-                                "[session-health] PENDING-WEDGE FINGERPRINT: "
-                                "worker_key=%s session=%s — semaphore permits_free=0 "
-                                "AND running_count=%d < max_sessions=%d. "
-                                "Slot held by non-running session (#1537 class): "
-                                "worker loop is parked at await semaphore.acquire(). "
-                                "See docs/features/worker-wedge-investigation.md.",
-                                worker_key,
-                                entry.agent_session_id,
-                                _running_count,
-                                _max_sessions,
-                            )
-                        elif _permits_free == 0:
-                            logger.info(
-                                "[session-health] worker_key=%s session=%s — "
-                                "semaphore permits_free=0, running_count=%d >= "
-                                "max_sessions=%d (healthy backpressure; worker loop "
-                                "legitimately queued on full semaphore).",
-                                worker_key,
-                                entry.agent_session_id,
-                                _running_count,
-                                _max_sessions,
-                            )
-                except Exception:
-                    pass  # Fail-quiet: never raise in the forensic log branch
+                # The leaked-slot fingerprint that used to be logged HERE
+                # (nested in this loop, gated on worker_alive, re-run once
+                # per pending entry) is now a single top-of-tick pass —
+                # see _reap_slot_leases(), called once at the start of
+                # _agent_session_health_check (issue #1820, Fix #2). It
+                # detects AND reclaims; this branch stays nudge-only.
 
                 # Worker exists — nudge its event in case it missed the original
                 # notify (e.g. startup-recovery race: session put to pending before

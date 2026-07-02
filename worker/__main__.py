@@ -655,13 +655,15 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
     from agent.session_health import _agent_session_tool_timeout_loop
 
-    # Initialize global concurrency semaphore BEFORE any worker loops are created.
-    # Clamp to minimum 1 to prevent deadlock if MAX_CONCURRENT_SESSIONS=0.
+    # Initialize the global concurrency slot registry BEFORE any worker loops
+    # are created. Clamp to minimum 1 to prevent deadlock if
+    # MAX_CONCURRENT_SESSIONS=0.
     _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
     import agent.session_state as _ss  # noqa: PLC0415
+    from agent.slot_lease import SlotLeaseRegistry  # noqa: PLC0415
 
-    _ss._global_session_semaphore = asyncio.Semaphore(_max_sessions)
-    logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
+    _ss._slot_registry = SlotLeaseRegistry(_max_sessions)
+    logger.info(f"Slot lease registry initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
 
     # Opt-in asyncio debug mode (issue #1808 investigation — Deliverable B / C-rev4).
     # Catches *synchronous* loop blocks (hypotheses 2/3 of the wedge investigation)
