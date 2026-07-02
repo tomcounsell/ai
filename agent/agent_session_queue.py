@@ -179,7 +179,6 @@ _AGENT_SESSION_FIELDS = [
     "pr_url",
     "context_summary",
     "expectations",
-    "queued_steering_messages",
     "correlation_id",
     "claude_session_uuid",
     "parent_agent_session_id",
