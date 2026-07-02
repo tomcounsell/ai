@@ -843,6 +843,28 @@ handles generic field addition per issues #1099/#1172).
   startup reads `data/granite_pty_pids.json` and PID-kills them. The kill is
   PID-targeted, so an operator's personal interactive `claude` session on
   another project is never touched.
+- **Crash-resume PID registration (plan #1851)**: `_resume_crashed_pty`
+  spawns its replacement `PTYDriver` OUTSIDE the pool's own spawn paths
+  (`_spawn_slot`/`_spawn_session_pair`), so before this fix the resumed
+  process's PID was never written to `data/granite_pty_pids.json` and could
+  leak as an orphan across a later worker crash/restart cycle. `Container`
+  now accepts `on_pty_spawn`/`on_pty_despawn` callbacks (the same injection
+  seam as `on_turn`/`on_pty_read`); `BridgeAdapter` wires them to
+  `PTYPool.register_pid`/`PTYPool.unregister_pid`. `_resume_crashed_pty`
+  calls `on_pty_spawn(new_pid)` immediately after the replacement PTY's
+  `spawn()` returns and BEFORE its `write()` call — the process is already
+  live at `spawn()`, and a `write()` failure must not leave a live,
+  unregistered `claude` process. It calls `on_pty_despawn(dead_pid)` from
+  the method's outer `finally` (so it fires on every exit path), gated on
+  the dead PTY's `close(force=True)` having actually succeeded — a
+  swallowed close failure means the old process may still be alive, so it
+  stays registered for the sweep to reap. `PTYPool.register_pid`/
+  `unregister_pid` are thread-safe (crash-resume callbacks fire from the
+  container's session thread, not the pool's event-loop thread) via a new
+  `_pids_lock` guarding every `_spawned_pids` mutation and the
+  `_persist_pids` snapshot. The self-spawned/test/CLI `Container` path (no
+  `PTYPool`) leaves both callbacks `None` and is unaffected — it already
+  tears its PTYs down synchronously via `_close_pair_and_reap` (#1816).
 - **PTY-master U-state block (issue #1767)**: when the worker's main thread
   is blocking inside `os.read()` on the PTY master fd (e.g. waiting for the
   granite Dev PTY to produce output), the kernel places it in uninterruptible

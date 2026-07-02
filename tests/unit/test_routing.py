@@ -12,6 +12,9 @@ They also cover classify_conversation_terminus fast-paths and failure modes.
 
 from __future__ import annotations
 
+import json
+import logging
+
 import pytest
 
 from bridge import routing
@@ -481,3 +484,106 @@ class TestResolveConfigPathLaunchdGuard:
         assert routing._is_under_desktop(home / "Desktop" / "x.json")
         assert not routing._is_under_desktop(home / "src" / "ai" / "config" / "projects.json")
         assert not routing._is_under_desktop(routing.Path("/etc/projects.json"))
+
+
+class TestGuardedConfigRead:
+    """C4 — guarded config read: a partial/corrupt projects.json must never raise.
+
+    A launchd KeepAlive respawn can race a mid-iCloud-write projects.json,
+    producing a truncated/corrupt JSON file. The guarded loader catches that,
+    logs, and falls back to the last-known-good sidecar instead of
+    propagating the exception — which would otherwise crash-loop the bridge
+    at import time.
+    """
+
+    def test_successful_read_caches_last_known_good(self, monkeypatch, tmp_path):
+        config_path = tmp_path / "projects.json"
+        config_path.write_text(json.dumps({"projects": {"a": 1}, "defaults": {}}))
+        lkg_path = tmp_path / "lkg.json"
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+
+        result = routing._guarded_json_load(config_path)
+
+        assert result == {"projects": {"a": 1}, "defaults": {}}
+        assert lkg_path.exists()
+        assert json.loads(lkg_path.read_text()) == result
+        assert not lkg_path.with_suffix(".tmp").exists()
+
+    def test_corrupt_read_falls_back_to_last_known_good(self, monkeypatch, tmp_path, caplog):
+        config_path = tmp_path / "projects.json"
+        config_path.write_text('{"projects": {"a": 1}, "def')  # truncated mid-write
+        lkg_path = tmp_path / "lkg.json"
+        lkg_path.write_text(json.dumps({"projects": {"good": True}, "defaults": {}}))
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+
+        with caplog.at_level(logging.ERROR):
+            result = routing._guarded_json_load(config_path)
+
+        assert result == {"projects": {"good": True}, "defaults": {}}
+        assert any("Failed to parse" in r.message for r in caplog.records)
+
+    def test_corrupt_read_without_last_known_good_returns_empty_defaults(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        config_path = tmp_path / "projects.json"
+        config_path.write_text("not json at all")
+        lkg_path = tmp_path / "does_not_exist.json"
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+
+        with caplog.at_level(logging.ERROR):
+            result = routing._guarded_json_load(config_path)
+
+        assert result == {"projects": {}, "defaults": {}}
+        assert any("No last-known-good config available" in r.message for r in caplog.records)
+
+    def test_guarded_json_load_never_raises_on_malformed_input(self, monkeypatch, tmp_path):
+        """Import-time invariant: a JSONDecodeError from a partial config must
+        never propagate — the loader always returns a dict."""
+        config_path = tmp_path / "projects.json"
+        config_path.write_bytes(b"\x00\x01garbage-not-json")
+        lkg_path = tmp_path / "lkg.json"
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+
+        result = routing._guarded_json_load(config_path)  # must not raise
+
+        assert isinstance(result, dict)
+
+    def test_load_config_falls_back_to_last_known_good_on_corrupt_file(self, monkeypatch, tmp_path):
+        config_path = tmp_path / "projects.json"
+        config_path.write_text('{"defaults": {"working_direct')  # partial write
+        lkg_path = tmp_path / "lkg.json"
+        lkg_config = {"projects": {}, "defaults": {"working_directory": str(tmp_path)}}
+        lkg_path.write_text(json.dumps(lkg_config))
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+        monkeypatch.setattr(routing, "_resolve_config_path", lambda: config_path)
+        monkeypatch.setattr(routing, "ACTIVE_PROJECTS", [])
+
+        result = routing.load_config()  # must not raise
+
+        assert result == lkg_config
+
+    def test_read_last_known_good_returns_none_when_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", tmp_path / "missing.json")
+        assert routing._read_last_known_good_config() is None
+
+    def test_write_last_known_good_is_atomic_and_creates_parent_dir(self, monkeypatch, tmp_path):
+        lkg_path = tmp_path / "nested" / "lkg.json"
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+
+        routing._write_last_known_good_config({"projects": {}, "defaults": {}})
+
+        assert lkg_path.exists()
+        assert not lkg_path.with_suffix(".tmp").exists()  # tmp file renamed away, not left behind
+
+    def test_write_last_known_good_swallows_oserror(self, monkeypatch, tmp_path):
+        """A write failure (e.g. read-only filesystem) must not raise — this
+        sidecar is a best-effort cache, not a critical write."""
+        lkg_path = tmp_path / "lkg.json"
+        monkeypatch.setattr(routing, "_LAST_KNOWN_GOOD_PATH", lkg_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("simulated read-only filesystem")
+
+        monkeypatch.setattr(routing.Path, "mkdir", _boom)
+
+        routing._write_last_known_good_config({"projects": {}})  # must not raise

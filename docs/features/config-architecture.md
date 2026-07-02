@@ -57,6 +57,7 @@ from config.paths import PROJECT_ROOT, DATA_DIR, CONFIG_DIR, VALOR_DIR, LOGS_DIR
 | `config/settings.py` | Pydantic Settings model (single source of truth for config schema) | Yes |
 | `config/paths.py` | Path constants derived from `__file__` | Yes |
 | `~/Desktop/Valor/projects.json` | Per-project config (working dirs, GitHub orgs, Telegram groups) | No (external, iCloud-synced) |
+| `data/projects.last_known_good.json` | Last successfully-parsed `projects.json`, served on a partial/corrupt read | No (generated cache) |
 | `config/projects.example.json` | Template for projects.json | Yes |
 | `config/models.py` | Model name constants | Yes |
 | `config/personas/_base.md` | Shared persona base (identity, values, tools, philosophy) | Yes |
@@ -100,6 +101,10 @@ Note: The DM whitelist is stored in the `dms.whitelist` array within `projects.j
 ### Bridge-contact ownership validation
 
 `projects.json` is validated as a green-light gate by the update script before any service restart (`scripts/update/run.py` Step 4.6 → `scripts/update/verify.py::check_projects_json` → `bridge/config_validation.py::validate_projects_config`). The validator enforces that every bridge-contact identifier — Telegram DM contact id, Telegram group name, email contact, and email domain — resolves to exactly one machine. If the rule is broken, the running bridge keeps serving on the previously-validated config; only a clean config can roll out. See [Single-Machine Ownership](single-machine-ownership.md) for the full identifier list and failure modes.
+
+### Guarded config read
+
+`bridge/routing.py::load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both read `projects.json` through a shared guarded loader (`_guarded_json_load()`) instead of a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/corrupt file; the guarded loader catches `JSONDecodeError`/`OSError`/`UnicodeDecodeError`, logs, and serves the `data/projects.last_known_good.json` sidecar (refreshed atomically on every successful read) instead of raising. This closes an import-time crash-loop, since `_get_active_projects()` used to raise directly out of module import. See [Bridge Self-Healing: Guarded Config Read](bridge-self-healing.md#19-guarded-config-read-bridgeroutingpy-issue-1817-workstream-c4) for the full failure mode and fix.
 
 Override with `GOOGLE_CREDENTIALS_DIR` env var if needed.
 

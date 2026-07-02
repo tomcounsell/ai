@@ -651,6 +651,8 @@ class BridgeAdapter:
                 role_transports=self._role_transports,
                 session_env=self._session_env,
                 agent_session_id=str(getattr(self._agent_session, "session_id", "") or ""),
+                on_pty_spawn=self._pool.register_pid,
+                on_pty_despawn=self._pool.unregister_pid,
             )
             # Compute transcript paths for the tailer. Plan #1842 tailer
             # invariant guard: populate a role's transcript path ONLY when that

@@ -118,12 +118,82 @@ def _is_under_desktop(path: Path) -> bool:
         return False
 
 
+# Sidecar caching the last successfully-parsed projects.json, written atomically
+# (temp-file + os.replace, per the idiom at agent/session_health.py:3009-3011) on
+# every successful read. Served back when a read hits a partial/corrupt file —
+# e.g. a launchd KeepAlive respawn racing a mid-iCloud-write projects.json.
+_LAST_KNOWN_GOOD_PATH = Path(__file__).parent.parent / "data" / "projects.last_known_good.json"
+
+
+def _write_last_known_good_config(config: dict) -> None:
+    """Atomically cache a successfully-parsed config to the last-known-good sidecar.
+
+    Best-effort: any failure (e.g. read-only filesystem, missing data/ dir) is
+    logged at debug and swallowed — this is a cache, not a critical write.
+    """
+    import os
+
+    try:
+        _LAST_KNOWN_GOOD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _LAST_KNOWN_GOOD_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config))
+        os.replace(tmp, _LAST_KNOWN_GOOD_PATH)
+    except OSError as e:
+        logger.debug("[config] Failed to write last-known-good sidecar: %s", e)
+
+
+def _read_last_known_good_config() -> dict | None:
+    """Read the last-known-good sidecar, or None if absent/unreadable."""
+    try:
+        with open(_LAST_KNOWN_GOOD_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _guarded_json_load(config_path: Path) -> dict:
+    """Read and parse a projects.json-shaped file, never raising.
+
+    On success, caches the parsed config to the last-known-good sidecar. On a
+    `JSONDecodeError` (or an `OSError`/`UnicodeDecodeError` from a partial read
+    racing a concurrent writer — e.g. mid-iCloud-sync), logs the failure and
+    serves the last-known-good sidecar instead of propagating the exception.
+    This is what stops a launchd `KeepAlive` respawn storm on a transiently
+    corrupt config file: the bridge/worker keep serving the last good config
+    rather than crash-looping at import time.
+    """
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        logger.error(
+            "[config] Failed to parse %s (%s: %s); falling back to last-known-good",
+            config_path,
+            type(e).__name__,
+            e,
+        )
+        fallback = _read_last_known_good_config()
+        if fallback is not None:
+            return fallback
+        logger.error(
+            "[config] No last-known-good config available for %s; using empty defaults",
+            config_path,
+        )
+        return {"projects": {}, "defaults": {}}
+    else:
+        _write_last_known_good_config(config)
+        return config
+
+
 def load_config() -> dict:
     """Load project configuration from projects.json.
 
     Loads from ~/Desktop/Valor/projects.json by default (iCloud-synced, private).
     Override with PROJECTS_CONFIG_PATH env var.
     Falls back to config/projects.json if ~/Desktop/Valor/ path doesn't exist.
+    A partial/corrupt read (e.g. mid-iCloud-write) falls back to the
+    last-known-good sidecar and logs, instead of raising (see
+    `_guarded_json_load`).
     """
     config_path = _resolve_config_path()
 
@@ -131,8 +201,7 @@ def load_config() -> dict:
         logger.warning(f"Project config not found at {config_path}, using defaults")
         return {"projects": {}, "defaults": {}}
 
-    with open(config_path) as f:
-        config = json.load(f)
+    config = _guarded_json_load(config_path)
 
     # Expand ~ in working_directory values
     for _proj in config.get("projects", {}).values():
