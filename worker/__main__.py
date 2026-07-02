@@ -868,6 +868,25 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Session recovery failed (non-fatal): {e}")
 
+    # Step 3c: Re-finalize parents stranded in waiting_for_children by a crash
+    # window between the child's finalize save and the parent's own transition
+    # (issue #1817, C1). finalize_session() intentionally saves the child
+    # independently of the parent's best-effort finalize (see
+    # agent/session_health.py::_sweep_stranded_waiting_for_children_parents for
+    # the full non-coupling rationale) -- this sweep is what closes the
+    # resulting crash-window orphan. Safe to run unconditionally: it only
+    # transitions parents whose children are ALL terminal, and is a no-op for
+    # a parent still legitimately waiting or already finalized.
+    try:
+        respawned = _sweep_stranded_waiting_for_children_parents()
+        if respawned:
+            logger.info(
+                "Startup recovery: re-finalized %d stranded waiting_for_children parent(s)",
+                respawned,
+            )
+    except Exception as e:
+        logger.warning(f"Stranded waiting_for_children sweep failed (non-fatal): {e}")
+
     # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
     try:
         orphans_killed = _cleanup_orphaned_claude_processes()

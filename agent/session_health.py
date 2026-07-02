@@ -996,6 +996,76 @@ def _sweep_dead_worker_sessions() -> int:
     return swept
 
 
+def _sweep_stranded_waiting_for_children_parents() -> int:
+    """Re-finalize parents stranded in ``waiting_for_children`` after a crash (C1, #1817).
+
+    Background: ``finalize_session()`` (``models/session_lifecycle.py:221``)
+    finalizes the parent best-effort inside a non-fatal try/except
+    (``_finalize_parent_sync``, :440-451) and ALWAYS saves the child (:474) --
+    intentionally, so the child finalizes independently even if the parent
+    lookup/save raises (parent deleted, Redis blip, stale index). This is a
+    deliberate contract that must NOT be inverted by coupling the two writes:
+    an all-or-nothing pipeline would strand the CHILD on every parent-finalize
+    hiccup instead of the rarer case this sweep targets. See
+    ``docs/plans/correctness-delivery-integrity.md`` C1.
+
+    The gap this closes: a process crash AFTER the child save but BEFORE the
+    parent transitions out of ``waiting_for_children`` leaves the parent
+    stranded forever -- nothing else re-triggers ``_finalize_parent_sync`` for
+    it once the crash window has passed.
+
+    Why this is safe to run unconditionally on every worker startup:
+    ``_finalize_parent_sync`` is itself idempotent -- it no-ops if the parent
+    is already terminal or no longer exists (``session_lifecycle.py:719-732``),
+    and it recomputes the parent's fate from the children's CURRENT statuses
+    (not replayed/stale state) each time it runs. Calling it against a parent
+    that already finalized normally, or one still legitimately waiting on a
+    non-terminal child, is a no-op -- only genuinely-stranded parents (all
+    children terminal, parent still ``waiting_for_children``) actually
+    transition here. A concurrent finalize from another process is resolved
+    by the generic CAS in ``transition_status()`` (:604-648, preserved
+    untouched by this sweep); ``_transition_parent`` already swallows the
+    resulting ``StatusConflictError`` at INFO level (:817-828), so this
+    function never needs to special-case that race.
+
+    Returns the count of parents actually re-finalized (confirmed by a
+    post-call status check) -- NOT the count of stranded-looking parents
+    scanned, most of which are expected to be legitimate no-ops.
+    """
+    from models.session_lifecycle import _finalize_parent_sync
+
+    stranded = _filter_hydrated_sessions(AgentSession.query.filter(status="waiting_for_children"))
+    if not stranded:
+        return 0
+
+    reswept = 0
+    for parent in stranded:
+        parent_id = getattr(parent, "id", None)
+        if not parent_id:
+            continue
+        try:
+            _finalize_parent_sync(parent_id)
+        except Exception as e:
+            logger.warning(
+                "[waiting-for-children-sweep] Failed to re-finalize parent %s: %s",
+                parent_id,
+                e,
+            )
+            continue
+
+        refreshed = AgentSession.get_by_id(parent_id)
+        if refreshed is not None and refreshed.status != "waiting_for_children":
+            reswept += 1
+            logger.warning(
+                "[waiting-for-children-sweep] Re-finalized stranded parent %s -> %s "
+                "(crash-window recovery, #1817)",
+                parent_id,
+                refreshed.status,
+            )
+
+    return reswept
+
+
 # === Agent Session Health Monitor ===
 
 

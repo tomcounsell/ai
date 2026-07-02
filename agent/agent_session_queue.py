@@ -84,6 +84,7 @@ from agent.session_health import (  # noqa: F401
     _recover_interrupted_agent_sessions_startup,
     _should_kill_no_progress,
     _sweep_dead_worker_sessions,
+    _sweep_stranded_waiting_for_children_parents,
     _tier2_reprieve_signal,
     _ts,
     _write_worker_heartbeat,
