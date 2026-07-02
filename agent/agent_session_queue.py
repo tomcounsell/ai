@@ -72,16 +72,20 @@ from agent.session_health import (  # noqa: F401
     HEARTBEAT_FRESHNESS_WINDOW,
     HEARTBEAT_WRITE_INTERVAL,
     MAX_RECOVERY_ATTEMPTS,
+    TASK_CANCEL_TIMEOUT,
     _agent_session_health_check,
     _agent_session_health_loop,
     _agent_session_hierarchy_health_check,
+    _apply_recovery_transition,
     _cleanup_orphaned_claude_processes,
     _dependency_health_check,
     _has_progress,
     _reap_orphan_session_processes,
     _recover_interrupted_agent_sessions_startup,
+    _should_kill_no_progress,
     _sweep_dead_worker_sessions,
     _tier2_reprieve_signal,
+    _ts,
     _write_worker_heartbeat,
     cleanup_corrupted_agent_sessions,
     format_duration,
@@ -132,6 +136,7 @@ from agent.session_state import (  # noqa: F401
 )
 from config.enums import ClassificationType, SessionType
 from models.agent_session import AgentSession
+from models.session_lifecycle import TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -1298,6 +1303,129 @@ def _ensure_worker(worker_key: str, is_project_keyed: bool = False) -> None:
         _starting_workers.discard(worker_key)
 
 
+# === Progress-deadline cancel scope (issue #1820 Fix #3) ===
+# Provisional, conservative defaults — tune after observing real
+# stall-vs-legitimate-long-tool-call histograms on the live bridge machine
+# (same posture as #1815's threshold tuning; see the plan's No-Gos).
+# SESSION_PROGRESS_DEADLINE_S must stay >= the maximum tool-timeout tier
+# (agent/session_stall_classifier.py) so `tool_timeout` always fires first
+# for a tool-in-flight wedge — this watcher only catches the residual (no
+# tool in flight / model-inference stall / wedged between tool calls).
+SESSION_PROGRESS_DEADLINE_S = int(os.environ.get("SESSION_PROGRESS_DEADLINE_S", 1800))
+# Poll interval for the owned-task progress watcher in `_worker_loop` below.
+# Provisional — keeps the worker loop's liveness beacon ticking while
+# watching progress without busy-waiting.
+PROGRESS_POLL_S = float(os.environ.get("PROGRESS_POLL_S", 30))
+
+
+def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
+    """Max over all PRESENT progress signals for ``session`` (issue #1820 Fix #3).
+
+    Transport-aware WITHOUT a hard transport branch (Granite deconfliction,
+    comment 4862216457, fact a) — this is the max over every signal that
+    happens to be populated, so it is correct for whichever transport is
+    live and needs no dependency on #1843 fix 2:
+
+      * **SDK sessions** bump ``last_tool_use_at`` (PreToolUse/PostToolUse
+        hooks) and ``last_turn_at`` (sdk_client ``result`` event).
+      * **Granite PTY sessions** run the CLI hooks, which never populate
+        those SDK fields — they are structurally dead there (the CLI hooks
+        bump only ``updated_at`` + ``tool_call_count``). Consuming only the
+        SDK fields for granite would leave ``acquired_at`` as the sole
+        non-None signal, false-killing every granite session the instant it
+        crosses the deadline. The #1724 PTY-liveness signal
+        ``last_pty_activity_at`` (``models/agent_session.py:392``,
+        diff-gate-stamped by the PTY read-loop callback) is granite's real
+        progress signal, so it is always included in the max.
+      * ``acquired_at`` — the slot lease's bind timestamp, captured by the
+        caller at the same moment ``registry.bind()`` records it (issue
+        #1820 "lease-at-bind-only") — is the fallback baseline present for
+        EVERY session regardless of transport or registry availability, so
+        the deadline is always well-defined even for a never-started
+        session with no other signal.
+
+    If #1843 fix 2 lands first and makes the granite CLI hooks additionally
+    populate the SDK fields, both signals are simply fresh and the max picks
+    the freshest — this function has no hard dependency either way.
+    """
+    candidates = [
+        _ts(getattr(session, "last_tool_use_at", None)),
+        _ts(getattr(session, "last_turn_at", None)),
+        _ts(getattr(session, "last_pty_activity_at", None)),
+        acquired_at,
+    ]
+    return max(c for c in candidates if c is not None)
+
+
+def _fd_pty_kill(session: AgentSession) -> None:
+    """Fd-level PTY kill for the progress-deadline cancel scope (issue #1820 Fix #3).
+
+    Closes the granite kill-scope gap ``_apply_recovery_transition``'s
+    ``claude_pid`` SIGKILL escalation cannot reach: a granite session runs
+    its container on a worker thread
+    (``await asyncio.to_thread(container.run)``, ``bridge_adapter.py:695``)
+    and records no ``claude_pid`` (SDK-path-only, ``session_executor.py:1425``),
+    so a task-cancel cannot stop the OS thread — recovery would otherwise
+    leave the granite PTY children alive until the orphan reaper sweeps them.
+
+    Transport-branched (BLOCKER r6 — comment 4862216457, fact b):
+
+      * **Pool-backed granite session** (``session.claude_pid is None`` AND
+        ``session.pm_pid``/``session.dev_pid`` set — stamped at
+        ``bridge_adapter.py:810-815`` from the acquired pool pair): delegate
+        to the PTYPool's **PID-targeted** kill,
+        ``PTYPool.kill_orphans({pm_pid, dev_pid})`` (``pty_pool.py:276``) —
+        specific PIDs, never a whole process group, so it can never race the
+        pool's background respawn or kill a PID the pool already recycled
+        for a different session's slot.
+      * **Self-spawned granite** (tests/ping-pong) or an **SDK session**:
+        no-op (log and return). The container's own ``_close_pair_and_reap``
+        killpg (``container.py:1032-1052``) already runs on close for a
+        self-spawned pair — that path is gated behind
+        ``if not self._uses_pool_pair()`` and is DEAD for pool pairs (the
+        production transport), so it is deliberately NOT reused here:
+        reusing it would kill nothing where it matters and could race the
+        pool's respawn. The SDK path is already covered by
+        ``_apply_recovery_transition``'s ``claude_pid`` SIGKILL escalation.
+
+    Never raises into the caller — a failed or missing PTY kill must not
+    block the reclaim+finalize that follows it.
+    """
+    try:
+        if session.claude_pid is None and (
+            session.pm_pid is not None or session.dev_pid is not None
+        ):
+            from agent.granite_container.pty_pool import PTYPool
+
+            pids = {p for p in (session.pm_pid, session.dev_pid) if p is not None}
+            killed = PTYPool.kill_orphans(pids)
+            logger.warning(
+                "[worker] Fix #3 fd-PTY-kill: PTYPool.kill_orphans(%s) for session %s "
+                "killed=%d (pool-backed granite, production transport)",
+                pids,
+                session.agent_session_id,
+                killed,
+            )
+        else:
+            logger.debug(
+                "[worker] Fix #3 fd-PTY-kill: no-op for session %s "
+                "(claude_pid=%s, pm_pid=%s, dev_pid=%s — not a pool-backed granite "
+                "session; SDK claude_pid SIGKILL or the container's own close-time "
+                "reap already cover it)",
+                session.agent_session_id,
+                session.claude_pid,
+                session.pm_pid,
+                session.dev_pid,
+            )
+    except Exception:
+        logger.warning(
+            "[worker] Fix #3 fd-PTY-kill failed for session %s (non-fatal, "
+            "proceeding to reclaim+finalize regardless)",
+            session.agent_session_id,
+            exc_info=True,
+        )
+
+
 async def _worker_loop(
     worker_key: str, event: asyncio.Event, is_project_keyed: bool = False
 ) -> None:
@@ -1501,31 +1629,225 @@ async def _worker_loop(
             # above and this call (issue #1820 "lease-at-bind-only"). `session`
             # is guaranteed non-None here: every None branch above either
             # `continue`s or `break`s the loop.
+            #
+            # `_session_acquired_at` mirrors the lease's own `acquired_at`
+            # (recorded inside `registry.bind()`) and is the progress-ts
+            # fallback for the watcher below — captured here rather than read
+            # back from the registry so it stays well-defined even when
+            # `registry` is None (unbounded-concurrency mode has no lease).
+            _session_acquired_at = time.time()
             if registry is not None:
                 registry.bind(session.agent_session_id)
 
+            # === Progress-deadline cancel scope (issue #1820 Fix #3) ===
+            # `_execute_agent_session` now runs as an OWNED child task,
+            # watched by a small on-loop poll loop, instead of a plain
+            # `await`. This is NOT a wall-clock cap (#1172 removed that) — it
+            # resets on any tool/turn/PTY activity and only fires when
+            # progress genuinely stalls past SESSION_PROGRESS_DEADLINE_S.
+            deadline_cancelled = False
+            # Telemetry-once latch (CONCERN r6): tier1/tier2 counters fire on
+            # the first deadline-exceeded poll only, never once per
+            # PROGRESS_POLL_S tick for a long-reprieved session.
+            np_telemetry_emitted = False
+            exec_task = asyncio.create_task(_execute_agent_session(session))
+            # #1039 CONTRACT HONORED (Blocker r4) — the registry handle is NOT
+            # rewired here. `_execute_agent_session` keeps its own
+            # `_active_sessions[sid] = SessionHandle(task=None)`
+            # (session_executor.py:734) and later sets
+            # `handle.task = task._task` (the INNER SDK task) at
+            # session_executor.py:1891 once BackgroundTask.run() has created
+            # it — exactly the target the SessionHandle docstring
+            # (session_state.py:19) mandates. BackgroundTask ABSORBS
+            # cancellation of `task._task` (its coroutine catches
+            # CancelledError and completes `_task` normally), so an
+            # out-of-band killer (`_apply_recovery_transition`,
+            # session_health.py) cancelling `handle.task` tears down the SDK
+            # subprocess WITHOUT propagating CancelledError into this loop —
+            # the worker survives. Wiring `handle.task = exec_task` instead
+            # would (1) tear down this whole healthy worker on such a cancel
+            # (exec_task's cancel is NOT absorbed the same way — its
+            # `await task._task` at :1942 is guarded only by
+            # `except Exception`) and (2) be silently reversed by :1891
+            # anyway — so it is deliberately never done. Fix #3's OWN
+            # deadline cancel targets `exec_task` directly (the local
+            # reference below) and kills the SDK subprocess/PTY itself via
+            # `_fd_pty_kill`; it never touches the handle.
             try:
-                await _execute_agent_session(session)
-                finalized_by_execute = True  # reached only on non-exceptional return
-            except asyncio.CancelledError:
-                logger.warning(
-                    "[worker:%s] Worker cancelled during session %s — session interrupted, "
-                    "will be re-queued by startup recovery",
-                    worker_key,
-                    session.agent_session_id,
-                )
-                try:
-                    session.log_lifecycle_transition(
-                        "running", "worker cancelled — startup recovery will re-queue"
+                while not exec_task.done():
+                    done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
+                    if exec_task in done:
+                        break
+                    fresh_for_progress = AgentSession.query.get(redis_key=session.db_key.redis_key)
+                    current = fresh_for_progress if fresh_for_progress is not None else session
+                    last = _session_progress_ts(current, _session_acquired_at)
+                    if (time.time() - last) <= SESSION_PROGRESS_DEADLINE_S:
+                        continue  # progress observed — keep watching
+                    if os.environ.get("DISABLE_PROGRESS_KILL") == "1":
+                        break  # kill-switch: let it run
+                    # BLOCKER (r5) — read the #1039 registry handle INSIDE
+                    # the loop, each poll, immediately before the reprieve
+                    # gate. `asyncio.create_task(...)` only SCHEDULES
+                    # `_execute_agent_session`; the handle is populated
+                    # inside it (session_executor.py:734) and cannot exist
+                    # until the first `await asyncio.wait(...)` above yields
+                    # control to the event loop. A read hoisted before the
+                    # loop would be `None` on EVERY poll, deterministically
+                    # defeating the active-children Tier-2 reprieve and
+                    # falsely cancelling a `waiting_for_children` PM.
+                    handle = _active_sessions.get(session.agent_session_id)
+                    # Telemetry-once (CONCERN r6): emit tier1/tier2 counters
+                    # only on the FIRST deadline-exceeded poll.
+                    emit = not np_telemetry_emitted
+                    np_telemetry_emitted = True
+                    if not _should_kill_no_progress(current, handle, emit_telemetry=emit):
+                        continue  # active children / compaction — reprieve, keep watching
+                    deadline_cancelled = True
+                    # FINALIZE FIRST — at the watcher scope, before cancel
+                    # reaches the CancelledError handler below.
+                    _fd_pty_kill(current)  # BLOCKER r6: transport-branched.
+                    if registry is not None:
+                        registry.reclaim(session.agent_session_id)  # free the slot
+                    did_finalize = await _apply_recovery_transition(
+                        current,
+                        reason="progress deadline exceeded",
+                        reason_kind="progress_deadline",
+                        # handle=None (NIT): Fix #3 OWNS the cancel scope — it
+                        # calls exec_task.cancel() itself below. Passing the
+                        # registry handle would make _apply_recovery_transition
+                        # ALSO run handle.task.cancel() + a bounded
+                        # wait_for() internally — a redundant double-cancel
+                        # that blocks up to TASK_CANCEL_TIMEOUT.
+                        handle=None,
+                        worker_key=worker_key,
                     )
-                except Exception:
+                    if not did_finalize:
+                        # _apply_recovery_transition returns False in TWO
+                        # cases: (1) it DECLINED (MAX_RECOVERY_ATTEMPTS /
+                        # OOM-defer — row stays `running`), or (2) the row is
+                        # ALREADY terminal because a concurrent killer
+                        # (tool_timeout / worker_dead) won the race. Re-read
+                        # fresh and only force a terminal state in case (1);
+                        # forcing "cancelled" in case (2) would overwrite the
+                        # winning killer's valid terminal state.
+                        fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
+                        if fresh and fresh.status not in TERMINAL_STATUSES:
+                            # "cancelled" is itself a TERMINAL_STATUSES member,
+                            # so transition_status() (non-terminal only) would
+                            # raise ValueError here — finalize_session() is
+                            # the terminal-transition entry point.
+                            from models.session_lifecycle import finalize_session
+
+                            finalize_session(
+                                fresh,
+                                "cancelled",
+                                reason="progress deadline exceeded (recovery declined)",
+                            )
+                    finalized_by_execute = True  # row is now terminal — SKIP the outer finally
+                    exec_task.cancel()
+                    break
+                await exec_task  # propagate result / CancelledError
+                finalized_by_execute = True  # only on non-exceptional return
+            except asyncio.CancelledError:
+                # BRANCH 2 vs BRANCH 3 disambiguation signal — computed
+                # unconditionally (cheap, no await) so it is available
+                # whichever branch below fires. Disambiguated via
+                # `Task.cancelling()` (Python 3.11+, verified against
+                # asyncio's actual cancel-propagation semantics — see the
+                # Branch 2 comment below), NOT the row's DB status alone.
+                # `asyncio.current_task()` here IS the worker-loop's own task
+                # (`_active_workers[worker_key]`) — we are executing directly
+                # inside `_worker_loop`, not a sub-task.
+                _me = asyncio.current_task()
+                _worker_loop_cancel_requested = _me is not None and _me.cancelling() > 0
+
+                if deadline_cancelled:
+                    # BRANCH 1 — Fix #3 deadline kill: already finalized +
+                    # reclaimed above. SWALLOW. Do NOT log "will be
+                    # re-queued", do NOT re-raise — prevents the requeue
+                    # loop (Blocker 1, round 1).
                     pass
-                # Do NOT call _complete_agent_session here — leave session in `running`
-                # state so _recover_interrupted_agent_sessions_startup() can re-queue it
-                # on next worker startup. Calling transition_status here would race with
-                # the new worker's startup recovery.
-                session_completed = True
-                raise  # Re-raise to exit worker loop
+                elif not _worker_loop_cancel_requested:
+                    # BRANCH 2 (Blocker r4, hardened past the plan's literal
+                    # text — see note) — this worker-loop task's OWN
+                    # cancellation was never requested (`.cancelling() == 0`),
+                    # REGARDLESS of which specific `await` inside the `try:`
+                    # above the cancellation landed on: a direct
+                    # `await exec_task` auto-propagates `.cancel()` down to
+                    # `exec_task` when the WAITER is cancelled, and
+                    # `asyncio.wait({exec_task}, ...)` does NOT (Blocker 1,
+                    # round 2) — but `current_task().cancelling()` reflects a
+                    # cancel request on the WORKER LOOP task either way, so it
+                    # is the reliable universal signal.
+                    #
+                    # This replaces a DB-row-status check (the plan's
+                    # original text: "a fresh re-read shows the row is
+                    # TERMINAL"), which has a real gap: a NON-final
+                    # `tool_timeout`/`worker_dead` recovery transitions the
+                    # row to `"pending"` (a requeue) — NOT a member of
+                    # `TERMINAL_STATUSES` — so a status-only check would
+                    # misclassify that common case as Branch 3 and tear down
+                    # a healthy worker while cleaning up one already-recovered
+                    # session. Empirically verified: cancelling `handle.task`
+                    # (the INNER SDK task, by an out-of-band killer like
+                    # `_apply_recovery_transition`) propagates
+                    # `CancelledError` uncaught through
+                    # `session_executor.py:1942`'s `await task._task`
+                    # (`except Exception` there does not catch
+                    # `CancelledError`) and out of `_execute_agent_session`
+                    # entirely — this marks `exec_task` itself "cancelled" as
+                    # an asyncio side effect (any task whose coroutine raises
+                    # `CancelledError` becomes cancelled) even though nobody
+                    # ever called `exec_task.cancel()` or
+                    # `current_task().cancel()` — so `.cancelling()` stays 0
+                    # and correctly identifies this as NOT a worker shutdown.
+                    #
+                    # A CancelledError under these conditions is a cleanup
+                    # artifact, NOT a worker shutdown — SWALLOW so a healthy
+                    # worker is never torn down while cleaning up one
+                    # already-recovered/already-dead session.
+                    if not exec_task.done():
+                        exec_task.cancel()
+                        try:
+                            await asyncio.wait_for(exec_task, timeout=TASK_CANCEL_TIMEOUT)
+                        except (TimeoutError, asyncio.CancelledError):
+                            pass
+                    finalized_by_execute = (
+                        True  # already handled elsewhere — SKIP the outer finally
+                    )
+                else:
+                    # BRANCH 3 — genuine worker shutdown/restart: the
+                    # worker-loop task itself was cancelled
+                    # (`.cancelling() > 0`). `asyncio.wait` does NOT cancel
+                    # exec_task when the waiter itself is cancelled, so the
+                    # SDK subprocess/PTY would otherwise still be running
+                    # (orphan). Tear it down BEFORE re-raising, or startup
+                    # recovery re-queues a still-`running` row → double
+                    # execution (Blocker 1, round 2).
+                    if not exec_task.done():
+                        exec_task.cancel()
+                        try:
+                            await asyncio.wait_for(exec_task, timeout=TASK_CANCEL_TIMEOUT)
+                        except (TimeoutError, asyncio.CancelledError):
+                            pass
+                    logger.warning(
+                        "[worker:%s] Worker cancelled during session %s — session interrupted, "
+                        "will be re-queued by startup recovery",
+                        worker_key,
+                        session.agent_session_id,
+                    )
+                    try:
+                        session.log_lifecycle_transition(
+                            "running", "worker cancelled — startup recovery will re-queue"
+                        )
+                    except Exception:
+                        pass
+                    # Do NOT call _complete_agent_session here — leave session in `running`
+                    # state so _recover_interrupted_agent_sessions_startup() can re-queue it
+                    # on next worker startup. Calling transition_status here would race with
+                    # the new worker's startup recovery.
+                    session_completed = True
+                    raise  # Re-raise to exit worker loop
             except Exception as e:
                 # Check if this is a circuit breaker rejection — leave session pending
                 from agent.sdk_client import CircuitOpenError
@@ -1595,6 +1917,18 @@ async def _worker_loop(
                     )
                     session_failed = True
             finally:
+                # Belt-and-suspenders (issue #1820 Fix #3): if control leaves
+                # the owned-task region above for any reason with `exec_task`
+                # still pending — e.g. a plain Exception raised from inside
+                # the progress-deadline while-loop itself, not from awaiting
+                # `exec_task` — cancel it so no subprocess/PTY is orphaned.
+                # No-op on every other exit path: Branches 1-3 above and the
+                # normal-completion path all already leave `exec_task` done.
+                # `exec_task` is always bound here — it is assigned
+                # unconditionally before the try/except/finally this
+                # `finally` belongs to.
+                if not exec_task.done():
+                    exec_task.cancel()
                 if not session_completed and not finalized_by_execute:
                     # Crash/cancel path only. On the happy path (nudge or completion),
                     # finalized_by_execute=True keeps this block from firing on a stale

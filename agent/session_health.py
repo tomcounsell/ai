@@ -1319,6 +1319,85 @@ def _tier2_reprieve_signal(
     return None
 
 
+def _should_kill_no_progress(
+    entry: AgentSession,
+    handle: "SessionHandle | None",
+    *,
+    emit_telemetry: bool,
+) -> bool:
+    """Shared Tier-2 reprieve gate for every ``no_progress``-shaped kill decision
+    (issue #1820 OQ3 — exactly one place this decision lives; NO-LEGACY).
+
+    Returns ``True`` if the session should be killed (no reprieve signal
+    applies), ``False`` if a Tier-2 reprieve (active children / compaction /
+    alive-but-quiet subprocess) applies and the caller must skip the kill.
+
+    This is a straight extraction of the reprieve decision that used to be
+    inlined in ``_apply_recovery_transition``'s ``reason_kind == "no_progress"``
+    branch — behavior is unchanged, only the call site moved, so every
+    ``no_progress``-shaped producer shares one reprieve policy instead of each
+    carrying its own copy:
+
+      * ``_apply_recovery_transition`` calls this for BOTH live ``no_progress``
+        producers — the never-started-past-grace path
+        (``session_health.py`` D0 branch) and the narrowed running-scan
+        ``no_progress`` elif (the #944 shared-``worker_key`` orphan net) —
+        passing ``emit_telemetry=True`` on its single per-recovery-decision
+        call (the same cadence the inlined block used before extraction).
+      * The progress-deadline cancel scope (issue #1820 Fix #3,
+        ``agent_session_queue.py``) re-invokes this every ``PROGRESS_POLL_S``
+        poll while a session is past its deadline, and passes
+        ``emit_telemetry=True`` ONLY on the first deadline-exceeded poll (a
+        loop-local latch) so a long-reprieved session's telemetry fires once,
+        not once per poll.
+
+    ``emit_telemetry=True`` increments the tier-1-flagged counter
+    unconditionally (the gate was evaluated), and — only when a reprieve
+    signal actually fires — increments ``tier2_reprieve_total:{reprieve}``,
+    saves the bumped ``entry.reprieve_count``, and logs the reprieve.
+    ``emit_telemetry=False`` still evaluates the gate (the kill/reprieve
+    decision itself is never skipped) but performs none of those side
+    effects — this predicate is
+    therefore NOT pure, but the caller fully controls when its side effects
+    fire (issue #1820 CONCERN r6).
+
+    Never raises — counter/save failures are logged and swallowed, matching
+    the pre-extraction inline block.
+    """
+    if emit_telemetry:
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
+        except Exception as _m_err:
+            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
+
+    reprieve = _tier2_reprieve_signal(handle, entry)
+    if reprieve is not None:
+        if emit_telemetry:
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
+            except Exception as _m_err:
+                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
+            try:
+                entry.reprieve_count = (entry.reprieve_count or 0) + 1
+                entry.save(update_fields=["reprieve_count"])
+            except Exception as _rc_err:
+                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
+            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
+            log_fn(
+                "[session-health] Tier 2 reprieve (%s) for session %s — "
+                "skipping kill (reprieve_count=%s)",
+                reprieve,
+                entry.agent_session_id,
+                entry.reprieve_count,
+            )
+        return False
+    return True
+
+
 # Total wall-clock budget for the SIGTERM->SIGKILL escalation in
 # ``_confirm_subprocess_dead``. Kept to single-digit seconds so the liveness
 # loop is never stalled by a slow kill (issue #1537 No-Go: short grace only).
@@ -1872,6 +1951,13 @@ async def _apply_recovery_transition(
         is the evidence (issue #1270). A tool that has not returned within its
         tier budget is wedged regardless of whether the parent SDK subprocess
         is still alive.
+      * ``"progress_deadline"`` — skip Tier 2 reprieve HERE; the caller (issue
+        #1820 Fix #3's progress-deadline cancel scope in
+        ``agent_session_queue.py``) already ran the shared reprieve gate
+        (``_should_kill_no_progress``) itself before deciding to cancel and
+        call this function — evaluating it a second time here would be a
+        redundant, stale re-check (the caller's decision already stands).
+        Always called with ``handle=None`` (Fix #3 owns its own cancel).
 
     Project-scoped Redis counter
     ``{project_key}:session-health:recoveries:{reason_kind}`` is incremented
@@ -1991,34 +2077,11 @@ async def _apply_recovery_transition(
             entry.agent_session_id,
         )
     if reason_kind == "no_progress":
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
-        except Exception as _m_err:
-            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
-
-        reprieve = _tier2_reprieve_signal(handle, entry)
-        if reprieve is not None:
-            try:
-                from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
-            except Exception as _m_err:
-                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
-            try:
-                entry.reprieve_count = (entry.reprieve_count or 0) + 1
-                entry.save(update_fields=["reprieve_count"])
-            except Exception as _rc_err:
-                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
-            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
-            log_fn(
-                "[session-health] Tier 2 reprieve (%s) for session %s — "
-                "skipping kill (reprieve_count=%s)",
-                reprieve,
-                entry.agent_session_id,
-                entry.reprieve_count,
-            )
+        # Reprieve decision + telemetry live in exactly one place — the shared
+        # predicate (issue #1820 OQ3, NO-LEGACY). This is the single
+        # per-recovery-decision call, so emit_telemetry=True unconditionally
+        # (same cadence as the pre-extraction inline block).
+        if not _should_kill_no_progress(entry, handle, emit_telemetry=True):
             return False
 
     # All Tier 2 gates failed (or skipped). Respect kill-switch.
@@ -2498,13 +2561,22 @@ async def _agent_session_health_check() -> None:
     Scans both 'running' and 'pending' sessions:
 
     For RUNNING sessions:
-    1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover.
-    2. If worker appears alive but running > AGENT_SESSION_HEALTH_MIN_RUNNING AND
-       ``_has_progress(entry)`` is False (no own-progress fields, no fresh
-       heartbeats, no live children): evaluate Tier 2 reprieve gates and recover
-       only if every gate also fails. Slugless dev sessions share ``worker_key``
-       with co-running PM sessions, so ``worker_alive`` alone does not prove
-       the dev session is being handled (#944).
+    1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover
+       (``reason_kind="worker_dead"``).
+    2. **NARROWED (issue #1820 Fix #3 + OQ3 + BLOCKER r6):** if worker appears alive
+       but there is NO live in-scope handle for this session
+       (``_active_sessions.get(entry.agent_session_id) is None``) AND running
+       > AGENT_SESSION_HEALTH_MIN_RUNNING AND ``_has_progress(entry)`` is False:
+       evaluate Tier 2 reprieve gates (via the shared ``_should_kill_no_progress``
+       predicate) and recover only if every gate also fails
+       (``reason_kind="no_progress"``). This is the #944 shared-``worker_key``
+       orphan net — a row left ``running`` by a crashed worker whose
+       ``worker_key`` was later reused by a respawned LIVE worker reads
+       ``worker_alive=True`` even though no live task executes it. A
+       worker-alive session WITH a live in-scope handle is instead owned by
+       the progress-deadline cancel scope in ``agent_session_queue.py``
+       (Fix #3) — the two are disjoint by construction on the in-scope-handle
+       test, so no running session has two killers.
     3. Legacy sessions without started_at and no worker: recover.
 
     For PENDING sessions:
@@ -2642,22 +2714,35 @@ async def _agent_session_health_check() -> None:
             worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
             worker_alive = worker is not None and not worker.done()
+            # Computed once, alongside worker_alive (issue #1820 OQ3 + BLOCKER
+            # r6): whether the CURRENT worker loop holds a live in-scope
+            # handle for THIS session. The progress-deadline cancel scope
+            # (Fix #3, agent_session_queue.py) is the authoritative
+            # no-progress killer for exactly the sessions where this is
+            # non-None — the narrowed elif below owns the disjoint residual
+            # (a worker-alive row with NO live in-scope handle: the #944
+            # shared-worker_key orphan, e.g. a crashed-then-respawned
+            # worker_key).
+            in_scope_handle = _active_sessions.get(entry.agent_session_id)
 
             started_ts = _ts(getattr(entry, "started_at", None))
             running_seconds = (now - started_ts) if started_ts else None
 
             should_recover = False
             reason = ""
+            _reason_kind: str | None = None
 
             if not worker_alive:
                 if started_ts is None:
                     should_recover = True
+                    _reason_kind = "worker_dead"
                     reason = "worker dead/missing, no started_at (legacy session)"
                 elif (
                     running_seconds is not None
                     and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
                 ):
                     should_recover = True
+                    _reason_kind = "worker_dead"
                     reason = (
                         f"worker dead/missing, running for "
                         f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard)"
@@ -2670,35 +2755,35 @@ async def _agent_session_health_check() -> None:
                         int(running_seconds) if running_seconds else "?",
                         AGENT_SESSION_HEALTH_MIN_RUNNING,
                     )
-            # Project-keyed dev sessions share worker_key with PM; without a
-            # progress signal, worker_alive alone doesn't prove the dev session
-            # is being handled (#944).
+            # NARROWED (issue #1820 OQ3 + BLOCKER r6): this elif is now
+            # disjoint-by-construction from Fix #3's in-scope progress-deadline
+            # watcher, which owns worker-alive sessions the current worker
+            # loop is actively executing (in_scope_handle is not None). This
+            # elif retains ONLY the #944 shared-worker_key orphan net: PM and
+            # a project-keyed dev-without-slug share a worker_key, so a row
+            # left `running` by a crashed worker whose worker_key was later
+            # reused by a respawned LIVE worker reads worker_alive=True even
+            # though no live task is executing it — no in-scope handle exists.
+            # Fix #3 cannot reach this orphan (it only watches the session its
+            # own owned task is executing), so this net must NOT be deleted —
+            # only narrowed to the case Fix #3 provably cannot cover.
             elif (
-                running_seconds is not None
+                in_scope_handle is None
+                and running_seconds is not None
                 and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
                 and not _has_progress(entry)
             ):
                 should_recover = True
+                _reason_kind = "no_progress"
                 reason = (
-                    f"no progress signal observed in last {int(running_seconds)}s "
+                    f"no progress signal, orphaned running row (no in-scope handle, #944), "
+                    f"{int(running_seconds)}s "
                     f"(>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, worker future not yet resolved, "
                     f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
                     f"claude_session_uuid={entry.claude_session_uuid!r})"
                 )
 
             if should_recover:
-                # Classify the recovery reason up front — referenced below to
-                # gate Tier 2 reprieve logic to no_progress recoveries only.
-                # worker_dead recoveries skip reprieve: a dead worker cannot
-                # be reprieved by an "active children" signal. The "timeout"
-                # reason kind was retired by #1172 along with the wall-clock
-                # cap — only "no_progress" and "worker_dead" remain.
-                if "no progress signal" in reason:
-                    _reason_kind = "no_progress"
-                else:
-                    _reason_kind = "worker_dead"
-
-                handle = _active_sessions.get(entry.agent_session_id)
                 # Delegate to shared recovery helper (issue #1270). Both this
                 # loop and `_agent_session_tool_timeout_loop` go through the
                 # same code path so MAX_RECOVERY_ATTEMPTS, the OOM defer, the
@@ -2708,7 +2793,7 @@ async def _agent_session_health_check() -> None:
                     entry,
                     reason=reason,
                     reason_kind=_reason_kind,
-                    handle=handle,
+                    handle=in_scope_handle,
                     worker_key=worker_key,
                 ):
                     recovered += 1
