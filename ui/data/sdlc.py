@@ -339,6 +339,15 @@ class PipelineProgress(BaseModel):
     dev_transcript_path: str | None = None
     pty_slot: int | None = None
 
+    # === Granite PTY read-loop freshness (issue #1724 / #1843 Gap B) ===
+    # ``last_pty_read_loop_at`` is stamped on every inner read_until_idle poll
+    # tick (throttled to <=1/sec), so a granite session wedged mid-turn on the
+    # idle-fallback path advances it within ~1s — the operator-visible signal
+    # that the read loop is still cycling. ``last_pty_activity_at`` is
+    # diff-gated (stamped only on genuine repaint).
+    last_pty_read_loop_at: float | None = None
+    last_pty_activity_at: float | None = None
+
     # Output routing state (issue #1647)
     # True once a user-facing message has been routed for this session.
     user_facing_routed: bool = False
@@ -982,6 +991,8 @@ def _session_to_pipeline(session) -> PipelineProgress:
         pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
         dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
         pty_slot=_safe_nullable_int(getattr(session, "pty_slot", None)),
+        last_pty_read_loop_at=_safe_float(getattr(session, "last_pty_read_loop_at", None)),
+        last_pty_activity_at=_safe_float(getattr(session, "last_pty_activity_at", None)),
         user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
         stall_advisory=stall_advisory,
         stall_advisory_reason=stall_advisory_reason,

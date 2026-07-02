@@ -477,6 +477,13 @@ def create_app() -> FastAPI:
             "current_tool_name": s.current_tool_name,
             "last_tool_use_at": s.last_tool_use_at,
             "last_turn_at": s.last_turn_at,
+            # Granite PTY read-loop freshness (#1724 / #1843 Gap B). The
+            # per-iteration read_until_idle callback refreshes
+            # last_pty_read_loop_at mid-turn, so a session wedged inside a long
+            # idle-path turn advances this field within ~1s — operators (and the
+            # stall-advisory actor) see the loop is still cycling.
+            "last_pty_read_loop_at": s.last_pty_read_loop_at,
+            "last_pty_activity_at": s.last_pty_activity_at,
             "recent_thinking_excerpt": s.recent_thinking_excerpt,
             "last_evidence_at": s.last_evidence_at,
             # BYOB scheduler-layer serialization (issue #1256, Decision 2).
