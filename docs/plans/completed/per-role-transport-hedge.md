@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: feature
 appetite: Medium
 owner: Tom Counsell
@@ -8,6 +8,7 @@ tracking: https://github.com/tomcounsell/ai/issues/1842
 last_comment_id: none
 slug: per-role-transport-hedge
 revision_applied: true
+merged: PR #1848 (merge commit b624607b, 2026-07-02) — MERGE stage complete
 ---
 
 # Per-Role Transport Hedge: Config-Selectable PTY vs Headless `claude -p` per PM/Dev Role
