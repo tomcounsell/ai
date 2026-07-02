@@ -344,6 +344,31 @@ class FeatureSettings(BaseModel):
         ),
     )
 
+    # --- Per-message producer claim (issue #1817 B1) ---
+    # GRAIN OF SALT: this TTL must stay SHORT -- sized to cross-actor
+    # processing skew (seconds), NOT the ~1h iCloud projects.json sync-lag
+    # window. The durable 2h DedupRecord membership set (models/dedup.py)
+    # already covers the sync-lag/replay window; this gate only needs to
+    # survive the brief overlap between two producers racing on the SAME
+    # message. A long TTL here was a BLOCKER in an earlier critique round:
+    # it would orphan the claim key for up to an hour on a mid-window
+    # process death, causing the reconciler's retry to wrongly conclude a
+    # peer won and silently drop the message for that entire window --
+    # recreating the exact bug this claim exists to fix.
+    bridge_msg_claim_ttl_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=300,
+        description=(
+            "Provisional short TTL (seconds) for the bridge:msgclaim:* SETNX "
+            "gate in bridge/dedup.py that prevents two near-simultaneous "
+            "producers (e.g. two machines during iCloud config sync lag) from "
+            "both enqueueing the same inbound Telegram message. Must stay "
+            "short (cross-actor skew, not sync-lag window) -- see the "
+            "comment above this field. Env: FEATURES__BRIDGE_MSG_CLAIM_TTL_SECONDS."
+        ),
+    )
+
 
 class GraniteSettings(BaseModel):
     """Granite PTY container configuration (plan #1572).

@@ -111,6 +111,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
@@ -140,6 +141,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
@@ -169,6 +171,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
@@ -199,6 +202,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
@@ -231,6 +235,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", record_fn),
             patch("bridge.reconciler.record_last_processed", cursor_fn),
         ):
@@ -256,6 +261,96 @@ class TestReconcileOnce:
         cursor_fn.assert_called_once_with(expected_chat_id, 555, msg.date)
 
     @pytest.mark.asyncio
+    async def test_lost_claim_skips_enqueue_and_leaves_no_dedup(self):
+        """A lost message claim skips enqueue AND leaves no durable dedup (BLOCKER).
+
+        Issue #1817 B1, round-4 BLOCKER: this is the exact scenario where a
+        peer producer (the live handler, or catchup) already won the SAME
+        message. The loser must not call record_message_processed, so a
+        winner-death self-heals via the next reconciler scan re-picking the
+        never-enqueued message instead of silently dropping it forever.
+        """
+        dialog = _make_dialog("Test Group", entity_id=250)
+        msg = _make_message(556, text="raced message")
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        should_respond_fn = AsyncMock(return_value=(True, False))
+        enqueue_fn = AsyncMock()
+        record_fn = AsyncMock()
+        cursor_fn = AsyncMock()
+        release_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=False),
+            patch("bridge.reconciler.release_message_claim", release_fn),
+            patch("bridge.reconciler.record_message_processed", record_fn),
+            patch("bridge.reconciler.record_last_processed", cursor_fn),
+        ):
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["test group"],
+                should_respond_fn=should_respond_fn,
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == 0
+        enqueue_fn.assert_not_called()
+        record_fn.assert_not_called()
+        cursor_fn.assert_not_called()
+        # Nothing to release -- the claim was never won by this caller.
+        release_fn.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_enqueue_exception_releases_claim_no_orphan(self):
+        """A fault-injected enqueue exception releases the claim before
+        propagating, preserving the propagate-and-retry contract (dedup
+        stays unrecorded so the message is re-enqueueable).
+        """
+        dialog = _make_dialog("Test Group", entity_id=251)
+        msg = _make_message(557, text="doomed message")
+
+        client = AsyncMock()
+        client.get_dialogs = AsyncMock(return_value=[dialog])
+        client.get_messages = AsyncMock(return_value=[msg])
+
+        should_respond_fn = AsyncMock(return_value=(True, False))
+        enqueue_fn = AsyncMock(side_effect=RuntimeError("enqueue boom"))
+        record_fn = AsyncMock()
+        release_fn = AsyncMock()
+
+        with (
+            patch(
+                "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
+            ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
+            patch("bridge.reconciler.release_message_claim", release_fn),
+            patch("bridge.reconciler.record_message_processed", record_fn),
+            patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
+        ):
+            # reconcile_once wraps the per-group body in a broad try/except
+            # that logs and continues -- the exception does not propagate
+            # out of reconcile_once, but the claim release must have
+            # happened before it was swallowed.
+            result = await reconcile_once(
+                client=client,
+                monitored_groups=["test group"],
+                should_respond_fn=should_respond_fn,
+                enqueue_agent_session_fn=enqueue_fn,
+                find_project_fn=MagicMock(return_value=_make_project()),
+            )
+
+        assert result == 0
+        release_fn.assert_called_once_with(dialog.id, 557)
+        record_fn.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_old_message_outside_lookback_is_skipped(self):
         """Messages older than the lookback window are not processed."""
         dialog = _make_dialog("Test Group")
@@ -272,6 +367,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
         ):
             result = await reconcile_once(
@@ -308,6 +404,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
             patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
@@ -382,6 +479,7 @@ class TestReconcileOnce:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
             patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
@@ -458,6 +556,7 @@ class TestReconcileOnceSilentStream:
                 new_callable=AsyncMock,
                 return_value=False,
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
             patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
             patch("bridge.silent_stream.get_last_event_ts", new_callable=AsyncMock) as evt,
@@ -499,6 +598,7 @@ class TestReconcileOnceSilentStream:
                 new_callable=AsyncMock,
                 return_value=False,
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
             patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
             patch(
@@ -547,6 +647,7 @@ class TestReconcilePersonaSessionType:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
             patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):
@@ -581,6 +682,7 @@ class TestReconcilePersonaSessionType:
             patch(
                 "bridge.reconciler.is_duplicate_message", new_callable=AsyncMock, return_value=False
             ),
+            patch("bridge.reconciler.claim_message", new_callable=AsyncMock, return_value=True),
             patch("bridge.reconciler.record_message_processed", new_callable=AsyncMock),
             patch("bridge.reconciler.record_last_processed", new_callable=AsyncMock),
         ):

@@ -128,3 +128,65 @@ class TestDedupFunctions:
         with patch("models.dedup.DedupRecord.get_or_create", side_effect=RuntimeError("boom")):
             # Should not raise
             await record_message_processed("test_err", 1)
+
+
+class TestMessageClaim:
+    """Tests for the atomic per-message producer claim (issue #1817 B1).
+
+    ``claim_message``/``release_message_claim`` are backed by a plain
+    (non-Popoto-managed) Redis SETNX key, distinct from the DedupRecord
+    membership set above. Tests use the real Redis client via
+    ``bridge.dedup._get_redis()`` and clean up their own keys.
+    """
+
+    def _cleanup(self, chat_id, message_id):
+        from bridge.dedup import _MSG_CLAIM_KEY_PREFIX, _get_redis
+
+        _get_redis().delete(f"{_MSG_CLAIM_KEY_PREFIX}{chat_id}:{message_id}")
+
+    def teardown_method(self):
+        self._cleanup("test_claim_chat", 1)
+        self._cleanup("test_claim_chat", 2)
+        self._cleanup("test_claim_release", 1)
+
+    @pytest.mark.asyncio
+    async def test_claim_fresh_id_succeeds(self):
+        """claim_message on a fresh (chat_id, message_id) returns True."""
+        from bridge.dedup import claim_message
+
+        result = await claim_message("test_claim_chat", 1)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_claim_already_claimed_fails(self):
+        """A second claim on the same (chat_id, message_id) returns False."""
+        from bridge.dedup import claim_message
+
+        first = await claim_message("test_claim_chat", 2)
+        second = await claim_message("test_claim_chat", 2)
+        assert first is True
+        assert second is False
+
+    @pytest.mark.asyncio
+    async def test_release_message_claim_deletes_key(self):
+        """release_message_claim deletes the key so a retry can re-acquire it."""
+        from bridge.dedup import claim_message, release_message_claim
+
+        assert await claim_message("test_claim_release", 1) is True
+        await release_message_claim("test_claim_release", 1)
+        # Re-acquisition succeeds only if the key was actually deleted.
+        assert await claim_message("test_claim_release", 1) is True
+
+    def test_claim_ttl_is_seconds_scoped_and_short(self):
+        """CLAIM_TTL_SECONDS must be short (cross-actor skew), decoupled from
+        the 2h DedupRecord membership TTL used for sync-lag/replay coverage.
+        """
+        from bridge.dedup import CLAIM_TTL_SECONDS
+        from models.dedup import DedupRecord
+
+        assert isinstance(CLAIM_TTL_SECONDS, int)
+        # "Short" per the plan: sized to cross-actor processing skew
+        # (seconds), not the ~1h sync-lag window. Generous upper bound of
+        # 5 minutes still rules out anything resembling the durable window.
+        assert 0 < CLAIM_TTL_SECONDS <= 300
+        assert CLAIM_TTL_SECONDS != DedupRecord._meta.ttl
