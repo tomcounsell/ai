@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-02
 tracking: https://github.com/tomcounsell/ai/issues/1844
 last_comment_id:
+revision_applied: true
 ---
 
 # Worker Recycle: SIGKILL Instead of SIGABRT (No macOS Crash Dialogs)
@@ -70,7 +71,7 @@ The kill path is single-seam by design:
 1. **Trigger (storm-cap)**: `supervise()._done_callback` — restart count in the rolling window reaches `max_restarts` → logs CRITICAL → calls `_self_kill()`.
 2. **Trigger (dead-man's-switch)**: `_heartbeat_cycle()` on the off-loop heartbeat thread — beacon stale beyond `WORKER_DEADMAN_STALENESS_THRESHOLD` (or never ticked past startup grace) AND `WORKER_DEADMAN_ENABLED` → logs CRITICAL → calls `_self_kill()`.
 3. **Seam**: `_self_kill()` — today `os.abort()`; after this change, emits a full thread dump then delivers SIGKILL.
-4. **Output**: process dies uncatchably → launchd respawns a clean worker; forensic thread dump lands in `logs/worker.log` (launchd captures stderr).
+4. **Output**: process dies uncatchably → launchd respawns a clean worker; forensic thread dump lands in `logs/worker_error.log` (`faulthandler` writes to stderr; `com.valor.worker.plist` `StandardErrorPath` routes stderr there).
 
 The change is confined to step 3. Steps 1, 2, and 4 are untouched — the trigger logic, the CRITICAL logs, and the launchd respawn contract all stay exactly as they are.
 
@@ -109,7 +110,7 @@ No prerequisites — this work has no external dependencies. `faulthandler` and 
 
 ### Flow
 
-Guard fires (storm-cap or dead-man's-switch) → CRITICAL log → `_self_kill()` → `faulthandler.dump_traceback(all_threads=True)` to stderr → `os.kill(getpid, SIGKILL)` → process dies uncatchably, no dialog → launchd respawns clean worker → operator reads the thread dump in `logs/worker.log`.
+Guard fires (storm-cap or dead-man's-switch) → CRITICAL log → `_self_kill()` → `faulthandler.dump_traceback(all_threads=True)` to stderr (in `try:`) → `os.kill(getpid, SIGKILL)` (in `finally:`) → process dies uncatchably, no dialog → launchd respawns clean worker → operator reads the thread dump in `logs/worker_error.log`.
 
 ### Technical Approach
 
@@ -121,41 +122,47 @@ Guard fires (storm-cap or dead-man's-switch) → CRITICAL log → `_self_kill()`
 import faulthandler  # add to worker/__main__.py imports
 
 def _self_kill() -> None:
-    """Hard-kill this process (uncatchable, signal-based on POSIX) so launchd respawns it.
+    """Hard-kill this process (uncatchable, signal-based) so launchd respawns it.
 
     Dumps all thread stacks to stderr first — a real production wedge then leaves
-    forensic evidence in logs/worker.log (superior to the macOS .ips C-frame report;
-    see #1808). Then delivers SIGKILL: equally unswallowable as the former SIGABRT,
-    but produces NO macOS crash-report dialog and NO Python-*.ips file. Extracted as
-    a seam so unit tests can assert the call without killing the test process.
+    forensic evidence in logs/worker_error.log (better than the macOS .ips C-frame
+    report for a Python-level wedge; see #1808). Then delivers SIGKILL: equally
+    unswallowable as the former SIGABRT, but produces NO macOS crash-report dialog
+    and NO Python-*.ips file. Extracted as a seam so unit tests can assert the call
+    without killing the test process.
+
+    The dump is best-effort; the SIGKILL is in a `finally` so it fires even if the
+    dump raises (e.g. stderr closed/monkeypatched) — otherwise, inside the storm-cap
+    asyncio done-callback the exception would be swallowed and the guard would
+    silently fail to recycle, the exact trap the subprocess test exists to catch.
     """
-    faulthandler.dump_traceback(all_threads=True)
-    sys.stderr.flush()
-    if sys.platform == "win32":
-        os._exit(3)  # No SIGKILL on Windows; worker is macOS/launchd-only, no dialog concern.
-    os.kill(os.getpid(), signal.SIGKILL)
+    try:
+        faulthandler.dump_traceback(all_threads=True)
+        sys.stderr.flush()
+    finally:
+        os.kill(os.getpid(), signal.SIGKILL)
 ```
 
 Rationale, answering the issue's four open questions:
 
-1. *Is the `.ips` forensic value worth keeping in production?* — **No, because we can do better.** A Python-process `.ips` is a C-level (interpreter) stack trace; for a **Python-level** wedge (a frozen coroutine / synchronously-blocked event loop, the #1808 scenario) it shows CPython C frames, not the Python line where the loop is stuck. `faulthandler.dump_traceback(all_threads=True)` emits every thread's **Python** stack — strictly more diagnostic — and it runs from the surviving off-loop heartbeat thread precisely when the loop is frozen. So SIGABRT is not needed to preserve forensics; the dump gives *better* forensics uniformly.
+1. *Is the `.ips` forensic value worth keeping in production?* — **No, because we can do better.** A Python-process `.ips` is a C-level (interpreter) stack trace; for a **Python-level** wedge (a frozen coroutine / synchronously-blocked event loop, the #1808 scenario) it shows CPython C frames, not the Python line where the loop is stuck. `faulthandler.dump_traceback(all_threads=True)` emits every thread's **Python** stack — strictly better for the Python-level wedge (#1808), complementary to the C-frame `.ips` otherwise — and it runs from the surviving off-loop heartbeat thread precisely when the loop is frozen. So SIGABRT is not needed to preserve forensics; the dump gives better forensics for the wedge scenario that actually occurs.
 
-2. *Is `worker.log` + wedge tooling already sufficient, making `.ips` redundant?* — **Yes**, and this plan makes it decisively so by routing the thread dump into `worker.log` (launchd captures stderr). The `.ips` becomes redundant.
+2. *Is `worker.log` + wedge tooling already sufficient, making `.ips` redundant?* — **Yes**, and this plan makes it decisively so by routing the thread dump to stderr, which `com.valor.worker.plist` (`StandardErrorPath`) captures into `logs/worker_error.log`. The `.ips` becomes redundant.
 
 3. *Can the crash dialog be suppressed at the OS/test-harness level instead?* — **Rejected.** Disabling the macOS crash reporter (unloading `ReportCrash` via `launchctl`, or `defaults write com.apple.CrashReporter`) mutates global system state, is macOS-version-fragile, doesn't travel to CI, and leaves SIGABRT (an abnormal-termination signal) as the production death mode for no benefit once the thread dump exists.
 
-4. *Do the tests still assert the correct exit condition?* — **Yes, updated to SIGKILL.** `test_worker_supervisor.py`'s subprocess assertion moves from `-signal.SIGABRT` (-6) to `-signal.SIGKILL` (-9) on POSIX; the seam test moves from patching `os.abort` to patching `os.kill`.
+4. *Do the tests still assert the correct exit condition?* — **Yes, updated to SIGKILL.** `test_worker_supervisor.py`'s subprocess assertion moves from `-signal.SIGABRT` (-6) to `-signal.SIGKILL` (-9); the seam test moves from patching `os.abort` to patching `os.kill`, and additionally asserts the SIGKILL still fires when `faulthandler.dump_traceback` is patched to raise (the `finally` guarantee).
 
-**Rejected alternative — environment-gated signal (SIGABRT in prod, SIGKILL under pytest).** This is the most tempting middle path but is rejected: (a) it forks production behavior from test behavior, so the tests would no longer exercise the real production death mode — the exact "log-only false pass" trap the current subprocess test was written to prevent; (b) it adds a `PYTEST_CURRENT_TEST`-style branch that silently drifts; (c) the `.ips` it would preserve in production is the low-value C-frame report, which the `faulthandler` dump supersedes. A single uniform signal with a superior forensic artifact is simpler and strictly better.
+**Rejected alternative — environment-gated signal (SIGABRT in prod, SIGKILL under pytest).** This is the most tempting middle path but is rejected: (a) it forks production behavior from test behavior, so the tests would no longer exercise the real production death mode — the exact "log-only false pass" trap the current subprocess test was written to prevent; (b) it adds a `PYTEST_CURRENT_TEST`-style branch that silently drifts; (c) the `.ips` it would preserve in production is the low-value C-frame report, which the `faulthandler` dump supersedes. A single uniform signal with a superior forensic artifact is simpler and better for the actual wedge scenario.
 
-**Windows handling.** `signal.SIGKILL` does not exist on Windows. The worker is macOS/launchd-only and there is no Windows CI, but to keep the module free of any `os.abort`/SIGABRT reference (AC#4) the Windows branch uses `os._exit(3)` — same exit code 3 the test's win32 branch already expects, uncatchable, no dialog concern on that platform.
+**Windows handling — dropped as dead code.** `signal.SIGKILL` does not exist on Windows, but the worker is macOS/launchd-only with no Windows CI, so a win32 branch is untestable dead code. Per NO LEGACY CODE tolerance, `_self_kill()` calls `os.kill(os.getpid(), signal.SIGKILL)` unconditionally and the win32 `== 3` assertion is deleted from `test_worker_supervisor.py`. AC#4 (no `os.abort`/SIGABRT reference) is satisfied either way.
 
-**Scope of edits in `worker/__main__.py`** (~15 references): the `_self_kill()` body + `import faulthandler`, and the SIGABRT/`os.abort` narrative in docstrings and comments at lines ~98, 112, 134, 140-141, 181, 186, 190, 278, 355, 906, 1012. All become SIGKILL narrative; the "never `sys.exit(1)` — SystemExit is swallowed in a done-callback" reasoning stays (still true and still important).
+**Scope of edits in `worker/__main__.py`** (13 references: 9 `SIGABRT` + 4 `os.abort`): the `_self_kill()` body + `import faulthandler`, and the SIGABRT/`os.abort` narrative in docstrings and comments at the two call sites. All become SIGKILL narrative; the "never `sys.exit(1)` — SystemExit is swallowed in a done-callback" reasoning stays (still true and still important).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_self_kill()` has no `except` block — it is a terminal seam. `faulthandler.dump_traceback` and `os.kill` are not wrapped; if the dump raises (it should not), the SIGKILL must still fire, so the dump is best-effort and precedes the kill. The subprocess test (`test_storm_cap_kills_process`) asserts the process actually dies with the expected signal, which is the observable behavior — a dump failure that also skipped the kill would surface as a wrong/zero return code.
+- [ ] `_self_kill()` wraps the dump in `try:` and the SIGKILL in `finally:` — the dump is best-effort; the kill is guaranteed even if `faulthandler.dump_traceback` or `sys.stderr.flush()` raises (e.g. stderr closed/monkeypatched). Without the `finally`, a dump exception inside the storm-cap asyncio done-callback would be swallowed by the event loop and the guard would silently fail to recycle — the exact trap the subprocess test exists to catch. `test_self_kill_sends_sigkill` must assert `os.kill` still fires with `faulthandler.dump_traceback` patched to raise. The subprocess test (`test_storm_cap_kills_process`) is the behavioral backstop: it asserts the process actually dies with SIGKILL.
 - [ ] The `WORKER_DEADMAN_ENABLED=false` rollback path (`_heartbeat_cycle`) still logs-only and does NOT call `_self_kill()` — covered by existing `test_worker_deadman.py` disabled-path tests; verify they still pass unchanged.
 
 ### Empty/Invalid Input Handling
@@ -166,8 +173,8 @@ Rationale, answering the issue's four open questions:
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_supervisor.py::test_storm_cap_kills_process` — UPDATE: POSIX assertion `result.returncode == -signal.SIGKILL` (was `-signal.SIGABRT`); Windows branch stays `== 3` (comment updated from "os.abort" to "os._exit(3)"). Update module + function docstrings (lines 7, 211-219, 229) from SIGABRT/`os.abort` to SIGKILL. Optionally assert the child's stderr contains a `faulthandler` thread-dump header.
-- [ ] `tests/unit/test_worker_deadman.py::TestSelfKillSeam::test_self_kill_calls_os_abort` — REPLACE: rename to `test_self_kill_sends_sigkill`; patch `os.kill` (and `faulthandler.dump_traceback`) instead of `os.abort`; assert `os.kill` called once with `(os.getpid(), signal.SIGKILL)` and that the dump was invoked before it. Update the class docstring and the module docstring line 13 ("`_self_kill()` delegates to `os.abort()`").
+- [ ] `tests/unit/test_worker_supervisor.py::test_storm_cap_kills_process` — UPDATE: assertion `result.returncode == -signal.SIGKILL` (was `-signal.SIGABRT`); **DELETE the win32 `== 3` branch entirely** (dead code — worker is macOS/launchd-only, no Windows CI). Update module + function docstrings (lines 7, 211-219, 229) from SIGABRT/`os.abort` to SIGKILL. Assert the child's stderr contains a `faulthandler` thread-dump header.
+- [ ] `tests/unit/test_worker_deadman.py::TestSelfKillSeam::test_self_kill_calls_os_abort` — REPLACE: rename to `test_self_kill_sends_sigkill`; patch `os.kill` (and `faulthandler.dump_traceback`) instead of `os.abort`; assert `os.kill` called once with `(os.getpid(), signal.SIGKILL)` and that the dump was invoked before it. Add a second assertion that `os.kill` **still fires when `faulthandler.dump_traceback` is patched to raise** (proves the `finally` guarantee). Update the class docstring and the module docstring line 13 ("`_self_kill()` delegates to `os.abort()`").
 - [ ] `tests/unit/test_worker_deadman.py` stale-beacon tests (lines 129-179, 277-347) — no behavioral change (they patch `_self_kill` directly); verify they still pass. No edit expected beyond any incidental SIGABRT mention in comments.
 - [ ] `tests/unit/test_worker_watchdog.py` — UPDATE (narrative only): docstrings at lines ~934, 997, 1001 that say "SIGABRT for launchd respawn" → "SIGKILL". The `test_frozen_loop_surviving_thread_self_kills` test (line 996) patches `_self_kill` and is signal-agnostic — no behavioral change.
 - [ ] `tests/unit/test_worker_watchdog.py` bridge-watchdog escalation ladder (lines 734-759 `SIGTERM → SIGKILL → bootout`, and the `launchctl` return-code tests) — DO NOT TOUCH. This is the external bridge_watchdog kill mechanism, unrelated to the `_self_kill()` self-recycle seam.
@@ -187,7 +194,7 @@ Rationale, answering the issue's four open questions:
 
 ### Risk 2: `faulthandler.dump_traceback` behaves unexpectedly when the event loop is frozen
 **Impact:** If the dump blocked or raised, the kill might not fire on a real wedge.
-**Mitigation:** `dump_traceback` is synchronous, signal-safe, and runs on the surviving off-loop heartbeat thread (not the frozen loop). It writes to stderr and returns. The kill is the next statement and is unconditional. The subprocess test proves the process still dies with SIGKILL after the dump.
+**Mitigation:** `dump_traceback` is synchronous and runs on the surviving off-loop heartbeat thread (not the frozen loop); it writes to stderr and returns. The kill is in a `finally:` so it fires even if the dump raises. **Caveat:** this covers an asyncio-level (coroutine/event-loop) freeze, which is the #1815/#1808 failure mode. It does NOT cover a true C-extension GIL freeze (a C call that never releases the GIL) — that would prevent the heartbeat thread from ever reaching `_self_kill()`, so neither the dump nor the kill fires. That gap is unchanged from the SIGABRT baseline (SIGABRT could not fire either), so this change introduces no regression. The subprocess test proves the process still dies with SIGKILL after the dump on the paths that do reach the seam.
 
 ### Risk 3: SIGKILL bypasses atexit/finally cleanup that SIGABRT also bypassed
 **Impact:** None new — SIGABRT already bypassed Python-level cleanup. SIGKILL has identical semantics here. launchd respawn contract is unchanged.
@@ -214,7 +221,7 @@ No agent integration required — this is a worker-internal change to the self-r
 
 ### Feature Documentation
 - [ ] Update `docs/features/worker-fault-containment.md` (2 SIGABRT/`os.abort` refs) — storm-cap now recycles via SIGKILL after emitting a `faulthandler` thread dump; no macOS crash dialog.
-- [ ] Update `docs/features/worker-liveness-recovery.md` (5 refs) — dead-man's-switch now recycles via SIGKILL with a thread dump; add the #1808 note that forensics moved from the `.ips` C-frame report to the Python all-thread dump in `logs/worker.log`.
+- [ ] Update `docs/features/worker-liveness-recovery.md` (5 refs) — dead-man's-switch now recycles via SIGKILL with a thread dump; add the #1808 note that forensics moved from the `.ips` C-frame report to the Python all-thread dump in `logs/worker_error.log` (stderr sink per the plist `StandardErrorPath`).
 - [ ] Update `docs/features/worker-service.md` (1 ref) — general recycle narrative SIGABRT → SIGKILL.
 - [ ] No `docs/features/README.md` index entry needed (these are existing docs, not new features).
 
@@ -265,8 +272,8 @@ No agent integration required — this is a worker-internal change to the self-r
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `import faulthandler` to `worker/__main__.py` imports.
-- Rewrite `_self_kill()` body: `faulthandler.dump_traceback(all_threads=True)` → `sys.stderr.flush()` → `os._exit(3)` on win32 else `os.kill(os.getpid(), signal.SIGKILL)`. Rewrite its docstring per Technical Approach.
-- Update every SIGABRT/`os.abort` mention in docstrings and comments (lines ~98, 112, 134, 140-141, 181, 186, 190, 278, 355, 906, 1012) to SIGKILL narrative; keep the "never `sys.exit(1)` in a done-callback" reasoning.
+- Rewrite `_self_kill()` body: `try:` block does `faulthandler.dump_traceback(all_threads=True)` → `sys.stderr.flush()`; `finally:` block does `os.kill(os.getpid(), signal.SIGKILL)` (no win32 branch). Rewrite its docstring per Technical Approach.
+- Update every SIGABRT/`os.abort` mention in docstrings and comments (13 refs: 9 `SIGABRT` + 4 `os.abort`, at the two call sites) to SIGKILL narrative; keep the "never `sys.exit(1)` in a done-callback" reasoning.
 
 ### 2. Update the three test files
 - **Task ID**: build-tests
@@ -275,8 +282,8 @@ No agent integration required — this is a worker-internal change to the self-r
 - **Assigned To**: seam-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- `test_worker_supervisor.py`: POSIX assertion → `-signal.SIGKILL`; win32 comment → `os._exit(3)`; docstrings SIGABRT → SIGKILL; add an assertion that child stderr contains a thread-dump header.
-- `test_worker_deadman.py`: rename `test_self_kill_calls_os_abort` → `test_self_kill_sends_sigkill`, patch `os.kill` + `faulthandler.dump_traceback`, assert SIGKILL to own pid and dump-before-kill; fix class + module docstrings.
+- `test_worker_supervisor.py`: assertion → `-signal.SIGKILL`; **delete the win32 `== 3` branch**; docstrings SIGABRT → SIGKILL; add an assertion that child stderr contains a thread-dump header.
+- `test_worker_deadman.py`: rename `test_self_kill_calls_os_abort` → `test_self_kill_sends_sigkill`, patch `os.kill` + `faulthandler.dump_traceback`, assert SIGKILL to own pid and dump-before-kill, **plus assert SIGKILL still fires when `faulthandler.dump_traceback` raises** (the `finally` guarantee); fix class + module docstrings.
 - `test_worker_watchdog.py`: docstring SIGABRT → SIGKILL at the `_self_kill`-related lines only. DO NOT touch the bridge-watchdog escalation-ladder tests.
 
 ### 3. Update the three docs
@@ -309,16 +316,21 @@ No agent integration required — this is a worker-internal change to the self-r
 | No SIGABRT in worker tests | `grep -rc 'SIGABRT\|os.abort' tests/unit/test_worker_supervisor.py tests/unit/test_worker_deadman.py tests/unit/test_worker_watchdog.py` | match count == 0 |
 | No SIGABRT in worker docs | `grep -rc 'SIGABRT\|os.abort' docs/features/worker-fault-containment.md docs/features/worker-liveness-recovery.md docs/features/worker-service.md` | match count == 0 |
 | faulthandler dump wired | `grep -c 'faulthandler.dump_traceback' worker/__main__.py` | output > 0 |
+| Forensic sink is worker_error.log | `plutil -extract StandardErrorPath raw ~/Library/LaunchAgents/com.valor.worker.plist` (or `grep -A1 StandardErrorPath` the plist) | path ends in `logs/worker_error.log` |
+| SIGKILL guaranteed on dump failure | `grep -A6 'def _self_kill' worker/__main__.py` shows `os.kill` under a `finally:` | `finally:` present |
 | Lint clean | `python -m ruff check worker/ tests/unit/test_worker_supervisor.py tests/unit/test_worker_deadman.py tests/unit/test_worker_watchdog.py` | exit code 0 |
 | Format clean | `python -m ruff format --check worker/__main__.py` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD (with concerns) — FULL depth (3 critics). 0 blockers, 3 concerns, 4 nits. All embedded in this revision:
 
----
+- **Concern 1 (kill-not-guaranteed):** SIGKILL moved into a `finally:` so it fires even if the dump raises; `test_self_kill_sends_sigkill` must assert this. → Technical Approach, Failure Path Test Strategy, Test Impact.
+- **Concern 2 (wrong forensic sink):** all references corrected from `logs/worker.log` to `logs/worker_error.log` (`faulthandler` → stderr → plist `StandardErrorPath`); plist-verification row added. → Data Flow, Flow, Technical Approach, Documentation, Verification.
+- **Concern 3 (open-questions contradiction):** OQs relabeled as confirmed decisions below; body and tail now agree.
+- **Nits:** GIL-starvation caveat scoped (Risk 2); "~15 references" corrected to 13; "strictly more diagnostic" softened to "strictly better for the Python-level wedge (#1808), complementary otherwise".
 
-## Open Questions
+## Resolved Decisions
 
-1. **Forensics mechanism sign-off.** The plan replaces the SIGABRT `.ips` report with a uniform SIGKILL plus a `faulthandler.dump_traceback(all_threads=True)` to `logs/worker.log`, arguing the Python thread dump is strictly more useful for the #1808 wedge investigation than the `.ips` C-frame report. Do you accept dropping the `.ips` entirely, or do you want SIGABRT retained in production behind an env gate despite the drift/test-fork cost?
-2. **Windows fallback.** The worker is macOS/launchd-only. The plan uses `os._exit(3)` on Windows (to keep the module free of any `os.abort`/SIGABRT reference) rather than SIGKILL (which doesn't exist there). Acceptable, or should the Windows branch be dropped as dead code entirely?
+1. **Forensics mechanism — DECIDED: uniform SIGKILL + `faulthandler.dump_traceback(all_threads=True)` to stderr (captured in `logs/worker_error.log`).** The Python all-thread dump beats the `.ips` C-frame report for the #1808 Python-level wedge and runs from the surviving off-loop heartbeat thread. The env-gated SIGABRT-in-prod alternative is rejected (re-forks test vs prod behavior; drift surface; the `.ips` it preserves is the low-value C-frame report). No open question remains.
+2. **Windows handling — DECIDED: dropped as dead code.** The worker is macOS/launchd-only with no Windows CI. `_self_kill()` calls `os.kill(os.getpid(), signal.SIGKILL)` unconditionally; the win32 `os._exit(3)` branch and the test's win32 `== 3` assertion are deleted (NO LEGACY CODE). No open question remains.
