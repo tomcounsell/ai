@@ -646,6 +646,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _recover_interrupted_agent_sessions_startup,
         _session_notify_listener,
         _sweep_dead_worker_sessions,
+        _sweep_stranded_waiting_for_children_parents,
         _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
@@ -834,14 +835,18 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
 
-    # Step 2c: Heal future-dated updated_at values written before fix #1645.
-    # Clamps any session whose updated_at is in the future (caused by popoto
-    # auto_now minting naive local time on non-UTC hosts). Idempotent.
+    # Step 2c: Detect future-dated updated_at values written before fix #1645.
+    # C2 (#1817): detection-only -- no longer clamps/re-saves (that reshuffled
+    # the created_at-based index; see _heal_future_updated_at's docstring).
+    # Purely an operator-visibility log; staleness reads no longer depend on
+    # this having run (agent/session_health.py uses a trusted-clock relative
+    # age instead of comparing local wall-clock to a possibly-skewed value).
     try:
         from models.agent_session import AgentSession as _AgentSession
 
         count = _AgentSession._heal_future_updated_at()
-        logger.info(f"_heal_future_updated_at: healed {count} records")
+        if count:
+            logger.info(f"_heal_future_updated_at: detected {count} future-dated record(s)")
     except Exception as e:
         logger.warning(f"_heal_future_updated_at non-fatal: {e}")
 
@@ -867,6 +872,25 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             logger.info(f"Recovered {recovered} interrupted session(s)")
     except Exception as e:
         logger.warning(f"Session recovery failed (non-fatal): {e}")
+
+    # Step 3c: Re-finalize parents stranded in waiting_for_children by a crash
+    # window between the child's finalize save and the parent's own transition
+    # (issue #1817, C1). finalize_session() intentionally saves the child
+    # independently of the parent's best-effort finalize (see
+    # agent/session_health.py::_sweep_stranded_waiting_for_children_parents for
+    # the full non-coupling rationale) -- this sweep is what closes the
+    # resulting crash-window orphan. Safe to run unconditionally: it only
+    # transitions parents whose children are ALL terminal, and is a no-op for
+    # a parent still legitimately waiting or already finalized.
+    try:
+        respawned = _sweep_stranded_waiting_for_children_parents()
+        if respawned:
+            logger.info(
+                "Startup recovery: re-finalized %d stranded waiting_for_children parent(s)",
+                respawned,
+            )
+    except Exception as e:
+        logger.warning(f"Stranded waiting_for_children sweep failed (non-fatal): {e}")
 
     # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
     try:

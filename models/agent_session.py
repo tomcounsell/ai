@@ -1015,14 +1015,27 @@ class AgentSession(Model):
 
     @classmethod
     def _heal_future_updated_at(cls) -> int:
-        """One-shot heal for future-dated updated_at values written before fix #1645.
+        """One-shot DETECTION for future-dated updated_at values written before fix #1645.
 
-        Clamps any session whose updated_at is in the future down to
-        max(created_at, now). Idempotent: a re-run clamps only still-future
-        records (partial mid-heal restart is safe because the per-record guard
-        is a strict `if record.updated_at > utc_now()` check, not a bulk update).
+        C2 (#1817): this function previously persisted a clamped
+        ``updated_at`` (a re-save call) whenever it found a future-dated
+        record. That re-save was itself a hazard, not a cure: persisting
+        rewrites the ``created_at``-based sorted index on every call, so
+        healing one future-dated straggler reshuffled the index position of
+        every OTHER recently-created record too -- corrupting freshness
+        ordering for every reader, not just the one record being healed.
 
-        Returns the number of records healed.
+        Detection is now read-only: it logs any future-dated records it
+        still finds (for operator visibility) but never mutates or persists
+        a clamped value. Health staleness no longer depends on this heal
+        having run -- see ``agent/session_health.py``'s trusted-clock fix
+        (Redis ``TIME`` instead of local wall-clock), which makes a
+        future-dated (skew-written) ``updated_at`` harmless to read even
+        without ever being clamped: age is computed from a single shared
+        clock, not from comparing two different processes' local clocks.
+
+        Returns the number of future-dated records detected (NOT healed —
+        nothing is mutated or re-saved).
         """
         from bridge.utc import utc_now
 
@@ -1048,31 +1061,13 @@ class AgentSession(Model):
                 if updated_at_utc <= now:
                     continue  # already sane, skip
 
-                # Clamp created_at first (dual-future-dated case, CONCERN — Adversary):
-                # ensures updated_at floor uses the already-clamped value so the
-                # invariant created_at <= updated_at <= now holds.
-                if record.created_at:
-                    created_at_utc = record.created_at
-                    if created_at_utc.tzinfo is None:
-                        created_at_utc = created_at_utc.replace(tzinfo=UTC)
-                    if created_at_utc > now:
-                        record.created_at = now
-                        logger.warning(
-                            f"_heal_future_updated_at: clamped future created_at on {record.id}"
-                        )
-
-                floor = record.created_at if record.created_at else now
-                # Normalize floor to tz-aware for max() comparison
-                if hasattr(floor, "tzinfo") and floor.tzinfo is None:
-                    floor = floor.replace(tzinfo=UTC)
-                record.updated_at = max(floor, now)
-                # Full save (no update_fields) so all changed fields are persisted
-                # and all popoto indexes (including SortedField created_at) are
-                # kept in sync. The save() override will re-stamp utc_now() for
-                # updated_at (idempotent — it will equal now).
-                record.save()
+                logger.warning(
+                    f"_heal_future_updated_at: detected future-dated updated_at on "
+                    f"{record.id} ({updated_at_utc.isoformat()} > now={now.isoformat()}) "
+                    "-- NOT re-saving (index-reshuffle hazard, see C2 #1817); "
+                    "staleness reads use a trusted-clock relative age instead"
+                )
                 count += 1
-                logger.info(f"_heal_future_updated_at: healed session {record.id}")
             except Exception as e:
                 logger.warning(
                     f"_heal_future_updated_at: skipped {getattr(record, 'id', '?')}: {e}"

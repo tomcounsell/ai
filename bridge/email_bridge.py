@@ -1076,7 +1076,19 @@ def _query_non_terminal_sessions(project_key: str) -> list:
         List of AgentSession objects.
     """
     from models.agent_session import AgentSession
+
+    # C3 (#1817): AgentSession's 30-day TTL means a status-index ghost member
+    # (hash expired, index membership survives) can in principle outlive its
+    # backing session. query.filter() below already never returns such a
+    # ghost as a live record (popoto silently drops empty hashes), so
+    # subject-coalescing can never attach to a session that no longer exists
+    # -- this call only accelerates removing the stale index entry instead of
+    # waiting for the nightly popoto-index-cleanup sweep. Rate-limited
+    # internally; see models/ghost_reconcile.py.
+    from models.ghost_reconcile import reconcile_ghost_members
     from models.session_lifecycle import NON_TERMINAL_STATUSES
+
+    reconcile_ghost_members(AgentSession)
 
     min_created_at = time.time() - COALESCE_MAX_AGE_SECONDS
     sessions = []
