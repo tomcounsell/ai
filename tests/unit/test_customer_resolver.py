@@ -4,18 +4,24 @@ Tests cover:
 - Subprocess form dispatch (argv, not shell)
 - Importlib callable form dispatch
 - Redis cache hit/miss/cached-None
-- Fail-closed on timeout/error
+- Raise ResolverUnavailableError (not return None) on infrastructure error (issue #1817 A2)
 - Failure counter increments
 - valor-retry label STORE attempted on failure
 - Sender pre-validation
-- Output sanitization (multi-line, garbage rejection)
+- Output sanitization (multi-line, garbage rejection) raises ResolverUnavailableError
+- Success clears both the failure counter and any armed resolver_unavailable alert
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from bridge.routing import invalidate_customer_cache, resolve_customer
+from bridge.routing import (
+    ResolverUnavailableError,
+    get_resolver_failure_count,
+    invalidate_customer_cache,
+    resolve_customer,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -119,13 +125,19 @@ async def test_resolve_customer_subprocess_success():
     mock_r.setex.assert_called_once()
     args = mock_r.setex.call_args[0]
     assert b"cust_42" in args
-    # Success clears failure counter
-    mock_r.delete.assert_called_once()
+    # Success clears both the failure counter AND any armed resolver_unavailable
+    # alert (issue #1817 A2) — two distinct keys, two delete calls.
+    deleted_keys = [c.args[0] for c in mock_r.delete.call_args_list]
+    assert "resolver:failures:test-proj" in deleted_keys
+    assert "email:resolver_unavailable" in deleted_keys
 
 
 @pytest.mark.asyncio
 async def test_resolve_customer_subprocess_empty_stdout_is_none():
-    """Subprocess that prints nothing returns None (cached as empty string)."""
+    """Subprocess that prints nothing is a DEFINITIVE non-customer result — the
+    resolver ran successfully, so this returns None (not raise). Cached as
+    empty string; failure counter and resolver_unavailable alert are still
+    cleared since the dispatch itself succeeded (issue #1817 A2)."""
     project = _project(resolver={"type": "subprocess", "command": ["sh", "-c", "true"]})
     mock_r = MagicMock()
     mock_r.get.return_value = None
@@ -138,6 +150,9 @@ async def test_resolve_customer_subprocess_empty_stdout_is_none():
     # Cached as empty bytes (represents None)
     call_args = mock_r.setex.call_args[0]
     assert b"" in call_args
+    deleted_keys = [c.args[0] for c in mock_r.delete.call_args_list]
+    assert "resolver:failures:test-proj" in deleted_keys
+    assert "email:resolver_unavailable" in deleted_keys
 
 
 @pytest.mark.asyncio
@@ -155,7 +170,9 @@ async def test_resolve_customer_subprocess_whitespace_is_none():
 
 @pytest.mark.asyncio
 async def test_resolve_customer_subprocess_multiline_is_garbage():
-    """Subprocess printing multi-line output (e.g. warnings + id) fails closed."""
+    """Subprocess printing multi-line output (e.g. warnings + id) is an
+    infrastructure failure — raises ResolverUnavailableError, NOT "not a
+    customer" (issue #1817 A2). Failure counter is still incremented."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -166,16 +183,16 @@ async def test_resolve_customer_subprocess_multiline_is_garbage():
     mock_r.get.return_value = None
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        result = await resolve_customer("user@example.com", project)
+        with pytest.raises(ResolverUnavailableError):
+            await resolve_customer("user@example.com", project)
 
-    # Multi-line output is malformed -> fail closed -> failure counter incremented
-    assert result is None
     mock_r.incr.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_resolve_customer_subprocess_html_garbage_is_rejected():
-    """HTML or other garbage output fails closed."""
+    """HTML or other garbage output is an infrastructure failure — raises
+    ResolverUnavailableError (issue #1817 A2)."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -186,9 +203,9 @@ async def test_resolve_customer_subprocess_html_garbage_is_rejected():
     mock_r.get.return_value = None
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        result = await resolve_customer("user@example.com", project)
+        with pytest.raises(ResolverUnavailableError):
+            await resolve_customer("user@example.com", project)
 
-    assert result is None
     mock_r.incr.assert_called_once()
 
 
@@ -199,7 +216,8 @@ async def test_resolve_customer_subprocess_html_garbage_is_rejected():
 
 @pytest.mark.asyncio
 async def test_resolve_customer_timeout_increments_failure_counter():
-    """Subprocess timeout increments failure counter and returns None."""
+    """Subprocess timeout increments failure counter and raises
+    ResolverUnavailableError (issue #1817 A2) — a timeout is not "not a customer"."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -211,15 +229,16 @@ async def test_resolve_customer_timeout_increments_failure_counter():
     mock_r.get.return_value = None
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        result = await resolve_customer("user@example.com", project)
+        with pytest.raises(ResolverUnavailableError):
+            await resolve_customer("user@example.com", project)
 
-    assert result is None
     mock_r.incr.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_resolve_customer_failure_attempts_valor_retry_label():
-    """On subprocess failure, valor-retry IMAP label is attempted when conn+uid provided."""
+    """On subprocess failure, valor-retry IMAP label is attempted when conn+uid
+    provided, and ResolverUnavailableError is raised (issue #1817 A2)."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -231,17 +250,18 @@ async def test_resolve_customer_failure_attempts_valor_retry_label():
     mock_imap_conn = MagicMock()
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        result = await resolve_customer(
-            "user@example.com", project, imap_conn=mock_imap_conn, imap_uid=b"42"
-        )
+        with pytest.raises(ResolverUnavailableError):
+            await resolve_customer(
+                "user@example.com", project, imap_conn=mock_imap_conn, imap_uid=b"42"
+            )
 
-    assert result is None
     mock_imap_conn.uid.assert_called_once_with("store", b"42", "+X-GM-LABELS", '("valor-retry")')
 
 
 @pytest.mark.asyncio
 async def test_resolve_customer_valor_retry_label_failure_is_nonfatal():
-    """If the IMAP STORE errors, the failure is logged but resolve_customer still returns None."""
+    """If the IMAP STORE errors, the failure is logged but ResolverUnavailableError
+    is still raised (issue #1817 A2)."""
     project = _project(resolver={"type": "subprocess", "command": ["sh", "-c", "exit 1"]})
     mock_r = MagicMock()
     mock_r.get.return_value = None
@@ -249,11 +269,11 @@ async def test_resolve_customer_valor_retry_label_failure_is_nonfatal():
     mock_imap_conn.uid.side_effect = Exception("IMAP store error")
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        result = await resolve_customer(
-            "user@example.com", project, imap_conn=mock_imap_conn, imap_uid=b"42"
-        )
+        with pytest.raises(ResolverUnavailableError):
+            await resolve_customer(
+                "user@example.com", project, imap_conn=mock_imap_conn, imap_uid=b"42"
+            )
 
-    assert result is None
     mock_r.incr.assert_called_once()
 
 
@@ -334,6 +354,35 @@ def test_invalidate_customer_cache():
     key = mock_r.delete.call_args[0][0]
     assert "my-project" in key
     assert "user@example.com" in key
+
+
+# ---------------------------------------------------------------------------
+# get_resolver_failure_count (issue #1817 A2 — reused by the email bridge's
+# alert-arming gate, not a parallel tally)
+# ---------------------------------------------------------------------------
+
+
+def test_get_resolver_failure_count_reads_counter():
+    """Returns the current int value of resolver:failures:{project_key}."""
+    mock_r = MagicMock()
+    mock_r.get.return_value = b"5"
+    with patch("bridge.routing._get_redis", return_value=mock_r):
+        assert get_resolver_failure_count("my-project") == 5
+    mock_r.get.assert_called_once_with("resolver:failures:my-project")
+
+
+def test_get_resolver_failure_count_missing_key_is_zero():
+    """No counter yet -> 0, not an error."""
+    mock_r = MagicMock()
+    mock_r.get.return_value = None
+    with patch("bridge.routing._get_redis", return_value=mock_r):
+        assert get_resolver_failure_count("my-project") == 0
+
+
+def test_get_resolver_failure_count_fails_closed_on_redis_error():
+    """A Redis error returns 0 rather than raising (best-effort alert gate)."""
+    with patch("bridge.routing._get_redis", side_effect=Exception("redis down")):
+        assert get_resolver_failure_count("my-project") == 0
 
 
 # ---------------------------------------------------------------------------

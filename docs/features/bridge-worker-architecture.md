@@ -488,7 +488,7 @@ The bridge and worker share a single contract: the `AgentSession` Popoto model i
 | `chat_id` | Yes | Yes (computes `worker_key` for teammate sessions; slugged dev sessions use `slug` instead, PM and slugless dev use `project_key`) |
 | `message_text` | Yes | Yes (passed to Claude) |
 | `session_type` | Yes | Yes (PM/dev/teammate persona selection) |
-| `queued_steering_messages` | Any process | Worker injects at turn boundary |
+| Redis steering list (`steering:{session_id}`, `agent/steering.py`) | Any process | Worker injects at turn boundary |
 
 The bridge also reads `AgentSession.status` to determine if a session is already active (dedup logic).
 

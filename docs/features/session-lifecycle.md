@@ -262,8 +262,6 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | Method | Fields Written | File |
 |--------|---------------|------|
 | `set_link()` | `[field_name, "updated_at"]` | `models/agent_session.py` |
-| `push_steering_message()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
-| `pop_steering_messages()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
 | Heartbeat in `_heartbeat_loop` | `["updated_at"]` | `agent/agent_session_queue.py` |
 | Steering drain (async) | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
 | Steering drain (sync fallback) | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
@@ -278,6 +276,8 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | Idempotent reactivation | `["updated_at", "completed_at"]` | `.claude/hooks/user_prompt_submit.py` |
 
 **Rule**: When adding a new save site on `AgentSession` that modifies non-lifecycle fields, always use `save(update_fields=[...])` listing only the fields you modified plus `"updated_at"`. Never use a bare `save()` on a session object that might be stale.
+
+Steering is not in this table because it no longer touches the `AgentSession` model at all — `push_steering_message()` and `pop_all_steering_messages()` (`agent/steering.py`) operate on a dedicated Redis list (`steering:{session_id}`), so there is no stale-object partial-save risk to guard against. See [Session Steering](session-steering.md).
 
 ### Layer 1c: Defensive `srem` in `finalize_session` (#950)
 

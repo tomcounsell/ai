@@ -40,6 +40,7 @@ def push_steering_message(
     sender: str,
     is_abort: bool = False,
     target_agent: str | None = None,
+    front: bool = False,
 ) -> None:
     """Push a message to a session's steering queue.
 
@@ -51,6 +52,11 @@ def push_steering_message(
         target_agent: Optional agent name this message is addressed to.
             When set, only the named agent should act on it. Consumers
             do not filter by this field yet -- it is stored for future use.
+        front: When True, prepend to the queue (LPUSH) so this message is
+            the next one drained, ahead of anything already queued. Used
+            for urgent advisories (e.g. a tool-timeout recovery hint) that
+            should be consumed before older, lower-priority messages.
+            When False (default), append to the queue (RPUSH) as normal.
     """
     r = _get_redis()
     key = _queue_key(session_id)
@@ -69,11 +75,15 @@ def push_steering_message(
         msg_dict["target_agent"] = target_agent
 
     payload = json.dumps(msg_dict)
-    r.rpush(key, payload)
+    if front:
+        r.lpush(key, payload)
+    else:
+        r.rpush(key, payload)
     target_suffix = f" target={target_agent}" if target_agent else ""
+    front_suffix = " (front)" if front else ""
     logger.info(
         f"[steering] Pushed {'ABORT' if is_abort else 'message'} to {key}: "
-        f"{text[:80]!r} (from {sender}){target_suffix}"
+        f"{text[:80]!r} (from {sender}){target_suffix}{front_suffix}"
     )
 
 
@@ -142,6 +152,26 @@ def has_steering_messages(session_id: str) -> bool:
     r = _get_redis()
     key = _queue_key(session_id)
     return r.llen(key) > 0
+
+
+def peek_steering_messages(session_id: str) -> list[dict]:
+    """Peek at all pending steering messages without consuming them.
+
+    Uses LRANGE (non-destructive) so callers -- status dumps, CLI inspection --
+    can inspect the queue without racing the turn-boundary consumer. Returns
+    messages in the same FIFO order pop_all_steering_messages would return
+    them. Returns an empty list if the queue is empty or unreadable.
+    """
+    r = _get_redis()
+    key = _queue_key(session_id)
+    raw_messages = r.lrange(key, 0, -1)
+    messages = []
+    for raw in raw_messages:
+        try:
+            messages.append(json.loads(raw))
+        except json.JSONDecodeError:
+            logger.warning(f"[steering] Invalid JSON in queue {key}: {raw!r}")
+    return messages
 
 
 def peek_steering_sender(session_id: str) -> str | None:

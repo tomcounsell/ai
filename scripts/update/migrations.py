@@ -124,6 +124,33 @@ def _migrate_unify_parent_session_field(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_steering_queue_drain(project_dir: Path) -> str | None:
+    """Drain residual AgentSession.queued_steering_messages into the Redis steering list.
+
+    Returns None on success, error string on failure.
+    """
+    script = project_dir / "scripts" / "migrate_steering_queue_drain.py"
+    if not script.exists():
+        return "migration script not found"
+
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), "--apply"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+        return None
+    except subprocess.TimeoutExpired:
+        return "migration timed out after 120s"
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing.
 
@@ -156,6 +183,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "unify_parent_session_field": (
         _migrate_unify_parent_session_field,
         "Normalize parent_session_id Redis fields into parent_agent_session_id",
+    ),
+    "steering_queue_drain": (
+        _migrate_steering_queue_drain,
+        "Drain residual AgentSession.queued_steering_messages into the Redis steering list",
     ),
 }
 

@@ -600,6 +600,24 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Email resolver persistent-unavailability alert (issue #1817, workstream A2).
+    # Provisional/tunable — chosen to absorb a one-off transient resolver blip
+    # without paging, while still catching a genuinely stuck resolver (e.g. an
+    # expired OAuth token) within a handful of inbound emails. Derived from the
+    # existing per-project resolver:failures:{project_key} counter maintained by
+    # bridge/routing.py::_on_resolver_failure — not a parallel tally.
+    # Override via EMAIL_RESOLVER_ALERT_AFTER env var.
+    email_resolver_alert_after: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description=(
+            "Consecutive resolver failures (per project) before the "
+            "email:resolver_unavailable operator alert arms. "
+            "Provisional/tunable. Env: EMAIL_RESOLVER_ALERT_AFTER."
+        ),
+    )
+
     # Component settings
     api: APISettings = Field(default_factory=APISettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)

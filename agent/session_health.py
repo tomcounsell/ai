@@ -2227,10 +2227,14 @@ async def _apply_recovery_transition(
             #     them would be misleading and could mask the real issue.
             if reason_kind == "tool_timeout" and tool_name:
                 try:
-                    entry.push_steering_message(
+                    from agent.steering import push_steering_message as _push_steering_message
+
+                    _push_steering_message(
+                        entry.session_id,
                         _compose_tool_timeout_steering(
                             tool_name, getattr(entry, "message_text", None)
                         ),
+                        "session-health",
                         front=True,
                     )
                     try:

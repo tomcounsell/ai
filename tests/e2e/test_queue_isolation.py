@@ -66,15 +66,14 @@ class TestPerChatQueueIsolation:
             message_text="msg2",
         )
 
-        s1.push_steering_message("fix the bug")
-        s2.push_steering_message("add the feature")
+        # Steering routes through the Redis list (the sole inbox), keyed by session_id.
+        from agent.steering import pop_all_steering_messages, push_steering_message
 
-        # Reload from Redis
-        s1_reloaded = list(AgentSession.query.filter(session_id=s1.session_id))[0]
-        s2_reloaded = list(AgentSession.query.filter(session_id=s2.session_id))[0]
+        push_steering_message(s1.session_id, "fix the bug", "test")
+        push_steering_message(s2.session_id, "add the feature", "test")
 
-        msgs1 = s1_reloaded.pop_steering_messages()
-        msgs2 = s2_reloaded.pop_steering_messages()
+        msgs1 = [m["text"] for m in pop_all_steering_messages(s1.session_id)]
+        msgs2 = [m["text"] for m in pop_all_steering_messages(s2.session_id)]
 
         assert msgs1 == ["fix the bug"]
         assert msgs2 == ["add the feature"]

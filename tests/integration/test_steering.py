@@ -69,6 +69,44 @@ class TestSteeringQueue:
     def test_pop_all_empty_queue(self):
         assert pop_all_steering_messages("nonexistent_session") == []
 
+    def test_concurrent_drainers_split_disjointly(self):
+        """Two concurrent drainers of one session_id partition the queue with no loss/dup.
+
+        A1 acceptance criterion: the turn-boundary drain is sequential-LPOP (not a
+        single atomic multi-pop), which is safe only because each LPOP is atomic. Two
+        drainers racing on the same session_id must each pop every message at most once
+        and together pop every message exactly once — no message lost, none duplicated.
+        This locks the single-consumer safety model against a future refactor that might
+        silently invalidate it (e.g. an LRANGE-then-trim drain that could double-count).
+        """
+        import threading
+
+        session_id = "test_concurrent_drainers"
+        n = 200
+        for i in range(n):
+            push_steering_message(session_id, f"msg-{i}", "Tom")
+
+        collected: list[dict] = []
+        lock = threading.Lock()
+
+        def drain():
+            got = pop_all_steering_messages(session_id)
+            with lock:
+                collected.extend(got)
+
+        threads = [threading.Thread(target=drain) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        texts = [m["text"] for m in collected]
+        # No loss, no duplication: the union is exactly the pushed set.
+        assert len(texts) == n, f"expected {n} messages across both drainers, got {len(texts)}"
+        assert sorted(texts) == sorted(f"msg-{i}" for i in range(n))
+        # Queue fully drained.
+        assert pop_all_steering_messages(session_id) == []
+
     def test_clear_steering_queue(self):
         session_id = "test_session_clear"
         push_steering_message(session_id, "msg1", "Tom")
@@ -597,9 +635,12 @@ class TestWatchdogSteering:
 
     @pytest.mark.asyncio
     async def test_watchdog_handles_missing_client_session_found(self):
-        """If no active client but session exists in DB, message lands in queued_steering_messages.
+        """No active client (CLI harness): the message is re-pushed to the Redis list.
 
-        Turn-boundary inbox (not Redis re-push) when the model lookup succeeds.
+        Post-A1 the Redis steering list is the sole inbox — the model ListField is gone.
+        When the watchdog finds a pending steer but no active SDK client, it re-pushes
+        every (non-abort) message so the worker's turn-boundary drain picks it up on the
+        next turn. Whether the session exists in the DB no longer changes this behavior.
         """
         from datetime import UTC, datetime
 
@@ -624,14 +665,10 @@ class TestWatchdogSteering:
         assert result is not None
         assert result["continue_"] is True
 
-        # Message should land in queued_steering_messages, NOT re-pushed to Redis list
+        # Message re-pushed to the Redis steering list (the sole inbox post-A1).
         msg = pop_steering_message(session_id)
-        assert msg is None, "Message should NOT have been re-pushed to Redis list"
-
-        # Verify it landed in the model's turn-boundary inbox
-        refreshed = list(AgentSession.query.filter(session_id=session_id))[0]
-        assert len(refreshed.queued_steering_messages) >= 1
-        assert "focus on OAuth" in refreshed.queued_steering_messages[0]
+        assert msg is not None, "Message should have been re-pushed to the Redis list"
+        assert msg["text"] == "focus on OAuth"
 
     @pytest.mark.asyncio
     async def test_watchdog_handles_missing_client_session_not_found(self):
@@ -653,50 +690,32 @@ class TestWatchdogSteering:
         assert msg["text"] == "fallback message"
 
     @pytest.mark.asyncio
-    async def test_watchdog_fallback_to_repush_when_model_write_fails(self):
-        """If no active client and model write raises, messages are re-pushed to Redis list."""
-        from datetime import UTC, datetime
+    async def test_watchdog_repush_on_injection_failure(self):
+        """If SDK injection raises, messages are re-pushed to the Redis list (never lost).
 
+        Post-A1 there is no model-write path in the delivery branch; the failure mode
+        worth guarding is an active SDK client whose interrupt()/query() raises. The
+        watchdog must re-deposit the popped messages onto the Redis list so a steer is
+        preserved for the next turn instead of being silently dropped.
+        """
         from agent.health_check import _handle_steering
-        from models.agent_session import AgentSession
 
-        session_id = "test_watchdog_model_write_fail"
-        session = AgentSession(
-            session_id=session_id,
-            project_key="test-steer",
-            status="running",
-            message_text="test task",
-            created_at=datetime.now(tz=UTC),
-        )
-        session.save()
-
+        session_id = "test_watchdog_injection_fail"
         push_steering_message(session_id, "update the tests", "Tom")
 
-        mock_session = session
-        original_push = mock_session.push_steering_message
+        failing_client = AsyncMock()
+        failing_client.interrupt.side_effect = RuntimeError("interrupt failed")
 
-        def raise_on_push(msg):
-            raise RuntimeError("Redis write failed")
-
-        mock_session.push_steering_message = raise_on_push
-
-        with patch("agent.sdk_client.get_active_client", return_value=None):
-            with patch(
-                "models.agent_session.AgentSession.query",
-            ) as mock_query:
-                mock_query.filter.return_value = [mock_session]
-                result = await _handle_steering(session_id)
+        with patch("agent.sdk_client.get_active_client", return_value=failing_client):
+            result = await _handle_steering(session_id)
 
         assert result is not None
         assert result["continue_"] is True
 
-        # After model write failure, message should be re-pushed to Redis list
+        # After injection failure, the message must be re-pushed to the Redis list.
         msg = pop_steering_message(session_id)
         assert msg is not None
         assert msg["text"] == "update the tests"
-
-        # Restore original method
-        mock_session.push_steering_message = original_push
 
     @pytest.mark.asyncio
     async def test_watchdog_repushes_on_injection_failure(self):
@@ -1499,8 +1518,12 @@ class TestSteerChildDelivery:
         return session
 
     def test_steer_child_cli_harness_delivery(self):
-        """_steer_child() writes message to turn-boundary inbox (queued_steering_messages)."""
-        from models.agent_session import AgentSession
+        """_steer_child() (non-abort) routes to the Redis steering list via steer_session().
+
+        Post-A1 the Redis list is the sole steering inbox. steer_session() looks the
+        child up by its Popoto session_id and pushes there, so the message lands on the
+        Redis list keyed by child.session_id (not the deleted ListField).
+        """
         from scripts.steer_child import _steer_child
 
         parent = self._create_pm_session("tg_test_parent_p001")
@@ -1515,20 +1538,19 @@ class TestSteerChildDelivery:
 
         assert exit_code == 0
 
-        # Verify the message landed in queued_steering_messages
-        sessions = list(AgentSession.query.filter(id=child.agent_session_id))
-        assert sessions, "Child session not found after steering"
-        refreshed = sessions[0]
-        assert len(refreshed.queued_steering_messages) >= 1
-        assert "focus on error handling" in refreshed.queued_steering_messages[0]
-
-        # Verify the Redis list was NOT used (turn-boundary path only)
+        # Non-abort steering lands on the Redis list keyed by the child's session_id.
         msg = pop_steering_message(child.session_id)
-        assert msg is None, "Message should NOT have gone to Redis steering list"
+        assert msg is not None, "Non-abort steer should land on the Redis steering list"
+        assert msg["text"] == "focus on error handling"
+        assert msg.get("is_abort") in (False, None)
 
     def test_steer_child_abort_uses_redis_list(self):
-        """_steer_child() with abort=True writes to Redis list, not turn-boundary inbox."""
-        from models.agent_session import AgentSession
+        """_steer_child() with abort=True pushes an is_abort message to the Redis list.
+
+        The abort path pushes with session_id set to the id passed to _steer_child (the
+        child's agent_session_id here), so the watchdog hook delivers it immediately.
+        The session_id-keyed inbox that non-abort steers use stays empty.
+        """
         from scripts.steer_child import _steer_child
 
         parent = self._create_pm_session("tg_test_parent_p002")
@@ -1543,18 +1565,14 @@ class TestSteerChildDelivery:
 
         assert exit_code == 0
 
-        # Abort message should be on the Redis list with is_abort=True
-        # Abort path uses session_id (Redis key) from push_steering_message
+        # Abort message is on the Redis list keyed by the id passed to _steer_child.
         msg = pop_steering_message(child.agent_session_id)
         assert msg is not None, "Abort message should be in Redis steering list"
         assert msg["is_abort"] is True
         assert "stop" in msg["text"]
 
-        # queued_steering_messages should be empty (abort does NOT use turn-boundary inbox)
-        sessions = list(AgentSession.query.filter(id=child.agent_session_id))
-        refreshed = sessions[0]
-        inbox = refreshed.queued_steering_messages or []
-        assert len(inbox) == 0, "Abort messages must NOT appear in queued_steering_messages"
+        # The non-abort (session_id-keyed) inbox stays empty for an abort.
+        assert pop_steering_message(child.session_id) is None
 
     def test_steer_child_terminal_session_exits_nonzero(self):
         """_steer_child() exits non-zero when session is in a terminal status."""

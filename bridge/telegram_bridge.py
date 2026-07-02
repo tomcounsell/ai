@@ -877,13 +877,11 @@ async def _ack_steering_routed(
     sender_name: str,
     text: str,
     log_context: str,
-    agent_session=None,
 ) -> None:
     """Bundle the terminal sequence shared by every steering routing branch.
 
-    Detects abort keywords, optionally writes to the AgentSession Popoto
-    model (when ``agent_session`` is given — durable, PM-visible),
-    pushes to the Redis steering queue, reacts to the user's message
+    Detects abort keywords, pushes to the Redis steering queue (the sole
+    steering inbox — see agent/steering.py), reacts to the user's message
     with the appropriate emoji, logs, and marks the message handled.
 
     Caller is responsible for ``return`` after this call. ``log_context``
@@ -945,11 +943,6 @@ async def _ack_steering_routed(
                 logger.warning(f"[steering-ingest] Failed to schedule task: {e}")
 
     is_abort = text.strip().lower() in ABORT_KEYWORDS
-    if agent_session is not None:
-        # Dual-push: the durable PM-visible write goes to the Popoto model's
-        # queued_steering_messages field BEFORE the Redis push, so the PM
-        # session sees it even before the worker drains the queue.
-        agent_session.push_steering_message(text)
     push_steering_message(session_id, text, sender_name, is_abort=is_abort)
 
     if not message.media:
@@ -1990,7 +1983,6 @@ async def main():
                             )
 
                         if guard_sessions:
-                            guard_session = guard_sessions[0]
                             await _ack_steering_routed(
                                 client,
                                 event,
@@ -2003,7 +1995,6 @@ async def main():
                                     f"merged message into session {guard_session_id} "
                                     f"(age={guard_age:.3f}s)"
                                 ),
-                                agent_session=guard_session,
                             )
                             return
                         else:
@@ -2100,7 +2091,6 @@ async def main():
                                     f"interjection to session "
                                     f"{fresh_session.session_id}"
                                 ),
-                                agent_session=fresh_session,
                             )
                             return
                         else:

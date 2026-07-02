@@ -141,6 +141,77 @@ class TestSessionsPartial:
         assert r.status_code == 200
 
 
+class TestEmailHealthAlerts:
+    """The dashboard's ``email`` health field surfaces email:auth_failed (A3)
+    and email:resolver_unavailable (A2) — issue #1817. Both /health and
+    /dashboard.json expose the same email_alert / email_alert_detail fields
+    rather than a new alert surface."""
+
+    def test_health_surfaces_auth_failed_alert(self, client):
+        from unittest.mock import MagicMock, patch
+
+        mock_r = MagicMock()
+        mock_r.get.side_effect = lambda key: {
+            "email:auth_failed": "1700000000.0:AUTHENTICATIONFAILED",
+        }.get(key)
+
+        with patch("redis.Redis.from_url", return_value=mock_r):
+            response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["email"] == "error"
+        assert data["email_alert"] == "auth_failed"
+        assert "AUTHENTICATIONFAILED" in data["email_alert_detail"]
+
+    def test_health_surfaces_resolver_unavailable_alert(self, client):
+        from unittest.mock import MagicMock, patch
+
+        mock_r = MagicMock()
+        mock_r.get.side_effect = lambda key: {
+            "email:resolver_unavailable": "1700000000.0:<msg-1@example.com>",
+        }.get(key)
+
+        with patch("redis.Redis.from_url", return_value=mock_r):
+            response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["email"] == "error"
+        assert data["email_alert"] == "resolver_unavailable"
+        assert "<msg-1@example.com>" in data["email_alert_detail"]
+
+    def test_health_no_alert_when_keys_absent(self, client):
+        from unittest.mock import MagicMock, patch
+
+        mock_r = MagicMock()
+        mock_r.get.return_value = None
+
+        with patch("redis.Redis.from_url", return_value=mock_r):
+            response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["email_alert"] is None
+        assert data["email_alert_detail"] is None
+
+    def test_dashboard_json_surfaces_auth_failed_alert(self, client):
+        from unittest.mock import MagicMock, patch
+
+        mock_r = MagicMock()
+        mock_r.get.side_effect = lambda key: {
+            "email:auth_failed": "1700000000.0:AUTHENTICATIONFAILED",
+        }.get(key)
+
+        with patch("redis.Redis.from_url", return_value=mock_r):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        health = response.json()["health"]
+        assert health["email"] == "error"
+        assert health["email_alert"] == "auth_failed"
+
+
 class TestStaticFiles:
     """Tests for static file serving."""
 

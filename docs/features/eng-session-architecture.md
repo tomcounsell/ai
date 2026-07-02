@@ -222,7 +222,7 @@ The Eng session can receive mid-execution course corrections via steering messag
 
 ### Mechanism
 
-The steering queue (`AgentSession.queued_steering_messages`) is the inbox -- any process writes messages, and the worker injects them at turn boundaries. See [Session Steering](session-steering.md) for the turn-boundary inbox architecture.
+The Redis steering list (`agent/steering.py`) is the inbox -- any process writes messages via `push_steering_message()`, and the worker injects them at turn boundaries. See [Session Steering](session-steering.md) for the turn-boundary inbox architecture.
 
 ```bash
 # Steer a running session

@@ -927,13 +927,15 @@ def _poll_steering() -> list[dict]:
 `pop_all_steering_messages` performs an atomic FIFO LPOP drain — race-free across
 the bridge process (writer) and the worker's container thread (sole consumer).
 
-**Why the Redis list, not the Popoto `queued_steering_messages` ListField.** The
-Popoto field is consumed via a cross-process read-modify-write: the bridge reads
-[A], appends B, saves [A,B], while the container concurrently reads [A] and saves
-[]. A message can be dropped in this race window with no way to close it without a
-distributed lock. The `steering:{session_id}` Redis list uses atomic RPUSH / LPOP
-— a message pushed between two drains is simply picked up on the next turn, never
-lost. The Popoto field continues to serve the SDK/CLI harness path unchanged.
+**Why the Redis list, not a Popoto `queued_steering_messages` ListField.** A
+Popoto ListField would be consumed via a cross-process read-modify-write: the
+bridge reads [A], appends B, saves [A,B], while the container concurrently reads
+[A] and saves []. A message can be dropped in this race window with no way to
+close it without a distributed lock. The `steering:{session_id}` Redis list uses
+atomic RPUSH / LPOP — a message pushed between two drains is simply picked up on
+the next turn, never lost. This is why the Redis list is the sole steering inbox
+for every harness (SDK, CLI, and granite PTY) — there is no separate Popoto-field
+path to keep in sync.
 
 **Injection flow (per turn):**
 
