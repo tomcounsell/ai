@@ -59,7 +59,6 @@ class TestWorktreeEnforcementGuard:
         session.created_at = None
         session.started_at = None
         session.updated_at = None
-        session.queued_steering_messages = []
         return session
 
     @staticmethod

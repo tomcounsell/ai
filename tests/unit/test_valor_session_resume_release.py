@@ -48,7 +48,6 @@ def _make_session(
     slug: str = "",
     claude_session_uuid: str | None = "uuid-default",
     model: str | None = None,
-    steering: list[str] | None = None,
 ) -> MagicMock:
     s = MagicMock()
     s.session_id = session_id
@@ -62,7 +61,6 @@ def _make_session(
     # must pass ``claude_session_uuid=None`` explicitly.
     s.claude_session_uuid = claude_session_uuid
     s.model = model
-    s.queued_steering_messages = list(steering or [])
     s.created_at = 0
     return s
 
@@ -155,7 +153,7 @@ class TestCmdResumeWrongStatus:
 
 class TestCmdResumeHappyPath:
     def test_transitions_to_pending_and_appends_steering(self):
-        """Happy path: transitions session to pending and appends message to steering queue."""
+        """Happy path: transitions session to pending and pushes the steering message."""
         session = _make_session("sess-ok", status="completed", model="claude-opus-4-5")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
@@ -163,6 +161,7 @@ class TestCmdResumeHappyPath:
 
         with (
             patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message") as mock_push,
             patch.dict(
                 "sys.modules",
                 {
@@ -177,30 +176,28 @@ class TestCmdResumeHappyPath:
             result = cmd_resume(_resume_args(session_id="sess-ok", message="Do the patch."))
 
         assert result == 0
-        # Steering message must be saved before transition_status is called
-        session.save.assert_called()
-        assert "Do the patch." in session.queued_steering_messages
+        # Steering message must be pushed to Redis before transition_status is called
+        mock_push.assert_called_once_with("sess-ok", "Do the patch.", "resume:valor-session resume")
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
 
-    def test_steering_message_saved_before_transition(self):
-        """Steering save must precede transition_status call (no race window)."""
+    def test_steering_push_before_transition(self):
+        """Steering push must precede transition_status call (no race window)."""
         call_order: list[str] = []
         session = _make_session("sess-order", status="completed")
         mock_cls = MagicMock()
         mock_cls.query.filter.return_value = [session]
 
-        def _record_save():
-            call_order.append("save")
+        def _record_push(*_a, **_kw):
+            call_order.append("push")
 
         def _record_transition(s, status, reason="", reject_from_terminal=True):
             call_order.append("transition")
 
-        session.save.side_effect = _record_save
-
         with (
             patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message", side_effect=_record_push),
             patch.dict(
                 "sys.modules",
                 {
@@ -215,8 +212,8 @@ class TestCmdResumeHappyPath:
             result = cmd_resume(_resume_args(session_id="sess-order"))
 
         assert result == 0
-        assert call_order.index("save") < call_order.index("transition"), (
-            "session.save() must be called before transition_status()"
+        assert call_order.index("push") < call_order.index("transition"), (
+            "push_steering_message() must be called before transition_status()"
         )
 
     def test_json_output(self, capsys):
@@ -269,6 +266,7 @@ class TestCmdResumeKilledFailedSupport:
 
         with (
             patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message") as mock_push,
             patch.dict(
                 "sys.modules",
                 {
@@ -281,22 +279,26 @@ class TestCmdResumeKilledFailedSupport:
             ),
         ):
             result = cmd_resume(_resume_args(session_id=session.session_id, message=message))
-        return result, mock_transition
+        return result, mock_transition, mock_push
 
     def test_killed_with_uuid_resumes(self):
         session = _make_session("sess-k", status="killed", claude_session_uuid="uuid-killed")
-        result, mock_transition = self._run_resume(session, message="Pick up where we left off.")
+        result, mock_transition, mock_push = self._run_resume(
+            session, message="Pick up where we left off."
+        )
         assert result == 0
-        assert "Pick up where we left off." in session.queued_steering_messages
+        mock_push.assert_called_once_with(
+            "sess-k", "Pick up where we left off.", "resume:valor-session resume"
+        )
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
 
     def test_failed_with_uuid_resumes(self):
         session = _make_session("sess-f", status="failed", claude_session_uuid="uuid-failed")
-        result, mock_transition = self._run_resume(session, message="Recover.")
+        result, mock_transition, mock_push = self._run_resume(session, message="Recover.")
         assert result == 0
-        assert "Recover." in session.queued_steering_messages
+        mock_push.assert_called_once_with("sess-f", "Recover.", "resume:valor-session resume")
         mock_transition.assert_called_once_with(
             session, "pending", reason="resume (valor-session resume)", reject_from_terminal=False
         )
@@ -391,6 +393,7 @@ class TestCmdResumeAbandonedSupport:
 
         with (
             patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message") as mock_push,
             patch.dict(
                 "sys.modules",
                 {
@@ -403,13 +406,17 @@ class TestCmdResumeAbandonedSupport:
             ),
         ):
             result = cmd_resume(_resume_args(session_id=session.session_id, message=message))
-        return result, mock_transition
+        return result, mock_transition, mock_push
 
     def test_abandoned_with_uuid_resumes(self):
         session = _make_session("sess-a", status="abandoned", claude_session_uuid="uuid-abandoned")
-        result, mock_transition = self._run_resume(session, message="Pick up where we left off.")
+        result, mock_transition, mock_push = self._run_resume(
+            session, message="Pick up where we left off."
+        )
         assert result == 0
-        assert "Pick up where we left off." in session.queued_steering_messages
+        mock_push.assert_called_once_with(
+            "sess-a", "Pick up where we left off.", "resume:valor-session resume"
+        )
         mock_transition.assert_called_once()
         _, kwargs = mock_transition.call_args
         assert kwargs.get("reject_from_terminal") is False
@@ -454,14 +461,12 @@ class TestResumeSessionCore:
         session_id="core-sess",
         status="failed",
         uuid="uuid-core",
-        steering=None,
     ):
         s = MagicMock()
         s.session_id = session_id
         s.status = status
         s.claude_session_uuid = uuid
         s.model = "claude-opus-4-5"
-        s.queued_steering_messages = list(steering or [])
         return s
 
     def _patch_lifecycle(self, mock_transition=None, resumable=None):
@@ -550,26 +555,30 @@ class TestResumeSessionCore:
         _, kwargs = mock_transition.call_args
         assert kwargs.get("reject_from_terminal") is False
 
-    def test_steering_message_appended_before_transition(self):
+    def test_steering_push_before_transition(self):
+        """push_steering_message() must precede transition_status() (no race window)."""
         call_order: list[str] = []
         session = self._make_mock_session(status="completed")
 
-        def _record_save():
-            call_order.append("save")
+        def _record_push(*_a, **_kw):
+            call_order.append("push")
 
         def _record_transition(s, status, reason="", reject_from_terminal=True):
             call_order.append("transition")
 
-        session.save.side_effect = _record_save
         mock_transition = MagicMock(side_effect=_record_transition)
         patch_ctx, _ = self._patch_lifecycle(mock_transition=mock_transition)
 
-        with patch("tools.valor_session._load_env"), patch_ctx:
+        with (
+            patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message", side_effect=_record_push) as mock_push,
+            patch_ctx,
+        ):
             result = resume_session(session, "continue")
 
         assert result.success is True
-        assert call_order.index("save") < call_order.index("transition")
-        assert "continue" in session.queued_steering_messages
+        assert call_order.index("push") < call_order.index("transition")
+        mock_push.assert_called_once_with("core-sess", "continue", "resume:cli")
 
     def test_transition_error_returns_failure(self):
         session = self._make_mock_session(status="failed")
