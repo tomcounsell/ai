@@ -931,7 +931,7 @@ class TestHeartbeatIsolation:
 
     Under the issue #1815 dead-man's-switch inversion, this off-loop isolation
     is no longer just "the thread keeps writing green" — it is precisely what
-    lets the thread observe a frozen on-loop beacon and SIGABRT for launchd
+    lets the thread observe a frozen on-loop beacon and SIGKILL for launchd
     respawn while the loop itself is wedged. The thread now writes green ONLY
     when the loop beacon is fresh (verified end-to-end in
     ``tests/unit/test_worker_deadman.py``); the property exercised below is the
@@ -994,12 +994,12 @@ class TestHeartbeatIsolation:
             executor.shutdown(wait=False, cancel_futures=True)
 
     def test_frozen_loop_surviving_thread_self_kills(self):
-        """The surviving off-loop thread fires the SIGABRT when the loop is frozen.
+        """The surviving off-loop thread fires the SIGKILL when the loop is frozen.
 
         Inversion meaning of #1767 isolation (#1815): because the heartbeat
         thread runs independently of the (now-frozen) event loop, it observes
         the stale beacon and triggers ``_self_kill`` so launchd can respawn a
-        healthy worker — exactly the abort path the loop itself could never run.
+        healthy worker — exactly the kill path the loop itself could never run.
         """
         import time
         from unittest.mock import patch

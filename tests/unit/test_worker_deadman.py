@@ -10,13 +10,18 @@ Covers _heartbeat_cycle() (the per-tick body) and the supporting seams:
 - FS write failure -> no abort (error swallowed by _green_heartbeat_write)
 - Graceful shutdown (_heartbeat_thread_main stop event) -> no abort
 - Beacon-age info log on green path (once per minute cadence)
-- _self_kill() delegates to os.abort()
+- _self_kill() dumps thread stacks then delivers SIGKILL (dump-before-kill;
+  kill fires even if the dump raises)
 """
 
 from __future__ import annotations
 
+import os
+import signal
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 import worker.__main__ as wm
 from worker.__main__ import (
@@ -411,13 +416,45 @@ class TestDeadmanBeaconAgeLog:
 
 
 class TestSelfKillSeam:
-    """_self_kill() is the correct seam — verifies it delegates to os.abort."""
+    """_self_kill() dumps thread stacks, then delivers SIGKILL so launchd respawns.
 
-    def test_self_kill_calls_os_abort(self):
-        """_self_kill must call os.abort() so launchd respawns the process."""
-        with patch("os.abort") as mock_abort:
+    SIGKILL is as unswallowable as the former abort path but raises no macOS
+    crash-report dialog or Python .ips file (#1844). The thread dump must land
+    BEFORE the kill (forensic evidence in logs/worker_error.log), and the kill
+    must fire even if the dump raises (the `finally` guarantee).
+    """
+
+    def test_self_kill_sends_sigkill(self):
+        """_self_kill dumps threads, then SIGKILLs this pid — dump strictly before kill."""
+        manager = MagicMock()
+        with (
+            patch("worker.__main__.faulthandler.dump_traceback") as mock_dump,
+            patch("worker.__main__.os.kill") as mock_kill,
+        ):
+            manager.attach_mock(mock_dump, "dump")
+            manager.attach_mock(mock_kill, "kill")
             wm._self_kill()
-        mock_abort.assert_called_once_with()
+
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGKILL)
+        assert mock_dump.called, "faulthandler thread dump must run before the kill"
+        # Ordering: the dump call is recorded before the kill call.
+        assert manager.mock_calls.index(call.dump(all_threads=True)) < manager.mock_calls.index(
+            call.kill(os.getpid(), signal.SIGKILL)
+        )
+
+    def test_self_kill_sigkill_fires_even_if_dump_raises(self):
+        """The SIGKILL is in a `finally` — it fires even when the dump blows up."""
+        with (
+            patch(
+                "worker.__main__.faulthandler.dump_traceback",
+                side_effect=RuntimeError("stderr closed"),
+            ),
+            patch("worker.__main__.os.kill") as mock_kill,
+        ):
+            # The dump exception propagates out AFTER the finally runs os.kill.
+            with pytest.raises(RuntimeError):
+                wm._self_kill()
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGKILL)
 
 
 # ---------------------------------------------------------------------------
