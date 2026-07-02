@@ -76,3 +76,37 @@ def test_last_evidence_at_uses_max_of_available_timestamps(sample_session):
 def test_last_evidence_at_none_when_every_field_absent(sample_session):
     p = _pipeline_for(sample_session)
     assert p.last_evidence_at is None
+
+
+# --- Per-role transport hedge dashboard fields (plan #1842) -----------------
+
+
+def test_transport_fields_default_safely_on_fresh_record(sample_session):
+    """A freshly-created session (no transport config yet) exposes the #1842
+    fields at their safe defaults so the dashboard serializer's getattr-based
+    reads never KeyError on pre-feature records."""
+    assert getattr(sample_session, "role_transports", None) is None
+    assert (getattr(sample_session, "metered_input_tokens", 0) or 0) == 0
+    assert (getattr(sample_session, "metered_output_tokens", 0) or 0) == 0
+    assert (getattr(sample_session, "metered_cache_read_tokens", 0) or 0) == 0
+    assert (getattr(sample_session, "metered_cost_usd", 0.0) or 0.0) == 0.0
+    # The combined cost view the dashboard computes = total + metered.
+    combined = float(sample_session.total_cost_usd or 0.0) + float(
+        getattr(sample_session, "metered_cost_usd", 0.0) or 0.0
+    )
+    assert combined == 0.0
+
+
+def test_transport_fields_roundtrip(sample_session):
+    """role_transports + metered_* persist and read back for dashboard display."""
+    sample_session.role_transports = {"pm": "pty", "dev": "headless"}
+    sample_session.metered_cost_usd = 1.5
+    sample_session.metered_input_tokens = 300
+    sample_session.save(
+        update_fields=["role_transports", "metered_cost_usd", "metered_input_tokens"]
+    )
+    rows = list(AgentSession.query.filter(session_id=sample_session.session_id))
+    reloaded = rows[0]
+    assert reloaded.role_transports == {"pm": "pty", "dev": "headless"}
+    assert reloaded.metered_cost_usd == 1.5
+    assert reloaded.metered_input_tokens == 300
