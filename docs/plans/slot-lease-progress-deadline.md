@@ -70,8 +70,10 @@ anchor in those files still holds verbatim (`session_state.py:76`,
 `session_health.py:1848/1994/2380/2418/2506-2517/2560-2613/3308-3314`). Only two
 anchors in adjacent files drifted (line numbers moved, claims unchanged) and were
 corrected inline: **`session_executor.py:702 → :734`** (the
-`_active_sessions[...] = SessionHandle(task=None)` registration — Blocker 1 root
-fix's `setdefault` target) and **`worker/__main__.py:649 → :663`** (the
+`_active_sessions[...] = SessionHandle(task=None)` registration; the inner-SDK-task
+population `handle.task = task._task` is at `session_executor.py:1891` — both are the
+#1039 contract Fix #3 honors UNCHANGED, per Blocker r4) and
+**`worker/__main__.py:649 → :663`** (the
 `_global_session_semaphore = asyncio.Semaphore(_max_sessions)` init). The
 `container.py` `os.killpg` scoped-teardown seam Fix #3 reuses is still present
 (`:1046/1052/1703/1706`). The five commits touching referenced files since the
@@ -95,7 +97,7 @@ so every file:line pointer was re-verified against `9d47033e` and drift correcte
 - **CancelledError handler at `agent_session_queue.py:1496-1514`** — re-verified: the `except asyncio.CancelledError` branch logs *"session interrupted, will be re-queued by startup recovery"*, sets `session_completed = True`, and **re-raises** to exit the worker loop, deliberately NOT finalizing (so startup recovery re-queues). **This is the handler Blocker 1 must disambiguate** — a progress-deadline cancel must NOT be misclassified as worker-shutdown-interrupt. `finalized_by_execute` flag is at `:1487` (set True only on non-exceptional return of `_execute_agent_session`); the outer `finally` at `:1583-1659` runs `_complete_agent_session` + `semaphore.release()` only when `not session_completed and not finalized_by_execute`.
 - `agent/agent_session_queue.py` release sites — **12 confirmed**: `:1349,1354,1360,1398,1403,1419,1424,1438,1443,1463,1473,1658`. **5 acquire sites confirmed**: `:1330,1392,1413,1430,1455`. **Every one uses the local `semaphore` variable** (assigned from `_global_session_semaphore` at `:1328`), NOT the module global directly — so a `_global_session_semaphore` grep does **not** catch them (Concern 1). The re-acquire sites (`:1392/1413/1430/1455`) live on the drain/standalone/bridge/fallback branches, each with its own release-on-None/exception guard.
 - `agent/session_health.py:2560-2613` — leaked-slot fingerprint — **re-verified and drift corrected: it is NESTED inside `for entry in pending_sessions:` (loop at `:2553`) and runs ONLY when `worker_alive` is True (`:2560`).** A literal in-place edit would run the reap N-times-per-tick and skip it entirely on a drained queue (Blocker 2). The enclosing function `_agent_session_health_check` begins at `:2330`; `now = time.time()` is at `:2380`; the SIGKILL-escalation drain runs `:2385-2409` before the RUNNING scan (`:2418`). The reap must be hoisted to a single top-of-tick pass here.
-- **Out-of-band `no_progress` decision path** — re-verified: the running-session scan classifies `reason_kind` at `:2526-2529` (`no_progress` when `worker_alive` but `not _has_progress`, `:2506-2517`; `worker_dead` when the worker future is dead, `:2482-2494`) and delegates to `_apply_recovery_transition` (`:2537`). The `DISABLE_PROGRESS_KILL` gate is at `:1994`; the Tier-2 reprieve (active-children / compaction) is at `:1962-1991` and is gated on `reason_kind == "no_progress"`. `_apply_recovery_transition` already cancels `handle.task` at `:2019-2024` when a registry handle is populated (`TASK_CANCEL_TIMEOUT=0.25` at `:243`) — **this is the seam Fix #3 wires `exec_task` into via `handle.task = exec_task`** (Blocker 1 root fix). **Second `no_progress` producer (round-2 correction):** `reason_kind="no_progress"` is ALSO emitted by the never-started-past-grace recovery at `:3308-3314` (`:3311`), NOT only by the running scan — so deleting the running-scan `elif` does not make the reprieve block dead; the reprieve decision is extracted into a shared `_should_kill_no_progress` that both `_apply_recovery_transition` (never-started path) and Fix #3 call (see OQ3 resolution). **The `worker_dead` branch cannot be owned by Fix #3** (an in-scope watcher is dead if the worker loop is dead); **the worker-alive running-scan `no_progress` branch is exactly what Fix #3 supersedes**.
+- **Out-of-band `no_progress` decision path** — re-verified: the running-session scan classifies `reason_kind` at `:2526-2529` (`no_progress` when `worker_alive` but `not _has_progress`, `:2506-2517`; `worker_dead` when the worker future is dead, `:2482-2494`) and delegates to `_apply_recovery_transition` (`:2537`). The `DISABLE_PROGRESS_KILL` gate is at `:1994`; the Tier-2 reprieve (active-children / compaction) is at `:1962-1991` and is gated on `reason_kind == "no_progress"`. `_apply_recovery_transition` already cancels `handle.task` at `:2019-2024` when a registry handle is populated (`TASK_CANCEL_TIMEOUT=0.25` at `:243`) — **`handle.task` is the INNER SDK task (`task._task`, set at `session_executor.py:1891`) per the #1039 contract; Fix #3 does NOT rewire it** (Blocker r4 — the withdrawn `handle.task = exec_task` wiring would have torn down the worker; BackgroundTask absorbs the inner-task cancel so no CancelledError reaches the worker loop). **Second `no_progress` producer (round-2 correction):** `reason_kind="no_progress"` is ALSO emitted by the never-started-past-grace recovery at `:3308-3314` (`:3311`), NOT only by the running scan — so deleting the running-scan `elif` does not make the reprieve block dead; the reprieve decision is extracted into a shared `_should_kill_no_progress` that both `_apply_recovery_transition` (never-started path) and Fix #3 call (see OQ3 resolution). **The `worker_dead` branch cannot be owned by Fix #3** (an in-scope watcher is dead if the worker loop is dead); **the worker-alive running-scan `no_progress` branch is exactly what Fix #3 supersedes**.
 - Tool-timeout loop — `_agent_session_tool_timeout_loop` at `:3450` (interval `TOOL_TIMEOUT_LOOP_INTERVAL=30s`), check at `_agent_session_tool_timeout_check` (`:3223`), finalizes via `_apply_recovery_transition(reason_kind="tool_timeout")` (`:3308`). Covers per-tool-tier wedges at finer cadence than Fix #3.
 - Progress signals — `models/agent_session.py:505` (`last_tool_use_at`), `:523` (`last_turn_at`), bumped in `agent/hooks/liveness_writers.py:76/158` (5s cooldown) — confirmed present and already consumed by the health loop + tool-timeout loop.
 - `_apply_recovery_transition` (`session_health.py:1848`) — the common out-of-band kill path — confirmed it transitions the DB row and **never touches the semaphore** (the leak).
@@ -211,11 +213,16 @@ token/unbound sub-system; see "unbound-permit simplification" in Technical Appro
 killer for worker-alive RUNNING sessions; see OQ3 resolution):
 1. **Entry point:** `agent_session_queue.py:1494`. New: run execution as an owned
    child task — `exec_task = asyncio.create_task(_execute_agent_session(session))` —
-   and a `deadline_cancelled = False` flag in loop scope. **Immediately wire
-   `handle.task = exec_task`** (Blocker 1 root fix) so the out-of-band killers that
-   cancel `handle.task` (`_apply_recovery_transition`, `session_health.py:2019-2024`)
-   cancel THIS awaitable instead of a stale one — this alone prevents the
-   `tool_timeout` / `worker_dead` cancel paths from orphaning the SDK subprocess/PTY.
+   and a `deadline_cancelled = False` flag in loop scope. **The registry handle is NOT
+   rewired** (Blocker r4): `handle.task` keeps pointing at the INNER SDK task
+   (`task._task`, set by `_execute_agent_session` at `session_executor.py:1891`), per
+   the #1039 SessionHandle contract (`session_state.py:19`). The out-of-band killers
+   (`_apply_recovery_transition`, `session_health.py:2019-2024`) cancel that inner task;
+   BackgroundTask absorbs the cancellation (completes `task._task` normally) so the SDK
+   subprocess is torn down and `_execute_agent_session`'s `await task._task`
+   (`:1942`) returns without propagating CancelledError into the worker loop — the worker
+   survives. Fix #3's own deadline cancel targets `exec_task` directly (it holds the
+   local reference) and fd-PTY-kills the SDK subprocess itself.
 2. **Deadline watch:** a small on-loop watcher computes
    `last_progress = max(last_tool_use_at, last_turn_at, acquired_at)` for the session
    and, if `now - last_progress > SESSION_PROGRESS_DEADLINE_S` while `exec_task` is
@@ -232,19 +239,32 @@ killer for worker-alive RUNNING sessions; see OQ3 resolution):
    `transition_status(session, "cancelled")` so the row is deterministically terminal;
    (c'') set `finalized_by_execute=True` so the outer `finally` is skipped — THEN
    `exec_task.cancel()` and `await exec_task`.
-4. **CancelledError disambiguation (Blocker 1, round 1):** the `except
-   asyncio.CancelledError` branch at `:1496` inspects `deadline_cancelled`. If `True` →
-   the session is already finalized + reclaimed; **swallow** the `CancelledError` (no
-   "will be re-queued" log, no re-raise) so it never reaches the worker-shutdown
-   classifier and the session is NOT re-queued into an infinite loop. If `False` → the
-   worker-shutdown path runs, **now hardened**: `exec_task.cancel()` + bounded
-   `await asyncio.wait_for(exec_task, TASK_CANCEL_TIMEOUT)` to tear down the orphaned
-   subprocess/PTY (Blocker 1, round 2 — `asyncio.wait` does not cancel its watched task
-   when the waiter is cancelled), then log "interrupted, will be re-queued", set
-   `session_completed=True`, re-raise. The deadline path sets `finalized_by_execute=True`
-   (step c''), so the outer `finally` — which runs only when `not session_completed and
-   not finalized_by_execute` — is skipped entirely; it never calls
-   `_complete_agent_session` on the killed row (Concern 1).
+4. **CancelledError disambiguation — THREE branches (Blocker 1 round 1 + Blocker r4):**
+   the `except asyncio.CancelledError` branch at `:1496` re-classifies on
+   `deadline_cancelled` **and a fresh status re-read**:
+   - **Branch 1 — `deadline_cancelled is True`:** the session is already finalized +
+     reclaimed by Fix #3; **swallow** (no "will be re-queued" log, no re-raise) so it
+     never reaches the worker-shutdown classifier and the session is NOT re-queued into
+     an infinite loop.
+   - **Branch 2 (NEW — Blocker r4) — `deadline_cancelled is False` AND a fresh re-read
+     (`AgentSession.query.get(...)`) shows the row is TERMINAL:** an out-of-band killer
+     already finalized the row and (edge case) its cancel bubbled here instead of being
+     absorbed by BackgroundTask. A CancelledError on an already-terminal row is a cleanup
+     artifact, NOT a worker shutdown — **swallow** (tear down `exec_task` defensively, set
+     `finalized_by_execute=True` to skip the outer finally, do NOT re-raise) so a healthy
+     worker is never torn down while cleaning up one already-dead session. This is the
+     defensive backstop for the worker-teardown bug the dropped `handle.task = exec_task`
+     wiring would have caused.
+   - **Branch 3 — `deadline_cancelled is False` AND the fresh row is still non-terminal:**
+     genuine worker shutdown/restart. **Hardened**: `exec_task.cancel()` + bounded
+     `await asyncio.wait_for(exec_task, TASK_CANCEL_TIMEOUT)` to tear down the orphaned
+     subprocess/PTY (Blocker 1, round 2 — `asyncio.wait` does not cancel its watched task
+     when the waiter is cancelled), then log "interrupted, will be re-queued", set
+     `session_completed=True`, re-raise.
+   The deadline path (Branch 1) sets `finalized_by_execute=True` (step c''), so the outer
+   `finally` — which runs only when `not session_completed and not finalized_by_execute`
+   — is skipped entirely; it never calls `_complete_agent_session` on the killed row
+   (Concern 1). Branch 2 sets it for the same reason.
 5. **Output:** the parked session is finalized, its slot freed, its PTY dead — all
    from the scope that owned the task, and the deadline-cancel is never confused with
    a worker shutdown.
@@ -351,8 +371,9 @@ Run via `python scripts/check_prerequisites.py docs/plans/slot-lease-progress-de
 ### Flow
 
 Worker loop → `await registry.acquire()` → pop session (None/exception →
-`registry.release_unbound()`) → `registry.bind(session_id)` → wire
-`handle.task = exec_task` → run `exec_task` under the progress-deadline watcher →
+`registry.release_unbound()`) → `registry.bind(session_id)` → run `exec_task =
+create_task(_execute_agent_session(...))` under the progress-deadline watcher
+(`handle.task` stays the inner SDK task per #1039 — NOT rewired) →
 **normal completion** → `registry.release(session_id)` /
 **no progress past deadline** → fd-PTY-kill → `registry.reclaim(session_id)` →
 finalize (`_apply_recovery_transition`) → set `deadline_cancelled` → cancel
@@ -451,24 +472,28 @@ calls `release_unbound()`).
   ```
   deadline_cancelled = False
   exec_task = asyncio.create_task(_execute_agent_session(session))
-  # ROOT FIX (Blocker 1) — wire the owned task into the registry handle so the
-  # out-of-band killers that cancel `handle.task` (`_apply_recovery_transition`,
-  # session_health.py:2019-2024) actually cancel THIS awaitable, not a stale one.
-  # Without this, tool_timeout / worker_dead cancels flip the DB row but orphan the
-  # SDK subprocess/PTY. One assignment covers both the tool_timeout-cancel path AND
-  # the worker-shutdown-cancel path.
-  #
-  # CRITICAL (r3 CONCERN — Risk & Robustness): the handle MUST be pre-registered
-  # HERE, in the worker loop. `create_task` only SCHEDULES the coroutine, so
-  # `_execute_agent_session`'s own `_active_sessions[sid] = SessionHandle(task=None)`
-  # (session_executor.py:734) has NOT run yet at this point — a bare
-  # `_active_sessions.get(sid)` would return None and the wiring would silently
-  # no-op, making this entire root fix dead code. Pre-register with the task set,
-  # and change session_executor.py:734 to `setdefault(...)` so the executor mutates
-  # (never clobbers) the pre-registered handle.
-  handle = _active_sessions.setdefault(
-      session.agent_session_id, SessionHandle(task=exec_task))
-  handle.task = exec_task  # idempotent whether pre-registered here or already present
+  # #1039 CONTRACT HONORED (Blocker r4) — do NOT rewire the registry handle here.
+  # `_execute_agent_session` keeps its own `_active_sessions[sid] = SessionHandle(
+  # task=None)` (session_executor.py:734) and later sets `handle.task = task._task`
+  # (the INNER SDK task) at session_executor.py:1891 once BackgroundTask.run() has
+  # created it. The SessionHandle docstring (session_state.py:19) mandates exactly
+  # this target: BackgroundTask ABSORBS cancellation (its coroutine catches
+  # CancelledError and completes `_task` normally), so cancelling `task._task` tears
+  # down the SDK subprocess WITHOUT propagating CancelledError into this loop —
+  # whereas cancelling a worker-loop-region task (`exec_task`) is NOT absorbed by
+  # `_execute_agent_session` (its `await task._task` at :1942 is guarded by
+  # `except Exception`, which never catches CancelledError), so it propagates out to
+  # :1496 and tears down the whole worker. Wiring `handle.task = exec_task` is
+  # therefore BOTH harmful (a setup-window out-of-band cancel tears down a healthy
+  # worker) AND silently reversed by :1891 (which resets it to task._task) — it is
+  # dropped entirely. Consequence: the out-of-band killers (`_apply_recovery_transition`,
+  # session_health.py:2019-2024) keep cancelling `handle.task = task._task`; the SDK
+  # subprocess dies (plus the #1537 SIGKILL escalation at :2036 confirms exit) and
+  # `_execute_agent_session`'s `await task._task` (session_executor.py:1942) returns
+  # normally — no CancelledError reaches this loop, the worker survives. Fix #3's OWN
+  # deadline cancel targets `exec_task` directly (local var) and kills the SDK
+  # subprocess itself via the fd-PTY-kill below; it never touches the handle.
+  handle = _active_sessions.get(session.agent_session_id)  # pid read for the reprieve gate
   try:
       while not exec_task.done():
           done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
@@ -480,9 +505,11 @@ calls `release_unbound()`).
                   break  # kill-switch: let it run
               if not _should_kill_no_progress(session, handle):  # Tier-2 reprieve gate (moved here — OQ3)
                   continue  # active children / compaction — reprieve, keep watching
-              # NOTE: pass `handle` (in scope from the `handle.task = exec_task` wiring
-              # above) so `_tier2_reprieve_signal(handle, entry)` sees active children;
-              # omitting it would falsely cancel a `waiting_for_children` PM session.
+              # NOTE: pass `handle` (the #1039 registry handle, read above) so
+              # `_tier2_reprieve_signal(handle, entry)` can read the pid for the
+              # active-children gate; without it a `waiting_for_children` PM session
+              # would be falsely cancelled. A stale None handle just means "no reprieve
+              # signal", which the exceeded deadline already justifies killing.
               deadline_cancelled = True
               # FINALIZE FIRST — at the watcher scope, before cancel reaches :1496:
               _fd_pty_kill(session)                      # scoped os.killpg (#1816)
@@ -516,15 +543,32 @@ calls `release_unbound()`).
       finalized_by_execute = True  # only on non-exceptional return
   except asyncio.CancelledError:
       if deadline_cancelled:
-          # Already finalized+reclaimed above — SWALLOW. Do NOT log "will be
-          # re-queued", do NOT re-raise. Prevents the requeue-loop (Blocker 1).
+          # BRANCH 1 — Fix #3 deadline kill: already finalized+reclaimed above.
+          # SWALLOW. Do NOT log "will be re-queued", do NOT re-raise. Prevents the
+          # requeue-loop (Blocker 1, round 1).
           pass
+      elif (fresh := AgentSession.query.get(redis_key=session.db_key.redis_key)) \
+              is not None and fresh.status in TERMINAL_STATUSES:
+          # BRANCH 2 (Blocker r4) — an out-of-band killer already flipped the row
+          # terminal and (edge case) its cancel bubbled to this loop instead of being
+          # absorbed by BackgroundTask. A CancelledError arriving on an ALREADY-terminal
+          # row is a cleanup artifact, NOT a worker shutdown — SWALLOW so a healthy
+          # worker is never torn down while cleaning up one already-dead session (the
+          # exact bug the dropped `handle.task = exec_task` wiring would have caused).
+          # Tear down exec_task defensively (usually already done); do NOT re-raise.
+          if not exec_task.done():
+              exec_task.cancel()
+              try:
+                  await asyncio.wait_for(exec_task, timeout=TASK_CANCEL_TIMEOUT)
+              except (TimeoutError, asyncio.CancelledError):
+                  pass
+          finalized_by_execute = True  # row already terminal — SKIP the outer finally
       else:
-          # Worker shutdown/restart cancelled the *waiter*. asyncio.wait does NOT
-          # cancel exec_task when the waiter is cancelled, so the SDK subprocess/PTY
-          # is still running (orphan). Tear it down BEFORE re-raising, or startup
-          # recovery re-queues a still-live `running` row → double execution
-          # (Blocker 1, round 2).
+          # BRANCH 3 — genuine worker shutdown/restart: the worker-loop task was
+          # cancelled and the row is still non-terminal. asyncio.wait does NOT cancel
+          # exec_task when the waiter is cancelled, so the SDK subprocess/PTY is still
+          # running (orphan). Tear it down BEFORE re-raising, or startup recovery
+          # re-queues a still-live `running` row → double execution (Blocker 1, round 2).
           if not exec_task.done():
               exec_task.cancel()
               try:
@@ -547,28 +591,47 @@ calls `release_unbound()`).
   `True` immediately before `exec_task.cancel()`. The existing `except asyncio.CancelledError`
   at `:1496` (which today unconditionally logs "session interrupted, will be
   re-queued by startup recovery", sets `session_completed=True`, and re-raises)
-  is split on the flag: `deadline_cancelled` True → the session is already terminal +
-  reclaimed, so swallow (no requeue log, no re-raise, no re-raise into the
-  worker-loop handler at `:1496-1514`); False → the existing worker-shutdown path,
-  **now hardened** (see below).
-- **Blocker 1 (round 2) — ROOT fix: wire `handle.task = exec_task`.** The primary,
-  most-complete fix for the orphan-subprocess regression is a single assignment. The
-  out-of-band killers cancel `handle.task` (`_apply_recovery_transition` at
-  `session_health.py:2019-2024`), but after Fix #3 the registry handle still points at
-  the OLD awaitable, not the new `exec_task = asyncio.create_task(...)`. So the SDK
-  subprocess/PTY is orphaned on **both** the worker-shutdown-cancel path **and** the
-  surviving `tool_timeout` / `worker_dead` cancel path. **The wiring must PRE-REGISTER
-  the handle in the worker loop** — `_active_sessions.setdefault(sid, SessionHandle(
-  task=exec_task))` immediately after `create_task(...)`, and change the executor's own
-  registration at `session_executor.py:734` from `_active_sessions[sid] =
-  SessionHandle(task=None)` to `setdefault(...)`. This is load-bearing (r3 CONCERN):
-  `create_task` only schedules the coroutine, so a bare `_active_sessions.get(sid)`
-  right after it returns `None` (the executor body has not run) and the wiring would
-  silently no-op — making this root fix dead code. Pre-registering makes every existing
-  `handle.task.cancel()` cancel the live awaitable, covering both cancel paths and the
-  `tool_timeout`-path orphan the shutdown-branch cancel alone would miss. `handle.task`
-  and the `:702` registration semantics re-verified at `session_health.py:2019-2024` /
-  `session_executor.py:734`.
+  is split three ways (see the code sketch): Branch 1 (`deadline_cancelled` True) →
+  already terminal + reclaimed, so swallow; Branch 2 (fresh row terminal) → swallow;
+  Branch 3 (fresh row still `running`) → the hardened worker-shutdown path.
+- **Blocker r4 — ROOT fix: HONOR the #1039 contract; do NOT wire `handle.task = exec_task`.**
+  The prior revision's "wire `handle.task = exec_task`" root fix is **withdrawn** — it was
+  both harmful and self-defeating, and it reversed a documented decision without engaging
+  it. Two independent failures:
+  1. **It tears down a healthy worker.** `handle.task` is the target the out-of-band
+     killers cancel (`_apply_recovery_transition` at `session_health.py:2019-2024`).
+     Pointing it at `exec_task` means a `tool_timeout` / `worker_dead` cancel cancels the
+     worker-loop-region awaitable. Because `_execute_agent_session` does **not** absorb
+     CancelledError (its `await task._task` at `session_executor.py:1942` is guarded only
+     by `except Exception`, which never catches `CancelledError`), the cancel propagates
+     out of `exec_task` → `await exec_task` re-raises at `:1496` with
+     `deadline_cancelled=False` → misclassified as worker-shutdown → re-raised to the
+     outer `except asyncio.CancelledError` at `:1674`, whose `finally` at `:1676` pops the
+     worker from `_active_workers`. One wedged-session cleanup tears down the **entire
+     healthy worker** for that worker_key.
+  2. **It is silently reversed.** `_execute_agent_session` sets
+     `_handle_for_task_ref.task = task._task` at `session_executor.py:1891` once
+     `BackgroundTask.run()` creates the inner SDK task. So even pre-registered, `handle.task`
+     is reset to `task._task` after setup — the worker-loop assignment only "holds" during
+     the setup window (exactly the window where failure 1 bites), and the success grep
+     `handle.task = exec_task > 0` passes while runtime behavior is the opposite.
+
+  The #1039 SessionHandle contract (`session_state.py:19` docstring) chose `task._task`
+  as the cancel target **precisely because** cancelling a worker-loop-region task tears
+  down the worker, and because `BackgroundTask` ABSORBS cancellation of `task._task`
+  (its coroutine catches `CancelledError` and completes `_task` normally). So under
+  #1039 the out-of-band killers already tear down the SDK subprocess cleanly (the inner
+  task cancel + the #1537 SIGKILL escalation at `session_health.py:2036` confirms exit)
+  **without** propagating CancelledError to the worker loop. The claimed
+  `tool_timeout`/`worker_dead` subprocess-orphan the wiring was meant to fix **does not
+  exist** under #1039 — it was a misdiagnosis. **Resolution:** drop the
+  `handle.task = exec_task` assignment and the `session_executor.py:734 → setdefault`
+  change entirely; `session_executor.py:734` and `:1891` are UNCHANGED. Fix #3's own
+  deadline cancel targets `exec_task` (owned local) + the fd-PTY-kill for the subprocess.
+  The defensive Branch 2 (fresh-status-terminal → swallow) is the backstop for the rare
+  case any out-of-band CancelledError still reaches `:1496`. Re-verified at
+  `session_state.py:19`, `session_executor.py:734`/`:1891`/`:1942`,
+  `session_health.py:2019-2024`/`:2036`.
 - **Blocker 1 (round 2) — belt-and-suspenders: shutdown-branch cancel.** Converting the
   directly-`await`ed coroutine into a detached `exec_task` watched by `asyncio.wait`
   introduced a regression: `asyncio.wait` does **not** cancel the task it watches when
@@ -577,7 +640,7 @@ calls `release_unbound()`).
   would keep running, its SDK subprocess/PTY survive the worker exit, and startup
   recovery re-queue the still-`running` row → **double execution**. The inline `await`
   did not have this problem (worker cancel propagated straight into the coroutine).
-  Fix: in the `else` (shutdown) branch, before re-raising, `exec_task.cancel()` and
+  Fix: in Branch 3 (shutdown), before re-raising, `exec_task.cancel()` and
   bounded-`await` it (`asyncio.wait_for(exec_task, timeout=TASK_CANCEL_TIMEOUT)`,
   suppressing `TimeoutError`/`CancelledError`) so the subprocess/PTY is confirmed torn
   down first. `session_completed=True` and the re-raise are preserved so startup
@@ -647,8 +710,10 @@ calls `release_unbound()`).
   verification greps (NIT, round 2 — no baseline-relative check):** the deleted
   running-scan classification is gone → `grep -c '_reason_kind = "no_progress"'
   agent/session_health.py == 0`; the reprieve decision lives in exactly one place →
-  `grep -c "_tier2_reprieve_signal" agent/session_health.py == 1` (the sole call site is
-  inside `_should_kill_no_progress`). **Residual ownership (no overlap):**
+  `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py == 1` (the sole CALL
+  site is inside `_should_kill_no_progress`; the bare-name `grep -c
+  "_tier2_reprieve_signal"` counts 5 — def + docstrings + call — so it can never be `1`,
+  hence the `(handle`-qualified call-site grep). **Residual ownership (no overlap):**
 
   | Killer | Owns | Cadence | Why it can't be Fix #3 |
   |--------|------|---------|------------------------|
@@ -714,7 +779,7 @@ calls `release_unbound()`).
 New tests (greenfield):
 - `tests/unit/test_slot_lease_registry.py` — acquire/bind/release/reclaim happy path; double-reclaim idempotency (no over-release); `acquire()`+`release_unbound()` leaves no lease and restores `permits_free`; terminal-owner reclaim; `permits_free` accounting. (No deadline-expired reclaim test — the wall-clock arm was removed, Blocker 2.)
 - `tests/integration/test_slot_lease_reclaim.py` — end-to-end: orphan a slot (bind a lease to a session, transition it terminal without releasing), run the reap pass **on a drained queue with no live worker** (hoisted top-of-tick pass), assert `permits_free` recovers and a parked worker proceeds — **acceptance criterion #1**. ALSO assert a still-`running`, progressing owner whose lease is old is NOT reclaimed (Blocker 2 regression guard: no over-admission of a healthy long session). ALSO (`disabled_still_logs` case — Operator CONCERN): with `SLOT_LEASE_REAP_DISABLED=1`, the reap pass still logs the leaked-slot WARNING (detection preserved) but reclaims NO permit and does NOT increment `slot_reclaims` — the kill-switch is detect-only, never no-visibility.
-- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **`handle.task` is wired to the owned `exec_task`** so a `tool_timeout`/`worker_dead` cancel tears down the subprocess (Blocker 1 root fix); a **worker-shutdown cancel** (`deadline_cancelled=False`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**.
+- `tests/integration/test_progress_deadline_cancel.py` — a session with no progress past `SESSION_PROGRESS_DEADLINE_S` is cancelled, its slot reclaimed, its PTY killed (mock/assert the `killpg` seam), and **NOT re-queued** (`deadline_cancelled` swallow path — Blocker 1); a session making steady progress is NOT cancelled; a `waiting_for_children` session with an active-children reprieve is NOT cancelled (OQ3 reprieve preservation); **an out-of-band `tool_timeout`/`worker_dead` cancel of the inner SDK task (`handle.task = task._task`, #1039) tears down the subprocess AND does NOT tear down the worker** — the worker survives and picks up the next session (Blocker r4; assert the worker loop is still alive and `_active_workers` still holds it after the kill); the Branch-2 backstop — an already-terminal row receiving a bubbled CancelledError is swallowed, not re-queued; a **worker-shutdown cancel** (Branch 3, `deadline_cancelled=False`, row still `running`) cancels + bounded-awaits `exec_task` before re-raise so no subprocess is orphaned (Blocker 1 round 2); a deadline kill where `_apply_recovery_transition` **declines** (returns False) still lands the row terminal via forced `transition_status(..., "cancelled")` and skips the outer finally (Concern 1) — **acceptance criterion #2**.
 
 ## Rabbit Holes
 
@@ -816,27 +881,34 @@ deadline when the task is still pending. `exec_task.cancel()` on an already-done
 task is a no-op, and `deadline_cancelled` is only set on the deadline branch, so a
 natural completion never enters the swallow path.
 
-### Race 3: Deadline-cancel vs worker-shutdown cancel (CancelledError source)
+### Race 3: Deadline-cancel vs worker-shutdown cancel vs out-of-band cancel (CancelledError source)
 **Location:** the `except asyncio.CancelledError` handler at `:1496-1514`.
-**Trigger:** A `CancelledError` reaches the handler — either from the Fix #3
-deadline branch (`exec_task.cancel()`) or from the worker loop itself being
-cancelled (shutdown/restart), which propagates into the same handler.
-**Data prerequisite:** the loop-scope `deadline_cancelled` flag.
+**Trigger:** A `CancelledError` reaches the handler from one of three sources: the Fix #3
+deadline branch (`exec_task.cancel()`); the worker loop itself being cancelled
+(shutdown/restart); or — the edge case — an out-of-band killer's cancel of the inner SDK
+task that (unexpectedly) bubbles up instead of being absorbed by BackgroundTask.
+**Data prerequisite:** the loop-scope `deadline_cancelled` flag AND a fresh status re-read.
 **State prerequisite:** `deadline_cancelled` is set `True` immediately before
 `exec_task.cancel()`, and Fix #3 finalizes (reclaim + terminal transition) BEFORE
-`await exec_task`, so the row is terminal before any `CancelledError` propagates.
-**Mitigation:** the handler branches on `deadline_cancelled`: `True` → swallow (row
-already terminal + reclaimed; no requeue log, no re-raise) so the deadline-kill never
-reaches the worker-shutdown classifier and can never loop forever via requeue; `False`
+`await exec_task`, so the row is terminal before any deadline `CancelledError` propagates.
+An out-of-band killer likewise flips the row terminal before/around its cancel.
+**Mitigation:** the handler classifies THREE ways (see the code sketch and Data Flow step 4):
+Branch 1 (`deadline_cancelled` True) → swallow (row already terminal + reclaimed; no
+requeue log, no re-raise), so the deadline-kill never reaches the worker-shutdown
+classifier and can never loop forever via requeue; Branch 2 (`deadline_cancelled` False
+AND fresh re-read terminal) → swallow (an out-of-band killer already finalized; a
+CancelledError on a terminal row is a cleanup artifact, NOT a shutdown — never tear down a
+healthy worker for it); Branch 3 (`deadline_cancelled` False AND fresh row still `running`)
 → the **hardened** worker-shutdown path: `exec_task.cancel()` + bounded
 `await asyncio.wait_for(exec_task, TASK_CANCEL_TIMEOUT)` to tear down the orphaned
 subprocess/PTY (Blocker 1 round 2 — `asyncio.wait` does not cancel its watched task when
 the waiter is cancelled), THEN log, `session_completed=True`, re-raise so startup
-recovery re-queues — but only after teardown. The `handle.task = exec_task` wiring (root
-fix) additionally means an out-of-band `tool_timeout`/`worker_dead` cancel targets the
-live awaitable, so neither cancel source leaves a subprocess orphaned. Test all three
+recovery re-queues — but only after teardown. The #1039 contract keeps `handle.task`
+pointing at the inner SDK task, so out-of-band `tool_timeout`/`worker_dead` cancels are
+absorbed by BackgroundTask (SDK subprocess torn down, no CancelledError to the worker
+loop) — the Branch 2 backstop covers the rare case one still bubbles up. Test all three
 sources (deadline, worker-shutdown, out-of-band tool_timeout) hit the correct branch and
-leave no orphan.
+leave no orphan and no healthy-worker teardown.
 
 > **Note — old "acquire/bind interleaving" race removed.** Dissolved by the
 > Concern-2 simplification (see Risks note); the reaper never observes an unbound
@@ -882,8 +954,8 @@ was a *silent* wedge that required a human to notice and restart, and the new
 `slot_reclaims` Redis counter is otherwise write-only. Surface it so operators can see
 recovery fired and catch a reclaim spike (which would signal an underlying leak the
 recovery is merely papering over): the reap emits
-`{project_key}:session-health:slot_reclaims` every tick; expose that count (and the
-last reclaim's owner/reason, plus the zero-reclaim heartbeat timestamp) in the existing
+`{project_key}:session-health:slot_reclaims` every tick; expose that count as a
+`slot_reclaims` field in the existing
 `localhost:8500/dashboard.json` payload — read it in `_get_worker_health()` (`ui/app.py`,
 consumed by the `/dashboard.json` route at `ui/app.py:507`) next to the
 running-count/`permits_free` fields, adding a `slot_reclaims` field to the `worker`
@@ -898,8 +970,9 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   semaphore leak class, the `SlotLeaseRegistry` (lease recorded at `bind()` only;
   owner+acquired_at, no reclaim deadline), the hoisted top-of-tick reap pass
   (fingerprint→reclaim, **terminal-owner only**), the prompt reclaim wired into
-  `_apply_recovery_transition`, the progress-deadline cancel scope + `deadline_cancelled`
-  disambiguation + `handle.task = exec_task` wiring + fd-PTY-kill, the single-
+  `_apply_recovery_transition`, the progress-deadline cancel scope + three-branch
+  `deadline_cancelled`/fresh-status `CancelledError` disambiguation + fd-PTY-kill + the
+  #1039 contract (why `handle.task` stays the inner SDK task, NOT `exec_task`), the single-
   authoritative-killer division (Fix #3 for worker-alive; `worker_dead` and
   `tool_timeout` for the disjoint residuals) with the shared `_should_kill_no_progress`
   reprieve gate (also called by `_apply_recovery_transition` for the never-started
@@ -940,12 +1013,18 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
 - [ ] A progress-deadline cancel is finalized in-scope and **NOT re-queued**
   (`deadline_cancelled` swallow path) — the `CancelledError` handler no longer
   misclassifies it as a worker-shutdown interrupt (Blocker 1, round 1).
-- [ ] **No orphaned subprocess on cancel (Blocker 1, round 2):** `handle.task =
-  exec_task` is wired immediately after `create_task`, so `tool_timeout` / `worker_dead`
-  cancels tear down the live subprocess; and on a worker-shutdown cancel the
-  `deadline_cancelled=False` branch cancels + bounded-awaits `exec_task` before
-  re-raising, so no session's SDK subprocess/PTY survives the worker exit to be
-  double-executed by startup recovery.
+- [ ] **No healthy-worker teardown on out-of-band cancel (Blocker r4):** the
+  `handle.task = exec_task` wiring is NOT present (`grep -c "handle.task = exec_task"
+  agent/agent_session_queue.py == 0`); `handle.task` stays the inner SDK task per #1039,
+  so a `tool_timeout` / `worker_dead` cancel is absorbed by BackgroundTask and the worker
+  survives. The `:1496` handler has a Branch-2 fresh-status-terminal swallow so any
+  bubbled out-of-band CancelledError never re-raises into the outer handler that pops the
+  worker. Test asserts the worker loop stays alive (`_active_workers` still holds it)
+  after an out-of-band kill of a running session.
+- [ ] **No orphaned subprocess on worker-shutdown cancel (Blocker 1, round 2):** on a
+  worker-shutdown cancel the Branch-3 (`deadline_cancelled=False`, row still `running`)
+  path cancels + bounded-awaits `exec_task` before re-raising, so no session's SDK
+  subprocess/PTY survives the worker exit to be double-executed by startup recovery.
 - [ ] **No wall-clock reclaim arm (Blocker 2):** the reap reclaims IFF the owner is
   terminal — `grep -c "lease.deadline" agent/session_health.py == 0` and
   `grep -rc "SLOT_LEASE_TTL_S" agent/ worker/ == 0`; a healthy long-progressing session
@@ -958,8 +1037,9 @@ registry is the deferred Fix #5 in #1821 — out of scope here.)
   running-scan worker-alive `no_progress` `elif` is deleted (`grep -c
   '_reason_kind = "no_progress"' == 0`); `worker_dead` and `tool_timeout` remain for the
   disjoint cases Fix #3 cannot reach; the Tier-2 reprieve decision lives in exactly one
-  place — the shared `_should_kill_no_progress` gate (`grep -c "_tier2_reprieve_signal"
-  == 1`), called by BOTH Fix #3 and `_apply_recovery_transition` (never-started path).
+  place — the shared `_should_kill_no_progress` gate (`grep -c "_tier2_reprieve_signal(handle"
+  == 1` — the call-site grep; the bare name counts 5), called by BOTH Fix #3 and
+  `_apply_recovery_transition` (never-started path).
 - [ ] `_apply_recovery_transition` reclaims the slot on out-of-band kill (prompt
   recovery, not 300s-tick-only).
 - [ ] The reap pass runs once per health tick, independent of `worker_alive` and of
@@ -1067,13 +1147,19 @@ lead NEVER builds directly.
 - At `agent_session_queue.py:1494`, run `_execute_agent_session` as an owned task
   under a progress-deadline watcher (`_session_progress_ts` = max of
   `last_tool_use_at`/`last_turn_at`/`acquired_at`) with a `deadline_cancelled` flag.
-- **Blocker 1 root fix:** immediately after `exec_task = asyncio.create_task(...)`,
-  PRE-REGISTER the handle in the worker loop — `handle = _active_sessions.setdefault(sid,
-  SessionHandle(task=exec_task)); handle.task = exec_task` — and change the executor's own
-  registration at `session_executor.py:734` to `setdefault(...)`. A bare `.get(sid)` here
-  no-ops (the coroutine body hasn't run yet), so pre-registration is required (r3 CONCERN).
-  This makes the out-of-band killers that cancel `handle.task` cancel the live awaitable —
-  fixes the `tool_timeout` / `worker_dead` subprocess-orphan too, not just the shutdown path.
+- **Blocker r4 — HONOR #1039; do NOT rewire the handle.** Do NOT add
+  `handle.task = exec_task` and do NOT change `session_executor.py:734`/`:1891`. Wiring
+  `handle.task = exec_task` (the withdrawn prior root fix) would (1) tear down the whole
+  worker when an out-of-band killer cancels it during the setup window — `exec_task`'s
+  cancel is NOT absorbed by `_execute_agent_session` (`await task._task` at `:1942` is
+  guarded by `except Exception`, which never catches CancelledError), so it re-raises at
+  `:1496` → outer handler at `:1674` pops the worker — and (2) be silently reversed by
+  `:1891` (`handle.task = task._task`). Leave `handle.task` pointing at the inner SDK task
+  per the #1039 contract; BackgroundTask ABSORBS its cancellation, so out-of-band kills
+  tear down the SDK subprocess (plus the #1537 SIGKILL escalation at `:2036`) WITHOUT
+  reaching the worker loop. Fix #3's own cancel targets the local `exec_task` + fd-PTY-kill.
+  Verify `grep -c "handle.task = exec_task" agent/agent_session_queue.py == 0` and that
+  `session_executor.py:734`/`:1891` are untouched.
 - On expiry (reprieve gate `_should_kill_no_progress` says kill): finalize FIRST —
   fd-PTY-kill via the scoped `container.py` `killpg` path → reclaim →
   `did_finalize = await _apply_recovery_transition(reason "progress_deadline",
@@ -1085,11 +1171,16 @@ lead NEVER builds directly.
   `_apply_recovery_transition` also run `handle.task.cancel()` + bounded
   `wait_for(handle.task)` internally — a redundant double-cancel that blocks up to
   `TASK_CANCEL_TIMEOUT`. `None` keeps a single unambiguous cancel path.
-- Blocker 1: split the `except asyncio.CancelledError` handler at `:1496` on
-  `deadline_cancelled` — True → swallow (no requeue log/re-raise); False → hardened
-  worker-shutdown path (`exec_task.cancel()` + bounded `wait_for(..., TASK_CANCEL_TIMEOUT)`
-  to tear down the orphaned subprocess, then log/`session_completed=True`/re-raise). Add
-  a `finally` that cancels a still-pending `exec_task` on any non-Cancelled exit.
+- Blocker 1 + r4: split the `except asyncio.CancelledError` handler at `:1496` THREE ways
+  — Branch 1 (`deadline_cancelled` True) → swallow (no requeue log/re-raise), set
+  `finalized_by_execute=True`; Branch 2 (`deadline_cancelled` False AND a fresh
+  `AgentSession.query.get(...)` shows the row TERMINAL) → swallow (out-of-band killer
+  already finalized; tear down `exec_task` defensively, set `finalized_by_execute=True`,
+  do NOT re-raise) so a healthy worker is never torn down; Branch 3 (False AND fresh row
+  still `running`) → hardened worker-shutdown path (`exec_task.cancel()` + bounded
+  `wait_for(..., TASK_CANCEL_TIMEOUT)` to tear down the orphaned subprocess, then
+  log/`session_completed=True`/re-raise). Add a `finally` that cancels a still-pending
+  `exec_task` on any non-Cancelled exit.
 - OQ3: extract the Tier-2 reprieve + telemetry into shared
   `_should_kill_no_progress(session, handle)`; DELETE the running-scan worker-alive
   `no_progress` `elif` (`session_health.py:2506-2517`). Note `reason_kind="no_progress"`
@@ -1097,7 +1188,7 @@ lead NEVER builds directly.
   `_apply_recovery_transition` must CALL `_should_kill_no_progress` (not keep an inline
   copy) — reprieve logic in exactly one place. Keep `worker_dead` and `tool_timeout`.
   Deterministic greps: `grep -c '_reason_kind = "no_progress"' == 0`;
-  `grep -c "_tier2_reprieve_signal" == 1`.
+  `grep -c "_tier2_reprieve_signal(handle" == 1` (call-site grep — the bare name counts 5).
 - **Telemetry cadence (Simplifier NIT):** `_should_kill_no_progress` is a pure
   kill/no-kill predicate; its `tier1_flagged_total` / `tier2_reprieve_total:{reprieve}`
   counter increments and `reprieve_count` save fire **exactly once per session** on the
@@ -1155,12 +1246,13 @@ lead NEVER builds directly.
 | Deadline-cancel disambiguation present (Blocker 1) | `grep -c "deadline_cancelled" agent/agent_session_queue.py` | output > 0 |
 | Progress-deadline cancel present | `grep -c "SESSION_PROGRESS_DEADLINE_S" agent/agent_session_queue.py` | output > 0 |
 | Single-killer: running-scan no_progress classification deleted (OQ3, deterministic) | `grep -c '_reason_kind = "no_progress"' agent/session_health.py` | == 0 |
-| Reprieve decision lives in exactly one place (OQ3, no dead/parallel copy) | `grep -c "_tier2_reprieve_signal" agent/session_health.py` | == 1 (sole call in `_should_kill_no_progress`) |
+| Reprieve decision lives in exactly one place (OQ3, no dead/parallel copy) | `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py` | == 1 (sole CALL site, inside `_should_kill_no_progress`; the bare-name count is 5) |
 | Shared reprieve gate extracted (OQ3) | `grep -c "_should_kill_no_progress" agent/session_health.py` | output > 0 |
 | No wall-clock reclaim arm in the reap (Blocker 2) | `grep -c "lease.deadline" agent/session_health.py` | == 0 |
 | `SLOT_LEASE_TTL_S` fully removed (Blocker 2) | `grep -rc "SLOT_LEASE_TTL_S" agent/ worker/` | match count == 0 |
-| Owned task wired into the registry handle (Blocker 1 root fix) | `grep -c "handle.task = exec_task" agent/agent_session_queue.py` | output > 0 |
-| Handle pre-registered in the worker loop, executor no longer clobbers (no-op guard) | `grep -c "_active_sessions.setdefault" agent/agent_session_queue.py agent/session_executor.py` | output ≥ 2 (one per file) |
+| #1039 contract honored — handle NOT rewired to exec_task (Blocker r4) | `grep -c "handle.task = exec_task" agent/agent_session_queue.py` | == 0 |
+| Executor registration/task-ref sites UNCHANGED (Blocker r4) | `grep -c "SessionHandle(task=None)" agent/session_executor.py` and `grep -c "handle.task = exec_task\|_active_sessions.setdefault" agent/session_executor.py` | first > 0 (`:734` intact); second == 0 (no setdefault swap) |
+| Out-of-band CancelledError swallow on terminal re-read (Branch 2, Blocker r4) | `grep -c "TERMINAL_STATUSES" agent/agent_session_queue.py` | output > 0 (fresh-status re-read in the `:1496` handler) |
 | Deadline decline forces terminal, skips outer finally (Concern 1) | `grep -c "did_finalize" agent/agent_session_queue.py` | output > 0 |
 | `slot_reclaims` surfaced on the dashboard (NIT) | `grep -c "slot_reclaims" ui/app.py` | output > 0 |
 | fd-PTY-kill uses scoped teardown (not machine pkill) | `grep -c "pkill" agent/agent_session_queue.py` | match count == 0 |
@@ -1178,16 +1270,20 @@ lead NEVER builds directly.
 | CONCERN | Scope & Value (User) | OQ3 keep-both vs replace out-of-band progress-kill — design fork unresolved | Resolved into Fix #3 Technical Approach (residual-ownership table) + OQ3 moved to resolved | Fix #3 single authoritative killer for worker-alive sessions; delete worker-alive `no_progress` branch; keep `worker_dead`+`tool_timeout`; reprieve preserved via shared gate |
 | NIT | Scope & Value (Simplifier) | Fix #2/#3 bundled into one Large PR | Appetite → PR strategy | Split: Fix #2 first (Acceptance #1), Fix #3 follow-up against stable registry |
 | NIT | History & Consistency | Duplicate verification grep (fingerprint vs killer rows) | Verification table | Killer row retargeted to `grep -A40 "_apply_recovery_transition" ... \| grep -c reclaim` |
-| **BLOCKER (r2)** | Risk & Robustness (Adversary) | Detached `exec_task` orphaned on worker shutdown (`asyncio.wait` doesn't cancel its watched task) → subprocess survives → startup recovery re-queues → double execution | Fix #3 code sketch + Data Flow step 1/4 + Race 3 + Step task 2 | **Root fix:** `handle.task = exec_task` right after `create_task` (covers tool_timeout/worker_dead orphan too). **Belt-and-suspenders:** shutdown branch `exec_task.cancel()` + bounded `wait_for(TASK_CANCEL_TIMEOUT)` before re-raise; owned-region `finally` cancels a still-pending task |
+| **BLOCKER (r2)** | Risk & Robustness (Adversary) | Detached `exec_task` orphaned on worker shutdown (`asyncio.wait` doesn't cancel its watched task) → subprocess survives → startup recovery re-queues → double execution | Fix #3 code sketch + Data Flow step 1/4 + Race 3 + Step task 2 | Belt-and-suspenders (KEPT): Branch-3 shutdown path `exec_task.cancel()` + bounded `wait_for(TASK_CANCEL_TIMEOUT)` before re-raise; owned-region `finally` cancels a still-pending task. **NOTE:** the r2 "root fix: `handle.task = exec_task`" was **WITHDRAWN in r4** (it tore down healthy workers and was clobbered by `:1891`) — see the r4 BLOCKER row |
 | **BLOCKER (r2)** | ALL THREE | Reaper's wall-clock `now > lease.deadline` arm strips the permit from a live progressing owner → over-admission (concurrent > max) → re-imposes the #1172 wall-clock cap | Data Flow step 5 + Technical Approach reap + Key Elements + Flow + Risks note + Success Criteria + Test Impact | Reap reclaims IFF owner ∈ `TERMINAL_STATUSES`; wall-clock arm deleted; `SLOT_LEASE_TTL_S` removed; `deadline` dropped from the `Lease`; greps `lease.deadline == 0` / `SLOT_LEASE_TTL_S == 0` |
 | **CONCERN (r2)** | Skeptic + Consistency | Outer `finally` calls `_complete_agent_session` (not `_apply_recovery_transition`); deadline path can be mislabeled "completed", and `_apply_recovery_transition` can decline (MAX_RECOVERY_ATTEMPTS/OOM) without transitioning | Fix #3 code sketch + Blocker-1/Concern-1 prose + Data Flow step 3 + Step task 2 | Capture `did_finalize`; force `transition_status(..., "cancelled")` on decline; set `finalized_by_execute=True` to skip the outer finally; citation corrected to `_complete_agent_session` (`session_completion.py:86`) |
-| **CONCERN (r2)** | Consistency Auditor | OQ3 "SKIPS" leaves dead reprieve code parallel to `_should_kill_no_progress` (NO-LEGACY violation) | Fix #3 OQ3 resolution + resolved-OQ3 block + freshness bullet + Verification | Reprieve decision+telemetry **MOVED** into `_should_kill_no_progress`; corrected: `no_progress` has a 2nd live producer (never-started `:3308-3314`), so `_apply_recovery_transition` **calls** the shared gate (no inline copy). Deterministic greps `_reason_kind = "no_progress" == 0` / `_tier2_reprieve_signal == 1` |
+| **CONCERN (r2)** | Consistency Auditor | OQ3 "SKIPS" leaves dead reprieve code parallel to `_should_kill_no_progress` (NO-LEGACY violation) | Fix #3 OQ3 resolution + resolved-OQ3 block + freshness bullet + Verification | Reprieve decision+telemetry **MOVED** into `_should_kill_no_progress`; corrected: `no_progress` has a 2nd live producer (never-started `:3308-3314`), so `_apply_recovery_transition` **calls** the shared gate (no inline copy). Deterministic greps `_reason_kind = "no_progress" == 0` / `_tier2_reprieve_signal(handle == 1` (call-site grep; corrected in r4) |
 | **NIT (r2)** | Scope & Value | Self-heal has no operator-facing surface; `slot_reclaims` counter write-only | Agent Integration + Documentation + Success Criteria + Verification | Surface `slot_reclaims` in the `worker` block of `dashboard.json` (`_get_worker_health`, `ui/app.py:507`); additive field only |
 | **NIT (r2)** | Coordinator | `bind()` deadline ambiguity (caller-supplied vs internally computed) | Resolved by Blocker 2 | `deadline` dropped from `Lease`/`bind` entirely; Fix #3's watcher computes its own progress deadline from `_session_progress_ts` — no ambiguity |
-| **NIT (r2)** | Coordinator | OQ3 verification grep non-deterministic ("fewer than baseline") | Verification table + OQ3 resolution | Replaced with exact zero/one checks: `_reason_kind = "no_progress" == 0`, `_tier2_reprieve_signal == 1` |
+| **NIT (r2)** | Coordinator | OQ3 verification grep non-deterministic ("fewer than baseline") | Verification table + OQ3 resolution | Replaced with exact zero/one checks: `_reason_kind = "no_progress" == 0`, `_tier2_reprieve_signal(handle == 1` (call-site grep; corrected in r4) |
 | **CONCERN (r3)** | Risk & Robustness (Operator) | `SLOT_LEASE_REAP_DISABLED=1` deletes the fingerprint AND its WARNING → kill-switch regresses from detect-only to **no-visibility**; leaked slots accumulate silently | Data Flow step 5 + Technical Approach reap (two-phase) + Key Elements + Step task 1 + Success Criteria + Verification + Test Impact | Reap split into two phases: phase 1 (fingerprint WARNING/INFO + heartbeat) runs **unconditionally**; only phase 2 (`reclaim()` + `slot_reclaims` increment) is gated on `not SLOT_LEASE_REAP_DISABLED`. New `disabled_still_logs` test asserts detection under the flag |
 | **NIT (r3)** | Scope & Value (Simplifier) | Fix #3 watcher's `_apply_recovery_transition` call passes `handle=...` (unspecified) → subtle double-cancel / internal `wait_for` block left to builder | Fix #3 code sketch + Data Flow step 3 + Step task 2 + Verification | Pass `handle=None` — Fix #3 owns the cancel scope (`exec_task.cancel()` itself); passing the handle would double-cancel and block up to `TASK_CANCEL_TIMEOUT`. Grep `handle=None > 0` |
 | **NIT (r3)** | Scope & Value (Simplifier, impl-note) | Extracted reprieve gate could fire `tier1_flagged_total`/`tier2_reprieve_total` counters every `PROGRESS_POLL_S` poll (inflated metric) | OQ3 resolution (telemetry cadence) + Step task 2 | `_should_kill_no_progress` is a pure predicate; counters + `reprieve_count` save fire **exactly once per session** on first kill-decision, not on the reprieve-and-continue path |
+| **BLOCKER (r4)** | Risk & Robustness | `handle.task = exec_task` wiring (r2 root fix) tears down the whole healthy worker: an out-of-band killer cancels it → `exec_task` cancel is NOT absorbed by `_execute_agent_session` (`await task._task` at `:1942` under `except Exception`) → re-raises at `:1496` (`deadline_cancelled=False`, misclassified worker-shutdown) → outer `:1674` handler pops the worker. AND it is silently reversed by `session_executor.py:1891` (`handle.task = task._task`), so the success grep passes while runtime is the opposite; the #1039 contract (`session_state.py:19`) was reversed without engaging it | Fix #3 code sketch + Data Flow step 1/4 + Race 3 + Blocker-r4 prose + Step task 2 + Success Criteria + Verification + Test Impact + Freshness | **Withdraw the wiring** (and the `:734 → setdefault` change) entirely — HONOR #1039: `handle.task` stays the inner SDK task, whose cancel BackgroundTask absorbs (SDK subprocess torn down + `:2036` SIGKILL escalation, no CancelledError to the worker loop). **Add a THIRD `:1496` branch:** re-read fresh status; if terminal → swallow (Branch 2), ahead of the worker-shutdown `else`. Greps `handle.task = exec_task == 0`; `:734`/`:1891` untouched. The claimed tool_timeout/worker_dead orphan the wiring "fixed" does not exist under #1039 (misdiagnosis) |
+| **CONCERN (r4)** | Risk & Robustness | Verification grep `_tier2_reprieve_signal == 1` can never pass — `grep -c` counts 5 lines today (def + docstrings + call) | Verification table + OQ3 resolution + Success Criteria + Step task 2 | Retargeted every occurrence to the single-call-site grep `grep -c "_tier2_reprieve_signal(handle" agent/session_health.py == 1` |
+| **NIT (r4)** | Scope & Value | Agent Integration parenthetical ("last reclaim's owner/reason, plus zero-reclaim heartbeat timestamp") exceeds the tested `slot_reclaims` scope | Agent Integration | Tightened to expose just the `slot_reclaims` count field (the only thing the `grep -c "slot_reclaims" ui/app.py > 0` check covers) |
+| **NIT (r4)** | History & Consistency | Stale `session_executor.py:702` anchor at the Blocker-1 prose | Blocker-r4 prose + Freshness | Corrected to `:734` (registration) / `:1891` (task-ref population) throughout |
 
 ---
 
