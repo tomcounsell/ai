@@ -173,6 +173,32 @@ class TestRegisterUnregisterPid(unittest.TestCase):
         pool.register_pid(11111)  # must return promptly, not hang
         self.assertIn(11111, pool.get_spawned_pids())
 
+    def test_persist_pids_swallows_non_os_error(self) -> None:
+        """`_persist_pids`'s except is broadened from OSError to Exception
+        (plan #1851 Technical Approach + thread-safety element) so that a
+        non-OSError raised during the write path — e.g. a RuntimeError
+        surfacing from concurrent iteration — can never escape and crash
+        the caller. Persistence is best-effort only."""
+        pool = _make_pool(size=1)
+        with (
+            patch.object(Path, "write_text", side_effect=RuntimeError("boom")),
+            self.assertLogs("agent.granite_container.pty_pool", level="WARNING") as log_ctx,
+        ):
+            pool.register_pid(22222)  # must not raise, must log a warning
+        self.assertIn(22222, pool.get_spawned_pids())
+        self.assertTrue(any("could not persist pid registry" in msg for msg in log_ctx.output))
+
+    def test_unregister_pid_swallows_non_os_error(self) -> None:
+        """Same broadened-except coverage for the unregister path."""
+        pool = _make_pool(size=1)
+        pool.register_pid(33333)
+        with (
+            patch.object(Path, "write_text", side_effect=TypeError("not JSON serializable")),
+            self.assertLogs("agent.granite_container.pty_pool", level="WARNING"),
+        ):
+            pool.unregister_pid(33333)  # must not raise, must log a warning
+        self.assertNotIn(33333, pool.get_spawned_pids())
+
 
 class TestAcquireRelease(unittest.TestCase):
     def test_acquire_returns_pair(self) -> None:
