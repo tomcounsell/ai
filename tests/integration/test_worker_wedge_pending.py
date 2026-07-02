@@ -1,30 +1,34 @@
 """Reproduction / regression harness for the wedged-but-alive worker investigation.
 
 Issue: #1808 — "Wedged-but-alive worker leaves sessions pending indefinitely despite
-300s health backstop."
+300s health backstop." Updated for issue #1820 (lease-based slot ownership): the
+raw ``_global_session_semaphore`` is now a ``SlotLeaseRegistry``.
 
 Two complementary tests ship here:
 
 A1 — ``test_worker_loop_parks_on_zero_semaphore`` (mechanism test, load-bearing):
-    Drives the *real* ``_worker_loop`` against a zero-slot
-    ``_global_session_semaphore`` and asserts the loop parks at
-    ``await semaphore.acquire()`` (``agent_session_queue.py:1314``), proving the
-    *mechanism* — a slot-starved worker loop — not just the consequence.
-    Recovery is also proven: one ``semaphore.release()`` unblocks the loop and the
-    sentinel ``_execute_agent_session`` is called.
-    ``_pop_agent_session`` is monkeypatched alongside ``_execute_agent_session``
-    so the test is deterministic regardless of async-Redis isolation state —
-    the real ``_worker_loop`` semaphore/acquire/release path is what we are testing,
-    not the pop mechanics.
+    Drives the *real* ``_worker_loop`` against a zero-permit ``SlotLeaseRegistry``
+    (``_session_state._slot_registry``) and asserts the loop parks at
+    ``await registry.acquire()``, proving the *mechanism* — a slot-starved worker
+    loop — not just the consequence. Recovery is also proven: one
+    ``registry.release_unbound()`` unblocks the loop and the sentinel
+    ``_execute_agent_session`` is called. ``_pop_agent_session`` is monkeypatched
+    alongside ``_execute_agent_session`` so the test is deterministic regardless
+    of async-Redis isolation state — the real ``_worker_loop`` acquire/release
+    path is what we are testing, not the pop mechanics.
 
-A2 — ``test_health_check_cannot_escalate_parked_worker`` (backstop-blindness test,
-    documents the consequence):
-    Registers a non-``done()`` worker future in ``_active_workers`` and shows that
-    ``_agent_session_health_check()`` never escalates (never starts a new worker) —
-    it nudges with ``event.set(); continue`` regardless of whether the semaphore is
-    exhausted.  The health check never reads ``_global_session_semaphore``.  This
-    confirms the 300s backstop is blind to the suspension wedge.
-    NOTE: this test proves the consequence only.  The loop-park proof lives in A1.
+A2 — ``test_health_check_reclaims_orphaned_slot_lease`` (issue #1820 acceptance
+    regression guard — INVERSION of the old ``test_health_check_cannot_escalate_
+    parked_worker`` documented-bug test):
+    The old A2 proved the 300s backstop was BLIND to a leaked slot (logging-only
+    fingerprint, no recovery). That claim is no longer true: the hoisted
+    top-of-tick reap pass (``agent.session_health._reap_slot_leases``, called
+    from ``_agent_session_health_check``) now reclaims a lease whose owner is
+    terminal, independent of ``worker_alive``/pending-session state. This test
+    orphans a slot lease (bind it to a session, then transition that session
+    terminal WITHOUT releasing the lease) and asserts the health check reclaims
+    it — ``permits_free`` recovers and a parked ``registry.acquire()`` unblocks —
+    with **no worker restart**.
 
 Env-flag assertions — ``TestAsyncioDebugHelper``:
     The ``_asyncio_debug_enabled(env_value)`` helper lives in ``worker/__main__.py``
@@ -45,6 +49,7 @@ import pytest
 import agent.session_state as _session_state
 from agent.agent_session_queue import _active_events, _active_workers
 from agent.session_health import _agent_session_health_check
+from agent.slot_lease import SlotLeaseRegistry
 from models.agent_session import AgentSession
 
 # ---------------------------------------------------------------------------
@@ -139,30 +144,31 @@ class TestAsyncioDebugHelper:
 
 @pytest.mark.integration
 class TestWorkerLoopSemaphorePark:
-    """A1: Drive the real ``_worker_loop`` against a zero-slot semaphore.
+    """A1: Drive the real ``_worker_loop`` against a zero-permit slot lease registry.
 
-    Proves the *mechanism* (not just the consequence): with no semaphore
-    permits available, the worker loop parks at ``await semaphore.acquire()``
-    and cannot pop or process a pending session.  Recovery is also proven.
+    Proves the *mechanism* (not just the consequence): with no permits
+    available, the worker loop parks at ``await registry.acquire()`` and
+    cannot pop or process a pending session.  Recovery is also proven.
 
     This is the load-bearing reproduction test for issue #1808 (hypothesis 1:
-    semaphore exhaustion).  The health-check tautology (A2) only proves the
-    *consequence* — that the 300s backstop cannot recover a parked worker.
+    semaphore exhaustion) — updated for issue #1820 (lease-based slot
+    ownership).  The health-check reclaim test (A2) proves a DIFFERENT
+    recovery path — the reap pass — not this direct-release mechanism.
 
     ``_pop_agent_session`` is monkeypatched alongside ``_execute_agent_session``
     so the recovery assertion is deterministic regardless of async-Redis isolation
-    state in the test environment.  The real ``_worker_loop`` semaphore
-    acquire/release path is what we are testing, not the pop or execution mechanics.
+    state in the test environment.  The real ``_worker_loop`` acquire/release
+    path is what we are testing, not the pop or execution mechanics.
     """
 
     WORKER_KEY = "test-wedge-sem-01"
 
     @pytest.mark.asyncio
     async def test_worker_loop_parks_on_zero_semaphore(self, monkeypatch, redis_test_db):
-        """A1 mechanism test: zero-slot semaphore parks the worker loop.
+        """A1 mechanism test: zero-permit registry parks the worker loop.
 
         Setup:
-        - ``_global_session_semaphore`` has zero available permits.
+        - ``_slot_registry`` has zero available permits.
         - ``_pop_agent_session`` is monkeypatched to return a fake session so the
           pop is deterministic (avoids async-Redis isolation complexity in tests).
         - ``_execute_agent_session`` is monkeypatched to a no-op sentinel.
@@ -170,23 +176,25 @@ class TestWorkerLoopSemaphorePark:
         Phase 1 — park assertion:
         - Spawn the real ``_worker_loop`` and yield the event loop a few times.
         - Assert: task is not done, sentinel not called.
-          This proves the loop is suspended at ``await semaphore.acquire()``
-          (``agent_session_queue.py:1314``), not at some other await.
+          This proves the loop is suspended at ``await registry.acquire()``,
+          not at some other await.
 
         Phase 2 — recovery assertion:
-        - Release one semaphore permit (``semaphore.release()``).
+        - Release one permit (``registry.release_unbound()`` — no lease was
+          ever bound for this permit, since the loop is still parked at
+          acquire() and never reached bind()).
         - Yield the event loop until the sentinel fires (bounded polling).
-        - Assert: sentinel was called, proving the park was on the semaphore.
+        - Assert: sentinel was called, proving the park was on this registry.
 
         Pin ``VALOR_WORKER_MODE=standalone`` so the loop uses the "wait
         indefinitely" branch (``event.wait()`` with no DRAIN_TIMEOUT) rather than
         the bridge-mode ``asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)``
         exit path — concern A1-rev4.
 
-        Teardown restores ``_session_state._global_session_semaphore`` and
-        ``_session_state._shutdown_requested`` (the standalone branch reads both
-        at ``agent_session_queue.py:1305`` and ``1371``; a stale value would
-        short-circuit the loop in the next test — A1-teardown-rev4).
+        Teardown restores ``_session_state._slot_registry`` and
+        ``_session_state._shutdown_requested`` (the standalone branch reads both;
+        a stale value would short-circuit the loop in the next test —
+        A1-teardown-rev4).
         """
         import agent.agent_session_queue as _aq
 
@@ -194,14 +202,14 @@ class TestWorkerLoopSemaphorePark:
         monkeypatch.setenv("VALOR_WORKER_MODE", "standalone")
 
         # --- Capture prior state for deterministic teardown ---
-        prior_semaphore = _session_state._global_session_semaphore
+        prior_registry = _session_state._slot_registry
         prior_shutdown = _session_state._shutdown_requested
         loop_task: asyncio.Task | None = None
 
         try:
-            # --- Replace semaphore with zero-slot (no permits — loop will park) ---
-            zero_semaphore = asyncio.Semaphore(0)
-            _session_state._global_session_semaphore = zero_semaphore
+            # --- Replace registry with a zero-permit one (loop will park) ---
+            zero_registry = SlotLeaseRegistry(max_concurrent=0)
+            _session_state._slot_registry = zero_registry
 
             # --- Build a fake session for the mock pop to return ---
             fake_session = MagicMock()
@@ -240,27 +248,29 @@ class TestWorkerLoopSemaphorePark:
             )
             _active_workers[self.WORKER_KEY] = loop_task
 
-            # --- Phase 1: yield the event loop; loop should park at semaphore.acquire() ---
-            # Give the task enough CPU ticks to reach the semaphore acquire and suspend.
+            # --- Phase 1: yield the event loop; loop should park at registry.acquire() ---
+            # Give the task enough CPU ticks to reach the acquire and suspend.
             for _ in range(20):
                 await asyncio.sleep(0)
 
             # The task should be suspended (not done), not exited prematurely.
             assert not loop_task.done(), (
-                "Worker loop task exited before semaphore was released — expected it to be "
-                "suspended at await semaphore.acquire() (agent_session_queue.py:1314). "
+                "Worker loop task exited before a permit was released — expected it to be "
+                "suspended at await registry.acquire(). "
                 f"Task exception: {loop_task.exception() if loop_task.done() else 'N/A'}"
             )
 
             # The sentinel should NOT have been called yet — loop is parked before the pop.
             assert len(execute_calls) == 0, (
-                f"Sentinel was called {len(execute_calls)} time(s) before semaphore release — "
+                f"Sentinel was called {len(execute_calls)} time(s) before permit release — "
                 f"loop reached _execute_agent_session without acquiring a permit (unexpected). "
-                f"This means the loop did NOT park at semaphore.acquire()."
+                f"This means the loop did NOT park at registry.acquire()."
             )
 
             # --- Phase 2: release one permit and let the loop recover ---
-            zero_semaphore.release()
+            # release_unbound() — the loop hasn't reached bind() yet (still
+            # parked at acquire()), so there is no lease to release() instead.
+            zero_registry.release_unbound()
 
             # Poll until the sentinel fires (loop woke up, popped, and executed the session).
             # Use real sleeps to allow I/O events and async Redis calls to complete.
@@ -270,11 +280,11 @@ class TestWorkerLoopSemaphorePark:
                     break
 
             assert len(execute_calls) >= 1, (
-                f"Expected sentinel to be called after semaphore release. Got 0 calls. "
+                f"Expected sentinel to be called after permit release. Got 0 calls. "
                 f"loop_task.done()={loop_task.done()}, "
                 f"pop_call_count={pop_call_count[0]}. "
                 f"If pop_count=0: loop did not wake after release — park was not on "
-                f"this semaphore object. "
+                f"this registry object. "
                 f"If pop_count>0 but execute=0: pop returned None (unexpected — mock "
                 f"should have returned fake_session on first call). "
             )
@@ -289,7 +299,7 @@ class TestWorkerLoopSemaphorePark:
                     pass
 
             # --- Restore module globals (A1-teardown-rev4) ---
-            _session_state._global_session_semaphore = prior_semaphore
+            _session_state._slot_registry = prior_registry
             _session_state._shutdown_requested = prior_shutdown
 
             # --- Remove worker registration ---
@@ -312,99 +322,84 @@ class TestWorkerLoopSemaphorePark:
 
 @pytest.mark.integration
 class TestHealthCheckBackstopBlindness:
-    """A2: The 300s health-check pending branch cannot escalate a parked worker.
+    """A2: the health check's slot-lease reclaim (issue #1820) — INVERSION of the
+    old ``test_health_check_cannot_escalate_parked_worker`` documented-bug test.
 
-    The health-check's pending branch (``session_health.py:2558``) evaluates
-    ``worker_alive = worker is not None and not worker.done()``.  A worker loop
-    task parked at ``await semaphore.acquire()`` is not ``done()`` — so
-    ``worker_alive = True`` — and the branch sets the event and ``continue``s
-    without starting a new worker.  The session stays ``pending`` indefinitely.
+    The OLD test proved the 300s health check could not recover a leaked slot —
+    it could only nudge a PENDING session's event, never reclaim the permit a
+    dead/wedged worker loop was still holding. That claim is no longer true: the
+    hoisted top-of-tick reap pass (``agent.session_health._reap_slot_leases``,
+    called unconditionally at the start of ``_agent_session_health_check``, before
+    the PENDING-session loop and independent of ``worker_alive``) now reclaims
+    any lease whose owner's DB status is terminal.
 
-    This test proves the *consequence* by:
-    1. Registering a non-``done()`` asyncio.Future as the fake worker.
-    2. Running ``_agent_session_health_check()``.
-    3. Asserting the session remains ``pending`` (not escalated).
-
-    NOTE: this test does NOT prove the semaphore-park mechanism — that is A1's job.
-    In fact, ``_agent_session_health_check()`` never reads ``_global_session_semaphore``
-    (its pending branch only calls ``worker.done()``).  The semaphore drain is
-    included for completeness to match production state, but the health-check
-    verdict is IDENTICAL at any semaphore value.
+    ``test_health_check_reclaims_orphaned_slot_lease`` proves this directly:
+    orphan a lease (bind it to a session, then let that session's row go
+    terminal without releasing the lease — the exact #1537/#1808 leak
+    signature), run the health check, and assert the reap pass recovers the
+    permit and unbinds the lease. This is **acceptance criterion #1** from the
+    plan. No worker restart is involved anywhere in this test.
     """
 
     WORKER_KEY = "test-wedge-hc-01"
 
     @pytest.mark.asyncio
-    async def test_health_check_cannot_escalate_parked_worker(self, redis_test_db):
-        """A2 consequence test: health check nudges and continues without escalating.
+    async def test_health_check_reclaims_orphaned_slot_lease(self, redis_test_db):
+        """A2 (inverted): the reap pass reclaims a leaked lease with no restart.
 
-        With a non-done() worker future in ``_active_workers``, the pending
-        branch treats the worker as alive and calls ``event.set(); continue``
-        without starting a new worker.  The session remains ``pending``.
+        Setup: a ``SlotLeaseRegistry(max_concurrent=1)`` with its single permit
+        bound to a session whose DB row is already terminal (``killed``) — the
+        worker loop that held this permit is gone/wedged and will never reach
+        its own ``finally`` release (the exact #1537/#1808 leak signature).
 
-        Boundary note: the health-check verdict is IDENTICAL regardless of the
-        semaphore state (depleted or not), because the pending branch never reads
-        ``_global_session_semaphore``.  The semaphore is drained to 0 here to
-        match realistic wedge state, but the assertion holds at any semaphore value.
+        Assert: BEFORE the health check, the registry is fully exhausted
+        (``permits_free() == 0``) and a second ``acquire()`` would park. AFTER
+        ``_agent_session_health_check()`` runs, the permit is recovered
+        (``permits_free() == 1``) and the lease is gone (``leases() == []``) —
+        proving the reap pass, not a restart, freed the slot.
         """
-        prior_semaphore = _session_state._global_session_semaphore
+        prior_registry = _session_state._slot_registry
         prior_shutdown = _session_state._shutdown_requested
 
         try:
-            # Drain semaphore to 0 (matches wedge production state)
-            zero_semaphore = asyncio.Semaphore(0)
-            _session_state._global_session_semaphore = zero_semaphore
+            registry = SlotLeaseRegistry(max_concurrent=1)
+            _session_state._slot_registry = registry
 
-            # Register a non-done() Future as the fake parked worker
-            fake_future: asyncio.Future[None] = asyncio.get_event_loop().create_future()
-            _active_workers[self.WORKER_KEY] = fake_future  # type: ignore[assignment]
+            # Orphan the lease: acquire the only permit, bind it to a session,
+            # then flip that session's row terminal WITHOUT releasing the lease
+            # — simulating a wedged worker loop whose own `finally` never fires
+            # (e.g. a granite session stuck on a container thread that never
+            # returns). No worker future is registered at all — the reclaim
+            # must not depend on _active_workers/worker_alive.
+            await registry.acquire()
+            session = _create_wedge_test_session(self.WORKER_KEY, status="killed")
+            registry.bind(session.agent_session_id)
 
-            # Register an event so the nudge branch finds one to set
-            fake_event = asyncio.Event()
-            _active_events[self.WORKER_KEY] = fake_event
-
-            # Create a pending session routed to WORKER_KEY via chat_id
-            session = _create_wedge_test_session(self.WORKER_KEY)
-            assert session.status == "pending"
-
-            # Sanity: fake future is not done (simulates a parked worker loop)
-            assert not fake_future.done(), "Precondition: fake worker future must be non-done"
+            # Precondition: the slot is leaked — fully exhausted, no running
+            # session actually holds it (the owner is already terminal).
+            assert registry.permits_free() == 0, "Precondition: the single permit must be held"
+            assert len(registry.leases()) == 1
 
             # --- Run the 300s health backstop ---
             await _agent_session_health_check()
 
-            # --- Assert session is still pending (no escalation) ---
-            fresh = AgentSession.query.get(redis_key=session.db_key.redis_key)
-            assert fresh is not None, "Test session disappeared from Redis during health check"
-            assert fresh.status == "pending", (
-                f"Expected session to remain 'pending' after health check with a non-done() "
-                f"worker (worker_alive=True). Got status='{fresh.status}'. "
-                f"If 'running': health check escalated — the backstop behavior changed and "
-                f"this test needs updating. "
-                f"This test documents that the 300s backstop is blind to the suspension wedge "
-                f"(worker loop parked at await semaphore.acquire())."
+            # --- Assert the leaked slot was reclaimed — no restart needed ---
+            assert registry.permits_free() == 1, (
+                "Expected the health check's hoisted reap pass to reclaim the "
+                "leaked slot lease (owner is terminal) without a worker restart. "
+                f"permits_free()={registry.permits_free()}, expected 1."
             )
-
-            # --- Assert the event was nudged (event.set() called) ---
-            assert fake_event.is_set(), (
-                "Expected the health check pending branch to call event.set() (nudge) "
-                "when worker_alive=True. The event was not set — health check behavior changed."
+            assert registry.leases() == [], (
+                "Expected the orphaned lease to be dropped from the registry "
+                f"after reclaim. leases()={registry.leases()!r}"
             )
 
         finally:
-            # Teardown: cancel fake future to suppress "Future exception never retrieved"
-            if not fake_future.done():
-                fake_future.cancel()
-
-            # Restore module globals
-            _session_state._global_session_semaphore = prior_semaphore
+            _session_state._slot_registry = prior_registry
             _session_state._shutdown_requested = prior_shutdown
-
-            # Remove worker registration
             _active_workers.pop(self.WORKER_KEY, None)
             _active_events.pop(self.WORKER_KEY, None)
 
-            # Delete test sessions via Popoto ORM
             stale = [s for s in AgentSession.query.all() if s.project_key == "test-wedge"]
             for s in stale:
                 try:
@@ -416,12 +411,11 @@ class TestHealthCheckBackstopBlindness:
     async def test_health_check_escalates_when_no_worker(self, redis_test_db):
         """Control test: health check DOES start a worker when no worker is registered.
 
-        Contrast with A2: without a live worker future, ``worker_alive = False``
-        and the health check calls ``_ensure_worker`` (after the age threshold).
-        This confirms the escalation path works — it is the path that is
-        bypassed when the worker is parked (``not done()`` → ``worker_alive = True``).
+        Without a live worker future, ``worker_alive = False`` and the health
+        check calls ``_ensure_worker`` (after the age threshold). This confirms
+        the PENDING-session escalation path (independent of slot leases) works.
         """
-        prior_semaphore = _session_state._global_session_semaphore
+        prior_registry = _session_state._slot_registry
         prior_shutdown = _session_state._shutdown_requested
 
         try:
@@ -454,7 +448,7 @@ class TestHealthCheckBackstopBlindness:
                 except (TimeoutError, asyncio.CancelledError):
                     pass
 
-            _session_state._global_session_semaphore = prior_semaphore
+            _session_state._slot_registry = prior_registry
             _session_state._shutdown_requested = prior_shutdown
             _active_workers.pop(self.WORKER_KEY + "-ctrl", None)
             _active_events.pop(self.WORKER_KEY + "-ctrl", None)
