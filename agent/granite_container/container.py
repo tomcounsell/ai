@@ -198,6 +198,41 @@ CYCLE_IDLE_TIMEOUT_S = 12 * 60 * 60.0  # 12 hours — sanity ceiling, not a hang
 # turn_end edge is picked up within ~1s of the Stop hook firing.
 HOOK_POLL_INTERVAL_S = 1.0
 
+# Minimum interval (seconds) between per-iteration PTY-read liveness stamps
+# (#1843 Gap B). The `read_until_idle` inner poll can spin many times per
+# second under verbose output; each unthrottled call would trigger an
+# AgentSession Redis write. Throttling to <=1 stamp/sec keeps
+# `last_pty_read_loop_at` fresh mid-turn without a write storm — matching the
+# 5s coalescing philosophy of the SDK-path liveness writer while sampling far
+# finer than the once-per-cycle `_cycle_idle` boundary fire.
+PTY_READ_ITER_MIN_INTERVAL_S = 1.0
+
+
+def _throttle(
+    fn: Callable[[str], None],
+    min_interval_s: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[str], None]:
+    """Wrap ``fn`` so it runs at most once per ``min_interval_s`` seconds.
+
+    The first call always runs; subsequent calls inside the window are dropped.
+    ``clock`` is injectable so the call-frequency bound is unit-testable without
+    real time. Used to gate the Gap B per-iteration PTY-read callback (#1843).
+    """
+    state = {"last": 0.0, "primed": False}
+
+    def _wrapped(arg: str) -> None:
+        now = clock()
+        if state["primed"] and (now - state["last"]) < min_interval_s:
+            return
+        state["primed"] = True
+        state["last"] = now
+        fn(arg)
+
+    return _wrapped
+
+
 # Per-cycle idle budget for the startup-phase poll loop. Short by
 # design: the loop's job is to detect transient startup events
 # (trust-folder, update notice), not to wait for a long model
@@ -730,6 +765,18 @@ class Container:
         # detector (#1724). Exceptions are swallowed — liveness signaling must
         # never crash the loop.
         self._on_pty_read = on_pty_read
+        # Per-iteration PTY-read liveness callback (#1843 Gap B). Threads the
+        # same freshness writer (_fire_pty_read → on_pty_read) into the
+        # read_until_idle inner poll loop so a session wedged mid-turn on the
+        # idle-fallback path refreshes last_pty_read_loop_at far sooner than the
+        # _cycle_idle window. Throttled to <=1 stamp/sec so verbose output can't
+        # produce a Redis write storm. None (byte-identical to pre-#1843) when
+        # there is no writer wired.
+        self._pty_read_iteration_cb: Callable[[str], None] | None = (
+            _throttle(self._fire_pty_read, PTY_READ_ITER_MIN_INTERVAL_S)
+            if on_pty_read is not None
+            else None
+        )
         # Optional pre-warmed PTY pair from the PTYPool. When both
         # are provided, Container skips _spawn_pair() and reuses
         # the pool's prewarmed pair (BridgeAdapter is the caller in
@@ -1084,18 +1131,19 @@ class Container:
         result = pty.read_until_idle(
             min_content_bytes=min_content_bytes,
             timeout_s=CYCLE_IDLE_TIMEOUT_S,
-            on_read_iteration=self._fire_pty_read,
+            on_read_iteration=self._pty_read_iteration_cb,
         )
         buffer = result.turn_buffer or result.buffer
         # Fire the PTY read-loop hook (path-B mid-run wedge detector, #1724).
         # Called unconditionally on every _cycle_idle so the bridge-adapter can
         # stamp last_pty_read_loop_at and diff-gate last_pty_activity_at.
         # Exceptions are swallowed — liveness signaling must never crash the run.
-        # The per-iteration callback is now wired via on_read_iteration=self._fire_pty_read
-        # (#1843 Gap B): every inner read_until_idle poll tick stamps last_pty_read_loop_at
-        # through the same bridge-adapter freshness writer, so a session wedged mid-turn on
-        # the idle-fallback path refreshes liveness far sooner than the _cycle_idle window.
-        # This turn-boundary fire remains as the final stamp for the completed cycle.
+        # The per-iteration callback is wired via on_read_iteration (#1843 Gap B):
+        # every inner read_until_idle poll tick stamps last_pty_read_loop_at through
+        # the same bridge-adapter freshness writer (throttled to <=1/sec), so a
+        # session wedged mid-turn on the idle-fallback path refreshes liveness far
+        # sooner than the _cycle_idle window. This turn-boundary fire remains the
+        # final unconditional stamp for the completed cycle.
         if self._on_pty_read is not None:
             try:
                 self._on_pty_read(buffer)

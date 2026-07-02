@@ -15,13 +15,18 @@ is recorded out-of-band (see the PR description); this module carries only
 the green assertions.
 
 Class 6 (silent no-progress tail) asserts silence is OBSERVABLE via the
-existing ``IdleResult`` seam only. Wiring an actual no-progress detector is
-explicitly OUT OF SCOPE (#1688 / plan No-Gos).
+existing ``IdleResult`` seam, AND (#1843 Gap B) that the per-iteration
+``on_read_iteration`` callback on ``read_until_idle`` samples liveness
+repeatedly during that same silent tail — the dimension that used to be
+dead (once-per-call, not once-per-poll). Wiring an actual
+``granite_wedged`` recovery/kill transition off that freshness signal is
+still explicitly OUT OF SCOPE here (#1820 owns the PTY process-group reap).
 """
 
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -239,6 +244,55 @@ class TestClass6SilentNoProgressTail(unittest.TestCase):
         )
         # The progress frames WERE captured (progress happened, then stopped).
         self.assertIn("esc to interrupt", result.turn_buffer)
+
+    @_FAST_QUIESCENCE
+    def test_per_iteration_callback_stamps_freshness_during_silent_tail(self) -> None:
+        """The read-loop-freshness dimension is wired (#1843 Gap B).
+
+        Threading a freshness writer through `on_read_iteration` samples
+        liveness repeatedly WHILE this same silent tail is waiting out its
+        budget — not just once when `read_until_idle` finally returns. This
+        is what closes the coarse-sampling gap: a wedge inside a long
+        idle-path turn used to leave `last_pty_read_loop_at` stale until the
+        whole call returned; now it is stamped on every inner poll tick.
+
+        No `granite_wedged` recovery/kill transition is asserted here — that
+        ladder is #1820's scope, not this plan's.
+        """
+        frames = scenarios.load_fixture("working_no_idle.frames")
+        driver = scenarios.driver_with_child(scenarios.fake_child_frames([frames]))
+
+        # Stand-in for the bridge-adapter's last_pty_read_loop_at writer:
+        # records a fresh timestamp on every call, mirroring the real
+        # writer's "stamp unconditionally on every call" contract.
+        stamps: list[float] = []
+
+        def _fake_freshness_writer(_buffer: str) -> None:
+            stamps.append(time.monotonic())
+
+        budget_s = 0.3
+        result = driver.read_until_idle(
+            min_content_bytes=0,
+            timeout_s=budget_s,
+            on_read_iteration=_fake_freshness_writer,
+        )
+
+        self.assertFalse(result.saw_idle, "progress-then-quiet must not false-idle")
+        self.assertGreater(
+            len(stamps),
+            1,
+            "the freshness writer must be sampled more than once during this "
+            "single silent tail — proof the callback fires per inner poll tick, "
+            "not once per read_until_idle call",
+        )
+        # Every stamp is a genuine mid-turn sample bounded by the call's own
+        # wall-clock window — none precede the call, none trail off past it
+        # by more than the read loop's own poll granularity.
+        self.assertLessEqual(
+            stamps[-1] - stamps[0],
+            budget_s + 0.5,
+            "freshness stamps must stay within the read_until_idle call's window",
+        )
 
 
 # ===========================================================================
