@@ -54,8 +54,32 @@ process restart. A no-progress session's PTY process survives its logical death.
 ## Freshness Check
 
 **Baseline commit:** `9d47033eee937b11fa60ededaa466b017d5cbebb`
+**Re-verified at:** `f8eac988` (2026-07-02, plan-stage refresh)
 **Issue filed at:** 2026-06-29T11:13:36Z
 **Disposition:** Minor drift
+
+Three sibling PRs landed on the referenced files **after** this issue was filed,
+so every file:line pointer was re-verified against `9d47033e` and drift corrected.
+
+**Plan-stage re-verification (2026-07-02, HEAD `f8eac988`, 44 commits past the
+`9d47033e` baseline).** The three highest-density source files —
+`agent/session_state.py`, `agent/agent_session_queue.py`, `agent/session_health.py`
+— are **byte-identical to the baseline** (0 commits touched them), so every dense
+anchor in those files still holds verbatim (`session_state.py:76`,
+`agent_session_queue.py:126/1328/1330/1494/1496/1658`,
+`session_health.py:1848/1994/2380/2418/2506-2517/2560-2613/3308-3314`). Only two
+anchors in adjacent files drifted (line numbers moved, claims unchanged) and were
+corrected inline: **`session_executor.py:702 → :734`** (the
+`_active_sessions[...] = SessionHandle(task=None)` registration — Blocker 1 root
+fix's `setdefault` target) and **`worker/__main__.py:649 → :663`** (the
+`_global_session_semaphore = asyncio.Semaphore(_max_sessions)` init). The
+`container.py` `os.killpg` scoped-teardown seam Fix #3 reuses is still present
+(`:1046/1052/1703/1706`). The five commits touching referenced files since the
+baseline are all granite-transport / worker-recycle work
+(`0297da0d` #1688 hook turn-returns, `f49781f4`/`e62dac76` #1843 wedge signals,
+`b624607b` #1842 per-role transport hedge, `a9616f27` #1844 worker recycle) —
+none touch the slot-semaphore, the health-check reap, or the worker-loop
+cancel scope, so the core defect and all Fix #2/#3 seams hold verbatim.
 
 Three sibling PRs landed on the referenced files **after** this issue was filed,
 so every file:line pointer was re-verified against `9d47033e` and drift corrected:
@@ -66,7 +90,7 @@ so every file:line pointer was re-verified against `9d47033e` and drift correcte
 - `ee6d598f` feat(redis): durability hardening (#1814) (#1824) — Redis/Popoto client hardening. Irrelevant to the in-memory slot registry.
 
 **File:line references re-verified against current HEAD `9d47033e` (corrected inline in Technical Approach):**
-- `agent/session_state.py:76` — `_global_session_semaphore: asyncio.Semaphore | None = None` — still the ownerless semaphore. Initialized at `worker/__main__.py:649` (`_ss._global_session_semaphore = asyncio.Semaphore(_max_sessions)`); re-exported at `agent_session_queue.py:126`; read into the local `semaphore` var at `agent_session_queue.py:1328`.
+- `agent/session_state.py:76` — `_global_session_semaphore: asyncio.Semaphore | None = None` — still the ownerless semaphore. Initialized at `worker/__main__.py:663` (`_ss._global_session_semaphore = asyncio.Semaphore(_max_sessions)`); re-exported at `agent_session_queue.py:126`; read into the local `semaphore` var at `agent_session_queue.py:1328`.
 - `agent/agent_session_queue.py:1494` — the `await _execute_agent_session(session)` try block — **still holds** (execute call at `:1494`; acquire is at `:1330`, `_semaphore_acquired` flag at `:1331`).
 - **CancelledError handler at `agent_session_queue.py:1496-1514`** — re-verified: the `except asyncio.CancelledError` branch logs *"session interrupted, will be re-queued by startup recovery"*, sets `session_completed = True`, and **re-raises** to exit the worker loop, deliberately NOT finalizing (so startup recovery re-queues). **This is the handler Blocker 1 must disambiguate** — a progress-deadline cancel must NOT be misclassified as worker-shutdown-interrupt. `finalized_by_execute` flag is at `:1487` (set True only on non-exceptional return of `_execute_agent_session`); the outer `finally` at `:1583-1659` runs `_complete_agent_session` + `semaphore.release()` only when `not session_completed and not finalized_by_execute`.
 - `agent/agent_session_queue.py` release sites — **12 confirmed**: `:1349,1354,1360,1398,1403,1419,1424,1438,1443,1463,1473,1658`. **5 acquire sites confirmed**: `:1330,1392,1413,1430,1455`. **Every one uses the local `semaphore` variable** (assigned from `_global_session_semaphore` at `:1328`), NOT the module global directly — so a `_global_session_semaphore` grep does **not** catch them (Concern 1). The re-acquire sites (`:1392/1413/1430/1455`) live on the drain/standalone/bridge/fallback branches, each with its own release-on-None/exception guard.
@@ -378,7 +402,7 @@ calls `release_unbound()`).
 - `reclaim(owner_session_id)` = `release` + telemetry + WARNING log; also idempotent.
 - `session_state.py:76`: replace `_global_session_semaphore: asyncio.Semaphore | None`
   with `_slot_registry: SlotLeaseRegistry | None`, initialized at
-  `worker/__main__.py:649` exactly where the semaphore is today. Update the re-export
+  `worker/__main__.py:663` exactly where the semaphore is today. Update the re-export
   at `agent_session_queue.py:126`.
 - **Migrate ALL slot sites (Concern 1), not just `:1330`.** The re-acquire sites use
   the local `semaphore` variable, so a `_global_session_semaphore` grep misses them —
@@ -437,10 +461,10 @@ calls `release_unbound()`).
   # CRITICAL (r3 CONCERN — Risk & Robustness): the handle MUST be pre-registered
   # HERE, in the worker loop. `create_task` only SCHEDULES the coroutine, so
   # `_execute_agent_session`'s own `_active_sessions[sid] = SessionHandle(task=None)`
-  # (session_executor.py:702) has NOT run yet at this point — a bare
+  # (session_executor.py:734) has NOT run yet at this point — a bare
   # `_active_sessions.get(sid)` would return None and the wiring would silently
   # no-op, making this entire root fix dead code. Pre-register with the task set,
-  # and change session_executor.py:702 to `setdefault(...)` so the executor mutates
+  # and change session_executor.py:734 to `setdefault(...)` so the executor mutates
   # (never clobbers) the pre-registered handle.
   handle = _active_sessions.setdefault(
       session.agent_session_id, SessionHandle(task=exec_task))
@@ -536,7 +560,7 @@ calls `release_unbound()`).
   surviving `tool_timeout` / `worker_dead` cancel path. **The wiring must PRE-REGISTER
   the handle in the worker loop** — `_active_sessions.setdefault(sid, SessionHandle(
   task=exec_task))` immediately after `create_task(...)`, and change the executor's own
-  registration at `session_executor.py:702` from `_active_sessions[sid] =
+  registration at `session_executor.py:734` from `_active_sessions[sid] =
   SessionHandle(task=None)` to `setdefault(...)`. This is load-bearing (r3 CONCERN):
   `create_task` only schedules the coroutine, so a bare `_active_sessions.get(sid)`
   right after it returns `None` (the executor body has not run) and the wiring would
@@ -544,7 +568,7 @@ calls `release_unbound()`).
   `handle.task.cancel()` cancel the live awaitable, covering both cancel paths and the
   `tool_timeout`-path orphan the shutdown-branch cancel alone would miss. `handle.task`
   and the `:702` registration semantics re-verified at `session_health.py:2019-2024` /
-  `session_executor.py:702`.
+  `session_executor.py:734`.
 - **Blocker 1 (round 2) — belt-and-suspenders: shutdown-branch cancel.** Converting the
   directly-`await`ed coroutine into a detached `exec_task` watched by `asyncio.wait`
   introduced a regression: `asyncio.wait` does **not** cancel the task it watches when
@@ -1010,7 +1034,7 @@ lead NEVER builds directly.
   `acquire`/`release_unbound`/`bind`/`release`/`reclaim`/`leases`/`permits_free`;
   idempotent release/reclaim; lease recorded ONLY at `bind()` — no token/unbound
   sub-system, no bind-grace, no `SLOT_LEASE_TTL_S`).
-- Swap `session_state.py:76` to `_slot_registry`; init at `worker/__main__.py:649`;
+- Swap `session_state.py:76` to `_slot_registry`; init at `worker/__main__.py:663`;
   update the `agent_session_queue.py:126` re-export.
 - Migrate ALL slot sites (Concern 1): 5 acquire sites (`:1330,1392,1413,1430,1455`)
   → `await registry.acquire()`; 11 pre-bind release sites (`:1349,1354,1360,1398,1403,
@@ -1046,7 +1070,7 @@ lead NEVER builds directly.
 - **Blocker 1 root fix:** immediately after `exec_task = asyncio.create_task(...)`,
   PRE-REGISTER the handle in the worker loop — `handle = _active_sessions.setdefault(sid,
   SessionHandle(task=exec_task)); handle.task = exec_task` — and change the executor's own
-  registration at `session_executor.py:702` to `setdefault(...)`. A bare `.get(sid)` here
+  registration at `session_executor.py:734` to `setdefault(...)`. A bare `.get(sid)` here
   no-ops (the coroutine body hasn't run yet), so pre-registration is required (r3 CONCERN).
   This makes the out-of-band killers that cancel `handle.task` cancel the live awaitable —
   fixes the `tool_timeout` / `worker_dead` subprocess-orphan too, not just the shutdown path.
