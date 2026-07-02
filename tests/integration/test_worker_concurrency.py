@@ -179,6 +179,44 @@ class TestGlobalSemaphore:
             _starting_workers.clear()
 
     @pytest.mark.asyncio
+    async def test_bridge_pushed_reclaim_request_frees_permit_via_drain(self):
+        """Fix #5 (#1821): a bridge-pushed reclaim-request frees a leaked permit
+        via the worker on-loop drain (restart-free, out-of-domain recovery)."""
+        import socket
+
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        import agent.session_health as _sh
+        import agent.session_state as _ss
+
+        original = _ss._slot_registry
+        try:
+            reg = SlotLeaseRegistry(3)
+            _ss._slot_registry = reg
+
+            # Orphan a slot: acquire + bind, then flip the owner terminal without release.
+            session = _create_test_session(chat_id="reclaim-chat", session_id="sess-reclaim-1")
+            await reg.acquire()
+            reg.bind(session.agent_session_id)
+            session.status = "completed"
+            session.save(update_fields=["status", "updated_at"])
+            before = reg.permits_free()
+
+            # Simulate the bridge push (the out-of-domain TRIGGER).
+            host = socket.gethostname()
+            POPOTO_REDIS_DB.rpush(f"worker:slot:reclaim_requests:{host}", session.agent_session_id)
+
+            # Worker on-loop drain performs the actual reclaim.
+            _sh._drain_reclaim_requests(reg, reg.leases())
+
+            assert reg.permits_free() == before + 1
+            assert session.agent_session_id not in {
+                lease.owner_session_id for lease in reg.leases()
+            }
+        finally:
+            _ss._slot_registry = original
+
+    @pytest.mark.asyncio
     async def test_semaphore_none_allows_unlimited_sessions(self):
         """When _slot_registry is None, no ceiling applies.
 
