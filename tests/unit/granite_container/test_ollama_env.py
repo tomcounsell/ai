@@ -77,9 +77,12 @@ class TestPickOllamaModel(unittest.TestCase):
         names = ["gemma3:27b", "gemma3n:latest", "nomic-embed-text:latest"]
         self.assertIsNone(pick_ollama_model(names))
 
-    def test_falls_back_to_any_usable_tag(self) -> None:
-        names = ["gemma3:27b", "some-other-instruct:latest"]
-        self.assertEqual(pick_ollama_model(names), "some-other-instruct:latest")
+    def test_qwen_only_no_fallback_until_ornith(self) -> None:
+        """Pinned to qwen: non-qwen tool-capable tags (gpt-oss, granite) are NOT
+        picked — a clean self-skip beats running the canary on an inappropriate
+        backend. Revisit when the ``ornith`` model ships."""
+        self.assertIsNone(pick_ollama_model(["gpt-oss:20b", "granite4.1:3b"]))
+        self.assertIsNone(pick_ollama_model(["gemma3:27b", "some-other-instruct:latest"]))
 
     def test_empty_returns_none(self) -> None:
         self.assertIsNone(pick_ollama_model([]))
