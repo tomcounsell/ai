@@ -329,7 +329,7 @@ Sessions belonging to the same `worker_key` always execute **strictly one at a t
 
 ### Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)
 
-A single global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys and **all** session types:
+A global, owner-keyed `SlotLeaseRegistry` limits how many sessions can execute simultaneously across **all** worker keys and **all** session types:
 
 ```bash
 # Set the ceiling (default: 8)
@@ -340,16 +340,16 @@ MAX_CONCURRENT_SESSIONS=8
 ```
 
 **Implementation details:**
-- `_global_session_semaphore` is a module-level `asyncio.Semaphore | None` in `agent/session_state.py` (re-exported from `verify if this module exists or reference correct import path`)
+- `_slot_registry` is a module-level `SlotLeaseRegistry | None` in `agent/session_state.py`, wrapping one `asyncio.Semaphore` for backpressure plus an `{owner_session_id: Lease}` map (issue #1820, replacing the prior ownerless `_global_session_semaphore`). See [Slot-Lease Ownership](slot-lease-ownership.md) for the full design.
 - Initialized by `_run_worker()` in `worker/__main__.py` **before** any worker loop is created
 - Clamped to minimum 1 to prevent deadlock (`MAX_CONCURRENT_SESSIONS=0` → 1 with a warning log)
-- The semaphore is acquired **before** `_pop_agent_session()` is called, so `transition_status("running")` never occurs without a slot — the dashboard count stays accurate
-- Released after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`)
+- `registry.acquire()` blocks **before** `_pop_agent_session()` is called, so `transition_status("running")` never occurs without a slot — the dashboard count stays accurate. `registry.bind(owner)` records the lease synchronously right after the pop resolves a session (no lease exists during the pop gap itself)
+- Released via `registry.release(owner)` after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`); an out-of-band kill instead calls `registry.reclaim(owner)` from `_apply_recovery_transition`, and a hoisted top-of-tick reap pass in the health check reclaims any lease still held by a session that has already reached a terminal status
 - When `None` (e.g., in tests that don't call `_run_worker()`), no ceiling applies
 
 **PM/dev deadlock prevention:** There is no session-type-specific cap. PM sessions that spawn child dev sessions transition to `waiting_for_children`, which triggers `output_router.route_session_output` to return `"deliver"` — the PM releases its global slot before the child needs it. Child dev sessions sort ahead of peers via the child-boost ordering in `sort_key`, so they acquire the freed slot next. See issues #1004 and #1021 for the history.
 
-**Wedge detection:** When the semaphore is exhausted (`_global_session_semaphore._value == 0`) and running sessions are fewer than `MAX_CONCURRENT_SESSIONS`, the health monitor's pending-session branch (`_agent_session_health_check`) emits a `WARNING: PENDING-WEDGE FINGERPRINT` log line before its normal `event.set(); continue` nudge. The most common production path is H3 (PTY-pool saturation): sessions hold a global slot while blocked inside `_execute_agent_session` waiting for a granite PTY pair, which can exhaust the semaphore when `GRANITE__PTY_POOL_SIZE < MAX_CONCURRENT_SESSIONS`. See [Worker Wedge Investigation](worker-wedge-investigation.md) for the full root-cause analysis and acquire/release audit.
+**Wedge detection and self-heal:** When the registry is exhausted (`registry.permits_free() == 0`) and running sessions are fewer than `MAX_CONCURRENT_SESSIONS`, the health monitor's hoisted reap pass (`_agent_session_health_check`) emits a `WARNING` leaked-slot fingerprint log line, then reclaims any lease whose owner has reached a terminal status — no process restart required (issue #1820, closing the #1537/#1808 leak class the old logging-only fingerprint could only report on). The most common production path is H3 (PTY-pool saturation): sessions hold a global slot while blocked inside `_execute_agent_session` waiting for a granite PTY pair, which can exhaust the registry when `GRANITE__PTY_POOL_SIZE < MAX_CONCURRENT_SESSIONS`. See [Worker Wedge Investigation](worker-wedge-investigation.md) for the root-cause analysis and [Slot-Lease Ownership](slot-lease-ownership.md) for the reclaim path.
 
 ### Redis Pop Lock (TOCTOU Prevention)
 

@@ -1211,7 +1211,7 @@ deferred Fix #5 in #1821 — out of scope here.)
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/slot-lease-ownership.md` describing: the ownerless-
+- [x] Create `docs/features/slot-lease-ownership.md` describing: the ownerless-
   semaphore leak class, the `SlotLeaseRegistry` (lease recorded at `bind()` only;
   owner+acquired_at, no reclaim deadline), the hoisted top-of-tick reap pass
   (fingerprint→reclaim, **terminal-owner only**), the prompt reclaim wired into
@@ -1232,22 +1232,22 @@ deferred Fix #5 in #1821 — out of scope here.)
   producer), the env constants with provisional defaults, and the k8s-Lease / Go-context
   precedents. State it is the continuation of `worker-liveness-recovery.md` (#1815)
   and that #1821 (fixes #5/#6) builds on the registry. (Acceptance criterion of #1815.)
-- [ ] Add entry to `docs/features/README.md` index table.
-- [ ] Document the `slot_reclaims` dashboard field (NIT): note in
+- [x] Add entry to `docs/features/README.md` index table.
+- [x] Document the `slot_reclaims` dashboard field (NIT): note in
   `docs/features/slot-lease-ownership.md` (Observability section) that
   `localhost:8500/dashboard.json` surfaces `slot_reclaims` in the `worker` health block,
   and that a rising count signals a recurring leak worth root-causing.
-- [ ] Forward-link from `docs/features/worker-wedge-investigation.md` (the
+- [x] Forward-link from `docs/features/worker-wedge-investigation.md` (the
   logging-only write-up) and `docs/features/worker-liveness-recovery.md` to this
   doc — describe the new status quo (the fingerprint now reclaims), per the
   no-historical-artifacts rule.
 
 ### Inline Documentation
-- [ ] Comment the on-loop-only mutation assumption on `SlotLeaseRegistry` (no lock;
+- [x] Comment the on-loop-only mutation assumption on `SlotLeaseRegistry` (no lock;
   loop-affine `asyncio.Semaphore`; why the reaper is on-loop not off-loop).
-- [ ] Comment why a lease is recorded only at `bind()` (no token/unbound tally) and
+- [x] Comment why a lease is recorded only at `bind()` (no token/unbound tally) and
   why `release_unbound()` on the pre-bind None/exception branches cannot leak.
-- [ ] Comment each new timeout/deadline constant with the grain-of-salt
+- [x] Comment each new timeout/deadline constant with the grain-of-salt
   "provisional, tune after observing real rates" note.
 
 ## Success Criteria

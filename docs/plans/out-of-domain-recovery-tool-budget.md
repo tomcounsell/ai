@@ -22,15 +22,18 @@ monitor that a frozen loop also stops running.**
 **Fix #5 — recovery runs inside the failure domain it polices.** The slot-leak
 reaper introduced by #1820 (`_agent_session_health_check`, the hoisted
 top-of-tick reap pass) reclaims a leaked concurrency permit by calling
-`registry.reclaim()` — but it runs **on the worker event loop**
-(`agent/session_health.py:3020`, `_agent_session_health_loop`). When the loop is
+`registry.reclaim()` — but it runs **on the worker event loop** (the reap pass
+`_reap_slot_leases()` at `agent/session_health.py:2459`, driven by
+`_agent_session_health_loop` at `:3256`). When the loop is
 synchronously frozen, the reaper task never runs, so the very recovery meant to
 liberate a leaked slot is itself wedged. The acceptance criterion from #1815
 demands that recovery be **verified to run from a process OTHER than the worker
 loop it polices**. Today only two out-of-domain actors exist —
 `monitoring/worker_watchdog.py` (a separate launchd process that kills+respawns a
 dead/stale-heartbeat worker) and the off-loop dead-man's-switch thread inside the
-worker (`worker/__main__.py:343`, SIGABRT self-kill on a stale beacon). Both
+worker (`worker/__main__.py:357` `_heartbeat_thread_main`, `_self_kill()` SIGKILL
+self-recycle on a stale beacon — the former SIGABRT was replaced by SIGKILL per
+#1808/#1816 to suppress the macOS crash-report dialog). Both
 recover only by **process restart**, which is lossy: it re-queues all in-flight
 work. Neither can perform the **lossless, targeted slot reclamation** that the
 #1820 registry makes possible, and neither surfaces the slot-lease state to an
@@ -78,51 +81,77 @@ loop's health.
 
 ## Freshness Check
 
-**Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045`
+**Baseline commit (revision 4):** `bdb77c100cde0f8b113a0172b795f5bfc97f6e29`
 **Issue filed at:** 2026-06-29 (deferred from #1815)
-**Disposition:** Clean — no drift on referenced files since recon.
-**Revision re-check (post-CRITIQUE, touched anchors re-verified against HEAD):**
+**Disposition:** Minor drift — line numbers moved under the #1820 merge; all claims
+still hold; refs corrected below.
+**Revision 4 re-check (post-#1820-merge, 2026-07-03).** #1820 (the hard dependency)
+merged 2026-07-02 (PR #1867, `72ba5d50`). All Fix #5 dependency surfaces re-verified
+against the merged code at HEAD `bdb77c10` (see the ✅ HARD DEPENDENCY SATISFIED block
+above): `SlotLeaseRegistry.{leases,permits_free,reclaim}` present in
+`agent/slot_lease.py`, the reap pass is the named `_reap_slot_leases()`
+(`agent/session_health.py:2459`), and `SLOT_LEASE_REAP_DISABLED=1` gates only the
+autonomous Phase-2 reclaim — confirming the bridge drain is the sole reclaim lever
+under that flag. `scripts/check_prerequisites.py` reports all 4 prerequisites PASS.
+**Fix #6 anchors re-verified against HEAD `bdb77c10` (line numbers corrected):**
 - `monitoring/session_watchdog.py` — `watchdog_loop` at `:173`; `_apply_stall_reaction`
   at `:531` (the deny-surfacing precedent Fix #6 mirrors — atomic `SET NX EX` dedup +
-  reaction-queue write). Confirmed.
-- `agent/hooks/pre_tool_use.py` — `pre_tool_use_hook` at `:371`. Confirmed.
-- `.claude/hooks/pre_tool_use.py` — `main()` wrapped by a module-level
-  `except Exception` at `:88-91` (`log_hook_error` → exit 0). Confirmed this catches
-  `Exception` (not `BaseException`), so a `SystemExit(2)` deny propagates while a
-  check-internal bug fails open (concern #6 grounding).
-- `.claude/hooks/post_tool_use.py` — sidecar resolve at `:464` (`_load_agent_session_sidecar`),
-  `AgentSession.get_by_id` at `:476`, `tool_call_count` bump at `:493` (the exact
-  no-session-vs-infra path Fix #6 reuses, concern #5). Confirmed.
+  reaction-queue write). Confirmed, no drift.
+- `agent/hooks/pre_tool_use.py` — `pre_tool_use_hook` at `:371`. Confirmed, no drift.
+- `.claude/hooks/pre_tool_use.py` — `main()` at `:194`, wrapped by a module-level
+  `except Exception` at `:223-229` (`if __name__ == "__main__"` → `log_hook_error`
+  → exit 0). Confirmed this catches `Exception` (not `BaseException`), so a
+  `SystemExit(2)` deny propagates while a check-internal bug fails open (concern #6
+  grounding).
+- `.claude/hooks/post_tool_use.py` — sidecar resolve at `:474`
+  (`_load_agent_session_sidecar`, defined at `:69`), `AgentSession.get_by_id` at
+  `:486`, `tool_call_count` bump at `:503` (the exact no-session-vs-infra path Fix #6
+  reuses, concern #5). Confirmed.
 
-**⚠️ HARD DEPENDENCY — #1820 lease registry (NOT yet merged).** Fix #5 consumes
-the `SlotLeaseRegistry` that #1820 (`docs/plans/slot-lease-progress-deadline.md`,
-currently in the SDLC pipeline, **not merged**) introduces in `agent/slot_lease.py`
-to replace `agent/session_state.py:76`'s ownerless `_global_session_semaphore`.
-Fix #5 reads the registry's `leases()` / `permits_free()` snapshot and adds a
-Redis reclaim-request drained by #1820's on-loop reap pass. **BUILD of Fix #5
-MUST wait until #1820 merges** — the `SlotLeaseRegistry` type, the reap pass, and
-`registry.reclaim()` are the surfaces Fix #5 extends. Fix #6 has **no** dependency
-on #1820 and MAY build independently (lower priority). See **## Prerequisites**.
+**✅ HARD DEPENDENCY SATISFIED — #1820 lease registry MERGED (PR #1867,
+2026-07-02, merge commit `72ba5d50`; plan archived at
+`docs/plans/completed/slot-lease-progress-deadline.md`).** Fix #5 consumes the
+`SlotLeaseRegistry` #1820 introduced in `agent/slot_lease.py` (replacing the
+ownerless `_global_session_semaphore`; the registry singleton is
+`agent/session_state.py:88` `_slot_registry`). **API re-verified against the
+merged code (HEAD `bdb77c10`):** `SlotLeaseRegistry.leases() -> list[Lease]`
+(`agent/slot_lease.py:186`), `permits_free() -> int` (`:190`, reads
+`_semaphore._value`), and `reclaim(owner_session_id)` (`:166`, idempotent,
+WARNING-logged) all exist exactly as this plan assumed. `Lease` (`:73`) carries
+`owner_session_id` + `acquired_at` (a **wall-clock** `time.time()` value, `:147`)
+— so the lease-snapshot JSON's `acquired_at_wall_ts` maps straight onto
+`Lease.acquired_at` with no conversion. The on-loop reap pass is the named
+function `_reap_slot_leases()` (`agent/session_health.py:2459`, called from
+`_agent_session_health_check` at `:2653`); its autonomous Phase-2 terminal-owner
+reclaim is gated on `os.environ.get("SLOT_LEASE_REAP_DISABLED") != "1"` (`:2507`,
+`:2550`) while Phase-1 detection always runs — **confirming the plan's central
+claim** that the bridge reclaim-request is the *only* reclaim lever under
+`SLOT_LEASE_REAP_DISABLED=1`. **Fix #5 BUILD is therefore UNBLOCKED.** Fix #6 has
+**no** dependency on #1820 and may build independently. See **## Prerequisites**
+(all four now PASS).
 
-**File:line references re-verified against HEAD `b99e2958`:**
+**File:line references re-verified against HEAD `bdb77c10` (revision 4, post-#1820-merge):**
 - `monitoring/session_watchdog.py` — `watchdog_loop` at `:173`; launched **in the
-  bridge process** at `bridge/telegram_bridge.py:3057-3059`. Owns only
+  bridge process** at `bridge/telegram_bridge.py:3053-3055` (`from
+  monitoring.session_watchdog import watchdog_loop` → `asyncio.create_task`). Owns only
   session-level health today (silence/loop/error-cascade/token-alert steers,
   `_apply_stall_reaction`). No worker-loop-liveness or slot logic. Confirmed.
-- `agent/session_state.py:84` — `last_loop_tick` is **`time.monotonic()`**, an
-  in-worker-process module global; `get_loop_tick()` `:93`, `bump_loop_tick()`
-  `:87`. **A monotonic clock is per-process — its raw value is meaningless in the
+- `agent/session_state.py:96` — `last_loop_tick` is **`time.monotonic()`**, an
+  in-worker-process module global; `get_loop_tick()` `:105`, `bump_loop_tick()`
+  `:99`. **A monotonic clock is per-process — its raw value is meaningless in the
   bridge process. This is why Fix #5 cannot "read the beacon" directly and must
   publish a Redis wall-clock beacon** (Data Flow, Risk 1). Confirmed.
-- `worker/__main__.py:242` — `_green_heartbeat_write` → `agent.session_health.
-  _write_worker_heartbeat`; `_heartbeat_cycle` `:257` computes
-  `beacon_age = now_monotonic - get_loop_tick()` (`:320`); `_heartbeat_thread_main`
-  `:343` runs off-loop every `WORKER_HEARTBEAT_INTERVAL=30s` (`:50`). Confirmed.
-- `agent/session_health.py:3001` — `_write_worker_heartbeat()` writes
-  `data/last_worker_connected` + calls `register_worker_pid()` (`:2981`, writes a
+- `worker/__main__.py:256` — `_green_heartbeat_write` → `agent.session_health.
+  _write_worker_heartbeat`; `_heartbeat_cycle` `:271` computes
+  `beacon_age = now_monotonic - get_loop_tick()`; `_heartbeat_thread_main`
+  `:357` runs off-loop every `WORKER_HEARTBEAT_INTERVAL=30s` (`:51`). Confirmed.
+- `agent/session_health.py:3237` — `_write_worker_heartbeat()` writes
+  `data/last_worker_connected` + calls `register_worker_pid()` (`:3217`, writes a
   Redis PID key) on every off-loop tick. **This is the publish seam for Fix #5's
-  Redis wall-clock beacon.** The on-loop reap pass (from #1820, top-of-tick in
-  `_agent_session_health_check`) is the publish seam for the lease-table snapshot.
+  Redis wall-clock beacon.** The on-loop reap pass (from #1820, the named function
+  `_reap_slot_leases()` at `agent/session_health.py:2459`, called from
+  `_agent_session_health_check` at `:2653`) is the publish seam for the lease-table
+  snapshot.
   Confirmed.
 - `monitoring/worker_watchdog.py` — **existing** out-of-domain recovery (separate
   launchd, StartInterval 120s): `check()` `:158` reads `HEARTBEAT_FILE` (`:72`),
@@ -136,7 +165,7 @@ on #1820 and MAY build independently (lower priority). See **## Prerequisites**.
 - `.claude/hooks/pre_tool_use.py` — CLI PreToolUse hook (the interactive `claude`
   TUI / granite-PTY path), currently logging-only. Session resolves via the
   sidecar in `.claude/hooks/post_tool_use.py::_update_agent_session`
-  (`:443-494`, `AgentSession.get_by_id`); `tool_call_count` bumped at `:493`.
+  (`:445-513`, `AgentSession.get_by_id` at `:486`); `tool_call_count` bumped at `:503`.
   Fix #6's load-bearing seam (blocks via exit code 2). Confirmed.
 - `agent/session_health.py:309-313` — `_agent_session_tool_timeout_loop`
   (`TOOL_TIMEOUT_LOOP_INTERVAL=30`, tiers `:311-313`) — the **background** monitor
@@ -144,20 +173,21 @@ on #1820 and MAY build independently (lower priority). See **## Prerequisites**.
 - `models/agent_session.py` — `tool_call_count` `:176`, `total_input_tokens`
   `:462`, `total_cost_usd` `:468`. Budget inputs present; Fix #6 only READS them.
   Confirmed.
-- `ui/app.py:340` — `_get_worker_health()` (dashboard route `:508`) reads the disk
+- `ui/app.py:370` — `_get_worker_health()` (dashboard route `:508`) reads the disk
   heartbeat. Extend for the Fix #5 operator surface. Confirmed.
 
 **Cited sibling issues/PRs re-checked:**
 - #1815 — CLOSED (PR #1823 merged); `last_loop_tick` beacon + `_self_kill()`
   landed. Deferred fixes #5/#6 here.
-- #1820 — OPEN, in pipeline, **NOT merged**; the lease registry Fix #5 consumes.
+- #1820 — CLOSED (PR #1867 merged 2026-07-02, `72ba5d50`); the lease registry
+  Fix #5 consumes. **Prerequisite now satisfied — Fix #5 BUILD unblocked.**
 - #1818 — OPEN, tracking umbrella.
 - #1816 — CLOSED (PR #1832); `supervise()`, scoped `os.killpg` teardown.
 
 **Active plans in `docs/plans/` overlapping this area:**
-- `docs/plans/slot-lease-progress-deadline.md` (#1820, in pipeline) — the direct
-  prerequisite; Fix #5's No-Gos in that plan explicitly name #1821 as the next
-  landing.
+- `docs/plans/completed/slot-lease-progress-deadline.md` (#1820, shipped) — the
+  direct prerequisite (now merged/archived); Fix #5's No-Gos in that plan explicitly
+  name #1821 as the next landing.
 - `docs/plans/completed/liveness-wedge-recovery.md` (#1815, shipped) — parent.
 - `docs/plans/completed/worker-fault-containment.md` (#1816, shipped) — adjacent.
 
@@ -168,8 +198,8 @@ on #1820 and MAY build independently (lower priority). See **## Prerequisites**.
   launchd respawns. Fix #5 reuses the **off-loop publish cadence** (`_write_worker_
   heartbeat`) to also emit a Redis wall-clock beacon, and treats the SIGABRT
   self-kill as the single killer it defers to. Recovery = restart (lossy).
-- **#1820 (in pipeline)** — `SlotLeaseRegistry` + on-loop reap pass +
-  `registry.reclaim()`. Fix #5 reads its lease snapshot and drives a Redis
+- **#1820 (merged, PR #1867)** — `SlotLeaseRegistry` + on-loop reap pass
+  (`_reap_slot_leases()`) + `registry.reclaim()`. Fix #5 reads its lease snapshot and drives a Redis
   reclaim-request drained by the same reap pass (targeted, lossless). **Hard
   prerequisite.**
 - **`monitoring/worker_watchdog.py` (shipped, #1767/#1311)** — the existing
@@ -385,10 +415,10 @@ arc — NOT one linear chain:
 - **Sub-pipeline A — Fix #6 (inline budget):** dependency-free, builds **first**,
   and lands as its own small PR satisfying Acceptance #2. It does NOT wait on Fix #5
   or #1820. Its validation asserts only Acceptance #2 + the Fix #6 failure paths.
-- **Sub-pipeline B — Fix #5 (out-of-domain recovery):** [ORDERED] BUILD-gated on
-  **#1820 merged** (the `SlotLeaseRegistry` it extends must exist first), lands as a
-  second PR satisfying Acceptance #1. Its validation asserts Acceptance #1 + the
-  Fix #5 failure paths + the four race scenarios.
+- **Sub-pipeline B — Fix #5 (out-of-domain recovery):** BUILD gate on **#1820
+  merged** is now SATISFIED (PR #1867, 2026-07-02) — the `SlotLeaseRegistry` it
+  extends exists. Lands as a second PR satisfying Acceptance #1. Its validation
+  asserts Acceptance #1 + the Fix #5 failure paths + the four race scenarios.
 
 The two sub-pipelines share only the documentarian and the final validation sweep
 (which runs once both PRs have landed). This unblocks the independent,
@@ -407,9 +437,11 @@ final `validate-all` sweep depends on both.
 | #1820 reap pass present | `grep -c "reclaim" agent/session_health.py` | Confirms the on-loop reap the reclaim-request drain extends | Fix #5 |
 | Python ≥ 3.11 | `python -c "import sys; assert sys.version_info >= (3, 11)"` | repo runs 3.14.3 | both |
 
-**Fix #6 has NO prerequisites** and may build immediately. **Fix #5 BUILD is
-blocked until #1820 merges** — the `SlotLeaseRegistry`, the on-loop reap pass, and
-`registry.reclaim()` must exist first. Planning is complete regardless.
+**Fix #6 has NO prerequisites** and may build immediately. **Fix #5 BUILD gate is
+now SATISFIED** — #1820 merged (PR #1867, 2026-07-02), so the `SlotLeaseRegistry`,
+the on-loop reap pass (`_reap_slot_leases()`), and `registry.reclaim()` all exist.
+All four prerequisite checks above PASS as of HEAD `bdb77c10`
+(`scripts/check_prerequisites.py` confirms). Both sub-pipelines may now build.
 
 ## Solution
 
@@ -435,7 +467,7 @@ blocked until #1820 merges** — the `SlotLeaseRegistry`, the on-loop reap pass,
 - **Operator surface:** `worker:watchdog:actions:{host}` action log +
   `bridge_reclaims` / `loop_wedged_detected` / `bridge_contract_stale` /
   `tool-budget:tripped` counters, surfaced in the `worker` block of
-  `localhost:8500/dashboard.json` (`_get_worker_health`, `ui/app.py:340`).
+  `localhost:8500/dashboard.json` (`_get_worker_health`, `ui/app.py:370`).
 - **Env kill-switches (all NAMED, env-overridable, conservative-provisional):**
   `BRIDGE_SLOT_RECLAIM_ENABLED`, `BRIDGE_WORKER_BEACON_STALE_S`,
   `RECLAIM_REQUESTS_MAX` (list-cap for `worker:slot:reclaim_requests`, Race 4),
@@ -458,15 +490,16 @@ beacon → log `loop_wedged` + defer to existing killer.
 **Fix #5 — out-of-domain recovery (BUILD after #1820 merges):**
 
 - **Publish the loop beacon.** In `agent/session_health.py::_write_worker_heartbeat`
-  (`:3001`, off-loop cadence), after the disk write, also
+  (`:3237`, off-loop cadence), after the disk write, also
   `POPOTO_REDIS_DB.set("worker:loop_beacon:{host}", json.dumps({...}), ex=3*WORKER_HEARTBEAT_INTERVAL)`.
   The beacon age is computed the same way `_heartbeat_cycle` already does
   (`now_monotonic − get_loop_tick()`), but the **wall-clock** `time.time()` is what
   the bridge keys on — never a monotonic value (Risk 1). Fail-quiet (Redis error
   must never break the heartbeat).
 - **Publish the lease snapshot + drain reclaim-requests.** In the #1820 on-loop
-  reap pass (top-of-tick in `_agent_session_health_check`), after computing the
-  fingerprint: (a) publish `worker:slot:leases:{host}` from the same
+  reap pass (`_reap_slot_leases()` at `agent/session_health.py:2459`; access the
+  registry via `_session_state._slot_registry`, guard on `is None`), after computing
+  the fingerprint: (a) publish `worker:slot:leases:{host}` from the same
   `list(registry.leases())` snapshot; (b) **drain** `worker:slot:reclaim_requests:{host}`
   via an atomic `LPOP` loop, re-read each owner's status fresh, and
   `registry.reclaim(owner)` for terminal owners (increment
@@ -489,7 +522,7 @@ beacon → log `loop_wedged` + defer to existing killer.
   `worker_watchdog.py`. The bridge owns detection + restart-free reclaim-trigger
   only. (Verification greps assert no `os.kill`/`launchctl`/`SIGABRT` in the new
   function.)
-- **Operator surface.** Extend `_get_worker_health()` (`ui/app.py:340`) to read
+- **Operator surface.** Extend `_get_worker_health()` (`ui/app.py:370`) to read
   `worker:slot:leases` (`permits_free`/`held`), the `bridge_reclaims` /
   `loop_wedged_detected` / `bridge_contract_stale` / `tool_budget_tripped` /
   `tool_budget_resolution_errors` counters, and the last few `worker:watchdog:actions`
@@ -553,7 +586,7 @@ beacon → log `loop_wedged` + defer to existing killer.
   human (Data Flow step 4).
 - **CLI hook.** At the top of `.claude/hooks/pre_tool_use.py::main`, resolve the
   session via the sidecar (the exact `_load_agent_session_sidecar` →
-  `AgentSession.get_by_id` path used in `.claude/hooks/post_tool_use.py:464-476`),
+  `AgentSession.get_by_id` path used in `.claude/hooks/post_tool_use.py:474-486`),
   applying the same no-session-vs-infra-error split; call `evaluate_tool_budget`; on
   deny print the reason to stderr and `sys.exit(2)` (Claude Code's block convention)
   and surface to the human (Data Flow step 4). Fail-open on a resolution error (log
@@ -809,8 +842,9 @@ owners keeps the list length bounded.
 
 ## No-Gos (Out of Scope)
 
-- [ORDERED] Fix #5 BUILD before #1820 merges — the `SlotLeaseRegistry` /
-  reap-pass / `registry.reclaim()` surfaces must exist first.
+- Fix #5 BUILD before the `SlotLeaseRegistry` / reap-pass / `registry.reclaim()`
+  surfaces exist — this gate is now SATISFIED (#1820 merged, PR #1867), so the
+  ordering constraint is discharged; retained here as the historical record.
 - A second process-kill ladder in the bridge — process recovery stays with the
   dead-man's-switch + `worker_watchdog.py`. The bridge detects + reclaims + defers.
 - Persisting the lease registry or beacon across worker restarts — records are
@@ -869,12 +903,12 @@ Fix #6 is invoked **by the agent implicitly** — every tool call the agent make
 traverses the PreToolUse hooks, which is precisely why the budget must live there
 (the only place guaranteed to run inline on the agent's own tool dispatch). Fix #5
 is bridge/worker-internal; the bridge already imports and launches
-`monitoring/session_watchdog.py` (`bridge/telegram_bridge.py:3057-3059`), so the
+`monitoring/session_watchdog.py` (`bridge/telegram_bridge.py:3053-3055`), so the
 new `check_worker_liveness_and_slots` call needs no new wiring beyond that loop.
 
 **Operator surface (both fixes).** Surface the recovery/budget state on the
 existing `localhost:8500/dashboard.json` `worker` block (additive fields only,
-`_get_worker_health` at `ui/app.py:340`): `permits_free`/`held` (from
+`_get_worker_health` at `ui/app.py:370`): `permits_free`/`held` (from
 `worker:slot:leases`), `bridge_reclaims`, `loop_wedged_detected`,
 `bridge_contract_stale`, `tool_budget_tripped`, `tool_budget_resolution_errors`
 counters, plus the last few `worker:watchdog:actions` entries. A rising
@@ -978,8 +1012,8 @@ lead NEVER builds directly.
 - **Builder (out-of-domain-recovery)**
   - Name: recovery-builder
   - Role: Fix #5 — Redis beacon/lease publish + reclaim-request drain (worker) +
-    `check_worker_liveness_and_slots` (bridge) + dashboard surface. **BUILD-blocked
-    until #1820 merges.**
+    `check_worker_liveness_and_slots` (bridge) + dashboard surface. **BUILD gate
+    satisfied — #1820 merged (PR #1867); may build now.**
   - Agent Type: builder
   - Domain: cross-process / async concurrency (loop-affine objects, Redis contract,
     no-second-kill boundary)
@@ -1032,18 +1066,19 @@ lead NEVER builds directly.
   `asyncio/Thread/sleep` in `agent/tool_budget.py`; the fail-open split and exit-2
   propagation are covered by `test_tool_budget_enforcement.py`.
 
-### 2. Build the out-of-domain recovery (Fix #5 — AFTER #1820 merges)
+### 2. Build the out-of-domain recovery (Fix #5 — #1820 merged, gate satisfied)
 - **Task ID**: build-out-of-domain-recovery
-- **Depends On**: build-tool-budget, **#1820 merged**
+- **Depends On**: build-tool-budget (**#1820 merged — PR #1867, gate satisfied**)
 - **Validates**: tests/integration/test_out_of_domain_reclaim.py (create), tests/unit/test_worker_liveness_beacon_publish.py (create)
 - **Assigned To**: recovery-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Gate:** confirm the #1820 prerequisites (`grep -c "class SlotLeaseRegistry"
-  agent/slot_lease.py > 0`, reap pass + `registry.reclaim()` present) before
-  starting. If #1820 is not merged, STOP and report blocked.
+- **Gate (now passing):** re-confirm the #1820 surfaces before starting —
+  `grep -c "class SlotLeaseRegistry" agent/slot_lease.py > 0` (currently 1),
+  `_reap_slot_leases()` + `registry.reclaim()` present in `agent/session_health.py`.
+  These pass as of HEAD `bdb77c10`; the guard remains only as a defensive re-check.
 - Worker publish: add the wall-clock `worker:loop_beacon:{host}` write to
-  `agent/session_health.py::_write_worker_heartbeat` (`:3001`); add the
+  `agent/session_health.py::_write_worker_heartbeat` (`:3237`); add the
   `worker:slot:leases:{host}` snapshot publish + the `worker:slot:reclaim_requests:{host}`
   drain (→ fresh-status re-read → `registry.reclaim` → `bridge_reclaims` counter) to
   the #1820 on-loop reap pass. Emit `bridge_contract_stale` (action-log + counter)
@@ -1056,7 +1091,7 @@ lead NEVER builds directly.
   `LTRIM ... 0 RECLAIM_REQUESTS_MAX-1`, Race 4) + action-log entry
   (gated `BRIDGE_SLOT_RECLAIM_ENABLED`); stale/missing beacon → `loop_wedged`
   action + counter, **NO kill**. No `os.kill`/`launchctl`/`critical` key.
-- Dashboard: extend `_get_worker_health()` (`ui/app.py:340`) with `permits_free`/
+- Dashboard: extend `_get_worker_health()` (`ui/app.py:370`) with `permits_free`/
   `held`/`bridge_reclaims`/`loop_wedged_detected`/`bridge_contract_stale`/
   `tool_budget_tripped`/`tool_budget_resolution_errors` + recent actions (additive
   only).

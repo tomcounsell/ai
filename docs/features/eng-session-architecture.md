@@ -261,7 +261,7 @@ For Eng sessions:
 | `agent/session_executor.py` | Core execute loop: `_execute_agent_session()`, turn-boundary steering, nudge/re-enqueue |
 | `agent/session_health.py` | Health monitor, startup recovery, orphan cleanup |
 | `agent/session_pickup.py` | Pop locking, steering drain, session selection |
-| `agent/session_state.py` | Shared globals: `_active_sessions`, `_global_session_semaphore`, `SessionHandle` |
+| `agent/session_state.py` | Shared globals: `_active_sessions`, `_slot_registry` (`SlotLeaseRegistry`, [Slot-Lease Ownership](slot-lease-ownership.md)), `SessionHandle` |
 | `agent/output_handler.py` | `OutputHandler` protocol for routing agent output; `TelegramRelayOutputHandler` (Redis outbox for Telegram delivery) and `FileOutputHandler` (logs to `logs/worker/`) implementations |
 | `agent/constants.py` | Canonical location for `REACTION_SUCCESS/COMPLETE/ERROR` |
 | `agent/sdk_client.py` | SDK client; `compose_system_prompt` assembles the final system prompt |
