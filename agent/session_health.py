@@ -13,6 +13,7 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import re
@@ -84,6 +85,40 @@ _SHELL_WRAPPER_NAMES = frozenset({"sh", "zsh", "bash", "dash"})
 # the integer values to its skip-set.
 WORKER_REGISTERED_PID_KEY_PREFIX = "worker:registered_pid:"
 WORKER_REGISTERED_PID_TTL_SECONDS = 86400  # 24h
+
+# === Fix #5 (#1821): worker→bridge Redis-mediated liveness/slot contract ===
+#
+# The bridge process cannot touch the worker's in-memory SlotLeaseRegistry (its
+# asyncio.Semaphore is loop-affine) and cannot read last_loop_tick (a monotonic()
+# value meaningless outside the worker process). Every cross-process signal
+# therefore goes through Redis, published by the worker and read by the bridge.
+# All keys are per-host and TTL'd so a dead worker's records expire and the
+# bridge sees "no beacon" rather than a phantom-live registry.
+#
+# Config location (not a defect): read via raw os.environ.get() at module scope,
+# matching the sibling WORKER_HEARTBEAT_INTERVAL / #1815 deadman constants — no
+# config/settings.py entry is expected.
+WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"))
+WORKER_LOOP_BEACON_KEY_PREFIX = "worker:loop_beacon:"
+WORKER_SLOT_LEASES_KEY_PREFIX = "worker:slot:leases:"
+WORKER_SLOT_RECLAIM_REQUESTS_KEY_PREFIX = "worker:slot:reclaim_requests:"
+WORKER_SLOT_LAST_RECLAIM_DRAIN_KEY_PREFIX = "worker:slot:last_reclaim_request_drain:"
+WORKER_WATCHDOG_ACTIONS_KEY_PREFIX = "worker:watchdog:actions:"
+# TTL for the loop beacon: 3× the heartbeat cadence, so a couple missed off-loop
+# ticks still leave a fresh beacon; a dead worker's beacon expires within 90s.
+WORKER_LOOP_BEACON_TTL_SECONDS = 3 * WORKER_HEARTBEAT_INTERVAL
+# TTL for the lease snapshot + reclaim-request list: 3× the health-check tick
+# (AGENT_SESSION_HEALTH_CHECK_INTERVAL == 300s, defined below). Literal here to
+# avoid a forward-reference at module import.
+WORKER_SLOT_KEY_TTL_SECONDS = 3 * 300
+# Cap on the operator action log + reclaim-request list (Race 4: bound the list
+# so a multi-owner leak burst cannot grow it unboundedly). Env-overridable.
+WORKER_WATCHDOG_ACTIONS_MAX = 256
+RECLAIM_REQUESTS_MAX = int(os.environ.get("RECLAIM_REQUESTS_MAX", "256"))
+# Beacon-freshness / bridge-contract staleness threshold, REUSED for the
+# bridge_contract_stale signal (concern #5 — no dedicated staleness var). Matches
+# the #1815 deadman staleness threshold default (90s).
+BRIDGE_WORKER_BEACON_STALE_S = int(os.environ.get("BRIDGE_WORKER_BEACON_STALE_S", "90"))
 
 # --- B2-probe: observability-only duplicate-worker detection (issue #1817) --
 #
@@ -2573,6 +2608,19 @@ def _reap_slot_leases() -> None:
         except Exception:
             logger.exception("[session-health] slot-lease detection phase failed")
 
+        # === Fix #5 (#1821): publish the lease snapshot (always-run region) ===
+        # A single atomic SET of the complete JSON blob so the bridge always
+        # reads a self-consistent snapshot (Race 1). Fail-quiet.
+        _publish_slot_leases(registry, leases_snapshot)
+
+        # === Fix #5 (#1821): drain bridge-pushed reclaim-requests ===
+        # MUST sit in the ALWAYS-RUN region — after Phase 1 detection, BEFORE the
+        # Phase-2 `if reap_disabled: return` gate below — so the drain still fires
+        # under SLOT_LEASE_REAP_DISABLED=1, where it is the ONLY reclaim lever (the
+        # autonomous Phase-2 reclaim is gated off). Placing it in/after the Phase-2
+        # loop would silently defeat the feature's headline capability (concern #5).
+        _drain_reclaim_requests(registry, leases_snapshot)
+
         # === Phase 2: reclaim — gated on SLOT_LEASE_REAP_DISABLED ===
         if reap_disabled:
             return
@@ -2603,6 +2651,233 @@ def _reap_slot_leases() -> None:
                 )
     except Exception:
         logger.exception("[session-health] _reap_slot_leases failed (non-fatal)")
+
+
+def _publish_slot_leases(registry, leases_snapshot) -> None:
+    """Publish the current lease snapshot to Redis (Fix #5, #1821).
+
+    Written as ONE atomic ``SET`` of a complete JSON blob so the bridge always
+    reads a self-consistent snapshot (Race 1 — never a partial, field-by-field
+    write). ``acquired_at`` is a wall-clock ``time.time()`` value (agent/slot_lease.py
+    Lease), so it maps straight onto ``acquired_at_wall_ts`` with no conversion.
+    Fail-quiet: a Redis error must never raise into the reap pass.
+    """
+    try:
+        try:
+            permits_free = registry.permits_free()
+        except Exception:
+            permits_free = None
+        held = len(leases_snapshot)
+        payload = {
+            "permits_free": permits_free,
+            "held": held,
+            "max": getattr(registry, "_max_concurrent", None),
+            "ts": time.time(),
+            "owners": [
+                {
+                    "owner_session_id": lease.owner_session_id,
+                    "acquired_at_wall_ts": lease.acquired_at,
+                }
+                for lease in leases_snapshot
+            ],
+        }
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        _R.set(
+            f"{WORKER_SLOT_LEASES_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}",
+            json.dumps(payload),
+            ex=WORKER_SLOT_KEY_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.debug("[session-health] slot-lease snapshot publish failed (non-fatal): %s", e)
+
+
+def _drain_reclaim_requests(registry, leases_snapshot) -> None:
+    """Drain bridge-pushed reclaim-requests and reclaim genuinely-terminal owners.
+
+    The out-of-domain half of Fix #5 (#1821): the bridge's
+    ``check_worker_liveness_and_slots`` pushes owner ids onto
+    ``worker:slot:reclaim_requests:{host}`` when it observes a terminal-owner
+    lease under a live loop; this drain (running on the worker loop, where the
+    semaphore actually lives) pops each request and performs the reclaim.
+
+    This is a DISTINCT code path from #1820's autonomous Phase-2 reclaim, so it
+    fires even when ``SLOT_LEASE_REAP_DISABLED=1`` gates the autonomous path off —
+    the whole reason the reclaim-request lever exists.
+
+    **#1868 trap (concern #2) — DELIBERATE divergence from the autonomous reaper.**
+    The autonomous Phase-2 reclaim treats ``get_by_id → None`` as terminal. This
+    request-driven drain MUST NOT: a transient Redis lookup failure returning
+    ``None`` (or any lookup exception) is "unknown → SKIP, do not reclaim", because
+    reclaiming on a blip would strip a LIVE session's permit (semaphore
+    over-admission). Reclaim ONLY on an EXPLICIT terminal ``status``.
+
+    Fail-quiet throughout; every swallow logs.
+    """
+    key = f"{WORKER_SLOT_RECLAIM_REQUESTS_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}"
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+    except Exception as e:
+        logger.debug("[session-health] reclaim-request drain: redis unavailable: %s", e)
+        return
+
+    drained = 0
+    try:
+        # Atomic LPOP loop — bounded by RECLAIM_REQUESTS_MAX to avoid an
+        # unbounded spin if the bridge is flooding the list faster than we drain.
+        for _ in range(RECLAIM_REQUESTS_MAX + 1):
+            owner = _R.lpop(key)
+            if owner is None:
+                break
+            if isinstance(owner, bytes):
+                owner = owner.decode("utf-8", "replace")
+            drained += 1
+            try:
+                fresh = AgentSession.get_by_id(owner)
+            except Exception:
+                # Transient lookup failure → unknown → SKIP (concern #2, #1868).
+                # Do NOT reclaim; a future tick re-evaluates if the bridge re-pushes.
+                logger.debug(
+                    "[session-health] reclaim-request drain: lookup failed for owner=%s "
+                    "(unknown → skip, not reclaiming)",
+                    owner,
+                )
+                continue
+            if fresh is None:
+                # #1868: None is "unknown", NOT terminal, for the request-driven
+                # drain — a deliberate divergence from the autonomous reaper.
+                logger.debug(
+                    "[session-health] reclaim-request drain: owner=%s not found "
+                    "(unknown → skip, not reclaiming)",
+                    owner,
+                )
+                continue
+            status = getattr(fresh, "status", None)
+            if status in _TERMINAL_STATUSES:
+                registry.reclaim(owner)
+                project_key = getattr(fresh, "project_key", None) or "unknown"
+                logger.warning(
+                    "[session-health] bridge-requested reclaim: freed leaked slot for "
+                    "terminal owner=%s (status=%s, project=%s)",
+                    owner,
+                    status,
+                    project_key,
+                )
+                try:
+                    _R.incr(f"{project_key}:session-health:bridge_reclaims")
+                except Exception as e:
+                    logger.debug(
+                        "[session-health] bridge_reclaims counter increment failed "
+                        "(non-fatal) for owner=%s: %s",
+                        owner,
+                        e,
+                    )
+            else:
+                # Requested owner is still live (Risk 3) — never strip its permit.
+                logger.debug(
+                    "[session-health] reclaim-request drain: owner=%s status=%s not "
+                    "terminal → skip (no reclaim)",
+                    owner,
+                    status,
+                )
+    except Exception as e:
+        logger.warning(
+            "[session-health] reclaim-request drain failed (non-fatal): %s", e, exc_info=True
+        )
+
+    _maybe_emit_bridge_contract_stale(drained, leases_snapshot)
+
+
+def _maybe_emit_bridge_contract_stale(drained: int, leases_snapshot) -> None:
+    """Emit ``bridge_contract_stale`` when a terminal-owner leak is observed but no
+    reclaim-request has been drained for a sustained window (concern #5, #1821).
+
+    Detects the new-worker / old-bridge direction: the worker keeps ONE Redis
+    timestamp (``worker:slot:last_reclaim_request_drain:{host}``, set whenever the
+    drain pops ≥1 request). On a tick where a terminal-owner leak IS present but
+    ``now − last_drain_ts > BRIDGE_WORKER_BEACON_STALE_S`` (the REUSED beacon
+    threshold — no new staleness var), emit ``bridge_contract_stale`` once (dedup
+    ``SET NX EX``) so the contract gap is operator-visible rather than a silent drop.
+
+    Fail-quiet — an observability signal must never raise into the reap pass.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        host = _ORPHAN_REAP_HOSTNAME
+        last_drain_key = f"{WORKER_SLOT_LAST_RECLAIM_DRAIN_KEY_PREFIX}{host}"
+        now = time.time()
+
+        if drained > 0:
+            # We drained a request → the contract is live; record the timestamp.
+            _R.set(last_drain_key, str(now), ex=WORKER_SLOT_KEY_TTL_SECONDS)
+            return
+
+        # No request drained this tick. Only interesting if a terminal-owner leak
+        # actually exists (else there is nothing for the bridge to have requested).
+        terminal_owner_present = False
+        for lease in leases_snapshot:
+            try:
+                fresh = AgentSession.get_by_id(lease.owner_session_id)
+            except Exception:
+                continue
+            if fresh is not None and getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                terminal_owner_present = True
+                break
+        if not terminal_owner_present:
+            return
+
+        raw = _R.get(last_drain_key)
+        last_drain_ts = None
+        if raw is not None:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            try:
+                last_drain_ts = float(raw)
+            except (TypeError, ValueError):
+                last_drain_ts = None
+
+        stale = last_drain_ts is None or (now - last_drain_ts) > BRIDGE_WORKER_BEACON_STALE_S
+        if not stale:
+            return
+
+        # Dedup so a persistent gap logs once per stale window, not every tick.
+        dedup_key = f"worker:slot:bridge_contract_stale_applied:{host}"
+        if not _R.set(dedup_key, "1", nx=True, ex=BRIDGE_WORKER_BEACON_STALE_S):
+            return
+
+        logger.warning(
+            "[session-health] bridge_contract_stale: terminal-owner lease present but no "
+            "reclaim-request drained for >%ss — bridge reclaim-request channel may be "
+            "absent (new-worker/old-bridge). Autonomous reap still covers the leak.",
+            BRIDGE_WORKER_BEACON_STALE_S,
+        )
+        _append_watchdog_action(
+            _R,
+            host,
+            {"action": "bridge_contract_stale", "ts": now},
+        )
+        try:
+            _R.incr(f"{host}:worker-watchdog:bridge_contract_stale")
+        except Exception as e:
+            logger.debug("[session-health] bridge_contract_stale counter increment failed: %s", e)
+    except Exception as e:
+        logger.debug("[session-health] bridge_contract_stale check failed (non-fatal): %s", e)
+
+
+def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
+    """Append a capped entry to the ``worker:watchdog:actions:{host}`` operator log.
+
+    Capped LPUSH + LTRIM (newest first, bounded at WORKER_WATCHDOG_ACTIONS_MAX)
+    + TTL, mirroring the existing action-log bound. Fail-quiet.
+    """
+    try:
+        actions_key = f"{WORKER_WATCHDOG_ACTIONS_KEY_PREFIX}{host}"
+        redis_client.lpush(actions_key, json.dumps(entry))
+        redis_client.ltrim(actions_key, 0, WORKER_WATCHDOG_ACTIONS_MAX - 1)
+        redis_client.expire(actions_key, WORKER_SLOT_KEY_TTL_SECONDS)
+    except Exception as e:
+        logger.debug("[session-health] watchdog-action append failed (non-fatal): %s", e)
 
 
 async def _agent_session_health_check() -> None:
@@ -3400,6 +3675,50 @@ def _write_worker_heartbeat() -> None:
         register_worker_pid()
     except Exception as e:
         logger.debug("[session-health] register_worker_pid refresh failed: %s", e)
+
+    _publish_loop_beacon()
+
+
+def _publish_loop_beacon() -> None:
+    """Publish the wall-clock loop beacon to Redis (Fix #5, #1821).
+
+    The bridge process cannot read ``last_loop_tick`` directly — it is a
+    ``time.monotonic()`` value, meaningless in another process. So the off-loop
+    heartbeat thread translates the per-process monotonic loop age into a
+    **wall-clock** ``time.time()`` timestamp the bridge can key freshness on.
+
+    CRITICAL (Risk 1 — the #1 design risk): the bridge keys freshness ONLY on
+    ``wall_ts`` (a wall-clock ``time.time()`` value). ``loop_beacon_age_s`` (the
+    monotonic ``now - last_loop_tick`` age) is carried as an ADVISORY field only
+    and must NEVER be used for cross-process time math — mixing two unrelated
+    clocks yields nonsense. ``armed=False`` / age ``None`` means the loop has not
+    ticked yet (the beacon is unarmed) and is NEVER treated as wedged.
+
+    Fail-quiet: a Redis error here must never break the heartbeat — the disk
+    write already happened before this call, and the dead-man's-switch never
+    aborts on a beacon-publish failure.
+    """
+    try:
+        tick = _session_state.get_loop_tick()
+        now_monotonic = time.monotonic()
+        armed = tick is not None
+        loop_beacon_age_s = (now_monotonic - tick) if tick is not None else None
+        payload = {
+            # wall_ts is the ONLY field the bridge keys freshness on (Risk 1).
+            "wall_ts": time.time(),
+            # Advisory only — a per-process monotonic age, never cross-process math.
+            "loop_beacon_age_s": loop_beacon_age_s,
+            "armed": armed,
+        }
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        _R.set(
+            f"{WORKER_LOOP_BEACON_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}",
+            json.dumps(payload),
+            ex=WORKER_LOOP_BEACON_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.debug("[session-health] loop-beacon publish failed (non-fatal): %s", e)
 
 
 async def _agent_session_health_loop() -> None:

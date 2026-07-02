@@ -367,6 +367,80 @@ def create_app() -> FastAPI:
         except Exception:
             return 0
 
+    def _get_worker_slot_health() -> dict:
+        """Read the Fix #5 (#1821) out-of-domain recovery surface for the dashboard.
+
+        Additive-only fields for the ``worker`` health block: the current slot-lease
+        occupancy (``permits_free``/``held`` from ``worker:slot:leases:{host}``), the
+        recovery counters (``bridge_reclaims``, ``loop_wedged_detected``,
+        ``bridge_contract_stale``), the Fix #6 budget counters
+        (``tool_budget_tripped``, ``tool_budget_resolution_errors``), and the last few
+        ``worker:watchdog:actions`` entries. Fail-quiet — never blocks the health
+        payload; every field defaults to a safe zero/None on any Redis error.
+        """
+        result: dict = {
+            "permits_free": None,
+            "held": None,
+            "bridge_reclaims": 0,
+            "loop_wedged_detected": 0,
+            "bridge_contract_stale": 0,
+            "tool_budget_tripped": 0,
+            "tool_budget_resolution_errors": 0,
+            "recent_actions": [],
+        }
+        try:
+            import socket
+
+            import redis as redis_lib
+
+            from ui.data.machine import get_machine_project_keys
+
+            r = redis_lib.Redis.from_url(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            host = socket.gethostname()
+
+            raw_leases = r.get(f"worker:slot:leases:{host}")
+            if raw_leases:
+                import json as _json
+
+                leases = _json.loads(raw_leases)
+                result["permits_free"] = leases.get("permits_free")
+                result["held"] = leases.get("held")
+
+            def _sum_project_counter(suffix: str) -> int:
+                total = 0
+                for project_key in get_machine_project_keys():
+                    val = r.get(f"{project_key}:{suffix}")
+                    if val:
+                        total += int(val)
+                return total
+
+            result["bridge_reclaims"] = _sum_project_counter("session-health:bridge_reclaims")
+            result["tool_budget_tripped"] = _sum_project_counter("tool-budget:tripped")
+            result["tool_budget_resolution_errors"] = _sum_project_counter(
+                "tool-budget:resolution_errors"
+            )
+
+            lw = r.get(f"{host}:worker-watchdog:loop_wedged_detected")
+            if lw:
+                result["loop_wedged_detected"] = int(lw)
+            bcs = r.get(f"{host}:worker-watchdog:bridge_contract_stale")
+            if bcs:
+                result["bridge_contract_stale"] = int(bcs)
+
+            try:
+                import json as _json2
+
+                raw_actions = r.lrange(f"worker:watchdog:actions:{host}", 0, 4)
+                result["recent_actions"] = [_json2.loads(a) for a in raw_actions]
+            except Exception:
+                result["recent_actions"] = []
+        except Exception:
+            pass
+        return result
+
     def _get_worker_health() -> dict:
         """Check worker health from last_worker_connected file freshness."""
 
@@ -375,19 +449,32 @@ def create_app() -> FastAPI:
         # Additive scalar (issue #1820) — sits beside age_s in this same dict,
         # not a new top-level key or a per-project map.
         slot_reclaims = _get_slot_reclaims_total()
+        # Additive Fix #5/#6 (#1821) operator surface — merged into every return.
+        slot_health = _get_worker_slot_health()
         try:
             if heartbeat_file.exists():
                 mtime = heartbeat_file.stat().st_mtime
                 age_s = round(time.time() - mtime)
                 if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
-                    return {"status": "ok", "age_s": age_s, "slot_reclaims": slot_reclaims}
+                    status = "ok"
                 elif age_s < WORKER_DOWN_THRESHOLD_S:
-                    return {"status": "running", "age_s": age_s, "slot_reclaims": slot_reclaims}
+                    status = "running"
                 else:
-                    return {"status": "error", "age_s": age_s, "slot_reclaims": slot_reclaims}
+                    status = "error"
+                return {
+                    "status": status,
+                    "age_s": age_s,
+                    "slot_reclaims": slot_reclaims,
+                    **slot_health,
+                }
         except OSError:
             pass
-        return {"status": "error", "age_s": None, "slot_reclaims": slot_reclaims}
+        return {
+            "status": "error",
+            "age_s": None,
+            "slot_reclaims": slot_reclaims,
+            **slot_health,
+        }
 
     def _get_claude_auth_health() -> dict:
         """Check Claude Code subscription auth via `claude auth status`."""
@@ -616,6 +703,18 @@ def create_app() -> FastAPI:
                     # Additive-only (issue #1820): count of concurrency slots
                     # auto-reclaimed from leaked leases without a worker restart.
                     "worker_slot_reclaims": worker["slot_reclaims"],
+                    # Additive-only (Fix #5/#6, #1821): out-of-domain recovery +
+                    # tool-budget operator surface.
+                    "worker_permits_free": worker.get("permits_free"),
+                    "worker_slots_held": worker.get("held"),
+                    "worker_bridge_reclaims": worker.get("bridge_reclaims"),
+                    "worker_loop_wedged_detected": worker.get("loop_wedged_detected"),
+                    "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
+                    "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
+                    "worker_tool_budget_resolution_errors": worker.get(
+                        "tool_budget_resolution_errors"
+                    ),
+                    "worker_recent_actions": worker.get("recent_actions"),
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
                     "email_alert": email.get("alert"),
@@ -652,6 +751,14 @@ def create_app() -> FastAPI:
                 "worker": worker["status"],
                 "worker_last_seen_s": worker["age_s"],
                 "worker_slot_reclaims": worker["slot_reclaims"],
+                # Additive-only (Fix #5/#6, #1821).
+                "worker_permits_free": worker.get("permits_free"),
+                "worker_slots_held": worker.get("held"),
+                "worker_bridge_reclaims": worker.get("bridge_reclaims"),
+                "worker_loop_wedged_detected": worker.get("loop_wedged_detected"),
+                "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
+                "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
+                "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
                 "email": email["status"],
                 "email_last_seen_s": email["age_s"],
                 "email_alert": email.get("alert"),

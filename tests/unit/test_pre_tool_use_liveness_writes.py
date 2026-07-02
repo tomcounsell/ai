@@ -92,6 +92,35 @@ def test_pre_tool_use_sets_current_tool_name(liveness_session):
     assert refreshed[0].last_tool_use_at is not None
 
 
+def test_budget_check_allows_and_liveness_still_fires(liveness_session, monkeypatch):
+    """Issue #1821 (Fix #6): the SDK PreToolUse hook gained a per-tool budget
+    check at the TOP. For an under-budget session it must be a no-op ALLOW and
+    the #1172 liveness write must still fire — the budget check is a coordinated
+    addition, not a behavior change for the common path.
+    """
+    from agent import tool_budget
+    from agent.hooks.pre_tool_use import pre_tool_use_hook
+
+    # Deterministic, generous cap; the fixture session has tool_call_count=0.
+    monkeypatch.setattr(tool_budget, "MAX_TOOL_CALLS_PER_SESSION", 1000)
+    monkeypatch.setattr(tool_budget, "TOOL_BUDGET_ENABLED", True)
+    _reset_cooldown()
+
+    result = asyncio.run(
+        pre_tool_use_hook(
+            input_data={"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}},
+            tool_use_id="budget-allow-1",
+            context=None,
+        )
+    )
+
+    # Budget allowed (no block) and the liveness field still landed.
+    assert "decision" not in result
+    refreshed = AgentSession.query.filter(session_id=liveness_session.session_id)
+    assert refreshed[0].current_tool_name == "Read"
+    assert refreshed[0].last_tool_use_at is not None
+
+
 def test_post_tool_use_clears_current_tool_name(liveness_session):
     from agent.hooks.post_tool_use import post_tool_use_hook
     from agent.hooks.pre_tool_use import pre_tool_use_hook

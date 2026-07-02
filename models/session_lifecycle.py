@@ -75,6 +75,7 @@ NON_TERMINAL_STATUSES = frozenset(
         "superseded",
         "paused_circuit",  # paused by api-health-gate when Anthropic circuit is OPEN
         "paused",  # paused mid-execution due to auth/API failure; resumed by session-resume-drip
+        "paused_budget",  # paused by the per-tool budget backstop (#1821); human-only recovery
     }
 )
 
@@ -91,6 +92,13 @@ RECOVERY_OWNERSHIP: dict[str, str] = {
     "superseded": "none",  # transitional; finalized immediately
     "paused_circuit": "bridge-watchdog",  # sustainability.py circuit drip
     "paused": "bridge-watchdog",  # hibernation.py session-resume-drip
+    # paused_budget is a NON-drip status by design (#1821). The per-tool budget
+    # backstop moves a runaway session here; recovery is HUMAN-only. It is
+    # deliberately excluded from session_recovery_drip.run() (which drips only
+    # "paused"/"paused_circuit" back to pending) so no
+    # pending→denied→paused→pending runaway can form — tool_call_count /
+    # total_cost_usd are cumulative and never reset, so an auto-drip would loop.
+    "paused_budget": "human",
 }
 
 # All known statuses

@@ -258,3 +258,22 @@ pattern (an explicit owner reclaims on terminal status) and Go's
 `context.WithDeadline` (a progress-fed deadline, not a wall-clock TTL). These are
 conceptual; the implementation is a stdlib `asyncio` in-memory registry with no
 Popoto model field and no migration — leases are rebuilt fresh on worker restart.
+
+## Status Quo
+
+The on-loop reap pass documented above (`_reap_slot_leases()`) now has a
+bridge-domain complement. Issue #1821 extended it with a lease-snapshot
+publish and a reclaim-request drain, so a bridge-process watchdog can trigger
+a restart-free reclaim from outside the worker loop — the sole reclaim lever
+that still fires under `SLOT_LEASE_REAP_DISABLED=1`, since the drain sits in
+the always-run region ahead of that flag's early return. `registry.reclaim()`
+itself still runs on the worker loop; only the trigger crosses the process
+boundary. See [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md).
+
+## See Also
+
+- [Worker Liveness Recovery](worker-liveness-recovery.md) — the dead-man's-switch
+  beacon this feature's lease registry sits alongside (#1815)
+- [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md) —
+  the bridge-domain reclaim trigger built on top of this registry's reap pass,
+  plus the synchronous per-tool budget (#1821)

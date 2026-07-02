@@ -105,7 +105,7 @@ class AgentSession(Model):
         create_child(): Create a child Eng session.
         create_local(): Create a local CLI session.
 
-    Status values (13 total):
+    Status values (14 total):
         Non-terminal (use transition_status()):
             pending              - Queued, waiting for worker
             running              - Worker picked up, agent executing
@@ -117,6 +117,9 @@ class AgentSession(Model):
                                    resumed by bridge-watchdog sustainability drip
             paused               - Paused mid-execution due to auth/API failure;
                                    resumed by bridge-watchdog session-resume-drip
+            paused_budget        - Paused by the per-tool budget backstop (#1821) when a session
+                                   exhausts its tool-call / cost budget; NON-drip, human-only
+                                   recovery (never re-queued by session-recovery-drip)
 
         Terminal (use finalize_session()):
             completed  - Work finished successfully
@@ -462,6 +465,20 @@ class AgentSession(Model):
     # `data.get("total_cost_usd")` (harness). Never recomputed from token
     # counts — this tracks upstream pricing automatically.
     total_cost_usd = FloatField(default=0.0)
+
+    # === Per-tool budget backstop (issue #1821, Fix #6) ===
+    # Hook-owned deny-surfacing fields set by the PreToolUse budget backstop
+    # (agent/tool_budget.py) when a session exhausts MAX_TOOL_CALLS_PER_SESSION
+    # or SESSION_COST_CAP_USD. Written ONLY by the budget hooks via a narrow
+    # save(update_fields=["budget_tripped", "budget_tripped_reason", ...]) —
+    # NEVER a status write (a hook-driven status write would race the granite
+    # bridge_adapter's partitioned update_fields saves). No other writer touches
+    # these fields, so they are always race-free; the dashboard,
+    # `valor-session status`, and the adapter/worker READ them. Both default
+    # falsy and Popoto is schema-on-read, so existing records need NO data
+    # migration.
+    budget_tripped = Field(default=False)
+    budget_tripped_reason = Field(null=True, default=None)
 
     # === Per-role transport hedge (plan #1842) ===
     # Resolved once at dispatch from config precedence

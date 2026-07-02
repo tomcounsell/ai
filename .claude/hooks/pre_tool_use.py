@@ -191,10 +191,93 @@ def capture_git_baseline_once(hook_input: dict) -> None:
         )
 
 
+def _resolve_cli_session(hook_input: dict):
+    """Resolve the AgentSession for the CLI hook via the sidecar path (#1821).
+
+    Uses the EXACT resolution path ``post_tool_use.py::_update_agent_session``
+    uses: read the per-session sidecar JSON, then ``AgentSession.get_by_id`` on
+    its ``agent_session_id``.
+
+    Returns the session, or ``None`` for a GENUINE no-session (no session_id / no
+    sidecar / no agent_session_id / ``get_by_id`` returns None). RAISES on an
+    infra/resolution error (Redis raised, ``get_by_id`` threw) — the caller
+    catches it for the loud "backstop BLIND" path.
+    """
+    session_id = hook_input.get("session_id", "")
+    if not session_id:
+        return None
+    sidecar = _load_agent_session_sidecar(session_id)
+    agent_session_id = sidecar.get("agent_session_id")
+    if not agent_session_id:
+        return None
+    from models.agent_session import AgentSession
+
+    # get_by_id → None is a genuine no-session (silent allow); a raised
+    # exception propagates to the caller as an infra error.
+    return AgentSession.get_by_id(agent_session_id)
+
+
+def _enforce_tool_budget(hook_input: dict) -> None:
+    """Synchronous per-tool budget backstop for the CLI (granite-PTY) surface (#1821).
+
+    On an over-budget session, prints the deny reason to stderr and
+    ``sys.exit(2)`` (Claude Code's block convention). The ``sys.exit(2)`` raises
+    ``SystemExit`` — NOT an ``Exception`` subclass — so it propagates through
+    ``main()``'s module-level ``except Exception`` wrapper at the bottom of this
+    file and denies the tool. A bug INSIDE this check raises a normal
+    ``Exception`` → caught by that wrapper → logged → exit 0 → fails OPEN. The
+    deny path therefore MUST live inside ``main()`` and MUST NOT be wrapped in a
+    bare ``except``/``except BaseException`` (which would swallow the exit-2).
+
+    Fails OPEN on any resolution/infra error (allow), splitting genuine
+    no-session (silent) from an infra error (loud WARNING +
+    ``resolution_errors`` counter).
+    """
+    # Resolution split: genuine no-session vs infra error. This is a plain
+    # if/try on the RESOLUTION only — it returns normally (allow); it never
+    # intercepts the exit-2 the deny branch raises after a successful resolution.
+    try:
+        session = _resolve_cli_session(hook_input)
+    except Exception as e:
+        try:
+            from agent.tool_budget import _project_key_env, record_resolution_error
+
+            record_resolution_error(_project_key_env(), e, surface="cli-hook")
+        except Exception:
+            print(
+                f"HOOK WARNING: tool-budget backstop BLIND (resolution error): {e}",
+                file=sys.stderr,
+            )
+        return  # fail open
+    if session is None:
+        return  # genuine no-session → silent allow
+
+    # Successful resolution: evaluate + actuate. A bug HERE raises Exception →
+    # swallowed by main()'s module-level wrapper → exit 0 (fail open). The deny
+    # below is sys.exit(2), which propagates (SystemExit is not an Exception).
+    from agent.tool_budget import evaluate_tool_budget, record_budget_trip
+
+    verdict = evaluate_tool_budget(session)
+    if verdict.allow:
+        return
+    # DENY. Surface first (fail-quiet), then block — surfacing NEVER flips it.
+    record_budget_trip(session, verdict)
+    print(f"HOOK BLOCK: {verdict.reason}", file=sys.stderr)
+    sys.exit(2)
+
+
 def main():
     hook_input = read_hook_input()
     if not hook_input:
         return
+
+    # Fix #6 (issue #1821): synchronous per-tool budget backstop. Runs first so
+    # it fires inline even when every background health loop is frozen. A genuine
+    # DENY raises sys.exit(2) (propagates through the module-level wrapper); a
+    # bug inside the check fails OPEN. On an ALLOW this returns and the rest of
+    # main() runs normally — including the #1849 _record_tool_start liveness
+    # write below, which stays intact and firing for every allowed tool call.
+    _enforce_tool_budget(hook_input)
 
     # Capture git baseline on first tool call (for stop hook comparison)
     capture_git_baseline_once(hook_input)

@@ -516,3 +516,93 @@ class TestCheckAllSessionsModelException:
         assert session.status == "active"
         # Error should have been logged
         assert any("Error handling session" in e for e in logged_errors)
+
+
+# ---------------------------------------------------------------------------
+# Fix #5 (#1821) — check_worker_liveness_and_slots (out-of-domain recovery)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckWorkerLivenessAndSlots:
+    """Unit coverage for the bridge-side out-of-domain worker liveness check.
+
+    Focuses on the fail-quiet contract, the loop_wedged detection, and the
+    no-second-killer guarantee. The end-to-end reclaim path lives in
+    tests/integration/test_out_of_domain_reclaim.py.
+    """
+
+    def _host(self):
+        import socket
+
+        return socket.gethostname()
+
+    def _redis(self):
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        return POPOTO_REDIS_DB
+
+    def test_missing_beacon_records_loop_wedged_no_kill(self):
+        import monitoring.session_watchdog as sw
+
+        host = self._host()
+        r = self._redis()
+        r.delete(f"worker:loop_beacon:{host}")
+
+        sw.check_worker_liveness_and_slots()
+
+        val = r.get(f"{host}:worker-watchdog:loop_wedged_detected")
+        assert val is not None and int(val) >= 1
+        # No kill — the critical worker-recovery key must never be written here.
+        assert r.get(f"worker:watchdog:critical:{host}") is None
+
+    def test_malformed_beacon_json_is_fail_quiet(self):
+        import monitoring.session_watchdog as sw
+
+        host = self._host()
+        r = self._redis()
+        r.set(f"worker:loop_beacon:{host}", "not-json{", ex=90)
+
+        # Must not raise — malformed beacon logs + records wedged, never propagates.
+        sw.check_worker_liveness_and_slots()
+
+        val = r.get(f"{host}:worker-watchdog:loop_wedged_detected")
+        assert val is not None and int(val) >= 1
+
+    def test_fresh_unarmed_beacon_is_noop(self):
+        import monitoring.session_watchdog as sw
+
+        host = self._host()
+        r = self._redis()
+        r.set(
+            f"worker:loop_beacon:{host}",
+            json.dumps({"wall_ts": time.time(), "loop_beacon_age_s": None, "armed": False}),
+            ex=90,
+        )
+        r.delete(f"{host}:worker-watchdog:loop_wedged_detected")
+
+        sw.check_worker_liveness_and_slots()
+
+        # Unarmed fresh beacon is never wedged and pushes nothing.
+        assert r.get(f"{host}:worker-watchdog:loop_wedged_detected") is None
+        assert r.llen(f"worker:slot:reclaim_requests:{host}") == 0
+
+    def test_redis_error_never_propagates(self, monkeypatch):
+        import monitoring.session_watchdog as sw
+
+        class _Boom:
+            def get(self, *a, **k):
+                raise RuntimeError("redis down")
+
+        monkeypatch.setattr("popoto.redis_db.POPOTO_REDIS_DB", _Boom())
+        # Must not raise despite the Redis client throwing on every read.
+        sw.check_worker_liveness_and_slots()
+
+    def test_no_kill_tokens_in_function_source(self):
+        """Structural guard: the function body issues no process-kill of any kind."""
+        import inspect
+
+        import monitoring.session_watchdog as sw
+
+        src = inspect.getsource(sw.check_worker_liveness_and_slots)
+        for token in ("os.kill", "launchctl", "SIGKILL", "SIGABRT", "watchdog:critical"):
+            assert token not in src, f"no-second-killer violation: {token!r} present"
