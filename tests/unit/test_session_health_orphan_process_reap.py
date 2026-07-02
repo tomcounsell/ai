@@ -450,15 +450,70 @@ class TestStalePrintOneshotFastKill:
         proc.terminate.assert_not_called()
 
     def test_interactive_bare_claude_not_matched_by_oneshot_signature(self, clean_state):
-        """Bare `claude` WITHOUT --print (interactive) never matches fast-kill."""
+        """Bare `claude` WITHOUT --print (interactive) never matches fast-kill.
+
+        The `_is_stale_print_oneshot` helper itself stays narrow to --print/-p
+        one-shots regardless of the broadened `_CLAUDE_CMDLINE_RE` (D2, issue
+        #1817, below) — the two matchers are deliberately disjoint.
+        """
+        assert not session_health._is_stale_print_oneshot(_BARE_INTERACTIVE_CMD, _stale_ct())
+
+    def test_interactive_bare_claude_with_live_session_not_reaped(self, clean_state):
+        """A PTY TUI `claude` process with a fresh owning session is protected.
+
+        D2 (issue #1817) broadened `_CLAUDE_CMDLINE_RE` to also match this
+        native/PTY-TUI cmdline shape (previously only the SDK-bundled path
+        matched, so an orphaned PTY child was invisible to the reaper). The
+        broadened match now goes through the general is_claude branch, which
+        (unlike the oneshot fast-kill path) is still heartbeat-gated — a
+        live session protects the process exactly like any other claude
+        signature match.
+        """
         proc = _fake_proc(pid=2102, ppid=1, cmdline=_BARE_INTERACTIVE_CMD, create_time=_stale_ct())
+        live_session = SimpleNamespace(
+            project_key="proj-pty",
+            status="running",
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=10),
+            claude_pid=2102,
+        )
+
+        with patch.object(psutil, "process_iter", return_value=[proc]):
+            with patch.object(
+                session_health.AgentSession, "find_by_claude_pid", return_value=live_session
+            ):
+                killed = session_health._reap_orphan_session_processes()
+
+        assert killed == 0
+        proc.terminate.assert_not_called()
+
+    def test_interactive_bare_claude_without_session_is_reaped(self, clean_state):
+        """An orphaned PTY TUI `claude` process (no owning session) IS reaped.
+
+        This is the D2 fix in action: before broadening, this cmdline shape
+        never matched any signature, so a PTY child of a dead/crashed
+        session ran forever, ungated. Now it matches the general is_claude
+        signature and — with no live session found and PPID==1 — is reaped
+        through the normal (heartbeat-gated, non-fast-kill) path.
+        """
+        proc = _fake_proc(pid=2103, ppid=1, cmdline=_BARE_INTERACTIVE_CMD, create_time=_stale_ct())
 
         with patch.object(psutil, "process_iter", return_value=[proc]):
             with patch.object(session_health.AgentSession, "find_by_claude_pid", return_value=None):
                 killed = session_health._reap_orphan_session_processes()
 
-        assert killed == 0
-        proc.terminate.assert_not_called()
+        assert killed == 1
+        proc.terminate.assert_called_once()
+
+    def test_headless_oneshot_never_matched_by_broadened_claude_signature(self, clean_state):
+        """A headless `claude -p` one-shot must NOT match the broadened
+        PTY-TUI alternative of `_CLAUDE_CMDLINE_RE` — only the separate,
+        age-gated `_is_stale_print_oneshot` matcher governs it (D2, issue
+        #1817). Both shapes carry `--permission-mode bypassPermissions`;
+        the only structural difference is `-p`/`--print`, which the
+        broadened regex's negative lookaheads must exclude.
+        """
+        cmdline_str = " ".join(_BARE_ONESHOT_CMD)
+        assert not session_health._CLAUDE_CMDLINE_RE.search(cmdline_str)
 
     def test_worker_cmdline_never_matches_oneshot_signature(self, clean_state):
         """`python -m worker --print-anything` can't match: argv[0] is not claude."""

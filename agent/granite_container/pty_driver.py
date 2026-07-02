@@ -137,6 +137,60 @@ QUIESCENCE_S = 2.0
 # with spaces (`Esc to cancel`); \s* matches both forms.
 OVERLAY_BAR = re.compile(r"esc\s*to\s*cancel", re.IGNORECASE)
 
+# === D1b: startup contract-check golden samples (issue #1817) ===
+#
+# Fingerprint check, not a live TUI spawn: a real `claude` PTY dry-spawn was
+# considered and rejected for the startup gate — it risks the same macOS
+# TCC/TTY hang the existing `claude -p` harness smoke test already guards
+# against under launchd (see `worker/__main__.py`'s VALOR_LAUNCHD-gated
+# `verify_harness_health` call), and costs several seconds on every worker
+# boot. Instead, each golden sample below is a literal reproduction of ACTUAL
+# observed CLI output already documented in this module's comments (IDLE_BAR,
+# SPINNER_EVIDENCE_RE above) and in `startup_parser.py` (trust-folder). The
+# contract-check (`verify_tui_marker_contract`) re-runs each marker regex
+# against its golden sample at worker startup: a mismatch means a code
+# refactor silently broke the marker (this repo's own regression), which is a
+# DIFFERENT failure mode than "the installed claude CLI's actual TUI output
+# drifted" (that's what D1a's version pin + a human re-verification pass
+# after a version bump covers — see docs/features/deployment.md).
+_CONTRACT_GOLDEN_SAMPLES: dict[str, str] = {
+    "IDLE_BAR": "  bypass permissions  ",
+    "PROMPT_GLYPH": "❯ ",
+    "SPINNER_EVIDENCE_RE": "✻ Sprouting… (esc to interrupt)",
+    "TRUST_FOLDER_PROMPT": "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder",
+}
+
+
+def verify_tui_marker_contract() -> tuple[bool, list[str]]:
+    """D1b (issue #1817): confirm the PTY driver's scraped TUI markers still
+    recognize their golden (known-good) sample text.
+
+    Checks IDLE_BAR, PROMPT_GLYPH, SPINNER_EVIDENCE_RE (this module) and the
+    trust-folder prompt pattern (`agent.granite_container.startup_parser`).
+    Returns ``(ok, failed_marker_names)`` — ``ok`` is True only when every
+    marker matches its golden sample. Never raises; a missing/broken import
+    is reported as a failed marker rather than propagating, so a startup
+    caller can decide how to react (see `worker/__main__.py`).
+    """
+    from agent.granite_container.startup_parser import StartupEvent, parse_startup_frame
+
+    failed: list[str] = []
+    if not IDLE_BAR.search(_CONTRACT_GOLDEN_SAMPLES["IDLE_BAR"]):
+        failed.append("IDLE_BAR")
+    if not PROMPT_GLYPH.search(_CONTRACT_GOLDEN_SAMPLES["PROMPT_GLYPH"]):
+        failed.append("PROMPT_GLYPH")
+    if not SPINNER_EVIDENCE_RE.search(_CONTRACT_GOLDEN_SAMPLES["SPINNER_EVIDENCE_RE"]):
+        failed.append("SPINNER_EVIDENCE_RE")
+    try:
+        match = parse_startup_frame(_CONTRACT_GOLDEN_SAMPLES["TRUST_FOLDER_PROMPT"])
+        if match is None or match.event != StartupEvent.TRUST_FOLDER_PROMPT:
+            failed.append("TRUST_FOLDER_PROMPT")
+    except Exception:
+        failed.append("TRUST_FOLDER_PROMPT")
+
+    return (not failed, failed)
+
+
 # C1: the submit key. Sent as a SEPARATE keystroke after the text body.
 SUBMIT_KEY = b"\r"
 # C1: delay between sending the text body and the submit CR. The TUI's

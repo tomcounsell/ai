@@ -22,6 +22,8 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from config.models import PINNED_CLAUDE_VERSION
+
 PROJECT_DIR = Path(__file__).parent.parent
 DATA_DIR = PROJECT_DIR / "data"
 LAST_RUN_FILE = DATA_DIR / "nightly_tests_last_run.json"
@@ -43,8 +45,10 @@ PYTEST_OLLAMA_TIMEOUT_SECONDS = 900  # 15 minutes for the ollama-backed E2E
 # Version-pinned canary for the ollama-backed granite suite (plan Task 6 /
 # Success Criterion 4). Substrate B launches the REAL ``claude`` binary — a new
 # release is the exact thing that silently breaks production granite, so the
-# nightly run pins the version it validated against and alerts on drift.
-PINNED_CLAUDE_VERSION = "2.1.197"
+# nightly run pins the version it validated against and alerts on drift. The pin
+# (imported at module top) is the SINGLE SOURCE OF TRUTH in config/models.py,
+# shared with the D1a update-time drift check (scripts/update/verify.py); bump
+# it there. Canary provisioning against a not-yet-fleet version: issue #1854.
 
 # TTFT regression gate (issue #1227).
 # Plan target: production 90s, nightly CI 120s (allowing slack for run-to-run noise).
@@ -414,7 +418,7 @@ def claude_canary_alert() -> str | None:
         f"claude version drift (granite ollama canary): pinned "
         f"{PINNED_CLAUDE_VERSION}, live {live}. A new claude release can break "
         f"the granite PTY idle heuristic — re-validate the harness and bump "
-        f"PINNED_CLAUDE_VERSION in scripts/nightly_regression_tests.py."
+        f"PINNED_CLAUDE_VERSION in config/models.py."
     )
 
 

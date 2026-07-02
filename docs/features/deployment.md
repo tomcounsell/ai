@@ -276,6 +276,74 @@ headless harness path on incident:
    idempotent on retried `[/user]` payloads.
 4. No manual flag toggling, no env var changes.
 
+## `claude` CLI Version Pin (D1a, issue #1817)
+
+The live `claude` CLI is installed via the **native installer**:
+`~/.local/bin/claude` is a symlink into
+`~/.local/share/claude/versions/<version>/`. It is not an npm package — it is
+never listed in `scripts/update/npm_tools.py`'s `MANAGED_PACKAGES`, and it
+must stay that way (adding it there would either no-op, since npm doesn't own
+the binary, or force-switch the fleet onto the npm install path, which is not
+how the CLI actually got onto this machine).
+
+The native installer floats `claude` to latest on auto-update. Historically,
+a minor-version bump has reworded the interactive TUI's scraped markers
+(`IDLE_BAR`, `PROMPT_GLYPH`, `SPINNER_EVIDENCE_RE` in
+`agent/granite_container/pty_driver.py`; the trust-folder prompt pattern in
+`agent/granite_container/startup_parser.py`) with no code change on our side
+— a silent, fleet-wide PTY-session hang. Two checks guard against this:
+
+- **D1a (version pin):** `scripts/update/verify.py`'s `check_claude_version_pin()`
+  compares the installed version to `PINNED_CLAUDE_VERSION`. The value has a
+  **single source of truth** in `config/models.py` (default `2.1.198`, env-
+  overridable via `PINNED_CLAUDE_VERSION`), imported by both this D1a check and
+  the #1839 ollama-canary drift alert in
+  `scripts/nightly_regression_tests.py`, and mirrored as a typed catalog entry
+  at `config/settings.py` `Settings.pinned_claude_version`. A drift logs a
+  WARNING by default (non-blocking — a version bump does not necessarily
+  break anything). Provisioning a canary against a not-yet-fleet version is
+  tracked in issue #1854.
+- **D1b (contract-check):** `worker/__main__.py` calls
+  `agent.granite_container.pty_driver.verify_tui_marker_contract()` at
+  startup, which re-runs each scraped-marker regex against a golden sample of
+  known-good CLI output. A mismatch logs CRITICAL — but only hard-fails
+  startup when at least one role is configured `pty`-transport (a fully
+  `headless` fleet is immune to TUI-marker drift by construction; see
+  `docs/features/README.md` for the per-role transport hedge).
+
+Both checks share one enforcement flag, off by default:
+
+```bash
+# Set to "1" to hard-fail /update and worker startup on a detected
+# claude-CLI-contract drift (version pin OR TUI marker mismatch). Off by
+# default — a drift does not necessarily mean anything is actually broken.
+CLAUDE_CONTRACT_CHECK_ENFORCE=1
+```
+
+### Bump procedure
+
+Bumping `PINNED_CLAUDE_VERSION` is a **deliberate** procedure, not something
+to do reflexively on every drift warning:
+
+1. Confirm the new `claude` version is actually installed and stable on at
+   least one machine (`readlink ~/.local/bin/claude`).
+2. Re-verify the D1b scraped markers still match the new version's actual
+   TUI output — run a live PTY session (or the existing granite smoke-test
+   tooling) and confirm idle detection, the trust-folder prompt, and the
+   spinner-evidence heuristic still fire correctly. If any marker's shape
+   changed, update the regex in `pty_driver.py`/`startup_parser.py` FIRST,
+   and update `verify_tui_marker_contract()`'s golden samples to match.
+3. Update the `PINNED_CLAUDE_VERSION` default in `config/models.py` (the single
+   source of truth — `scripts/update/verify.py`, `scripts/nightly_regression_tests.py`,
+   and `config/settings.py` all read it from there) to the new version string.
+4. Note the bump here (version, date, what — if anything — changed in the
+   scraped markers):
+
+   | Version | Date | Notes |
+   |---|---|---|
+   | 2.1.197 | 2026-07-02 | Initial pin (issue #1817) |
+   | 2.1.198 | 2026-07-03 | Single-sourced the pin in `config/models.py` (shared with the #1839 nightly canary); default set to the current fleet version. Markers unchanged. |
+
 ## See Also
 
 - Run `/setup` for full machine configuration

@@ -325,8 +325,14 @@ def _record_extraction_error(
                 "project_key": project_key or "",
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # D3 (issue #1817): was silently swallowed. Non-fatal by design
+        # (analytics must never crash extraction) but now observable.
+        logger.debug(
+            "[memory_extraction] record_metric(memory.extraction.error) failed for session %s: %s",
+            session_id,
+            e,
+        )
 
 
 # Extraction prompt for Haiku — structured JSON output
@@ -534,8 +540,15 @@ async def extract_observations_async(
                     )
 
                     generate_title_async(m.memory_id, strip_private(obs_content[:500]))
-                except Exception:
-                    pass
+                except Exception as e:
+                    # D3 (issue #1817): title generation is best-effort — a
+                    # missing title never blocks the memory save — but was
+                    # previously invisible on failure.
+                    logger.debug(
+                        "[memory_extraction] generate_title_async failed for memory %s: %s",
+                        getattr(m, "memory_id", "?"),
+                        e,
+                    )
 
                 saved.append(
                     {
@@ -557,8 +570,13 @@ async def extract_observations_async(
                 float(len(saved)),
                 {"session_id": session_id, "project_key": project_key},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # D3 (issue #1817): was silently swallowed.
+            logger.debug(
+                "[memory_extraction] record_metric(memory.extraction) failed for session %s: %s",
+                session_id,
+                e,
+            )
 
         return saved
 
@@ -788,8 +806,14 @@ async def extract_post_merge_learning(
                 )
 
                 generate_title_async(m.memory_id, strip_private(content_text[:500]))
-            except Exception:
-                pass
+            except Exception as e:
+                # D3 (issue #1817): title generation is best-effort — was
+                # previously invisible on failure.
+                logger.debug(
+                    "[memory_extraction] generate_title_async failed for memory %s: %s",
+                    getattr(m, "memory_id", "?"),
+                    e,
+                )
 
             logger.info(f"[memory_extraction] Post-merge learning saved: {content_text[:100]}")
             return {
@@ -1026,7 +1050,15 @@ def _persist_outcome_metadata(
 
             m.metadata = meta
             m.save()
-        except Exception:
+        except Exception as e:
+            # D3 (issue #1817): was silently swallowed ("fail-silent per
+            # record" is intentional — one bad record must not abort the
+            # rest of the batch — but the failure is now observable).
+            logger.debug(
+                "[memory_extraction] outcome update failed for memory %s: %s",
+                mid,
+                e,
+            )
             continue  # fail-silent per record
 
 

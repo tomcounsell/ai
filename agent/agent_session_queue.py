@@ -807,6 +807,117 @@ def _numsub_count(numsub_result: object, channel: str) -> int:
     return 0
 
 
+# D4 (issue #1817): interval (seconds) for the periodic off-path pubsub
+# liveness watchdog below. Provisional/tunable — balances quick detection of
+# a silently-dropped subscription against probe overhead. Also documented as
+# a typed catalog entry at config/settings.py Settings.notify_healthcheck_interval.
+# Read directly via os.environ here (not through the settings singleton) so
+# a value changed after process startup — e.g. test monkeypatching — takes
+# effect immediately. Override via NOTIFY_HEALTHCHECK_INTERVAL env var.
+NOTIFY_HEALTHCHECK_INTERVAL = float(os.environ.get("NOTIFY_HEALTHCHECK_INTERVAL", "15"))
+
+
+class _ListenerPubsubHandle:
+    """Mutable holder for the current listener thread's LIVE pubsub object.
+
+    Populated by `_listen_in_thread` only AFTER a subscribe is confirmed via
+    the NUMSUB self-check (so the watchdog never touches a pubsub object
+    that's still mid-establishment); cleared before that thread's own
+    teardown begins. Read by `_notify_healthcheck_watchdog` (D4) to
+    force-close a CONFIRMED-dropped subscription so the listener's blocking
+    `listen()` call returns and the outer `while True` loop in
+    `_session_notify_listener` re-subscribes. Never used to touch the
+    `listen()` connection's `socket_timeout=None` — only `.close()` to
+    unblock it.
+    """
+
+    def __init__(self) -> None:
+        self.pubsub = None
+
+
+async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
+    """Periodic OFF-PATH liveness probe for the session-notify subscription.
+
+    D4 (issue #1817). The subscribe-time NUMSUB self-check in
+    `_listen_in_thread` only catches a subscribe that failed to register in
+    the first place. It does NOT catch POST-subscribe drift — a subscription
+    that was fine, then silently drops (e.g. a Redis failover) with no
+    exception on the `listen()` connection, leaving the listener wedged for
+    up to 300s (the existing health backstop in agent/session_health.py)
+    before anything notices (the conceding comment in `_listen_in_thread`'s
+    docstring, above).
+
+    Every NOTIFY_HEALTHCHECK_INTERVAL seconds, this issues `PUBSUB NUMSUB` on
+    a SEPARATE, short-lived Redis connection — NEVER on the `listen()`
+    connection. That connection's `socket_timeout=None` MUST stay
+    unconditional: a finite timeout there previously caused spurious
+    "Timeout reading from socket" exceptions and a 10s reconnect cycle that
+    DROPPED notifications published during the dead window (see
+    `_listen_in_thread`'s docstring). This watchdog's own probe connection
+    uses a short finite timeout — that is fine, because it is a disposable
+    connection used for one NUMSUB call, never the persistent listen()
+    connection.
+
+    On a CONFIRMED NUMSUB==0 for valor:sessions:new, logs a WARNING and
+    force-closes the listener's pubsub handle so its blocking `listen()`
+    call returns, letting the outer while-True loop re-subscribe. A
+    transient probe error (Redis briefly unreachable) is logged at WARNING
+    and the tick is skipped — it must NOT tear down a healthy listener on a
+    probe-side failure, only on a CONFIRMED drop.
+    """
+    while True:
+        await asyncio.sleep(NOTIFY_HEALTHCHECK_INTERVAL)
+
+        try:
+            import redis as _redis
+            from popoto.redis_db import POPOTO_REDIS_DB
+
+            kw = POPOTO_REDIS_DB.connection_pool.connection_kwargs
+            probe_conn = _redis.Redis(
+                host=kw.get("host", "localhost"),
+                port=kw.get("port", 6379),
+                db=kw.get("db", 0),
+                username=kw.get("username"),
+                password=kw.get("password"),
+                decode_responses=kw.get("decode_responses", False),
+                # Short-lived probe connection ONLY — never the listen()
+                # connection, whose socket_timeout=None is load-bearing.
+                socket_timeout=5,
+            )
+            try:
+                numsub_result = probe_conn.pubsub_numsub("valor:sessions:new")
+                count = _numsub_count(numsub_result, "valor:sessions:new")
+            finally:
+                try:
+                    probe_conn.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(
+                "Session notify healthcheck: NUMSUB probe raised (skipping "
+                "this tick, NOT tearing down the listener): %s",
+                e,
+            )
+            continue
+
+        if count == 0:
+            logger.warning(
+                "Session notify healthcheck: NUMSUB confirmed 0 for "
+                "valor:sessions:new — notify subscription dropped, forcing "
+                "resubscribe"
+            )
+            pubsub = handle.pubsub
+            if pubsub is not None:
+                try:
+                    pubsub.close()
+                except Exception as close_err:
+                    logger.debug(
+                        "Session notify healthcheck: pubsub.close() during "
+                        "forced resubscribe raised (non-fatal): %s",
+                        close_err,
+                    )
+
+
 async def _session_notify_listener() -> None:
     """Subscribe to valor:sessions:new and wake the worker on new sessions.
 
@@ -816,10 +927,17 @@ async def _session_notify_listener() -> None:
     Uses a queue to bridge the blocking pubsub.listen() thread and the asyncio
     event loop: the background thread puts chat_ids onto the queue, and the
     coroutine awaits them and calls _ensure_worker / sets the event.
+
+    D4 (issue #1817): alongside the blocking listener thread, each iteration
+    also runs `_notify_healthcheck_watchdog` — a periodic off-path liveness
+    probe that detects a POST-subscribe drop and forces a resubscribe. The
+    watchdog task is held (not fire-and-forget) and cancelled in `finally`
+    every iteration so it never outlives its listener generation.
     """
     while True:
         notify_queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
+        pubsub_handle = _ListenerPubsubHandle()
 
         def _listen_in_thread() -> None:
             """Blocking loop that drains pubsub and forwards chat_ids to the queue.
@@ -853,6 +971,17 @@ async def _session_notify_listener() -> None:
                     username=kw.get("username"),
                     password=kw.get("password"),
                     decode_responses=kw.get("decode_responses", False),
+                    # KEEP socket_timeout=None. Do NOT "helpfully" add a finite
+                    # timeout here (see this function's docstring, above): a
+                    # finite timeout on THIS connection previously caused
+                    # spurious "Timeout reading from socket" exceptions and a
+                    # 10s reconnect cycle that dropped notifications published
+                    # during the dead window. D4 (issue #1817) added a
+                    # SEPARATE periodic watchdog (`_notify_healthcheck_watchdog`)
+                    # that probes liveness on its OWN short-lived connection
+                    # instead of touching this one — that is the sanctioned way
+                    # to add periodic liveness checking without reintroducing
+                    # the reverted finite-timeout bug.
                     socket_timeout=None,
                     socket_connect_timeout=None,
                 )
@@ -898,6 +1027,11 @@ async def _session_notify_listener() -> None:
                     # Fall through to the existing finally teardown; the outer while True
                     # loop will re-subscribe after its 5s backoff.
                     return
+                # D4 (issue #1817): publish the confirmed-live pubsub object to
+                # the shared handle only NOW — after the NUMSUB self-check
+                # passed — so the healthcheck watchdog never force-closes a
+                # subscription that's still mid-establishment.
+                pubsub_handle.pubsub = pubsub
                 for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
@@ -920,6 +1054,9 @@ async def _session_notify_listener() -> None:
             except Exception as e:
                 logger.warning("Session notify listener thread error: %s", e)
             finally:
+                # D4: clear the shared handle FIRST so the watchdog never
+                # races this thread's own teardown below.
+                pubsub_handle.pubsub = None
                 # Teardown in order: unsubscribe → close pubsub → close connection
                 # This prevents dangling Redis subscribers on reconnect cycles.
                 if pubsub is not None:
@@ -939,6 +1076,10 @@ async def _session_notify_listener() -> None:
                 # Signal the coroutine side to restart
                 loop.call_soon_threadsafe(notify_queue.put_nowait, None)
 
+        # D4: the healthcheck watchdog runs for this listener generation only.
+        # Held (not fire-and-forget) and cancelled in `finally` below so it
+        # can never outlive the listener thread it's watching.
+        watchdog_task = asyncio.create_task(_notify_healthcheck_watchdog(pubsub_handle))
         try:
             # Run the blocking pubsub loop in a thread; process results here
             listener_future = asyncio.to_thread(_listen_in_thread)
@@ -963,6 +1104,12 @@ async def _session_notify_listener() -> None:
 
         except Exception as e:
             logger.warning("Session notify listener error: %s. Retrying in 5s...", e)
+        finally:
+            watchdog_task.cancel()
+            try:
+                await watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         await asyncio.sleep(5)
 

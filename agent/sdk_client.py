@@ -1891,7 +1891,19 @@ class ValorAgent:
                 session_id,
                 query_timeout,
             )
-            asyncio.ensure_future(circuit.record_failure(TimeoutError("query timeout")))
+            # Awaited directly (D3, issue #1817) instead of fire-and-forget
+            # `asyncio.ensure_future` — a Redis write failure here used to
+            # vanish silently (the circuit breaker never trips). Wrapped so a
+            # failure to RECORD the failure can't mask the real TimeoutError.
+            try:
+                await circuit.record_failure(TimeoutError("query timeout"))
+            except Exception as breaker_exc:
+                logger.warning(
+                    "[circuit-breaker] record_failure raised — breaker may not "
+                    "trip for session %s: %s",
+                    session_id,
+                    breaker_exc,
+                )
             raise
 
         except asyncio.CancelledError:
@@ -1905,8 +1917,20 @@ class ValorAgent:
             raise
 
         except Exception as e:
-            # Record failure for circuit breaker
-            asyncio.ensure_future(circuit.record_failure(e))
+            # Record failure for circuit breaker. Awaited directly (D3, issue
+            # #1817) — a fire-and-forget `ensure_future` here meant a Redis
+            # write failure while RECORDING this very failure was invisible,
+            # so the breaker silently never tripped. Guarded so a breaker
+            # write failure can't mask the original exception `e`.
+            try:
+                await circuit.record_failure(e)
+            except Exception as breaker_exc:
+                logger.warning(
+                    "[circuit-breaker] record_failure raised — breaker may not "
+                    "trip for session %s: %s",
+                    session_id,
+                    breaker_exc,
+                )
 
             error_str = str(e)
             init_elapsed = time.time() - init_start
@@ -1971,8 +1995,17 @@ class ValorAgent:
             raise
 
         else:
-            # Query succeeded — record success for circuit breaker
-            asyncio.ensure_future(circuit.record_success())
+            # Query succeeded — record success for circuit breaker. Awaited
+            # directly (D3, issue #1817); see the `record_failure` sites above
+            # for why fire-and-forget hid Redis write failures.
+            try:
+                await circuit.record_success()
+            except Exception as breaker_exc:
+                logger.warning(
+                    "[circuit-breaker] record_success raised for session %s: %s",
+                    session_id,
+                    breaker_exc,
+                )
 
         finally:
             # Always unregister client from registry

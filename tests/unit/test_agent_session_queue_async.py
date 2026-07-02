@@ -454,3 +454,173 @@ class TestNumsubCount:
 
     def test_empty_dict_returns_zero(self):
         assert self.fn({}, self.ch) == 0
+
+
+class TestNotifyHealthcheckWatchdog:
+    """Unit tests for the D4 periodic off-path pubsub liveness watchdog (#1817).
+
+    `_notify_healthcheck_watchdog` runs alongside `_session_notify_listener`'s
+    blocking pubsub thread and probes NUMSUB on a SEPARATE short-lived Redis
+    connection every NOTIFY_HEALTHCHECK_INTERVAL seconds. These tests drive
+    the watchdog directly (not through the full listener) so timing is fast
+    and deterministic; the listener's own subscribe/resubscribe machinery is
+    covered by TestNotifyListenerNusubSelfCheck above.
+    """
+
+    def _run_watchdog_ticks(self, handle, numsub_side_effect, interval=0.05, ticks=1):
+        """Run _notify_healthcheck_watchdog for `ticks` probe cycles then cancel."""
+        import redis as _redis_module
+
+        from agent.agent_session_queue import _notify_healthcheck_watchdog
+
+        mock_probe_conn = MagicMock()
+        mock_probe_conn.pubsub_numsub.side_effect = numsub_side_effect
+
+        mock_popoto = MagicMock()
+        mock_popoto.connection_pool.connection_kwargs = {
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+        }
+
+        async def run():
+            with (
+                patch("agent.agent_session_queue.NOTIFY_HEALTHCHECK_INTERVAL", interval),
+                patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto),
+                patch.object(_redis_module, "Redis", return_value=mock_probe_conn),
+            ):
+                task = asyncio.create_task(_notify_healthcheck_watchdog(handle))
+                await asyncio.sleep(interval * (ticks + 2))
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+        return mock_probe_conn
+
+    def test_confirmed_drop_closes_handle_pubsub_and_warns(self, caplog):
+        """A CONFIRMED NUMSUB==0 forces a resubscribe: closes the handle's
+        pubsub and logs a WARNING — within NOTIFY_HEALTHCHECK_INTERVAL."""
+        import logging
+
+        from agent.agent_session_queue import _ListenerPubsubHandle
+
+        handle = _ListenerPubsubHandle()
+        mock_pubsub = MagicMock()
+        handle.pubsub = mock_pubsub
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            self._run_watchdog_ticks(
+                handle, numsub_side_effect=lambda *a, **k: [(b"valor:sessions:new", 0)]
+            )
+
+        mock_pubsub.close.assert_called()
+        assert any("notify subscription dropped" in r.getMessage() for r in caplog.records), (
+            "Expected a WARNING announcing the forced resubscribe"
+        )
+
+    def test_healthy_subscription_does_not_close_pubsub(self):
+        """NUMSUB >= 1 (healthy) must never close the listener's pubsub."""
+        from agent.agent_session_queue import _ListenerPubsubHandle
+
+        handle = _ListenerPubsubHandle()
+        mock_pubsub = MagicMock()
+        handle.pubsub = mock_pubsub
+
+        self._run_watchdog_ticks(
+            handle, numsub_side_effect=lambda *a, **k: [(b"valor:sessions:new", 1)]
+        )
+
+        mock_pubsub.close.assert_not_called()
+
+    def test_transient_probe_error_does_not_tear_down_listener(self, caplog):
+        """A probe-side exception (Redis transiently unreachable) must be
+        logged and skipped — it must NOT close the listener's pubsub."""
+        import logging
+
+        from agent.agent_session_queue import _ListenerPubsubHandle
+
+        handle = _ListenerPubsubHandle()
+        mock_pubsub = MagicMock()
+        handle.pubsub = mock_pubsub
+
+        with caplog.at_level(logging.WARNING, logger="agent.agent_session_queue"):
+            self._run_watchdog_ticks(handle, numsub_side_effect=RuntimeError("redis unreachable"))
+
+        mock_pubsub.close.assert_not_called()
+        assert any("NUMSUB probe raised" in r.getMessage() for r in caplog.records)
+
+    def test_handle_with_no_pubsub_yet_does_not_crash_on_drop(self):
+        """A confirmed drop before the listener has published its pubsub
+        (handle.pubsub is still None, e.g. mid-establishment) must not raise."""
+        from agent.agent_session_queue import _ListenerPubsubHandle
+
+        handle = _ListenerPubsubHandle()
+        assert handle.pubsub is None
+
+        # Must not raise.
+        self._run_watchdog_ticks(
+            handle, numsub_side_effect=lambda *a, **k: [(b"valor:sessions:new", 0)]
+        )
+
+
+class TestNotifyListenerPreservesNoneSocketTimeout:
+    """D4 (issue #1817): the listen() connection's socket_timeout=None must
+    stay unconditional — a finite timeout there was already tried and
+    reverted (spurious "Timeout reading from socket" + a dropped-notification
+    window). This guards against a future regression reintroducing one."""
+
+    def test_listener_connection_uses_socket_timeout_none(self):
+        import json
+
+        import redis as _redis_module
+
+        from agent.agent_session_queue import _session_notify_listener
+
+        mock_pubsub = MagicMock()
+        mock_pubsub.listen.return_value = iter([])
+
+        mock_conn = MagicMock()
+        mock_conn.pubsub.return_value = mock_pubsub
+        mock_conn.pubsub_numsub.return_value = [(b"valor:sessions:new", 1)]
+
+        mock_popoto = MagicMock()
+        mock_popoto.connection_pool.connection_kwargs = {
+            "host": "localhost",
+            "port": 6379,
+            "db": 0,
+        }
+
+        redis_calls = []
+
+        def _redis_ctor(*args, **kwargs):
+            redis_calls.append(kwargs)
+            return mock_conn
+
+        async def run():
+            with (
+                patch("popoto.redis_db.POPOTO_REDIS_DB", mock_popoto),
+                patch("agent.agent_session_queue.json", wraps=json),
+                patch.object(_redis_module, "Redis", side_effect=_redis_ctor),
+                patch("time.sleep"),
+            ):
+                task = asyncio.create_task(_session_notify_listener())
+                await asyncio.sleep(0.2)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        asyncio.run(run())
+
+        assert redis_calls, "Expected at least one Redis connection constructed"
+        listener_calls = [c for c in redis_calls if c.get("socket_timeout") is None]
+        assert listener_calls, (
+            "The listen() connection must be constructed with socket_timeout=None "
+            "— this was reverted once already after causing spurious timeouts "
+            "and a dropped-notification window; do not reintroduce a finite "
+            "timeout here."
+        )
