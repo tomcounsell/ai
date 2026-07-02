@@ -278,7 +278,7 @@ def _resolver_project_config(key: str) -> dict:
 
 
 class TestResolverUnavailable:
-    """A ResolverUnavailable from resolve_customer() must never be treated as
+    """A ResolverUnavailableError from resolve_customer() must never be treated as
     "not a customer" — the message is left unseen (un-marked) so the next
     IMAP poll retries it, and a PERSISTENTLY unavailable resolver arms the
     email:resolver_unavailable operator alert (cleared on the first
@@ -290,7 +290,7 @@ class TestResolverUnavailable:
 
         import bridge.routing as routing
         from bridge.email_bridge import _process_inbound_email
-        from bridge.routing import ResolverUnavailable
+        from bridge.routing import ResolverUnavailableError
 
         project_key = "cs-unavailable"
         project = _resolver_project_config(project_key)
@@ -312,7 +312,7 @@ class TestResolverUnavailable:
                 patch("bridge.email_bridge._get_redis", return_value=test_r),
                 patch(
                     "bridge.routing.resolve_customer",
-                    AsyncMock(side_effect=ResolverUnavailable("token expired")),
+                    AsyncMock(side_effect=ResolverUnavailableError("token expired")),
                 ),
                 patch("bridge.email_bridge._unmark_seen", mock_unmark),
                 caplog.at_level(logging.WARNING),
@@ -349,7 +349,7 @@ class TestResolverUnavailable:
             REDIS_RESOLVER_UNAVAILABLE_KEY,
             _process_inbound_email,
         )
-        from bridge.routing import ResolverUnavailable
+        from bridge.routing import ResolverUnavailableError
 
         project_key = "cs-persistent"
         project = _resolver_project_config(project_key)
@@ -372,7 +372,7 @@ class TestResolverUnavailable:
                 patch("bridge.routing._get_redis", return_value=test_r),
                 patch(
                     "bridge.routing.resolve_customer",
-                    AsyncMock(side_effect=ResolverUnavailable("token expired")),
+                    AsyncMock(side_effect=ResolverUnavailableError("token expired")),
                 ),
                 patch("bridge.email_bridge._unmark_seen", AsyncMock()),
             ):

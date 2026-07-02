@@ -4,11 +4,11 @@ Tests cover:
 - Subprocess form dispatch (argv, not shell)
 - Importlib callable form dispatch
 - Redis cache hit/miss/cached-None
-- Raise ResolverUnavailable (not return None) on infrastructure error (issue #1817 A2)
+- Raise ResolverUnavailableError (not return None) on infrastructure error (issue #1817 A2)
 - Failure counter increments
 - valor-retry label STORE attempted on failure
 - Sender pre-validation
-- Output sanitization (multi-line, garbage rejection) raises ResolverUnavailable
+- Output sanitization (multi-line, garbage rejection) raises ResolverUnavailableError
 - Success clears both the failure counter and any armed resolver_unavailable alert
 """
 
@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from bridge.routing import (
-    ResolverUnavailable,
+    ResolverUnavailableError,
     get_resolver_failure_count,
     invalidate_customer_cache,
     resolve_customer,
@@ -171,7 +171,7 @@ async def test_resolve_customer_subprocess_whitespace_is_none():
 @pytest.mark.asyncio
 async def test_resolve_customer_subprocess_multiline_is_garbage():
     """Subprocess printing multi-line output (e.g. warnings + id) is an
-    infrastructure failure — raises ResolverUnavailable, NOT "not a
+    infrastructure failure — raises ResolverUnavailableError, NOT "not a
     customer" (issue #1817 A2). Failure counter is still incremented."""
     project = _project(
         resolver={
@@ -183,7 +183,7 @@ async def test_resolve_customer_subprocess_multiline_is_garbage():
     mock_r.get.return_value = None
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        with pytest.raises(ResolverUnavailable):
+        with pytest.raises(ResolverUnavailableError):
             await resolve_customer("user@example.com", project)
 
     mock_r.incr.assert_called_once()
@@ -192,7 +192,7 @@ async def test_resolve_customer_subprocess_multiline_is_garbage():
 @pytest.mark.asyncio
 async def test_resolve_customer_subprocess_html_garbage_is_rejected():
     """HTML or other garbage output is an infrastructure failure — raises
-    ResolverUnavailable (issue #1817 A2)."""
+    ResolverUnavailableError (issue #1817 A2)."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -203,7 +203,7 @@ async def test_resolve_customer_subprocess_html_garbage_is_rejected():
     mock_r.get.return_value = None
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        with pytest.raises(ResolverUnavailable):
+        with pytest.raises(ResolverUnavailableError):
             await resolve_customer("user@example.com", project)
 
     mock_r.incr.assert_called_once()
@@ -217,7 +217,7 @@ async def test_resolve_customer_subprocess_html_garbage_is_rejected():
 @pytest.mark.asyncio
 async def test_resolve_customer_timeout_increments_failure_counter():
     """Subprocess timeout increments failure counter and raises
-    ResolverUnavailable (issue #1817 A2) — a timeout is not "not a customer"."""
+    ResolverUnavailableError (issue #1817 A2) — a timeout is not "not a customer"."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -229,7 +229,7 @@ async def test_resolve_customer_timeout_increments_failure_counter():
     mock_r.get.return_value = None
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        with pytest.raises(ResolverUnavailable):
+        with pytest.raises(ResolverUnavailableError):
             await resolve_customer("user@example.com", project)
 
     mock_r.incr.assert_called_once()
@@ -238,7 +238,7 @@ async def test_resolve_customer_timeout_increments_failure_counter():
 @pytest.mark.asyncio
 async def test_resolve_customer_failure_attempts_valor_retry_label():
     """On subprocess failure, valor-retry IMAP label is attempted when conn+uid
-    provided, and ResolverUnavailable is raised (issue #1817 A2)."""
+    provided, and ResolverUnavailableError is raised (issue #1817 A2)."""
     project = _project(
         resolver={
             "type": "subprocess",
@@ -250,7 +250,7 @@ async def test_resolve_customer_failure_attempts_valor_retry_label():
     mock_imap_conn = MagicMock()
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        with pytest.raises(ResolverUnavailable):
+        with pytest.raises(ResolverUnavailableError):
             await resolve_customer(
                 "user@example.com", project, imap_conn=mock_imap_conn, imap_uid=b"42"
             )
@@ -260,7 +260,7 @@ async def test_resolve_customer_failure_attempts_valor_retry_label():
 
 @pytest.mark.asyncio
 async def test_resolve_customer_valor_retry_label_failure_is_nonfatal():
-    """If the IMAP STORE errors, the failure is logged but ResolverUnavailable
+    """If the IMAP STORE errors, the failure is logged but ResolverUnavailableError
     is still raised (issue #1817 A2)."""
     project = _project(resolver={"type": "subprocess", "command": ["sh", "-c", "exit 1"]})
     mock_r = MagicMock()
@@ -269,7 +269,7 @@ async def test_resolve_customer_valor_retry_label_failure_is_nonfatal():
     mock_imap_conn.uid.side_effect = Exception("IMAP store error")
 
     with patch("bridge.routing._get_redis", return_value=mock_r):
-        with pytest.raises(ResolverUnavailable):
+        with pytest.raises(ResolverUnavailableError):
             await resolve_customer(
                 "user@example.com", project, imap_conn=mock_imap_conn, imap_uid=b"42"
             )

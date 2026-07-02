@@ -1449,7 +1449,7 @@ def _get_redis():
     return redis.Redis.from_url(redis_url, decode_responses=False)
 
 
-class ResolverUnavailable(Exception):
+class ResolverUnavailableError(Exception):
     """Raised by resolve_customer() when the resolver could not run to
     completion due to an infrastructure error (subprocess/callable dispatch
     failure, expired OAuth token, gws error, malformed output, etc.).
@@ -1498,7 +1498,7 @@ async def resolve_customer(
     4. Dispatch subprocess (argv form) or importlib callable.
     5. On dispatch error (infra failure — subprocess/callable crash, timeout,
        malformed output): increment resolver:failures:{project_key}, attempt
-       valor-retry IMAP label (best-effort), then RAISE ResolverUnavailable.
+       valor-retry IMAP label (best-effort), then RAISE ResolverUnavailableError.
        This is NOT a "not a customer" result — the caller must retry, never
        silently drop (issue #1817 A2).
     6. On a successful dispatch (customer found OR definitively not a
@@ -1517,7 +1517,7 @@ async def resolve_customer(
         determined the sender is not a customer.
 
     Raises:
-        ResolverUnavailable: If the resolver dispatch failed (infrastructure
+        ResolverUnavailableError: If the resolver dispatch failed (infrastructure
             error) — the sender's customer status could not be determined.
     """
     resolver_config = project_config.get("customer_resolver")
@@ -1581,7 +1581,7 @@ async def resolve_customer(
     if dispatch_error is not None:
         logger.error(f"[resolver] Dispatch failed for {sender!r}: {dispatch_error}")
         _on_resolver_failure(project_key, imap_conn, imap_uid, r)
-        raise ResolverUnavailable(
+        raise ResolverUnavailableError(
             f"Resolver dispatch failed for project={project_key!r} sender={sender!r}: "
             f"{dispatch_error}"
         ) from dispatch_error

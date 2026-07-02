@@ -1185,7 +1185,7 @@ def _unmark_seen_sync(imap_config: dict, uid: bytes) -> None:
 async def _unmark_seen(imap_config: dict, uid: bytes) -> None:
     """Restore the \\Seen flag removal for ``uid`` so the next IMAP poll retries it.
 
-    Called from the ``ResolverUnavailable`` branch of ``_process_inbound_email``
+    Called from the ``ResolverUnavailableError`` branch of ``_process_inbound_email``
     (issue #1817 A2) — a resolver outage must never permanently drop a
     customer email, and the message is already \\Seen by the time this runs
     (``_fetch_unseen`` marks it before fetch, as a concurrency guard against
@@ -1269,7 +1269,7 @@ async def _process_inbound_email(
     from agent.byob_skill_triggers import infer_requires_real_chrome
     from bridge.routing import (
         ACTIVE_PROJECTS,
-        ResolverUnavailable,
+        ResolverUnavailableError,
         find_project_for_email,
         resolve_customer,
     )
@@ -1301,7 +1301,7 @@ async def _process_inbound_email(
     if project.get("customer_resolver"):
         try:
             customer_id = await resolve_customer(from_addr, project, imap_uid=imap_uid)
-        except ResolverUnavailable as e:
+        except ResolverUnavailableError as e:
             # Infrastructure error (e.g. an expired OAuth token) — this is NOT
             # "not a customer." Leave the message unseen so the next IMAP poll
             # retries it, and track the outage for the operator alert
