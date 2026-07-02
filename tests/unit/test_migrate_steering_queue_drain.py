@@ -95,11 +95,6 @@ def residual_key():
 
 
 @pytest.fixture()
-def clean_key():
-    return b"AgentSession:def456:eng:test-project:completed"
-
-
-@pytest.fixture()
 def index_keys():
     return [
         b"AgentSession:_sorted_set:session_type:eng",
@@ -181,20 +176,51 @@ class TestLiveRun:
 
 
 class TestIdempotency:
-    def test_second_run_finds_nothing_to_migrate(self, clean_key):
-        hash_data = {clean_key: {"session_id": "sess-def456"}}
-        redis_mock = _make_redis([clean_key], hash_data)
+    def test_true_double_run_is_idempotent(self, residual_key):
+        """Two consecutive --apply runs against the same state.
+
+        The first run drains the residual field onto the steering list. The
+        second run sees a genuinely-drained record: it migrates zero and adds
+        no duplicate entries to the list the first run built.
+        """
+        hash_data = {
+            residual_key: {
+                "session_id": "sess-abc123",
+                "queued_steering_messages": json.dumps(["focus on OAuth", "check tests"]),
+            },
+        }
+        redis_mock = _make_redis([residual_key], hash_data)
         popoto_mod = _make_popoto(redis_mock)
-        push_mock = MagicMock()
+
+        # Model the steering list so we can assert its content across both runs.
+        steering_list: list[tuple[str, str]] = []
+
+        def push_side_effect(session_id, text, sender):
+            steering_list.append((session_id, text))
+
+        push_mock = MagicMock(side_effect=push_side_effect)
         mod = _load_module()
 
         with _patched_modules(popoto_mod, push_mock):
-            stats = mod.migrate(apply=True)
+            stats_first = mod.migrate(apply=True)
+            stats_second = mod.migrate(apply=True)
 
-        push_mock.assert_not_called()
-        redis_mock.hdel.assert_not_called()
-        assert stats["drained"] == 0
-        assert stats["already_clean"] == 1
+        expected_list = [
+            ("sess-abc123", "focus on OAuth"),
+            ("sess-abc123", "check tests"),
+        ]
+
+        # First run drained both messages onto the list.
+        assert stats_first["drained"] == 1
+        assert stats_first["messages_migrated"] == 2
+        assert steering_list == expected_list
+
+        # Second run: nothing left to migrate, no duplicate pushes, list unchanged.
+        assert stats_second["drained"] == 0
+        assert stats_second["messages_migrated"] == 0
+        assert stats_second["already_clean"] == 1
+        assert push_mock.call_count == 2  # no additional pushes on the second run
+        assert steering_list == expected_list
 
     def test_empty_list_field_is_cleaned_without_pushing(self, residual_key):
         hash_data = {

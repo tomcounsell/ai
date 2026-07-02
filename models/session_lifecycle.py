@@ -684,6 +684,67 @@ def transition_status(
             pass
 
 
+# Short-TTL SETNX gate protecting ONLY the pending->running acquisition
+# (issue #1817, workstream B2). GRAIN OF SALT for future maintainers:
+#
+# This is a narrow, ADDITIVE gate -- it is not, and must never become, a
+# replacement for the generic optimistic-concurrency CAS inside
+# transition_status() above (the `on_disk_status != current_status` compare).
+# That CAS governs EVERY non-terminal status edge in the system -- paused,
+# superseded, kill, finalize, and this same plan's own C1 fix, which
+# transitions a parent out of waiting_for_children via transition_status().
+# An earlier critique round flagged deleting/replacing that CAS as a
+# BLOCKER: it would strip optimistic-concurrency protection from every
+# other edge, a correctness regression far worse than the bug this claim
+# fixes. Do not delete it, and do not fold this claim's logic into it.
+#
+# Why pending->running specifically needs an extra gate: multiple
+# independent actors (the worker's pop loop, the valor-session CLI resume
+# path, catchup/reflections drip) can each read the SAME pending session
+# and race to become the one that runs it. The run-claim SETNX makes the
+# read-then-transition sequence atomic from the caller's perspective: only
+# the actor that wins the SETNX proceeds to call
+# transition_status(session, "running", ...); the loser skips the
+# candidate entirely. This guarantees at most one actor ever attempts the
+# transition for a given session_id -- the CAS above remains as the
+# second line of defense for the transition the winner performs, and as
+# the ONLY defense for every other status edge.
+RUN_CLAIM_TTL_SECONDS = 30  # short: only needs to cover the query -> transition_status window
+
+
+def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_SECONDS) -> bool:
+    """Atomically claim the right to transition ``session_id`` from pending to running.
+
+    Returns ``True`` if this caller won the claim -- it must proceed to call
+    ``transition_status(session, "running", ...)``. Returns ``False`` if
+    another actor already holds the claim -- the caller must skip this
+    session (a peer is handling it, or already did).
+
+    Backed by a plain (non-Popoto-managed) Redis key
+    ``session:runclaim:{session_id}``, matching the existing ``SET NX``
+    idiom used elsewhere for short-lived coordination locks (see
+    ``agent/session_health.py`` and ``agent/session_pickup.py``). This is
+    NOT a general-purpose lock manager -- it exists solely to gate this one
+    transition.
+
+    Fails OPEN (returns ``True``) on Redis errors: a Redis hiccup degrades
+    to today's CAS-only protection rather than starving the pending queue.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        key = f"session:runclaim:{session_id}"
+        acquired = _R.set(key, worker_id, nx=True, ex=ttl)
+        return bool(acquired)
+    except Exception as e:
+        logger.warning(
+            "[session-lifecycle] run-claim acquisition failed for %s (failing open): %s",
+            session_id,
+            e,
+        )
+        return True
+
+
 def _finalize_parent_sync(
     parent_id: str,
     completing_child_id: str | None = None,

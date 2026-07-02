@@ -13,9 +13,11 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from bridge.dedup import (
+    claim_message,
     is_duplicate_message,
     record_last_processed,
     record_message_processed,
+    release_message_claim,
 )
 from bridge.routing import persona_to_session_type, resolve_persona
 from bridge.silent_stream import SilentStreamState, check_silent_chat
@@ -236,21 +238,47 @@ async def reconcile_once(
                     )
                     session_type = SessionType.ENG
 
-                await enqueue_agent_session_fn(
-                    project_key=project_key,
-                    session_id=session_id,
-                    working_dir=working_dir,
-                    message_text=text,
-                    sender_name=sender_name,
-                    chat_id=str(chat_id),
-                    telegram_message_id=message.id,
-                    chat_title=chat_title,
-                    priority="low",
-                    sender_id=sender_id,
-                    session_type=session_type,
-                    project_config=project,
-                )
+                # Atomic per-message producer claim (issue #1817 B1, BLOCKER):
+                # shared key with the live handler (bridge/dispatch.py) and
+                # bridge/catchup.py so a peer producer racing on this SAME
+                # message loses cleanly instead of double-enqueueing. A lost
+                # claim means a peer already won (or is winning) this message
+                # -- skip WITHOUT recording durable dedup, so a winner-death
+                # self-heals via the next reconciler scan re-picking the
+                # message instead of being silently dropped forever.
+                if not await claim_message(chat_id, message.id):
+                    logger.info(
+                        "[reconciler] lost message claim for chat=%s msg=%s "
+                        "-- a peer producer won, skipping",
+                        chat_id,
+                        message.id,
+                    )
+                    continue
 
+                try:
+                    await enqueue_agent_session_fn(
+                        project_key=project_key,
+                        session_id=session_id,
+                        working_dir=working_dir,
+                        message_text=text,
+                        sender_name=sender_name,
+                        chat_id=str(chat_id),
+                        telegram_message_id=message.id,
+                        chat_title=chat_title,
+                        priority="low",
+                        sender_id=sender_id,
+                        session_type=session_type,
+                        project_config=project,
+                    )
+                except BaseException:
+                    # No orphan: release the claim so a retry (this scan's
+                    # next tick, or a peer) is not locked out for the TTL.
+                    await release_message_claim(chat_id, message.id)
+                    raise
+
+                # Only the winner writes the durable 2h membership record,
+                # and only AFTER its own successful enqueue -- see the
+                # BLOCKER rationale in bridge/dispatch.py's module docstring.
                 await record_message_processed(chat_id, message.id)
                 await record_last_processed(chat_id, message.id, message.date)
                 recovered += 1

@@ -85,6 +85,32 @@ _SHELL_WRAPPER_NAMES = frozenset({"sh", "zsh", "bash", "dash"})
 WORKER_REGISTERED_PID_KEY_PREFIX = "worker:registered_pid:"
 WORKER_REGISTERED_PID_TTL_SECONDS = 86400  # 24h
 
+# --- B2-probe: observability-only duplicate-worker detection (issue #1817) --
+#
+# A SEPARATE, additive key namespace from WORKER_REGISTERED_PID_KEY_PREFIX
+# above -- this probe never reads or writes the reaper's positive-ID
+# self-protection keys, so it cannot regress that mechanism. One key per
+# (host, role): ``worker:role_pid:{hostname}:{role}`` holds the pid of the
+# most recently registered worker for that role, and
+# ``worker:pid_heartbeat_ts:{hostname}:{pid}`` holds a per-pid unix timestamp
+# refreshed alongside every registration write, used as the liveness
+# freshness signal (reuses HEARTBEAT_FRESHNESS_WINDOW as the staleness
+# threshold -- see ``_probe_duplicate_worker_registration``).
+_WORKER_ROLE_PID_KEY_PREFIX = "worker:role_pid:"
+_WORKER_PID_HEARTBEAT_TS_KEY_PREFIX = "worker:pid_heartbeat_ts:"
+
+
+def _current_worker_role() -> str:
+    """Return this process's worker role for B2-probe scoping.
+
+    Mirrors the ``VALOR_PROJECT_KEY`` fallback used elsewhere (e.g.
+    ``agent/session_pickup.py``): empty/whitespace falls back to a stable
+    default so writers and readers agree on the namespace.
+    """
+    v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
+    return v or "default"
+
+
 # SIGKILL escalation queue for cross-process orphans.
 # Stages ``(pid, create_time)`` tuples. At drain time the reaper reconstructs
 # ``psutil.Process(pid)`` and verifies ``proc.create_time() == staged`` BEFORE
@@ -3223,6 +3249,14 @@ def register_worker_pid() -> None:
     live worker is never reaped even if a future code change re-adds the
     worker pattern to the cmdline regex set. Failure is non-fatal: the reaper
     still has ``os.getpid()`` in its skip-set.
+
+    B2-probe (issue #1817, optional/observability-only): additionally runs a
+    liveness-gated duplicate-worker check scoped to the same host + role and
+    logs a WARNING when a genuinely live second worker is found. This probe
+    is diagnostic-only: it always lets registration proceed, never exits,
+    and never blocks -- see ``_probe_duplicate_worker_registration`` for the
+    full rationale. The original additive ``_R.set`` write above is
+    unchanged.
     """
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
@@ -3232,6 +3266,121 @@ def register_worker_pid() -> None:
         _R.set(key, pid, ex=WORKER_REGISTERED_PID_TTL_SECONDS)
     except Exception as e:
         logger.debug("[session-health] register_worker_pid write failed: %s", e)
+
+    try:
+        _probe_duplicate_worker_registration(os.getpid())
+    except Exception as e:
+        logger.debug("[session-health] duplicate-worker probe failed (non-fatal): %s", e)
+
+
+def _probe_duplicate_worker_registration(pid: int) -> None:
+    """Observability-only liveness-gated duplicate-worker probe (issue #1817 B2-probe).
+
+    Scoped to the SAME host + role: a different machine, or a worker running
+    a different role (``VALOR_PROJECT_KEY``), legitimately owns its own
+    registration and is never compared against. ``pid`` is always
+    ``os.getpid()`` of the caller -- a worker never flags itself, since the
+    comparison only considers a *different* pid found under the role key.
+
+    A competitor pid is only treated as a genuine conflict when it is
+    CONFIRMED LIVE: it must pass ``os.kill(pid, 0)`` AND have a heartbeat
+    timestamp fresher than ``HEARTBEAT_FRESHNESS_WINDOW``. A pid that fails
+    either check is dead-worker residue (the exact launchd-respawn case) --
+    it is silently superseded (this registration overwrites the role key)
+    with no log line, since logging a "conflict" for routine respawn churn
+    would be noise, not signal.
+
+    Only when a competitor pid is CONFIRMED LIVE does this emit
+    ``logger.warning`` and supersede the role key. Still never
+    exits/blocks/refuses in either branch.
+
+    Why this must NEVER refuse to start: under launchd ``KeepAlive``, an
+    unclean worker exit leaves the dead pid's TTL'd key present until its
+    TTL expires. A refuse-guard here would block the HEALTHY RESPAWNED
+    worker for that entire window -- an availability outage. The atomic
+    pending->running run-claim (``models.session_lifecycle.claim_pending_run``,
+    issue #1817 B2) is what makes exactly-one-actor-per-session correctness
+    hold; this probe is diagnostic only and always allows registration to
+    proceed.
+    """
+    from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+    role = _current_worker_role()
+    role_key = f"{_WORKER_ROLE_PID_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{role}"
+
+    existing_raw = _R.get(role_key)
+    if existing_raw is not None:
+        try:
+            existing_pid = int(existing_raw)
+        except (TypeError, ValueError):
+            existing_pid = None
+
+        if existing_pid is not None and existing_pid != pid:
+            is_live = _pid_is_live(existing_pid)
+            heartbeat_fresh = is_live and _worker_pid_heartbeat_fresh(existing_pid)
+
+            if is_live and heartbeat_fresh:
+                logger.warning(
+                    "[session-health] second live worker for host=%s role=%s "
+                    "(existing pid=%d, new pid=%d) -- superseding pid registration",
+                    _ORPHAN_REAP_HOSTNAME,
+                    role,
+                    existing_pid,
+                    pid,
+                )
+            # else: dead/stale residue (liveness or heartbeat check failed) --
+            # silently supersede, no log. This is the routine launchd-respawn
+            # case, not a real conflict.
+
+    # Additive: this registration always proceeds and always overwrites the
+    # role key + this pid's heartbeat timestamp, regardless of the liveness
+    # outcome above. Never refuses.
+    now_ts = datetime.now(UTC).timestamp()
+    _R.set(role_key, pid, ex=WORKER_REGISTERED_PID_TTL_SECONDS)
+    _R.set(
+        f"{_WORKER_PID_HEARTBEAT_TS_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{pid}",
+        now_ts,
+        ex=WORKER_REGISTERED_PID_TTL_SECONDS,
+    )
+
+
+def _pid_is_live(pid: int) -> bool:
+    """Return True if ``pid`` appears to be a live process on this host.
+
+    ``os.kill(pid, 0)`` sends no signal, only checks existence/permission.
+    A ``PermissionError`` means the process exists but is owned by another
+    user -- treated conservatively as live (we cannot confirm death, so we
+    do not silently supersede without evidence). Any other failure
+    (``ProcessLookupError``, etc.) means the pid is dead-worker residue.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _worker_pid_heartbeat_fresh(pid: int) -> bool:
+    """Return True if ``pid``'s last B2-probe heartbeat timestamp is fresh.
+
+    Reuses ``HEARTBEAT_FRESHNESS_WINDOW`` as the staleness threshold. Missing
+    or unparseable timestamps are treated as stale (fail toward "silently
+    supersede", not toward "log a conflict").
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(f"{_WORKER_PID_HEARTBEAT_TS_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{pid}")
+        if raw is None:
+            return False
+        ts = float(raw)
+        return (datetime.now(UTC).timestamp() - ts) < HEARTBEAT_FRESHNESS_WINDOW
+    except Exception:
+        return False
 
 
 def _write_worker_heartbeat() -> None:

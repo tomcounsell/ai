@@ -114,6 +114,10 @@ def migrate(apply: bool = False) -> dict:
                 f"into steering:{session_id}"
             )
             if apply:
+                # Deliberate at-least-once: push-all then hdel is not atomic, so a
+                # death between the two re-delivers these entries on the next --apply
+                # run. Duplicating an ephemeral steer is preferable to losing a human
+                # course-correction.
                 for text in entries:
                     push_steering_message(session_id, str(text), "migration-drain")
                 redis_client.hdel(key, "queued_steering_messages")
