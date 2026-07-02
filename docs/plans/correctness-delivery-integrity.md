@@ -55,7 +55,7 @@ not four separate plans.
 
 **Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045`
 **Issue filed at:** 2026-06-29T09:22:54Z
-**Disposition:** Minor drift (line numbers moved; one finding — B1 — Revised because the code changed materially since filing). Post-critique round 1: five findings revised in place against the same baseline. Post-critique round 2 (2026-07-02, HEAD `3514ed1b`): B2 blocker resolved + A1 anchors re-verified after further drift (`session_executor.py` `:1584→:1675`, `:2012→:2106`, `:647→:679`, `:1595→:1686`; `agent_session.py` methods `2015/2054→2046/2085`; `bridge_adapter.py` `:536→:624`) — see "Post-critique re-verification" below and the Critique Results table. Post-critique round 3 (2026-07-02, HEAD `f8544f0a`, anchors unchanged since `199bda9a`): B1 claim-before-enqueue orphan BLOCKER resolved (provisional short-TTL gate + delete-on-exception); A1 `health_check.py:573` re-verified as a CLI-harness DELIVERY write (NOT a dual-write — do not delete, repoint to the Redis list); A2 resolver-unavailable gains an operator alert matching A3; D1b/D2 re-verified against the merged #1842 per-role transport hedge (headless roles have no PTY pid — D2 made None-aware, D1b scoped to PTY transport); C2 heal anchor drift corrected (`agent_session.py` `973-1037→1004-1070`, `record.save()` `:1029→:1060`). See the Round-3 Critique Results block.
+**Disposition:** Minor drift (line numbers moved; one finding — B1 — Revised because the code changed materially since filing). Post-critique round 1: five findings revised in place against the same baseline. Post-critique round 2 (2026-07-02, HEAD `3514ed1b`): B2 blocker resolved + A1 anchors re-verified after further drift (`session_executor.py` `:1584→:1675`, `:2012→:2106`, `:647→:679`, `:1595→:1686`; `agent_session.py` methods `2015/2054→2046/2085`; `bridge_adapter.py` `:536→:624`) — see "Post-critique re-verification" below and the Critique Results table. Post-critique round 3 (2026-07-02, HEAD `f8544f0a`, anchors unchanged since `199bda9a`): B1 claim-before-enqueue orphan BLOCKER resolved (provisional short-TTL gate + delete-on-exception); A1 `health_check.py:573` re-verified as a CLI-harness DELIVERY write (NOT a dual-write — do not delete, repoint to the Redis list); A2 resolver-unavailable gains an operator alert matching A3; D1b/D2 re-verified against the merged #1842 per-role transport hedge (headless roles have no PTY pid — D2 made None-aware, D1b scoped to PTY transport); C2 heal anchor drift corrected (`agent_session.py` `973-1037→1004-1070`, `record.save()` `:1029→:1060`). See the Round-3 Critique Results block. Post-critique round 4 (2026-07-02, current HEAD `13fb646e`, anchors unchanged since `f8544f0a`): two NEW blockers resolved without reopening B1-orphan or B2-pid — (1) B2 SETNX run-claim re-scoped to the `pending`→`running` edge ONLY so the generic `transition_status()` CAS (`session_lifecycle.py:604-648`, `on_disk_status != current_status` compare @623) is PRESERVED for every other edge including C1's `waiting_for_children` transition (`transition_status(parent, "waiting_for_children", …)` @740-742, re-verified @HEAD `13fb646e`); (2) B1 recovery-path SETNX loser now `continue`s WITHOUT recording durable dedup (only the enqueue winner records the 2h membership, AFTER enqueue) so a winner-death mid-window cannot leave a durable dedup for a never-enqueued message — recovery anchors re-verified @HEAD `13fb646e`: catchup `enqueue`@257/`record`@276, reconciler `enqueue`@239/`record`@254. See the Round-4 Critique Results block.
 
 All Findings citations were HEAD-of-writing (2026-06-29). Five sibling resilience
 PRs merged in the 2-day window before planning, moving many line numbers and
@@ -162,12 +162,12 @@ decision and its durable record with a Redis-atomic op, or surface the silent br
 2. Two machines during sync lag both pass the check, both enqueue, both record.
 3. **Fix — a PROVISIONAL concurrency gate, not a durable claim.** `claim_message(chat_id, message_id)` does a `SET NX` with a SHORT TTL in **seconds** (`CLAIM_TTL_SECONDS`, provisional ~60s, env-overridable) evaluated **before** enqueue; only the winner enqueues. The gate's TTL is sized to the cross-actor *processing skew* between two near-simultaneous producers (seconds), NOT the ~1h iCloud sync-lag window. The durable cross-machine/catchup-replay dedup remains the existing **2h membership set** (`record_message_processed`), recorded AFTER a successful enqueue exactly as today. Folded into `bridge/dedup.py`.
 4. **Fail-safe: delete the gate on ANY enqueue exception.** The enqueue is wrapped so that if it raises (or the caller propagates a failure), the claim key is `DELETE`d before re-raising — leaving NO orphaned gate. This preserves the dispatch contract: a failed enqueue leaves both the gate AND dedup clear, so the reconciler re-acquires the gate and re-enqueues. If the process DIES between claim and enqueue (SIGKILL/power loss — no chance to delete), the SHORT TTL self-heals the orphan within seconds, and the next reconciler scan (3-min cadence) re-acquires and re-enqueues. This is why the gate MUST be short-lived: a ~1h TTL would strand the message for up to an hour on a mid-window death — recreating the exact silent-drop B1 exists to eliminate.
-5. **Recovery paths (catchup/reconciler) also gate — SHARED key, same fail-safe.** These bypass the dispatch wrapper by design and only pre-check `is_duplicate_message`, so two machines' recovery loops can double-enqueue under sync lag. The same `claim_message` gate is added in-line before the recovery enqueue sites, wrapped in the same delete-on-exception guard. The key is SHARED across live + recovery (a distinct per-path gate would reopen the cross-path double-enqueue race: live claims key-A, recovery claims key-B, both enqueue). Safety comes from the short TTL + delete-on-failure, not from splitting the key. A message the live path already enqueued+recorded is stopped at the durable `is_duplicate_message` pre-check before a racing recovery scan ever reaches the gate; the gate only arbitrates the seconds-wide window where two producers race before either records dedup.
+5. **Recovery paths (catchup/reconciler) also gate — SHARED key, same fail-safe.** These bypass the dispatch wrapper by design and only pre-check `is_duplicate_message`, so two machines' recovery loops can double-enqueue under sync lag. The same `claim_message` gate is added in-line before the recovery enqueue sites, wrapped in the same delete-on-exception guard. The key is SHARED across live + recovery (a distinct per-path gate would reopen the cross-path double-enqueue race: live claims key-A, recovery claims key-B, both enqueue). Safety comes from the short TTL + delete-on-failure, not from splitting the key. A message the live path already enqueued+recorded is stopped at the durable `is_duplicate_message` pre-check before a racing recovery scan ever reaches the gate; the gate only arbitrates the seconds-wide window where two producers race before either records dedup. **On a lost claim the recovery loser `continue`s WITHOUT recording durable dedup (Round-4 BLOCKER)** — only the enqueue WINNER writes the durable 2h membership, and only AFTER a successful enqueue. If the loser wrote dedup and the winner then died mid-window (its provisional gate self-healing via the short TTL, message never enqueued), the loser's durable dedup would make `is_duplicate_message` return `True` forever and permanently silent-drop the never-enqueued message. Leaving the loser's dedup unwritten keeps the durable set an accurate record of only-actually-enqueued messages, so a winner-death self-heal is re-enqueued by the next reconciler scan.
 
-**B2 — pending→running claim (WATCH/MULTI):**
-1. Worker (or `valor-session` CLI / catchup / reflections) picks a pending session → `session_lifecycle.py:604-648` re-reads + compares status in Python → saves `running`.
+**B2 — pending→running claim (narrow SETNX run-claim, generic CAS preserved):**
+1. Worker (or `valor-session` CLI / catchup / reflections) picks a pending session → calls `transition_status(session, "running", …)`, whose generic CAS at `session_lifecycle.py:604-648` re-reads + compares status → saves `running`. The generic CAS is a whole-transition-status guard, not a pending→running lock, so two actors reading the same `pending` snapshot both pass the compare.
 2. Two actors both pass the compare → both run the session.
-3. **Fix:** the transition executes inside a Redis `WATCH`/`MULTI` (or a `SET NX` claim key) so exactly one actor wins (this alone guarantees one actor per session). `register_worker_pid` gains only an observability-only, liveness-gated log-and-supersede probe — never a refuse-guard (a refuse would wedge the launchd respawn loop on a dead pid's residual TTL'd key).
+3. **Fix:** ADD a `SET NX` run-claim key `session:runclaim:{session_id}` gating the `pending`→`running` edge specifically — the actor must win the SETNX before it calls `transition_status(…, "running", …)`, so exactly one actor acquires and runs (this alone guarantees one actor per session). The generic CAS at 604-648 is NOT deleted — it remains intact to protect every other status edge (C1's `waiting_for_children` transition @740-742, paused, superseded, kill, finalize). `register_worker_pid` gains only an observability-only, liveness-gated log-and-supersede probe — never a refuse-guard (a refuse would wedge the launchd respawn loop on a dead pid's residual TTL'd key).
 
 **C1 — parent/child finalize (preserve child-independence; idempotent sweep):**
 1. `finalize_session` @221 finalizes the parent best-effort (`_finalize_parent_sync`@440-451, wrapped in a non-fatal try/except by design) and saves the child @474; the child ALWAYS finalizes even if the parent finalize raises.
@@ -250,8 +250,10 @@ Run via `python scripts/check_prerequisites.py docs/plans/correctness-delivery-i
 - **B1 — Atomic per-message claim** (`bridge/dedup.py`, `bridge/dispatch.py`,
   `bridge/catchup.py`, `bridge/reconciler.py`): a `SET NX` claim before enqueue on the live path
   AND both recovery enqueue sites; only the winner enqueues.
-- **B2 — Atomic pending→running claim** (`models/session_lifecycle.py`): Redis `WATCH`/`MULTI`
-  (or SETNX claim key) replaces the Python CAS — this is the correctness-critical double-exec fix,
+- **B2 — Atomic pending→running claim** (`models/session_lifecycle.py`): a `SET NX` run-claim key
+  `session:runclaim:{session_id}` gates the `pending`→`running` edge ONLY; the generic
+  `transition_status()` CAS at 604-648 is PRESERVED intact (it still guards every other edge,
+  including C1's `waiting_for_children` transition). This is the correctness-critical double-exec fix,
   shipped as its own minimal PR4 (Concern 4).
 - **B2-probe — Observability-only pid probe** (`agent/session_health.py`): SEPARATED into PR4b.
   `register_worker_pid` gains an observability-only, liveness-gated log-and-supersede probe (never
@@ -332,6 +334,16 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
   silently invalidate A1's argument. Do NOT convert the drain to a Lua/atomic multi-pop; that is
   scope creep — the invariant, not atomicity, is the contract (add an explicit code comment at the
   turn-boundary read stating this).
+- **Builder note (non-blocking) — second steering-consumer abort-message hazard.** Post-A1 the Redis
+  list is the SOLE inbox, but there are two distinct consumers per session: the turn-boundary drain
+  (`session_executor.py:1675`) and the mid-turn `_handle_steering` LPOP in the health-check tool hook
+  (`health_check.py:507`), which splits ABORT vs non-abort messages (abort interrupts the turn; non-abort
+  are re-delivered via `_repush_messages`). These do not run concurrently for the same session under the
+  single-consumer invariant, but the builder must confirm that an ABORT message LPOP'd by `_handle_steering`
+  is acted on (interrupt) and NOT silently re-pushed as a plain steer, and that a non-abort message the hook
+  re-pushes is not mistaken for an abort by the turn-boundary drain. Keep the abort/non-abort partition
+  behavior identical to pre-A1; A1 only changes WHERE messages are re-deposited (Redis list, not the
+  ListField), not the abort semantics.
 
 **A2 — distinguish "resolver unavailable" from "not a customer":**
 - `resolve_customer` (`routing.py:1404`): wrap the resolver/`gws`/OAuth call; on
@@ -353,6 +365,13 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
   `EMAIL_RESOLVER_ALERT_AFTER`, env-overridable, grain-of-salt comment); clear the key on the first
   successful resolve. This converts "every customer email silently piles up unseen behind an expired
   token" into an operator-visible signal without paging on noise.
+- **Builder note (non-blocking) — reuse the existing resolver-failure machinery, do NOT add a parallel signal.**
+  `bridge/routing.py` already increments a per-project `resolver:failures:{project_key}` counter and applies a
+  `valor-retry` Gmail label on a resolver failure (`_handle_resolver_failure`@~1598; increment@1607; label@1614;
+  cleared via `r.delete(f"resolver:failures:{project_key}")`@1504 on success). The A2 threshold/duration gate
+  should derive from that EXISTING counter (read `resolver:failures:{project_key}` to decide when to arm
+  `email:resolver_unavailable`) rather than introducing a second, redundant failure tally. The alert is the new
+  surface; the failure count that arms it already exists — build on it.
 
 **A3 — classify permanent IMAP auth failure + alert:**
 - `email_bridge.py:1490-1496`: inspect the `imaplib.IMAP4.error` message for auth-permanent
@@ -414,10 +433,19 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
   the exact double-exec race B1 closes in the live path would remain open on the recovery paths.
   Therefore B1 extends the same `claim_message` gate to **both** recovery enqueue sites, with the SAME
   fail-safe wrapping: `claim_message(chat_id, message.id)` immediately before `enqueue_agent_session_fn(...)`
-  in `catchup.py:~257` and `reconciler.py:~239`; on a lost claim skip the enqueue (a peer won) but still
-  record dedup so the local scan treats it as handled; on an enqueue exception `release_message_claim`
-  then re-raise (or let the loop's existing error handling continue) so no orphaned gate blocks the next
-  scan. The key is **SHARED** across live + recovery (a distinct per-path gate would REOPEN the
+  in `catchup.py:~257` and `reconciler.py:~239`; **on a lost claim `continue` WITHOUT calling
+  `record_message_processed` (Round-4 BLOCKER)** — the loser must NOT write durable dedup. Only the enqueue
+  WINNER records the durable 2h membership, and only AFTER a successful enqueue (preserving the two-step
+  `enqueue → record_message_processed` pairing). **Why the loser must not record dedup:** if the WINNER
+  then dies between `claim_message` and `enqueue_agent_session_fn` (the provisional gate self-heals via the
+  short `CLAIM_TTL_SECONDS`, so the message was never enqueued), a durable 2h dedup written by the loser
+  would make every future `is_duplicate_message` return `True` — the reconciler's re-scan would treat the
+  never-enqueued message as already-handled and permanently SILENTLY DROP it, the exact class of failure B1
+  exists to eliminate. Leaving the loser's dedup unwritten means the durable membership set reflects only
+  messages that actually got enqueued, so a winner-death self-heal is re-picked and re-enqueued by the next
+  reconciler scan. On an enqueue exception on the winner path, `release_message_claim` then re-raise (or let
+  the loop's existing error handling continue) so no orphaned gate blocks the next scan. The key is
+  **SHARED** across live + recovery (a distinct per-path gate would REOPEN the
   cross-path race — live claims one key, recovery claims another, both enqueue). A message the live path
   already enqueued+recorded is stopped at the durable `is_duplicate_message` pre-check before a racing
   recovery scan reaches the gate. We do NOT route these through the dispatch wrapper (preserving the
@@ -431,13 +459,11 @@ Grouped by workstream; each maps to one PR in Step-by-Step. **Provisional consta
 > only) and the observability-only pid probe (PR4b, `session_health.py`) ship as SEPARATE PRs so PR4 stays
 > minimal — the atomic status claim is the load-bearing correctness fix; the pid probe is diagnostic and
 > droppable.
-- Replace the Python CAS in `session_lifecycle.py:604-648` with either (a) a Redis
-  `WATCH`/`MULTI` on the session-status field, or (b) a `SET NX` run-claim key
-  `session:runclaim:{session_id}` (simpler, matches the existing SETNX idiom). Prefer (b)
-  for simplicity unless the status field must remain the single source — decide in review.
-  The loser raises `StatusConflictError` (existing) so callers already handle it.
-- **No parallel system:** the WATCH/MULTI (or SETNX) claim REPLACES the re-read+compare;
-  delete the Python compare once the atomic gate lands.
+- **Scope the atomic claim to the `pending`→`running` edge ONLY; KEEP the generic CAS (Round-4 BLOCKER).**
+  `session_lifecycle.py:604-648` is the **generic `transition_status()` CAS** (`if on_disk_status != current_status: raise StatusConflictError` @623) that governs **every** status transition — including this plan's own C1 `waiting_for_children` transition (`transition_status(parent, "waiting_for_children", …)` @740-742) driven by multiple actors, plus paused/superseded/kill/finalize edges. Deleting or replacing that region wholesale would strip optimistic-concurrency from every other edge — a correctness regression far wider than B2's scope. So B2 does **NOT** touch the generic CAS. Instead it ADDS a narrow `SET NX` run-claim key `session:runclaim:{session_id}` gating **only** the `pending`→`running` acquisition (the double-exec edge): before an actor transitions a `pending` session to `running`, it must first `_R.set("session:runclaim:{session_id}", worker_id, nx=True, ex=…)`; only the winner proceeds to call `transition_status(session, "running", …)`. The loser skips (it lost the claim) — and the generic CAS remains as the second line of defense for the transition it still performs.
+- **The claim is additive, not a replacement.** The generic re-read+compare at 604-648 stays fully intact (it protects `waiting_for_children`, paused, superseded, kill, and finalize transitions that the run-claim does not gate). The run-claim SETNX is the pending→running arbiter; `transition_status`'s existing `StatusConflictError` still fires for any concurrent status change on the same edge, so callers already handle the loser path.
+- Prefer the SETNX run-claim over `WATCH`/`MULTI` (simpler, matches the existing SETNX idiom in `session_health.py:1530,1658,1776`); a WATCH/MULTI on the status field is an acceptable alternative if review prefers the status field remain the single source of truth for the pending→running edge. Either way, the generic CAS is preserved.
+- **C1 dependency (confirm):** C1's parent finalize transitions the parent out of `waiting_for_children` via `transition_status()` (`session_lifecycle.py:740-742`), which relies on the generic CAS at 604-648 for its own optimistic-concurrency guard against the multiple actors that can finalize a parent. B2 preserving that CAS is a prerequisite for C1's correctness — the run-claim must be scoped to pending→running so C1's transition keeps its CAS.
 - **`register_worker_pid` is NOT a second concurrency gate (Blocker B2 resolution).** The atomic
   pending→running status claim above is the real and sufficient double-exec fix: it guarantees
   exactly one actor per session regardless of how many worker processes are alive. The prior
@@ -666,6 +692,7 @@ in-code comment already rejected.
 - [ ] A2: assert the `ResolverUnavailable` branch leaves the message **unseen** and logs — a test simulating an OAuth error must NOT `\Seen`-drop; a PERSISTENT unavailable resolver (across the threshold) arms the `email:resolver_unavailable` operator alert and clears it on the first successful resolve (Concern 2).
 - [ ] A3: assert a permanent `IMAP4.error` sets the alert key + `logger.critical` and stops the backoff doubling; a transient error keeps backing off.
 - [ ] B1 (BLOCKER, Round 3): assert that when `enqueue_agent_session` raises between claim and enqueue, the claim key is DELETED (no orphan) and the message is re-enqueueable by the reconciler — NOT silently dropped; assert the gate TTL is in seconds (short self-heal on a simulated process death), decoupled from the 2h membership.
+- [ ] B1 recovery-loser dedup (BLOCKER, Round 4): assert a recovery-path SETNX loser does NOT call `record_message_processed`; simulate the winner dying post-claim/pre-enqueue and assert the loser left no durable dedup, so `is_duplicate_message` stays `False` and the next reconciler scan re-enqueues the never-enqueued message.
 - [ ] D3: each formerly-silent handler (`sdk_client` circuit writes, bridge tasks, `memory_extraction.py:328,537,560,791,1029`) now emits an observable log/metric on failure — assert via `caplog`.
 - [ ] C4: a `JSONDecodeError` from a partial config returns last-known-good and logs — assert import does NOT raise.
 
@@ -684,7 +711,7 @@ in-code comment already rejected.
 
 - [ ] `tests/unit/test_dedup.py` (or the bridge dedup tests) — UPDATE: add `claim_message` provisional-gate cases + `release_message_claim` DELETE; assert the gate TTL is in seconds (`CLAIM_TTL_SECONDS`, decoupled from the 2h membership); assert the existing membership behavior is unchanged (B1 coexists).
 - [ ] `tests/unit/bridge/test_dispatch.py` (dispatch wrapper tests) — UPDATE: assert `claim_message` gates enqueue; a lost claim skips enqueue; **fault injection (BLOCKER, Round 3):** when `enqueue_agent_session` raises, the claim key is DELETED before the exception propagates (no orphaned gate) and dedup stays unrecorded — assert the reconciler contract holds (message is re-enqueueable, not silently dropped) (B1).
-- [ ] `tests/**/test_catchup*.py` and `tests/**/test_reconciler*.py` — UPDATE/ADD: assert the recovery enqueue sites also call `claim_message` (shared key) and skip enqueue on a lost claim; a message already claimed/recorded by the live path is not double-enqueued by a racing catchup/reconciler scan; assert an enqueue exception on the recovery path releases the gate so the next scan re-acquires (no permanent drop) (B1, Concern 1 + Round-3 BLOCKER).
+- [ ] `tests/**/test_catchup*.py` and `tests/**/test_reconciler*.py` — UPDATE/ADD: assert the recovery enqueue sites also call `claim_message` (shared key) and skip enqueue on a lost claim; a message already claimed/recorded by the live path is not double-enqueued by a racing catchup/reconciler scan; assert an enqueue exception on the recovery path releases the gate so the next scan re-acquires (no permanent drop) (B1, Concern 1 + Round-3 BLOCKER). **Round-4 BLOCKER fault injection:** a SETNX claim LOSER on the recovery path does NOT call `record_message_processed`; and the winner-death case — winner acquires the claim then dies before `enqueue_agent_session_fn` (short TTL self-heals the gate) — asserts the loser did NOT persist durable dedup so `is_duplicate_message` stays `False` and the next reconciler scan re-enqueues the never-enqueued message (NOT silent-dropped).
 - [ ] `tests/**/test_*steering*.py` or a `health_check` steering test — ADD: assert the CLI-harness delivery path (`_handle_steering`, no active SDK client) re-deposits popped non-abort messages onto the Redis list via `_repush_messages` so they are NOT lost after A1 deletes the ListField method (Concern 1); a steer is delivered at the next turn boundary.
 - [ ] `tests/**/test_*steering*.py` and any test asserting `queued_steering_messages` / `agent_session.pop_steering_messages()` — REPLACE: rewrite against `agent/steering.py` LPOP; the ListField and its methods are deleted (A1). Grep `grep -rln "queued_steering_messages\|\.pop_steering_messages(\|\.push_steering_message(" tests/` to enumerate before deletion. ADD a single-consumer-invariant test (two concurrent drainers of one session_id → disjoint split, no dup/loss) that documents why the non-atomic drain is safe.
 - [ ] `tests/**/test_session_lifecycle*.py` (pending→running claim) — UPDATE: assert the atomic claim (WATCH/MULTI or SETNX) admits exactly one actor; two concurrent claimants → one `StatusConflictError` (B2).
@@ -757,14 +784,14 @@ disposition then becomes ADD. No test is DELETE-only except those asserting the 
 **Trigger:** iCloud `projects.json` reassignment not yet propagated → both machines receive the `NewMessage` (live path) or both machines' catchup/reconciler scans replay the same message (recovery path).
 **Data prerequisite:** Both machines share the same Redis (they do — single Redis).
 **State prerequisite:** `SET NX` with a SHORT `CLAIM_TTL_SECONDS` admits exactly one writer for the seconds-wide concurrency window; the gate key is SHARED across live + recovery producers (a distinct per-path key would reopen the cross-path race), and the durable 2h membership set stops a much-later recovery replay of an already-enqueued+recorded message before it reaches the gate.
-**Mitigation:** Only the `SET NX` winner enqueues; the loser skips (but still records dedup). The gate is DELETED on any enqueue exception (and self-heals via the short TTL on a process death), so a lost/failed producer never orphans the key and re-drops the message. Test simulates concurrent dispatch of the same `(chat_id, message_id)` on the live path AND a concurrent catchup/reconciler replay of an already-live-claimed message, PLUS the fault-injection case (enqueue raises between claim and enqueue → gate released → reconciler re-enqueues).
+**Mitigation:** Only the `SET NX` winner enqueues; the loser `continue`s and does **NOT** record durable dedup (Round-4 BLOCKER — a loser-written 2h dedup would permanently silent-drop the message if the winner then died mid-window before enqueue). Only the winner records the durable 2h membership, AFTER a successful enqueue. The gate is DELETED on any enqueue exception (and self-heals via the short TTL on a process death), so a lost/failed producer never orphans the key and re-drops the message. Test simulates concurrent dispatch of the same `(chat_id, message_id)` on the live path AND a concurrent catchup/reconciler replay of an already-live-claimed message, PLUS the fault-injection cases (enqueue raises between claim and enqueue → gate released → reconciler re-enqueues; AND winner dies post-claim/pre-enqueue → loser did NOT persist durable dedup → reconciler re-enqueues).
 
 ### Race 3: Two actors claim the same pending session (B2)
-**Location:** `session_lifecycle.py:604-648`.
+**Location:** the `pending`→`running` acquisition guarded by the new `session:runclaim:{session_id}` SETNX (NOT the generic CAS at `session_lifecycle.py:604-648`, which is preserved for all other edges).
 **Trigger:** Worker + `valor-session` CLI + catchup + reflection all eligible to pick a pending session.
 **Data prerequisite:** Session status in Redis.
-**State prerequisite:** WATCH/MULTI (or SETNX run-claim) admits one transition.
-**Mitigation:** Atomic transition; loser gets `StatusConflictError`. Delete the Python compare.
+**State prerequisite:** The `SET NX` run-claim admits exactly one actor to the pending→running edge; the generic `transition_status()` CAS remains the second-line guard on the transition the winner performs.
+**Mitigation:** SETNX run-claim scoped to pending→running; loser skips (lost the claim), and the generic CAS still fires `StatusConflictError` on any concurrent status change. The generic CAS at 604-648 is PRESERVED (deleting it would strip optimistic-concurrency from every other edge, including C1's `waiting_for_children` transition @740-742) — Round-4 BLOCKER.
 
 ### Race 4: Crash after child save, before parent transitions out of waiting_for_children (C1)
 **Location:** `session_lifecycle.py:440-451` (best-effort parent finalize) vs `:474` (child save).
@@ -854,7 +881,7 @@ Mostly bridge/worker-internal. Specific surfaces:
 ### Inline Documentation
 - [ ] Grain-of-salt comments on all provisional constants (`CLAIM_TTL`, `PINNED_CLAUDE_VERSION`, contract-check enforce flag, `NOTIFY_HEALTHCHECK_INTERVAL` (D4 off-path probe interval), email watchdog threshold).
 - [ ] Comment at the D4 `listen()` connection reaffirming WHY `socket_timeout=None` is retained (cross-reference the existing @822-828 rationale) so a future maintainer doesn't "helpfully" add a finite timeout.
-- [ ] Comment the B1/B2 atomic-claim rationale at each seam: for B1, why the `claim_message` gate is a SHORT provisional TTL (`CLAIM_TTL_SECONDS`) decoupled from the 2h membership and why it MUST be released on any enqueue exception (a long-lived orphaned gate silently re-drops the message — the Round-3 BLOCKER); for B2, why SETNX/WATCH replaces the Python CAS.
+- [ ] Comment the B1/B2 atomic-claim rationale at each seam: for B1, why the `claim_message` gate is a SHORT provisional TTL (`CLAIM_TTL_SECONDS`) decoupled from the 2h membership and why it MUST be released on any enqueue exception (a long-lived orphaned gate silently re-drops the message — the Round-3 BLOCKER); for B2, why the SETNX run-claim (`session:runclaim:{id}`) gates ONLY the pending→running edge while the generic `transition_status()` CAS at 604-648 is PRESERVED for every other edge (Round-4 BLOCKER).
 
 ## Success Criteria
 
@@ -863,7 +890,8 @@ Mostly bridge/worker-internal. Specific surfaces:
 - [ ] **A3:** A permanent `IMAP4.error` stops the infinite backoff and raises an operator alert (visible on the dashboard/alert surface); transient errors still back off.
 - [ ] **B1:** Two concurrent dispatches of the same `(chat_id, message_id)` result in exactly one enqueue (`SET NX` provisional gate), verified under a simulated config-sync-lag test — on the live path AND across the catchup/reconciler recovery paths (a message claimed on any path is not double-enqueued by a racing recovery scan).
 - [ ] **B1 fail-safe (BLOCKER, Round 3):** When `enqueue` raises between claim and enqueue, the claim key is DELETED and the message is NOT permanently dropped — a subsequent reconciler scan re-acquires the gate and re-enqueues (fault-injection test). When the process DIES between claim and enqueue (no delete), the short `CLAIM_TTL_SECONDS` gate self-heals within seconds and the next reconciler scan re-enqueues (no ~1h orphan). The gate TTL is in SECONDS, decoupled from the 2h membership set.
-- [ ] **B2:** Two concurrent pending→running claimants result in exactly one `running` transition; the loser gets `StatusConflictError`. The Python re-read+compare is deleted. `register_worker_pid` never refuses or exits on a duplicate pid key: a dead/stale pid (failed `os.kill(pid, 0)` or stale heartbeat) is silently superseded so a launchd-respawned worker is never blocked; only a *confirmed-live* second worker on the same host+role emits a WARNING and supersedes. A test asserts a stale-pid key does NOT block registration (respawn-safety), the worker never flags `os.getpid()` against itself, and cross-host/cross-role pids are not treated as conflicts.
+- [ ] **B1 recovery-loser durable-dedup (BLOCKER, Round 4):** On the recovery paths (catchup/reconciler), a SETNX claim LOSER `continue`s WITHOUT recording durable dedup — only the enqueue WINNER writes the durable 2h membership, and only AFTER a successful enqueue. Fault-injection test: winner dies post-claim/pre-enqueue → the loser did NOT persist durable dedup → `is_duplicate_message` stays `False` for the never-enqueued message → the next reconciler scan re-enqueues it (NOT permanently silent-dropped).
+- [ ] **B2:** Two concurrent pending→running claimants result in exactly one `running` transition; the loser is stopped by the run-claim (or the generic CAS's `StatusConflictError`). A `SET NX` run-claim (`session:runclaim:{session_id}`) gates the pending→running edge; the generic `transition_status()` CAS at `session_lifecycle.py:604-648` is PRESERVED intact (asserted still governing C1's `waiting_for_children` transition and all other edges — Round-4 BLOCKER). `register_worker_pid` never refuses or exits on a duplicate pid key: a dead/stale pid (failed `os.kill(pid, 0)` or stale heartbeat) is silently superseded so a launchd-respawned worker is never blocked; only a *confirmed-live* second worker on the same host+role emits a WARNING and supersedes. A test asserts a stale-pid key does NOT block registration (respawn-safety), the worker never flags `os.getpid()` against itself, and cross-host/cross-role pids are not treated as conflicts.
 - [ ] **C1:** A crash injected after the child save (parent still `waiting_for_children`) leaves no permanently-stranded parent — the idempotent startup sweep re-finalizes it. The child-independent finalize contract is preserved: a parent-finalize failure never blocks or rolls back the child finalize (no pipeline coupling).
 - [ ] **C2:** Under simulated clock skew (reader ≥90s ahead), fresh sessions are NOT flagged stale and `_heal_future_updated_at` does not re-save/reshuffle the index.
 - [ ] **C3:** `query.filter()` over an index with a ghost member returns only live records; email subject-coalescing cannot attach to a non-existent session.
@@ -953,7 +981,7 @@ can land last or be dropped.
 - **Agent Type**: builder — Domain: redis-popoto, async-concurrency
 - **Parallel**: true
 - Add `claim_message` (`SET NX`, `CLAIM_TTL`) to `bridge/dedup.py`; gate `dispatch_telegram_session` + `record_telegram_message_handled` before enqueue. Keep membership set for catchup.
-- Extend the claim to the recovery paths (Concern 1): add `claim_message` before the enqueue sites in `catchup.py:~257` and `reconciler.py:~239` (shared claim key, in-line — not via the wrapper, preserving the documented recovery two-step contract); loser skips enqueue but records dedup. Update the `dispatch.py` module docstring to note recovery paths now also claim.
+- Extend the claim to the recovery paths (Concern 1): add `claim_message` before the enqueue sites in `catchup.py:~257` and `reconciler.py:~239` (shared claim key, in-line — not via the wrapper, preserving the documented recovery two-step contract). **On a lost claim `continue` WITHOUT calling `record_message_processed` (Round-4 BLOCKER)** — only the enqueue WINNER records durable dedup, and only AFTER a successful enqueue (`enqueue`@catchup:257→`record`@276; `enqueue`@reconciler:239→`record`@254). A loser that recorded dedup would permanently silent-drop the message if the winner then died mid-window before enqueue (its provisional gate self-heals via the short TTL, leaving a durable dedup for a never-enqueued message). Update the `dispatch.py` module docstring to note recovery paths now also claim and that only the enqueue winner records dedup.
 
 ### 4. B2 — Atomic pending→running claim (PR4 — correctness only)
 - **Task ID**: build-b2-claim
@@ -962,7 +990,7 @@ can land last or be dropped.
 - **Assigned To**: claims-builder
 - **Agent Type**: builder — Domain: redis-popoto, async-concurrency
 - **Parallel**: true (coordinate merge order with task 5)
-- **Kept MINIMAL (Concern 4):** ONLY the correctness-critical atomic status claim. Replace the Python CAS @604-648 with WATCH/MULTI or a SETNX run-claim; delete the compare. This alone is the double-exec fix (exactly one actor per session). Does NOT touch `session_health.py` — the pid probe is split into task 4b.
+- **Kept MINIMAL (Concern 4):** ONLY the correctness-critical atomic claim. ADD a `SET NX` run-claim key `session:runclaim:{session_id}` gating the `pending`→`running` edge; the winner then calls `transition_status(…, "running", …)`. **Do NOT delete or replace the generic CAS @604-648 (Round-4 BLOCKER)** — it is `transition_status()`'s optimistic-concurrency guard for EVERY status edge, including C1's `waiting_for_children` transition @740-742; deleting it strips concurrency-safety from all other edges. The run-claim is additive and scoped to pending→running; the generic CAS stays intact. This alone is the double-exec fix (exactly one actor per session). Does NOT touch `session_health.py` — the pid probe is split into task 4b.
 
 ### 4b. B2-probe — Observability-only pid probe (PR4b — separated, optional)
 - **Task ID**: build-b2-pid-probe
@@ -1087,7 +1115,9 @@ can land last or be dropped.
 | B1: dispatch releases gate on enqueue exception (BLOCKER) | `grep -c "release_message_claim" bridge/dispatch.py` | output > 0 |
 | B1: gate gates dispatch | `grep -c "claim_message" bridge/dispatch.py` | output > 0 |
 | B1: gate gates + releases on recovery paths | `grep -cE "claim_message\|release_message_claim" bridge/catchup.py bridge/reconciler.py` | output > 0 |
-| B2: atomic claim replaces CAS | `grep -cE "watch\|multi\|nx=True" models/session_lifecycle.py` | output > 0 |
+| B1: recovery loser writes no durable dedup (Round-4 BLOCKER, winner-death fault-injection test) | `grep -rlE "winner.*dies\|did NOT persist durable dedup\|not double-record" tests/` | at least one test file |
+| B2: SETNX run-claim gates pending→running | `grep -cE "session:runclaim\|runclaim" models/session_lifecycle.py` | output > 0 |
+| B2: generic CAS PRESERVED (anti-criterion, Round-4 BLOCKER) | `grep -c "on_disk_status != current_status" models/session_lifecycle.py` | output >= 1 |
 | B2: pid probe supersede-only (liveness-gated) | `grep -cE "supersede\|os\.kill\|liveness" agent/session_health.py` | output > 0 |
 | B2: pid probe never refuses/exits (anti-criterion) | `sed -n '/def register_worker_pid/,/^def [a-zA-Z_]/p' agent/session_health.py \| grep -cE "sys\.exit\|raise .*Conflict\|refuse"` | output == 0 |
 | C1: idempotent finalize sweep on startup | `grep -cE "waiting_for_children" worker/__main__.py` | output > 0 |
@@ -1108,7 +1138,11 @@ can land last or be dropped.
 
 Note: the `grep -c claude` row is a presence sanity check, not a strict anti-criterion; the
 builder tunes the exact expected count to the final diff. The anti-criteria (expected 0 or, for
-`socket_timeout=None`, expected-preserved) are: A1 no-stray-refs; B2 pid-probe-never-refuses (the
+`socket_timeout=None`, expected-preserved) are: A1 no-stray-refs; B2 generic-CAS-preserved (the
+`on_disk_status != current_status` compare in `transition_status` must still exist — `grep -c` >= 1 —
+because deleting the generic CAS strips optimistic-concurrency from every non-pending→running edge,
+including C1's `waiting_for_children` transition @740-742; the Round-4 BLOCKER — B2 ADDS a scoped SETNX
+run-claim, it does NOT replace the CAS); B2 pid-probe-never-refuses (the
 `register_worker_pid` function-scoped grep for `sys.exit`/`raise …Conflict`/`refuse` must be 0 —
 the probe is supersede-only, so it can never wedge the launchd respawn loop); C2 heal function-scoped
 no-save; D1a not-in-MANAGED_PACKAGES; D4 finite-socket_timeout-not-reintroduced (the `socket_timeout=None`
@@ -1119,6 +1153,16 @@ description. The C2 row already returns 1 against the current HEAD (the pre-fix 
 at `models/agent_session.py:1060` exists), so its red-state is the baseline itself.
 
 ## Critique Results
+
+### Round 4 (2026-07-02, FULL critique @HEAD `13fb646e` → NEEDS REVISION → revised)
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| Blocker | Critique | B2 must NOT replace the generic CAS wholesale. The plan labels `session_lifecycle.py:604-648` "the pending→running claim" and says "delete the Python compare." But 604-648 is the **generic `transition_status()` CAS** (`if on_disk_status != current_status: raise StatusConflictError` @623) governing ALL status transitions — including this plan's own C1 `waiting_for_children` transition (`transition_status(parent, …)` @740-742) driven by multiple actors. Deleting/replacing it strips optimistic-concurrency from every other edge. | Technical Approach B2, Solution B2, Data Flow B2 (step 3), Race 3, Success Criteria B2, Verification (B2 rows + anti-criteria note), Build task 4, Open Question 2 | Scoped the new atomic claim to the `pending`→`running` edge ONLY: ADD a `SET NX` run-claim key `session:runclaim:{session_id}` gating that edge; the winner then calls `transition_status(…, "running", …)`. The generic CAS at 604-648 is KEPT fully intact (it still guards `waiting_for_children`, paused, superseded, kill, finalize edges). Success Criteria changed from "the Python re-read+compare is deleted" to "a SETNX run-claim gates the pending→running edge; the generic CAS is preserved." Verification row retargeted (`session:runclaim` present) + new anti-criterion (`on_disk_status != current_status` compare must still exist, `grep -c` >= 1). Confirmed against HEAD `13fb646e` that C1's `waiting_for_children` transition @740-742 routes through `transition_status()` and depends on the preserved generic CAS. |
+| Blocker | Critique | B1 recovery-path loser must NOT write durable dedup. The plan told the recovery SETNX loser to "skip the enqueue but still record dedup." But if the winner dies between `claim_message` and `enqueue_agent_session` (provisional gate self-heals via the short TTL, message never enqueued), the loser's already-written durable 2h dedup makes every future `is_duplicate_message` return `True` → permanent silent-drop — the exact class B1 exists to eliminate. | Technical Approach B1 (recovery bullet), Data Flow B1 (step 5), Race 2, Build task 3, Success Criteria B1, Failure-Path (B1), Test Impact (catchup/reconciler fault-injection), Verification (new row) | On a lost claim the recovery loser now `continue`s WITHOUT calling `record_message_processed`. Only the enqueue WINNER writes the durable 2h membership, and only AFTER a successful enqueue — so the durable set reflects only actually-enqueued messages and a winner-death self-heal is re-picked by the next reconciler scan. Added the winner-dies-post-claim-pre-enqueue fault-injection case (loser did NOT persist durable dedup → reconciler re-enqueues) to Test Impact + Failure-Path + Success Criteria. Recovery anchors re-verified @HEAD `13fb646e` (catchup enqueue@257/record@276, reconciler enqueue@239/record@254). |
+| Nit | Critique | A2 resolver-unavailable alert may duplicate an existing `resolver:failures` counter + `valor-retry` label machinery. | Technical Approach A2 (builder note) | Added a non-blocking builder note: derive the A2 threshold/duration gate from the EXISTING per-project `resolver:failures:{project_key}` counter (`bridge/routing.py`: increment@1607, label@1614, cleared@1504) rather than a parallel tally; the alert key `email:resolver_unavailable` is the only new signal. |
+| Nit | Critique | A1 second steering-consumer abort-message hazard. | Technical Approach A1 (builder note) | Added a non-blocking builder note: post-A1 (Redis list = sole inbox) the turn-boundary drain and `_handle_steering`'s mid-turn LPOP both consume the list; the builder must confirm ABORT messages keep their interrupt semantics and are not silently re-pushed as plain steers — A1 changes only WHERE messages are re-deposited, not the abort/non-abort partition. |
+| Nit | Critique | PR4b droppable scope + Freshness Check cites stale HEAD. | PR-split table / Build task 4b (already states droppable), Freshness Check (Round-4 note) | PR4b is already documented as optional/droppable (the atomic status claim is the load-bearing fix). Freshness Check updated: current HEAD `13fb646e`; anchors re-verified for both blockers (generic CAS @604-648, `waiting_for_children` @740-742, recovery enqueue/record sites). |
 
 ### Round 3 (2026-07-02, FULL critique @HEAD `199bda9a` (revised @HEAD `f8544f0a`) → NEEDS REVISION → revised)
 
@@ -1144,7 +1188,7 @@ at `models/agent_session.py:1060` exists), so its red-state is the baseline itse
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | Blocker | Critique | D4 finite `socket_timeout` reverts a documented design (`agent_session_queue.py:822-828`) — prior finite timeout caused spurious socket-timeout exceptions + a 10s reconnect cycle that DROPPED notifications. | Technical Approach D4, Data Flow, Race 5, Risks/Failure-Path, Success Criteria D4, Verification | Rewrote D4: KEEP `socket_timeout=None` on the blocking `listen()` connection; add an OFF-PATH periodic `PUBSUB NUMSUB` liveness probe on a SEPARATE connection; resubscribe + WARNING only on a confirmed NUMSUB==0. Round two can't reproduce the failure because the `listen()` connection is untouched — the probe reads a different connection whether or not a message is in flight. |
-| Concern | Critique | B1 claim gates only the dispatch path; `catchup.py`/`reconciler.py` intentionally bypass the wrapper (`dispatch.py:15-18`), leaving the double-exec race open on recovery paths. | Technical Approach B1, Data Flow B1, Race 2, Test Impact, Success Criteria B1, Verification | Extended `claim_message` in-line to both recovery enqueue sites (catchup `:257`, reconciler `:239`) with a shared claim key; loser skips enqueue but records dedup. Kept the documented two-step recovery pairing (not routed through the wrapper); docstring updated. |
+| Concern | Critique | B1 claim gates only the dispatch path; `catchup.py`/`reconciler.py` intentionally bypass the wrapper (`dispatch.py:15-18`), leaving the double-exec race open on recovery paths. | Technical Approach B1, Data Flow B1, Race 2, Test Impact, Success Criteria B1, Verification | Extended `claim_message` in-line to both recovery enqueue sites (catchup `:257`, reconciler `:239`) with a shared claim key; loser skips enqueue but records dedup *(superseded Round 4: the loser now `continue`s WITHOUT recording durable dedup — only the enqueue winner records, after enqueue)*. Kept the documented two-step recovery pairing (not routed through the wrapper); docstring updated. |
 | Concern | Critique | C1 all-or-nothing finalize inverts the intentional child-independent-finalize contract (`session_lifecycle.py:439-451` swallows parent-finalize as non-fatal). | Technical Approach C1, Data Flow C1, Race 4, Risk 5, Test Impact, Success Criteria C1, Verification | Withdrew the pipeline coupling. Preserve child-independent best-effort parent finalize; close the crash-window orphan with an idempotent worker-startup sweep re-invoking the already-idempotent `_finalize_parent_sync` (`:719-732`). |
 | Concern | Critique | A1 mischaracterizes `pop_all_steering_messages` as atomic; it's a non-atomic LPOP loop safe only under a single-consumer invariant (`steering.py:80-109`). | Data Flow A1, Technical Approach A1, Race 1, Failure-Path, Test Impact, Success Criteria A1 | Corrected all references to the non-atomic-but-single-consumer model; A1 now PRESERVES and TESTS the invariant (two concurrent drainers of one session_id split disjointly). |
 | Concern | Critique | D1 OQ3 (npm pin vs native version-assertion) unresolved and conflated with the contract-check probe. | Technical Approach D1, Update System, Data Flow, Solution, OQ3, Success Criteria D1a/D1b, Verification, Prerequisites, Research, PR-split | Resolved: live `claude` is native-installer (`~/.local/bin/claude` → `~/.local/share/claude/versions/2.1.197`), NOT npm — so `MANAGED_PACKAGES` is wrong. Pin via a `PINNED_CLAUDE_VERSION` assertion in `verify.py` (D1a); the marker contract-check (D1b) is split into a separate PR. |
@@ -1162,9 +1206,13 @@ at `models/agent_session.py:1060` exists), so its red-state is the baseline itse
    gate TTL safe (a long gate TTL was the Round-3 BLOCKER: it orphaned the key on a mid-window failure
    and silently re-dropped the message). The gate is released on any enqueue exception and self-heals via
    its short TTL on a process death.
-2. **B2 mechanism:** Redis `WATCH`/`MULTI` on the status field, or a `SET NX`
-   `session:runclaim:{id}` key? Plan leans SETNX (matches existing idiom, simpler); WATCH/MULTI
-   if the status field must remain the sole source of truth.
+2. **B2 mechanism — RESOLVED to scope (Round 4).** Whichever mechanism is chosen, it gates the
+   `pending`→`running` edge ONLY and the generic `transition_status()` CAS at 604-648 is PRESERVED
+   (deleting it would strip concurrency-safety from every other edge, including C1's
+   `waiting_for_children` transition @740-742 — the Round-4 BLOCKER). Remaining sub-choice: a `SET NX`
+   `session:runclaim:{id}` key (plan leans this — matches the existing SETNX idiom, simpler) vs a
+   `WATCH`/`MULTI` on the status field (if the status field must remain the sole source of truth for
+   that edge). Both are additive to, not a replacement for, the generic CAS.
 3. **D1 pin mechanism — RESOLVED.** The live CLI is at `~/.local/bin/claude` →
    `~/.local/share/claude/versions/2.1.197` via the **native installer** (verified against HEAD),
    NOT npm. So the npm route (`MANAGED_PACKAGES`) is the wrong mechanism. **Decision:** keep the
