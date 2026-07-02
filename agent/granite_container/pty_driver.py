@@ -561,14 +561,22 @@ class PTYDriver:
         `on_read_iteration` (optional, default `None` — byte-identical
         behavior to before this param existed) is invoked once per inner
         poll iteration of the read loop below, BEFORE that iteration's
-        PTY read, with the ANSI-stripped per-turn capture accumulated so
-        far (`_turn_text`). This lets a caller sample per-poll liveness
-        (e.g. stamping a freshness timestamp) far more often than once
-        per `read_until_idle` call — closing the coarse-sampling gap
-        where a wedge *inside* a long idle-path turn left liveness
-        signals stale until the whole call returned (#1843 Gap B). The
-        callback is best-effort: any exception it raises is caught and
-        logged, never allowed to break or abort the read loop.
+        PTY read, with the RAW (not ANSI-stripped) per-turn capture
+        accumulated so far (`_turn_text`). This lets a caller sample
+        per-poll liveness (e.g. stamping a freshness timestamp) far more
+        often than once per `read_until_idle` call — closing the
+        coarse-sampling gap where a wedge *inside* a long idle-path turn
+        left liveness signals stale until the whole call returned (#1843
+        Gap B). The callback is best-effort: any exception it raises is
+        caught and logged, never allowed to break or abort the read loop.
+
+        The text is intentionally passed RAW rather than pre-stripped:
+        `_strip_ansi` is O(len(_turn_text)) and this loop can spin many
+        times per second under verbose output, so stripping on every
+        iteration (up to `TURN_TEXT_MAX_CHARS` = 256 KB) would run at full
+        iteration rate rather than the caller's throttled write rate. A
+        caller that needs stripped text should strip it itself, after its
+        own throttle gate admits the call (see `Container._fire_pty_read`).
         """
         if self._child is None:
             raise PTYDriverError("PTYDriver.read_until_idle() called before spawn()")
@@ -583,7 +591,7 @@ class PTYDriver:
         while time.monotonic() < deadline:
             if on_read_iteration is not None:
                 try:
-                    on_read_iteration(_strip_ansi(self._turn_text))
+                    on_read_iteration(self._turn_text)
                 except Exception as _read_iter_err:
                     logger.debug(
                         "[pty-driver] on_read_iteration callback raised: %s",

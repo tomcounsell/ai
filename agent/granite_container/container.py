@@ -61,6 +61,7 @@ from agent.granite_container.hook_edge import (
 from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
     PTYDriver,
+    _strip_ansi,
 )
 from agent.granite_container.role_driver import HeadlessRoleDriver
 from agent.granite_container.startup_parser import (
@@ -799,14 +800,19 @@ class Container:
         # never crash the loop.
         self._on_pty_read = on_pty_read
         # Per-iteration PTY-read liveness callback (#1843 Gap B). Threads the
-        # same freshness writer (_fire_pty_read → on_pty_read) into the
-        # read_until_idle inner poll loop so a session wedged mid-turn on the
-        # idle-fallback path refreshes last_pty_read_loop_at far sooner than the
-        # _cycle_idle window. Throttled to <=1 stamp/sec so verbose output can't
-        # produce a Redis write storm. None (byte-identical to pre-#1843) when
-        # there is no writer wired.
+        # same freshness writer (_fire_pty_read_raw → _fire_pty_read →
+        # on_pty_read) into the read_until_idle inner poll loop so a session
+        # wedged mid-turn on the idle-fallback path refreshes
+        # last_pty_read_loop_at far sooner than the _cycle_idle window.
+        # Throttled to <=1 stamp/sec so verbose output can't produce a Redis
+        # write storm. None (byte-identical to pre-#1843) when there is no
+        # writer wired. `read_until_idle` passes RAW (un-stripped) text to
+        # this callback (see pty_driver.py); `_fire_pty_read_raw` strips it
+        # AFTER the throttle admits the call, so the O(n) ANSI strip runs at
+        # the throttled write rate rather than the inner poll's full
+        # iteration rate (perf finding, PR #1849 review).
         self._pty_read_iteration_cb: Callable[[str], None] | None = (
-            _throttle(self._fire_pty_read, PTY_READ_ITER_MIN_INTERVAL_S)
+            _throttle(self._fire_pty_read_raw, PTY_READ_ITER_MIN_INTERVAL_S)
             if on_pty_read is not None
             else None
         )
@@ -1397,6 +1403,19 @@ class Container:
                 self._on_pty_read(buffer)
             except Exception as e:
                 logger.debug("[granite-container] on_pty_read hook raised: %s", e)
+
+    def _fire_pty_read_raw(self, raw_text: str) -> None:
+        """ANSI-strip raw per-iteration turn text, then fire the liveness hook.
+
+        Used as the throttled Gap-B per-iteration callback (#1843):
+        `read_until_idle` passes the RAW (un-stripped) `_turn_text` buffer to
+        `on_read_iteration` on every inner poll iteration, and `_throttle`
+        gates how often the wrapped function actually runs. Doing the strip
+        here — inside the throttled function — means the (up to 256 KB)
+        `_strip_ansi` cost only pays on an admitted call (<=1/sec), not on
+        every iteration (perf finding, PR #1849 review).
+        """
+        self._fire_pty_read(_strip_ansi(raw_text))
 
     @staticmethod
     def _latest_turn_end(edges: list[HookEdge], session_id: str | None) -> HookEdge | None:
