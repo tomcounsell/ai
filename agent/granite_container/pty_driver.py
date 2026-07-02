@@ -63,13 +63,17 @@ headless harness is untouched" invariant.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pexpect
 import pexpect.exceptions
+
+logger = logging.getLogger(__name__)
 
 # The session UUID Claude embeds in stream-json `session_id` fields and
 # prints in its on-exit hint line: `claude --resume <uuid>`. Capturing it
@@ -514,6 +518,7 @@ class PTYDriver:
         self,
         min_content_bytes: int = DEFAULT_MIN_CONTENT_BYTES,
         timeout_s: float | None = None,
+        on_read_iteration: Callable[[str], None] | None = None,
     ) -> IdleResult:
         """Block until the TUI is idle, up to `timeout_s` (default driver timeout).
 
@@ -552,6 +557,18 @@ class PTYDriver:
         fires before the idle signal stabilizes. `buffer` is the
         ANSI-stripped text read during this call; `turn_buffer` is the
         ANSI-stripped capture since the last write.
+
+        `on_read_iteration` (optional, default `None` — byte-identical
+        behavior to before this param existed) is invoked once per inner
+        poll iteration of the read loop below, BEFORE that iteration's
+        PTY read, with the ANSI-stripped per-turn capture accumulated so
+        far (`_turn_text`). This lets a caller sample per-poll liveness
+        (e.g. stamping a freshness timestamp) far more often than once
+        per `read_until_idle` call — closing the coarse-sampling gap
+        where a wedge *inside* a long idle-path turn left liveness
+        signals stale until the whole call returned (#1843 Gap B). The
+        callback is best-effort: any exception it raises is caught and
+        logged, never allowed to break or abort the read loop.
         """
         if self._child is None:
             raise PTYDriverError("PTYDriver.read_until_idle() called before spawn()")
@@ -564,6 +581,14 @@ class PTYDriver:
         last_chunk_at = start
 
         while time.monotonic() < deadline:
+            if on_read_iteration is not None:
+                try:
+                    on_read_iteration(_strip_ansi(self._turn_text))
+                except Exception as _read_iter_err:
+                    logger.debug(
+                        "[pty-driver] on_read_iteration callback raised: %s",
+                        _read_iter_err,
+                    )
             try:
                 chunk = self._child.read_nonblocking(size=8192, timeout=0.5)
             except pexpect.TIMEOUT:
