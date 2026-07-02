@@ -7,6 +7,11 @@ had no deadline. Deferred follow-ups: fix #2 (lease semaphore) + fix #3 (progres
 cancel scope) are tracked in issue #1820; fix #5 (out-of-domain recovery) + fix #6
 (per-tool budget backstop) are tracked in issue #1821.
 
+Fixes #2 and #3 have since shipped — see [Slot-Lease Ownership](slot-lease-ownership.md)
+(issue #1820): the ownerless concurrency semaphore is now an owner-keyed
+`SlotLeaseRegistry` whose leaked permits self-heal via a top-of-tick reap, and a
+progress-deadline cancel scope owns the no-progress kill for worker-alive sessions.
+
 ## Background
 
 Issue #1808 (documented in [Worker Wedge Investigation](worker-wedge-investigation.md))
