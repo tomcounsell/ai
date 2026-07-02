@@ -266,9 +266,10 @@ class TestReconcileOnce:
 
         Issue #1817 B1, round-4 BLOCKER: this is the exact scenario where a
         peer producer (the live handler, or catchup) already won the SAME
-        message. The loser must not call record_message_processed, so a
-        winner-death self-heals via the next reconciler scan re-picking the
-        never-enqueued message instead of silently dropping it forever.
+        message. The loser must not call record_message_processed (it does
+        not double-record), so if the winner dies before enqueue the next
+        reconciler scan re-picks the never-enqueued message instead of
+        silently dropping it forever.
         """
         dialog = _make_dialog("Test Group", entity_id=250)
         msg = _make_message(556, text="raced message")

@@ -82,9 +82,9 @@ class TestCatchupClaimGate:
         """A lost claim skips enqueue AND leaves no durable dedup (BLOCKER).
 
         This is the exact round-4 scenario: a peer producer already won this
-        message. The loser must not call record_message_processed, so a
-        winner-death self-heals via the next scan instead of the message
-        being silently dropped forever.
+        message. The loser must not call record_message_processed (it does
+        not double-record), so if the winner dies before enqueue a re-scan
+        self-heals instead of the message being silently dropped forever.
         """
         dialog = _make_dialog("Test Group", entity_id=400)
         msg = _make_message(700, text="missed message")
