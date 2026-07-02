@@ -1074,9 +1074,13 @@ class BridgeAdapter:
         captured loop ref is mandatory for async send_cbs. A sync
         send_cb is called directly on the calling thread.
 
-        Returns True on confirmed delivery, False on any failure or
-        timeout. The caller (_make_user_callback / _make_complete_callback)
-        uses the return value to set self._user_facing_routed (issue #1647).
+        Returns True when the payload is delivered synchronously or
+        re-enqueued to the outbox before returning; False when neither
+        happened (sync send_cb raised, a pre-scheduling error occurred,
+        or the same-thread fire-and-forget path where outbox recovery
+        is deferred to a done-callback). The caller
+        (_make_user_callback / _make_complete_callback) uses the return
+        value to set self._user_facing_routed (issue #1647).
 
         On a missing/closed loop or a delivery timeout, the error
         is logged and a session_events entry is appended. The
