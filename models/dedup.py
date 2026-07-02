@@ -44,6 +44,21 @@ class DedupRecord(Model):
     @classmethod
     def get_or_create(cls, chat_id: str) -> "DedupRecord":
         """Get existing record for a chat, or create a new one."""
+        # C3 (#1817): DedupRecord's short 2h TTL makes it the most likely
+        # model to accumulate ghost index members (hash expired, class-set
+        # membership survives). get_or_create() runs on every inbound
+        # message, so it is a good place to opportunistically self-heal the
+        # index instead of waiting up to 24h for the nightly
+        # popoto-index-cleanup reflection. Rate-limited internally (at most
+        # once/60s) -- safe to call unconditionally on every read.
+        # query.filter() itself already silently drops ghost members from
+        # `existing` (never attaches a dead record's data); this only
+        # accelerates removing the ghost from the index. See
+        # models/ghost_reconcile.py for the full rationale.
+        from models.ghost_reconcile import reconcile_ghost_members
+
+        reconcile_ghost_members(cls)
+
         existing = cls.query.filter(chat_id=str(chat_id))
         if existing:
             return existing[0]
