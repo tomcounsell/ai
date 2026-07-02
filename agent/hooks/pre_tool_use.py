@@ -368,6 +368,73 @@ def _handle_skill_tool_start(tool_input: dict[str, Any], claude_uuid: str | None
     _start_pipeline_stage(session_id, stage)
 
 
+def _resolve_sdk_session():
+    """Resolve the in-flight AgentSession for the SDK hook via ``AGENT_SESSION_ID``.
+
+    Mirrors ``_handle_skill_tool_start``'s resolution: ``AGENT_SESSION_ID`` holds
+    the session_id (set by the worker when spawning the session), looked up with
+    ``AgentSession.query.filter(session_id=...)``.
+
+    Returns the session, or ``None`` for a GENUINE no-session (env unset / no
+    matching record). RAISES on an infra/resolution error (Redis raised) — the
+    caller catches it separately for the loud "backstop BLIND" path.
+    """
+    session_id = os.environ.get("AGENT_SESSION_ID")
+    if not session_id:
+        return None
+    from models.agent_session import AgentSession
+
+    matches = list(AgentSession.query.filter(session_id=session_id))
+    if not matches:
+        return None
+    return matches[0]
+
+
+def _enforce_tool_budget_sdk() -> dict[str, Any] | None:
+    """Synchronous per-tool budget backstop for the SDK/headless surface (#1821).
+
+    Returns a ``{"decision":"block","reason":...}`` dict for an over-budget
+    session (under ``TOOL_BUDGET_ENABLED``, default on), or ``None`` to allow.
+
+    Fails OPEN on any resolution/infra error, splitting genuine no-session
+    (silent allow) from an infra error (loud WARNING + ``resolution_errors``
+    counter). A bug inside the evaluate/actuate step also fails OPEN (returns
+    ``None``) — the budget is a backstop and must never brick a tool call.
+    """
+    # Resolution split: genuine no-session vs infra error.
+    try:
+        session = _resolve_sdk_session()
+    except Exception as e:
+        try:
+            from agent.tool_budget import _project_key_env, record_resolution_error
+
+            record_resolution_error(_project_key_env(), e, surface="sdk-hook")
+        except Exception as inner:
+            logger.warning("[pre_tool_use] tool-budget resolution error (BLIND): %s", inner)
+        return None  # fail open
+    if session is None:
+        return None  # genuine no-session → silent allow
+
+    # Successful resolution: evaluate + actuate. Fail OPEN on any internal error.
+    try:
+        from agent.tool_budget import evaluate_tool_budget, record_budget_trip
+
+        verdict = evaluate_tool_budget(session)
+        if verdict.allow:
+            return None
+        # DENY. Surface first (fail-quiet), then block — surfacing NEVER flips it.
+        record_budget_trip(session, verdict)
+        logger.warning(
+            "[pre_tool_use] tool-budget DENY for session %s: %s",
+            getattr(session, "session_id", "?"),
+            verdict.reason,
+        )
+        return {"decision": "block", "reason": verdict.reason}
+    except Exception as e:
+        logger.warning("[pre_tool_use] tool-budget check failed (fail-open): %s", e)
+        return None
+
+
 async def pre_tool_use_hook(
     input_data: PreToolUseHookInput,
     tool_use_id: str | None,
@@ -383,6 +450,13 @@ async def pre_tool_use_hook(
     """
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
+
+    # Fix #6 (issue #1821): synchronous per-tool budget backstop. Runs at the
+    # TOP so it covers ALL tools (before the write-capable filter) and fires
+    # inline even when every background health loop is frozen.
+    budget_block = _enforce_tool_budget_sdk()
+    if budget_block is not None:
+        return budget_block
 
     # Pillar A liveness write — fire-and-forget, never blocks the hook.
     try:
