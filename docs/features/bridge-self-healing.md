@@ -10,6 +10,8 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 
 The same defensive `try/except ValueError` pattern was applied to `tools/valor_telegram.py` where lazy `int(os.environ.get(...))` calls existed inside functions.
 
+The same failure class — a raise at import time trapping the watchdog in a restart loop — also applied to `projects.json` parsing; see Component 19 (Guarded Config Read) below for the fix.
+
 ## Components
 
 ### 1. Session Lock Cleanup (`bridge/telegram_bridge.py`)
@@ -553,6 +555,19 @@ redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 
 **Installed by** `scripts/install_worker.sh` as `${SERVICE_LABEL_PREFIX}.worker-watchdog`.
 
+### 19. Guarded Config Read (`bridge/routing.py`, issue #1817 workstream C4)
+
+**Problem**: `load_config()` and `telegram_bridge.py`'s import-time `_get_active_projects()` both parsed `projects.json` with a bare `json.load()`. A launchd `KeepAlive` respawn can race a mid-iCloud-write of `projects.json`, producing a partial/truncated file. The bare parse raised `JSONDecodeError` (or, on a partial read, `OSError`/`UnicodeDecodeError`) straight out of `_get_active_projects()`, which runs at `telegram_bridge.py` import time (`ACTIVE_PROJECTS = _get_active_projects()`) — crashing the bridge before any logging or recovery could run and trapping the watchdog in the same restart-loop failure mode described under Import-Time Safety above.
+
+**Solution**: `bridge/routing.py::_guarded_json_load()` wraps the parse in a `try/except (json.JSONDecodeError, OSError, UnicodeDecodeError)`. On success it caches the parsed config to a last-known-good sidecar (`data/projects.last_known_good.json`), written atomically via temp-file + `os.replace` — the same idiom used by `data/flood-backoff` (Component 11) and `agent/session_health.py`. On a parse failure it logs an ERROR and serves the last-known-good sidecar instead of raising; if no sidecar exists yet, it falls back to empty defaults (`{"projects": {}, "defaults": {}}`). `_guarded_json_load()` never raises. Both `load_config()` and `telegram_bridge.py::_get_active_projects()` (including its import-time module-level call) route through this shared helper, so a transiently corrupt config no longer crash-loops either the bridge or the worker's config reads.
+
+**Files**:
+- `data/projects.last_known_good.json` — last successfully-parsed config, refreshed on every successful read
+
+**Tests**: `tests/unit/test_routing.py::TestGuardedConfigRead` (9 cases) — successful reads cache the sidecar atomically; a corrupt read falls back to the sidecar and logs; a corrupt read with no sidecar falls back to empty defaults and logs; malformed/binary input never raises; `load_config()` falls back correctly end-to-end; sidecar read/write helpers handle missing-file and write-failure cases without raising.
+
+See [Config Architecture](config-architecture.md) for how `projects.json` fits into the broader config system.
+
 ## Idle SDK Teardown (issue #1128)
 
 The Claude Agent SDK's persistent `ClaudeSDKClient` connections die
@@ -887,6 +902,7 @@ The runner-entry guard in `agent/session_completion.py` (`_deliver_pipeline_comp
 | `data/flood-backoff` | Flood-backoff expiry (JSON) |
 | `data/last_connected` | Last-connected timestamp (ISO 8601) |
 | `data/last_worker_connected` | Worker heartbeat file (mtime checked by `worker-status` and `worker_watchdog.py`) |
+| `data/projects.last_known_good.json` | Last successfully-parsed `projects.json`, served on a partial/corrupt config read (Component 19) |
 | `logs/watchdog.log` | Bridge watchdog output |
 | `logs/worker_watchdog.log` | Worker watchdog output |
 | `logs/worker/{session_id}.log` | FileOutputHandler dual-write output (persisted even during bridge downtime) |
