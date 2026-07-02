@@ -24,11 +24,9 @@ class TestValidateTransportAccepts:
         "transport",
         [
             {"pm": "pty", "dev": "headless"},
-            {"pm": "headless", "dev": "pty"},
             {"pm": "pty", "dev": "pty"},
-            {"pm": "headless", "dev": "headless"},
-            {"pm": "headless"},  # dev omitted → defaults downstream
-            {"dev": "headless"},  # pm omitted → defaults downstream
+            {"dev": "headless"},  # pm omitted → defaults to pty downstream
+            {"dev": "pty"},  # pm omitted → defaults downstream
             {},  # empty dict is valid
         ],
     )
@@ -77,6 +75,23 @@ class TestValidateTransportRejects:
             validate_transport({"projects": {"proj": {"transport": {"pm": 123}}}})
         assert "proj" in str(exc.value)
 
+    @pytest.mark.parametrize(
+        "transport",
+        [
+            {"pm": "headless", "dev": "pty"},
+            {"pm": "headless", "dev": "headless"},
+            {"pm": "headless"},
+        ],
+    )
+    def test_pm_headless_rejected(self, transport):
+        # PM headless is not yet supported (plan #1842 v1) — the PM startup /
+        # login / plateau machinery is PTY-coupled. Reject with a clear message.
+        with pytest.raises(ConfigValidationError) as exc:
+            validate_transport({"projects": {"proj": {"transport": transport}}})
+        msg = str(exc.value)
+        assert "proj" in msg
+        assert "PM headless not yet supported" in msg
+
     def test_aggregates_multiple_errors(self):
         # Two problems across two projects — both must appear in one raise.
         with pytest.raises(ConfigValidationError) as exc:
@@ -103,4 +118,9 @@ class TestAggregatorRegistration:
 
     def test_valid_transport_passes_aggregator(self):
         # A config with a valid transport block and no other violations passes.
-        validate_projects_config({"projects": {"proj": {"transport": {"pm": "headless"}}}})
+        validate_projects_config({"projects": {"proj": {"transport": {"dev": "headless"}}}})
+
+    def test_pm_headless_surfaces_through_aggregator(self):
+        with pytest.raises(ConfigValidationError) as exc:
+            validate_projects_config({"projects": {"proj": {"transport": {"pm": "headless"}}}})
+        assert "PM headless not yet supported" in str(exc.value)

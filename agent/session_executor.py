@@ -1623,6 +1623,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         f"[{session.project_key}] Failed to persist role_transports "
                         f"(non-fatal): {_rt_err}"
                     )
+        # PM headless is not yet supported (plan #1842 v1). Config validation
+        # rejects ``transport.pm=headless``, but a ``GRANITE__PM_TRANSPORT`` env
+        # override or ``settings.granite.pm_transport`` bypasses that gate. Coerce
+        # defensively to ``pty`` so a stray pm=headless never reaches the
+        # PTY-coupled PM startup / login / plateau machinery.
+        if role_transports.get("pm") == "headless":
+            logger.warning(
+                "[executor-guard] session %s: transport.pm=headless is unsupported; "
+                "coercing to pty (PM headless not yet supported in v1)",
+                session.agent_session_id,
+            )
+            role_transports["pm"] = "pty"
         # Defensive fail-loud backstop: config validation at update time is the
         # primary gate, but an invalid resolved value must never silently default.
         _bad = [

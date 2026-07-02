@@ -50,11 +50,14 @@ with no persisted map degrades to both-PTY.
 ### Validation
 
 `bridge/config_validation.py::validate_transport` rejects a non-dict `transport`
-block, an unknown role key, and any value outside `{pty, headless}` — each error
+block, an unknown role key, any value outside `{pty, headless}`, and
+`transport.pm = "headless"` (PM headless is not yet supported in v1) — each error
 names the offending project key. It is registered in `validate_projects_config`,
 so a malformed block fails loud at update time (Step 4.6) and blocks the bridge
 restart. The executor adds a defensive backstop: an invalid resolved value
-finalizes the session `failed` with a reason naming the bad value.
+finalizes the session `failed` with a reason naming the bad value, and a stray
+`pm=headless` (from an env/settings override that bypasses config validation) is
+coerced to `pty` with a warning.
 
 ## How the headless leg works
 
@@ -64,14 +67,14 @@ machinery the drafter uses, with `ANTHROPIC_API_KEY` stripped and stale-UUID
 retry intact. `agent/granite_container/role_driver.py::HeadlessRoleDriver` adds:
 
 - **Priming (first turn).** Two implemented branches selected at build time via
-  `HeadlessRoleDriver(prime_path=...)`. The **default** is
-  `PRIME_PATH_APPEND`: the role's prime command body
-  (`.claude/commands/granite/prime-{pm,dev}-role.md`, frontmatter stripped) is
-  injected via `--append-system-prompt`. The alternative `PRIME_PATH_SLASH`
-  prepends the `/granite:prime-*` slash command to the first message. The append
-  path is the default because slash-command *resolution* under `claude -p` is
-  unverified on machines without Substrate B / ollama (Task 0 Probe B deferred);
-  both branches are covered by unit tests.
+  `HeadlessRoleDriver(prime_path=...)`. The **default** is `PRIME_PATH_SLASH`:
+  the role's `/granite:prime-*` slash command is prepended to the first message.
+  Task 0 Probe B empirically confirmed the slash command *resolves* under
+  `claude -p` (the primed persona's routing token surfaced under Substrate B).
+  The alternative `PRIME_PATH_APPEND` injects the role's prime command body
+  (`.claude/commands/granite/prime-{pm,dev}-role.md`, frontmatter stripped) via
+  `--append-system-prompt` and stays as a documented contingency, selectable if
+  slash resolution ever regresses. Both branches are covered by unit tests.
 - **Turn-end reconciliation.** The subprocess is spawned with the #1688
   `--settings` hook set writing to the per-session NDJSON edge file. The driver
   **prefers a `TURN_END` hook envelope** (parent `Stop`, filtered by session and
@@ -91,6 +94,38 @@ The PTY leg is untouched — `PTYRoleDriver` is a mechanical wrapper over today'
 `PTYDriver` + `HookEdgeConsumer`, byte-identical under the default config. Only
 roles configured `pty` get a PTY process spawned (`_spawn_session_pair`); the
 pool still bounds concurrency at one slot per session pair.
+
+### Container dispatch wiring
+
+A headless Dev role is reachable in production through the container's turn
+dispatch, not just in tests. At the Dev-turn chokepoint
+(`Container._route_pm_classification`), when `role_transports["dev"] ==
+"headless"` the turn is dispatched through `Container._run_dev_turn_headless`,
+which drives a reused `HeadlessRoleDriver` (constructed once via
+`_get_dev_headless_driver` so the captured `claude_session_id` enables
+`--resume` and first-turn priming happens exactly once). The container-owned
+post-turn logic is transport-agnostic and shared with the PTY path: empty-return
+fallback → `DEV_REPORT_UNAVAILABLE`, `_last_dev_report` capture, PM relay with
+`PM_TURN_CONTRACT_REMINDER`, `TurnRecord` append, and hung → `dev_hang`. A
+headless Dev role has no PTY, so the container skips its PTY prime / startup-idle
+machinery and the pool spawns no Dev PTY (`_spawn_pair` / `_uses_pool_pair` treat
+a headless role as satisfied with a `None` pool member — the `None` flows through
+spawn, `_released_to_pool`, and close/release paths cleanly). Every new branch is
+gated on transport, so a no-config / both-`pty` session is byte-identical to the
+pre-#1842 loop.
+
+### Scope: Dev headless only in v1 (PM headless deferred)
+
+Only the **Dev** role runs headless in v1 — it is the primary metered worker leg.
+`transport.pm = "headless"` is **rejected** by `validate_transport` with a clear
+"PM headless not yet supported" error (and defensively coerced to `pty` by the
+executor if an env/settings override bypasses config validation). The PM startup,
+`/login` re-auth recovery, and plateau-detection machinery are PTY-coupled and
+territory-restricted (the sibling PTY-read-loop work owns that surface), so
+routing PM headless would require an invasive refactor outside this appetite. The
+per-role config *shape* stays intact so PM headless can be enabled later without a
+schema change. This is the accepted state of plan Open Question #1: some transport
+combos are unit-covered but not yet E2E-proven.
 
 ## Cost surfacing
 

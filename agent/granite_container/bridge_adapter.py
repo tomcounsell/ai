@@ -602,9 +602,14 @@ class BridgeAdapter:
             # the orphan-leak acceptance criterion (issue #1572).
             # Mark the pair as pool-owned so Container._close_pair
             # does not double-close; the pool's __aexit__ owns the
-            # close + respawn lifecycle.
-            pm._released_to_pool = True
-            dev._released_to_pool = True
+            # close + respawn lifecycle. A headless role carries a None
+            # pool member (the pool spawns NO PTY for it), so guard each
+            # dereference — a None must flow through cleanly end-to-end
+            # (plan #1842 B2).
+            if pm is not None:
+                pm._released_to_pool = True
+            if dev is not None:
+                dev._released_to_pool = True
             # Storage-agnostic steering-poll closure (mid-run steering, #1779).
             # Container calls this once per steady-state turn; it drains the
             # race-free Redis list (atomic LPOP) for this session and returns the
@@ -640,8 +645,12 @@ class BridgeAdapter:
                 dev_session_id=dev_session_id,
                 pm_hook_edge_file=pm_hook_edge_file,
                 dev_hook_edge_file=dev_hook_edge_file,
+                pm_settings_path=pm_settings_path,
+                dev_settings_path=dev_settings_path,
                 hook_driven=hook_driven,
                 role_transports=self._role_transports,
+                session_env=self._session_env,
+                agent_session_id=str(getattr(self._agent_session, "session_id", "") or ""),
             )
             # Compute transcript paths for the tailer. Plan #1842 tailer
             # invariant guard: populate a role's transcript path ONLY when that

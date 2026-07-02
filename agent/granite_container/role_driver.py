@@ -52,12 +52,14 @@ TRANSPORT_HEADLESS = "headless"
 
 # Headless prime-injection strategy (concern 5). Both paths are implemented and
 # unit-tested; the driver selects at build time. The DEFAULT is the
-# append-system-prompt fallback for safety — slash-command RESOLUTION under
-# ``claude -p`` is unconfirmed on this machine (Task 0 Probe B is deferred
-# because Substrate B / ollama may be unavailable), so we do not depend on it.
+# slash-command path: Task 0 Probe B empirically confirmed
+# ``/granite:prime-pm-role`` RESOLVES under ``claude -p`` (the primed persona's
+# routing token surfaced under Substrate B, claude 2.1.198 / qwen). The
+# ``--append-system-prompt`` path stays as a documented contingency, selectable
+# via ``prime_path=PRIME_PATH_APPEND`` if slash resolution ever regresses.
 PRIME_PATH_SLASH = "slash_command"
 PRIME_PATH_APPEND = "append_system_prompt"
-DEFAULT_HEADLESS_PRIME_PATH = PRIME_PATH_APPEND
+DEFAULT_HEADLESS_PRIME_PATH = PRIME_PATH_SLASH
 
 # The granite prime command files, keyed by role. Invoked as
 # ``/granite:prime-{pm,dev,teammate}-role`` (slash path) or read as the

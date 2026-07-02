@@ -62,6 +62,7 @@ from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
     PTYDriver,
 )
+from agent.granite_container.role_driver import HeadlessRoleDriver
 from agent.granite_container.startup_parser import (
     StartupEvent,
     parse_startup_frame,
@@ -737,10 +738,15 @@ class Container:
         dev_session_id: str | None = None,
         pm_hook_edge_file: str | None = None,
         dev_hook_edge_file: str | None = None,
+        pm_settings_path: str | None = None,
+        dev_settings_path: str | None = None,
         hook_driven: bool | None = None,
         hook_turn_end_wait_s: float | None = None,
         crash_resume_cap: int | None = None,
         role_transports: dict[str, str] | None = None,
+        session_env: dict[str, str] | None = None,
+        agent_session_id: str | None = None,
+        headless_harness_fn: Callable[..., Any] | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
@@ -752,6 +758,24 @@ class Container:
         self._role_transports = (
             dict(role_transports) if role_transports else {"pm": "pty", "dev": "pty"}
         )
+        # Headless-leg provisioning (plan #1842). A "headless" role runs one
+        # ``claude -p`` subprocess per turn via HeadlessRoleDriver instead of a
+        # PTYDriver. The driver needs the per-session hook settings + edge file
+        # (so the Stop hook writes TURN_END), the session env, and the bridge
+        # session_id (metered accounting lands on the AgentSession keyed by it).
+        self._pm_settings_path = pm_settings_path
+        self._dev_settings_path = dev_settings_path
+        self._dev_hook_edge_file = dev_hook_edge_file
+        self._session_env = dict(session_env) if session_env else None
+        # Bridge/Telegram session_id — the key ``accumulate_session_tokens`` and
+        # ``_store_claude_session_uuid`` use to land metered_* on the record.
+        self._agent_session_id = agent_session_id
+        # Test seam: inject a fake harness_fn so the headless dispatch can be
+        # driven end-to-end through the container without a real subprocess.
+        self._headless_harness_fn = headless_harness_fn
+        # Constructed once on the first headless Dev turn and reused across turns
+        # so the captured claude_session_id enables ``--resume`` (plan #1842 B3).
+        self._dev_role_driver: HeadlessRoleDriver | None = None
         self.user_message = user_message
         self.cwd = cwd
         self.max_turns = max_turns
@@ -897,6 +921,18 @@ class Container:
         """
         return self._crash_resume_in_flight
 
+    # -- Transport helpers (plan #1842) -----------------------------------
+
+    def _transport_of(self, role: str) -> str:
+        """Resolved transport ("pty"/"headless") for a role; default "pty"."""
+        return self._role_transports.get(role, "pty")
+
+    def _dev_is_headless(self) -> bool:
+        return self._transport_of("dev") == "headless"
+
+    def _pm_is_headless(self) -> bool:
+        return self._transport_of("pm") == "headless"
+
     # -- Lifecycle --------------------------------------------------------
 
     def _spawn_pair(self) -> None:
@@ -905,8 +941,15 @@ class Container:
         Reuses a prewarmed pair when the ctor received one
         (production path: PTYPool -> BridgeAdapter -> Container).
         Spawns a fresh pair otherwise (tests, run_ping_pong_test).
+
+        Transport-aware (plan #1842): a "headless" role has NO PTY — its
+        prewarmed member is None by design and it is never self-spawned. The
+        pool-pair reuse and the self-spawn fallback each spawn a PTY only for
+        roles configured "pty".
         """
-        if self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None:
+        if self._uses_pool_pair():
+            # The pool supplies a PTY only for pty roles; a headless role's
+            # member is None and stays None (no PTY process for it).
             self._pm_pty = self._prewarmed_pm_pty
             self._dev_pty = self._prewarmed_dev_pty
             return
@@ -917,10 +960,12 @@ class Container:
         else:
             cwd = self.cwd
 
-        self._pm_pty = PTYDriver(role="pm", cwd=cwd, model=self._pm_model)
-        self._dev_pty = PTYDriver(role="dev", cwd=cwd, model=self._dev_model)
-        self._pm_pty.spawn()
-        self._dev_pty.spawn()
+        if not self._pm_is_headless():
+            self._pm_pty = PTYDriver(role="pm", cwd=cwd, model=self._pm_model)
+            self._pm_pty.spawn()
+        if not self._dev_is_headless():
+            self._dev_pty = PTYDriver(role="dev", cwd=cwd, model=self._dev_model)
+            self._dev_pty.spawn()
 
     def _close_pair(self) -> None:
         # Skip PTYs the pool already owns — its __aexit__ does the
@@ -948,12 +993,23 @@ class Container:
     def _uses_pool_pair(self) -> bool:
         """Whether this container runs on a PTYPool-prewarmed pair.
 
-        Pool-backed containers receive a prewarmed PM+Dev PTY pair from the
+        Pool-backed containers receive a prewarmed PTY per pty-role from the
         PTYPool; self-spawned containers (tests, ping-pong) create their own.
         The pool owns its PTY lifecycle via close-on-release and PID-targeted
         orphan kill at worker startup.
+
+        Transport-aware (plan #1842 B2): a "headless" role's prewarmed member is
+        None by design, so requiring BOTH members non-None would misroute a
+        headless-configured pool session into self-spawning a fresh PTY pair
+        (ignoring the headless selection). Instead, each role is "satisfied" when
+        it is headless (needs no PTY) OR its prewarmed member is present; and at
+        least one prewarmed member must be present to distinguish the pool path
+        from the no-prewarm self-spawn path (tests).
         """
-        return self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None
+        pm_ok = self._pm_is_headless() or self._prewarmed_pm_pty is not None
+        dev_ok = self._dev_is_headless() or self._prewarmed_dev_pty is not None
+        any_prewarmed = self._prewarmed_pm_pty is not None or self._prewarmed_dev_pty is not None
+        return pm_ok and dev_ok and any_prewarmed
 
     def _close_pair_and_reap(self) -> None:
         """Close PTYs, then reap orphaned process groups on the self-spawned path only.
@@ -1661,9 +1717,17 @@ class Container:
             _pm_prime_cmd = _resolve_pm_prime_cmd(self._session_type)
             self._prime_session(self._pm_pty, _pm_prime_cmd, include_user_message=True)
             logger.info("container: PM prime done")
-            logger.info("container: priming Dev")
-            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=True)
-            logger.info("container: Dev prime done; entering startup loop")
+            # A headless Dev role has no PTY to prime here — HeadlessRoleDriver
+            # applies its own first-turn persona priming (slash command or
+            # --append-system-prompt) at the first [/dev] dispatch (plan #1842).
+            if not self._dev_is_headless():
+                logger.info("container: priming Dev")
+                self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=True)
+                logger.info("container: Dev prime done; entering startup loop")
+            else:
+                logger.info(
+                    "container: Dev is headless — skipping PTY prime; entering startup loop"
+                )
 
             # Startup-phase loop. Watch both PTYs for known startup
             # events (trust-folder, update notice — the parser
@@ -1695,7 +1759,14 @@ class Container:
 
             while time.monotonic() < startup_deadline:
                 pm_idle = self._startup_cycle_idle(self._pm_pty)
-                dev_idle = self._startup_cycle_idle(self._dev_pty)
+                # A headless Dev role has no PTY to cycle — it never participates
+                # in the PTY startup/idle machinery. Treat it as settled with an
+                # empty edge buffer so the both-idle break gates on PM alone
+                # (plan #1842). The default both-PTY path is byte-identical.
+                if self._dev_is_headless():
+                    dev_idle = (True, "", "", "", 0)
+                else:
+                    dev_idle = self._startup_cycle_idle(self._dev_pty)
                 pm_saw_idle, pm_edge, pm_level, pm_marker, pm_ms = pm_idle
                 dev_saw_idle, dev_edge, dev_level, dev_marker, dev_ms = dev_idle
 
@@ -2258,6 +2329,12 @@ class Container:
                 # with the empty-[/dev] guard above).
                 self._pm_pty.write(PM_COMPLIANCE_NUDGE)
                 return RouteOutcome(should_break=False, exit_reason=None)
+            # Headless Dev has no persistent PTY to write-and-continue into; each
+            # turn is a fresh `claude -p` and the next turn carries context via
+            # --resume. Dispatch the cleaned steer payload as a normal headless
+            # Dev turn (plan #1842) rather than dereferencing a None PTY.
+            if self._dev_is_headless():
+                return self._run_dev_turn_headless(clean, turn_index, classification, result)
             # Submit the steer as a Dev turn (no _get_builder, no Dev-idle wait).
             self._dev_pty.write(clean + "\n")
             # Write a one-line continuation ack to PM so it produces its next turn
@@ -2276,6 +2353,14 @@ class Container:
             )
             result.turns.append(turn_record)
             return RouteOutcome(should_break=False, exit_reason=None)
+
+        # Headless Dev leg (plan #1842 B1/B3): when Dev runs headless, dispatch
+        # the turn through HeadlessRoleDriver.run_turn (metered `claude -p`)
+        # instead of the PTY builder harness. The container-owned post-turn logic
+        # (empty-return fallback, _last_dev_report, PM relay + contract reminder,
+        # TurnRecord append) is preserved in the shared _finish_dev_turn path.
+        if self._dev_is_headless():
+            return self._run_dev_turn_headless(dev_prompt, turn_index, classification, result)
 
         # Resolve the builder harness for this turn.
         # harness_name is None → default claude PTY path; unknown names
@@ -2335,6 +2420,118 @@ class Container:
             routed_payload_chars=len(dev_prompt),
             pm_idle_marker="",
             dev_idle_marker=builder.last_dev_marker,
+        )
+        result.turns.append(turn_record)
+        return RouteOutcome(should_break=False, exit_reason=None)
+
+    # -- Headless Dev leg (plan #1842) ------------------------------------
+
+    def _get_dev_headless_driver(self) -> HeadlessRoleDriver:
+        """Construct (once) and return the reusable Dev HeadlessRoleDriver.
+
+        Built lazily on the first headless Dev turn and reused across turns so
+        the captured claude_session_id enables ``--resume`` and first-turn
+        persona priming happens exactly once (plan #1842 B3). The driver reuses
+        #1688's hook plumbing: the per-session ``--settings`` file registers the
+        Stop-hook forwarder that writes TURN_END to ``dev_hook_edge_file``, and
+        the driver's own HookEdgeConsumer over that file reconciles turn-end.
+        """
+        if self._dev_role_driver is None:
+            self._dev_role_driver = HeadlessRoleDriver(
+                role="dev",
+                # Bridge session_id — the key accumulate_session_tokens uses to
+                # land metered_* on the AgentSession record.
+                session_id=self._agent_session_id or self._dev_session_id or "",
+                working_dir=self.cwd or "",
+                model=self._dev_model,
+                settings_path=self._dev_settings_path,
+                edge_file=self._dev_hook_edge_file,
+                env=self._session_env,
+                project_root=self.cwd,
+                harness_fn=self._headless_harness_fn,
+            )
+        return self._dev_role_driver
+
+    def _run_dev_turn_headless(
+        self,
+        dev_prompt: str,
+        turn_index: int,
+        classification: Any,
+        result: ContainerResult,
+    ) -> RouteOutcome:
+        """Dispatch one Dev turn through HeadlessRoleDriver (plan #1842 B3).
+
+        Mirrors the container-owned post-turn logic of the PTY builder path so
+        the orchestration is transport-agnostic: empty-return fallback →
+        ``DEV_REPORT_UNAVAILABLE``, ``_last_dev_report`` capture, PM relay with
+        ``PM_TURN_CONTRACT_REMINDER``, ``TurnRecord`` append, and hung → dev_hang.
+        The driver / harness own turn-end reconciliation (prefer the #1688
+        ``TURN_END`` HookEdge, fall back to clean exit) and metered accounting
+        (``metered_*`` on the AgentSession). A headless turn carries NO PTY bytes,
+        so ``total_dev_pty_bytes`` is left untouched — the disjoint metered_* /
+        total_* partition (Race 1) keeps mixed-transport accounting
+        non-clobbering.
+        """
+        import asyncio  # noqa: PLC0415
+
+        driver = self._get_dev_headless_driver()
+        # The container loop is sync (run() is executed via asyncio.to_thread, so
+        # this worker thread has no running loop); asyncio.run drives the single
+        # per-turn subprocess to completion.
+        try:
+            outcome = asyncio.run(driver.run_turn(dev_prompt))
+        except Exception as e:  # noqa: BLE001
+            logger.error("[granite-container] headless Dev turn raised: %s", e)
+            result.exit_message = _truncate_exit_message(f"headless Dev turn error: {e}")
+            return RouteOutcome(should_break=True, exit_reason="exception")
+
+        # Hung subprocess (bounded-wait timeout) → dev_hang, mirroring the PTY
+        # builder's last_hung branch.
+        if outcome.hung:
+            result.exit_message = "Dev headless turn timed out (hung subprocess)"
+            return RouteOutcome(should_break=True, exit_reason="dev_hang")
+
+        # Hard subprocess failure (binary missing, thinking-block corruption,
+        # nonzero exit). empty_output is NOT a hard failure — it takes the
+        # DEV_REPORT_UNAVAILABLE fallback below, mirroring the PTY empty-transcript
+        # path so the PM can still continue.
+        if outcome.exit_reason and outcome.exit_reason != "empty_output":
+            result.exit_message = _truncate_exit_message(
+                f"Dev headless turn failed: {outcome.exit_reason}"
+            )
+            return RouteOutcome(should_break=True, exit_reason="exception")
+
+        dev_text = outcome.reply_text
+        if not dev_text:
+            logger.warning(
+                "[granite-container] headless Dev returned empty; "
+                "falling back to transcript_fallback_count bump"
+            )
+            result.transcript_fallback_count += 1
+            dev_text = DEV_REPORT_UNAVAILABLE
+
+        # Container-owned: capture the Dev text for the wrap-up guard (issue #1647).
+        self._last_dev_report = dev_text
+
+        # Relay Dev's verbatim text to PM's PTY with the per-turn contract
+        # reminder (issue #1719), identical to the PTY path.
+        await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
+        if not await_pm:
+            result.exit_message = "PM did not reach idle before Dev report"
+            return RouteOutcome(should_break=True, exit_reason="pm_hang")
+        self._pm_pty.write(dev_text + PM_TURN_CONTRACT_REMINDER)
+
+        turn_record = TurnRecord(
+            turn_index=turn_index,
+            pm_idle_ms=0,
+            dev_idle_ms=0,
+            classification="dev",
+            compliance_miss=classification.compliance_miss,
+            pm_first_line=classification.raw_first_line,
+            routed_payload_chars=len(dev_prompt),
+            pm_idle_marker="",
+            # Record which signal ended the headless turn (hook_edge / result).
+            dev_idle_marker=outcome.turn_end_source,
         )
         result.turns.append(turn_record)
         return RouteOutcome(should_break=False, exit_reason=None)

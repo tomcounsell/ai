@@ -435,6 +435,18 @@ def validate_transport(config: dict) -> None:
                     f"project '{proj_key}' transport.{role} has invalid value {value!r} "
                     f"(valid transports: {sorted(_VALID_TRANSPORTS)})"
                 )
+                continue
+            # PM headless is not yet supported (plan #1842 v1). The PM startup /
+            # login / plateau machinery is PTY-coupled and territory-restricted
+            # (#1843 owns the PTY read loop), so PM runs on PTY only. Dev headless
+            # is the metered worker leg that ships in v1. Reject pm=headless with a
+            # clear message rather than crashing deep in the container.
+            if role == "pm" and value == "headless":
+                errors.append(
+                    f"project '{proj_key}' transport.pm=headless is not yet supported "
+                    "(PM headless not yet supported — only the Dev role may run "
+                    "headless in v1; keep transport.pm=pty)"
+                )
 
     if errors:
         raise ConfigValidationError(
