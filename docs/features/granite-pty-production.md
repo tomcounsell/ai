@@ -986,6 +986,13 @@ replaced an earlier regex loading-spinner negative, which mid-turn cell-
 fragment repaints could both evade (false idle) and falsely latch (a stale
 spinner frame blocking idle for the rest of the call).
 
+> **#1688 update — `read_until_idle` is no longer the turn-completion
+> authority.** With hook-driven turn returns (default on), the parent `Stop`
+> hook edge is the completion signal; `read_until_idle` is demoted to a
+> running/idle badge, liveness, and crash detection. The idle heuristic above
+> is retained as the documented fallback (feature flag off / no edge file). See
+> [Granite Hook-Driven Turn Returns](granite-hook-driven-turn-returns.md).
+
 ## Reverting the granite cutover
 
 The cutover is all-or-nothing with no runtime feature flag. To roll back to the
