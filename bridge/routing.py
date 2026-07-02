@@ -1380,6 +1380,19 @@ def _get_redis():
     return redis.Redis.from_url(redis_url, decode_responses=False)
 
 
+class ResolverUnavailable(Exception):
+    """Raised by resolve_customer() when the resolver could not run to
+    completion due to an infrastructure error (subprocess/callable dispatch
+    failure, expired OAuth token, gws error, malformed output, etc.).
+
+    Distinct from a definitively-resolved "not a customer" (which returns
+    None from resolve_customer()). Callers MUST NOT treat this exception as
+    authoritative non-customer routing — the inbound email should be
+    retried on the next poll, not discarded (see
+    bridge/email_bridge.py::_process_inbound_email, issue #1817 A2).
+    """
+
+
 def _resolve_resolver_callable(dotted_path: str):
     """Resolve a dotted Python path to a callable.
 
@@ -1414,8 +1427,15 @@ async def resolve_customer(
     2. Reject malformed sender (conservative regex) — return None, no counter.
     3. Check Redis cache (cache hit returns cached value; cached "" means None).
     4. Dispatch subprocess (argv form) or importlib callable.
-    5. Cache result. On error: increment resolver:failures:{project_key},
-       attempt valor-retry IMAP label (best-effort), return None (fail-closed).
+    5. On dispatch error (infra failure — subprocess/callable crash, timeout,
+       malformed output): increment resolver:failures:{project_key}, attempt
+       valor-retry IMAP label (best-effort), then RAISE ResolverUnavailable.
+       This is NOT a "not a customer" result — the caller must retry, never
+       silently drop (issue #1817 A2).
+    6. On a successful dispatch (customer found OR definitively not a
+       customer): cache the result, clear resolver:failures:{project_key}
+       and any armed email:resolver_unavailable alert (the resolver
+       mechanism itself is healthy again), and return customer_id or None.
 
     Args:
         sender: The sender's email address.
@@ -1424,7 +1444,12 @@ async def resolve_customer(
         imap_uid: Optional IMAP UID bytes (for valor-retry label on failure).
 
     Returns:
-        customer_id string on success, None if not a customer or on any error.
+        customer_id string on success, None if the resolver definitively
+        determined the sender is not a customer.
+
+    Raises:
+        ResolverUnavailable: If the resolver dispatch failed (infrastructure
+            error) — the sender's customer status could not be determined.
     """
     resolver_config = project_config.get("customer_resolver")
     if not resolver_config:
@@ -1487,7 +1512,10 @@ async def resolve_customer(
     if dispatch_error is not None:
         logger.error(f"[resolver] Dispatch failed for {sender!r}: {dispatch_error}")
         _on_resolver_failure(project_key, imap_conn, imap_uid, r)
-        return None
+        raise ResolverUnavailable(
+            f"Resolver dispatch failed for project={project_key!r} sender={sender!r}: "
+            f"{dispatch_error}"
+        ) from dispatch_error
 
     # Cache result (empty string for None)
     cache_value = customer_id if customer_id is not None else ""
@@ -1497,18 +1525,47 @@ async def resolve_customer(
     except Exception as e:
         logger.warning(f"[resolver] Redis cache write failed: {e}")
 
+    # Dispatch succeeded — whether or not this sender turned out to be a
+    # customer, the resolver mechanism itself is healthy again. Clear both
+    # the failure counter and any armed email:resolver_unavailable alert here
+    # (not gated on customer_id) so a transient/expired-token outage doesn't
+    # leave a stale alert if the first post-recovery message happens to be
+    # from a non-customer (issue #1817 A2).
+    try:
+        if r is not None:
+            r.delete(f"resolver:failures:{project_key}")
+            r.delete("email:resolver_unavailable")
+    except Exception:
+        pass
+
     if customer_id is not None:
-        # Success: clear failure counter
-        try:
-            if r is not None:
-                r.delete(f"resolver:failures:{project_key}")
-        except Exception:
-            pass
         logger.info(f"[resolver] Resolved {sender!r} -> {customer_id!r}")
     else:
         logger.debug(f"[resolver] {sender!r} is not a known customer")
 
     return customer_id
+
+
+def get_resolver_failure_count(project_key: str) -> int:
+    """Return the current resolver:failures:{project_key} counter value.
+
+    Read-only accessor used by bridge/email_bridge.py to gate the A2
+    persistent-unavailability operator alert (email:resolver_unavailable) —
+    reuses the existing failure counter maintained by
+    _on_resolver_failure()/resolve_customer() rather than a second, parallel
+    tally. Fails closed (returns 0) on any Redis error, matching the
+    best-effort nature of the surrounding alert machinery.
+    """
+    try:
+        r = _get_redis()
+        raw = r.get(f"resolver:failures:{project_key}")
+        if raw is None:
+            return 0
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        return int(raw)
+    except Exception:
+        return 0
 
 
 async def _dispatch_subprocess_resolver(
