@@ -330,12 +330,14 @@ class PTYPool:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"pids": snapshot}))
-        except Exception as e:
-            # Broadened from OSError: persistence is best-effort and must
-            # never crash a register_pid/unregister_pid caller. This is
-            # belt-and-suspenders defense-in-depth behind `_pids_lock`,
-            # which already prevents `RuntimeError` from concurrent
-            # iteration at the source.
+        except OSError as e:
+            # Kept narrow at OSError (not broadened to Exception): the
+            # snapshot above is taken under `_pids_lock`, so no thread can
+            # mutate `_spawned_pids` mid-iteration and the
+            # `RuntimeError: Set changed size during iteration` this lock
+            # exists to prevent cannot reach this except clause. Only
+            # genuine OS/file errors remain here; swallowing anything
+            # wider would silently hide future bugs.
             logger.warning("[pty-pool] could not persist pid registry %s: %s", path, e)
 
     @staticmethod
