@@ -439,7 +439,9 @@ The lead agent orchestrates; it never builds directly.
 
 ## Open Questions
 
-1. **Edge transport confirmation:** spike-1 chose an append-only NDJSON file + durable cursor over a Redis list (honors the Popoto-only rule, restart-safe). Confirm this is acceptable vs a preference for keeping all session state in Redis for #1721 alignment.
-2. **Feature-flag default & fallback removal:** should the hook-driven path default ON immediately (idle fallback retained), or ship OFF behind a soak flag first? The `[ORDERED]` No-Go assumes fallback removal is a later gated step — confirm the initial default.
-3. **Startup pre-auth depth:** is trusted-dirs + permission-mode pre-auth sufficient for the companion task, or should the `/login` re-auth window (already handled by the #1750 BYOB driver) be explicitly excluded here?
-4. **Practice 6 scope line:** confirm the verified-submit minimum (crash-resume `continue` + prime submit) is the right cut, with the full >16KB bracketed-paste overhaul left out of scope.
+All four questions below are RESOLVED to match the plan body (critique concern #5: the body asserts these as settled; the annotations below remove the contradiction so builder and reviewer agree on what is approved).
+
+1. **Edge transport** — *(resolved: append-only NDJSON file + durable cursor, per spike-1 and the plan body).* Honors the Popoto-only rule, restart-safe, coexists with #1721's loop cursor as separate per-session file state. Not a Redis list.
+2. **Feature-flag default** — *(resolved: default ON, idle fallback retained — matches the body's feature-flag safety valve).* Removing the idle fallback (sole-authority) stays the separate `[ORDERED]` No-Go gated on a soak period. Shipped as `GraniteSettings.hook_driven_turn_end = True`.
+3. **Startup pre-auth depth** — *(resolved: permission-mode pre-auth via the generated settings only; `/login` re-auth explicitly excluded).* The `/login` window is owned by the #1750 BYOB driver and is not re-handled here; Task 3 shrinks the permission-bar scrape surface, and the trust-folder/update-notice dismissals remain with `startup_parser` (documented limit in `generate_hook_settings`).
+4. **Practice 6 scope line** — *(resolved: load-bearing minimum only, matching the body + Rabbit Holes).* Verified-submit covers the crash-resume `continue` nudge + the initial prime/message submit; the general >16KB bracketed-paste overhaul is out of scope.
