@@ -115,9 +115,9 @@ def _self_kill() -> None:
     Dumps all thread stacks to stderr first — a real production wedge then leaves
     forensic evidence in logs/worker_error.log (better than the macOS .ips C-frame
     report for a Python-level wedge; see #1808). Then delivers SIGKILL: equally
-    unswallowable as the former SIGABRT, but produces NO macOS crash-report dialog
-    and NO Python-*.ips file. Extracted as a seam so unit tests can assert the call
-    without killing the test process.
+    unswallowable as the former abort-based kill, but produces NO macOS crash-report
+    dialog and NO Python-*.ips file. Extracted as a seam so unit tests can assert the
+    call without killing the test process.
 
     The dump is best-effort; the SIGKILL is in a `finally` so it fires even if the
     dump raises (e.g. stderr closed/monkeypatched) — otherwise, inside the storm-cap
