@@ -1,7 +1,7 @@
 # Agent Reply Terminus Detection
 
 **Status:** Shipped  
-**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2), [#1318](https://github.com/tomcounsell/ai/issues/1318) (imperative Fast-Path 0 + few-shot prompt)
+**Issues:** [#911](https://github.com/tomcounsell/ai/issues/911) (initial), [#1090](https://github.com/tomcounsell/ai/issues/1090) (question-aware Fast-Path 2), [#1318](https://github.com/tomcounsell/ai/issues/1318) (imperative Fast-Path 0 + few-shot prompt), [#1836](https://github.com/tomcounsell/ai/issues/1836) (link/pointer Fast-Path 1.5)
 
 ## Problem
 
@@ -47,6 +47,9 @@ Fast-paths are checked before any LLM call, in this exact order:
 1. **Bot sender + no standalone `?`** → `SILENT`  
    The primary loop-break signal. If the sender is a bot and the message contains no question, it's a loop continuation — silence it immediately.
 
+1.5. **Human sender + reply that is essentially just a bare link/pointer** → `RESPOND`  
+   Added in [#1836](https://github.com/tomcounsell/ai/issues/1836). Runs after Fast-Path 1 (bot-sender bare URLs are already silenced by then) and — load-bearing — before Fast-Path 2's `word_count` computation, since a bare URL is a single token and would otherwise hit Fast-Path 2's ≤1-word `SILENT` branch first. See [Fast-Path 1.5: Link/Pointer Replies](#fast-path-15-linkpointer-replies) below.
+
 2. **Acknowledgment token or ≤1 word** → `SILENT`  
    Checks `_ACKNOWLEDGMENT_TOKENS` set (shared with `classify_needs_response`). Fires **after** the bot check — never before — to avoid silencing human short replies. Also skipped entirely when `thread_messages` contains a question: if Valor's prior message in the thread contained a standalone `?` (per `_STANDALONE_QUESTION_RE`), the ≤1-word check is bypassed so a human short answer like "Yes" / "No" falls through to the LLM (or the RESPOND default). See [#1090](https://github.com/tomcounsell/ai/issues/1090).
 
@@ -78,6 +81,39 @@ A regex anchored only to message start (`^\s*`) would have missed this — the i
 **Verbs deliberately excluded:** `run`, `fix`, `merge`, `start`, `deploy`, `execute`, `push`, `complete`. These appear too frequently in declarative speech to anchor a deterministic short-circuit ("the run was successful", "fix the bug at your leisure", "start of the meeting"). The few-shot LLM prompt covers them via examples instead.
 
 **Bot-sender guard:** Fast-Path 0 is gated by `not sender_is_bot`. Bot loop suppression (Fast-Path 1) is unaffected. A bot saying "Continue with deployment" still hits Fast-Path 1 and returns SILENT.
+
+#### Fast-Path 1.5: Link/Pointer Replies
+
+Added in [#1836](https://github.com/tomcounsell/ai/issues/1836) after a real dropped
+message: a human reply that was essentially "look here: `<url>`" — no `?`, no
+imperative verb (Fast-Path 0's narrow verb list doesn't cover "look"), and not
+an acknowledgment token — fell through to the LLM classifier, which plausibly
+returned `REACT` (the "adds nothing new or is redundant" rule). `should_respond_async`
+maps `REACT` to `should_respond=False`, so the message was silently dropped
+(👍 emoji reaction only, no reply). A human sharing a new link is new
+information, not a conversation closer, and should never be silenced this way.
+
+**Condition:** `not sender_is_bot` AND the text contains a URL (`_URL_RE`) AND,
+after stripping the URL(s), the remainder is not an acknowledgment token and is
+at most 3 words — i.e. the message is *essentially* a bare link/pointer
+("look here: `<url>`", "`<url1>` `<url2>`"), not a URL embedded in substantive
+prose.
+
+**Placement is load-bearing:** this branch runs between Fast-Path 1 and
+Fast-Path 2, before `word_count` is computed. A bare URL is `word_count == 1`,
+so if the branch ran after Fast-Path 2, that path would return `SILENT` first
+and pre-empt the fix.
+
+**Deliberately narrow — no LLM prompt change.** Prose/non-URL pointer replies
+(e.g. "see the PR description") are explicitly out of scope and continue to
+the LLM classifier unchanged; they were considered and rejected during
+planning as unverifiable without a deterministic test (see [#1836](https://github.com/tomcounsell/ai/issues/1836)'s
+resolved Open Question 3). If prose-pointer drops recur in practice, they get
+a separate issue with their own LLM-path test strategy.
+
+**Bot-sender guard:** gated on `not sender_is_bot` — Fast-Path 1 already
+routes bot-sender bare URLs to `SILENT` before this branch is ever reached,
+so loop-break behavior is unaffected.
 
 #### Few-Shot LLM Prompt
 
@@ -189,6 +225,14 @@ Unit tests in `tests/unit/test_routing.py` cover all required scenarios:
 - `test_classify_terminus_thanks_still_silent` — "thanks" → SILENT (regression guard)
 - `test_classify_terminus_bot_imperative_still_silent` — bot saying "Continue with deployment" → SILENT (Fast-Path 1 wins)
 - `test_imperative_line_re_does_not_match_mid_sentence` — "I would just continue this automatically" must not match (mid-line falls through to LLM)
+
+**Fast-Path 1.5 link/pointer tests** (issue [#1836](https://github.com/tomcounsell/ai/issues/1836)):
+
+- `test_classify_terminus_human_bare_url_returns_respond` — bare URL, no other text → RESPOND
+- `test_classify_terminus_human_look_here_url_returns_respond` — the motivating "look here: `<url>`" case → RESPOND
+- `test_classify_terminus_human_multi_url_returns_respond` — multiple bare URLs, no other content → RESPOND
+- `test_classify_terminus_bot_bare_url_still_silent` — bot sender + bare URL → SILENT (Fast-Path 1 wins, pins ordering)
+- `test_classify_terminus_url_with_substantive_prose_falls_through_to_llm` — URL + >3-word remainder is not force-RESPONDed; falls through to the LLM unchanged
 
 ## Related
 
