@@ -42,6 +42,56 @@ def _count_tokens(text: str) -> int:
         return len(text) // 4
 
 
+def truncate_to_tokens(text: str | None, max_tokens: int = 8000) -> str | None:
+    """Truncate text to at most `max_tokens` tokens (cl100k_base).
+
+    Reuses the module's cached `_get_encoding()` rather than creating a
+    second tiktoken encoding instance.
+
+    Args:
+        text: The text to truncate. `None` and `""` are passed through
+            unchanged (no raise).
+        max_tokens: Maximum number of tokens to retain. Defaults to 8000.
+
+    Returns:
+        `text` unchanged (byte-for-byte, no re-encode/decode round trip)
+        when it is already within `max_tokens`. Otherwise the decoded
+        first `max_tokens` tokens of `text`. `None` in, `None` out;
+        `""` in, `""` out.
+
+    Fallback behavior:
+        If tiktoken encoding/decoding raises, falls back to a conservative
+        char-based cap (`text[:max_tokens * 4]`), mirroring the fallback
+        style already used by `_count_tokens` in this module. This keeps
+        the function from ever raising due to a tokenizer failure.
+
+    Logging:
+        Logs a WARNING with the before/after token counts only when
+        truncation actually drops content -- not on every call.
+    """
+    if not text:
+        return text
+
+    try:
+        encoding = _get_encoding()
+        tokens = encoding.encode(text)
+        token_count = len(tokens)
+
+        if token_count <= max_tokens:
+            return text
+
+        truncated = encoding.decode(tokens[:max_tokens])
+        logger.warning(
+            f"truncate_to_tokens: truncated content from {token_count} to {max_tokens} tokens"
+        )
+        return truncated
+    except Exception as e:
+        logger.warning(
+            f"tiktoken encoding failed in truncate_to_tokens, falling back to char cap: {e}"
+        )
+        return text[: max_tokens * 4]
+
+
 def _split_by_headings(content: str) -> list[tuple[str, str]]:
     """Split content by top-level (h1/h2) headings.
 

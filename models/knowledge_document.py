@@ -21,6 +21,8 @@ from popoto import (
 from popoto.fields.content_field import ContentField
 from popoto.fields.embedding_field import EmbeddingField
 
+from tools.knowledge.chunking import truncate_to_tokens
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,8 +74,9 @@ class KnowledgeDocument(Model):
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             mtime = os.path.getmtime(abs_path)
 
-            # Truncate content to avoid exceeding OpenAI embedding token limit
-            content = content[:30000]
+            # Truncate content by token count (not char count) to avoid
+            # exceeding the OpenAI embedding provider's 8,192-token limit
+            content = truncate_to_tokens(content, 8000)
 
             # Check for existing document with same content hash
             existing = cls.query.filter(file_path=abs_path)
