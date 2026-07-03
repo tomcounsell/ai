@@ -1,21 +1,29 @@
 ---
 name: do-skills-audit
-description: "Audit all Claude Code skills for compliance with canonical template standards. Use when checking skill quality, validating skill structure, linting SKILL.md files, verifying frontmatter, or scanning for skill issues. Runs deterministic validation rules and best practices sync against latest Anthropic docs by default."
+description: "Audit skill quality: lint structure, descriptions, rot, orphans; --arch for architecture dispositions. Use when auditing, linting, or checking skills."
 disable-model-invocation: true
-allowed-tools: Read, Grep, Glob, Bash
-argument-hint: "[--fix] [--json] [--skill <name>] [--no-sync]"
+allowed-tools: Read, Grep, Glob, Bash, Agent
+argument-hint: "[--fix] [--json] [--skill <name>] [--no-sync] [--arch]"
 ---
 
 # Skills Audit
 
-Validates all `.claude/skills/*/SKILL.md` files against canonical template standards and Anthropic's latest published best practices.
+Audits every skill the repo has — `.claude/skills-global/` (synced to all machines) and
+`.claude/skills/` (project-only) — plus user-level `~/.claude/skills/` orphan detection.
+Two layers: a **deterministic lint** (script; code checks what code can verify) and an
+optional **architecture pass** (`--arch`; model judgment against a fixed rubric).
 
-## What this skill does
+## Why this audit exists (the economics)
 
-1. Runs 12 deterministic validation rules (frontmatter, structure, classification, content)
-2. Fetches latest Anthropic skill docs and compares against our standards (by default)
-3. Produces a structured PASS/WARN/FAIL report per skill
-4. Optionally auto-fixes trivial issues
+A skill costs context in three places, each with different economics:
+
+1. **Description** — ships in *every* session, used or not. The fleet total is the scarcest
+   resource here: budget 4,000 chars (~2% of context), per-skill target ≤120.
+2. **Body (SKILL.md)** — loads once per invocation. Only what every invocation needs. Cap 500 lines.
+3. **Sub-files** — load on demand. Reference tables, edge cases, templates live here.
+
+Always-true policy belongs in CLAUDE.md, not in any skill. Most findings are misplacements
+across these three boundaries.
 
 ## Quick start
 
@@ -23,55 +31,62 @@ Validates all `.claude/skills/*/SKILL.md` files against canonical template stand
 python .claude/skills-global/do-skills-audit/scripts/audit_skills.py $ARGUMENTS
 ```
 
-**If `$ARGUMENTS` was not substituted** (the command shows a literal `$ARGUMENTS`): Look at the user's original message — they invoked this as `/do-skills-audit <flags>`. Extract whatever follows `/do-skills-audit` and pass it to the script. If no flags were provided, run the script with no arguments (default behavior).
-
-## Arguments
+**If `$ARGUMENTS` was not substituted** (the command shows a literal `$ARGUMENTS`): extract
+whatever followed `/do-skills-audit` in the user's message and pass it through; no flags
+means default behavior.
 
 | Flag | Description |
 |------|-------------|
-| `--fix` | Auto-fix trivial issues (missing name, trailing whitespace) |
-| `--json` | Output JSON only |
+| `--fix` | Auto-fix trivial issues (missing name, whitespace, untracked build artifacts) |
+| `--json` | JSON output (contract in the script docstring; consumed by the skills-audit reflection) |
 | `--skill <name>` | Audit a single skill |
-| `--no-sync` | Skip best practices sync (fast, offline) |
-| `--apply` | Apply best practices updates to template/validator |
-| `--update-skills` | Update existing skills to match new best practices |
-| `--force-refresh` | Bypass doc cache and re-fetch |
+| `--no-sync` | Skip best-practices sync (fast, offline) |
+| `--apply` / `--update-skills` / `--force-refresh` | Best-practices sync controls (see below) |
 
-## Validation Rules
+## Layer 1 — deterministic lint (20 rules)
 
-**Structural (FAIL):** line count ≤500, frontmatter exists, name valid, broken sub-file links
-**Quality (WARN):** description trigger-oriented, description ≤1024 chars, known fields only, argument-hint presence
-**Classification (WARN):** infrastructure/background/fork skills have correct frontmatter flags
-**Content (WARN):** no duplicate descriptions across skills
+**Structure (1–3, 9, 11–12):** line count ≤500 · frontmatter parses · name valid + matches
+dir · sub-file links resolve · only known fields · `argument-hint` when `$ARGUMENTS` used.
 
-## Description Budget Target
+**Descriptions (4–5, 10, 14, 17):** trigger phrase present · length ≤200 (target ≤120,
+hard cap 1024) · no duplicate descriptions · fleet total within the 4,000-char budget ·
+no near-duplicate trigger surfaces (word-overlap collision detection).
 
-The skill listing budget is `skillListingBudgetFraction` (currently 2% of context ≈ 4,000 chars). With 49 skills the per-skill target is **≤80 chars** to stay comfortably under budget without raising the fraction. The hard ceiling per description is 1,536 chars (Claude Code truncates beyond that).
+**Classification (6–8):** infra skills carry `disable-model-invocation` · background
+reference skills carry `user-invocable: false` · fork skills carry `context: fork`.
 
-**Goal:** total description chars across all skills ≤ 4,000 (currently ~13,000 — needs trimming).
+**Repo-agnostic seam (13):** global skill bodies containing executable ai-repo coupling
+(the CLI/module tokens in the script's `COUPLING_SIGNALS` set) must carry the canonical
+probe step deferring to the per-repo skill-context seam. Project-only skills are exempt.
 
-### What a good description looks like
+**Rot & hygiene (15–16, 18–20):** referenced paths resolve (skills decay as repos move —
+missing own assets FAIL, other unresolvable paths WARN) · no tracked junk files
+(README/CHANGELOG/pyc) · every bundled sub-file is referenced by SKILL.md or a sibling ·
+no husk directories (a dir without SKILL.md is a move leftover) · user-level
+`~/.claude/skills/` copies trace back to a repo source and haven't diverged.
 
-The description field is a **trigger**, not documentation. The body loads after invocation; the description only needs to fire it.
+The audit must pass on itself: `--skill do-skills-audit` is the first check of a fleet run.
 
-**Bad** (verbose, explains what it does):
-```
-"Audit all Claude Code skills for compliance with canonical template standards. Use when checking skill quality, validating skill structure, linting SKILL.md files, verifying frontmatter, or scanning for skill issues."
-```
+## Layer 2 — architecture pass (`--arch`)
 
-**Good** (punchy, trigger-first):
-```
-"Audit skill quality: frontmatter, descriptions, structure. Triggered by 'audit skills', 'check skill', 'lint SKILL.md'."
-```
+Model judgment, not script: for each skill produce improvement suggestions, a
+**disposition** (keep / merge / split / workflow / subagent / script / retire), and a
+**model tier** (sonnet / opus / fable), with adversarial verification of every non-keep
+disposition. Load [references/rubric.md](references/rubric.md) for the five lenses,
+disposition criteria, findings schema, and verifier prompt — do not improvise criteria.
 
-**Rules for effective descriptions:**
-1. Lead with what it does (≤10 words) — the model reads left-to-right
-2. List exact trigger phrases if the skill name isn't self-evident
-3. Add one "do NOT trigger on X" only if false positives are a real problem
-4. Never explain implementation details, file paths, or step counts — that's body content
-5. Target 60–120 chars; 200+ is a signal the description is doing documentation work
+## Best-practices sync
 
+`scripts/sync_best_practices.py` fetches Anthropic's current skills docs and the upstream
+skill-creator, caches them under `references/` (7-day TTL), and diffs against our template
+standards. Runs by default; `--no-sync` skips, `--apply` updates our template/validator,
+`--update-skills` propagates to existing skills, `--force-refresh` bypasses the cache.
 
-## After the Audit
+## After the audit
 
-With `--fix`: trivial issues (missing name field, trailing whitespace) are auto-corrected in place. Complex findings (classification mismatches, trigger phrasing, duplicate descriptions) are reported for human review. Without `--fix`: all findings are report-only.
+- `--fix` corrects trivial mechanical findings only. Merges, splits, and description
+  rewrites change trigger behavior — always human-reviewed, never auto-applied.
+- FAIL findings that persist across 2 consecutive runs are auto-filed as GitHub issues by
+  the `skills-audit` reflection (daily).
+- Accepted `--arch` dispositions become one GitHub issue each, carrying the
+  `RENAMED_REMOVALS` and doc-sweep requirements that skill moves need.

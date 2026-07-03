@@ -9,6 +9,22 @@ Tests are organized by tier with pytest markers. See `tests/README.md` for the f
 - `tests/integration/` — Requires live APIs and services. Do not mock.
 - `pytest -m sdlc` — Run SDLC-related tests as a feature slice.
 
+## Test Runner: scripts/pytest-clean.sh (never bare pytest)
+
+This repo runs the suite through `scripts/pytest-clean.sh`, a drop-in pytest wrapper that
+reaps xdist workers on exit. Orphaned workers each consume ~180 MB; a full run spawns 8–12
+that accumulate if interrupted. Never use bare `pytest` or `pytest -n auto` directly — the
+wrapper handles parallelism via `pyproject.toml`.
+
+| Input | Command |
+|-------|---------|
+| _(empty)_ | `scripts/pytest-clean.sh tests/ -v --tb=short` |
+| `unit` / `integration` / `e2e` / `tools` / `performance` | `scripts/pytest-clean.sh tests/{tier}/ -v --tb=short` |
+| a file path | `scripts/pytest-clean.sh tests/unit/test_foo.py -v --tb=short` |
+| a single test node | add `-n0` (no xdist workers to reap; cleaner output) |
+
+Coverage (`--cov=. --cov-report=term-missing`) only when explicitly requested.
+
 ## Redis Isolation
 
 Unit tests must never touch production Redis. Use `REDIS_TEST_DB` or a test-specific key prefix. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.

@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Skills audit: validate all SKILL.md files against canonical template standards.
+"""Skills audit: validate SKILL.md files against canonical template standards.
 
-Runs 12 deterministic validation rules and optionally syncs against
-Anthropic's latest published best practices.
+Runs 20 deterministic validation rules over every skills root the repo has
+(`.claude/skills-global/` and `.claude/skills/`), detects husk directories and
+user-level orphans, and optionally syncs against Anthropic's latest published
+best practices.
+
+JSON contract (consumed by reflections/audits/skills_audit.py):
+  {"summary": {"total_skills": N, "pass": N, "warn": N, "fail": N,
+               "description_total_chars": N, "description_budget": N},
+   "findings": [{"skill", "rule", "severity", "message", "dir"}, ...]}
+Legacy aliases "results" and "skills_audited" are kept for older consumers.
 
 Exit codes:
   0 — all pass (may have warnings)
@@ -14,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
@@ -25,12 +34,27 @@ import yaml
 # Constants
 # ---------------------------------------------------------------------------
 
-REPO_ROOT = (
-    Path(__file__).resolve().parents[4]
-)  # .claude/skills-global/do-skills-audit/scripts -> repo
+
+def _resolve_repo_root() -> Path:
+    """Repo root: prefer cwd when it has skills roots (hardlinked copies run
+    from foreign repos audit that repo), else derive from this file's location
+    (scripts -> do-skills-audit -> skills[-global] -> .claude -> repo)."""
+    cwd = Path.cwd()
+    if (cwd / ".claude" / "skills-global").is_dir() or (cwd / ".claude" / "skills").is_dir():
+        return cwd
+    return Path(__file__).resolve().parents[4]
+
+
+REPO_ROOT = _resolve_repo_root()
 SKILLS_DIR = REPO_ROOT / ".claude" / "skills-global"
+PROJECT_SKILLS_DIR = REPO_ROOT / ".claude" / "skills"
+USER_SKILLS_DIR = Path.home() / ".claude" / "skills"
+
 MAX_LINES = 500
-MAX_DESC_LEN = 1024
+MAX_DESC_LEN = 1024  # Anthropic hard cap
+WARN_DESC_LEN = 200  # doing documentation work beyond this
+TARGET_DESC_LEN = 120  # what a pure trigger costs
+FLEET_DESC_BUDGET = 4000  # ~2% of context for all descriptions combined
 MAX_NAME_LEN = 64
 
 KNOWN_FIELDS = frozenset(
@@ -49,9 +73,9 @@ KNOWN_FIELDS = frozenset(
 )
 
 # Classification lists — which skills should have specific frontmatter flags.
-# NOTE: setup/prime/sdlc moved to project-only .claude/skills/ (issue #1783, Bucket C),
-# so they are no longer iterated by this audit and were pruned from these sets.
-INFRA_SKILLS = frozenset({"update", "reclassify", "new-skill", "new-valor-skill"})
+# NOTE: setup/prime/sdlc moved to project-only .claude/skills/ (issue #1783, Bucket C).
+# Since the audit now iterates both roots, entries may live in either.
+INFRA_SKILLS = frozenset({"update", "reclassify", "new-skill", "do-skills-audit"})
 BACKGROUND_SKILLS = frozenset(
     {
         # BYOB is exposed as MCP tools only (mcp__byob__browser_*) — there
@@ -73,7 +97,8 @@ FORK_SKILLS = frozenset({"do-build", "do-pr-review", "pthread", "do-design-audit
 # global skill in skills-global/ ships to every machine and runs in every repo,
 # so any of these tokens in the body means the skill leaks ai-repo specifics
 # unless it defers to the per-repo skill-context seam via the canonical probe
-# step.
+# step. Project-only skills (.claude/skills/) run only in this repo, so the
+# guard applies to the "global" root alone.
 #
 # The set is deliberately limited to EXECUTABLE / IMPORT references — invocations
 # that actually *error or silently misfire* in a foreign repo (the plan's exact
@@ -111,6 +136,29 @@ TRIGGER_PHRASES = re.compile(
 
 ARGUMENTS_RE = re.compile(r"\$ARGUMENTS|\$\d+|\$\{ARGUMENTS")
 
+# rule_15 asset-rot tokens: skill-conventional subpaths and .claude/ paths with
+# a file extension. Placeholder-bearing tokens ({slug}, <name>, $VAR, globs)
+# are skipped, as are the two skill-context seam locations, whose references
+# are conditional by convention ("If <path> exists, ...").
+ASSET_TOKEN_RE = re.compile(
+    r"(?<![\w/-])(?:\./)?(?:\.claude|scripts|references|assets)/[\w\-./]+\.[A-Za-z0-9]{1,5}\b"
+)
+PLACEHOLDER_CHARS = ("{", "<", "*", "$", "…")
+SEAM_PREFIXES = (".claude/skill-context/", "docs/sdlc/")
+
+# rule_16 junk patterns — only flagged when git-tracked (untracked build
+# artifacts like test-import __pycache__ regenerate and are gitignored).
+JUNK_NAMES = frozenset({"README.md", "CHANGELOG.md", ".DS_Store"})
+JUNK_SUFFIXES = (".pyc",)
+
+# rule_17 near-duplicate descriptions: Jaccard similarity of content words.
+NEAR_DUP_THRESHOLD = 0.5
+DESC_STOPWORDS = frozenset(
+    "a an and any are as at be by for from has if in into is it not of on or "
+    "over should that the this to use used uses when whenever will with you "
+    "your skill skills triggered also request requests".split()
+)
+
 # ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
@@ -122,6 +170,7 @@ class Finding:
     rule: int
     severity: str  # PASS, WARN, FAIL
     message: str
+    dir: str = ""  # which root the skill came from: global | project | user
 
 
 @dataclass
@@ -218,11 +267,18 @@ def rule_04_description_trigger(skill_name: str, fm: dict) -> Finding:
 
 
 def rule_05_description_length(skill_name: str, fm: dict) -> Finding:
-    """Description must be <= 1024 characters."""
+    """Description target <=120 chars; WARN above 200 (doing documentation
+    work); the Anthropic hard cap is 1024."""
     desc = fm.get("description", "")
     length = len(str(desc))
-    if length > MAX_DESC_LEN:
-        return Finding(skill_name, 5, "WARN", f"Description length {length} exceeds {MAX_DESC_LEN}")
+    if length > WARN_DESC_LEN:
+        return Finding(
+            skill_name,
+            5,
+            "WARN",
+            f"Description length {length} exceeds {WARN_DESC_LEN} "
+            f"(target <={TARGET_DESC_LEN}; hard cap {MAX_DESC_LEN})",
+        )
     return Finding(skill_name, 5, "PASS", f"Description length ({length} chars)")
 
 
@@ -369,6 +425,9 @@ def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
     non-zero exit code only when summary["fail"] > 0, so a WARN would never trip
     the red-state exit this regression guard depends on. A clean or properly
     probed body returns PASS. Deterministic on empty/garbage input — never raises.
+
+    The caller (audit_skill) applies this rule to the "global" root only —
+    project-only skills run solely in this repo and may couple freely.
     """
     body = body or ""
     matched = [sig for sig in COUPLING_SIGNALS if sig in body]
@@ -387,6 +446,255 @@ def rule_13_coupling_signals(skill_name: str, body: str) -> Finding:
         "FAIL",
         f"Coupling signals without skill-context probe step: {', '.join(matched)}",
     )
+
+
+def rule_14_fleet_description_budget(descriptions: dict[str, str]) -> Finding:
+    """All skill descriptions ship in every session's context. The fleet total
+    must stay within FLEET_DESC_BUDGET chars (~2% of context)."""
+    total = sum(len(d) for d in descriptions.values())
+    if total > FLEET_DESC_BUDGET:
+        return Finding(
+            "(fleet)",
+            14,
+            "WARN",
+            f"Fleet description total {total} chars exceeds budget {FLEET_DESC_BUDGET} "
+            f"({len(descriptions)} skills; per-skill target <={TARGET_DESC_LEN})",
+        )
+    return Finding(
+        "(fleet)",
+        14,
+        "PASS",
+        f"Fleet description total {total}/{FLEET_DESC_BUDGET} chars",
+    )
+
+
+def rule_15_asset_rot(skill_name: str, body: str, skill_dir: Path) -> Finding:
+    """Path-like tokens in the body must resolve. Skills rot as repos move:
+    a body citing scripts/foo.py or .claude/x/y.md that no longer exists will
+    error or silently misfire at invocation time.
+
+    Unambiguous self-references (.claude/skills*/<this-skill>/...) missing ->
+    FAIL. Everything else missing -> WARN: bare scripts/references/assets
+    tokens may be cross-skill mentions, create-this-file instructions, or
+    foreign-repo generics — triage material, never auto-filed as issues.
+    Seam paths and placeholder tokens are skipped (conditional by convention).
+    """
+    body = body or ""
+    missing_self: list[str] = []
+    missing_other: list[str] = []
+    self_prefixes = (
+        f".claude/skills-global/{skill_name}/",
+        f".claude/skills/{skill_name}/",
+    )
+    for token in sorted(set(ASSET_TOKEN_RE.findall(body))):
+        if any(ch in token for ch in PLACEHOLDER_CHARS):
+            continue
+        normalized = token[2:] if token.startswith("./") else token
+        if any(normalized.startswith(p) for p in SEAM_PREFIXES):
+            continue  # conditional by convention: "If <seam-path> exists, ..."
+        if (
+            (skill_dir / normalized).exists()
+            or (REPO_ROOT / normalized).exists()
+            or (Path.home() / normalized).exists()
+        ):
+            continue
+        if normalized.startswith(self_prefixes):
+            missing_self.append(token)
+        else:
+            missing_other.append(token)
+    if missing_self:
+        return Finding(
+            skill_name,
+            15,
+            "FAIL",
+            f"Body references missing own assets: {', '.join(missing_self)}",
+        )
+    if missing_other:
+        return Finding(
+            skill_name,
+            15,
+            "WARN",
+            f"Body references unresolvable paths: {', '.join(missing_other)}",
+        )
+    return Finding(skill_name, 15, "PASS", "All referenced assets resolve")
+
+
+def rule_16_junk_files(skill_name: str, skill_dir: Path, tracked_files: set[str] | None) -> Finding:
+    """No auxiliary/junk files in skill directories (per Anthropic guidance:
+    no README.md, CHANGELOG.md, etc.). Only git-TRACKED junk is flagged —
+    untracked build artifacts (test-import __pycache__) are gitignored noise."""
+    if tracked_files is None:
+        return Finding(skill_name, 16, "PASS", "Junk check skipped (git unavailable)")
+    try:
+        prefix = str(skill_dir.relative_to(REPO_ROOT))
+    except ValueError:
+        return Finding(skill_name, 16, "PASS", "Junk check skipped (outside repo)")
+    junk: list[str] = []
+    for rel in tracked_files:
+        if not rel.startswith(prefix + "/"):
+            continue
+        name = rel.rsplit("/", 1)[-1]
+        if name in JUNK_NAMES or name.endswith(JUNK_SUFFIXES) or "__pycache__" in rel:
+            junk.append(rel[len(prefix) + 1 :])
+    if junk:
+        return Finding(
+            skill_name,
+            16,
+            "WARN",
+            f"Tracked junk files in skill dir: {', '.join(sorted(junk))}",
+        )
+    return Finding(skill_name, 16, "PASS", "No junk files tracked in skill dir")
+
+
+def _desc_word_set(desc: str) -> frozenset[str]:
+    words = re.findall(r"[a-z][a-z0-9'-]+", desc.lower())
+    return frozenset(w for w in words if w not in DESC_STOPWORDS)
+
+
+def rule_17_near_duplicate_descriptions(descriptions: dict[str, str]) -> list[Finding]:
+    """Two skills whose descriptions share most content words have colliding
+    trigger surfaces — the model can't reliably pick between them. Catches
+    what rule 10's exact-match misses."""
+    findings: list[Finding] = []
+    items = sorted(descriptions.items())
+    word_sets = {name: _desc_word_set(desc) for name, desc in items}
+    for i, (name_a, _) in enumerate(items):
+        set_a = word_sets[name_a]
+        if not set_a:
+            continue
+        for name_b, _ in items[i + 1 :]:
+            set_b = word_sets[name_b]
+            if not set_b:
+                continue
+            jaccard = len(set_a & set_b) / len(set_a | set_b)
+            if jaccard >= NEAR_DUP_THRESHOLD:
+                findings.append(
+                    Finding(
+                        name_b,
+                        17,
+                        "WARN",
+                        f"Trigger surface overlaps '{name_a}' "
+                        f"(similarity {jaccard:.0%}) — merge candidates or sharpen descriptions",
+                    )
+                )
+    return findings
+
+
+def rule_18_unreferenced_sub_files(skill_name: str, body: str, skill_dir: Path) -> Finding:
+    """Every file bundled in a skill dir should be referenced by SKILL.md or by
+    a sibling file (scripts reading references/, etc.). Unreferenced files are
+    dead weight that still syncs to every machine."""
+    sub_files = [
+        p
+        for p in skill_dir.rglob("*")
+        if p.is_file()
+        and p.name != "SKILL.md"
+        and "__pycache__" not in p.parts
+        and p.name != ".DS_Store"
+    ]
+    if not sub_files:
+        return Finding(skill_name, 18, "PASS", "No sub-files")
+    # Corpus: SKILL.md body plus every text sub-file's content (a file counts
+    # as referenced when any OTHER file mentions its name).
+    texts: dict[str, str] = {"SKILL.md": body or ""}
+    for p in sub_files:
+        if p.suffix in {".py", ".sh", ".md", ".json", ".yaml", ".yml", ".txt"}:
+            try:
+                texts[str(p.relative_to(skill_dir))] = p.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                continue
+    unreferenced = []
+    for p in sub_files:
+        rel = str(p.relative_to(skill_dir))
+        referenced = any(p.name in text for owner, text in texts.items() if owner != rel)
+        if not referenced:
+            unreferenced.append(rel)
+    if unreferenced:
+        return Finding(
+            skill_name,
+            18,
+            "WARN",
+            "Sub-files never referenced by SKILL.md or siblings: "
+            + ", ".join(sorted(unreferenced)),
+        )
+    return Finding(skill_name, 18, "PASS", "All sub-files referenced")
+
+
+def rule_19_husk_directories(skills_dir: Path, dir_label: str) -> list[Finding]:
+    """A directory in a skills root without SKILL.md is not a skill — it is a
+    leftover from a move/rename (metadata husks, orphaned sub-files). Dirs
+    starting with '_' (shared assets) are exempt."""
+    findings: list[Finding] = []
+    if not skills_dir.is_dir():
+        return findings
+    for d in sorted(skills_dir.iterdir()):
+        if not d.is_dir() or d.name.startswith(("_", ".")):
+            continue
+        if (d / "SKILL.md").exists():
+            continue
+        contents = [
+            str(p.relative_to(d))
+            for p in d.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store"
+        ]
+        detail = f" (contains: {', '.join(sorted(contents)[:5])})" if contents else " (empty)"
+        findings.append(
+            Finding(
+                d.name,
+                19,
+                "FAIL",
+                f"Husk directory: no SKILL.md{detail} — delete or restore",
+                dir=dir_label,
+            )
+        )
+    return findings
+
+
+def rule_20_user_level_orphans(repo_skill_dirs: dict[str, Path]) -> list[Finding]:
+    """Skills in ~/.claude/skills/ should be hardlink-synced from a repo source.
+    A user-level skill with no repo source is an orphan (stale leftover or
+    unsynced personal skill); one whose SKILL.md diverged from its repo source
+    is a broken sync."""
+    findings: list[Finding] = []
+    if not USER_SKILLS_DIR.is_dir():
+        return findings
+    for d in sorted(USER_SKILLS_DIR.iterdir()):
+        user_md = d / "SKILL.md"
+        if not d.is_dir() or d.name.startswith(("_", ".")) or not user_md.exists():
+            continue
+        repo_dir = repo_skill_dirs.get(d.name)
+        if repo_dir is None:
+            findings.append(
+                Finding(
+                    d.name,
+                    20,
+                    "WARN",
+                    "User-level skill has no source in this repo "
+                    "(stale orphan, or personal/foreign skill — disposition needed)",
+                    dir="user",
+                )
+            )
+            continue
+        repo_md = repo_dir / "SKILL.md"
+        try:
+            same = user_md.stat().st_ino == repo_md.stat().st_ino or (
+                user_md.read_bytes() == repo_md.read_bytes()
+            )
+        except OSError:
+            continue
+        if not same:
+            findings.append(
+                Finding(
+                    d.name,
+                    20,
+                    "WARN",
+                    "User-level copy diverged from repo source (sync broken — re-run /update)",
+                    dir="user",
+                )
+            )
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +729,18 @@ def apply_fixes(skill_path: Path, fm: dict, text: str, dir_name: str) -> list[st
         new_text = f"---\n{fm_text}\n---\n{body}"
         skill_path.write_text(new_text, encoding="utf-8")
 
+    # Fix 3: Remove untracked build artifacts from the skill dir
+    skill_dir = skill_path.parent
+    for junk in list(skill_dir.rglob("__pycache__")) + list(skill_dir.rglob(".DS_Store")):
+        try:
+            if junk.is_dir():
+                shutil.rmtree(junk)
+            else:
+                junk.unlink()
+            fixes.append(f"Removed {junk.relative_to(skill_dir)}")
+        except OSError:
+            continue
+
     return fixes
 
 
@@ -439,8 +759,31 @@ def discover_skills(skills_dir: Path, single: str | None = None) -> list[Path]:
     return sorted(skills_dir.glob("*/SKILL.md"))
 
 
-def audit_skill(skill_path: Path, report: AuditReport, do_fix: bool = False) -> dict[str, str]:
-    """Audit a single skill. Returns {skill_name: description} for dedup check."""
+def _git_tracked_files() -> set[str] | None:
+    """Repo-relative tracked paths, or None when git is unavailable."""
+    try:
+        proc = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            cwd=str(REPO_ROOT),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return set(proc.stdout.splitlines())
+
+
+def audit_skill(
+    skill_path: Path,
+    report: AuditReport,
+    do_fix: bool = False,
+    dir_label: str = "",
+    tracked_files: set[str] | None = None,
+) -> dict[str, str]:
+    """Audit a single skill. Returns {skill_name: description} for cross-skill checks."""
     skill_dir = skill_path.parent
     dir_name = skill_dir.name
     text = skill_path.read_text(encoding="utf-8")
@@ -451,26 +794,41 @@ def audit_skill(skill_path: Path, report: AuditReport, do_fix: bool = False) -> 
     if do_fix:
         fixes = apply_fixes(skill_path, fm, text, dir_name)
         for fix in fixes:
-            report.add(Finding(dir_name, 0, "PASS", f"Fixed: {fix}"))
+            report.add(Finding(dir_name, 0, "PASS", f"Fixed: {fix}", dir=dir_label))
         # Re-read after fixes
         if fixes:
             text = skill_path.read_text(encoding="utf-8")
             lines = text.splitlines()
             fm, body = parse_frontmatter(text)
 
-    # Run all rules
-    report.add(rule_01_line_count(dir_name, lines))
-    report.add(rule_02_frontmatter_exists(dir_name, fm))
-    report.add(rule_03_name_field(dir_name, fm, dir_name))
-    report.add(rule_04_description_trigger(dir_name, fm))
-    report.add(rule_05_description_length(dir_name, fm))
-    report.add(rule_06_infra_classification(dir_name, fm))
-    report.add(rule_07_background_classification(dir_name, fm))
-    report.add(rule_08_fork_classification(dir_name, fm))
-    report.add(rule_09_sub_file_links(dir_name, body, skill_dir))
-    report.add(rule_11_known_fields(dir_name, fm))
-    report.add(rule_12_argument_hint(dir_name, fm, body))
-    report.add(rule_13_coupling_signals(dir_name, body))
+    # rule 13 guards the sync boundary: it applies to skills that ship to every
+    # machine ("global" root, or unlabeled for direct/test invocations).
+    # Project-only skills run solely in this repo and may couple freely.
+    if dir_label == "project":
+        coupling = Finding(dir_name, 13, "PASS", "Project-only skill; local coupling allowed")
+    else:
+        coupling = rule_13_coupling_signals(dir_name, body)
+
+    per_skill = [
+        rule_01_line_count(dir_name, lines),
+        rule_02_frontmatter_exists(dir_name, fm),
+        rule_03_name_field(dir_name, fm, dir_name),
+        rule_04_description_trigger(dir_name, fm),
+        rule_05_description_length(dir_name, fm),
+        rule_06_infra_classification(dir_name, fm),
+        rule_07_background_classification(dir_name, fm),
+        rule_08_fork_classification(dir_name, fm),
+        rule_09_sub_file_links(dir_name, body, skill_dir),
+        rule_11_known_fields(dir_name, fm),
+        rule_12_argument_hint(dir_name, fm, body),
+        coupling,
+        rule_15_asset_rot(dir_name, body, skill_dir),
+        rule_16_junk_files(dir_name, skill_dir, tracked_files),
+        rule_18_unreferenced_sub_files(dir_name, body, skill_dir),
+    ]
+    for f in per_skill:
+        f.dir = f.dir or dir_label
+        report.add(f)
 
     desc = str(fm.get("description", ""))
     return {dir_name: desc} if desc else {}
@@ -548,12 +906,19 @@ def format_human(report: AuditReport, sync_output: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def format_json(report: AuditReport, sync_output: str | None = None) -> str:
-    """Format report as JSON."""
+def format_json(report: AuditReport, sync_output: str | None = None, desc_total: int = 0) -> str:
+    """Format report as JSON (contract documented in the module docstring)."""
+    findings = [asdict(f) for f in report.results]
     data = {
-        "skills_audited": report.skills_audited,
-        "results": [asdict(f) for f in report.results],
-        "summary": report.summary,
+        "skills_audited": report.skills_audited,  # legacy alias
+        "findings": findings,
+        "results": findings,  # legacy alias
+        "summary": {
+            **report.summary,
+            "total_skills": report.skills_audited,
+            "description_total_chars": desc_total,
+            "description_budget": FLEET_DESC_BUDGET,
+        },
     }
     if sync_output:
         data["best_practices_sync"] = sync_output
@@ -577,27 +942,50 @@ def main() -> int:
 
     report = AuditReport()
 
-    # Discover skills
-    skill_paths = discover_skills(SKILLS_DIR, args.skill)
+    # Roots: the global fleet plus this repo's project-only skills. A foreign
+    # repo typically has only .claude/skills/ — missing roots are skipped.
+    roots: list[tuple[str, Path]] = []
+    if SKILLS_DIR.is_dir():
+        roots.append(("global", SKILLS_DIR))
+    if PROJECT_SKILLS_DIR.is_dir():
+        roots.append(("project", PROJECT_SKILLS_DIR))
+
+    skill_paths: list[tuple[str, Path]] = []
+    for label, root in roots:
+        found = discover_skills(root, args.skill)
+        skill_paths.extend((label, p) for p in found)
+        if args.skill and found:
+            break  # single-skill mode: first root wins
+
     if not skill_paths:
         print(f"No skills found{f' matching {args.skill!r}' if args.skill else ''}")
         return 1
 
     report.skills_audited = len(skill_paths)
+    tracked_files = _git_tracked_files()
 
-    # Audit each skill, collecting descriptions for dedup
+    # Audit each skill, collecting descriptions for cross-skill checks
     all_descriptions: dict[str, str] = {}
-    for sp in skill_paths:
-        descs = audit_skill(sp, report, do_fix=args.fix)
+    repo_skill_dirs: dict[str, Path] = {}
+    for label, sp in skill_paths:
+        descs = audit_skill(
+            sp, report, do_fix=args.fix, dir_label=label, tracked_files=tracked_files
+        )
         all_descriptions.update(descs)
+        repo_skill_dirs.setdefault(sp.parent.name, sp.parent)
 
-    # Rule 10: duplicate descriptions (cross-skill check)
-    if not args.skill:  # Only check when auditing all skills
-        dedup_findings = rule_10_duplicate_descriptions(all_descriptions)
-        for f in dedup_findings:
+    # Fleet-level rules (full-fleet runs only)
+    if not args.skill:
+        for f in rule_10_duplicate_descriptions(all_descriptions):
             report.add(f)
-        if not dedup_findings:
-            report.summary["pass"] += 1  # No duplicates found
+        report.add(rule_14_fleet_description_budget(all_descriptions))
+        for f in rule_17_near_duplicate_descriptions(all_descriptions):
+            report.add(f)
+        for label, root in roots:
+            for f in rule_19_husk_directories(root, label):
+                report.add(f)
+        for f in rule_20_user_level_orphans(repo_skill_dirs):
+            report.add(f)
 
     # Best practices sync
     sync_output = None
@@ -605,8 +993,9 @@ def main() -> int:
         sync_output = run_sync(args)
 
     # Output
+    desc_total = sum(len(d) for d in all_descriptions.values())
     if args.json:
-        print(format_json(report, sync_output))
+        print(format_json(report, sync_output, desc_total=desc_total))
     else:
         print(format_human(report, sync_output))
 

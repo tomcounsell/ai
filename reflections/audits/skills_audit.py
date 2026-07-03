@@ -44,7 +44,17 @@ _SKILLS_AUDIT_LOCK_TTL = 60
 
 
 def _skills_audit_script_path(repo_root: Path) -> Path:
-    """Return the path to a repo's `audit_skills.py` (does not check existence)."""
+    """Return the path to a repo's `audit_skills.py`.
+
+    Prefers `.claude/skills-global/` (this repo's canonical location since the
+    issue-#1783 move) and falls back to `.claude/skills/` (foreign repos that
+    vendor the skill project-locally). Returns the fallback path even when
+    neither exists — callers gate on `.exists()` via `skip_if`.
+    """
+    for skills_dir in ("skills-global", "skills"):
+        p = repo_root / ".claude" / skills_dir / "do-skills-audit" / "scripts" / "audit_skills.py"
+        if p.exists():
+            return p
     return repo_root / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
 
 
