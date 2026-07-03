@@ -322,6 +322,106 @@ async def test_classify_terminus_url_query_in_thread_not_treated_as_question():
 
 
 # =============================================================================
+# Fast-Path 1.5: link/pointer tests (issue #1836)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_human_bare_url_returns_respond():
+    """Human sender + bare URL (no other text) → RESPOND via Fast-Path 1.5.
+
+    Without this fast-path, a bare URL is word_count == 1 and would hit
+    Fast-Path 2's ≤1-word SILENT branch before reaching the LLM.
+    """
+    result = await classify_conversation_terminus(
+        text="https://github.com/BuilderIO/agent-native/tree/main/plans",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_human_look_here_url_returns_respond():
+    """Motivating example from issue #1836: 'look here: <url>' → RESPOND.
+
+    No '?', no imperative verb, not an ack token — previously fell through
+    to the LLM classifier, which plausibly returned REACT and silently
+    dropped the message.
+    """
+    result = await classify_conversation_terminus(
+        text="look here: https://github.com/BuilderIO/agent-native/tree/main/plans",
+        thread_messages=["Which approach do you want to use for this?"],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_human_multi_url_returns_respond():
+    """Human sender + multiple bare URLs, no other content → RESPOND."""
+    result = await classify_conversation_terminus(
+        text="https://example.com/a https://example.com/b",
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "RESPOND"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_bot_bare_url_still_silent():
+    """Bot sender + bare URL must still be SILENT via Fast-Path 1 (unchanged).
+
+    Fast-Path 1 fires before Fast-Path 1.5 is ever reached — the link/pointer
+    fast-path is `not sender_is_bot`-gated and must not resurrect bot loops.
+    """
+    result = await classify_conversation_terminus(
+        text="https://github.com/BuilderIO/agent-native/tree/main/plans",
+        thread_messages=[],
+        sender_is_bot=True,
+    )
+    assert result == "SILENT"
+
+
+@pytest.mark.asyncio
+async def test_classify_terminus_url_with_substantive_prose_falls_through_to_llm(
+    monkeypatch,
+):
+    """URL followed by substantive prose (>3 words after URL removal) must NOT be
+    force-RESPONDed by Fast-Path 1.5 — the ≤3-word remainder guard holds.
+
+    The message has no ``?``, no imperative verb, is not an ack token, and its
+    URL-stripped remainder is many words, so no fast-path fires and it reaches
+    the LLM. We pin the LLM to SILENT via an injected fake ``ollama`` module
+    (Haiku disabled by nulling the API key). If Fast-Path 1.5 had incorrectly
+    fired, the result would be RESPOND; asserting SILENT proves the guard held.
+    """
+
+    class FakeOllama:
+        @staticmethod
+        def chat(**kwargs):
+            return {"message": {"content": "SILENT"}}
+
+    import sys
+    import types
+
+    fake_module = types.ModuleType("ollama")
+    fake_module.chat = FakeOllama.chat
+    monkeypatch.setitem(sys.modules, "ollama", fake_module)
+    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+
+    result = await classify_conversation_terminus(
+        text=(
+            "https://example.com/report and here are my detailed thoughts on why "
+            "this approach fails badly in production"
+        ),
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "SILENT"
+
+
+# =============================================================================
 # Fast-Path 0: imperative verb tests (issue #1318)
 # =============================================================================
 

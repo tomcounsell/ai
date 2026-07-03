@@ -731,6 +731,10 @@ async def classify_needs_response_async(text: str) -> bool:
 # Lookahead: not followed by \w+= (query param name=value pattern)
 _STANDALONE_QUESTION_RE = re.compile(r"(?<![=&\w])\?|(?<![=&])\?(?!\w+=)")
 
+# Regex matching bare http(s) URLs, used by Fast-Path 1.5 to detect a reply
+# that is "essentially just a link/pointer".
+_URL_RE = re.compile(r"https?://\S+")
+
 # Fast-Path 0: imperative continuation verbs that must always RESPOND.
 #
 # These few-shot examples are mined from real misclassified messages where the
@@ -789,6 +793,10 @@ async def classify_conversation_terminus(
     0. human sender + imperative continuation verb at start of any line → RESPOND
        (issue #1318 — prevents SILENT misclassification of explicit directives)
     1. sender_is_bot + no question → SILENT  (primary loop-break signal)
+    1.5. human sender + reply is essentially just a bare link/pointer → RESPOND
+       (issue #1836 — prevents REACT/SILENT misclassification dropping a
+       shared link; must run before word_count is computed in Fast-Path 2,
+       since a bare URL is a single token)
     2. acknowledgment token or very short (≤1 word) → SILENT
        (unless thread_messages contains a question — then fall through, so a
        human short answer like "Yes"/"No" to a Valor question is not dropped;
@@ -817,6 +825,42 @@ async def classify_conversation_terminus(
     # Fast-path 1: bot sender with no question → SILENT (strongest signal for loop break)
     if sender_is_bot and not _STANDALONE_QUESTION_RE.search(text_stripped):
         return "SILENT"
+
+    # Fast-path 1.5: human sender + reply that is essentially just a bare
+    # link/pointer → RESPOND.
+    #
+    # Mined example (real dropped message, issue #1836, July 1 2026): a reply
+    # to a Valor message that ended with an open question — "look here:
+    # https://github.com/BuilderIO/agent-native/tree/main/plans" — has no
+    # "?", no imperative verb (Fast-Path 0's narrow verb list doesn't cover
+    # "look"), and is not an acknowledgment token, so it fell through to the
+    # LLM classifier, which plausibly returned REACT (the "adds nothing new
+    # or is redundant with prior context" rule). `should_respond_async` maps
+    # REACT to `should_respond=False`, so the message was silently dropped
+    # (👍 emoji reaction only, no reply). A human sharing a new link is new
+    # information, not a conversation closer, and should never be silenced.
+    #
+    # Placement is load-bearing — this MUST run before `word_count` is
+    # computed (Fast-Path 2 below): a bare URL is a single token
+    # (word_count == 1), so if this branch ran after Fast-Path 2, that path
+    # would return SILENT first and pre-empt this fix.
+    #
+    # Deliberately narrow: gated on `not sender_is_bot` (Fast-Path 1 above
+    # already routes bot-sender bare URLs to SILENT, preserving loop-break
+    # behavior) and on the presence of an actual URL — prose/non-URL
+    # pointers (e.g. "see the PR description") are explicitly out of scope
+    # and continue to the LLM classifier unchanged.
+    if not sender_is_bot and _URL_RE.search(text_stripped):
+        text_without_urls = _URL_RE.sub("", text_stripped).strip()
+        remainder_normalized = text_without_urls.lower().rstrip("!.,:").strip()
+        # "Trivially short" = at most a few leading/trailing pointer words
+        # ("look here:", "see this", "") — not a substantive ack token,
+        # which is handled (and should keep being handled) by Fast-Path 2.
+        if (
+            remainder_normalized not in _ACKNOWLEDGMENT_TOKENS
+            and len(text_without_urls.split()) <= 3
+        ):
+            return "RESPOND"
 
     # Fast-path 2: acknowledgment token (fires AFTER sender check, never before)
     # — but skip the check entirely when the replied-to context contained a
