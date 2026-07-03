@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent import session_completion
+from agent.notification_copy import INTERRUPT_NO_RESUME, INTERRUPT_RESUME
 
 
 @pytest.fixture
@@ -219,6 +220,8 @@ class TestCancelledError:
         # First lock set (pipeline_complete_pending) succeeds, second (interrupted-sent) succeeds
         redis_db.set = MagicMock(return_value=True)
         redis_db.exists = MagicMock(return_value=False)
+        # No cancel-reason set → resume copy (historical default).
+        redis_db.get = MagicMock(return_value=None)
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
             patch("agent.sdk_client.get_response_via_harness", new=_cancel),
@@ -228,11 +231,9 @@ class TestCancelledError:
                 await session_completion._deliver_pipeline_completion(
                     parent, "ctx", send_cb, parent.chat_id, None
                 )
-        # send_cb should have been called once for the interrupted message.
+        # send_cb should have been called once with the shared resume constant.
         interrupted_calls = [
-            call
-            for call in send_cb.await_args_list
-            if isinstance(call.args[1], str) and "interrupted" in call.args[1].lower()
+            call for call in send_cb.await_args_list if call.args[1] == INTERRUPT_RESUME
         ]
         assert len(interrupted_calls) == 1
 
@@ -255,6 +256,84 @@ class TestCancelledError:
                 )
         # Dedup suppressed the interrupted send.
         send_cb.assert_not_awaited()
+
+
+class _DualFireRedis:
+    """Stateful redis stand-in for the interrupted-send dual-fire race (#1877).
+
+    The first `interrupted-sent:{sid}` SET NX wins (True); subsequent ones lose
+    (False). `cancel-reason:{sid}` is read non-destructively and always returns
+    the configured reason. Every other SET NX (e.g. the pipeline CAS lock) wins.
+    """
+
+    def __init__(self, reason: bytes | None = b"no_resume"):
+        self._interrupted_sent: set[str] = set()
+        self._reason = reason
+        self.deleted: list[str] = []
+
+    def set(self, key, value, nx=False, ex=None):
+        if key.startswith("interrupted-sent:"):
+            if key in self._interrupted_sent:
+                return False
+            self._interrupted_sent.add(key)
+            return True
+        return True
+
+    def get(self, key):
+        if key.startswith("cancel-reason:"):
+            return self._reason
+        return None
+
+    def exists(self, key):
+        return False
+
+    def delete(self, *keys):
+        self.deleted.extend(keys)
+
+
+class TestReasonAwareInterrupt:
+    """Reason-aware interrupt copy at the completion-runner send site (#1877 defect #1)."""
+
+    async def test_no_resume_reason_sends_no_resume_copy(self, parent, send_cb):
+        fake = _DualFireRedis(reason=b"no_resume")
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", fake):
+            await session_completion._send_interrupted_message(
+                send_cb, parent.chat_id, None, parent, parent.session_id
+            )
+        send_cb.assert_awaited_once()
+        assert send_cb.await_args.args[1] == INTERRUPT_NO_RESUME
+
+    async def test_unset_reason_sends_resume_copy(self, parent, send_cb):
+        fake = _DualFireRedis(reason=None)
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", fake):
+            await session_completion._send_interrupted_message(
+                send_cb, parent.chat_id, None, parent, parent.session_id
+            )
+        send_cb.assert_awaited_once()
+        assert send_cb.await_args.args[1] == INTERRUPT_RESUME
+
+    async def test_dual_fire_winner_sends_no_resume_loser_silent(self, parent):
+        """BLOCKER regression guard: both sites race the interrupted-sent dedup with
+        cancel-reason=no_resume. The SET-NX winner sends the no-resume copy; the
+        loser stays silent. The non-destructive read means the loser cannot starve
+        the winner of the reason (the key is never deleted)."""
+        winner_cb = AsyncMock(return_value=None)
+        loser_cb = AsyncMock(return_value=None)
+        fake = _DualFireRedis(reason=b"no_resume")
+        with patch("popoto.redis_db.POPOTO_REDIS_DB", fake):
+            # First caller wins the SET NX; second caller loses.
+            await session_completion._send_interrupted_message(
+                winner_cb, parent.chat_id, None, parent, parent.session_id
+            )
+            await session_completion._send_interrupted_message(
+                loser_cb, parent.chat_id, None, parent, parent.session_id
+            )
+
+        winner_cb.assert_awaited_once()
+        assert winner_cb.await_args.args[1] == INTERRUPT_NO_RESUME
+        loser_cb.assert_not_awaited()
+        # The cancel-reason key was never deleted (180s TTL is the only reclaimer).
+        assert fake.deleted == []
 
 
 class TestScheduler:

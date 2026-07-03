@@ -1352,6 +1352,18 @@ def main() -> None:
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
 
+    # Worker-process Sentry (#1877 defect #3). Session execution happens here, so
+    # worker exceptions must reach Sentry with the same fidelity as bridge ones.
+    # The worker passes before_send=None (no bridge-hibernation coupling); the
+    # shared helper is DSN-gated and self-guards against pytest/CI mis-tagging.
+    from monitoring.sentry_config import configure_sentry  # noqa: PLC0415
+
+    configure_sentry("worker", before_send=None)
+    logger.info(
+        "worker sentry: %s",
+        "enabled" if os.getenv("SENTRY_DSN") else "disabled (no DSN in worker env)",
+    )
+
     # Configure resilient Redis connection before any Popoto model is accessed.
     # Degrade-don't-die: if Redis is unreachable at boot this logs a warning
     # and returns without raising so operators can start Redis and restart.

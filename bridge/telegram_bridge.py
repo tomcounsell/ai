@@ -71,17 +71,9 @@ def _sentry_before_send(event, hint):
     return event
 
 
-_sentry_dsn = os.getenv("SENTRY_DSN")
-if _sentry_dsn:
-    import sentry_sdk  # noqa: E402
+from monitoring.sentry_config import configure_sentry  # noqa: E402
 
-    sentry_sdk.init(
-        dsn=_sentry_dsn,
-        release=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
-        traces_sample_rate=0.1,
-        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
-        before_send=_sentry_before_send,
-    )
+configure_sentry("bridge", before_send=_sentry_before_send)
 
 # Claude Agent SDK is always used (legacy mode removed)
 

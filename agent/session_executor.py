@@ -695,6 +695,62 @@ def steer_session(session_id: str, message: str) -> dict:
         return {"success": False, "session_id": session_id, "error": str(e)}
 
 
+async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
+    """Best-effort user-facing notice on a running->failed transition (#1877 defect #2).
+
+    Mirrors the CancelledError best-effort interrupted-message pattern. Guarantees:
+
+    * **Deduped.** A ``failed-sent:{session_id}`` SET NX key (120s TTL) ensures the
+      three finalize paths in the executor's failure block never double-send.
+    * **Never double-narrates a no-resume killed session.** If a killer already owns
+      a no-resume exit narrative it has written ``cancel-reason:{session_id}=no_resume``
+      (and sent its own interrupt message); this function returns early so the user is
+      not sent two competing exit stories (folded-in critique concern: cross-class dedup
+      collision). A stale ``resume`` reason does NOT suppress the notice — a session
+      that was requeued and then genuinely crashed still deserves the failure copy.
+    * **Never blocks finalization.** The send is bounded by a 2s ``wait_for`` and
+      every error (including the timeout) is swallowed — this coroutine never
+      raises, so the caller's finalize path always proceeds.
+    """
+    try:
+        from agent.cancel_reason import get_cancel_reason
+        from agent.notification_copy import FAILURE_NOTICE
+
+        # Cross-class dedup collision (critique concern): a killer that already
+        # owns a *no-resume* exit narrative must not be double-messaged. We key on
+        # "no_resume" specifically (not merely "present"): a stale "resume" reason
+        # from an interrupt-and-requeue followed by a genuine crash in the same TTL
+        # window should still surface the failure notice, not be silently swallowed.
+        if get_cancel_reason(session_id) == "no_resume":
+            logger.info(
+                "[%s] Failure notice suppressed — a killer already owns the "
+                "no-resume exit narrative (cancel-reason=no_resume)",
+                session_id,
+            )
+            return
+
+        should_send = True
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+            should_send = bool(
+                POPOTO_REDIS_DB.set(f"failed-sent:{session_id}", "1", nx=True, ex=120)
+            )
+        except Exception as dedup_err:
+            # Redis unavailable: send anyway (a duplicate is preferable to silence
+            # on a genuine failure).
+            logger.debug(
+                "[%s] failed-sent dedup lock unavailable (%s); sending anyway",
+                session_id,
+                dedup_err,
+            )
+
+        if should_send:
+            await asyncio.wait_for(messenger._send_callback(FAILURE_NOTICE), timeout=2.0)
+    except (TimeoutError, Exception) as err:
+        logger.warning("[%s] Failure-notice best-effort send failed: %s", session_id, err)
+
+
 async def _execute_agent_session(session: AgentSession) -> None:
     """
     Execute a single agent session:
@@ -1975,6 +2031,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 )
         finally:
             heartbeat.cancel()
+
+        # Failure notification (#1877 defect #2). A running->failed transition
+        # used to be silent — no Telegram message at all. Best-effort, deduped,
+        # and never blocking finalization; see `_maybe_send_failure_notice`.
+        if task.error and not chat_state.defer_reaction:
+            await _maybe_send_failure_notice(messenger, session.session_id)
 
         # Update session status in Redis via AgentSession
         # When auto-continue deferred, session is still active (not completed)

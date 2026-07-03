@@ -140,6 +140,51 @@ The worker's startup sequence is deterministic:
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
 | 8 | `run_idle_sweep()` | Background task: proactively tears down idle persistent Claude SDK clients on dormant/paused sessions before the ~48h Anthropic silent-death window (issue #1128). See [Worker-Internal Idle Sweeper](#worker-internal-idle-sweeper-issue-1128). |
 
+### Worker-Process Sentry (issue #1877)
+
+Session execution happens in the worker, so worker-side exceptions (SDK,
+tool, and lifecycle crashes) need the same Sentry visibility as bridge
+exceptions. Before issue #1877, `sentry_sdk.init()` was called only from
+`bridge/telegram_bridge.py`; the worker had no Sentry init at all, so every
+exception during session execution — including a silent running→failed
+crash — was invisible to Sentry.
+
+The fix extracts the bridge's init block into a shared
+`configure_sentry(component, before_send=None)` helper in
+`monitoring/sentry_config.py`, called by both processes at startup: the
+bridge from its module-level init block, the worker from
+`worker/__main__.py::main()` before `asyncio.run(_run_worker(...))`.
+
+- **DSN-gated, verbatim.** If `SENTRY_DSN` is unset the helper returns
+  without initializing — the same gating the bridge already had. `release`
+  (git HEAD), `traces_sample_rate`, and `environment` are preserved
+  unchanged.
+- **`before_send` is a parameter, not hardcoded.** The bridge passes its
+  `_sentry_before_send`, which drops events while the *bridge* is
+  hibernating (see `docs/plans/sentry_hibernation_filter.md`) — a
+  bridge-only concept. The worker passes `before_send=None` so worker
+  Sentry events are never silently dropped just because the bridge happens
+  to be hibernating while the worker itself is healthy. `configure_sentry`
+  never imports `bridge.hibernation`.
+- **Minimal pytest/CI guard only — no machine gate.** `configure_sentry`
+  returns early when `PYTEST_CURRENT_TEST` or `CI` is set, so a
+  `SENTRY_DSN`-present worker test run never mis-tags events as
+  `production`. This is deliberately the *only* environment gate in the
+  helper — there is no machine/platform check. The richer dev-vs-prod
+  environment gating is a separate concern (issue #1834) that layers on top
+  of this helper later; #1877 does not block on it.
+- **Env propagation needs no update-system changes.** The worker is a
+  separate launchd process, but `scripts/install_worker.sh` and
+  `scripts/remote-update.sh` already inject **all** `.env` values —
+  including `SENTRY_DSN` / `SENTRY_ENVIRONMENT` — into the worker plist's
+  `EnvironmentVariables` via `dotenv_values`, exactly as they do for the
+  bridge plist. `os.getenv("SENTRY_DSN")` therefore resolves correctly in
+  the launchd worker with no additional wiring.
+- **Startup observability.** The worker logs its enabled/disabled state at
+  startup: `worker sentry: enabled` or
+  `worker sentry: disabled (no DSN in worker env)`, so a missing-env no-op
+  is visible in `logs/worker.log` rather than silent.
+
 ### Media Enrichment (issue #1297)
 
 Telegram media (photos, voice, audio, documents) requires both Telethon RPC (download) and an AI call (vision / Whisper / extraction). The two halves are split along the bridge/worker boundary:

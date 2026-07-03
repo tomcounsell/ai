@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent import session_completion
+from agent.notification_copy import INTERRUPT_NO_RESUME, INTERRUPT_RESUME
 
 # -----------------------------------------------------------------------------
 # Fixtures
@@ -221,10 +222,11 @@ class TestCancelledErrorInterrupted:
             return "never"
 
         # Acquire pipeline_complete_pending AND interrupted-sent on first call
-        # each. Both return True.
+        # each. Both return True. No cancel-reason set → resume copy (default).
         redis_db = MagicMock()
         redis_db.set = MagicMock(return_value=True)
         redis_db.exists = MagicMock(return_value=False)
+        redis_db.get = MagicMock(return_value=None)
 
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
@@ -243,14 +245,44 @@ class TestCancelledErrorInterrupted:
                 pass
 
         # The runner's CancelledError handler best-effort delivers the
-        # interrupted message and re-raises.
-        interrupted = [
-            c.args
-            for c in send_cb.await_args_list
-            if isinstance(c.args[1], str) and "interrupted" in c.args[1].lower()
-        ]
+        # interrupted message (resume copy) and re-raises.
+        interrupted = [c.args for c in send_cb.await_args_list if c.args[1] == INTERRUPT_RESUME]
         assert len(interrupted) == 1
-        assert "resume automatically" in interrupted[0][1]
+
+    async def test_cancelled_error_no_resume_reason_delivers_no_resume_copy(self, parent):
+        """A killer that finalized the session terminal writes cancel-reason=no_resume;
+        the interrupted send must use the no-resume copy, not 'will resume'."""
+        send_cb = AsyncMock(return_value=None)
+
+        async def _slow_harness(**_kw):
+            await asyncio.sleep(60.0)
+            return "never"
+
+        redis_db = MagicMock()
+        redis_db.set = MagicMock(return_value=True)
+        redis_db.exists = MagicMock(return_value=False)
+        # cancel-reason:{session_id} present → no-resume copy.
+        redis_db.get = MagicMock(return_value=b"no_resume")
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
+            patch("agent.sdk_client.get_response_via_harness", new=_slow_harness),
+            patch("agent.sdk_client._get_prior_session_uuid", return_value="u"),
+        ):
+            task = session_completion.schedule_pipeline_completion(
+                parent, "ctx", send_cb, parent.chat_id, None
+            )
+            assert task is not None
+            await session_completion.drain_pending_completions(timeout=0.2)
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+        no_resume = [c.args for c in send_cb.await_args_list if c.args[1] == INTERRUPT_NO_RESUME]
+        assert len(no_resume) == 1
+        # And the resume copy was NOT sent.
+        assert all(c.args[1] != INTERRUPT_RESUME for c in send_cb.await_args_list)
 
     async def test_cancelled_then_second_cancel_does_not_duplicate_interrupted(self, parent):
         """Risk 6 flap-dedup: two cancellations of two runners for the same

@@ -272,9 +272,13 @@ def _cleanup_stale_sessions(project_dir: Path, age_minutes: int = 120) -> tuple[
 def _cleanup_duplicate_sessions(project_dir: Path) -> int:
     """Kill pending sessions that re-process messages already handled by a completed session.
 
-    A session is a re-run if another session with the same (chat_id, telegram_message_id)
-    has already reached a terminal state (completed, killed, abandoned, failed).
-    Pending duplicates are killed before the worker picks them up.
+    A session is a re-run only if another session with the same
+    (chat_id, telegram_message_id) has already reached ``completed`` — the sole
+    status that means the message was actually handled. A prior ``killed`` /
+    ``abandoned`` / ``failed`` attempt did NOT handle the message, so a legitimate
+    ``pending`` retry after one of those must survive (issue #1877 defect #4).
+    Pending duplicates of a completed message are killed before the worker picks
+    them up.
 
     Returns the number of sessions killed.
     """
@@ -295,9 +299,11 @@ def _cleanup_duplicate_sessions(project_dir: Path) -> int:
     if not pending_by_key:
         return 0
 
-    # Find terminal sessions that cover the same keys
+    # Find sessions that actually HANDLED the same keys. Only `completed` counts:
+    # a killed/abandoned/failed attempt left the message unhandled, so a pending
+    # retry must not be suppressed by one (issue #1877 defect #4).
     terminal_keys: set[tuple[str, int]] = set()
-    for status in ("completed", "killed", "abandoned", "failed"):
+    for status in ("completed",):
         for s in AgentSession.query.filter(status=status):
             msg_id = s.telegram_message_id
             chat_id = getattr(s, "chat_id", None)
