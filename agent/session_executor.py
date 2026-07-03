@@ -702,11 +702,12 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
 
     * **Deduped.** A ``failed-sent:{session_id}`` SET NX key (120s TTL) ensures the
       three finalize paths in the executor's failure block never double-send.
-    * **Never double-narrates a killed session.** If a killer already owns the exit
-      narrative it has written a ``cancel-reason:{session_id}`` (and sent its own
-      interrupt message); this function returns early so the user is not sent two
-      competing exit stories (folded-in critique concern: cross-class dedup
-      collision).
+    * **Never double-narrates a no-resume killed session.** If a killer already owns
+      a no-resume exit narrative it has written ``cancel-reason:{session_id}=no_resume``
+      (and sent its own interrupt message); this function returns early so the user is
+      not sent two competing exit stories (folded-in critique concern: cross-class dedup
+      collision). A stale ``resume`` reason does NOT suppress the notice — a session
+      that was requeued and then genuinely crashed still deserves the failure copy.
     * **Never blocks finalization.** The send is bounded by a 2s ``wait_for`` and
       every error (including the timeout) is swallowed — this coroutine never
       raises, so the caller's finalize path always proceeds.
@@ -716,11 +717,14 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
         from agent.notification_copy import FAILURE_NOTICE
 
         # Cross-class dedup collision (critique concern): a killer that already
-        # owns the exit narrative must not be double-messaged.
-        if get_cancel_reason(session_id) is not None:
+        # owns a *no-resume* exit narrative must not be double-messaged. We key on
+        # "no_resume" specifically (not merely "present"): a stale "resume" reason
+        # from an interrupt-and-requeue followed by a genuine crash in the same TTL
+        # window should still surface the failure notice, not be silently swallowed.
+        if get_cancel_reason(session_id) == "no_resume":
             logger.info(
-                "[%s] Failure notice suppressed — a killer already owns the exit "
-                "narrative (cancel-reason present)",
+                "[%s] Failure notice suppressed — a killer already owns the "
+                "no-resume exit narrative (cancel-reason=no_resume)",
                 session_id,
             )
             return
