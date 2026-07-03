@@ -333,11 +333,24 @@ class BackgroundTask:
                     )
 
                 if _should_send:
+                    # Reason-aware copy (#1877 defect #1). Read the cancel-reason
+                    # ONLY here, inside the dedup-winner branch, and never
+                    # destructively — so the losing (non-sending) site can never
+                    # starve this read. Absent/unknown reason -> resume copy
+                    # (historical default; Branch-3 worker shutdown writes nothing).
+                    from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
+                    from agent.notification_copy import (  # noqa: PLC0415
+                        INTERRUPT_NO_RESUME,
+                        INTERRUPT_RESUME,
+                    )
+
+                    _reason = get_cancel_reason(self.messenger.session_id)
+                    _interrupt_msg = (
+                        INTERRUPT_NO_RESUME if _reason == "no_resume" else INTERRUPT_RESUME
+                    )
                     try:
                         await asyncio.wait_for(
-                            self.messenger._send_callback(
-                                "I was interrupted and will resume automatically. No action needed."
-                            ),
+                            self.messenger._send_callback(_interrupt_msg),
                             timeout=2.0,
                         )
                     except (TimeoutError, Exception) as _send_err:

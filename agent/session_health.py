@@ -2317,6 +2317,25 @@ async def _apply_recovery_transition(
         reason,
     )
 
+    # Cancel-reason signal (#1877 defect #1). When THIS function owns the cancel
+    # (handle present), predict the resume-ness of the outcome and write it BEFORE
+    # cancelling, so the interrupt-message send (which fires during the cancel
+    # await below) selects the right copy. `is_local` (abandoned) and the
+    # exhausted-attempts ceiling (failed) are known here and are terminal ->
+    # no_resume; otherwise the transition most likely re-queues to pending ->
+    # resume. The subprocess-survived escalation to `failed` is only known after
+    # the cancel; it re-stamps no_resume in its own branch below and degrades
+    # safely to the resume copy (pre-#1877 behavior) if the send already fired.
+    # When handle is None the caller (progress-deadline Fix #3) owns the cancel
+    # and writes its own reason, so we skip here to avoid a wrong prediction.
+    if handle is not None and handle.task is not None and not handle.task.done():
+        from agent.cancel_reason import set_cancel_reason
+
+        _predicted_terminal = (
+            is_local or ((entry.recovery_attempts or 0) + 1) >= MAX_RECOVERY_ATTEMPTS
+        )
+        set_cancel_reason(entry.session_id, "no_resume" if _predicted_terminal else "resume")
+
     # Cancel the in-flight session task if we have a handle and the task
     # reference has been populated. Cancelling the populated task terminates
     # the SDK subprocess via CancelledError propagation, preventing orphan
@@ -2492,6 +2511,15 @@ async def _apply_recovery_transition(
             # ``failed`` terminal status so the in-process orphan reaper
             # (_TERMINAL_STATUSES) owns cleanup. Do NOT null ``started_at`` into
             # a pending record.
+            # Cancel-reason re-stamp (#1877 defect #1): this escalation to the
+            # terminal `failed` status was NOT predictable before the cancel
+            # above (it depends on the post-cancel subprocess-confirmation), so
+            # the pre-cancel prediction may have written `resume`. Correct it to
+            # `no_resume`; if the interrupt send already fired it degrades safely
+            # to the resume copy (documented acceptable degradation).
+            from agent.cancel_reason import set_cancel_reason
+
+            set_cancel_reason(entry.session_id, "no_resume")
             _has_deferred = (getattr(entry, "extra_context", None) or {}).get(
                 "deferred_self_draft_pending"
             )

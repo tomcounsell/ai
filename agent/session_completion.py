@@ -1169,7 +1169,15 @@ async def _send_interrupted_message(
     if not should_send:
         return
 
-    msg = "I was interrupted and will resume automatically. No action needed."
+    # Reason-aware copy (#1877 defect #1). We reach here only after WINNING the
+    # interrupted-sent SET-NX above, so this is the single sending site for this
+    # session_id. Read the cancel-reason non-destructively (180s TTL is the only
+    # reclaimer); absent/unknown -> resume copy (historical default).
+    from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
+    from agent.notification_copy import INTERRUPT_NO_RESUME, INTERRUPT_RESUME  # noqa: PLC0415
+
+    reason = get_cancel_reason(session_id)
+    msg = INTERRUPT_NO_RESUME if reason == "no_resume" else INTERRUPT_RESUME
     try:
         await asyncio.wait_for(send_cb(chat_id, msg, telegram_message_id, parent), timeout=2.0)
     except (TimeoutError, Exception) as send_err:
