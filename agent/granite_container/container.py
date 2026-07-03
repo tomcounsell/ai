@@ -493,6 +493,15 @@ class ContainerResult:
     # startup_plateau_cycles: number of consecutive identical fingerprint cycles
     # that triggered the plateau bail (None for ceiling exits).
     startup_plateau_cycles: int | None = None
+    # startup_settle_reason: which startup settle path fired (issue #1881).
+    #   "both_idle"           — classic same-cycle PM+Dev idle.
+    #   "pm_latched_dev_idle" — PM went idle on an earlier cycle (latched via
+    #                           pm_ever_idle); Dev reached idle later.
+    #   "pm_terminal_fast"    — PM produced a terminal [/complete]/[/user] turn
+    #                           and startup settled immediately, without waiting
+    #                           for Dev (decouples PM→user delivery from Dev).
+    # None on a startup that never settles (plateau / ceiling).
+    startup_settle_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1809,6 +1818,25 @@ class Container:
             # the prime text, not in the omission of the message).
             logger.info("container: priming PM")
             _pm_prime_cmd = _resolve_pm_prime_cmd(self._session_type)
+            # Relay baseline snapshot (issue #1881): snapshot the count of
+            # text-bearing PM assistant entries BEFORE PM emits any
+            # task-response output — i.e. before _prime_session(pm) below.
+            # This MUST precede PM's prime turn: the prime-turn relay's
+            # freshness guard `last_assistant_text(..., baseline_text_count=
+            # pm_prime_baseline)` returns "" when len(texts) <= baseline. If
+            # the baseline were snapshotted after the startup loop (its old
+            # site) it would already count PM's [/complete] in the fast-PM/
+            # slow-Dev race — PM's terminal turn flushes cycles before the
+            # loop breaks — so the relay would drop the reply and exit a
+            # compliance nudge instead of pm_complete. Captured here, PM's
+            # terminal turn is always a NEW text-bearing entry, so the relay
+            # delivers it for a both-idle, latch, or fast-settle break alike.
+            # result.pm_transcript_path was populated by _capture_pty_identity
+            # above; tolerate None → 0 (matches the prior post-loop behavior).
+            _pm_relay_transcript = result.pm_transcript_path
+            pm_prime_baseline = (
+                text_bearing_count(_pm_relay_transcript) if _pm_relay_transcript else 0
+            )
             self._prime_session(self._pm_pty, _pm_prime_cmd, include_user_message=True)
             logger.info("container: PM prime done")
             # A headless Dev role has no PTY to prime here — HeadlessRoleDriver
@@ -1838,6 +1866,15 @@ class Container:
             startup_settled = False
             startup_deadline = time.monotonic() + STARTUP_HARD_CEILING_S
             cycle = 0
+            # PM-idle latch (issue #1881). Idle detection is edge-triggered per
+            # cycle, so in the fast-PM/slow-Dev race PM's idle is observed in an
+            # early cycle and Dev's idle in a later one, never together — the old
+            # same-cycle `pm_saw_idle and dev_saw_idle` gate then never fires and
+            # the run burns to the ceiling. Latching PM idle once observed lets a
+            # later Dev-idle cycle settle startup. (Headless Dev already forces
+            # dev_saw_idle=True, so once PM is idle the gate reduces to PM alone,
+            # byte-identical to before.)
+            pm_ever_idle = False
             # Plateau detection state.
             # Fingerprint is the parser's verdict (response) ALONE. The idle bools
             # are NOT included in the fingerprint key because they can flicker on
@@ -1863,6 +1900,11 @@ class Container:
                     dev_idle = self._startup_cycle_idle(self._dev_pty)
                 pm_saw_idle, pm_edge, pm_level, pm_marker, pm_ms = pm_idle
                 dev_saw_idle, dev_edge, dev_level, dev_marker, dev_ms = dev_idle
+
+                # Latch PM idle (issue #1881): once PM is observed idle in any
+                # cycle, remember it so the settle gate no longer requires PM
+                # and Dev to be idle in the SAME cycle.
+                pm_ever_idle = pm_ever_idle or pm_saw_idle
 
                 # Update level tails for frame capture at any exit point.
                 _last_pm_level_tail = pm_level.strip() or pm_edge
@@ -1971,11 +2013,71 @@ class Container:
                     result.startup_plateau_cycles = _plateau_count
                     return result
 
+                # Terminal-turn fast settle (issue #1881). When PM has gone idle
+                # THIS cycle (gated strictly on the current cycle's pm_saw_idle,
+                # never the pm_ever_idle latch — a latched idle can be stale
+                # while PM is mid-turn on a later cycle; Race 2), classify PM's
+                # prime transcript against the SAME pre-loop pm_prime_baseline
+                # the relay uses. A non-empty [/complete] or a [/user] turn is
+                # user-facing and Dev-independent, so settle startup immediately
+                # and fall through to the single prime-turn relay for delivery —
+                # without waiting for Dev at all. This is READ-ONLY: it only
+                # decides to break; it snapshots no second baseline and forwards
+                # no payload/_prime_relayed state into the relay, which remains
+                # the sole delivery authority. Mere idle (empty [/complete],
+                # unknown chatter) does NOT fast-settle — it falls through to the
+                # latched pm_ever_idle AND dev_saw_idle gate, so a genuinely
+                # stuck PM still reaches plateau/ceiling (Risk 3).
+                if pm_saw_idle and result.pm_transcript_path:
+                    try:
+                        _fast_text = last_assistant_text(
+                            result.pm_transcript_path,
+                            baseline_text_count=pm_prime_baseline,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[granite-container] fast-settle transcript read raised: %s", e
+                        )
+                        _fast_text = ""
+                    if _fast_text:
+                        _fast_cls = classify_pm_prefix(_fast_text)
+                        _is_terminal = _fast_cls.destination == "user" or (
+                            _fast_cls.destination == "complete" and _fast_cls.payload.strip()
+                        )
+                        if _is_terminal:
+                            logger.info(
+                                "container: startup fast settle on PM terminal turn "
+                                "(dest=%s) — delivering without waiting for Dev",
+                                _fast_cls.destination,
+                            )
+                            startup_settled = True
+                            result.startup_settle_reason = "pm_terminal_fast"
+                            result.startup_events.append(
+                                {"cycle": cycle, "settle_reason": "pm_terminal_fast"}
+                            )
+                            break
+
                 if response is None:
-                    # No startup event in this window -- break if
-                    # both PTYs are idle, otherwise keep watching.
-                    if pm_saw_idle and dev_saw_idle:
-                        logger.info("container: startup both idle, breaking")
+                    # No startup event in this window -- break if PM has been
+                    # idle (latched via pm_ever_idle; issue #1881) and Dev is
+                    # idle this cycle, otherwise keep watching. The latch is why
+                    # this reads pm_ever_idle rather than pm_saw_idle: PM may have
+                    # gone idle several cycles earlier (fast-PM/slow-Dev race).
+                    # Headless Dev forces dev_saw_idle=True, so once PM is idle
+                    # this reduces to PM alone — byte-identical to the old gate.
+                    if pm_ever_idle and dev_saw_idle:
+                        # both_idle: classic same-cycle settle. pm_latched_dev_idle:
+                        # PM idled on an earlier cycle and Dev caught up now.
+                        result.startup_settle_reason = (
+                            "both_idle" if pm_saw_idle else "pm_latched_dev_idle"
+                        )
+                        logger.info(
+                            "container: startup settled (%s), breaking",
+                            result.startup_settle_reason,
+                        )
+                        result.startup_events.append(
+                            {"cycle": cycle, "settle_reason": result.startup_settle_reason}
+                        )
                         startup_settled = True
                         break
                     cycle += 1
@@ -2012,11 +2114,13 @@ class Container:
             # destination (user/complete/dev) during its prime response
             # rather than waiting for the first steady-state idle.
             pm_transcript = result.pm_transcript_path
-            # Snapshot the count of text-bearing PM assistant entries before the
-            # idle read so last_assistant_text can require a NEW text-bearing
-            # entry this cycle (content-identity guard; immune to intra-turn
-            # tool_use/tool_result writes that defeated the old mtime guard).
-            pm_prime_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
+            # pm_prime_baseline was snapshotted BEFORE _prime_session(pm)
+            # (issue #1881) so it predates PM's task-response output. The
+            # freshness guard `last_assistant_text(..., baseline_text_count=
+            # pm_prime_baseline)` therefore requires a NEW text-bearing entry
+            # (content-identity guard; immune to intra-turn tool_use/tool_result
+            # writes that defeated the old mtime guard) and delivers PM's
+            # already-flushed [/complete] regardless of which break reason fired.
             prime_wait = self._cycle_turn(
                 self._pm_pty, self._pm_consumer, self._pm_session_id, role="pm"
             )
