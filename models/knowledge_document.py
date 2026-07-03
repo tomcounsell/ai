@@ -55,7 +55,9 @@ class KnowledgeDocument(Model):
     ) -> "KnowledgeDocument | None":
         """Read a file and create/update a KnowledgeDocument.
 
-        Skips re-indexing if content hash is unchanged.
+        Skips re-indexing only when the content hash is unchanged AND the
+        existing record already carries a populated embedding; a record with
+        a matching hash but a missing embedding is re-embedded.
         Returns the KnowledgeDocument instance, or None on failure.
         """
         try:
@@ -82,7 +84,16 @@ class KnowledgeDocument(Model):
             existing = cls.query.filter(file_path=abs_path)
             if existing:
                 doc = existing[0]
-                if doc.content_hash == content_hash:
+                # Skip re-embedding only when the content is unchanged AND a
+                # populated embedding already exists. content_hash is computed
+                # from the full pre-truncation file, so a matching hash alone
+                # can mask a record that was persisted without a usable
+                # embedding (e.g. an earlier provider failure that returned no
+                # vector). doc.embedding holds the embedding dimension count
+                # (a positive int) once embedded and is None/0 otherwise;
+                # gating on it forces a re-embed in that case instead of
+                # silently no-op'ing the truncation fix. (issue #1876)
+                if doc.content_hash == content_hash and doc.embedding:
                     logger.debug(f"KnowledgeDocument: unchanged, skipping: {abs_path}")
                     return doc
                 # Update existing document

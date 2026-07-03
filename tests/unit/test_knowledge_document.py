@@ -195,3 +195,90 @@ class TestSafeUpsertTokenTruncation:
         )
 
         doc.delete()
+
+
+@pytest.mark.unit
+class TestSafeUpsertReembedGate:
+    """safe_upsert re-embeds a record whose content hash matches but whose
+    embedding is missing (issue #1876, critique concern #2).
+
+    content_hash is computed from the full pre-truncation file, so the
+    unchanged-skip short-circuit can otherwise no-op the fix: a doc that was
+    persisted (hash written) but never got a usable embedding (e.g. a provider
+    that returned no vector) would be skipped forever. The gate additionally
+    requires a populated embedding before short-circuiting.
+    """
+
+    def _swap_provider(self, provider):
+        from popoto.fields.embedding_field import (
+            invalidate_cache,
+            set_default_provider,
+        )
+
+        set_default_provider(provider)
+        invalidate_cache()
+
+    def test_matching_hash_but_empty_embedding_is_reembedded(self, tmp_path):
+        from popoto.embeddings import AbstractEmbeddingProvider
+        from popoto.fields.embedding_field import (
+            get_default_provider,
+            invalidate_cache,
+            set_default_provider,
+        )
+
+        from models.knowledge_document import KnowledgeDocument
+
+        class _EmptyVectorProvider(AbstractEmbeddingProvider):
+            """Returns no vector -- popoto's on_save skips embedding without
+            raising, so the record persists with content_hash but no embedding
+            (the exact 'persisted hash, null embedding' state from concern #2)."""
+
+            def embed(self, texts, input_type=None):
+                return [[] for _ in texts]
+
+            @property
+            def dimensions(self):
+                return 4
+
+            @property
+            def max_batch_size(self):
+                return 32
+
+        class _RealVectorProvider(AbstractEmbeddingProvider):
+            def embed(self, texts, input_type=None):
+                return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+            @property
+            def dimensions(self):
+                return 4
+
+            @property
+            def max_batch_size(self):
+                return 32
+
+        doc_file = tmp_path / "reembed-gate.md"
+        doc_file.write_text("# Heading\n\nStable content that will not change.\n")
+
+        prior = get_default_provider()
+        try:
+            # First pass: provider returns no vector -> persisted with a
+            # content_hash but a null embedding.
+            self._swap_provider(_EmptyVectorProvider())
+            doc = KnowledgeDocument.safe_upsert(str(doc_file), "test-1876", "client")
+            assert doc is not None
+            assert not doc.embedding, "precondition: record must persist without an embedding"
+            stored_hash = doc.content_hash
+
+            # Second pass: content unchanged (same hash) but a working
+            # provider is now available. The gate must force a re-embed rather
+            # than short-circuit on the matching hash.
+            self._swap_provider(_RealVectorProvider())
+            doc2 = KnowledgeDocument.safe_upsert(str(doc_file), "test-1876", "client")
+            assert doc2 is not None
+            assert doc2.content_hash == stored_hash
+            assert doc2.embedding, "matching-hash record with a null embedding must be re-embedded"
+
+            doc2.delete()
+        finally:
+            set_default_provider(prior)
+            invalidate_cache()
