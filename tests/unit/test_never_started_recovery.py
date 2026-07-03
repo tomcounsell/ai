@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import agent.session_health as session_health
 
 
 def _make_session(**kwargs):
@@ -564,3 +567,143 @@ class TestPrimePtyAliveRecoveryPath:
 
         result = session_health._prime_pty_alive(session, now)
         assert result is False, "Stale PTY session must be kill-eligible"
+
+
+def _fake_d0_entry(
+    *,
+    sid: str = "d0-sess-1",
+    project_key: str = "test-d0-loop",
+    last_pty_read_loop_at: datetime | None = None,
+    last_pty_activity_at: datetime | None = None,
+    created_at_age_seconds: float = 500,
+):
+    """Build a fake never-started-past-grace session row for the D0 loop
+    (``_agent_session_tool_timeout_check``'s never-started branch, #1878 Part A).
+
+    ``created_at_age_seconds`` defaults well past ``NEVER_STARTED_GRACE_SECS +
+    NEVER_STARTED_CONFIRM_MARGIN_SECS`` (150s) so ``_never_started_past_grace``
+    fires regardless of the PTY-liveness fields under test.
+    """
+    now = datetime.now(tz=UTC)
+    saves: list[list[str]] = []
+
+    def _save(update_fields=None, **_kw):
+        saves.append(list(update_fields) if update_fields else [])
+
+    return SimpleNamespace(
+        agent_session_id=sid,
+        id=sid,
+        session_id=f"sid-{sid}",
+        status="running",
+        project_key=project_key,
+        current_tool_name=None,
+        last_tool_use_at=None,
+        last_turn_at=None,
+        last_heartbeat_at=now,
+        created_at=now - timedelta(seconds=created_at_age_seconds),
+        started_at=None,
+        worker_key="telegram-test-chat",
+        recovery_attempts=0,
+        reprieve_count=0,
+        last_pty_read_loop_at=last_pty_read_loop_at,
+        last_pty_activity_at=last_pty_activity_at,
+        mid_run_quiescent_since=None,
+        get_children=MagicMock(return_value=[]),
+        save=_save,
+        delete=lambda **_kw: None,
+        _saves=saves,
+    )
+
+
+class TestD0KillLoopEndToEnd:
+    """End-to-end proof that the D0 never-started branch inside
+    ``_agent_session_tool_timeout_check`` actually defers the kill when the
+    granite PTY is alive during priming, and still kills when it is not
+    (#1878 Part A). Unlike ``TestPrimePtyAliveRecoveryPath`` above (which only
+    re-calls the ``_prime_pty_alive`` predicate), these tests drive the real
+    loop function and assert on ``_apply_recovery_transition`` invocation —
+    proving the wiring added to ``_prime_session`` actually changes outcomes
+    at the session-health layer, not just at the predicate layer.
+    """
+
+    async def test_fresh_pty_liveness_defers_d0_kill(self):
+        """Fresh last_pty_read_loop_at/last_pty_activity_at during priming must
+        defer the D0 kill even though the session is well past the 150s grace."""
+        now = datetime.now(tz=UTC)
+        entry = _fake_d0_entry(
+            last_pty_read_loop_at=now - timedelta(seconds=5),
+            last_pty_activity_at=now - timedelta(seconds=10),
+        )
+        transition_mock = AsyncMock()
+
+        with (
+            patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+            patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+            patch.object(
+                session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)
+            ),
+            patch.dict(
+                "sys.modules", {"popoto.redis_db": SimpleNamespace(POPOTO_REDIS_DB=MagicMock())}
+            ),
+            patch.object(session_health, "_apply_recovery_transition", transition_mock),
+        ):
+            await session_health._agent_session_tool_timeout_check()
+
+        transition_mock.assert_not_called()
+
+    async def test_stale_pty_liveness_lets_d0_kill_fire(self):
+        """Stale last_pty_read_loop_at/last_pty_activity_at (frozen-frame reap)
+        must NOT defer the D0 kill — the recovery transition must fire."""
+        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+        now = datetime.now(tz=UTC)
+        entry = _fake_d0_entry(
+            last_pty_read_loop_at=now - timedelta(seconds=NEVER_STARTED_PTY_LIVENESS_SECS + 30),
+            last_pty_activity_at=now - timedelta(seconds=NEVER_STARTED_PTY_LIVENESS_SECS + 30),
+        )
+        transition_mock = AsyncMock()
+
+        with (
+            patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+            patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+            patch.object(
+                session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)
+            ),
+            patch.dict(
+                "sys.modules", {"popoto.redis_db": SimpleNamespace(POPOTO_REDIS_DB=MagicMock())}
+            ),
+            patch.object(session_health, "_apply_recovery_transition", transition_mock),
+        ):
+            await session_health._agent_session_tool_timeout_check()
+
+        transition_mock.assert_called_once()
+        assert transition_mock.call_args.kwargs.get("reason_kind") == "no_progress"
+
+    async def test_non_pty_sdk_session_hard_regression_still_kills(self):
+        """HARD REGRESSION (#1878 Part A): a non-PTY (SDK/headless) session —
+        ``last_pty_read_loop_at is None`` — must still be killed by the
+        age-only never-started predicate exactly as before this change.
+        ``_prime_pty_alive`` must short-circuit False on branch 2 (no PTY loop)
+        so the deferral never engages for SDK sessions.
+        """
+        entry = _fake_d0_entry(
+            last_pty_read_loop_at=None,
+            last_pty_activity_at=None,
+        )
+        transition_mock = AsyncMock()
+
+        with (
+            patch.object(session_health.AgentSession.query, "filter", return_value=[entry]),
+            patch.object(session_health, "_filter_hydrated_sessions", lambda x: list(x)),
+            patch.object(
+                session_health.AgentSession, "get_by_id", classmethod(lambda cls, sid: entry)
+            ),
+            patch.dict(
+                "sys.modules", {"popoto.redis_db": SimpleNamespace(POPOTO_REDIS_DB=MagicMock())}
+            ),
+            patch.object(session_health, "_apply_recovery_transition", transition_mock),
+        ):
+            await session_health._agent_session_tool_timeout_check()
+
+        transition_mock.assert_called_once()
+        assert transition_mock.call_args.kwargs.get("reason_kind") == "no_progress"
