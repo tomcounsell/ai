@@ -92,7 +92,11 @@ def migrate(apply: bool = False) -> dict:
 
             try:
                 entries = json.loads(raw_val)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+                # An empty Popoto ListField is stored as msgpack nil (b"\xc0"),
+                # which is not valid UTF-8 and raises UnicodeDecodeError here.
+                # Any non-JSON payload means there is nothing to drain -- treat
+                # it as an empty queue so the stale field is cleaned, not errored.
                 entries = []
 
             if not isinstance(entries, list) or not entries:
