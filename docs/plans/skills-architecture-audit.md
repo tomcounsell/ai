@@ -5,7 +5,7 @@ appetite: Medium
 owner: Tom Counsell
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1883
-last_comment_id: none
+last_comment_id: 4877872940
 ---
 
 # Skills Architecture Audit
@@ -15,20 +15,20 @@ last_comment_id: none
 The skill fleet has grown by accretion: 46 global skills in `.claude/skills-global/` and 14 project-only skills in `.claude/skills/`, roughly 17,000 lines of instruction text. Each skill was added one business requirement at a time, which is exactly the accretion trap Anthropic's agent-decomposition guidance warns about. Nobody has stepped back to ask, per skill: is this the right primitive (skill vs. workflow vs. subagent), is it the right size, and which model should run it?
 
 **Current behavior:**
-- The existing `/do-skills-audit` lints structure (frontmatter, description budget, line caps) but says nothing about architecture. A skill can pass every lint rule and still be the wrong shape.
+- The `/do-skills-audit` lint was renovated as groundwork for this audit (commit `56124515`, 2026-07-03): 20 deterministic rules over both repo roots plus user-level orphan detection, a revived nightly FAIL→issue reflection, and an `--arch` rubric at `.claude/skills-global/do-skills-audit/references/rubric.md`. The lint now catches hygiene (rot, husks, budget, trigger collisions) — but the architecture judgments themselves (dispositions, model tiers) remain this plan's job. A skill can pass every lint rule and still be the wrong shape.
 - Tiny skills with overlapping domains coexist (`do-debrief` + `do-voice-recording` are both TTS; `analyze` / `grill-me` / `zoom-out` are all "think harder" prompts; four `audit-*` skills share one skeleton).
 - Very large multi-stage skills (`do-pr-review` 1,627 lines total, `do-plan` 1,190, `do-build` 879, `x-com` 728, `linkedin` 800, `setup` 620) run as single-context monoliths even where their stages are independent and could pipeline as a Workflow or isolate as subagents.
 - Every skill runs on whatever model the session happens to use. Only 5 skills carry any `model:` hint. Mechanical skills burn frontier-model tokens; judgment-heavy skills (critique, war-room) sometimes run on cheaper tiers.
-- Drift artifacts exist: `do-design-review` survives only as a user-level copy in `~/.claude/skills/` with no repo source; `audit-next-tool` appears in the session skill list but in neither repo directory.
+- Drift artifacts exist: `do-design-review`, `audit-next-tool`, `get-telegram-messages`, `searching-message-history`, and `sentry-cli` survive only as user-level copies in `~/.claude/skills/` with no repo source (now auto-flagged by lint rule 20); their dispositions are this audit's to make.
 
 **Desired outcome:**
 A per-skill architecture audit that produces, for every one of the 60 skills: (1) concrete improvement suggestions, (2) a disposition — keep / merge-with-named-sibling / split / convert-to-Workflow / convert-to-subagent / retire, and (3) a recommended model tier (sonnet / opus / fable) with rationale. Delivered as a durable report plus one follow-up GitHub issue per accepted consolidation, so execution can proceed slug-by-slug.
 
 ## Freshness Check
 
-**Baseline commit:** `06fca807`
+**Baseline commit:** `56124515` (re-verified 2026-07-03 after the do-skills-audit renovation; originally planned at `06fca807`)
 **Issue filed at:** plan-initiated (tracking issue created alongside this plan; no pre-existing issue to re-verify)
-**Disposition:** Unchanged
+**Disposition:** Minor drift — the renovation (this plan's own groundwork) changed the inventory substrate and pre-resolved the husk anomalies; premises otherwise hold
 
 **File:line references re-verified:** Inventory taken directly from the working tree at the baseline commit (see Spike Results) — 46 global + 14 project-only skills confirmed present.
 
@@ -38,14 +38,14 @@ A per-skill architecture audit that produces, for every one of the 60 skills: (1
 
 **Active plans in `docs/plans/` overlapping this area:** none — the five most recent active plans (delivery paths, TUI liveness, session lifecycle, granite hooks, reflection scheduler) touch runtime systems, not skills.
 
-**Notes:** No drift risk — this plan reads the tree as-is at audit time.
+**Notes:** Groundwork performed between plan creation and this revision (issue comments 4877617569, 4877872940, both incorporated): a blind-draft comparison of the existing lint, then a full renovation shipped in `56124515`. Lint baseline at that commit: 60 skills · 828 PASS · 73 WARN · 7 FAIL (all seven FAILs are line-count monoliths — this plan's decompose candidates). Fleet description total: 16,596 chars against the 4,000 budget.
 
 ## Prior Art
 
 - **#1783 / PR #1806**: Generalize all global skills to be repo-agnostic — succeeded. Established the probe-sentence + skill-context convention and the `rule_13_coupling_signals` guard. This audit's merge/split recommendations must preserve probe sentences and the global/project split.
 - **#1299**: Skills-audit reflection files GitHub issues on FAIL findings (two-run gate) — succeeded. Gives us the pattern for audit-finding → issue automation this plan reuses.
 - **#1416/#1417/#1474/#1618**: Doc-reference drift issues from the skills-audit move to `skills-global/` — evidence that skill moves/renames leak stale references; any merge executed as follow-up must include a doc sweep and `RENAMED_REMOVALS` entries.
-- **/do-skills-audit** (existing skill, 10 files): deterministic lint + Anthropic best-practices sync. This plan **extends** it with an architecture pass; it does not replace it.
+- **/do-skills-audit** (renovated in `56124515` as this plan's groundwork): 20-rule deterministic lint over both repo roots + user-level orphan detection + Anthropic best-practices sync + the `--arch` rubric this audit executes. The blind-draft comparison that motivated the renovation is recorded on the tracking issue (comment 4877617569).
 
 ## Research
 
@@ -74,9 +74,9 @@ Primary source: Anthropic engineering talk, "Right agentic primitives at the rig
 ### spike-2: Duplicate and orphan detection
 - **Assumption**: "Some skills exist in both directories or only at user level."
 - **Method**: code-read (`comm` across dirs, `ls ~/.claude/skills/`)
-- **Finding**: `do-skills-audit` and `do-test` exist in both `skills-global/` and `skills/` (intentional scoped-variant pattern — but the audit must verify the variants haven't diverged). `do-design-review` exists **only** in `~/.claude/skills/` (orphan; near-duplicate description of `do-design-audit`). `audit-next-tool` is invocable this session but absent from both repo dirs.
-- **Confidence**: high
-- **Impact on plan**: adds an explicit "inventory reconciliation" stage before analysis; orphans are candidate `RENAMED_REMOVALS` entries.
+- **Finding**: originally read `do-skills-audit`/`do-test` in both dirs as an intentional scoped-variant pattern — **REFUTED on deep read**: both were husks from the skills-global migration (stale `__pycache__`/metadata; an orphaned `PYTHON.md` nothing loaded). Deleted in the `56124515` renovation; lint rule 19 now FAILs any future husk. User-level orphans confirmed and expanded: `do-design-review`, `audit-next-tool`, `get-telegram-messages`, `searching-message-history`, `sentry-cli` (rule 20 flags them each run; `sentry` additionally has a diverged user copy).
+- **Confidence**: high (mechanically enforced now)
+- **Impact on plan**: inventory reconciliation is automated by the renovated lint; the audit consumes rule 19/20 findings and owns the orphan dispositions. Orphan removals are candidate `RENAMED_REMOVALS` entries.
 
 ### spike-3: Model-hint precedent
 - **Assumption**: "Per-skill model recommendations have somewhere to live."
@@ -88,7 +88,7 @@ Primary source: Anthropic engineering talk, "Right agentic primitives at the rig
 ## Data Flow
 
 1. **Entry point**: operator runs the audit (a one-shot orchestrated run in a local Claude Code session, per Step by Step Tasks below).
-2. **Inventory stage**: deterministic script output (census, duplicates, orphans, description-budget stats from the existing `/do-skills-audit --json`) → normalized inventory JSON.
+2. **Inventory stage**: deterministic script output from the renovated `/do-skills-audit --json --no-sync` (both roots, size census, budget stats, rot/junk/collision WARNs, husk FAILs, user-orphan flags) → normalized inventory JSON.
 3. **Analyst fan-out**: one analyst per skill cluster (8 clusters, below) reads every SKILL.md + sub-files in its cluster and emits structured findings per skill: improvements[], disposition{action, target, rationale}, model_tier{tier, rationale}, token_cost_estimate.
 4. **Adversarial verify**: every non-"keep" disposition (merge/split/convert/retire) goes to a fresh-context verifier prompted to refute it (the video's fresh-mind rule applied to our own audit). Majority-refuted dispositions downgrade to "keep + note".
 5. **Synthesis**: single synthesizer merges cluster reports, resolves cross-cluster merges (e.g., a voice skill merging into a media skill spans clusters), produces the report.
@@ -111,13 +111,13 @@ The audit itself is read-only; the appetite is spent on analysis quality and the
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
 | `gh` authenticated | `gh auth status` | Filing follow-up issues |
-| Existing lint audit runs | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json --no-sync > /dev/null && echo ok` | Inventory stage reuses its JSON output |
+| Lint audit runs (exit 0 or 1; 1 = findings, not breakage) | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json --no-sync > /dev/null; test $? -le 1 && echo ok` | Inventory stage reuses its JSON output |
 
 ## Solution
 
 ### Key Elements
 
-- **Rubric (the audit's constitution)**: a one-page scoring rubric derived from the Research section — five lenses applied to every skill:
+- **Rubric (the audit's constitution)**: **shipped** — lives at `.claude/skills-global/do-skills-audit/references/rubric.md` (written during the renovation from this plan's Research section). Analysts load that file verbatim; the plan text below is its summary, the skill file is authoritative. Five lenses applied to every skill:
   1. **Context economy** — is body content needed *every* invocation, or should it progressively disclose into sub-files? Is any content always-true policy that belongs in CLAUDE.md instead?
   2. **Primitive fit** — SKILL (task guidance, single context) vs. WORKFLOW (multi-stage with independent stages needing deterministic control flow) vs. SUBAGENT (only for parallelism or fresh-mind isolation — must cite which) vs. SCRIPT (deterministic logic pretending to be prose — belongs in a `scripts/` file the skill calls).
   3. **Consolidation** — overlapping trigger domains, shared skeletons, or one skill being a thin wrapper over another (merge direction must be named: which survives, which becomes a section or an argument).
@@ -125,10 +125,10 @@ The audit itself is read-only; the appetite is spent on analysis quality and the
   5. **Efficiency** — estimated tokens pulled into context per invocation (body + eagerly-loaded sub-files); flag skills whose description alone does documentation work (>200 chars) and skills that inline data a bash one-liner could fetch.
 - **Cluster map** — 8 analyst clusters sized so no analyst reads more than ~3,500 lines:
   1. *SDLC core*: do-plan, do-plan-critique, do-build, do-patch, do-merge, do-sdlc, sdlc (project)
-  2. *SDLC periphery*: do-test (×2 variants), do-pr-review, do-docs, do-issue, do-investigation-issue
-  3. *Audit family*: do-skills-audit (×2 variants), audit-hooks, audit-models, audit-tools, do-integration-audit, do-oop-audit, new-audit-skill (+ orphan audit-next-tool)
+  2. *SDLC periphery*: do-test, do-pr-review, do-docs, do-issue, do-investigation-issue
+  3. *Audit family*: do-skills-audit, audit-hooks, audit-models, audit-tools, do-integration-audit, do-oop-audit, new-audit-skill (+ orphan audit-next-tool)
   4. *Design & media*: do-design-audit, do-design-system, frontend-design, pencil-design, mermaid-render, do-presentation, do-debrief, do-voice-recording (+ orphan do-design-review)
-  5. *Comms & channels* (project-heavy): telegram, email, google-workspace, checking-system-logs, reading-sms-messages, linkedin, x-com, authenticity-pass, sentry
+  5. *Comms & channels* (project-heavy): telegram, email, google-workspace, checking-system-logs, reading-sms-messages, linkedin, x-com, authenticity-pass, sentry (+ orphans get-telegram-messages, searching-message-history, sentry-cli)
   6. *Thinking & meta*: analyze, grill-me, zoom-out, ontologies, weekly-review, reclassify, skillify, new-skill, pthread, tdd, deepen, observability, claude-standards
   7. *CMA & external*: imagine-agent, build-agent, do-discover-paths, computer-use, officecli, ebook-ingest
   8. *Machine ops* (project): setup, prime, update, do-deploy, do-deploy-example
@@ -137,7 +137,7 @@ The audit itself is read-only; the appetite is spent on analysis quality and the
   - Decompose: do-pr-review (multi-dimension review + screenshot capture is a natural Workflow: dimensions fan out, findings adversarially verified — mirrors the built-in /code-review shape); do-build (already delegates to builder agents; audit whether its 526-line body is orchestration prose that should be a Workflow script); linkedin/x-com (800/728 lines of mixed reference + procedure — split reference tables into sub-files with progressive disclosure rather than convert; browser-driving is inherently sequential, a Workflow buys nothing); setup (620 lines, deterministic — most of it should be a script the skill runs).
   - Model tiers (seed, per-skill final call is the audit's job): fable → do-plan-critique, analyze, grill-me, imagine-agent, do-plan (architecture judgment); opus → do-build, do-pr-review, do-docs, do-design-system, frontend-design; sonnet → telegram, email, reading-sms-messages, update, do-skills-audit, weekly-review, do-voice-recording, get-telegram-messages-style I/O skills.
 - **Disposition report**: one table row per skill (60 rows): current lines/files, cluster, findings summary, disposition, model tier, token estimate, verifier verdict. Dispositions are recommendations; nothing is executed in this slug.
-- **Issue generation**: after human sign-off on the report, one `gh issue create` per accepted merge/split/conversion, each self-contained with the affected paths, the `RENAMED_REMOVALS` requirement, and the doc-sweep requirement (prior art: #1416-#1618 drift).
+- **Issue generation**: after human sign-off on the report, one `gh issue create` per accepted merge/split/conversion, each self-contained with the affected paths, the `RENAMED_REMOVALS` requirement, and the doc-sweep requirement (prior art: #1416-#1618 drift). The revived nightly skills-audit reflection will independently file issues for the 7 standing rule-1 FAILs after 2 consecutive runs (streak gate) — the issue-generation step must check for those auto-filed issues and absorb or close them against the audit's own decompose issues rather than leaving duplicates.
 
 ### Flow
 
@@ -257,8 +257,8 @@ No agent integration required — no MCP servers, `.mcp.json` entries, or bridge
 - **Validates**: report "Inventory" section row count == fleet size
 - **Informed By**: spike-1, spike-2
 - **Parallel**: false
-- Run `/do-skills-audit --json --no-sync`; normalize with the size census into inventory JSON (include both-dir variants and user-level orphans)
-- Write the rubric preamble (five lenses + tier definitions) into the report skeleton
+- Run the renovated `/do-skills-audit --json --no-sync`; normalize into inventory JSON (both roots + rule-20 user-level orphans; husks are already lint FAILs, not audit rows)
+- Copy the rubric summary + tier definitions from `.claude/skills-global/do-skills-audit/references/rubric.md` (already written) into the report skeleton preamble
 
 ### 2. Analyst fan-out
 - **Task ID**: build-analysis
@@ -310,7 +310,7 @@ No agent integration required — no MCP servers, `.mcp.json` entries, or bridge
 | Full coverage | `grep -c '^| ' docs/audits/skills-architecture-audit-2026-07.md` | output > 60 |
 | Model tier on every row | `grep -Ec 'sonnet\|opus\|fable' docs/audits/skills-architecture-audit-2026-07.md` | output > 59 |
 | No skill bodies changed in this slug | `git diff --stat main -- .claude/skills .claude/skills-global \| tail -1` | output does not contain changed |
-| Lint audit still green | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --no-sync > /dev/null; echo $?` | output contains 0 |
+| Auditor self-audit green | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --no-sync --skill do-skills-audit > /dev/null; echo $?` | output contains 0 |
 
 ## Critique Results
 
