@@ -766,7 +766,7 @@ The original #1878 plan scoped a rung that would send a `continue` nudge to a
 wedged session before killing it, as a cheaper first recovery attempt. Plan
 critique found it structurally infeasible on the then-current main: the ordinary
 external steering queue (`agent/steering.py`,
-[Mid-run steering](#mid-run-steering-issue-1779) above) is drained only at the
+[Mid-run steering](#mid-run-steering-issue-1779) below) is drained only at the
 **top of a completed turn**. A wedged session — parked inside `_await_turn_end`
 with a frozen normalized frame — by definition never reaches that drain point,
 so there was no live consumer for a nudge to reach. The rung was split to #1879,
