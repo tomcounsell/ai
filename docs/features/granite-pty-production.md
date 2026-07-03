@@ -682,6 +682,58 @@ The residual — reaping the granite PTY *process group* rather than a single PI
 `container` `killpg` seam. Issue #1843 adds no kill path and does not touch
 `session_health.py`.
 
+#### Priming now stamps PTY liveness fields (issue #1878)
+
+Issue #1792 (PR #1798) added `_prime_pty_alive()` — a deferral for the D0
+never-started kill gate in `agent/session_health.py` that keeps a slow-but-alive
+cold start (e.g. Opus warming up) from being killed as a wedged session. The
+deferral reads `last_pty_read_loop_at` and `last_pty_activity_at`. Those fields
+were only ever stamped by the steady-state loop's `on_read_iteration` callback
+(`_pty_read_iteration_cb`, #1843 Gap B) — `_prime_session` never wired the same
+callback into its own `read_until_idle` calls, so **during priming the fields
+never moved**, and `_prime_pty_alive()` could never observe fresh liveness. The
+deferral was reachable in code but permanently defeated in the one phase
+(priming) it was built to protect.
+
+Issue #1878 closes this gap: `_prime_session` (`agent/granite_container/container.py`)
+now passes `on_read_iteration=self._pty_read_iteration_cb` into all three
+`read_until_idle` calls it makes (the trust-dismiss loop, the pre-write idle
+wait, and the post-write idle wait). This is the same throttled callback the
+steady-state loop already used — no new field, no new constant, just the
+existing producer wired into the previously-unwired priming consumer path.
+With this change:
+
+- `last_pty_read_loop_at` is stamped on every inner poll tick during priming
+  (proves the read loop itself is alive), exactly as it already was in the
+  steady-state loop.
+- `last_pty_activity_at` is stamped only when the normalized PTY frame changes
+  (`_normalize_pty_buffer`, the anti-spinner guard from issue #1768 that strips
+  spinner glyphs and elapsed-second counters so a merely-animating frame does
+  not read as "activity"). A prime that is genuinely progressing (model
+  streaming its response) keeps this field fresh; a prime that has actually
+  wedged does not.
+
+The net effect: `_prime_pty_alive()` now correctly defers the D0 never-started
+kill while a slow cold-start prime is still painting new content, and still
+kills on a stale or frozen prime — completing the intent of #1792 rather than
+changing its gating logic. See
+[pm-session-liveness.md — PTY-liveness gates (Gate 2)](pm-session-liveness.md#pty-liveness-gates-for-kill-paths)
+for the gate's branch logic, which is unchanged by this fix.
+
+**Why no `continue`-nudge recovery rung was added here.** The original #1878
+plan also scoped a rung that would send a `continue` nudge to a wedged/no-progress
+session before killing it, as a cheaper first recovery attempt. That rung was
+split out to follow-up issue **#1879** after plan critique found it structurally
+infeasible on current main: the external steering queue (`agent/steering.py`,
+[Mid-run steering](#mid-run-steering-issue-1779) above) is drained only at the
+**top of a completed turn** in the steady-state loop. A session that is
+wedged or stuck in `no_progress` by definition never reaches that drain point —
+it is still inside an in-flight turn (or, for priming, hasn't reached the
+steady-state loop at all). The drain point and the wedge condition are mutually
+exclusive on the current architecture, so there is no live consumer for a
+nudge to reach. #1879 will build the mid-run steering-drain infrastructure a
+nudge rung requires before that recovery path can be added.
+
 ### Startup hard ceiling
 
 The startup loop polls both PTYs on short (`STARTUP_CYCLE_TIMEOUT_S` = 3s)
