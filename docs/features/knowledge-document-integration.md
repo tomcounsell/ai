@@ -93,7 +93,7 @@ Embeddings are generated automatically by Popoto's `EmbeddingField` using the gl
 
 This truncation only bounds the coarse document-level embedding vector used for whole-document similarity. It does not affect chunk embeddings (see Document Chunking below), which are built independently from the full raw file and bounded per-chunk to 1,500 tokens, so fine-grained retrieval coverage is unchanged regardless of how the document-level vector is truncated.
 
-**Skip-gate requires a populated embedding**: `safe_upsert()`'s unchanged-content skip (`doc.content_hash == content_hash`) also checks `doc.embedding` is populated before skipping. `content_hash` is computed from the full pre-truncation file, so a hash match alone can mask a record that was persisted without a usable vector -- e.g. one that hit the pre-fix 400 error and was saved anyway by the broad `except Exception` handler. Gating on both conditions means a previously-failed doc gets re-embedded on its next scan even without a content change, instead of being silently skipped forever.
+**Skip-gate requires a populated embedding**: `safe_upsert()`'s unchanged-content skip (`doc.content_hash == content_hash`) also checks `doc.embedding` is populated before skipping. `content_hash` is computed from the full pre-truncation file, so a hash match alone can mask a record that was persisted without a usable vector -- Popoto's `EmbeddingField.on_save()` still completes the save when the provider returns no vector for the content (it only raises on a hard provider error, which aborts the whole save). Gating on both conditions means a record left with a missing embedding gets re-embedded on its next scan even without a content change, instead of being silently skipped forever.
 
 ### 5. Document Chunking
 
