@@ -212,6 +212,44 @@ class TestEmailHealthAlerts:
         assert health["email_alert"] == "auth_failed"
 
 
+class TestRedisOffloadDashboardMetric:
+    """The dashboard's ``health.redis_offload`` block surfaces the drain-loop
+    idle-check latency gauges from agent/redis_offload.py — issue #1826."""
+
+    def test_dashboard_json_has_redis_offload_block(self, client):
+        from agent.redis_offload import reset_max_redis_latency
+
+        reset_max_redis_latency()
+
+        response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        health = response.json()["health"]
+        assert "redis_offload" in health
+        redis_offload = health["redis_offload"]
+        assert redis_offload["label"] == "drain-loop idle-check latency"
+        assert redis_offload["p95_latency_s"] == 0.0
+        assert redis_offload["max_latency_s"] == 0.0
+        assert redis_offload["last_latency_s"] == 0.0
+
+    def test_dashboard_json_redis_offload_values_are_numeric(self, client):
+        from agent.redis_offload import _record
+
+        _record(0.05)
+        _record(0.2)
+
+        response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        redis_offload = response.json()["health"]["redis_offload"]
+        assert isinstance(redis_offload["p95_latency_s"], (int, float))
+        assert isinstance(redis_offload["max_latency_s"], (int, float))
+        assert isinstance(redis_offload["last_latency_s"], (int, float))
+        assert redis_offload["p95_latency_s"] is not None
+        assert redis_offload["max_latency_s"] is not None
+        assert redis_offload["last_latency_s"] is not None
+
+
 class TestStaticFiles:
     """Tests for static file serving."""
 
