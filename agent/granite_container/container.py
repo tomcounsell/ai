@@ -744,6 +744,7 @@ class Container:
         dev_pty: PTYDriver | None = None,
         session_type: str | None = None,
         poll_steering: Callable[[], list[dict]] | None = None,
+        poll_wedge_nudge: Callable[[], list[dict]] | None = None,
         pm_session_id: str | None = None,
         dev_session_id: str | None = None,
         pm_hook_edge_file: str | None = None,
@@ -863,6 +864,20 @@ class Container:
         # the call site is fail-silent: a raising callback yields [] and never
         # crashes the loop.
         self._poll_steering = poll_steering
+        # Optional, storage-agnostic wedge-nudge poll callback (mid-run drain,
+        # issue #1879). Distinct from `_poll_steering` above: this is drained
+        # from *inside* `_await_turn_end` (a session parked mid-turn, no
+        # completed-turn boundary), not at the top of a steady-state turn.
+        # Returns a list of pending nudge dicts (each with `text`, `sender`,
+        # `timestamp`, `is_abort`) from a channel the BridgeAdapter closure
+        # keeps isolated from ordinary operator steering (see
+        # `agent/steering.py` channel-isolation contract). The Container
+        # never imports Redis / agent.steering — the BridgeAdapter supplies
+        # the closure. Default None preserves every existing caller (CLI,
+        # tests, non-hook-driven runs) unchanged. Like `_poll_steering`, the
+        # call site is fail-silent: a raising callback yields [] and never
+        # crashes the loop.
+        self._poll_wedge_nudge = poll_wedge_nudge
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -1386,6 +1401,47 @@ class Container:
                 pty = resumed
                 deadline = time.monotonic() + self._hook_turn_end_wait_s  # re-arm
                 continue
+
+            # 3.5. Mid-run wedge-nudge drain (issue #1879). Placement is
+            # deliberate: this runs AFTER the crash-detection/crash-resume
+            # block above, never before it. That block either returns
+            # (crash-resume cap exhausted or spawn failed) or reassigns
+            # `pty = resumed` and `continue`s the loop — every `not alive`
+            # branch exits this point in the loop body without falling
+            # through to here. So by construction, reaching this line means
+            # `pty` is the LIVE handle for this tick (either it was alive
+            # all along, or it is the freshly resumed replacement from a
+            # prior tick). Draining earlier (e.g. right after the step-2
+            # liveness pump) would risk writing to a `pty` that just died on
+            # THIS tick — the nudge would be silently lost to a dead
+            # process while the session-health producer's one-nudge-per-
+            # window latch is still spent, wasting the single recovery
+            # attempt with zero keystrokes reaching anything alive.
+            #
+            # No `_cycle_idle` gate is used here, unlike the top-of-turn
+            # `_poll_steering` drain in the steady-state loop. Two
+            # independent guarantees make the gate unnecessary: (1) channel
+            # isolation — the wedge-nudge channel (`steering:nudge:{id}`) is
+            # a distinct Redis key from ordinary operator steering
+            # (`steering:{id}`), so this drain can never consume a message
+            # the top-of-turn path owns; and (2) token idempotency — the
+            # only thing ever written here is `CRASH_RESUME_CONTINUE`, the
+            # exact same constant/call the crash-resume path above already
+            # uses via `_resume_crashed_pty` (`pty.write(CRASH_RESUME_CONTINUE)`).
+            # A `continue` keystroke to a PTY that is parked (by definition —
+            # there is no in-flight turn to interrupt while waiting on the
+            # Stop edge) carries no corruption risk to gate against.
+            if self._poll_wedge_nudge is not None:
+                try:
+                    nudges = self._poll_wedge_nudge() or []
+                except Exception as e:
+                    logger.warning("[granite-container] poll_wedge_nudge callback raised: %s", e)
+                    nudges = []
+                if nudges:
+                    try:
+                        pty.write(CRASH_RESUME_CONTINUE)
+                    except Exception as e:
+                        logger.warning("[granite-container] wedge-nudge PTY write failed: %s", e)
 
             # 4. Bounded timeout: alive + quiet + no Stop past the budget.
             if time.monotonic() > deadline:

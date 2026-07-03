@@ -75,7 +75,7 @@ from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
     read_transcript_telemetry,
 )
-from agent.steering import pop_all_steering_messages
+from agent.steering import pop_all_steering_messages, pop_wedge_nudges
 
 logger = logging.getLogger(__name__)
 
@@ -630,6 +630,28 @@ class BridgeAdapter:
                     )
                     return []
 
+            # Storage-agnostic wedge-nudge poll closure (mid-run drain,
+            # issue #1879). Container calls this from INSIDE
+            # `_await_turn_end` — a session parked mid-turn, no completed-
+            # turn boundary — so it must drain a channel entirely separate
+            # from `_poll_steering` above. `pop_wedge_nudges` reads only
+            # `steering:nudge:{session_id}`; it never touches
+            # `steering:{session_id}` (the ordinary operator queue) or the
+            # TTL latch key. Fail-silent: any error yields [] and never
+            # crashes the run, mirroring `_poll_steering`.
+            def _poll_wedge_nudge() -> list[dict]:
+                if not steering_session_id:
+                    return []
+                try:
+                    return pop_wedge_nudges(steering_session_id)
+                except Exception as e:
+                    logger.warning(
+                        "[granite-bridge-adapter] poll_wedge_nudge drain failed for session %s: %s",
+                        steering_session_id,
+                        e,
+                    )
+                    return []
+
             container = Container(
                 user_message=user_message,
                 cwd=working_dir,
@@ -641,6 +663,7 @@ class BridgeAdapter:
                 dev_pty=dev,
                 session_type=self._session_type,
                 poll_steering=_poll_steering,
+                poll_wedge_nudge=_poll_wedge_nudge,
                 pm_session_id=pm_session_id,
                 dev_session_id=dev_session_id,
                 pm_hook_edge_file=pm_hook_edge_file,
