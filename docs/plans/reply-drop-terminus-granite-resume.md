@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1836
 last_comment_id: 4877536194
+revision_applied: true
 ---
 
 # Reply-to-Valor drops: terminus misclassification + granite resume gate
@@ -56,7 +57,7 @@ the second blocked the correct recovery path once the drop was found.
 - `agent/granite_container/bridge_adapter.py` "persists `dev_transcript_path` ~line 640-642" — **drifted** to lines 821-823 (exit-summary save `_publish_exit_summary`). Claim still holds: `dev_transcript_path` is persisted, `claude_session_uuid` is not.
 - `tools/valor_session.py` resume gate "line 713" — **drifted** to line 715. Claim holds: `resume_session()` returns the null-UUID error when `claude_session_uuid is None`.
 - `agent/sdk_client.py::_store_claude_session_uuid` — **still holds**, line 534; only reached from the headless SDK-client path (lines 1797, 2632), not the granite PTY path.
-- `docs/features/agent-session-model.md:272` guard ("drafter UUID NOT written over PM's `claude_session_uuid`") — **still holds** (enforced at `agent/session_completion.py:723-728`). Spike-2 confirmed no collision: that guard *preserves* an already-populated PM UUID; this fix is the *first* population.
+- `docs/features/agent-session-model.md:272` guard ("drafter UUID NOT written over PM's `claude_session_uuid`") — **still holds** (enforced at `agent/session_completion.py:723-728`), but is **irrelevant to this fix**: that code discards the drafter's UUID (passes `session_id=None`); it does not read or branch on `claude_session_uuid`, so it offers no overwrite protection. This fix (re)writes `claude_session_uuid` on every granite `run()` with the current run's fresh PM UUID — not a one-time first population. Harmless for the gate-unblock (field is non-null at a resumable status).
 
 **Cited sibling issues/PRs re-checked:**
 - #1318 (imperative fast-path) — CLOSED. Its narrow-verb design is the template for Part A's fast-path.
@@ -95,14 +96,14 @@ No relevant external findings — this is purely internal (LLM-classifier prompt
 - **Method**: code-read (`bridge/routing.py`, `tests/unit/test_routing.py`)
 - **Finding**: Confirmed. No fast-path fires — the URL has no `?`, "look" is not an imperative verb, word_count=3, and the replied-to Valor message contained a question (so Fast-Path 2's `not valor_asked_question` guard is False anyway). The message reaches the LLM (843-877); the "adds nothing new → REACT" rule (871-872) is the plausible verdict. `should_respond_async` (1331-1349) maps **both** REACT and SILENT to `should_respond=False` — REACT only adds 👍. The existing test suite is dominated by **deterministic fast-path tests that mock no LLM**; a `not sender_is_bot`-gated fast-path for "essentially just a link/pointer" is therefore testable without mocking Ollama/Haiku. A broad "any URL → RESPOND" rule would regress `test_classify_terminus_url_with_query_param_not_respond` (bot-sender URL → SILENT), so the fast-path must gate on `not sender_is_bot`.
 - **Confidence**: high
-- **Impact on plan**: Part A = add a narrow, `not sender_is_bot`-gated fast-path (RESPOND for a reply that is essentially a bare link/pointer with no ack token and no closing signal), placed after Fast-Path 2 and before the LLM call; plus a defense-in-depth few-shot example in the LLM prompt. Regression test asserts the fast-path deterministically.
+- **Impact on plan**: Part A = add a narrow, `not sender_is_bot`-gated fast-path (RESPOND for a reply that is essentially a bare link/pointer with no ack token and no closing signal), placed **between Fast-Path 1 and Fast-Path 2 — before `word_count` is computed** (a bare URL is `word_count == 1`, so a post-FP2 placement would be pre-empted by FP2's SILENT return and break the mandated `bare-URL → RESPOND` test). No LLM few-shot change (the fast-path covers the in-scope case; prose pointers are a No-Go per resolved OQ3). Regression test asserts the fast-path deterministically.
 
 ### spike-2: Part B — role choice, resume re-entry mechanics, fix location, guard
 - **Assumption**: "Populating `claude_session_uuid` from the dev transcript is the fix and is sufficient for resume to work end-to-end."
 - **Method**: code-read (`bridge_adapter.py`, `container.py`, `pty_driver.py`, `tools/valor_session.py`, `docs/plans/granite_lossless_checkpoint_resume.md`, tests)
-- **Finding**: **Two corrections.** (1) ROLE: the human-facing thread is owned by the **PM**, not the Dev — steering messages (how a human reply reaches a running/resumed session) are written only to PM's PTY (`container.py:2136`, doc 848, 2074-2075). The issue's `dev_transcript_path` citation is wrong for resume; use the **PM** `resume_handles` entry. (2) SUFFICIENCY: populating the field is **necessary but not sufficient** for true re-entry. On worker re-pickup, `bridge_adapter.run()` generates **fresh** UUIDs (558-559) and spawns cold from turn 0 — it never reads the prior `claude_session_uuid`/`resume_handles`. `--resume` is only wired for intra-run crash-resume (`pty_driver.py:431-435,471-476`), not cross-pickup. Cross-pickup consumption is #1721's explicit scope (`_persist_resume_handles` docstring: "Consumption ... is #1721's scope") and #1721 is Ready, not landed. FIX LOCATION: spawn-time `_persist_resume_handles` (714-768) already holds the PTY PM UUID; for headless PM the UUID lands at first turn (same seam as `_store_claude_session_uuid`). GUARD: no collision — the `agent-session-model.md:272` guard *preserves* an already-populated PM UUID; this is the first population.
+- **Finding**: **Two corrections.** (1) ROLE: the human-facing thread is owned by the **PM**, not the Dev — steering messages (how a human reply reaches a running/resumed session) are written only to PM's PTY (`container.py:2136`, doc 848, 2074-2075). The issue's `dev_transcript_path` citation is wrong for resume; use the **PM** `resume_handles` entry. (2) SUFFICIENCY: populating the field is **necessary but not sufficient** for true re-entry. On worker re-pickup, `bridge_adapter.run()` generates **fresh** UUIDs (558-559) and spawns cold from turn 0 — it never reads the prior `claude_session_uuid`/`resume_handles`. `--resume` is only wired for intra-run crash-resume (`pty_driver.py:431-435,471-476`), not cross-pickup. Cross-pickup consumption is #1721's explicit scope (`_persist_resume_handles` docstring: "Consumption ... is #1721's scope") and #1721 is Ready, not landed. FIX LOCATION: spawn-time `_persist_resume_handles` (714-768) already holds the PTY PM UUID; for headless PM the UUID lands at first turn (same seam as `_store_claude_session_uuid`). GUARD: no guard needed — the `agent-session-model.md:272` code discards the drafter UUID (`session_id=None`) and never reads `claude_session_uuid`, so it neither protects nor collides. `claude_session_uuid` is (re)written on every granite `run()` with a fresh `uuid.uuid4()` PM UUID; this is not a first-population and there is no overwrite hazard for the gate-unblock (the field just needs to be non-null at a resumable status).
 - **Confidence**: high
-- **Impact on plan**: Part B = populate `claude_session_uuid` from the **PM** handle (spawn-time for PTY PM; first-turn for headless PM), unblocking the `resume_session()` gate so resume transitions to `pending`. Full cold→warm transcript re-entry is a No-Go tagged to #1721. The AC "resume succeeds against a real completed granite session" is interpreted as **the `resume_session()` gate passes and the session transitions to pending** (see Open Question 1).
+- **Impact on plan**: Part B = populate `claude_session_uuid` from the **PM** handle (spawn-time for PTY PM; first-turn for headless PM), unblocking the `resume_session()` gate so resume transitions to `pending`. Full cold→warm transcript re-entry is a No-Go tagged to #1721. #1721's cross-pickup consumer must read the `resume_handles` list, not treat `claude_session_uuid` as a stable anchor (it holds the latest run's fresh PM UUID). The AC "resume succeeds against a real completed granite session" is interpreted as **the `resume_session()` gate passes and the session transitions to pending** (see Open Question 1).
 
 ## Data Flow
 
@@ -131,10 +132,10 @@ No relevant external findings — this is purely internal (LLM-classifier prompt
 ## Architectural Impact
 
 - **New dependencies**: none.
-- **Interface changes**: none. `classify_conversation_terminus` signature unchanged; `claude_session_uuid` is an existing `AgentSession` field.
+- **Interface changes**: `classify_conversation_terminus` signature unchanged; `claude_session_uuid` is an existing `AgentSession` field. One additive `ResumeResult.warning` field (default `None`, Part C).
 - **Coupling**: Part B reuses the `resume_handles` PM entry captured by #1842 — no new cross-component coupling; if anything it makes the existing field consistent across transports.
-- **Data ownership**: `claude_session_uuid` for granite sessions becomes owned by the granite adapter's spawn/first-turn path, mirroring how the SDK-client path owns it via `_store_claude_session_uuid`.
-- **Reversibility**: trivial — both changes are additive (one fast-path branch, one field write) and revert cleanly.
+- **Data ownership**: `claude_session_uuid` for granite sessions becomes owned by the granite adapter's spawn/first-turn path, mirroring how the SDK-client path owns it via `_store_claude_session_uuid`. It is rewritten each run with the current run's fresh PM UUID — a per-run value, not a durable resume anchor (that role is #1721's `resume_handles`).
+- **Reversibility**: trivial — all three changes are additive (one fast-path branch, one field write, one optional-string result field) and revert cleanly.
 
 ## Appetite
 
@@ -156,9 +157,8 @@ No prerequisites — this work has no external dependencies. Both changes are in
 
 ### Key Elements
 
-- **Link/pointer fast-path (Part A)**: a `not sender_is_bot`-gated branch in `classify_conversation_terminus` that returns RESPOND when a reply is essentially a bare link/reference with no acknowledgment token and no closing signal.
-- **LLM few-shot reinforcement (Part A)**: an example line in the classifier prompt mapping a bare-link reply to RESPOND (defense-in-depth for cases the fast-path misses).
-- **PM-handle UUID population (Part B)**: write the PM role's `claude_session_id` onto `agent_session.claude_session_uuid` at the point it becomes known — spawn-time for PTY PM (`_persist_resume_handles`), first-turn for headless PM.
+- **Link/pointer fast-path (Part A)**: a `not sender_is_bot`-gated branch in `classify_conversation_terminus`, placed **between Fast-Path 1 and Fast-Path 2** (before `word_count` is computed), that returns RESPOND when a reply is essentially a bare link/reference with no acknowledgment token and no closing signal. No LLM-prompt change.
+- **PM-handle UUID population (Part B)**: write the PM role's `claude_session_id` onto `agent_session.claude_session_uuid` at the point it becomes known — spawn-time for PTY PM (`_persist_resume_handles`), first-turn for headless PM. (Re)written every granite run with the current run's PM UUID; exists to satisfy the `resume_session()` gate.
 
 ### Flow
 
@@ -168,8 +168,10 @@ No prerequisites — this work has no external dependencies. Both changes are in
 
 ### Technical Approach
 
-- **Part A** (`bridge/routing.py`): Add the link/pointer fast-path after Fast-Path 2 (ack) and before the LLM call (~line 838). Condition: `not sender_is_bot` AND the stripped text, with URLs removed, is empty or trivially short (i.e. the message is "essentially just a link/pointer") AND it is not already an ack token. Return RESPOND. Keep the bot-sender path untouched so `test_classify_terminus_url_with_query_param_not_respond` still yields SILENT. Add one few-shot line to the LLM prompt (852-866) mapping `"look here: <url>" → RESPOND`.
-- **Part B** (`agent/granite_container/bridge_adapter.py`): In `_persist_resume_handles` (714-768), after building `handles`, if the PM handle has a non-null `claude_session_id`, also set `self._agent_session.claude_session_uuid = <pm_uuid>` and include it in the `save(update_fields=...)`. For the headless-PM case (per #1842's per-role hedge), confirm the first-turn capture path (`_store_claude_session_uuid` / `container.py:774` seam) also lands the PM UUID on `claude_session_uuid`; if it does not, add the write there. Do **not** derive from `dev_transcript_path`. Guard-safe: this is the field's first population; the completion-runner drafter guard (`session_completion.py:723-728`) already avoids overwriting it.
+- **Part A** (`bridge/routing.py`): Add the link/pointer fast-path **between Fast-Path 1 (bot→SILENT, line 818) and Fast-Path 2 (ack/≤1-word, line 836) — before `word_count` is computed at line 835.** This placement is load-bearing: a bare URL is a single token (`word_count == 1`), so if the branch were placed *after* Fast-Path 2, that path would return SILENT first (when `thread_messages` has no question) and the mandated `human bare-URL → RESPOND` test would fail deterministically. Condition: `not sender_is_bot` AND the stripped text, with URLs removed, is empty or trivially short (i.e. the message is "essentially just a link/pointer") AND it is not already an ack token. Return RESPOND. Bot-sender bare URLs still hit Fast-Path 1 first (line 818: bot + no standalone question → SILENT; `_STANDALONE_QUESTION_RE` excludes URL query params), so `test_classify_terminus_url_with_query_param_not_respond` still yields SILENT unchanged. **No LLM few-shot change** — the fast-path fully covers the in-scope bare-URL/link case; prose/non-URL pointers are an explicit No-Go (see Open Question 3, resolved).
+- **Part B** (`agent/granite_container/bridge_adapter.py`): In `_persist_resume_handles` (714-768), after building `handles`, if the PM handle (`role == "pm"`) has a non-null `claude_session_id`, also set `self._agent_session.claude_session_uuid = <pm_uuid>` and include it in the `save(update_fields=...)`. **Narrative correction:** this is NOT a one-time "first population." `_persist_resume_handles` runs on every `run()`, and the per-role UUIDs are freshly generated (`uuid.uuid4()`) each run — so `claude_session_uuid` is (re)written with the current run's PM UUID on every granite run. That is harmless for the gate-unblock: at any resumable status the field is simply non-null and points at the most recent run's PM transcript. The drafter guard at `session_completion.py:723-728` is **irrelevant** here — it discards the drafter's UUID (passes `session_id=None`) rather than reading or branching on `claude_session_uuid`, so it offers no overwrite protection and needs none. For the **headless-PM** case (per #1842's per-role hedge), the UUID is null at spawn; land it at the first-turn capture seam (`_store_claude_session_uuid` / `container.py:774`) — this is an **explicit, tested build task**, not a conditional confirm (see Step 2 and Success Criteria). Never write `None` over an existing value: only assign when the PM `claude_session_id` is non-null. Do **not** derive from `dev_transcript_path`.
+- **#1721 consumer contract (correction):** #1721's cross-pickup consumer must read the `resume_handles` list (its per-role schema with transcript paths), **NOT** treat `claude_session_uuid` as a stable resume anchor. `claude_session_uuid` holds the current run's fresh PM UUID and is overwritten each run; it exists only to satisfy the `resume_session()` gate. This boundary is noted in the inline comment at the write site.
+- **Part C — honest resume signal** (`tools/valor_session.py`): add a `warning: str | None = None` field to the `ResumeResult` dataclass (664-671). In `resume_session()` (674-748), when the gate passes for a granite session, set `warning` on the success result to something like `"resumed as a fresh session; prior-transcript re-entry pending #1721"`, and have `cmd_resume` surface it to the operator. Without #1721 landed, a bare `success=True` cold-spawns from turn 0 and reads to an operator as full continuation; the warning gives a runtime signal at the call site rather than relying on docs + sign-off alone. Keep it a plain additive field (default `None`) so non-granite/SDK-client callers are unaffected.
 - **AC4 (no SDK-client regression)**: the granite path does not touch `_store_claude_session_uuid` for PTY; the headless capture already flows through it. `_get_prior_session_uuid` is never read by `bridge_adapter.run()` (it generates fresh UUIDs), so populating the field cannot cause a stale-transcript resume on a *new* granite session.
 
 ## Failure Path Test Strategy
@@ -180,7 +182,8 @@ No prerequisites — this work has no external dependencies. Both changes are in
 
 ### Empty/Invalid Input Handling
 - [ ] The link/pointer fast-path must handle: empty text (already returns RESPOND at 803-804, before the new branch), whitespace-only, a URL with a trailing word ("look here: <url> thoughts?" — has `?`, should already RESPOND via Fast-Path 3), and a bare token that is also an ack. Add tests for the bare-URL, "look here: <url>", and multi-URL cases.
-- [ ] Part B: assert a granite session whose PM handle has a null `claude_session_id` (headless-at-spawn) does not write a `None` over an existing value.
+- [ ] Part B (headless-PM, negative): assert a granite session whose PM handle has a null `claude_session_id` at spawn (headless-at-spawn) does not write a `None` over an existing value in `_persist_resume_handles`.
+- [ ] Part B (headless-PM, positive — explicit tested task, not a conditional): assert a **completed** headless-PM granite session ends with a non-null `claude_session_uuid` (landed at the first-turn `_store_claude_session_uuid`/`container.py:774` seam) and that `resume_session()` returns `success=True` against it. This closes the "confirm/if-not-add" seam the critique flagged: the headless population is a required, verified build step for both transports.
 
 ### Error State Rendering
 - [ ] Part A output is user-visible: assert that a RESPOND verdict for the link reply produces `should_respond=True` (the message is not dropped to emoji-only). Covered by a routing-level test.
@@ -189,16 +192,16 @@ No prerequisites — this work has no external dependencies. Both changes are in
 ## Test Impact
 
 - [ ] `tests/unit/test_routing.py` — UPDATE (additive): add regression tests for the link/pointer fast-path (human bare-URL → RESPOND; "look here: <url>" → RESPOND; multi-URL → RESPOND). Verify `test_classify_terminus_url_with_query_param_not_respond` (bot-sender URL → SILENT) still passes unchanged — the new fast-path is `not sender_is_bot`-gated.
-- [ ] `tests/unit/test_valor_session_resume_release.py` — UPDATE (additive): add a case where a resumable session with a populated `claude_session_uuid` resumes successfully (mirrors the existing null-UUID rejection at lines 330-348, inverted).
-- [ ] `tests/unit/test_session_executor_granite.py` — UPDATE (additive): extend the real-`AgentSession` fixture (`_make_session`, 88-116) to assert that after a granite run the record has a non-null `claude_session_uuid` equal to the PM handle's `claude_session_id`, and that `resume_session()` succeeds against it.
+- [ ] `tests/unit/test_valor_session_resume_release.py` — UPDATE (additive): add a case where a resumable session with a populated `claude_session_uuid` resumes successfully (mirrors the existing null-UUID rejection at lines 330-348, inverted), and assert the returned `ResumeResult.warning` names the #1721 re-entry deferral.
+- [ ] `tests/unit/test_session_executor_granite.py` — UPDATE (additive): extend the real-`AgentSession` fixture (`_make_session`, 88-116) to assert that after a granite run the record has a non-null `claude_session_uuid` equal to the PM handle's `claude_session_id`, and that `resume_session()` succeeds against it. Cover **both** transports: a PTY-PM case (UUID written at spawn) AND a headless-PM case (UUID landed at first-turn), each ending non-null and passing the resume gate.
 
-No existing test is broken or deleted — both fixes are purely additive (a new fast-path branch before the LLM, and a first-population field write). No existing behavior or interface changes.
+No existing test is broken or deleted — the fixes are purely additive (a new fast-path branch before the LLM, a per-run field write, and one optional `ResumeResult.warning` string defaulting to `None`). No existing behavior or interface changes.
 
 ## Rabbit Holes
 
-- **Building the full lossless-resume re-entry.** Making the worker actually re-enter the prior PM transcript from turn N (feed the stored UUID into `--resume`, replay the loop cursor, skip re-priming) is #1721's entire Large-appetite scope. Populating the field is a one-line prerequisite; do NOT pull #1721's consumption work into this plan.
+- **Building the full lossless-resume re-entry.** Making the worker actually re-enter the prior PM transcript from turn N (read `resume_handles`, feed the stored UUID into `--resume`, replay the loop cursor, skip re-priming) is #1721's entire Large-appetite scope. This plan only makes the `resume_session()` gate stop hard-erroring; #1721 consumes `resume_handles` (not `claude_session_uuid`, which is overwritten each run) for true re-entry. Do NOT pull #1721's consumption work into this plan.
 - **Over-broadening the Part A fast-path.** "Any message containing a URL → RESPOND" would regress the bot-sender-URL SILENT case and could re-open bot loops. Keep it narrow: `not sender_is_bot` AND the reply is *essentially* a bare link/pointer.
-- **Reworking the LLM prompt wholesale.** Tightening one few-shot line is fine; redesigning the RESPOND/REACT/SILENT prompt is a separate, un-scoped effort with no deterministic test.
+- **Touching the LLM prompt at all.** This revision drops the previously-planned few-shot line — the deterministic fast-path covers the in-scope case and the prompt is left unchanged. Redesigning or tuning the RESPOND/REACT/SILENT prompt is a separate, un-scoped effort with no deterministic test.
 - **Choosing dev over PM for the UUID.** The issue text says `dev_transcript_path`; spike-2 proved PM owns the thread. Do not follow the issue text here.
 
 ## Risks
@@ -209,11 +212,11 @@ No existing test is broken or deleted — both fixes are purely additive (a new 
 
 ### Risk 2: Part B populates the field but resume still "does nothing useful"
 **Impact:** After the gate passes, the worker re-picks the session but spawns cold from turn 0 (re-entry is #1721), so the human perceives a fresh, context-less session rather than a true continuation.
-**Mitigation:** Scope Part B's AC to the gate-unblock (session transitions to pending, no hard error) and document the cold-re-entry limitation in `granite-pty-production.md` with a pointer to #1721. Surface as Open Question 1 for explicit sign-off.
+**Mitigation:** Scope Part B's AC to the gate-unblock (session transitions to pending, no hard error); document the cold-re-entry limitation in `granite-pty-production.md` with a pointer to #1721; surface as Open Question 1 for explicit sign-off. **Plus a runtime signal (Part C):** `resume_session()` attaches a `warning` to the success `ResumeResult` ("resumed as a fresh session; prior-transcript re-entry pending #1721"), so an operator sees the limitation at the call site rather than reading a bare `success=True` as full continuation.
 
-### Risk 3: Headless-PM transport writes a null UUID
-**Impact:** Under #1842's per-role hedge, if PM runs headless, `claude_session_id` is null at spawn — a naive spawn-time write would clobber the field with None.
-**Mitigation:** Only write when the PM handle's `claude_session_id` is non-null; land the headless-PM UUID at first-turn capture (the existing `_store_claude_session_uuid` seam). Test both transports.
+### Risk 3: Headless-PM transport writes a null UUID / leaves the field unpopulated
+**Impact:** Under #1842's per-role hedge, if PM runs headless, `claude_session_id` is null at spawn — a naive spawn-time write would clobber the field with None, and if the first-turn seam is never wired the headless-PM session stays ungateable (resume hard-errors for that whole transport).
+**Mitigation:** Only write when the PM handle's `claude_session_id` is non-null; land the headless-PM UUID at first-turn capture (the existing `_store_claude_session_uuid` seam) as an **explicit, positively-tested** build task — not a "confirm/if-not-add" conditional. Test both transports: a negative test (null-at-spawn does not clobber) AND a positive test (completed headless-PM session ends non-null and passes the resume gate).
 
 ## Race Conditions
 
@@ -226,8 +229,9 @@ No existing test is broken or deleted — both fixes are purely additive (a new 
 
 ## No-Gos (Out of Scope)
 
-- [SEPARATE-SLUG #1721] **Cold→warm transcript re-entry** — feeding the stored `claude_session_uuid` into a `--resume` spawn on worker re-pickup, loop-cursor replay, and skip-priming so a resumed granite session continues from turn N instead of spawning fresh. This is the entire scope of the open, Ready plan `granite_lossless_checkpoint_resume.md` (#1721). Part B only populates the field so #1721's consumption has something to read and the `resume_session()` gate stops hard-erroring.
+- [SEPARATE-SLUG #1721] **Cold→warm transcript re-entry** — reading `resume_handles` on worker re-pickup, feeding the stored UUID into a `--resume` spawn, loop-cursor replay, and skip-priming so a resumed granite session continues from turn N instead of spawning fresh. This is the entire scope of the open, Ready plan `granite_lossless_checkpoint_resume.md` (#1721). Part B only makes the `resume_session()` gate stop hard-erroring; #1721's consumer reads `resume_handles`, not the overwritten-each-run `claude_session_uuid`.
 - [SEPARATE-SLUG #1721] **Dev-role transcript resume** — resuming the Dev sub-session's transcript. The human thread is PM-owned; Dev re-entry, if ever needed, belongs with #1721's per-role handle consumption.
+- **Prose / non-URL pointer replies (Part A).** A reply that points at something without a URL (e.g. "see the PR description", "check the plan doc") is **not** covered by the link/pointer fast-path and stays LLM-dependent. Resolving OQ3, this is deliberately kept out of scope: the fast-path is URL/link-anchored and deterministically testable; broadening to prose pointers would require an LLM-path change with no deterministic test (the exact incremental-fast-path-plus-few-shot pattern "Why Previous Fixes Failed" flags as insufficient). If prose-pointer drops recur, file a separate issue with an LLM-path test strategy.
 
 ## Update System
 
@@ -243,22 +247,24 @@ No agent integration required — both fixes are bridge/worker-internal.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/granite-pty-production.md` — note that `claude_session_uuid` is now populated from the PM role handle so `valor-session resume` clears the gate; link to #1721 for the cold-re-entry limitation.
-- [ ] Update `docs/features/agent-session-model.md` — document that granite sessions now populate `claude_session_uuid` (PM handle), and reconcile with the existing drafter-guard note at line 272 (first-population vs. no-overwrite).
+- [ ] Update `docs/features/granite-pty-production.md` — note that `claude_session_uuid` is now (re)populated from the PM role handle on every granite run so `valor-session resume` clears the gate; that resume returns a warning about deferred re-entry; and link to #1721 for the cold-re-entry limitation (the #1721 consumer reads `resume_handles`, not this scalar).
+- [ ] Update `docs/features/agent-session-model.md` — document that granite sessions now populate `claude_session_uuid` from the PM handle, **rewritten each run** with the current run's fresh UUID (not a stable anchor). Correct any implication that the drafter guard at line 272 protects this field — it does not read `claude_session_uuid` at all.
 
 ### External Documentation Site
 - No external docs site in scope.
 
 ### Inline Documentation
 - [ ] Docstring on the new link/pointer fast-path in `classify_conversation_terminus`, mirroring the Fast-Path 0 comment style (mined-example provenance).
-- [ ] Comment at the `claude_session_uuid` write in `_persist_resume_handles` explaining the PM-role choice and the #1721 boundary.
+- [ ] Comment at the `claude_session_uuid` write in `_persist_resume_handles` explaining the PM-role choice, that it is rewritten each run (not a first-population), and the #1721 boundary (consumer reads `resume_handles`, not this scalar).
 
 ## Success Criteria
 
 - [ ] A human reply-to-Valor that is essentially a bare link/reference with no `?`, ack token, or imperative verb classifies as RESPOND (deterministic fast-path test, no LLM mock).
 - [ ] A bot-sender bare-URL reply still classifies as SILENT (no regression to `test_classify_terminus_url_with_query_param_not_respond`).
-- [ ] A completed granite PTY session has `claude_session_uuid` populated (equal to the PM handle's `claude_session_id`) once its first turn completes.
+- [ ] A completed granite **PTY**-PM session has `claude_session_uuid` populated (equal to the PM handle's `claude_session_id`, written at spawn in `_persist_resume_handles`).
+- [ ] A completed granite **headless**-PM session has `claude_session_uuid` populated (landed at the first-turn `_store_claude_session_uuid` seam) — explicitly tested, both transports covered.
 - [ ] `python -m tools.valor_session resume --id <granite-session-id> --message "..."` returns success (gate passes, transitions to `pending`) against a real completed granite session in a test — no `cannot resume: no transcript UUID stored`.
+- [ ] `resume_session()` returns a `ResumeResult` carrying a warning that prior-transcript re-entry is pending #1721 (the operator gets a runtime signal, not a bare `success=True` that reads as full continuation).
 - [ ] No regression to the SDK-client-path `_store_claude_session_uuid` behavior (headless UUID capture unchanged).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -271,14 +277,14 @@ The lead agent orchestrates; it does not build directly. Parts A and B are indep
 
 - **Builder (routing / Part A)**
   - Name: routing-builder
-  - Role: Add the link/pointer fast-path + few-shot line in `bridge/routing.py`; add routing regression tests.
+  - Role: Add the link/pointer fast-path (labeled `Fast-path 1.5`, between FP1 and FP2) in `bridge/routing.py`; no LLM-prompt change; add routing regression tests.
   - Agent Type: builder
   - Domain: conversational-UX (see DOMAIN_FRAMING.md)
   - Resume: true
 
 - **Builder (granite resume / Part B)**
   - Name: granite-builder
-  - Role: Populate `claude_session_uuid` from the PM handle in `bridge_adapter.py` (PTY spawn + headless first-turn); add granite/resume regression tests.
+  - Role: Populate `claude_session_uuid` from the PM handle in `bridge_adapter.py` (PTY spawn + headless first-turn); add the `ResumeResult.warning` field + granite gate-pass warning in `tools/valor_session.py` (Part C); add granite/resume regression tests for both transports.
   - Agent Type: builder
   - Domain: Redis/Popoto data (see DOMAIN_FRAMING.md)
   - Resume: true
@@ -309,9 +315,9 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover all work; dom
 - **Assigned To**: routing-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add a `not sender_is_bot`-gated fast-path in `classify_conversation_terminus` (after Fast-Path 2, before the LLM call) returning RESPOND when the reply is essentially a bare link/reference with no ack token and no closing signal.
-- Add one few-shot line to the LLM prompt mapping a bare-link reply to RESPOND.
-- Add regression tests: human bare-URL → RESPOND; "look here: <url>" → RESPOND; bot-sender bare-URL → SILENT (unchanged).
+- Add a `not sender_is_bot`-gated fast-path in `classify_conversation_terminus` **between Fast-Path 1 (line 818) and Fast-Path 2 (line 836) — before `word_count` is computed at line 835** returning RESPOND when the reply is essentially a bare link/reference with no ack token and no closing signal. (Post-FP2 placement is wrong: a bare URL is `word_count == 1` and FP2 would return SILENT first — the mandated test would fail.) Label the branch comment `Fast-path 1.5:` so the ordering is grep-verifiable.
+- No LLM few-shot change. Prose/non-URL pointers are a No-Go (resolved OQ3).
+- Add regression tests: human bare-URL → RESPOND; "look here: <url>" → RESPOND; multi-URL → RESPOND; bot-sender bare-URL → SILENT (unchanged, via Fast-Path 1).
 
 ### 2. Part B — populate `claude_session_uuid` from PM handle
 - **Task ID**: build-granite-resume
@@ -321,9 +327,10 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover all work; dom
 - **Assigned To**: granite-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `_persist_resume_handles`, write the PM handle's non-null `claude_session_id` to `agent_session.claude_session_uuid` and include it in `save(update_fields=...)`.
-- Confirm/handle the headless-PM first-turn capture path so `claude_session_uuid` lands for both transports; never write None over an existing value.
-- Add regression tests: completed granite session has non-null `claude_session_uuid`; `resume_session()` succeeds against it.
+- In `_persist_resume_handles`, write the PM handle's non-null `claude_session_id` to `agent_session.claude_session_uuid` and include it in `save(update_fields=...)`. This (re)writes on every run — not a first-population; the drafter guard is irrelevant. Inline-comment the #1721 boundary (consumer reads `resume_handles`, not this scalar).
+- **Explicitly** land the headless-PM UUID at the first-turn `_store_claude_session_uuid`/`container.py:774` seam (required tested task, not a conditional confirm); never write None over an existing value.
+- Add a `warning` field to `ResumeResult` and set it in `resume_session()` for granite gate-pass, surfaced by `cmd_resume` (Part C).
+- Add regression tests: completed **PTY**-PM session has non-null `claude_session_uuid`; completed **headless**-PM session has non-null `claude_session_uuid`; `resume_session()` succeeds against each and returns the #1721 re-entry warning.
 
 ### 3. Validate both parts
 - **Task ID**: validate-both
@@ -359,14 +366,21 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover all work; dom
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Part A fast-path present | `grep -c "sender_is_bot" bridge/routing.py` | output > 0 |
 | Part B writes PM uuid | `grep -c "claude_session_uuid" agent/granite_container/bridge_adapter.py` | output > 0 |
+| Part C resume warning | `grep -c "warning" tools/valor_session.py` | output > 0 |
+| Part A branch precedes FP2 | `python -c "s=open('bridge/routing.py').read(); assert s.index('Fast-path 1.5') < s.index('word_count = len')"` | exit code 0 (new branch labeled 'Fast-path 1.5' sits before word_count) |
 | No dev-basename resume (anti-criterion) | `grep -c "dev_transcript_path" agent/granite_container/bridge_adapter.py \| head -1; grep -rn "claude_session_uuid.*dev_transcript_path\|dev_transcript_path.*claude_session_uuid" agent/granite_container/bridge_adapter.py` | match count == 0 |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room), FULL depth, 3 critics — 2026-07-03. Verdict: NEEDS REVISION (1 blocker + 4 concerns). Revision applied 2026-07-03: blocker + all 4 concerns resolved (see Addressed By column). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness | Part A fast-path placement "after Fast-Path 2" contradicts the mandated `human bare-URL → RESPOND` test: a bare URL is `word_count == 1`, so Fast-Path 2 returns SILENT before the new branch is reached. Verified against `routing.py:836`. | **RESOLVED (revision 2026-07-03)** — Technical Approach, Key Elements, spike-1 note, Step 1 | Branch now placed **between Fast-Path 1 and Fast-Path 2, before `word_count` is computed** (labeled `Fast-path 1.5` for grep-verifiable ordering). Bot URLs still hit FP1 first, preserving `test_classify_terminus_url_with_query_param_not_respond`. Verification-table row added. |
+| CONCERN | Risk & Robustness + History & Consistency (agreed) | The "first population / guard-safe / #1721 prerequisite" framing (plan:59,103,172,199,229) is inaccurate: `_persist_resume_handles` runs on every `run()` with fresh `uuid.uuid4()` UUIDs, so `claude_session_uuid` is overwritten each granite run; and `session_completion.py:723-728` discards the drafter UUID (`session_id=None`) rather than reading/branching on `claude_session_uuid`, so it offers no overwrite protection. | **RESOLVED** — Freshness note, spike-2 GUARD, Technical Approach Part B, Rabbit Holes, No-Gos, Documentation, Architectural Impact | Reframed throughout: `claude_session_uuid` is (re)written every granite run with the current run's fresh PM UUID; the drafter guard is irrelevant (never reads it). Added the #1721 consumer-contract note (consume `resume_handles`, not this scalar). Harmless for the gate-unblock. |
+| CONCERN | Scope & Value + History & Consistency (agreed) | Part A's few-shot LLM line is dead code for the in-scope bare-URL case (spike-1: fast-path fires first) and un-scoped/unverified for its real target (prose pointers, Open Question 3). Adding another narrow fast-path + few-shot line repeats the exact incremental pattern the plan's own "Why Previous Fixes Failed" diagnoses as insufficient. | **RESOLVED via OQ3 option (a)** — Key Elements, Technical Approach, Step 1, No-Gos, Open Questions | Dropped the LLM few-shot line entirely. Prose/non-URL pointer replies documented as an explicit No-Go (stay LLM-dependent; file a separate issue with an LLM-path test strategy if they recur). Fast-path covers the in-scope URL/link case deterministically. |
+| CONCERN | Risk & Robustness | Headless-PM `claude_session_uuid` population is an unverified "confirm/if-not-add" seam (`_store_claude_session_uuid`/first-turn); the only headless test specified asserts the negative (no `None` clobber), never that a headless-PM session populates the field and passes the resume gate. | **RESOLVED** — Technical Approach Part B, Step 2, Failure Path Test Strategy, Success Criteria, Risk 3, Test Impact | Headless-PM population is now an explicit, positively-tested build task. Added a positive test: completed headless-PM session ends non-null and `resume_session()` returns `success=True`; negative test (null-at-spawn no clobber) retained. Both transports covered in Success Criteria and Test Impact. |
+| CONCERN | Scope & Value | Standalone (without #1721), Part B converts an honest error (`cannot resume: no transcript UUID stored`) into a silent `success=True` that cold-spawns from turn 0 — an operator reasonably reads "resume succeeded" as continuation and gets a context-less session. Plan surfaces this as Risk 2 / Open Question 1 but the only mitigation is docs + sign-off; no runtime signal at the call site. | **RESOLVED** — Technical Approach Part C, Step 2, Risk 2, Success Criteria, Test Impact | Added Part C: a `warning` field on `ResumeResult`, set in `resume_session()` for the granite gate-pass ("resumed as a fresh session; prior-transcript re-entry pending #1721") and surfaced by `cmd_resume`. Runtime signal at the call site, not just docs. |
 
 ---
 
@@ -374,4 +388,4 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover all work; dom
 
 1. **Part B AC interpretation (blocking-ish).** "resume succeeds against a real completed granite session" — is the accepted definition **(a)** the `resume_session()` gate passes and the session transitions to `pending` (what Part B delivers; true transcript re-entry deferred to #1721), or **(b)** the resumed session must actually re-enter the prior PM transcript from turn N (requires #1721's consumption to land first)? The plan defaults to (a) and files re-entry as a #1721 No-Go. Confirm (a) is acceptable, or Part B becomes blocked-on-#1721.
 2. **PM vs. Dev for the scalar field.** Spike-2 determined the PM handle is correct (PM owns the human thread; steering injects into PM's PTY). The issue text cited the dev transcript. Confirm PM is the intended resume target. If Dev-session resume is also wanted, that is separate #1721 scope.
-3. **Fast-path breadth for Part A.** The plan scopes the fast-path to "essentially a bare link/pointer with no ack/closing signal." Should it also cover a reply that is a short pointer phrase with no URL (e.g. "see the PR description")? The conservative default is to keep it URL/link-anchored and let the few-shot LLM line handle prose pointers — confirm that split is acceptable.
+3. **Fast-path breadth for Part A.** ~~Should it also cover a reply that is a short pointer phrase with no URL (e.g. "see the PR description")?~~ **RESOLVED (revision 2026-07-03): option (a).** The fast-path stays URL/link-anchored and deterministically testable. Prose/non-URL pointer replies are an explicit **No-Go** — the earlier idea of a defense-in-depth few-shot LLM line was dropped (it was dead code for the in-scope case and unverifiable for prose pointers). If prose-pointer drops recur in practice, they get a separate issue with an LLM-path test strategy, rather than repeating the incremental fast-path+few-shot pattern "Why Previous Fixes Failed" flags as insufficient.
