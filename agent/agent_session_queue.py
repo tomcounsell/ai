@@ -42,6 +42,9 @@ from agent.output_router import (
     determine_delivery_action,  # noqa: F401
 )
 
+# Off-loop Redis bulkhead seam for the drain-loop idle-check (issue #1826).
+from agent.redis_offload import offload_redis
+
 # Session completion (post-execution lifecycle) — re-exported here for backward compatibility.
 from agent.session_completion import (  # noqa: F401
     _CONTINUATION_PM_MAX_DEPTH,
@@ -1642,30 +1645,49 @@ async def _worker_loop(
                     registry.release_unbound()
                     _slot_acquired = False
 
-                # Guard against event.set()/event.clear() race: if a notify fired
-                # while we were in _pop_agent_session (e.g. startup health check),
-                # clearing the event here would lose it. Do a cheap sync check
-                # first; if there IS pending work, skip the wait entirely.
+                # Clear-then-check ordering (async-safe, issue #1826 / Risk 1):
+                # event.clear() MUST run BEFORE the offloaded query below. The
+                # idle-check used to run synchronously check-before-clear (a
+                # cheap on-loop guard against the event.set()/event.clear()
+                # race), but adding an `await` at the check opens a real yield
+                # point — a producer could enqueue + event.set() during the
+                # in-flight offload, and a subsequent event.clear() would then
+                # swallow that wakeup. Clearing first eliminates the hole:
+                # Redis is the source of truth, so any enqueue that fires after
+                # this clear is either observed by the query (-> continue) or
+                # leaves the event set so event.wait() returns immediately.
+                event.clear()
+
+                # Idle-check runs off the event loop via offload_redis so a
+                # slow/restarting Redis degrades this call's latency instead of
+                # freezing the loop (and starving the #1815 liveness tick).
                 _has_pending = bool(
-                    AgentSession.query.filter(
-                        **(
-                            {"project_key": worker_key}
-                            if is_project_keyed
-                            else {"chat_id": worker_key}
-                        ),
-                        status="pending",
+                    await offload_redis(
+                        lambda: list(
+                            AgentSession.query.filter(
+                                **(
+                                    {"project_key": worker_key}
+                                    if is_project_keyed
+                                    else {"chat_id": worker_key}
+                                ),
+                                status="pending",
+                            )
+                        )
                     )
                 )
                 if _has_pending:
-                    continue
-
-                # Event-based drain: wait for enqueue_agent_session() to signal new work,
-                # or fall back to sync query after timeout.
-                event.clear()
+                    continue  # work is pending — skip the wait
 
                 if standalone:
-                    # Persistent mode: wait indefinitely for new work
-                    await event.wait()
+                    # Persistent mode: wait for new work. Bounded by
+                    # DRAIN_TIMEOUT as a defensive net — the clear-then-check
+                    # ordering above already prevents lost wakeups; the timeout
+                    # guarantees recovery on an unforeseen edge instead of
+                    # parking forever on an unbounded wait.
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
+                    except TimeoutError:
+                        pass  # fall through, re-check at top of loop
                     if _session_state._shutdown_requested:
                         logger.info(f"[worker:{worker_key}] Woke from wait, shutdown requested")
                         break
