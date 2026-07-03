@@ -777,7 +777,9 @@ nudge rung requires before that recovery path can be added.
 ### Startup hard ceiling
 
 The startup loop polls both PTYs on short (`STARTUP_CYCLE_TIMEOUT_S` = 3s)
-reads until both reach idle, dismissing transient startup events
+reads until it settles (see "Startup settle conditions" above — settling no
+longer requires both PTYs idle in the same cycle, and a PM terminal turn can
+settle without Dev reaching idle at all), dismissing transient startup events
 (trust-folder, update notice) along the way. A slow cold persona load simply
 keeps the loop cycling cheaply. If the PTYs never settle within
 `STARTUP_HARD_CEILING_S` (600s), the run exits `startup_unresolved` — the
