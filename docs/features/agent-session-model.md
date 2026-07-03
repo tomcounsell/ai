@@ -26,6 +26,8 @@ See [Session Lifecycle](session-lifecycle.md) for the full 14-state reference (9
 
 **Lifecycle:** `session_events` (ListField of `SessionEvent` dicts), `issue_url`, `plan_url`, `pr_url`
 
+**Resume:** `claude_session_uuid`, `resume_handles`. `resume_session()` (`tools/valor_session.py`) gates every `valor-session resume` on `claude_session_uuid` being non-null. The SDK-client path populates it via `_store_claude_session_uuid` (`agent/sdk_client.py`). Granite sessions populate it from the **PM** role handle in `BridgeAdapter._persist_resume_handles` (issue #1836): the PM handle's `claude_session_id` is mirrored onto `claude_session_uuid` so the gate passes. This is **PTY-PM only** (headless-PM is deferred to #1843) and is **rewritten with a fresh UUID on every run** — it reflects only the most recent run's PM transcript, not a durable resume anchor. `resume_handles` (the per-role list added by #1842) is the anchor #1721's cold→warm re-entry consumer reads; the scalar exists only to satisfy the gate.
+
 **Parent-Child:** `parent_agent_session_id` (KeyField — canonical parent reference), `slug` (KeyField — derives branch, plan path, worktree; indexed so the slug-keyed worker-pop filter can find slugged eng sessions — see [Bridge/Worker Architecture §Three Worker Loop Archetypes](bridge-worker-architecture.md#three-worker-loop-archetypes)). The session role is carried by the `session_type` discriminator (`"eng"`/`"teammate"`/`"granite"`), not a separate `role` field.
 
 All timestamp fields use Popoto `DatetimeField` or `SortedField(type=datetime)` with proper UTC datetime objects. Float/int timestamps are auto-converted via `__setattr__`.
@@ -272,7 +274,11 @@ a quality + reliability gate. It runs independently of the session cascade:
   Claude Code UUID is NOT written over the PM's `claude_session_uuid`.
   Pass 2 uses `prior_uuid=None` + `session_id=None` — the review prompt is
   self-contained (Pass 1's draft is embedded verbatim), so there's no need
-  to resume the PM session and polluting its history is undesirable.
+  to resume the PM session and polluting its history is undesirable. Note
+  this is passive isolation, not an active guard: the drafter path never
+  reads or branches on `claude_session_uuid`; it simply declines to write by
+  passing `session_id=None`. It therefore neither protects nor collides with
+  the granite PM-handle mirror added in #1836.
 - **Ollama fallback deferred** — see issue #1137. Until that lands,
   Anthropic-down manifests as a visible degraded-fallback message + ERROR
   log + Redis counter

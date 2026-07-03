@@ -763,7 +763,43 @@ class BridgeAdapter:
                         }
                     )
             self._agent_session.resume_handles = handles
-            self._agent_session.save(update_fields=["resume_handles", "updated_at"])
+            update_fields = ["resume_handles", "updated_at"]
+
+            # Part B (#1836): also mirror the PM handle's UUID onto the
+            # legacy scalar `claude_session_uuid` field so
+            # `resume_session()`'s gate (`tools/valor_session.py`,
+            # ~line 715) stops hard-erroring with "cannot resume: no
+            # transcript UUID stored" for granite sessions. PM (not Dev)
+            # is chosen because PM owns the human-facing thread --
+            # steering messages are only ever injected into PM's PTY
+            # (see `container.py`), so PM's transcript is the one a
+            # human-initiated resume should target.
+            #
+            # This is (re)written with a *fresh* UUID on every `run()` --
+            # NOT a one-time first-population. `claude_session_uuid`
+            # therefore only ever reflects the most recent run's PM
+            # transcript; it is not a durable resume anchor. Future
+            # consumers (#1721, cold->warm transcript re-entry) must read
+            # the `resume_handles` list above, not this scalar.
+            #
+            # The granite path deliberately never calls
+            # `_store_claude_session_uuid` (`agent/sdk_client.py`) --
+            # that helper is SDK-client-only, reached only from the
+            # headless SDK-client harness path (`get_response_via_harness`).
+            #
+            # Never write None over an existing value: only assign when
+            # the PM handle's `claude_session_id` is non-null. PTY-PM has
+            # its UUID known at spawn (pre-assigned via `--session-id`),
+            # so this always fires for the (in-scope) PTY-PM transport.
+            # Headless-PM handles are written with a null UUID here (see
+            # docstring above) -- population for that transport is
+            # deferred to #1843, which owns the PM headless read loop.
+            pm_handle = next((h for h in handles if h.get("role") == "pm"), None)
+            if pm_handle and pm_handle.get("claude_session_id"):
+                self._agent_session.claude_session_uuid = pm_handle["claude_session_id"]
+                update_fields.append("claude_session_uuid")
+
+            self._agent_session.save(update_fields=update_fields)
         except Exception as e:  # noqa: BLE001
             logger.warning("[bridge-adapter] resume_handles persist failed: %s", e)
 

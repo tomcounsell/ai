@@ -1194,6 +1194,46 @@ Session persistence failures never affect the CLI exit code or results JSON
 output. A single `granite session not recorded: <reason>` line is emitted to
 stderr and execution continues normally.
 
+## Resume gate: `claude_session_uuid` population (issue #1836)
+
+`resume_session()` (`tools/valor_session.py`) hard-gates every
+`valor-session resume` on `claude_session_uuid` being non-null. Granite PTY is
+the primary bridge Eng execution path, and before #1836 that field was never
+populated for granite sessions, so every granite resume hard-errored with
+`cannot resume: no transcript UUID stored`.
+
+`BridgeAdapter._persist_resume_handles` now mirrors the **PM** role handle's
+`claude_session_id` onto `agent_session.claude_session_uuid` so the gate passes.
+The PM role is chosen because it owns the human-facing conversational thread
+(steering messages inject into PM's PTY), so its transcript is the correct
+target for a human-initiated resume.
+
+Key properties:
+
+- **PTY-PM only.** The PM PTY's UUID is known at spawn (pre-assigned via
+  `claude --session-id`), so the write always fires for the in-scope PTY-PM
+  transport. Headless-PM UUID population is deferred to #1843, which owns the PM
+  headless read loop; PM-headless has no run path today.
+- **Rewritten every run, not a durable anchor.** `_persist_resume_handles`
+  runs on every `run()` with a freshly generated PM UUID, so
+  `claude_session_uuid` always reflects only the most recent run's PM
+  transcript. Never write `None` over an existing value — the mirror only fires
+  when the PM handle's `claude_session_id` is non-null.
+- **Gate-unblock, not re-entry.** Populating the field lets the resume gate pass
+  and the session transition to `pending`; the worker then cold-spawns from
+  turn 0. True cold→warm transcript re-entry (reading `resume_handles`, feeding
+  the stored UUID into `--resume`, cursor replay, skip-priming) is #1721's
+  scope. The #1721 consumer must read the per-role `resume_handles` list, **not**
+  this overwritten-each-run scalar.
+- **Honest resume signal.** For a granite gate-pass (`resume_handles` present),
+  `resume_session()` returns a `ResumeResult.warning`
+  (`"resumed as a fresh session; prior-transcript re-entry pending #1721"`),
+  surfaced by `cmd_resume`, so an operator reads the limitation at the call site
+  rather than mistaking a bare `success=True` for full continuation.
+
+The granite path deliberately never calls the SDK-client-only
+`_store_claude_session_uuid` helper (`agent/sdk_client.py`).
+
 ## Completion-Cleanup Safety Floor (issue #1646)
 
 Dev sessions commit work to `session/dev-{id}` branches inside `.worktrees/dev-{id}`.

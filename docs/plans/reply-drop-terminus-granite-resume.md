@@ -116,7 +116,7 @@ No relevant external findings — this is purely internal (LLM-classifier prompt
 **Part B (resume attempt):**
 1. **Entry point**: `python -m tools.valor_session resume --id <granite-session-id> --message "..."` → `cmd_resume` → `resume_session()` (`tools/valor_session.py:674`).
 2. **Gate**: `resume_session()` checks `claude_session_uuid is None` (715). Today: None for granite → hard error. After fix: populated → passes.
-3. **Population (fix)**: at granite spawn, `_persist_resume_handles` (`bridge_adapter.py:714`) builds per-role handles; the PTY PM handle's `claude_session_id` is also written to `agent_session.claude_session_uuid`. Headless PM: `outcome.claude_session_id` is captured at first turn inside `HeadlessRoleDriver.run_turn` (`role_driver.py:413-418`); a **net-new post-`run_turn` persist** (guarded `role == "pm" and outcome.claude_session_id`) writes it back to `claude_session_uuid`.
+3. **Population (fix)**: at granite spawn, `_persist_resume_handles` (`bridge_adapter.py:714`) builds per-role handles; the PTY PM handle's `claude_session_id` is also written to `agent_session.claude_session_uuid`. **PTY-PM only** — headless-PM UUID population is deferred to #1843 (which owns the PM headless read loop); PM-headless has no run path today, so nothing writes the field for that transport in this plan's scope.
 4. **Output**: gate passes → steering message pushed to Redis → `transition_status(..., "pending")` → worker re-picks the session. (Actual transcript re-entry from turn N is #1721.)
 
 ## Why Previous Fixes Failed
@@ -134,7 +134,7 @@ No relevant external findings — this is purely internal (LLM-classifier prompt
 - **New dependencies**: none.
 - **Interface changes**: `classify_conversation_terminus` signature unchanged; `claude_session_uuid` is an existing `AgentSession` field. One additive `ResumeResult.warning` field (default `None`, Part C).
 - **Coupling**: Part B reuses the `resume_handles` PM entry captured by #1842 — no new cross-component coupling; if anything it makes the existing field consistent across transports.
-- **Data ownership**: `claude_session_uuid` for granite sessions becomes owned by the granite adapter's spawn/first-turn path, mirroring how the SDK-client path owns it via `_store_claude_session_uuid`. It is rewritten each run with the current run's fresh PM UUID — a per-run value, not a durable resume anchor (that role is #1721's `resume_handles`).
+- **Data ownership**: `claude_session_uuid` for granite sessions becomes owned by the granite adapter's spawn-time PTY-PM path (`_persist_resume_handles`). The granite path deliberately does **not** reuse the SDK-client-only `_store_claude_session_uuid` helper. It is rewritten each run with the current run's fresh PM UUID — a per-run value, not a durable resume anchor (that role is #1721's `resume_handles`). (Headless-PM ownership is deferred to #1843.)
 - **Reversibility**: trivial — all three changes are additive (one fast-path branch, one field write, one optional-string result field) and revert cleanly.
 
 ## Appetite
@@ -225,8 +225,8 @@ No existing test is broken or deleted — the fixes are purely additive (a new f
 **Trigger:** An operator runs `valor-session resume` against a session that is mid-spawn.
 **Data prerequisite:** `claude_session_uuid` must be persisted before a resume is attempted.
 **State prerequisite:** Resume only targets sessions in `RESUMABLE_STATUSES` (completed/killed/failed/abandoned) — a mid-spawn session is `running`/`pending` and is rejected by the status gate (694-714) before the UUID gate is reached.
-**Headless-PM note (advisory fold-in):** for the headless-PM transport the UUID is **not** written at spawn — it lands only after the first `run_turn` completes (the net-new post-`run_turn` persist). The invariant still holds because a session cannot reach a `RESUMABLE_STATUS` without having run at least one turn (the first turn is what produces any terminal status), so by the time a headless-PM session is resumable its first-turn persist has already fired. If a headless-PM session terminates *before* its first turn ever completes (e.g. spawn crash), `claude_session_uuid` stays null and `resume_session()` returns the honest `cannot resume: no transcript UUID stored` error — the correct outcome, not a silent success.
-**Mitigation:** The status gate already excludes non-terminal sessions, so the UUID is fully persisted (spawn-time for PTY PM, first-turn for headless PM) by the time a session is resumable — with the pre-first-turn crash exception above degrading to the honest null-UUID error. No new synchronization needed; note it in the test.
+**Headless-PM note:** headless-PM UUID population is **out of scope — deferred to #1843**. PM-headless has no run path today, so this plan writes `claude_session_uuid` only for the PTY-PM transport (at spawn). Headless-PM's race analysis lands with #1843.
+**Mitigation:** The status gate already excludes non-terminal sessions, so the PTY-PM UUID is fully persisted at spawn by the time a session is resumable. No new synchronization needed; note it in the test.
 
 ## No-Gos (Out of Scope)
 

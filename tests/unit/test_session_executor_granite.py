@@ -34,6 +34,7 @@ from agent.granite_container.bridge_adapter import BridgeAdapter
 from agent.granite_container.pty_pool import PTYPool
 from agent.session_executor import _execute_agent_session
 from models.agent_session import AgentSession
+from tools.valor_session import resume_session
 
 
 def _make_pool(size: int = 1) -> PTYPool:
@@ -731,4 +732,124 @@ class TestReactionGating:
         assert actual_is_error == is_error, (
             f"exit_reason={exit_reason!r}, user_facing_routed={user_facing_routed} → "
             f"expected is_error={is_error}, got emoji={actual_emoji!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Part B (#1836): PM-handle claude_session_uuid population via
+# _persist_resume_handles, so the resume gate stops hard-erroring for granite.
+# PTY-PM only (headless-PM UUID population is deferred to #1843).
+# ---------------------------------------------------------------------------
+
+
+def _make_adapter(session: AgentSession) -> BridgeAdapter:
+    """Construct a BridgeAdapter around a real AgentSession for calling
+    _persist_resume_handles directly. The pool/callbacks are never touched by
+    _persist_resume_handles, so a MagicMock pool is sufficient."""
+    return BridgeAdapter(
+        agent_session=session,
+        project_key="test",
+        transport="telegram",
+        pool=MagicMock(spec=PTYPool),
+    )
+
+
+class TestPersistResumeHandlesUuidPopulation:
+    """`_persist_resume_handles` mirrors the PTY-PM handle's UUID onto the
+    scalar `claude_session_uuid` so `resume_session()`'s gate passes (#1836
+    Part B). PTY-PM only."""
+
+    def test_pty_pm_run_populates_claude_session_uuid(self, redis_test_db):
+        """After a PTY-PM granite spawn, the record has a non-null
+        `claude_session_uuid` equal to the PM handle's `claude_session_id`,
+        and `resume_session()` succeeds against it (gate passes)."""
+        import uuid as uuid_module
+
+        # Unique session_id per test — the redis test DB can be shared across
+        # concurrent SDLC lanes, so a fixed id risks a cross-run collision on
+        # the reload (a foreign record shadowing this one).
+        sid = f"granite-resume-{uuid_module.uuid4().hex[:12]}"
+        session = _make_session(session_id=sid)
+        # Resume only targets terminal sessions; move it to a resumable status.
+        session.status = "completed"
+        session.save(update_fields=["status"])
+
+        adapter = _make_adapter(session)
+        pm_uuid = str(uuid_module.uuid4())
+        dev_uuid = str(uuid_module.uuid4())
+        adapter._persist_resume_handles(
+            "/tmp/wd",
+            {"pm": pm_uuid, "dev": dev_uuid},
+            {"pm": "pty", "dev": "pty"},
+        )
+
+        # Reload from Redis to confirm the write was persisted, not just set
+        # on the in-memory instance.
+        reloaded = AgentSession.query.filter(session_id=sid).all()[0]
+        assert reloaded.claude_session_uuid == pm_uuid, (
+            "PTY-PM run must mirror the PM handle's claude_session_id onto claude_session_uuid"
+        )
+        # resume_handles carries the per-role schema #1721 consumes.
+        pm_handle = next(h for h in reloaded.resume_handles if h["role"] == "pm")
+        assert pm_handle["claude_session_id"] == pm_uuid
+
+        # The resume gate now passes for this granite session.
+        result = resume_session(reloaded, "continue where we left off", source="test")
+        assert result.success is True, (
+            f"resume_session must succeed once claude_session_uuid is populated; "
+            f"got error={result.error!r}"
+        )
+        assert result.warning and "#1721" in result.warning, (
+            "granite gate-pass must carry the #1721 re-entry-deferral warning"
+        )
+
+    def test_null_pm_uuid_does_not_clobber_existing_value(self, redis_test_db):
+        """A null PM `claude_session_id` at spawn (headless-at-spawn) must NOT
+        write None over an existing `claude_session_uuid` (Risk 3)."""
+        import uuid as uuid_module
+
+        sid = f"granite-resume-neg-{uuid_module.uuid4().hex[:12]}"
+        existing_uuid = str(uuid_module.uuid4())
+        session = _make_session(session_id=sid)
+        session.claude_session_uuid = existing_uuid
+        session.save(update_fields=["claude_session_uuid"])
+
+        adapter = _make_adapter(session)
+        # Headless transport → the handle's claude_session_id is null at spawn.
+        adapter._persist_resume_handles(
+            "/tmp/wd",
+            {"pm": None, "dev": None},
+            {"pm": "headless", "dev": "headless"},
+        )
+
+        reloaded = AgentSession.query.filter(session_id=sid).all()[0]
+        assert reloaded.claude_session_uuid == existing_uuid, (
+            "a null PM claude_session_id must never clobber an existing claude_session_uuid"
+        )
+
+    def test_persist_failure_logs_warning_and_does_not_crash(self, redis_test_db, caplog):
+        """`_persist_resume_handles` wraps its body in `except Exception`: a
+        persist failure logs a warning and does not raise (fail-silent —
+        observability must never crash the run)."""
+        import uuid as uuid_module
+
+        session = _make_session(session_id=f"granite-resume-exc-{uuid_module.uuid4().hex[:12]}")
+        adapter = _make_adapter(session)
+
+        with (
+            patch(
+                "agent.granite_container.bridge_adapter._transcript_path_from_spec",
+                side_effect=RuntimeError("boom"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            # Must not raise despite the injected failure.
+            adapter._persist_resume_handles(
+                "/tmp/wd",
+                {"pm": "pm-uuid-x", "dev": "dev-uuid-y"},
+                {"pm": "pty", "dev": "pty"},
+            )
+
+        assert any("resume_handles persist failed" in r.message for r in caplog.records), (
+            "a persist failure must log the [bridge-adapter] warning"
         )

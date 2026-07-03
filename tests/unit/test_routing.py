@@ -383,6 +383,44 @@ async def test_classify_terminus_bot_bare_url_still_silent():
     assert result == "SILENT"
 
 
+@pytest.mark.asyncio
+async def test_classify_terminus_url_with_substantive_prose_falls_through_to_llm(
+    monkeypatch,
+):
+    """URL followed by substantive prose (>3 words after URL removal) must NOT be
+    force-RESPONDed by Fast-Path 1.5 — the ≤3-word remainder guard holds.
+
+    The message has no ``?``, no imperative verb, is not an ack token, and its
+    URL-stripped remainder is many words, so no fast-path fires and it reaches
+    the LLM. We pin the LLM to SILENT via an injected fake ``ollama`` module
+    (Haiku disabled by nulling the API key). If Fast-Path 1.5 had incorrectly
+    fired, the result would be RESPOND; asserting SILENT proves the guard held.
+    """
+
+    class FakeOllama:
+        @staticmethod
+        def chat(**kwargs):
+            return {"message": {"content": "SILENT"}}
+
+    import sys
+    import types
+
+    fake_module = types.ModuleType("ollama")
+    fake_module.chat = FakeOllama.chat
+    monkeypatch.setitem(sys.modules, "ollama", fake_module)
+    monkeypatch.setattr(routing, "get_anthropic_api_key", lambda: None)
+
+    result = await classify_conversation_terminus(
+        text=(
+            "https://example.com/report and here are my detailed thoughts on why "
+            "this approach fails badly in production"
+        ),
+        thread_messages=[],
+        sender_is_bot=False,
+    )
+    assert result == "SILENT"
+
+
 # =============================================================================
 # Fast-Path 0: imperative verb tests (issue #1318)
 # =============================================================================

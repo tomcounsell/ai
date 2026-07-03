@@ -48,6 +48,7 @@ def _make_session(
     slug: str = "",
     claude_session_uuid: str | None = "uuid-default",
     model: str | None = None,
+    resume_handles: list | None = None,
 ) -> MagicMock:
     s = MagicMock()
     s.session_id = session_id
@@ -62,6 +63,11 @@ def _make_session(
     s.claude_session_uuid = claude_session_uuid
     s.model = model
     s.created_at = 0
+    # resume_handles is the granite-only signal (populated by
+    # BridgeAdapter._persist_resume_handles) that Part C (#1836) keys the
+    # honest re-entry warning on. Default None so a generic/SDK-client
+    # session gets warning=None; granite tests pass an explicit list.
+    s.resume_handles = resume_handles
     return s
 
 
@@ -344,6 +350,58 @@ class TestCmdResumeNullUuidGuard:
         assert "no transcript UUID stored" in err
 
 
+class TestResumeGraniteReentryWarning:
+    """Part C (#1836): resume_session attaches an honest re-entry warning for
+    granite sessions (resume_handles populated) and none for SDK-client sessions.
+
+    The warning gives the operator a runtime signal at the call site that the
+    granite gate-pass cold-spawns from turn 0 (true prior-transcript re-entry is
+    deferred to #1721) rather than reading a bare success=True as full
+    continuation.
+    """
+
+    def _resume(self, session):
+        with (
+            patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message"),
+            patch.dict(
+                "sys.modules",
+                {
+                    "models.session_lifecycle": MagicMock(
+                        transition_status=MagicMock(),
+                        RESUMABLE_STATUSES=_RESUMABLE_STATUSES,
+                    ),
+                },
+            ),
+        ):
+            return resume_session(session, "continue", source="test")
+
+    def test_granite_session_resume_returns_reentry_warning(self):
+        """A granite session (resume_handles truthy) resumes with the #1721 warning."""
+        session = _make_session(
+            "sess-granite",
+            status="completed",
+            claude_session_uuid="pm-uuid-abc",
+            resume_handles=[{"role": "pm", "claude_session_id": "pm-uuid-abc"}],
+        )
+        result = self._resume(session)
+        assert result.success is True
+        assert result.warning is not None
+        assert "#1721" in result.warning
+
+    def test_sdk_client_session_resume_has_no_warning(self):
+        """An SDK-client session (no resume_handles) resumes with warning=None."""
+        session = _make_session(
+            "sess-sdk",
+            status="completed",
+            claude_session_uuid="sdk-uuid",
+            resume_handles=None,
+        )
+        result = self._resume(session)
+        assert result.success is True
+        assert result.warning is None
+
+
 class TestCmdResumeStatusGuardExactMessage:
     """The operator-facing wording of the status guard must be stable."""
 
@@ -590,6 +648,56 @@ class TestResumeSessionCore:
 
         assert result.success is False
         assert "Could not transition" in result.error
+
+    def test_granite_resume_carries_1721_warning(self):
+        """A granite session (has `resume_handles`) that clears the gate must
+        carry the #1836 Part C warning naming the #1721 re-entry deferral —
+        mirror-inverted from the null-UUID rejection. Populating
+        `claude_session_uuid` only clears the gate; it does not re-enter the
+        prior transcript."""
+        session = self._make_mock_session(status="completed", uuid="pm-uuid-granite")
+        # A granite session is the only writer of resume_handles.
+        session.resume_handles = [
+            {
+                "role": "pm",
+                "claude_session_id": "pm-uuid-granite",
+                "transcript_path": "/tmp/pm.jsonl",
+                "transport": "pty",
+            }
+        ]
+        patch_ctx, mock_transition = self._patch_lifecycle()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message"),
+            patch_ctx,
+        ):
+            result = resume_session(session, "continue", source="test")
+
+        assert result.success is True
+        assert result.warning is not None
+        assert "#1721" in result.warning, (
+            "granite gate-pass warning must name the #1721 re-entry deferral"
+        )
+        mock_transition.assert_called_once()
+
+    def test_non_granite_resume_has_no_warning(self):
+        """A non-granite (SDK-client) resume has no `resume_handles`, so no
+        warning is attached — the additive field defaults to None and does not
+        affect existing callers."""
+        session = self._make_mock_session(status="completed", uuid="sdk-uuid")
+        session.resume_handles = None
+        patch_ctx, _ = self._patch_lifecycle()
+
+        with (
+            patch("tools.valor_session._load_env"),
+            patch("agent.steering.push_steering_message"),
+            patch_ctx,
+        ):
+            result = resume_session(session, "continue", source="test")
+
+        assert result.success is True
+        assert result.warning is None
 
 
 # ---------------------------------------------------------------------------
