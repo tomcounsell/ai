@@ -189,3 +189,137 @@ class TestConstants:
 
         assert CHUNK_OVERLAP_TOKENS < CHUNK_SIZE_TOKENS
         assert CHUNK_OVERLAP_TOKENS > 0
+
+
+def _dense_table_content(min_chars: int) -> str:
+    """Build table-like content that tokenizes far denser than plain prose.
+
+    Reproduces the failure mode from issue #1876: dense vault docs (tables,
+    transcripts, converted xlsx/pdf sidecars) pack more tokens per char than
+    the ~3.66 chars/token the old `[:30000]` char cap assumed. Random digits
+    defeat BPE's ability to compress repeated substrings, so this content's
+    chars/token ratio is representative of the worst real-world docs (the
+    plan cites a doc at 10,016 tokens after the old char-based truncation).
+
+    Args:
+        min_chars: Build at least this many characters of content.
+
+    Returns:
+        A string of pipe-delimited rows with randomized numeric fields.
+    """
+    import random
+
+    rng = random.Random(1876)  # deterministic, keyed to the tracking issue
+    lines = []
+    total_chars = 0
+    i = 0
+    while total_chars < min_chars:
+        row = (
+            f"| {i} | {rng.randint(0, 999999):06d} | {rng.randint(0, 999999):06d} "
+            f"| {rng.randint(0, 999999):06d} | active |\n"
+        )
+        lines.append(row)
+        total_chars += len(row)
+        i += 1
+    return "".join(lines)
+
+
+@pytest.mark.unit
+class TestTruncateToTokens:
+    """Test the truncate_to_tokens helper (issue #1876)."""
+
+    def test_over_budget_input_truncates_to_max_tokens(self):
+        """Over-budget input is truncated to at most max_tokens tokens."""
+        from tools.knowledge.chunking import _get_encoding, truncate_to_tokens
+
+        # 30,000 chars of dense table content reproduces the exact failure
+        # mode: the old `[:30000]` char cap still exceeded 8,192 tokens.
+        oversized = _dense_table_content(30000)
+        encoding = _get_encoding()
+        assert len(encoding.encode(oversized)) > 8192, (
+            "fixture must reproduce the >8192-token failure mode before truncation"
+        )
+
+        result = truncate_to_tokens(oversized, max_tokens=8000)
+
+        assert len(encoding.encode(result)) <= 8000
+
+    def test_under_budget_input_returned_unchanged(self):
+        """Under-budget text is returned byte-for-byte unchanged, no re-encode artifacts."""
+        from tools.knowledge.chunking import truncate_to_tokens
+
+        text = "This is a short document well under the token budget."
+        result = truncate_to_tokens(text, max_tokens=8000)
+
+        assert result == text
+        assert result is text
+
+    def test_empty_string_returns_empty_string(self):
+        """Empty string input returns empty string."""
+        from tools.knowledge.chunking import truncate_to_tokens
+
+        assert truncate_to_tokens("", max_tokens=8000) == ""
+
+    def test_none_input_returns_none_without_raising(self):
+        """None input passes through unchanged without raising."""
+        from tools.knowledge.chunking import truncate_to_tokens
+
+        assert truncate_to_tokens(None, max_tokens=8000) is None
+
+    def test_tiktoken_failure_falls_back_to_char_cap(self, monkeypatch):
+        """When tiktoken raises, falls back to text[:max_tokens * 4] and returns a string."""
+        from tools.knowledge import chunking
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("simulated tiktoken failure")
+
+        monkeypatch.setattr(chunking, "_get_encoding", _raise)
+
+        text = "x" * 50000
+        result = chunking.truncate_to_tokens(text, max_tokens=8000)
+
+        assert isinstance(result, str)
+        assert result == text[: 8000 * 4]
+
+    def test_warning_logged_when_truncation_drops_content(self, caplog):
+        """A WARNING is logged when truncation actually drops content."""
+        import logging
+
+        from tools.knowledge.chunking import truncate_to_tokens
+
+        oversized = _dense_table_content(30000)
+
+        with caplog.at_level(logging.WARNING, logger="tools.knowledge.chunking"):
+            truncate_to_tokens(oversized, max_tokens=8000)
+
+        assert any("truncat" in record.message.lower() for record in caplog.records)
+
+    def test_no_warning_logged_when_under_budget(self, caplog):
+        """No WARNING is logged when input is already under budget."""
+        import logging
+
+        from tools.knowledge.chunking import truncate_to_tokens
+
+        with caplog.at_level(logging.WARNING, logger="tools.knowledge.chunking"):
+            truncate_to_tokens("A short string under budget.", max_tokens=8000)
+
+        assert len(caplog.records) == 0
+
+    def test_reproducible_dense_docs_fit_after_truncation(self):
+        """Oversized-doc index proof: dense content that broke the old char cap
+        fits within budget after truncate_to_tokens, at several sizes.
+
+        Synthesized to reproduce the reported failure mode (>8192 tokens
+        after a naive [:30000] char truncation) without depending on
+        ~/work-vault, which may not exist in CI.
+        """
+        from tools.knowledge.chunking import _get_encoding, truncate_to_tokens
+
+        encoding = _get_encoding()
+        for min_chars in (30000, 45000, 60000):
+            content = _dense_table_content(min_chars)
+            # Confirm the fixture actually reproduces the old failure mode.
+            assert len(encoding.encode(content[:30000])) > 8192
+
+            truncated = truncate_to_tokens(content, max_tokens=8000)
+            assert len(encoding.encode(truncated)) <= 8000

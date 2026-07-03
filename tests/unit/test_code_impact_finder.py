@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 from pathlib import Path
 from unittest.mock import patch
 
@@ -334,6 +335,69 @@ class TestCodeFinderPipeline:
                 repo_root=Path("/nonexistent"),
             )
             assert result == []
+
+
+# ---------------------------------------------------------------------------
+# TestEmbedOpenAITruncation — token-aware truncation before the provider call
+# (issue #1876)
+# ---------------------------------------------------------------------------
+
+
+class TestEmbedOpenAITruncation:
+    def test_embed_openai_truncates_oversized_text_by_tokens(self):
+        """_embed_openai truncates an oversized text by token count (not char
+        count) before it reaches the OpenAI client -- the sibling fix to
+        safe_upsert's truncation, sharing the same truncate_to_tokens helper.
+        """
+        from tools.impact_finder_core import _embed_openai
+        from tools.knowledge.chunking import _get_encoding
+
+        encoding = _get_encoding()
+
+        # Dense content that exceeds 8,192 tokens even after the old
+        # [:30000] char cap, reproducing the same failure mode as #1876.
+        rng = random.Random(1876)
+        lines = []
+        total_chars = 0
+        i = 0
+        while total_chars < 30000:
+            row = (
+                f"| {i} | {rng.randint(0, 999999):06d} | {rng.randint(0, 999999):06d} "
+                f"| {rng.randint(0, 999999):06d} | active |\n"
+            )
+            lines.append(row)
+            total_chars += len(row)
+            i += 1
+        oversized = "".join(lines)
+        assert len(encoding.encode(oversized[:30000])) > 8192, (
+            "fixture must reproduce the pre-fix failure mode"
+        )
+
+        captured_inputs = []
+
+        class _FakeEmbeddingItem:
+            def __init__(self):
+                self.embedding = [0.0, 0.0, 0.0, 0.0]
+
+        class _FakeEmbeddingResponse:
+            def __init__(self, n):
+                self.data = [_FakeEmbeddingItem() for _ in range(n)]
+
+        class _FakeEmbeddings:
+            def create(self, model, input):
+                captured_inputs.extend(input)
+                return _FakeEmbeddingResponse(len(input))
+
+        class _FakeOpenAIClient:
+            def __init__(self, *args, **kwargs):
+                self.embeddings = _FakeEmbeddings()
+
+        with patch("openai.OpenAI", _FakeOpenAIClient):
+            result = _embed_openai([oversized])
+
+        assert len(result) == 1
+        assert len(captured_inputs) == 1
+        assert len(encoding.encode(captured_inputs[0])) <= 8000
 
 
 # ---------------------------------------------------------------------------
