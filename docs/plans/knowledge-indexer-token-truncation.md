@@ -5,7 +5,7 @@ appetite: Small
 owner: Valor
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1876
-last_comment_id:
+last_comment_id: 4877536958
 ---
 
 # Knowledge Indexer: Token-Aware Embedding Truncation
