@@ -331,6 +331,27 @@ The heal is idempotent: a re-run clamps only still-future records, so a mid-run 
 
 **In-process vs. standalone:** When the update script runs inside the same process as the queue (bridge in-process update), `_active_workers` is populated and fully authoritative. When it runs as a CLI subprocess, `_active_workers` will always be empty and the function logs a warning before relying on the `updated_at` recency check.
 
+## Duplicate-Session Dedup — Only `completed` Counts as Handled (issue #1877)
+
+`_cleanup_duplicate_sessions()` in `scripts/update/run.py` runs during every
+`/update` deploy and kills `pending` sessions that re-process a
+`(chat_id, telegram_message_id)` pair already covered by another session.
+Of the five terminal statuses, only **`completed`** means the message was
+actually handled — `killed`, `abandoned`, and `failed` all mean the prior
+attempt did *not* produce a delivered response.
+
+Before issue #1877, the terminal-status scan included all four of
+`("completed", "killed", "abandoned", "failed")`, so a legitimate `pending`
+retry after a killed/abandoned/failed attempt was silently suppressed —
+the user's message was never actually answered. The scan now checks only
+`("completed",)`: a `pending` session survives unless another session for
+the same `(chat_id, telegram_message_id)` reached `completed`.
+
+This is a narrower rule than the general terminal-status vocabulary above —
+it applies specifically to the duplicate-message dedup scan, not to the
+[Kill-is-Terminal Invariant](#kill-is-terminal-invariant) or any other
+terminal-status check in this document.
+
 ## Stall Reaction Dedup Reset (issue #1313)
 
 When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visible ⏳ reaction for a stalled session (see [Bridge Self-Healing § 4a](bridge-self-healing.md#4a-user-visible-stall-alerts-monitoringsession_watchdogpy-issue-1313)), it claims the dedup key `watchdog:stall_reaction_applied:{session_id}` so the reaction is queued at most once per stall period.

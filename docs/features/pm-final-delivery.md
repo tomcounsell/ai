@@ -87,10 +87,14 @@ Two distinct pieces replace the marker:
   6. Stamp `response_delivered_at` on the parent and finalize to
      `"completed"` via `finalize_session`. The runner is the **sole** caller
      that transitions the parent to `"completed"` on the success path.
-  7. On `asyncio.CancelledError`, best-effort deliver
-     `"I was interrupted and will resume automatically. No action needed."`
-     (dedup'd by `interrupted-sent:{session_id}` — 120s TTL) and re-raise to
-     preserve asyncio shutdown semantics.
+  7. On `asyncio.CancelledError`, best-effort deliver a reason-aware interrupt
+     message — `INTERRUPT_RESUME` ("will resume automatically") or
+     `INTERRUPT_NO_RESUME` ("won't resume automatically"), selected via
+     `agent/cancel_reason.py::get_cancel_reason` (dedup'd by
+     `interrupted-sent:{session_id}` — 120s TTL) and re-raise to preserve
+     asyncio shutdown semantics. See
+     [Reason-Aware Interrupt Messaging and Failure Notification](#reason-aware-interrupt-messaging-and-failure-notification-issue-1877)
+     below.
 
 `schedule_pipeline_completion(...)` wraps the runner in a tracked
 `asyncio.Task` registered in `_pending_completion_tasks` so the worker
@@ -148,6 +152,79 @@ Behavior mirrors the runner's CancelledError handler: dedup on
 redundancy is intentional — both layers may trip during shutdown; the
 Redis dedup ensures the user sees exactly one interrupted message per
 real interruption window, not N.
+
+## Reason-Aware Interrupt Messaging and Failure Notification (issue #1877)
+
+`agent/notification_copy.py` is the single source of truth for the
+user-facing lifecycle copy that both this doc and `agent/messenger.py` /
+`agent/session_completion.py` reference: `INTERRUPT_RESUME`,
+`INTERRUPT_NO_RESUME`, and `FAILURE_NOTICE`. Send sites import these
+constants rather than inlining literal strings, so a copy change is a
+single-file edit.
+
+### Defect #1 — reason-aware interrupt copy
+
+Before issue #1877, both interrupt send sites hardcoded "I was interrupted
+and will resume automatically" on every `CancelledError`, even when the
+killer had finalized the session to a terminal, non-resumable status. The
+fix threads a transient reason signal from the killer to the send site
+without giving the ORM-free messenger a database read:
+
+- **Key:** `cancel-reason:{session_id}` in `POPOTO_REDIS_DB` (raw Redis, the
+  same access pattern as the `interrupted-sent:{session_id}` dedup key).
+- **Values:** `"no_resume"` (the killer finalized the session terminal —
+  nothing will resume) or `"resume"` (a recovery path re-queued the session
+  to `pending`). Absent key (genuine worker shutdown, or a killer that
+  raced ahead of its own write) means `INTERRUPT_RESUME` — the historical
+  default.
+- **TTL:** 180 seconds, and that TTL is the *sole* cleanup mechanism —
+  neither `agent/cancel_reason.py` nor either send site ever pops or
+  deletes the key.
+- **Read discipline:** `get_cancel_reason()` is read **only inside the
+  branch that won the `interrupted-sent` SET-NX dedup** (i.e. only by the
+  site that is actually about to send). This is load-bearing: both
+  `agent/messenger.py` and `agent/session_completion.py` race that
+  single-winner dedup, and a destructive read by the *losing* (non-sending)
+  site could otherwise starve the *winning* site into reading `None` and
+  emitting the wrong copy. Non-destructive reads plus read-inside-winner
+  placement close that race.
+- **Writers:** every killer that finalizes a session to a terminal,
+  non-resumable status writes `"no_resume"` before it cancels the running
+  task — the deadline kill in `agent/agent_session_queue.py`'s worker loop,
+  and the out-of-band kill / terminal-escalation branches inside
+  `agent/session_health.py::_apply_recovery_transition` (health-check kill
+  and the post-cancel subprocess-survived escalation to `failed`). Recovery
+  paths that re-queue to `pending` write `"resume"`.
+- **Deliberately not wired:** supersede and PM-cancel finalize sessions that
+  are not currently `running`, so no `CancelledError` interrupt send ever
+  fires on those paths — there is nothing for a cancel-reason to influence,
+  so those call sites do not write one.
+
+See `agent/cancel_reason.py` for the full docstring covering the
+non-destructive-read contract and safe-default semantics.
+
+### Defect #2 — running→failed notification
+
+Before issue #1877, a session that crashed from an uncaught exception
+(`running` → `failed`) produced no Telegram message at all — the three
+finalize-on-failure paths in `agent/session_executor.py` persisted the
+terminal status but never called back to the user. The fix adds
+`_maybe_send_failure_notice(messenger, session_id)`, invoked on the
+failure-finalize branch when `task.error` is set and
+`not chat_state.defer_reaction`:
+
+- Sends the shared `FAILURE_NOTICE` copy via
+  `messenger._send_callback(...)`, bounded by a 2s `asyncio.wait_for` and
+  wrapped so a send failure (including the timeout) is swallowed and never
+  blocks finalization — mirroring the CancelledError best-effort pattern.
+- Deduped via a `failed-sent:{session_id}` SET-NX key (120s TTL) so the
+  three finalize-on-failure paths in the executor never double-send.
+- **Cross-class skip-guard:** before sending, the helper checks
+  `get_cancel_reason(session_id)`. If a cancel-reason is present, a killer
+  already owns this session's exit narrative (it cancelled the task and
+  sent its own reason-aware interrupt message), so the failure send is
+  skipped entirely rather than sending a second, competing "something went
+  wrong" message for the same exit.
 
 ## Race conditions (mitigations)
 
@@ -331,4 +408,6 @@ message content; the predicate + runner is the canonical path.
 - Tests: `tests/unit/test_pipeline_complete_predicate.py`,
   `tests/unit/test_deliver_pipeline_completion.py`,
   `tests/unit/test_messenger_cancelled_error.py`,
-  `tests/integration/test_pm_final_delivery.py`.
+  `tests/integration/test_pm_final_delivery.py`,
+  `tests/unit/test_cancel_reason.py`,
+  `tests/unit/test_session_executor_failure_notification.py` (issue #1877).
