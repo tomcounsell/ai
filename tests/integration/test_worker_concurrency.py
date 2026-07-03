@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import agent.agent_session_queue as _queue
+import agent.session_state as _session_state
 from agent.agent_session_queue import (
     _active_workers,
     _ensure_worker,
@@ -423,6 +424,17 @@ class TestPMProjectKeySerialization:
 class TestDevWorktreeParallelism:
     """Dev sessions with slug (worktree-isolated) run concurrently, across
     chats AND across slugs in the same chat (issue #1085)."""
+
+    @pytest.fixture(autouse=True)
+    def _granite_available(self):
+        """The #1816 degradation gate defers slug-keyed ENG pickup while
+        session_state.granite_available is False — its module default,
+        flipped True only by the worker's reprobe loop, which never runs
+        under pytest. Force it on so pickup executes (issue #1869)."""
+        original = _session_state.granite_available
+        _session_state.granite_available = True
+        yield
+        _session_state.granite_available = original
 
     @pytest.mark.asyncio
     async def test_two_slugged_dev_sessions_execute_concurrently(self):
