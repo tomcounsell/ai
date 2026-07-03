@@ -1676,11 +1676,25 @@ class Container:
         the Dev prime does NOT — the Dev must wait for the operator to
         relay the PM's first [/dev] instruction, not start work
         immediately on its own from the raw user message (issue #1644).
+
+        Also wires `on_read_iteration=self._pty_read_iteration_cb` into
+        all three `read_until_idle` calls below (trust-dismiss loop,
+        pre-write wait, post-write wait). This is the same throttled
+        liveness callback the steady-state loop threads into
+        `_cycle_idle` / `_await_turn_end` (#1843 Gap B) — reusing it here
+        stamps `last_pty_read_loop_at` / `last_pty_activity_at` DURING
+        priming, not just at cycle boundaries after it. Without this,
+        the `_prime_pty_alive()` kill-gate deferral added by #1792
+        (PR #1798) never actually engages: it reads those same fields,
+        but `_prime_session` never stamped them, so a slow Opus
+        cold-start prime still looked identical to a wedged/no-progress
+        session to the health monitor (issue #1878).
         """
         for _ in range(5):
             result = pty.read_until_idle(
                 min_content_bytes=0,
                 timeout_s=PRIME_TRUST_DISMISS_TIMEOUT_S,
+                on_read_iteration=self._pty_read_iteration_cb,
             )
             if result.saw_idle:
                 break
@@ -1696,7 +1710,11 @@ class Container:
             break
         # Wait for the TUI's initial idle (no content floor — the
         # first paint is the welcome frame, not a response).
-        pty.read_until_idle(min_content_bytes=0, timeout_s=PRIME_PRE_WRITE_TIMEOUT_S)
+        pty.read_until_idle(
+            min_content_bytes=0,
+            timeout_s=PRIME_PRE_WRITE_TIMEOUT_S,
+            on_read_iteration=self._pty_read_iteration_cb,
+        )
         # Send the slash command. The PM prime appends self.user_message
         # so the PM immediately has the task context. The Dev prime
         # sends the slash command alone — Dev must wait for the
@@ -1725,6 +1743,7 @@ class Container:
         post = pty.read_until_idle(
             min_content_bytes=PRIME_POST_WRITE_MIN_CONTENT_BYTES,
             timeout_s=PRIME_POST_WRITE_TIMEOUT_S,
+            on_read_iteration=self._pty_read_iteration_cb,
         )
         logger.info(
             "container: prime post-write wait saw_idle=%s buffer_len=%d elapsed_ms=%d",

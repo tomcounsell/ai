@@ -53,3 +53,36 @@ def test_throttle_first_call_always_fires():
     wrapped = _throttle(calls.append, PTY_READ_ITER_MIN_INTERVAL_S, clock=lambda: 42.0)
     wrapped("first")
     assert calls == ["first"]
+
+
+# --------------------------------------------------------------------------
+# #1878 Part A — prime + steady-state share ONE throttle instance
+# --------------------------------------------------------------------------
+def test_shared_throttle_prevents_prime_and_steady_state_double_stamp():
+    """One throttle instance backs BOTH call sites, so they can't double-fire.
+
+    `Container.__init__` builds `_pty_read_iteration_cb` exactly once
+    (wrapping `_fire_pty_read_raw` in `_throttle`), and both
+    `_prime_session` (#1878 Part A) and the steady-state `_cycle_idle` /
+    `_await_turn_end` loop (#1843 Gap B) pass that SAME instance into
+    `read_until_idle`. Simulating both call sites hitting the shared
+    wrapper inside one window must still collapse to a single admitted
+    call — sharing the instance cannot double the write-storm risk the
+    throttle exists to bound.
+    """
+    clock = {"t": 0.0}
+    calls: list[str] = []
+    shared = _throttle(calls.append, 1.0, clock=lambda: clock["t"])
+
+    # Prime call site fires first in the window...
+    clock["t"] = 0.0
+    shared("prime-frame")
+    # ...then the steady-state call site fires moments later, same window.
+    clock["t"] = 0.3
+    shared("steady-state-frame")
+
+    assert len(calls) == 1, (
+        "prime and steady-state sharing one throttle instance must still "
+        "collapse to one stamp per window"
+    )
+    assert calls == ["prime-frame"]
