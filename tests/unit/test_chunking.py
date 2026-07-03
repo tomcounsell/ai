@@ -267,7 +267,12 @@ class TestTruncateToTokens:
         assert truncate_to_tokens(None, max_tokens=8000) is None
 
     def test_tiktoken_failure_falls_back_to_char_cap(self, monkeypatch):
-        """When tiktoken raises, falls back to text[:max_tokens * 4] and returns a string."""
+        """When tiktoken raises, falls back to text[:int(max_tokens * 3)] (~24000 chars).
+
+        The 3x ratio is kept strictly below the ~3.66 chars/token ratio that
+        causes dense docs to still exceed the caller's budget after truncation
+        (concern #1), so the fallback never re-introduces the root-cause bug.
+        """
         from tools.knowledge import chunking
 
         def _raise(*args, **kwargs):
@@ -279,7 +284,7 @@ class TestTruncateToTokens:
         result = chunking.truncate_to_tokens(text, max_tokens=8000)
 
         assert isinstance(result, str)
-        assert result == text[: 8000 * 4]
+        assert result == text[: int(8000 * 3)]
 
     def test_warning_logged_when_truncation_drops_content(self, caplog):
         """A WARNING is logged when truncation actually drops content."""
