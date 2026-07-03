@@ -248,6 +248,46 @@ the routing outcome (including dev routes). The first steady-state iteration
 then reads a **fresh** PM idle before classifying — the stale-buffer race guard
 — so the prime buffer is never double-classified.
 
+### Startup settle conditions (issue #1881)
+
+PM→user delivery is decoupled from whether the Dev PTY has finished priming.
+The startup loop watches both PTYs and settles by one of three paths, recorded
+on `ContainerResult.startup_settle_reason` and appended to `startup_events`:
+
+| `startup_settle_reason` | Condition | When it fires |
+|--------------------------|-----------|---------------|
+| `both_idle` | PM and Dev both idle in the **same** cycle | Classic cold start where the two PTYs quiesce together. |
+| `pm_latched_dev_idle` | PM went idle on an **earlier** cycle (latched via `pm_ever_idle`), Dev reaches idle later | Fast PM, slow Dev — PM finishes and quiesces before Dev primes, Dev catches up a few cycles later. |
+| `pm_terminal_fast` | PM produces a terminal `[/complete]`/`[/user]` turn and settles **immediately**, without waiting for Dev at all | PM-only requests (status check, Q&A, board update) that never need the Dev PTY. |
+
+`startup_settle_reason` is `None` when startup never settles (plateau or ceiling
+exit).
+
+Two mechanisms make this work:
+
+- **PM-idle latch (`pm_ever_idle`).** Idle detection is edge-triggered per cycle,
+  so in the fast-PM/slow-Dev race PM's idle is observed in an early cycle and
+  Dev's in a later one, never together. The latch remembers that PM was idle, so
+  the settle gate reads `pm_ever_idle and dev_saw_idle` rather than requiring both
+  in the same cycle. (A headless Dev already forces `dev_saw_idle=True`, so once
+  PM is idle the gate reduces to PM alone — byte-identical to the pre-#1881 gate.)
+- **Terminal-turn fast settle.** When PM has gone idle **this cycle**, the loop
+  classifies PM's prime transcript (read-only) against the same pre-loop baseline
+  the relay uses. A non-empty `[/complete]` or a `[/user]` turn is user-facing and
+  Dev-independent, so startup settles immediately and falls through to the single
+  prime-turn relay for delivery. An empty `[/complete]` or non-terminal chatter
+  does **not** fast-settle — it falls through to the latched gate, so a genuinely
+  stuck PM still reaches plateau/ceiling.
+
+The relay is the single delivery site for all three paths. Its `pm_prime_baseline`
+snapshot is taken **before** `_prime_session(pm)` — before PM emits any
+task-response output — so the relay's `last_assistant_text(...,
+baseline_text_count=pm_prime_baseline)` freshness guard always sees PM's terminal
+turn as a new text-bearing entry and delivers it, whichever break reason fired.
+Snapshotting the baseline after the loop (its pre-#1881 site) would already count
+a fast PM's `[/complete]` that flushed cycles earlier, so the guard returned `""`
+and the reply was silently dropped as a compliance nudge instead of `pm_complete`.
+
 ### Per-turn prefix-contract reminder (issue #1719)
 
 On every Dev-report handoff (when the PM's `[/dev]` classification routes
