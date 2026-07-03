@@ -40,9 +40,22 @@ from agent.session_health import (
 # ---------------------------------------------------------------------------
 
 
-def _entry(*, last_pty_read_loop_at, last_pty_activity_at, project_key="test-wedge-nudge"):
+def _entry(
+    *,
+    last_pty_read_loop_at,
+    last_pty_activity_at,
+    project_key="test-wedge-nudge",
+    session_id="tg-sess-eligible",
+    agent_session_id="sess-eligible",
+):
+    # ``session_id`` (the Telegram routing key) is DELIBERATELY distinct from
+    # ``agent_session_id`` (the UUID alias) so these tests catch a producer
+    # that keys the nudge channel on the wrong id: the consumer
+    # (``bridge_adapter._poll_wedge_nudge``) drains ``steering:nudge:{session_id}``,
+    # so the producer must push to ``session_id`` — not ``agent_session_id``.
     return SimpleNamespace(
-        agent_session_id="sess-eligible",
+        agent_session_id=agent_session_id,
+        session_id=session_id,
         project_key=project_key,
         last_pty_read_loop_at=last_pty_read_loop_at,
         last_pty_activity_at=last_pty_activity_at,
@@ -132,8 +145,9 @@ def test_maybe_push_wedge_nudge_pushes_and_increments_telemetry_on_match():
         result = _maybe_push_wedge_nudge(entry, now)
 
     assert result is True
-    mock_push.assert_called_once_with("sess-eligible")
-    mock_latch.assert_called_once_with("sess-eligible", ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S)
+    # Keyed by session_id (the routing key the consumer drains), NOT agent_session_id.
+    mock_push.assert_called_once_with("tg-sess-eligible")
+    mock_latch.assert_called_once_with("tg-sess-eligible", ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S)
     assert fake_redis.counts == {"test-wedge-nudge:session-health:wedge_nudge_sent": 1}
 
 
@@ -296,8 +310,9 @@ def test_one_nudge_per_window_second_tick_within_ttl_pushes_nothing():
         assert first_result is True
         assert second_result is False
 
-        # Exactly one nudge landed on the signal channel.
-        nudges = pop_wedge_nudges(entry.agent_session_id)
+        # Exactly one nudge landed on the signal channel — keyed by session_id,
+        # the same key the consumer drains.
+        nudges = pop_wedge_nudges(entry.session_id)
         assert len(nudges) == 1
         assert nudges[0]["text"] == "continue"
 

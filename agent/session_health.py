@@ -567,6 +567,22 @@ def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
     return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
 
 
+def _is_granite_pty_session(entry: "AgentSession") -> bool:
+    """Single source of truth for the granite-PTY-vs-non-PTY transport check.
+
+    A granite PTY session has a ``last_pty_read_loop_at`` write (stamped by
+    the PTY read-loop liveness callback); SDK/headless sessions leave it
+    ``None``. Both the D0 priming-liveness gate (``_prime_pty_alive``) and
+    the #1879 wedge-nudge producer gate (``_wedge_nudge_eligible``) MUST use
+    exactly this predicate to exclude non-PTY sessions — a nudge or a
+    PTY-liveness deferral only makes sense for a session that actually runs
+    on a granite PTY. Factoring it here keeps the two call sites provably in
+    lock-step (critique concern 5) rather than each re-deriving the field
+    check and risking future drift.
+    """
+    return getattr(entry, "last_pty_read_loop_at", None) is not None
+
+
 def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
     """Return True if the PTY is alive during priming (defer D0 kill); False if kill-eligible.
 
@@ -607,9 +623,11 @@ def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
             return False
 
         # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
-        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
-        if last_pty_read_loop_at is None:
+        # Shared transport check (critique concern 5) so this gate and the
+        # #1879 producer gate never drift apart.
+        if not _is_granite_pty_session(entry):
             return False
+        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
 
         # Branch 3: stale read loop — a dead read loop cannot prove liveness.
         if isinstance(last_pty_read_loop_at, datetime):
@@ -672,8 +690,10 @@ def _wedge_nudge_eligible(entry: "AgentSession", now: datetime) -> bool:
     This predicate does not check the latch — callers must separately call
     ``set_wedge_nudge_latch`` (the atomic acquire-and-gate) before pushing.
     """
-    last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
-    if last_pty_read_loop_at is None:
+    # Gate 1: granite-PTY transport — reuse the SAME predicate ``_prime_pty_alive``
+    # uses (critique concern 5), so the two never drift on how a non-PTY
+    # session is recognized.
+    if not _is_granite_pty_session(entry):
         return False
     last_activity = getattr(entry, "last_pty_activity_at", None)
     if not isinstance(last_activity, datetime):
