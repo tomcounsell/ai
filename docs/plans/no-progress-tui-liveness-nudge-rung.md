@@ -71,6 +71,10 @@ Structural Finding.
 
 **Baseline commit (original plan):** `6de1f531` (`git rev-parse HEAD` at plan time).
 **Re-critique / second-revision baseline:** `8c8d64b0` (plan commit at the second revision).
+**Third-revision (split) baseline:** `9f69d114` (plan commit splitting Part B to #1879). All
+file:line references below were independently re-verified against this HEAD, and tracking
+issue #1878 was re-titled + annotated (Solution sketch B / OQ3 / AC #4 marked out-of-scope,
+transferred to #1879) so the tracking artifact matches the Part-A-only plan scope.
 **Issue filed at:** 2026-07-03T05:48:09Z (createdAt)
 **Disposition:** Unchanged (issue filed today; only doc/plan commits landed on main since,
 none touching the referenced code paths).
