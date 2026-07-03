@@ -97,5 +97,59 @@ class TestReadUntilIdlePerIterationCallback(unittest.TestCase):
         )
 
 
+class TestPrimeSessionWiresOnReadIteration(unittest.TestCase):
+    """Regression lock (#1878 Part A).
+
+    `Container._prime_session` must thread `on_read_iteration` into every
+    `read_until_idle` call it makes (trust-dismiss, pre-write, post-write),
+    reusing the SAME shared throttled callback the steady-state loop uses
+    (`Container._pty_read_iteration_cb`, #1843 Gap B). Without this, the
+    `_prime_pty_alive()` kill-gate deferral added by #1792 (PR #1798) can
+    never actually engage during a slow prime, because `last_pty_read_loop_at`
+    / `last_pty_activity_at` are never stamped mid-prime. This test locks the
+    wiring so a future refactor of `_prime_session` cannot silently drop it.
+    """
+
+    def test_prime_session_passes_on_read_iteration_to_all_read_until_idle_calls(
+        self,
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
+
+        c = Container(user_message="hello", max_turns=1, on_pty_read=lambda _b: None)
+        pm_mock = MagicMock(spec=PTYDriver)
+        pm_mock.read_until_idle.return_value = MagicMock(
+            saw_idle=True,
+            buffer="startup idle bypass permissions on",
+            idle_marker="bypass permissions on",
+            elapsed_ms=0,
+        )
+
+        with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+            c._pm_pty = pm_mock
+            c._dev_pty = MagicMock(spec=PTYDriver)
+            c._prime_session(pm_mock, PM_PRIME_SLASH_CMD, include_user_message=True)
+
+        self.assertGreaterEqual(
+            pm_mock.read_until_idle.call_count,
+            1,
+            "prime should have called read_until_idle at least once",
+        )
+        for call in pm_mock.read_until_idle.call_args_list:
+            self.assertIn(
+                "on_read_iteration",
+                call.kwargs,
+                "every read_until_idle call inside _prime_session must pass "
+                "on_read_iteration, or the #1792 kill-gate deferral cannot "
+                "engage during a slow prime",
+            )
+            self.assertIs(
+                call.kwargs["on_read_iteration"],
+                c._pty_read_iteration_cb,
+                "must reuse the shared throttled callback (#1843 Gap B), not build a new one",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,9 @@ import shutil
 import subprocess
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pexpect
 
 from agent.granite_container.pty_driver import PTYDriver, _default_substrate_model
 
@@ -204,7 +207,7 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
 
     def test_pm_prime_write_carries_user_message(self) -> None:
         """PM prime writes slash_cmd + space + user_message to the PTY."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
         from agent.granite_container.pty_driver import PTYDriver
@@ -233,7 +236,7 @@ class TestPrimeSessionUserMessageSeparation(unittest.TestCase):
         understands the task when the PM's [/dev] relay arrives. The prime text
         instructs Dev NOT to act until it receives the [/dev] relay.
         """
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from agent.granite_container.container import DEV_PRIME_SLASH_CMD, Container
         from agent.granite_container.pty_driver import PTYDriver
@@ -289,7 +292,6 @@ class TestSessionTypePrimeSelection(unittest.TestCase):
     """
 
     def _make_idle_mock(self):  # type: ignore[return]
-        from unittest.mock import MagicMock
 
         m = MagicMock()
         m.read_until_idle.return_value = MagicMock(
@@ -323,7 +325,7 @@ class TestSessionTypePrimeSelection(unittest.TestCase):
 
     def test_container_teammate_prime_written_to_pty(self) -> None:
         """Container with session_type='teammate' writes the teammate prime to the PM PTY."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from agent.granite_container.container import TEAMMATE_PRIME_SLASH_CMD, Container
         from agent.granite_container.pty_driver import PTYDriver
@@ -348,7 +350,7 @@ class TestSessionTypePrimeSelection(unittest.TestCase):
 
     def test_container_eng_prime_written_to_pty(self) -> None:
         """Container with session_type='eng' writes the standard PM prime to the PM PTY."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
         from agent.granite_container.pty_driver import PTYDriver
@@ -375,6 +377,223 @@ class TestSessionTypePrimeSelection(unittest.TestCase):
         """The prime-teammate-role.md file exists and is non-empty."""
         self.assertTrue(TEAMMATE_PRIME.exists(), f"missing {TEAMMATE_PRIME}")
         self.assertGreater(TEAMMATE_PRIME.stat().st_size, 0, "prime-teammate-role.md is empty")
+
+
+class _TwoPhasePexpectChild:
+    """Fake pexpect child gated on `write()`, for testing `_prime_session`.
+
+    `_prime_session` issues THREE `read_until_idle` calls against the SAME
+    PTY: trust-dismiss + pre-write (both before any `write()`), then
+    post-write (after `PTYDriver.write()` resets `_turn_text` and sends
+    the slash command). A naive fake child that just yields a fixed list
+    of chunks breaks here: `read_until_idle`'s inner loop keeps calling
+    `read_nonblocking` back-to-back as long as chunks are non-empty (see
+    the `if chunk: ... continue` branch), so the very first (trust-
+    dismiss) call would drain the ENTIRE chunk list before the post-write
+    read ever runs — starving it and hanging until its own multi-minute
+    timeout.
+
+    This fake stays silent (`pexpect.TIMEOUT`, "phase 1") until `send()`
+    is called (which `PTYDriver.write()` calls), then starts yielding the
+    post-write `phase2_chunks` one at a time ("phase 2"). Combined with
+    pre-seeding `PTYDriver._turn_text` with an already-idle welcome frame,
+    this lets the trust-dismiss/pre-write reads settle immediately on the
+    pre-seeded text (phase 1, no chunks consumed) while the post-write
+    read observes the real repaint sequence (phase 2).
+    """
+
+    def __init__(self, phase2_chunks: list[str]) -> None:
+        self._phase2 = iter(phase2_chunks)
+        self._armed = False
+
+    def read_nonblocking(self, size: int, timeout: float) -> str:
+        if not self._armed:
+            raise pexpect.TIMEOUT("phase 1: silent until write()")
+        try:
+            return next(self._phase2)
+        except StopIteration as exc:
+            raise pexpect.TIMEOUT("phase 2: exhausted") from exc
+
+    def send(self, text: str) -> None:
+        self._armed = True
+
+    def isalive(self) -> bool:
+        return True
+
+
+class _FreshnessWriter:
+    """Stand-in for the bridge-adapter's freshness writer (#1843 Gap B).
+
+    Mirrors its real contract: `last_pty_read_loop_at` is stamped
+    unconditionally on every call; `last_pty_activity_at` is stamped only
+    when the buffer differs from the previous call (diff-gated). Uses a
+    monotonically-incrementing fake tick instead of wall-clock time so the
+    test can assert ordering without real sleeps.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.last_pty_read_loop_at: float | None = None
+        self.last_pty_activity_at: float | None = None
+        self.activity_history: list[float] = []
+        self._prev_buffer: object = object()  # sentinel, never equals a str
+        self._tick = 0.0
+
+    def __call__(self, buffer: str) -> None:
+        self._tick += 1.0
+        self.calls.append(buffer)
+        self.last_pty_read_loop_at = self._tick
+        if buffer != self._prev_buffer:
+            self.last_pty_activity_at = self._tick
+            self.activity_history.append(self._tick)
+        self._prev_buffer = buffer
+
+
+class _CountingClock:
+    """Fake monotonic clock that always advances past the throttle window.
+
+    `Container._pty_read_iteration_cb` is built with the real wall-clock
+    default in production, throttled to <=1 stamp/sec (#1843 Gap B) so a
+    real multi-minute prime doesn't write-storm Redis. A unit test that
+    completes in well under a second would have every call but the first
+    silently dropped by that same window. Substituting this clock (which
+    always reports enough elapsed time to clear the window) lets the test
+    assert on the underlying wiring/advancement behavior without asserting
+    anything about the throttle itself (that has dedicated coverage in
+    `test_pty_read_iteration_throttle.py`).
+    """
+
+    def __init__(self) -> None:
+        self._t = 0.0
+
+    def __call__(self) -> float:
+        self._t += 2.0
+        return self._t
+
+
+class TestPrimeSessionStampsLivenessMidPrime(unittest.TestCase):
+    """#1878 Part A: `_prime_session` must wire `on_read_iteration` so the
+    #1792 `_prime_pty_alive()` kill-gate deferral actually engages.
+
+    Uses a real `PTYDriver` with a mocked pexpect child that streams
+    several distinct repaint frames (spinner ticks, then the final
+    idle-bearing frame) so the per-iteration callback observes genuine
+    mid-prime progression, not just a single stamp at the very end.
+    """
+
+    def _make_container_with_writer(self):  # type: ignore[return]
+        from agent.granite_container.container import (
+            PTY_READ_ITER_MIN_INTERVAL_S,
+            Container,
+            _throttle,
+        )
+
+        writer = _FreshnessWriter()
+        c = Container(user_message="hello", max_turns=1, on_pty_read=writer)
+        # Reuse the real _throttle wrapping the real _fire_pty_read_raw
+        # (byte-identical wiring to production), only substituting a
+        # clock that never suppresses a call — see _CountingClock.
+        c._pty_read_iteration_cb = _throttle(
+            c._fire_pty_read_raw, PTY_READ_ITER_MIN_INTERVAL_S, clock=_CountingClock()
+        )
+        return c, writer
+
+    def test_stamps_advance_during_prime_not_only_at_the_end(self) -> None:
+        chunk1 = "✳ Sprouting… (2s · esc to interrupt)\n"
+        chunk2 = "✵ Brewing… (4s · esc to interrupt)\n"
+        chunk3 = "⏺ Reading files...\n" + ("x" * 400) + "\n"
+        chunk4 = (
+            "⏺ [/user] "
+            + ("filler response text " * 80)
+            + "\n❯ \nbypass permissions on (shift+tab to cycle)\n"
+        )
+        self.assertGreater(
+            len(chunk1) + len(chunk2) + len(chunk3) + len(chunk4),
+            1500,
+            "fixture must clear PRIME_POST_WRITE_MIN_CONTENT_BYTES",
+        )
+
+        with patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0.02):
+            c, writer = self._make_container_with_writer()
+            pty = PTYDriver(role="pm")
+            pty._child = _TwoPhasePexpectChild([chunk1, chunk2, chunk3, chunk4])
+            # Pre-seed the welcome-frame idle text so the trust-dismiss and
+            # pre-write reads (phase 1, before any write()) settle
+            # immediately without consuming any of the post-write chunks.
+            pty._turn_text = "bypass permissions on ❯ "
+
+            with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+                c._pm_pty = pty
+                c._dev_pty = MagicMock(spec=PTYDriver)
+                from agent.granite_container.container import PM_PRIME_SLASH_CMD
+
+                c._prime_session(pty, PM_PRIME_SLASH_CMD, include_user_message=False)
+
+        self.assertGreater(
+            len(writer.calls),
+            3,
+            "on_read_iteration must fire many times across the prime, not once",
+        )
+        self.assertGreater(
+            len(set(writer.calls)),
+            1,
+            "buffer content must change across polls (repaint), proving mid-prime "
+            "progression rather than a single frozen snapshot",
+        )
+        self.assertGreater(
+            len(writer.activity_history),
+            1,
+            "last_pty_activity_at must be re-stamped more than once during the "
+            "prime window (not only once at the final frame)",
+        )
+        self.assertEqual(
+            writer.last_pty_read_loop_at,
+            writer._tick,
+            "last_pty_read_loop_at must be the freshest stamp (unconditional every call)",
+        )
+
+    def test_raising_callback_does_not_abort_prime(self) -> None:
+        """Regression: a raising on_read_iteration must not break `_prime_session`.
+
+        `read_until_idle` already swallows exceptions from the callback
+        (see `test_read_until_idle_per_iteration.py::
+        test_raising_callback_does_not_break_read_loop`); this is the
+        prime-level version of that assertion — the whole `_prime_session`
+        call must still complete and reach idle.
+        """
+        call_count = {"n": 0}
+
+        def _boom(_buffer: str) -> None:
+            call_count["n"] += 1
+            raise RuntimeError("on_read_iteration callback exploded")
+
+        with patch("agent.granite_container.pty_driver.QUIESCENCE_S", 0.02):
+            from agent.granite_container.container import PM_PRIME_SLASH_CMD, Container
+
+            c = Container(user_message="hello", max_turns=1)
+            c._pty_read_iteration_cb = _boom
+            pty = PTYDriver(role="pm")
+            pty._child = _TwoPhasePexpectChild(
+                [
+                    "✳ Sprouting… (2s · esc to interrupt)\n⏺ [/user] "
+                    + ("filler response text " * 80)
+                    + "\n❯ \nbypass permissions on (shift+tab to cycle)\n"
+                    + ("y" * 400)
+                ]
+            )
+            pty._turn_text = "bypass permissions on ❯ "
+
+            with patch.object(c, "_spawn_pair"), patch.object(c, "_close_pair"):
+                c._pm_pty = pty
+                c._dev_pty = MagicMock(spec=PTYDriver)
+                # Must not raise.
+                c._prime_session(pty, PM_PRIME_SLASH_CMD, include_user_message=False)
+
+        self.assertGreater(
+            call_count["n"],
+            0,
+            "the raising callback should still have been invoked at least once",
+        )
 
 
 if __name__ == "__main__":

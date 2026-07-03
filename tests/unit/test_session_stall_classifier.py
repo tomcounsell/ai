@@ -709,4 +709,63 @@ class TestNeverStartedPtyLivenessSecs:
         try:
             assert sc.NEVER_STARTED_PTY_LIVENESS_SECS == 42
         finally:
+            # Explicitly delenv BEFORE reloading: monkeypatch's own teardown
+            # runs after this test function returns, so a reload here while
+            # the env var is still set to "42" would silently fail to restore
+            # the default (this was a latent cross-test pollution bug —
+            # surfaced by #1878 Part A's drift-pin test in this same module).
+            monkeypatch.delenv("NEVER_STARTED_PTY_LIVENESS_SECS", raising=False)
             importlib.reload(sc)  # Restore original value
+
+
+# ---------------------------------------------------------------------------
+# #1878 Part A drift-pin: wiring on_read_iteration into _prime_session must
+# NOT change any stall-classifier constant, and must NOT introduce a new
+# prime-specific stall constant or the continue-nudge rung (#1879, out of
+# scope for this plan).
+# ---------------------------------------------------------------------------
+
+
+class TestPart1878ConstantsUnchanged:
+    """Pin the constant VALUES the D0 PTY-liveness gate depends on, and
+    confirm this plan introduced no new stall constants."""
+
+    def test_never_started_pty_liveness_secs_still_90(self):
+        """NEVER_STARTED_PTY_LIVENESS_SECS must remain 90 after the wiring change
+        in #1878 Part A — this task is test-only and must not alter constants."""
+        import os
+
+        if os.environ.get("NEVER_STARTED_PTY_LIVENESS_SECS") is None:
+            from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+            assert NEVER_STARTED_PTY_LIVENESS_SECS == 90
+
+    def test_heartbeat_freshness_window_still_90(self):
+        """HEARTBEAT_FRESHNESS_WINDOW (session_health.py) must remain 90 —
+        cross-module alignment with NEVER_STARTED_PTY_LIVENESS_SECS is load-bearing
+        for `_prime_pty_alive`'s stale-read-loop branch (session_health.py)."""
+        import os
+
+        from agent.session_health import HEARTBEAT_FRESHNESS_WINDOW
+
+        if os.environ.get("HEARTBEAT_FRESHNESS_WINDOW") is None:
+            assert HEARTBEAT_FRESHNESS_WINDOW == 90
+
+    def test_no_continue_nudge_reprieve_constant_introduced(self):
+        """The continue-nudge rung (#1879) is out of scope for this plan (Part A
+        only). Neither module should define CONTINUE_NUDGE_REPRIEVE_SECS or a
+        last_continue_nudge_at-adjacent constant yet."""
+        import agent.session_health as sh
+        import agent.session_stall_classifier as sc
+
+        assert not hasattr(sc, "CONTINUE_NUDGE_REPRIEVE_SECS")
+        assert not hasattr(sh, "CONTINUE_NUDGE_REPRIEVE_SECS")
+
+    def test_no_new_prime_specific_stall_constant(self):
+        """This plan reuses NEVER_STARTED_PTY_LIVENESS_SECS and
+        HEARTBEAT_FRESHNESS_WINDOW verbatim (per plan intent) rather than
+        introducing a dedicated prime-only liveness window constant."""
+        import agent.session_stall_classifier as sc
+
+        assert not hasattr(sc, "PRIME_PTY_LIVENESS_SECS")
+        assert not hasattr(sc, "PRIME_SESSION_LIVENESS_SECS")
