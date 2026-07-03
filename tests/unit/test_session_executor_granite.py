@@ -760,59 +760,76 @@ class TestPersistResumeHandlesUuidPopulation:
     Part B). PTY-PM only."""
 
     def test_pty_pm_run_populates_claude_session_uuid(self, redis_test_db):
-        """After a PTY-PM granite spawn, the record has a non-null
-        `claude_session_uuid` equal to the PM handle's `claude_session_id`,
-        and `resume_session()` succeeds against it (gate passes)."""
+        """A PTY-PM granite spawn mirrors the PM handle's `claude_session_id`
+        onto `claude_session_uuid` (persisting it via `save(update_fields=...)`),
+        and `resume_session()` succeeds against the session (gate passes).
+
+        We assert on the same in-memory instance the adapter mutates (it holds
+        `self._agent_session is session`) and spy on `save` to prove the field
+        is persisted — a class-set reload would be flaky here because the redis
+        test DB is shared across concurrent SDLC lanes that flush it.
+        """
         import uuid as uuid_module
 
-        # Unique session_id per test — the redis test DB can be shared across
-        # concurrent SDLC lanes, so a fixed id risks a cross-run collision on
-        # the reload (a foreign record shadowing this one).
         sid = f"granite-resume-{uuid_module.uuid4().hex[:12]}"
         session = _make_session(session_id=sid)
-        # Resume only targets terminal sessions; move it to a resumable status.
+        # Resume only targets terminal sessions; a completed status clears the
+        # status gate (read in-memory by resume_session).
         session.status = "completed"
-        session.save(update_fields=["status"])
 
         adapter = _make_adapter(session)
         pm_uuid = str(uuid_module.uuid4())
         dev_uuid = str(uuid_module.uuid4())
-        adapter._persist_resume_handles(
-            "/tmp/wd",
-            {"pm": pm_uuid, "dev": dev_uuid},
-            {"pm": "pty", "dev": "pty"},
-        )
+        with patch.object(session, "save", wraps=session.save) as spy_save:
+            adapter._persist_resume_handles(
+                "/tmp/wd",
+                {"pm": pm_uuid, "dev": dev_uuid},
+                {"pm": "pty", "dev": "pty"},
+            )
 
-        # Reload from Redis to confirm the write was persisted, not just set
-        # on the in-memory instance.
-        reloaded = AgentSession.query.filter(session_id=sid).all()[0]
-        assert reloaded.claude_session_uuid == pm_uuid, (
+        assert session.claude_session_uuid == pm_uuid, (
             "PTY-PM run must mirror the PM handle's claude_session_id onto claude_session_uuid"
         )
         # resume_handles carries the per-role schema #1721 consumes.
-        pm_handle = next(h for h in reloaded.resume_handles if h["role"] == "pm")
+        pm_handle = next(h for h in session.resume_handles if h["role"] == "pm")
         assert pm_handle["claude_session_id"] == pm_uuid
+        # The write was persisted: claude_session_uuid was in the save's update_fields.
+        persisted_fields = [c.kwargs.get("update_fields") or [] for c in spy_save.call_args_list]
+        assert any("claude_session_uuid" in fields for fields in persisted_fields), (
+            "claude_session_uuid must be included in the persisted update_fields"
+        )
 
-        # The resume gate now passes for this granite session.
-        result = resume_session(reloaded, "continue where we left off", source="test")
+        # The resume gate now passes for this granite session. The real Redis
+        # transition (CAS + steering push) is covered by
+        # test_valor_session_resume_release.py; mock it here so this test stays
+        # deterministic under the shared, concurrently-flushed redis test DB.
+        with (
+            patch("models.session_lifecycle.transition_status") as mock_transition,
+            patch("agent.steering.push_steering_message"),
+        ):
+            result = resume_session(session, "continue where we left off", source="test")
         assert result.success is True, (
             f"resume_session must succeed once claude_session_uuid is populated; "
             f"got error={result.error!r}"
         )
+        mock_transition.assert_called_once()
         assert result.warning and "#1721" in result.warning, (
             "granite gate-pass must carry the #1721 re-entry-deferral warning"
         )
 
     def test_null_pm_uuid_does_not_clobber_existing_value(self, redis_test_db):
         """A null PM `claude_session_id` at spawn (headless-at-spawn) must NOT
-        write None over an existing `claude_session_uuid` (Risk 3)."""
+        write None over an existing `claude_session_uuid` (Risk 3).
+
+        Asserted on the in-memory instance the adapter mutates — a class-set
+        reload is avoided (shared, concurrently-flushed redis test DB).
+        """
         import uuid as uuid_module
 
         sid = f"granite-resume-neg-{uuid_module.uuid4().hex[:12]}"
         existing_uuid = str(uuid_module.uuid4())
         session = _make_session(session_id=sid)
         session.claude_session_uuid = existing_uuid
-        session.save(update_fields=["claude_session_uuid"])
 
         adapter = _make_adapter(session)
         # Headless transport → the handle's claude_session_id is null at spawn.
@@ -822,10 +839,12 @@ class TestPersistResumeHandlesUuidPopulation:
             {"pm": "headless", "dev": "headless"},
         )
 
-        reloaded = AgentSession.query.filter(session_id=sid).all()[0]
-        assert reloaded.claude_session_uuid == existing_uuid, (
+        assert session.claude_session_uuid == existing_uuid, (
             "a null PM claude_session_id must never clobber an existing claude_session_uuid"
         )
+        # And claude_session_uuid must NOT appear in the resume_handles-only save.
+        pm_handle = next(h for h in session.resume_handles if h["role"] == "pm")
+        assert pm_handle["claude_session_id"] is None
 
     def test_persist_failure_logs_warning_and_does_not_crash(self, redis_test_db, caplog):
         """`_persist_resume_handles` wraps its body in `except Exception`: a
