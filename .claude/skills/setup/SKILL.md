@@ -38,9 +38,110 @@ ln -sf "$(command -v python3)" /opt/homebrew/bin/python
 
 The update orchestrator (`scripts/update/run.py`) verifies this via `check_python_alias()` and fails loudly if missing.
 
-### Bootstrap cross-machine shell env loader
+## Step 0: Vault Location (`VALOR_VAULT_DIR`)
 
-Cross-machine secrets and shell config live in `~/Desktop/Valor/` (iCloud-synced). `~/.zshenv` itself does NOT sync (it's in `$HOME`), so each new machine needs a one-line bootstrap that sources the vault loader. The update script self-heals this on every run via `scripts/update/zshenv_sync.py`, but on a fresh machine the easiest path is to run that module directly before the first `/update`:
+Before anything else, establish where Valor's secrets vault lives on this machine. The vault holds the canonical `.env`, `projects.json`, identity overlays, persona overlays, Google credentials, and reflections registry. Every later step reads from it.
+
+**Security note**: Vaults under `~/Desktop`, `~/Documents`, or `~/iCloud Drive` are TCC-restricted on macOS — launchd-spawned processes can't read files there at runtime. The install scripts work around this by baking the entire `.env` (including API keys) into each launchd plist's `EnvironmentVariables` dict and `chmod 0600`-ing the plist. Vaults under `~/.valor` or any other non-TCC path keep secrets in `<vault>/.env` only. The picker labels each option with its security posture so the user can pick informed.
+
+Resolution cascade (in order):
+
+1. **`VALOR_VAULT_DIR` already set in the user's shell env or invocation**: use it as-is, skip the picker.
+2. **User passed a `--vault-dir <path>` directive in their `/setup` invocation**: use that path, skip the picker.
+3. **`~/.valor/.env` exists** (machine already configured to the preferred default): use `~/.valor` and skip the picker.
+4. **`~/Desktop/Valor/.env` exists** (machine on the legacy default): use `~/Desktop/Valor` and skip the picker.
+5. **Nothing pre-set**: prompt the user via the harness-aware picker (next sub-step).
+
+### 0.1 Detect pre-set vault location
+
+```bash
+if [ -n "${VALOR_VAULT_DIR:-}" ]; then
+  echo "VALOR_VAULT_DIR already set: $VALOR_VAULT_DIR — skipping picker"
+elif [ -f "$HOME/.valor/.env" ]; then
+  export VALOR_VAULT_DIR="$HOME/.valor"
+  echo "Existing vault found at $VALOR_VAULT_DIR (preferred default) — using it"
+elif [ -f "$HOME/Desktop/Valor/.env" ]; then
+  export VALOR_VAULT_DIR="$HOME/Desktop/Valor"
+  echo "Existing vault found at $VALOR_VAULT_DIR (legacy default) — using it"
+fi
+```
+
+If none matched, continue to 0.2.
+
+### 0.2 Run the vault-location picker
+
+Invoke the harness-aware shim. In Claude Code, it emits a JSON instruction on stdout and exits 78; in a TTY, it prompts inline and prints the chosen path.
+
+```bash
+cd ~/src/ai
+VALOR_HARNESS=claude-code .venv/bin/python -m tools.install.prompt vault-picker > /tmp/vault-picker.json
+echo "exit=$?"
+```
+
+Read `/tmp/vault-picker.json` and call **AskUserQuestion** using its fields:
+
+- `question` → the question text
+- `header` → the question header (max 12 chars)
+- For each `options[i]`: pass `label`, `description` (becomes the option's description), and remember the `value` so you can map the chosen label back to the value to use.
+
+If the user picks **Custom path…** (value `__custom__`), run a second helper invocation to gather the free-form path, then pass that JSON into a follow-up AskUserQuestion (use a single-question form with no preset options — the user types one):
+
+```bash
+VALOR_HARNESS=claude-code .venv/bin/python -c "
+from tools.install.prompt import ask_input, InstallPromptDeferred
+try:
+    ask_input('Enter the absolute path for your Valor vault directory', header='Vault path')
+except InstallPromptDeferred:
+    pass
+" > /tmp/vault-picker-custom.json
+```
+
+The follow-up JSON has `kind: ask_input` — render it as a free-text question and capture the user's typed path.
+
+### 0.3 Validate and set `VALOR_VAULT_DIR`
+
+```bash
+CHOSEN_PATH="<the-path-the-user-picked>"
+.venv/bin/python -c "
+import sys
+from pathlib import Path
+from config.settings import VaultPathInvalid, VaultSettings
+p = Path('$CHOSEN_PATH').expanduser()
+try:
+    VaultSettings._validate_dir(p)
+except VaultPathInvalid as e:
+    print(f'ERROR: {e}', file=sys.stderr); sys.exit(1)
+" || { echo "Vault path rejected (in-repo or ephemeral root). Re-run /setup."; exit 1; }
+
+export VALOR_VAULT_DIR="$(.venv/bin/python -c "from pathlib import Path; print(Path('$CHOSEN_PATH').expanduser())")"
+mkdir -p "$VALOR_VAULT_DIR"
+```
+
+### 0.4 Persist `VALOR_VAULT_DIR` for future sessions
+
+Write it into the new vault's `.env` so that subsequent processes (the bridge, worker, calendar hooks) pick it up without relying on the user's shell rc:
+
+```bash
+touch "$VALOR_VAULT_DIR/.env"
+grep -q '^VALOR_VAULT_DIR=' "$VALOR_VAULT_DIR/.env" \
+  || echo "VALOR_VAULT_DIR=$VALOR_VAULT_DIR" >> "$VALOR_VAULT_DIR/.env"
+```
+
+### 0.5 Repoint the repo `.env` symlink
+
+The repo's `.env` is a symlink to `$VALOR_VAULT_DIR/.env`. If the user picked a non-default location, repoint it:
+
+```bash
+cd ~/src/ai
+rm -f .env
+ln -s "$VALOR_VAULT_DIR/.env" .env
+```
+
+After Step 0 completes, `$VALOR_VAULT_DIR` is exported for this shell, persisted in the vault `.env`, and the repo `.env` symlink points at the chosen location. All later steps use `${VALOR_VAULT_DIR}` instead of a hardcoded vault path.
+
+### 0.6 Bootstrap cross-machine shell env loader
+
+Cross-machine secrets and shell config live in the iCloud-synced vault (legacy default `~/Desktop/Valor/`). `~/.zshenv` itself does NOT sync (it's in `$HOME`), so each new machine needs a one-line bootstrap that sources the vault loader. The update script self-heals this on every run via `scripts/update/zshenv_sync.py`, but on a fresh machine the easiest path is to run that module directly before the first `/update`:
 
 ```bash
 cd ~/src/ai
@@ -48,12 +149,12 @@ cd ~/src/ai
 ```
 
 That:
-- Seeds `~/Desktop/Valor/zshenv.sh` with a default loader if missing (only the very first machine ever does this — subsequent machines inherit the file via iCloud).
-- Appends a `[ -f ~/Desktop/Valor/zshenv.sh ] && source ...` guard to `~/.zshenv` if missing.
+- Seeds the vault's `zshenv.sh` with a default loader if missing (only the very first machine ever does this — subsequent machines inherit the file via iCloud).
+- Appends a `[ -f <vault>/zshenv.sh ] && source ...` guard to `~/.zshenv` if missing.
 
 After it runs, open a fresh shell and confirm a shared secret is loaded (e.g., `echo "${SENTRY_PERSONAL_TOKEN:+set}"` — should print `set` if the vault `.env` defines it). If the vault hasn't synced yet, the guard line is still safe (it's `[ -f ]`-gated) and will activate as soon as iCloud lands the file.
 
-If you need to add new cross-machine shell config later (PATH tweaks shared across all Valor machines, shell functions, etc.), edit `~/Desktop/Valor/zshenv.sh` directly — it syncs everywhere automatically. Keep host-specific config in the local `~/.zshenv` or `~/.zshrc`.
+If you need to add new cross-machine shell config later (PATH tweaks shared across all Valor machines, shell functions, etc.), edit the vault's `zshenv.sh` directly — it syncs everywhere automatically. Keep host-specific config in the local `~/.zshenv` or `~/.zshrc`.
 
 ## Step 1: Install uv Package Manager
 
@@ -113,7 +214,7 @@ Check if `.env` exists. If not:
 cp .env.example .env
 ```
 
-**Ask the user** which project(s) this machine should monitor. The available projects are defined in `~/Desktop/Valor/projects.json` -- check the full list there. Common options:
+**Ask the user** which project(s) this machine should monitor. The available projects are defined in `${VALOR_VAULT_DIR}/projects.json` -- check the full list there. Common options:
 - Single project: `ACTIVE_PROJECTS=psyoptimal`
 - Multiple: `ACTIVE_PROJECTS=valor,popoto`
 - All: `ACTIVE_PROJECTS=valor,django-project-template,popoto,psyoptimal,flutter-project-template,cuttlefish,yudame-research`
@@ -141,21 +242,21 @@ Set up Google Calendar integration for work time tracking.
 Check if credentials exist:
 
 ```bash
-ls ~/Desktop/Valor/google_credentials.json
+ls "${VALOR_VAULT_DIR}/google_credentials.json"
 ```
 
 If missing, ask the user to:
 1. Go to Google Cloud Console (project: Yudame General)
 2. Enable Google Calendar API
 3. Create OAuth 2.0 Client ID (Desktop app)
-4. Download JSON and save to `~/Desktop/Valor/google_credentials.json`
+4. Download JSON and save to `${VALOR_VAULT_DIR}/google_credentials.json`
 
 ### 4.2 Run OAuth consent flow
 
 Check if token already exists:
 
 ```bash
-ls ~/Desktop/Valor/google_token.json 2>/dev/null
+ls "${VALOR_VAULT_DIR}/google_token.json" 2>/dev/null
 ```
 
 If no token exists, run the OAuth flow:
@@ -222,25 +323,25 @@ The SDK spawns Claude Code CLI subprocesses that inherit authentication from the
 # Login to Sentry (generates auth token)
 sentry-cli login
 
-# Or set token directly in ~/Desktop/Valor/.env
+# Or set token directly in ${VALOR_VAULT_DIR}/.env
 # SENTRY_PERSONAL_TOKEN=sntrys_...
 # The SDK automatically injects this as SENTRY_AUTH_TOKEN for Eng (and Teammate) sessions
 ```
 
-The token is stored in `~/Desktop/Valor/.env` as `SENTRY_PERSONAL_TOKEN` and auto-injected into agent sessions by `sdk_client.py`.
+The token is stored in `${VALOR_VAULT_DIR}/.env` as `SENTRY_PERSONAL_TOKEN` and auto-injected into agent sessions by `sdk_client.py`.
 
-## Step 6: Project Configuration (~/Desktop/Valor/projects.json)
+## Step 6: Project Configuration (`${VALOR_VAULT_DIR}/projects.json`)
 
-Project configuration lives in `~/Desktop/Valor/projects.json` (iCloud-synced, private). This directory is shared across machines via iCloud.
+Project configuration lives in `${VALOR_VAULT_DIR}/projects.json` (typically iCloud-synced when the vault sits on iCloud-managed paths; private). The contents may be shared across machines via whatever sync mechanism the user picked.
 
-Check if `~/Desktop/Valor/projects.json` exists. If not, create from the repo example:
+Check if it exists. If not, create from the repo example:
 
 ```bash
-mkdir -p ~/Desktop/Valor
-cp config/projects.example.json ~/Desktop/Valor/projects.json
+mkdir -p "${VALOR_VAULT_DIR}"
+cp config/projects.example.json "${VALOR_VAULT_DIR}/projects.json"
 ```
 
-Edit `~/Desktop/Valor/projects.json` for this machine's projects.
+Edit `${VALOR_VAULT_DIR}/projects.json` for this machine's projects.
 
 **Critical rules when editing projects.json:**
 
@@ -295,7 +396,7 @@ Example minimal project entry:
 
 ### Persona overlays
 
-Persona overlay files live in `~/Desktop/Valor/personas/`. The loader (`agent.sdk_client.load_persona_prompt`) prefers the private overlay when present and falls back to the in-repo template (`config/personas/<persona>.md`) otherwise. Seeding the private overlays from the in-repo defaults at setup time gives the agent identical behavior on every fresh machine without waiting for iCloud propagation from another box.
+Persona overlay files live in `${VALOR_VAULT_DIR}/personas/`. The loader (`agent.sdk_client.load_persona_prompt`) prefers the private overlay when present and falls back to the in-repo template (`config/personas/<persona>.md`) otherwise. Seeding the private overlays from the in-repo defaults at setup time gives the agent identical behavior on every fresh machine without waiting for cross-machine sync.
 
 The engineer and customer-service personas have in-repo templates that are version-controlled and PR-reviewable:
 - `config/personas/engineer.md` — Engineer SDLC-owner playbook (CRITIQUE/REVIEW gates, Mode 3 parallel orchestrator, `merge_authorized` bypass)
@@ -304,11 +405,11 @@ The engineer and customer-service personas have in-repo templates that are versi
 Seed them into the vault if not already present (do NOT overwrite — existing overlays may carry per-machine customizations):
 
 ```bash
-mkdir -p ~/Desktop/Valor/personas
+mkdir -p "${VALOR_VAULT_DIR}/personas"
 
 for persona in engineer customer-service; do
   src="config/personas/${persona}.md"
-  dst="$HOME/Desktop/Valor/personas/${persona}.md"
+  dst="${VALOR_VAULT_DIR}/personas/${persona}.md"
   if [ ! -f "$dst" ]; then
     cp "$src" "$dst"
     echo "Seeded $dst from $src"
@@ -318,20 +419,20 @@ for persona in engineer customer-service; do
 done
 ```
 
-The `teammate` persona has no in-repo template — there is no `config/personas/teammate.md`. A teammate overlay is purely operator-authored under `~/Desktop/Valor/personas/teammate.md`; if absent, the loader has no fallback for that persona, so a teammate-using machine must author its own overlay.
+The `teammate` persona has no in-repo template — there is no `config/personas/teammate.md`. A teammate overlay is purely operator-authored under `${VALOR_VAULT_DIR}/personas/teammate.md`; if absent, the loader has no fallback for that persona, so a teammate-using machine must author its own overlay.
 
 If the machine is already running and you want to inspect drift between the in-repo template and the private overlay:
 
 ```bash
-diff config/personas/engineer.md ~/Desktop/Valor/personas/engineer.md
-diff config/personas/customer-service.md ~/Desktop/Valor/personas/customer-service.md
+diff config/personas/engineer.md "${VALOR_VAULT_DIR}/personas/engineer.md"
+diff config/personas/customer-service.md "${VALOR_VAULT_DIR}/personas/customer-service.md"
 ```
 
 The persona loader emits a WARNING log line if a known load-bearing substring is missing from the private engineer overlay (e.g., `CRITIQUE` for the pipeline gate, `Mode 3` for the parallel orchestrator, `merge_authorized` for the stale-baseline bypass). The `/update` script also runs an engineer-overlay drift check (`scripts/update/persona_drift.py`, Step 4.10). Watch `logs/bridge.log` after the first session for these warnings — they signal that the private overlay has rolled back and should be re-synced.
 
 ### Cross-machine reuse
 
-If the project is already defined on another machine's `~/Desktop/Valor/projects.json`, copy its entry rather than writing from scratch (iCloud syncs this file across machines).
+If the project is already defined on another machine's `projects.json`, copy its entry rather than writing from scratch (whatever sync mechanism the user picked — iCloud for vaults under `~/Desktop`/`~/Documents`, manual copy for `~/.valor`, etc. — determines how it gets there).
 
 After editing, verify all working directories exist:
 
@@ -475,10 +576,10 @@ needs no choice here. Pick the generation variant from this machine's RAM:
 - **RAM < 48 GB** → Ollama Cloud variant `gemma4:31b-cloud` (a lightweight hosted
   pointer that fits any machine, including a 16 GB host).
 
-Write the choice to `~/.zshenv` — **machine-local**, NOT the iCloud-synced
-`~/Desktop/Valor/.env` (the vault `.env` would propagate one machine's variant to
-every other machine via iCloud and break per-machine semantics). The write is
-grep-before-append idempotent:
+Write the choice to `~/.zshenv` — **machine-local**, NOT the vault
+`${VALOR_VAULT_DIR}/.env` (an iCloud-synced vault `.env` would propagate one
+machine's variant to every other machine and break per-machine semantics). The
+write is grep-before-append idempotent:
 
 ```bash
 RAM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
@@ -610,7 +711,7 @@ uv sync --all-extras
 ```
 
 ### Calendar OAuth fails
-1. Verify credentials file exists: `ls ~/Desktop/Valor/google_credentials.json`
+1. Verify credentials file exists: `ls "${VALOR_VAULT_DIR}/google_credentials.json"`
 2. Ensure Google Calendar API is enabled in Cloud Console
 3. Re-run OAuth: `.venv/bin/valor-calendar --reauth`
 

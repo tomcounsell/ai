@@ -248,8 +248,10 @@ def _telethon_client():
     """Create a Telethon client from env vars. Returns (client, api_id, api_hash) or raises."""
     from dotenv import load_dotenv
 
+    from config.settings import load_vault_env
+
     load_dotenv()
-    load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
+    load_vault_env()  # symlink target — no-op when repo .env is intact
 
     try:
         api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))

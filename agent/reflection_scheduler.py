@@ -65,14 +65,15 @@ _reflection_pool = ThreadPoolExecutor(
 
 
 # Path to the reflections registry.
-# Resolution order: REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml → config/
+# Resolution order: REFLECTIONS_YAML env var → vault.reflections_yaml → config/
 def _resolve_registry_path() -> Path:
     """Resolve the reflections YAML path using vault-first fallback logic.
 
     Priority:
-    1. REFLECTIONS_YAML env var (explicit override, e.g., for testing)
-    2. ~/Desktop/Valor/reflections.yaml (iCloud-synced vault, private config)
-    3. config/reflections.yaml (in-repo fallback, always present)
+    1. `REFLECTIONS_YAML` env var (explicit override, e.g., for testing)
+    2. `vault.reflections_yaml` — `<VALOR_VAULT_DIR>/reflections.yaml` (default
+       vault: `~/Desktop/Valor/`)
+    3. `config/reflections.yaml` (in-repo fallback, always present)
     """
     import os
 
@@ -83,14 +84,24 @@ def _resolve_registry_path() -> Path:
             return p
         logger.warning("REFLECTIONS_YAML env var points to non-existent path: %s", env_path)
 
-    # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced Desktop
-    # path entirely. macOS TCC blocks stat()/open() on ~/Desktop files from launchd
-    # agents — even exists() hangs indefinitely and blocks the asyncio event loop.
-    # install_worker.sh copies reflections.yaml → config/reflections.yaml at install time.
-    if not os.environ.get("VALOR_LAUNCHD"):
-        vault_path = Path.home() / "Desktop" / "Valor" / "reflections.yaml"
-        if vault_path.exists():
-            return vault_path
+    # Under launchd, skip the vault path ONLY when the vault sits on a
+    # TCC-protected location (~/Desktop, ~/Documents, ~/iCloud Drive).
+    # macOS TCC blocks stat()/open() on iCloud-synced files from launchd
+    # agents — even exists() hangs indefinitely and blocks the asyncio
+    # event loop. install_worker.sh copies reflections.yaml →
+    # config/reflections.yaml at install time so we have a readable local
+    # copy. Non-TCC vaults (~/.valor, custom paths) work fine at runtime
+    # even under launchd, so we read from them directly.
+    try:
+        from config.settings import VaultNotResolved, vault
+
+        under_launchd = bool(os.environ.get("VALOR_LAUNCHD"))
+        if not under_launchd or not vault.is_tcc_restricted:
+            vault_path = vault.reflections_yaml
+            if vault_path.exists():
+                return vault_path
+    except VaultNotResolved:
+        pass  # vault not configured; fall through to in-repo copy
 
     return Path(__file__).parent.parent / "config" / "reflections.yaml"
 
@@ -211,7 +222,7 @@ def load_registry(path: Path | None = None) -> list[ReflectionEntry]:
 
     Args:
         path: Path to the YAML file. Defaults to vault-first resolution:
-              REFLECTIONS_YAML env var → ~/Desktop/Valor/reflections.yaml →
+              REFLECTIONS_YAML env var → `vault.reflections_yaml` →
               config/reflections.yaml.
 
     Returns:

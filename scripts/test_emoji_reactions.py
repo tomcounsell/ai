@@ -24,9 +24,11 @@ from telethon import TelegramClient
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import ReactionEmoji
 
+from config.settings import load_vault_env
+
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")
+load_vault_env()
 
 try:
     API_ID = int(os.getenv("TELEGRAM_API_ID") or "0")

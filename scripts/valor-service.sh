@@ -11,7 +11,7 @@ VENV="$PROJECT_DIR/.venv"
 
 # Source .env so SERVICE_LABEL_PREFIX (and other env vars) are available.
 # Failures are non-fatal — we fall back to defaults below.
-# Note: .env symlinks to ~/Desktop/Valor/.env (iCloud + TCC-protected). Direct source
+# Note: .env symlinks to <vault>/.env (default ~/Desktop/Valor/.env, iCloud + TCC-protected). Direct source
 # can hit EINTR (iCloud eviction) or EPERM (TCC revoked) and abort bash under set -e
 # before `||` can catch it. Copy to a local temp first — cp handles EINTR at the C
 # level, and source on the local temp is stable.
@@ -125,11 +125,12 @@ ensure_setup() {
         return 1
     fi
 
-    PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+    VAULT_DIR="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}"
+    PROJECTS_JSON="${PROJECTS_CONFIG_PATH:-$VAULT_DIR/projects.json}"
     if [ ! -f "$PROJECTS_JSON" ]; then
         echo "ERROR: projects.json not found at $PROJECTS_JSON"
-        echo "  mkdir -p ~/Desktop/Valor"
-        echo "  cp $PROJECT_DIR/config/projects.example.json ~/Desktop/Valor/projects.json"
+        echo "  mkdir -p $VAULT_DIR"
+        echo "  cp $PROJECT_DIR/config/projects.example.json $VAULT_DIR/projects.json"
         echo "  # Then edit with your project settings"
         return 1
     fi
@@ -391,7 +392,7 @@ bootstrap_plist_idempotent() {
 }
 
 has_bridge_role() {
-    local config="${PROJECTS_CONFIG_PATH:-$HOME/Desktop/Valor/projects.json}"
+    local config="${PROJECTS_CONFIG_PATH:-${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}/projects.json}"
     if [ ! -f "$config" ]; then
         return 0
     fi

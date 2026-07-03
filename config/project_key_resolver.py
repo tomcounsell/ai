@@ -57,7 +57,15 @@ def _load_projects(projects_path: Path | None = None) -> list[tuple[str, str]]:
     """
     global _projects_cache, _projects_cache_path
 
-    resolved = str(projects_path or Path.home() / "Desktop" / "Valor" / "projects.json")
+    if projects_path is not None:
+        resolved = str(projects_path)
+    else:
+        try:
+            from config.settings import vault
+
+            resolved = str(vault.projects_path)
+        except Exception:
+            resolved = str(Path.home() / "Desktop" / "Valor" / "projects.json")
 
     # Cache hit (same path)
     if _projects_cache is not None and _projects_cache_path == resolved:
@@ -101,7 +109,8 @@ def resolve_project_key(
         env: Environment mapping to look up ``VALOR_PROJECT_KEY``.  Defaults to
             ``os.environ`` when ``None``.
         projects_path: Override path to ``projects.json``.  Defaults to
-            ``~/Desktop/Valor/projects.json``.
+            ``vault.projects_path`` (configurable via ``VALOR_VAULT_DIR``;
+            base default ``~/Desktop/Valor/projects.json``).
         project_key: Explicit override.  If non-empty, returned immediately
             without consulting ``env`` or ``projects.json``.
 

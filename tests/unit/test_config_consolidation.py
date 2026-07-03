@@ -1,20 +1,66 @@
-"""Tests for config consolidation: ~/Desktop/Valor/ as single credentials path."""
+"""Tests for config consolidation: vault-aware credentials path resolution."""
 
+import sys
 from pathlib import Path
+
+import pytest
+
+import config.settings  # noqa: F401  (force import so sys.modules has the entry)
+
+_VAULT_MODULE = sys.modules["config.settings"]
+
+
+@pytest.fixture(autouse=True)
+def _reset_vault_singleton(monkeypatch):
+    """Reset the vault singleton before every test in this module."""
+    monkeypatch.setattr(_VAULT_MODULE, "_vault_singleton", None)
 
 
 class TestGoogleAuthSettingsDefault:
-    """GoogleAuthSettings.credentials_dir defaults to ~/Desktop/Valor/."""
+    """GoogleAuthSettings.credentials_dir resolves through the vault cascade."""
 
-    def test_default_credentials_dir(self):
-        """Default credentials_dir should be ~/Desktop/Valor/ not config/secrets."""
+    def test_default_credentials_dir_uses_vault(self, monkeypatch, tmp_path):
+        """When VALOR_VAULT_DIR is set, the default routes through it."""
+        monkeypatch.setattr(_VAULT_MODULE, "_EPHEMERAL_PATH_PREFIXES", ())
+        monkeypatch.setenv("VALOR_VAULT_DIR", str(tmp_path))
+        monkeypatch.delenv("GOOGLE_CREDENTIALS_DIR", raising=False)
+
         from config.settings import GoogleAuthSettings
 
         settings = GoogleAuthSettings()
-        assert settings.credentials_dir == Path.home() / "Desktop" / "Valor"
+        assert settings.credentials_dir == tmp_path
 
-    def test_env_override_still_works(self):
-        """GOOGLE_CREDENTIALS_DIR env var should still override the default."""
+    def test_default_credentials_dir_falls_back_to_desktop_when_vault_unresolved(
+        self, monkeypatch, tmp_path
+    ):
+        """No VALOR_VAULT_DIR + no ~/Desktop/Valor/.env → desktop literal fallback."""
+        monkeypatch.delenv("VALOR_VAULT_DIR", raising=False)
+        monkeypatch.delenv("GOOGLE_CREDENTIALS_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        # Fake home has no Desktop/Valor/.env, so cascade raises VaultNotResolved.
+
+        from config.settings import GoogleAuthSettings
+
+        settings = GoogleAuthSettings()
+        assert settings.credentials_dir == tmp_path / "Desktop" / "Valor"
+
+    def test_default_credentials_dir_honors_google_credentials_dir_env(
+        self, monkeypatch, tmp_path
+    ):
+        """GOOGLE_CREDENTIALS_DIR override wins via vault.google_credentials_dir."""
+        monkeypatch.setattr(_VAULT_MODULE, "_EPHEMERAL_PATH_PREFIXES", ())
+        monkeypatch.setenv("VALOR_VAULT_DIR", str(tmp_path / "vault"))
+        (tmp_path / "vault").mkdir()
+        override = tmp_path / "creds-elsewhere"
+        monkeypatch.setenv("GOOGLE_CREDENTIALS_DIR", str(override))
+
+        from config.settings import GoogleAuthSettings
+
+        settings = GoogleAuthSettings()
+        assert settings.credentials_dir == override
+
+    def test_explicit_credentials_dir_arg_still_works(self):
+        """Passing credentials_dir= explicitly still wins."""
         from config.settings import GoogleAuthSettings
 
         settings = GoogleAuthSettings(credentials_dir=Path("/custom/path"))
@@ -92,11 +138,35 @@ class TestPathsNoSecretsDir:
         content = paths_file.read_text()
         assert "SECRETS_DIR" not in content
 
-    def test_has_valor_dir(self):
-        """config/paths.py should export VALOR_DIR."""
-        from config.paths import VALOR_DIR
+    def test_valor_dir_resolves_via_vault(self, monkeypatch, tmp_path):
+        """`config.paths.VALOR_DIR` resolves through the vault cascade.
 
-        assert VALOR_DIR == Path.home() / "Desktop" / "Valor"
+        The constant is computed at import time. We force a fresh resolution
+        by clearing the singleton and re-importing the module.
+        """
+        import importlib
+
+        monkeypatch.setattr(_VAULT_MODULE, "_EPHEMERAL_PATH_PREFIXES", ())
+        monkeypatch.setenv("VALOR_VAULT_DIR", str(tmp_path))
+
+        import config.paths
+
+        importlib.reload(config.paths)
+        assert config.paths.VALOR_DIR == tmp_path
+
+    def test_valor_dir_falls_back_to_desktop_when_vault_unresolved(
+        self, monkeypatch, tmp_path
+    ):
+        """No VALOR_VAULT_DIR + no ~/Desktop/Valor/.env → desktop literal."""
+        import importlib
+
+        monkeypatch.delenv("VALOR_VAULT_DIR", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        import config.paths
+
+        importlib.reload(config.paths)
+        assert config.paths.VALOR_DIR == tmp_path / "Desktop" / "Valor"
 
 
 class TestNoConfigSecrets:

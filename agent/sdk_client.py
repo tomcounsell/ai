@@ -681,12 +681,25 @@ PERSONAS_SEGMENTS_DIR = PERSONAS_BASE_DIR / "segments"
 # Path to identity config
 IDENTITY_CONFIG_PATH = Path(__file__).parent.parent / "config" / "identity.json"
 
-# Path to private identity override (iCloud-synced)
-PRIVATE_IDENTITY_PATH = Path.home() / "Desktop" / "Valor" / "identity.json"
 
-# Path to persona overlay files (private, iCloud-synced)
-# Overlays live in ~/Desktop/Valor/personas/ — falls back to config/personas/ for dev
-PERSONAS_OVERLAY_DIR = Path.home() / "Desktop" / "Valor" / "personas"
+def _resolve_vault_path(prop: str, fallback_subpath: tuple[str, ...]) -> Path:
+    """Resolve a path under the configured vault, falling back to the
+    established default `~/Desktop/Valor/<fallback_subpath>` when the vault
+    is unresolvable (fresh checkout, broken symlink, etc.)."""
+    try:
+        from config.settings import vault
+
+        return getattr(vault, prop)
+    except Exception:
+        return Path.home().joinpath("Desktop", "Valor", *fallback_subpath)
+
+
+# Path to private identity override (lives in the configured vault)
+PRIVATE_IDENTITY_PATH = _resolve_vault_path("identity_path", ("identity.json",))
+
+# Path to persona overlay files (private, lives in the configured vault)
+# Falls back to config/personas/ for dev when the vault overlay is missing.
+PERSONAS_OVERLAY_DIR = _resolve_vault_path("personas_dir", ("personas",))
 
 # Path to PRINCIPAL.md — supervisor's operating context for strategic decisions
 PRINCIPAL_PATH = Path(__file__).parent.parent / "config" / "PRINCIPAL.md"
@@ -837,7 +850,7 @@ def load_principal_context(condensed: bool = True) -> str:
 def load_identity() -> dict:
     """Load structured identity data from config/identity.json.
 
-    Merges with ~/Desktop/Valor/identity.json if present (shallow merge,
+    Merges with `<vault>/identity.json` if present (shallow merge,
     private values override repo values for matching keys).
 
     Returns:
@@ -930,14 +943,15 @@ def _assemble_segments(identity: dict) -> str:
 def _resolve_overlay_path(persona: str) -> Path:
     """Resolve persona overlay file path.
 
-    Checks ~/Desktop/Valor/personas/{persona}.md first (private, iCloud-synced),
-    then falls back to config/personas/{persona}.md (in-repo, for development).
+    Checks `<vault>/personas/{persona}.md` first (private, lives in the
+    configured vault), then falls back to `config/personas/{persona}.md`
+    (in-repo, for development).
     """
     overlay_path = PERSONAS_OVERLAY_DIR / f"{persona}.md"
     if overlay_path.exists():
         return overlay_path
 
-    # Fallback: in-repo overlay (for development or when Desktop/Valor not available)
+    # Fallback: in-repo overlay (for dev or when the vault overlay is missing)
     return PERSONAS_BASE_DIR / f"{persona}.md"
 
 
@@ -963,8 +977,9 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
 
     Segments are assembled from config/personas/segments/ per manifest.json,
     with identity fields injected from config/identity.json.
-    Overlays are read from ~/Desktop/Valor/personas/{persona}.md (private, iCloud-synced),
-    falling back to config/personas/{persona}.md (in-repo, for development).
+    Overlays are read from `<vault>/personas/{persona}.md` (private, lives in
+    the configured vault), falling back to `config/personas/{persona}.md`
+    (in-repo, for development).
 
     Args:
         persona: Persona name — one of "engineer", "teammate",
@@ -985,7 +1000,7 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
     identity = load_identity()
     base_content = _assemble_segments(identity)
 
-    # Resolve overlay: ~/Desktop/Valor/personas/ first, then config/personas/
+    # Resolve overlay: <vault>/personas/ first, then config/personas/
     overlay_path = _resolve_overlay_path(persona)
 
     if overlay_path.exists():
@@ -1017,8 +1032,7 @@ def load_persona_prompt(persona: str = "engineer", substitutions: dict | None = 
                 'instructions (subagent_type="dev-session"). '
                 "Eng sessions are now created via "
                 "`python -m tools.valor_session create --role eng`. "
-                "Update ~/Desktop/Valor/personas/engineer.md to remove the Agent tool "
-                "dispatch pattern."
+                f"Update {overlay_path} to remove the Agent tool dispatch pattern."
             )
         logger.info(f"Loaded persona '{persona}' from {overlay_path}")
         result = f"{base_content}\n\n---\n\n{overlay_content}"
@@ -1486,8 +1500,8 @@ def _resolve_sentry_auth_token() -> str | None:
     """Resolve Sentry auth token for PM/Teammate session env injection.
 
     Cascade: SENTRY_PERSONAL_TOKEN env var -> SENTRY_AUTH_TOKEN env var ->
-    ~/Desktop/Valor/.env file read (only in terminal mode; launchd blocks
-    ~/Desktop under TCC).
+    `<vault>/.env` file read (only in terminal mode; launchd blocks
+    iCloud-synced ~/Desktop paths under TCC).
 
     Returns:
         The Sentry auth token, or None if no source resolves successfully.
@@ -1496,8 +1510,8 @@ def _resolve_sentry_auth_token() -> str | None:
     if token:
         return token
     if os.environ.get("VALOR_LAUNCHD"):
-        return None  # launchd cannot read ~/Desktop (macOS TCC)
-    sentry_env = Path.home() / "Desktop" / "Valor" / ".env"
+        return None  # launchd cannot read iCloud-synced ~/Desktop (macOS TCC)
+    sentry_env = _resolve_vault_path("env_path", (".env",))
     try:
         if not sentry_env.exists():
             return None

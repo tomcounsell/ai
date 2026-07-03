@@ -28,7 +28,7 @@ from pathlib import Path
 # When running via launchd, env vars are injected into the plist by
 # install_worker.sh — VALOR_LAUNCHD=1 is set to signal this. We skip
 # dotenv entirely in that case: macOS TCC blocks open() on iCloud-synced
-# ~/Desktop/Valor/.env (which .env symlinks to), causing the process to
+# vault .env paths (which the repo .env symlinks to), causing the process to
 # hang indefinitely.
 if not os.environ.get("VALOR_LAUNCHD"):
     try:

@@ -136,7 +136,7 @@ def _format_signals_for_prompt(raw_signals: dict[str, list[dict]]) -> str:
 def _draft_pass_a(raw_signals: dict[str, list[dict]]) -> str:
     """Run Pass A: ask Claude Haiku to draft the brief from raw signals.
 
-    Mirrors the pattern in reflections/utils.py:run_llm_reflection. Returns
+    Mirrors the pattern in reflections/utilities.py:run_llm_reflection. Returns
     the transcript string. Raises RuntimeError on hard failure (no anthropic
     package, no API key, or LLM error) so the caller surfaces it.
     """

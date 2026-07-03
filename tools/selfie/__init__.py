@@ -13,9 +13,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from bridge.utc import utc_now
+from config.settings import load_vault_env
 
 load_dotenv()
-load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
+load_vault_env()  # symlink target — no-op when repo .env is intact
 
 # Canonical appearance description derived from Valor's profile photo
 VALOR_APPEARANCE = (

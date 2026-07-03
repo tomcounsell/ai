@@ -11,11 +11,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
 
-# ── Ensure .env → ~/Desktop/Valor/.env symlink ──────────────────────
+# ── Ensure .env → <vault>/.env symlink ──────────────────────────────
 # The vault file is the single source of truth for secrets. On a fresh machine
 # or after accidental deletion, create the symlink before sourcing .env so the
-# rest of this script always reads from the vault.
-VAULT_ENV="$HOME/Desktop/Valor/.env"
+# rest of this script always reads from the vault. VALOR_VAULT_DIR (when set
+# in the user's shell rc) overrides the established default ~/Desktop/Valor.
+VAULT_ENV="${VALOR_VAULT_DIR:-$HOME/Desktop/Valor}/.env"
 REPO_ENV="$PROJECT_DIR/.env"
 if [ -n "$VAULT_ENV" ] && [ -f "$VAULT_ENV" ] && [ ! -L "$REPO_ENV" ]; then
     echo "[update] Creating .env symlink → $VAULT_ENV"
@@ -123,11 +124,11 @@ if [ -f "$REFLECTIONS_DST" ]; then
 fi
 
 # ── Sync config/reflections.yaml (real file copy) ────────────────────
-# Vault file at ~/Desktop/Valor/reflections.yaml takes precedence over in-repo.
+# Vault file at <vault>/reflections.yaml takes precedence over in-repo.
 # Must be a REAL COPY, never a symlink — the launchd worker's reflection
-# scheduler reads it, and a symlink to ~/Desktop hangs the asyncio event loop
-# under launchd TCC (June 2026 worker wedge). Idempotent: skips gracefully if
-# the vault file doesn't exist (fresh machine).
+# scheduler reads it, and a symlink to a TCC-restricted vault (e.g. ~/Desktop)
+# hangs the asyncio event loop under launchd TCC (June 2026 worker wedge).
+# Idempotent: skips gracefully if the vault file doesn't exist (fresh machine).
 "$PYTHON" -c "
 from scripts.update.env_sync import sync_reflections_yaml
 from pathlib import Path

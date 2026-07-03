@@ -1,7 +1,9 @@
 """Google Workspace OAuth authentication module.
 
 Handles OAuth2 credential management for Google APIs.
-Credentials and tokens stored in ~/Desktop/Valor/ (env: GOOGLE_CREDENTIALS_DIR).
+Credentials and tokens are stored in the configured vault directory (default
+`~/Desktop/Valor/`; set `VALOR_VAULT_DIR` to change). The `GOOGLE_CREDENTIALS_DIR`
+env var still wins as an explicit per-call override.
 Tokens are per-machine to avoid iCloud sync race conditions on refresh.
 
 TOKEN_PATH is computed once at import time via _get_token_path() and remains
@@ -68,7 +70,9 @@ def _timed_request() -> Request:
     return Request(session=session)
 
 
-# Resolve credentials directory: env var override or settings default (~/Desktop/Valor/)
+# Resolve credentials directory: env var override wins, else the settings
+# default (vault.google_credentials_dir — configurable via VALOR_VAULT_DIR,
+# established default ~/Desktop/Valor/).
 _env_dir = os.getenv("GOOGLE_CREDENTIALS_DIR")
 CONFIG_DIR = Path(_env_dir) if _env_dir else settings.google_auth.credentials_dir
 

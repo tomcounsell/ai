@@ -3,10 +3,21 @@ Configuration Management System for AI Rebuild
 
 This module provides comprehensive configuration management using pydantic-settings
 for environment-based configuration with validation and type safety.
+
+VaultSettings (and the module-level `vault` singleton) own resolution of the
+master vault directory via a cascade — VALOR_VAULT_DIR > ~/.valor/.env >
+~/Desktop/Valor/.env > raise — and expose vault-relative paths (env_path,
+projects_path, personas_dir, identity_path, google_credentials_dir,
+reflections_yaml).
+Per-path env var overrides (GOOGLE_CREDENTIALS_DIR, PROJECTS_CONFIG_PATH,
+REFLECTIONS_YAML) win over the master vault dir at property-access time.
+VaultSettings does NOT do I/O or path creation — those belong to install
+scripts.
 """
 
 import logging
 import logging.handlers
+import os
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -15,6 +26,267 @@ from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from config.models import PINNED_CLAUDE_VERSION
+
+_logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Vault directory resolution
+# ---------------------------------------------------------------------------
+
+# Roots that are not safe as a permanent vault location. Tests that need to
+# place a fake vault under tmp_path monkeypatch this tuple to ().
+_EPHEMERAL_PATH_PREFIXES: tuple[Path, ...] = (
+    Path("/tmp"),
+    Path("/private/tmp"),
+    Path("/var/folders"),
+    Path("/private/var/folders"),
+)
+
+
+class VaultNotResolved(RuntimeError):  # noqa: N818  (plan-mandated name)
+    """No vault directory could be resolved from any cascade tier."""
+
+
+class VaultPathInvalid(ValueError):  # noqa: N818  (plan-mandated name)
+    """A candidate vault path is unsafe (inside repo, ephemeral root, etc.)."""
+
+
+class VaultSettings(BaseModel):
+    """Resolves the master vault directory and exposes vault-relative paths.
+
+    Cascade order (first match wins):
+      1. ``VALOR_VAULT_DIR`` env var
+      2. ``~/.valor/.env`` exists (preferred default — non-TCC path)
+      3. ``~/Desktop/Valor/.env`` exists (legacy default — iCloud + TCC)
+      4. raise :class:`VaultNotResolved`
+
+    Per-path env vars (``GOOGLE_CREDENTIALS_DIR``, ``PROJECTS_CONFIG_PATH``,
+    ``REFLECTIONS_YAML``) are checked at property-access time and win over the
+    master vault dir.
+
+    The default ``VaultSettings()`` constructor runs the cascade. Pass
+    ``dir=...`` and ``source=...`` explicitly to skip resolution (used by any
+    caller that already knows the answer, e.g. a ``--vault-dir`` CLI flag).
+    Validation (in-repo / ephemeral-root rejection) always runs, regardless of
+    construction path.
+    """
+
+    dir: Path
+    source: str  # "env" | "default_valor_home" | "default_desktop" | "explicit"
+
+    def __init__(self, **data: Any) -> None:
+        # Validation runs outside super().__init__ so VaultPathInvalid /
+        # VaultNotResolved propagate bare rather than getting wrapped in a
+        # pydantic ValidationError.
+        if "dir" not in data:
+            resolved_dir, source = self._cascade()
+            data["dir"] = resolved_dir
+            data.setdefault("source", source)
+        self._validate_dir(Path(data["dir"]))
+        _logger.info(
+            "Vault directory resolved to: %s (source: %s)",
+            data["dir"],
+            data.get("source"),
+        )
+        super().__init__(**data)
+
+    @classmethod
+    def _cascade(cls) -> tuple[Path, str]:
+        env_val = os.environ.get("VALOR_VAULT_DIR")
+        if env_val:
+            return Path(env_val).expanduser(), "env"
+
+        valor_home = Path.home() / ".valor"
+        if (valor_home / ".env").exists():
+            return valor_home, "default_valor_home"
+
+        desktop_valor = Path.home() / "Desktop" / "Valor"
+        if (desktop_valor / ".env").exists():
+            return desktop_valor, "default_desktop"
+
+        raise VaultNotResolved(
+            "No vault directory could be resolved. Tried (in order): "
+            "VALOR_VAULT_DIR env var (unset), "
+            f"~/.valor/.env (not found at {valor_home / '.env'}), "
+            f"~/Desktop/Valor/.env (not found at {desktop_valor / '.env'}). "
+            "Set VALOR_VAULT_DIR or run /setup."
+        )
+
+    @staticmethod
+    def _validate_dir(path: Path) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        try:
+            path.resolve().relative_to(repo_root)
+        except ValueError:
+            pass  # not inside repo — good
+        else:
+            raise VaultPathInvalid(f"vault path {path} is inside repo root {repo_root}")
+
+        resolved = path.resolve()
+        for prefix in _EPHEMERAL_PATH_PREFIXES:
+            try:
+                resolved.relative_to(prefix)
+            except ValueError:
+                continue
+            raise VaultPathInvalid(f"vault path {path} is under ephemeral root {prefix}")
+
+    # --- TCC restriction check -------------------------------------------
+
+    @staticmethod
+    def path_is_tcc_restricted(path: Path) -> bool:
+        """True if ``path`` lives under a macOS TCC / FileProvider-gated dir.
+
+        Restricted roots:
+          * ``~/Desktop``, ``~/Documents`` — classic TCC categories.
+          * ``~/iCloud Drive`` — Finder alias for iCloud Drive (may not exist
+            on disk on every machine).
+          * ``~/Library/Mobile Documents`` — canonical iCloud Drive mount
+            (``~/iCloud Drive`` is a symlink/alias to a subdir under here).
+          * ``~/Library/CloudStorage`` — macOS Sonoma+ FileProvider mount
+            point for iCloud, Dropbox, OneDrive, Google Drive, etc. All
+            FileProvider-gated; launchd-spawned processes hang on reads here
+            for the same reason classic TCC paths hang.
+
+        ``path`` and each candidate root are resolved (symlinks followed)
+        before prefix comparison so that a vault symlinked from a benign
+        name into a restricted target is still caught. ``strict=False``
+        means non-existent paths still get a best-effort absolute form.
+
+        When the vault is on a restricted path, launchd-managed services
+        cannot read ``<vault>/.env`` at runtime and must instead have its
+        contents baked into the plist's ``EnvironmentVariables`` dict at
+        install time (when the calling terminal still has TCC consent).
+        See ``scripts/install/inject_plist_env.py``.
+        """
+        home = Path.home()
+        restricted_roots = (
+            home / "Desktop",
+            home / "Documents",
+            home / "iCloud Drive",
+            home / "Library" / "Mobile Documents",
+            home / "Library" / "CloudStorage",
+        )
+
+        def _safe_resolve(p: Path) -> Path:
+            try:
+                return p.resolve(strict=False)
+            except (OSError, RuntimeError):
+                return p.absolute()
+
+        resolved = _safe_resolve(path)
+        for root in restricted_roots:
+            resolved_root = _safe_resolve(root)
+            if resolved == resolved_root or resolved_root in resolved.parents:
+                return True
+        return False
+
+    @property
+    def is_tcc_restricted(self) -> bool:
+        """True if this vault's ``dir`` is on a TCC-protected path."""
+        return self.path_is_tcc_restricted(self.dir)
+
+    # --- vault-relative properties ----------------------------------------
+
+    @property
+    def env_path(self) -> Path:
+        return self.dir / ".env"
+
+    @property
+    def projects_path(self) -> Path:
+        override = os.environ.get("PROJECTS_CONFIG_PATH")
+        if override:
+            return Path(override).expanduser()
+        return self.dir / "projects.json"
+
+    @property
+    def personas_dir(self) -> Path:
+        return self.dir / "personas"
+
+    @property
+    def identity_path(self) -> Path:
+        return self.dir / "identity.json"
+
+    @property
+    def google_credentials_dir(self) -> Path:
+        override = os.environ.get("GOOGLE_CREDENTIALS_DIR")
+        if override:
+            return Path(override).expanduser()
+        return self.dir
+
+    @property
+    def reflections_yaml(self) -> Path:
+        override = os.environ.get("REFLECTIONS_YAML")
+        if override:
+            return Path(override).expanduser()
+        return self.dir / "reflections.yaml"
+
+
+# Module-level lazy singleton. Resolved on first attribute access via the
+# module __getattr__ below so that `from config.settings import vault` does
+# not fail at import time on machines without a configured vault.
+_vault_singleton: VaultSettings | None = None
+
+
+def _get_vault() -> VaultSettings:
+    global _vault_singleton
+    if _vault_singleton is None:
+        _vault_singleton = VaultSettings()
+    return _vault_singleton
+
+
+def __getattr__(name: str) -> Any:
+    if name == "vault":
+        return _get_vault()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def load_vault_env() -> Path | None:
+    """Load ``<vault>/.env`` into ``os.environ`` as a defensive belt-and-suspenders
+    load alongside the repo's symlinked ``.env``.
+
+    The repo ``.env`` is a symlink to ``<vault>/.env``, so a plain
+    ``load_dotenv()`` from the repo cwd is typically sufficient. This helper
+    exists for processes invoked from arbitrary cwd (CLI tools), launchd
+    contexts where the cwd-relative ``.env`` isn't auto-detected, and fresh
+    checkouts where the symlink hasn't been created yet.
+
+    Returns the path actually loaded, or ``None`` if no reachable .env was
+    found.
+
+    When ``VALOR_VAULT_DIR`` is **explicitly set**, this function ONLY tries
+    that path — it does NOT fall through to ``~/.valor`` / ``~/Desktop/Valor``
+    probes. Falling back would silently inherit secrets from a different vault
+    if the explicit path is a typo, an unmounted external disk, or otherwise
+    missing. Fail-loud (return None) is safer than silent-wrong (load somebody
+    else's .env).
+
+    When ``VALOR_VAULT_DIR`` is **unset**, we probe the two default tiers
+    in cascade order so a fresh checkout still picks up secrets before
+    ``/setup`` runs.
+    """
+    from dotenv import load_dotenv
+
+    if os.environ.get("VALOR_VAULT_DIR"):
+        # Explicit vault: honor only that path, no fallback.
+        try:
+            env_path = _get_vault().env_path
+        except (VaultNotResolved, VaultPathInvalid):
+            return None
+        if env_path.exists():
+            load_dotenv(env_path)
+            return env_path
+        return None
+
+    # No explicit env var: probe defaults in cascade order.
+    for candidate in (
+        Path.home() / ".valor" / ".env",
+        Path.home() / "Desktop" / "Valor" / ".env",
+    ):
+        if candidate.exists():
+            load_dotenv(candidate)
+            return candidate
+    return None
 
 
 class LogLevel(StrEnum):
@@ -153,12 +425,33 @@ class RedisSettings(BaseModel):
         return v.strip()
 
 
+def _default_google_credentials_dir() -> Path:
+    """Resolve the default credentials directory via the vault cascade.
+
+    Honors ``GOOGLE_CREDENTIALS_DIR`` (via ``vault.google_credentials_dir``)
+    and ``VALOR_VAULT_DIR``. Falls back to the same defaults the vault
+    cascade probes (~/.valor preferred, ~/Desktop/Valor legacy) when the
+    vault is unresolved.
+    """
+    try:
+        return _get_vault().google_credentials_dir
+    except VaultNotResolved:
+        valor_home = Path.home() / ".valor"
+        if valor_home.exists():
+            return valor_home
+        return Path.home() / "Desktop" / "Valor"
+
+
 class GoogleAuthSettings(BaseModel):
     """Google OAuth credential settings."""
 
     credentials_dir: Path = Field(
-        default_factory=lambda: Path.home() / "Desktop" / "Valor",
-        description="Directory for Google auth credentials (env: GOOGLE_CREDENTIALS_DIR)",
+        default_factory=_default_google_credentials_dir,
+        description=(
+            "Directory for Google auth credentials. Default: vault.google_credentials_dir "
+            "(configurable via VALOR_VAULT_DIR; established default ~/Desktop/Valor). "
+            "Override this field directly or via the GOOGLE_CREDENTIALS_DIR env var."
+        ),
     )
 
     @field_validator("credentials_dir")
@@ -559,15 +852,42 @@ class PathSettings(BaseModel):
             self.config_dir = self.project_root / "config"
 
 
+def _settings_should_skip_env_file() -> bool:
+    """True when pydantic-settings should NOT read ``.env`` at process start.
+
+    The skip is needed only for the narrow case where (a) we are running
+    under launchd and (b) the configured vault path is TCC-protected — i.e.
+    ``open(<vault>/.env)`` would hang. In every other configuration the
+    file is readable and pydantic-settings should load it normally.
+
+    Best-effort: if vault resolution fails (fresh checkout, missing config),
+    we conservatively skip when under launchd to preserve the historical
+    behavior that kept Tom's machine running. Non-launchd processes always
+    read ``.env`` regardless of vault state.
+    """
+    if not os.environ.get("VALOR_LAUNCHD"):
+        return False
+    try:
+        return _get_vault().is_tcc_restricted
+    except (VaultNotResolved, VaultPathInvalid):
+        # Vault unresolvable under launchd: assume worst case (TCC-restricted)
+        # to avoid re-introducing the indefinite-hang bug.
+        return True
+
+
 class Settings(BaseSettings):
     """Main application settings with environment variable support."""
 
     model_config = SettingsConfigDict(
-        # Skip reading .env when VALOR_LAUNCHD=1: all vars are already injected
-        # into the launchd plist by install_worker.sh. The .env symlinks to
-        # ~/Desktop/Valor/.env (iCloud), and pydantic-settings' open() on that
-        # file blocks indefinitely under macOS TCC in the launchd environment.
-        env_file=None if __import__("os").environ.get("VALOR_LAUNCHD") else ".env",
+        # Skip reading .env only when BOTH conditions hold:
+        # (a) we're under launchd (VALOR_LAUNCHD=1), and
+        # (b) the resolved vault is on a TCC-protected path (~/Desktop,
+        #     ~/Documents, ~/iCloud Drive) — pydantic-settings' open() on
+        #     such a .env hangs indefinitely under macOS TCC.
+        # When the vault is on a non-TCC path (~/.valor, custom paths),
+        # reading .env at runtime is safe and avoids baking secrets into
+        # the launchd plist.
+        env_file=None if _settings_should_skip_env_file() else ".env",
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         case_sensitive=False,

@@ -24,7 +24,7 @@ There is no manual promotion step, no container registry, no platform CLI. Mergi
 
 A few things are **one-time, per-machine human steps** that the auto-update cron cannot do (they need a browser or interactive consent). These are not part of a deploy, but if a machine is misbehaving after picking up changes, check whether it was ever set up:
 
-- **`gws` (Google Workspace CLI) auth** — installed by `/update` but ships unauthenticated. Authenticate by copying the shared vault OAuth client to `~/.config/gws/client_secret.json` and running `gws auth login` (skips the broken gcloud path). Full procedure: `docs/features/gws-cli-auth.md` (in the `ai` repo). The shared credential `~/Desktop/Valor/google_credentials.json` is identical on every machine (iCloud-synced), so the steps are the same everywhere.
+- **`gws` (Google Workspace CLI) auth** — installed by `/update` but ships unauthenticated. Authenticate by copying the shared vault OAuth client to `~/.config/gws/client_secret.json` and running `gws auth login` (skips the broken gcloud path). Full procedure: `docs/features/gws-cli-auth.md` (in the `ai` repo). The shared credential `${VALOR_VAULT_DIR}/google_credentials.json` is identical on every machine, so the steps are the same everywhere.
 
 ## What This Skill Does
 
@@ -91,7 +91,8 @@ Read the machine list from projects.json and report which machines will auto-upd
 ```bash
 python -c "
 import json, os
-config = json.load(open(os.path.expanduser('~/Desktop/Valor/projects.json')))
+vault = os.path.expanduser(os.environ.get('VALOR_VAULT_DIR', '~/Desktop/Valor'))
+config = json.load(open(os.path.join(vault, 'projects.json')))
 machines = set()
 for proj in config.get('projects', {}).values():
     m = proj.get('machine', '')

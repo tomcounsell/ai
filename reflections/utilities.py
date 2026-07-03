@@ -41,20 +41,25 @@ CORRECTION_PATTERNS = [
 def load_local_projects() -> list[dict]:
     """Load projects from projects.json, filtered to those present on this machine.
 
-    Loads from ~/Desktop/Valor/projects.json (iCloud-synced, private).
-    Falls back to legacy in-repo config path if the Desktop path doesn't exist.
+    Loads from `vault.projects_path` (configurable via `VALOR_VAULT_DIR`;
+    default: `~/Desktop/Valor/projects.json`). `PROJECTS_CONFIG_PATH` env var
+    overrides. Falls back to in-repo `config/projects.json` if neither exists.
 
     Returns:
         List of project dicts, each including a 'slug' key derived from the
         projects.json key. Only projects whose working_directory exists on disk
         are returned.
     """
-    config_path = Path(
-        os.environ.get(
-            "PROJECTS_CONFIG_PATH",
-            str(Path.home() / "Desktop" / "Valor" / "projects.json"),
-        )
-    ).expanduser()
+    env_override = os.environ.get("PROJECTS_CONFIG_PATH")
+    if env_override:
+        config_path = Path(env_override).expanduser()
+    else:
+        try:
+            from config.settings import VaultNotResolved, vault
+
+            config_path = vault.projects_path
+        except VaultNotResolved:
+            config_path = AI_ROOT / "config" / "projects.json"
     if not config_path.exists():
         config_path = AI_ROOT / "config" / "projects.json"
     if not config_path.exists():

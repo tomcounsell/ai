@@ -57,11 +57,13 @@ DEFAULT_MENTIONS = []
 
 
 def _resolve_config_path() -> Path:
-    """Resolve projects.json path from env var or default location.
+    """Resolve projects.json path from env var or vault location.
 
     Resolution order:
-    1. PROJECTS_CONFIG_PATH env var (explicit override)
-    2. ~/Desktop/Valor/projects.json (iCloud-synced default) — skipped under launchd
+    1. PROJECTS_CONFIG_PATH env var (explicit override) — honored even under launchd
+    2. <vault>/projects.json (vault.projects_path) — skipped under launchd
+       when the vault sits on a TCC-restricted path (~/Desktop, ~/Documents,
+       iCloud/FileProvider mounts)
     3. config/projects.json (local copy, updated by install_worker.sh)
 
     The launchd guard (VALOR_LAUNCHD) is authoritative: under launchd we NEVER
@@ -92,13 +94,22 @@ def _resolve_config_path() -> Path:
             return local_path
         return resolved
 
-    # When running under launchd (VALOR_LAUNCHD=1), skip the iCloud-synced
-    # Desktop path entirely.
-    # install_worker.sh copies projects.json → config/projects.json at install time.
-    if not under_launchd:
-        desktop_path = Path.home() / "Desktop" / "Valor" / "projects.json"
-        if desktop_path.exists():
-            return desktop_path
+    # Under launchd, skip the vault path ONLY when the vault sits on a
+    # TCC-protected location (~/Desktop, ~/Documents, ~/iCloud Drive).
+    # macOS TCC blocks open()/stat() on iCloud-synced files from launchd
+    # agents, causing indefinite hangs. install_worker.sh copies
+    # projects.json → config/projects.json at install time so we have a
+    # readable local copy. Non-TCC vaults (~/.valor, custom paths) work
+    # fine at runtime even under launchd, so we read from them directly.
+    try:
+        from config.settings import VaultNotResolved, vault
+
+        if not under_launchd or not vault.is_tcc_restricted:
+            vault_path = vault.projects_path
+            if vault_path.exists():
+                return vault_path
+    except VaultNotResolved:
+        pass  # vault not configured; fall through to local copy
 
     # Local copy (updated by install_worker.sh) or legacy in-repo fallback
     return local_path
@@ -188,9 +199,10 @@ def _guarded_json_load(config_path: Path) -> dict:
 def load_config() -> dict:
     """Load project configuration from projects.json.
 
-    Loads from ~/Desktop/Valor/projects.json by default (iCloud-synced, private).
-    Override with PROJECTS_CONFIG_PATH env var.
-    Falls back to config/projects.json if ~/Desktop/Valor/ path doesn't exist.
+    Loads from `vault.projects_path` by default (vault location is configurable
+    via `VALOR_VAULT_DIR`; default is `~/Desktop/Valor/projects.json`).
+    Override with `PROJECTS_CONFIG_PATH` env var.
+    Falls back to `config/projects.json` if the vault path doesn't exist.
     A partial/corrupt read (e.g. mid-iCloud-write) falls back to the
     last-known-good sidecar and logs, instead of raising (see
     `_guarded_json_load`).
@@ -224,7 +236,7 @@ def load_config() -> dict:
         logger.warning(
             "No 'working_directory' in defaults section of projects.json. "
             "Projects without working_directory will fail. "
-            "Check ~/Desktop/Valor/projects.json and add a working_directory to defaults."
+            f"Check {config_path} and add a working_directory to defaults."
         )
 
     # Validate each active project
@@ -238,7 +250,7 @@ def load_config() -> dict:
             logger.error(
                 f"Project '{project_key}' has no working_directory and no default set. "
                 "The bridge WILL fail when processing messages for this project. "
-                "Fix: add 'working_directory' to the project in ~/Desktop/Valor/projects.json"
+                f"Fix: add 'working_directory' to the project in {config_path}"
             )
         elif not Path(working_dir).exists():
             logger.warning(

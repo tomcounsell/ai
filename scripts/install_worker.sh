@@ -28,9 +28,9 @@ mkdir -p "$PROJECT_DIR/logs"
 mkdir -p "$PROJECT_DIR/logs/worker"
 
 # Copy iCloud vault files to config/ so the launchd worker can read them without TCC hangs.
-# macOS TCC blocks open()/stat() on ~/Desktop files from launchd agents, causing indefinite
-# hangs that freeze the asyncio event loop. The worker reads these local copies when
-# VALOR_LAUNCHD=1 (bridge/routing.py and agent/reflection_scheduler.py skip the iCloud path).
+# macOS TCC blocks open()/stat() on iCloud-synced files from launchd agents, causing
+# indefinite hangs that freeze the asyncio event loop. The worker reads these local copies
+# when VALOR_LAUNCHD=1 (bridge/routing.py and agent/reflection_scheduler.py skip the vault path).
 # We rm -f the destination first to avoid "identical (not copied)" errors when the destination
 # is a symlink pointing back to the source (set -euo pipefail would otherwise abort the script).
 _copy_config_file() {
@@ -44,8 +44,10 @@ _copy_config_file() {
     fi
 }
 
-_copy_config_file "$HOME/Desktop/Valor/projects.json"     "$PROJECT_DIR/config/projects.json"     "projects.json"
-_copy_config_file "$HOME/Desktop/Valor/reflections.yaml"  "$PROJECT_DIR/config/reflections.yaml"  "reflections.yaml"
+VAULT_DIR="${VALOR_VAULT_DIR:-$HOME/.valor}"
+[ -d "$VAULT_DIR" ] || VAULT_DIR="$HOME/Desktop/Valor"  # legacy compat
+_copy_config_file "$VAULT_DIR/projects.json"     "$PROJECT_DIR/config/projects.json"     "projects.json"
+_copy_config_file "$VAULT_DIR/reflections.yaml"  "$PROJECT_DIR/config/reflections.yaml"  "reflections.yaml"
 
 # Single-machine ownership for repo-specific reflections: disable any reflection
 # carrying a `project_key` this machine does not own (per config/projects.json) in
@@ -97,74 +99,25 @@ fi
 echo "Installing plist to $PLIST_DST..."
 sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL__|$LABEL|g" "$PLIST_SRC" > "$PLIST_DST"
 
-# Inject env vars from .env directly into the plist so the worker process
-# never needs to open the iCloud-synced .env file at runtime. macOS TCC
-# blocks launchd agents from accessing ~/Desktop files, causing open() to
-# hang indefinitely. Reading here (from the terminal, which has full access)
-# and baking into the plist avoids the hang entirely.
+# Inject env vars into the plist. Two modes selected automatically by the
+# helper based on whether the vault is on a macOS TCC-restricted path
+# (~/Desktop, ~/Documents, ~/iCloud Drive):
 #
-# We use Python's dotenv parser so quoting/escaping is handled correctly.
-echo "Injecting env vars from .env into plist..."
-export PROJECT_DIR PLIST_DST
-"$PROJECT_DIR/.venv/bin/python" - <<'PYEOF'
-import os, sys, plistlib
-from pathlib import Path
-from dotenv import dotenv_values
-
-project_dir = Path(os.environ.get("PROJECT_DIR", "."))
-plist_dst = Path(os.environ.get("PLIST_DST", ""))
-env_file = project_dir / ".env"
-
-if not plist_dst:
-    print("PLIST_DST not set, skipping env injection", file=sys.stderr)
-    sys.exit(0)
-
-# Parse .env (follows symlinks, works with iCloud file from terminal)
-try:
-    env_vars = dotenv_values(env_file)
-except Exception as e:
-    print(f"Warning: could not parse .env: {e}", file=sys.stderr)
-    sys.exit(0)
-
-# Also parse machine-local MODELS__* vars from ~/.zshenv. /setup writes the
-# per-machine generation model (MODELS__OLLAMA_GENERATION_MODEL) there — NOT to
-# the iCloud-synced .env — so the launchd worker (which never reads the shell)
-# would otherwise see only the gemma4:31b-cloud default. Merge these in so the
-# worker honors the per-machine variant.
-zshenv_path = Path.home() / ".zshenv"
-if zshenv_path.exists():
-    try:
-        for raw_line in zshenv_path.read_text().splitlines():
-            line = raw_line.strip()
-            if line.startswith("export "):
-                line = line[len("export ") :].strip()
-            if not line.startswith("MODELS__") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and value:
-                env_vars[key] = value
-    except Exception as e:
-        print(f"Warning: could not parse ~/.zshenv MODELS__ vars: {e}", file=sys.stderr)
-
-# Load the plist
-with open(plist_dst, "rb") as f:
-    plist = plistlib.load(f)
-
-# Merge env vars into EnvironmentVariables (plist values take precedence for PATH/HOME)
-existing = plist.setdefault("EnvironmentVariables", {})
-injected = 0
-for key, value in env_vars.items():
-    if key not in existing and value is not None:
-        existing[key] = value
-        injected += 1
-
-with open(plist_dst, "wb") as f:
-    plistlib.dump(plist, f)
-
-print(f"  Injected {injected} env vars into plist")
-PYEOF
+#   * Lean: only VALOR_VAULT_DIR + operational vars. Secrets stay in
+#     <vault>/.env (0600) and the worker reads them at runtime.
+#   * Full: bake the entire .env into the plist + chmod 0600. Needed
+#     because launchd-spawned processes can't open iCloud-synced .env
+#     files (TCC hangs indefinitely).
+#
+# In both modes the helper also merges per-machine MODELS__* overrides from
+# ~/.zshenv (where /setup writes the per-machine generation model — NOT the
+# iCloud-synced .env — so the launchd worker, which never reads the shell,
+# still honors the machine's model variant).
+echo "Injecting env vars into plist..."
+"$PROJECT_DIR/.venv/bin/python" "$SCRIPT_DIR/install/inject_plist_env.py" \
+    --plist "$PLIST_DST" \
+    --env-file "$PROJECT_DIR/.env" \
+    --vault-dir "$VAULT_DIR"
 
 # Validate plist
 if ! plutil -lint "$PLIST_DST" > /dev/null; then

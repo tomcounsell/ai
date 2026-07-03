@@ -5,7 +5,7 @@ Backfills the new model relationship fields introduced by the popoto model
 relationships refactor (issue #295):
 
 1. Populates project_key on TelegramMessage, Link, DeadLetter, Chat,
-   ReflectionRun by deriving it from chat_id using ~/Desktop/Valor/projects.json.
+   ReflectionRun by deriving it from chat_id using `<vault>/projects.json`.
 2. Copies media/URL/classification fields from AgentSession to the
    corresponding TelegramMessage (matched by chat_id + message_id).
 3. Sets telegram_message_key on AgentSession and agent_session_id on
@@ -29,8 +29,22 @@ from pathlib import Path
 
 # Add project root to path
 PROJECT_DIR = Path(__file__).parent.parent
-DESKTOP_VALOR_DIR = Path.home() / "Desktop" / "Valor"
 sys.path.insert(0, str(PROJECT_DIR))
+
+
+def _resolve_vault_dir() -> Path:
+    """Resolve the vault dir, falling back to the established default."""
+    try:
+        from config.settings import vault
+
+        return vault.dir
+    except Exception:
+        return Path.home() / "Desktop" / "Valor"
+
+
+# Name kept for backwards compat with `tests/unit/test_model_relationships.py`
+# which monkeypatches this attribute. The value is now vault-aware.
+DESKTOP_VALOR_DIR = _resolve_vault_dir()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 def load_chat_to_project_map() -> dict[str, str]:
     """Build a chat_id -> project_key mapping from projects.json."""
-    # Check PROJECT_DIR first (allows test overrides), then Desktop/Valor
+    # Check PROJECT_DIR first (allows test overrides), then the vault
     config_path = PROJECT_DIR / "config" / "projects.json"
     if not config_path.exists():
         config_path = DESKTOP_VALOR_DIR / "projects.json"
