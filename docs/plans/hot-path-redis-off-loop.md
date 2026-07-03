@@ -22,7 +22,7 @@ compounded by the `Retry(ExponentialBackoff, retries=3)` layer added in #1814
 
 Two concrete on-loop call sites are the hot spots:
 
-1. **The drain-loop hot path** — `agent/agent_session_queue.py:1367-1376`:
+1. **The drain-loop hot path** — `agent/agent_session_queue.py:1649-1658`:
    ```python
    _has_pending = bool(
        AgentSession.query.filter(
@@ -76,7 +76,7 @@ operator-visible so a regression is caught early.
 **IN SCOPE (Medium appetite):**
 - Introduce a single off-loop redis-offload mechanism (`run_in_executor` on a
   dedicated bounded thread pool) and **cut over** the hot-path drain query
-  (`agent_session_queue.py:1367-1376`) and the startup scans
+  (`agent_session_queue.py:1649-1658`) and the startup scans
   (`worker/__main__.py`) to it — no sync path left behind.
 - Expose a redis-call-latency / loop-stall operator metric (dashboard + threshold
   WARNING log) so a regression is visible.
@@ -84,60 +84,76 @@ operator-visible so a regression is caught early.
   #1815 tick keeps advancing throughout.
 
 **OUT OF SCOPE (see No-Gos):** rewriting Popoto to an async client; Fix #2 (SQLite
-secondary store) and Fix #5 (Redis replication + Sentinel) from #1814; the deferred
-liveness fixes #1820/#1821.
+secondary store) and Fix #5 (Redis replication + Sentinel) from #1814; the liveness
+fixes #1820/#1821 (now merged separately — this plan composes with them, never touches them).
 
 ## Freshness Check
 
-**Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045` (main, plan time)
+**Original baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045` (main, plan time 2026-07-01)
+**Re-verified against:** `06fca8078a47b704ee9b4e8defc054be3e4004f4` (main HEAD, 2026-07-03)
 **Issue filed at:** 2026-06-30T05:37:07Z
-**Disposition:** Unchanged
+**Disposition:** **Minor drift** — line numbers moved substantially (nine resilience-cluster
+commits landed between the two baselines, several touching the target files), but **every
+premise still holds and the build-critical cut-over target survives verbatim.** Inline
+`file:line` references throughout the rest of this plan reflect the original `b99e2958`
+baseline; the corrected line map below is authoritative, and the Verification section's checks
+are regex/`grep`-based (line-number-independent), so the build does not depend on the stale
+inline numbers. The only build-critical reference (`agent_session_queue.py`, the hot-path
+site) has been updated in place to its current location.
 
-**File:line references re-verified against `b99e2958`:**
-- `agent/agent_session_queue.py:1367-1376` — the `_has_pending = bool(AgentSession.query.filter(...))`
-  synchronous drain-loop scan — **still holds** (verified verbatim; inside the
-  per-worker loop's "session is None" branch, guarding the `event.clear()` before
-  `await event.wait()`).
-- `agent/agent_session_queue.py:970` — `DRAIN_TIMEOUT = 1.5` — **still holds**
-  (bridge-mode wait bound; standalone mode waits indefinitely, `:1384-1386`).
-- `agent/agent_session_queue.py:404` — `await asyncio.to_thread(POPOTO_REDIS_DB.publish, ...)`
-  — **still holds**: the enqueue path *already* offloads a Popoto/redis-py call via
-  `asyncio.to_thread` (also `:321,363,375,776,939`). This is direct in-repo precedent
-  that the redis-py client is already relied upon as thread-safe.
-- `worker/__main__.py:691` — `register_worker_pid()` (sync Redis write) — **still holds**.
-- `worker/__main__.py:699` — `list(AgentSession.query.filter(status="pending"))` Redis-verify
-  scan, `sys.exit(1)` on failure — **still holds**.
-- `worker/__main__.py:772/786/811/827/841/849` — the sequential startup cleanup/recovery
-  scans (index rebuild → corrupted cleanup → class-set clean → heal-future → dead-worker
-  sweep 3a → recover 3b) — **still holds**; ordering comments intact (`:832-839` explicitly
-  requires 3a BEFORE 3b).
-- `worker/__main__.py:891` — `granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)`
-  — **still holds**: existing off-loop offload precedent adjacent to the startup scans.
-- `worker/__main__.py:931` — `pending_sessions = list(AgentSession.query.filter(status="pending"))`
-  feeding the `_ensure_worker` startup kick — **still holds**.
-- `worker/__main__.py:975-996` — `_loop_tick_task()` (the #1815 on-loop beacon) + its
-  done-callback — **still holds**; MUST remain on-loop and unchanged.
-- `agent/reflection_scheduler.py:57-64` — `_reflection_pool = ThreadPoolExecutor(...)`
-  bulkhead (`REFLECTION_POOL_WORKERS`, default 2, clamped ≥1) — **still holds**; the
+**Corrected line map (re-verified against `06fca807`):**
+- **Hot-path cut-over target (build-critical):** `agent/agent_session_queue.py:1649-1658` —
+  `_has_pending = bool(AgentSession.query.filter(..., status="pending"))` — **still
+  synchronous, still on-loop, verbatim.** Was `:1367-1376` at plan time; drifted ~+282 lines.
+  The lost-wakeup guard comment (`:1645-1648`), the `if _has_pending: continue` (`:1659`),
+  and `event.clear()` (`:1664`) → `await event.wait()` (`:1668`) ordering are all intact. The
+  plan's inline `1649-1658` references now point at the real site.
+- **#1820 composition — verified safe.** #1820 (PR/commit `72ba5d50`) rewrote 513 lines of
+  `agent_session_queue.py`, migrating the drain loop from `asyncio.Semaphore` to a
+  `SlotLeaseRegistry`. Crucially, the slot is released via `registry.release_unbound()` at
+  `:1641-1643` **before** the `_has_pending` idle-check, so the offloaded `await offload_redis(...)`
+  runs while holding **no** lease — adding the `await` there introduces no lease-ownership
+  hazard. #1820's progress-deadline cancel scope wraps *session execution*, not the
+  between-sessions idle-check, so Risk 3 (cancellation leaking a Redis call) is unchanged.
+- `agent/agent_session_queue.py:1122` — `DRAIN_TIMEOUT = 1.5` (was `:970`) — **still holds**.
+- `agent/agent_session_queue.py:326,368,380,409,781,1085` — the enqueue/listener path
+  `asyncio.to_thread` offloads (was `:321,363,375,404,776,939`) — **still holds**: direct
+  in-repo precedent that the redis-py client is relied upon as thread-safe.
+- `worker/__main__.py` startup scans (all **descoped — not touched by this plan**):
+  `register_worker_pid()` `:781` (was `:691`); Redis-verify pending scan `:789` (was `:699`);
+  `run_cleanup()` `:911`, `cleanup_corrupted_agent_sessions()` `:925` (were `:772/786`);
+  dead-worker sweep 3a `:984`, recover 3b `:992` (were `:841/849`) — **ordering comment
+  intact**, 3a MUST precede 3b (`:975-981`); pending-kick scan `:1093` (was `:931`) — **all
+  still hold**, structurally unchanged.
+- `worker/__main__.py:1137-1147` — `_loop_tick_task()` (the #1815 on-loop beacon) + its
+  done-callback at `:1149-1158` (was `:975-996`) — **still holds**; MUST remain on-loop and
+  unchanged.
+- `agent/reflection_scheduler.py:60-63` — `_reflection_pool = ThreadPoolExecutor(...)` bulkhead
+  (`REFLECTION_POOL_WORKERS`, default 2, clamped ≥1) (was `:57-64`) — **still holds**; the
   template this plan mirrors for the redis-offload bulkhead.
-- `config/redis_bootstrap.py:122-129` — `set_REDIS_DB_settings(..., retry=Retry(ExponentialBackoff, 3), health_check_interval=30)`; **no `max_connections` set** → the redis-py `ConnectionPool` is unbounded (default) — **still holds**; load-bearing for the thread-safety plan (executor workers ≤ pool capacity trivially satisfied).
+- `config/redis_bootstrap.py:114-129` — `Retry(ExponentialBackoff(cap=10, base=1), 3)`,
+  `health_check_interval=30`; **no `max_connections` set** → redis-py `ConnectionPool`
+  unbounded — **still holds**; load-bearing for the thread-safety plan.
 
-**Cited sibling issues/PRs re-checked:**
+**Cited sibling issues/PRs re-checked against `06fca807`:**
 - #1814 — CLOSED (PR #1824 merged): added the retry/backoff client; explicitly deferred
-  this off-loop move as Fix #4. `docs/plans/completed/redis-durability-hardening.md`
-  confirms the deferral and names `agent/agent_session_queue.py:1367-1376` as the hot path.
-- #1815 — the on-loop tick / dead-man's-switch this plan must compose with (merged;
-  `docs/plans/completed/liveness-wedge-recovery.md`). This plan touches
-  `agent/agent_session_queue.py` (hot path) and `worker/__main__.py` (startup scans);
-  #1815's tick task and `session_state.last_loop_tick` beacon are **read/preserved, not
-  modified**.
+  this off-loop move as Fix #4. Confirmed in `docs/plans/completed/redis-durability-hardening.md`.
+- #1815 — the on-loop tick / dead-man's-switch this plan composes with (merged). Its tick task
+  and `session_state.last_loop_tick` beacon are **read/preserved, not modified** by this plan.
+- #1816 — worker fault containment (merged `bab446d8`): established the `_reflection_pool`
+  bulkhead this plan mirrors. No file overlap with the hot-path query.
 - #1818 — OPEN — resilience-cluster umbrella; #1826 is the #1814 Fix #4 child.
-- #1816 — worker fault containment (merged): established the bulkhead pattern
-  (`_reflection_pool`) this plan reuses. No file overlap with the hot-path query.
+- **#1820 — now CLOSED/merged (`72ba5d50`)** and **#1821 — now CLOSED** (landed via #1872
+  `b01d7fce`). The plan lists these as "deferred liveness fixes, out of scope." They have
+  since landed; this does **not** change this plan's scope — those were separate concerns this
+  plan composes with but never touches (see the #1820 composition note above). The No-Gos
+  reference to them is retained as a scope boundary, not a claim that they are still pending.
 
-**Commits on main since the issue was filed touching referenced files:** none.
-`git log --since=2026-06-30T05:37:07Z` over `agent/agent_session_queue.py`,
-`worker/__main__.py`, `config/redis_bootstrap.py` returned zero. Premises intact.
+**Commits on main since the issue was filed touching referenced files:** nine, all
+resilience-cluster siblings (`46850300`, `6e846f0d`, `b01d7fce`, `72ba5d50`, `d1b73b04`,
+`f8eac988`, `b624607b`, `a9616f27`, `bab446d8`). Each was reviewed: they moved line numbers in
+`agent/agent_session_queue.py` and `worker/__main__.py` but left the hot-path idle-check
+structure, the startup-scan ordering, and the #1815 beacon intact. Premises hold.
 
 **Active plans in `docs/plans/` overlapping this area:** none live. `liveness-wedge-recovery.md`
 and `redis-durability-hardening.md` are both **completed**; this plan builds on both.
@@ -167,7 +183,7 @@ and `redis-durability-hardening.md` are both **completed**; this plan builds on 
 |-----------|-------------|----------------------|
 | #1814 (Fix #3) resilient client | Added retry/backoff/health-check so a transient Redis restart reconnects | Bounds *recovery*, not *loop occupancy*: a slow call still blocks the loop for its full duration, and retries make that block **longer**. Fix #4 (off-loop) was explicitly deferred. |
 | #1815 on-loop tick / dead-man's-switch | Detects a synchronously-frozen loop and self-kills | Cannot distinguish "worker wedged" from "Redis slow, loop blocked in a sync redis call" — so a slow Redis can *false-trigger* the self-kill. This plan removes the on-loop block that confuses it. |
-| enqueue-path `to_thread` wrapping | Offloaded the *write* path's Popoto calls | Never covered the *read* hot path (`:1367-1376`) — the one remaining on-loop, concurrently-running blocking site that starves the tick. |
+| enqueue-path `to_thread` wrapping | Offloaded the *write* path's Popoto calls | Never covered the *read* hot path (`:1649-1658`) — the one remaining on-loop, concurrently-running blocking site that starves the tick. |
 
 **Root-cause pattern:** the async migration of Popoto calls was done piecemeal on the
 write/enqueue path but the read hot path was left synchronous on the loop, where it runs
@@ -277,7 +293,7 @@ slow Redis. Startup is left entirely untouched.
 | Python ≥ 3.11 | `python -c "import sys; assert sys.version_info >= (3, 11)"` | Modern `asyncio`/`run_in_executor` semantics (note: an in-flight executor thread still runs to completion on cancel — see Risk 3; this is not force-cancellation) |
 | redis-py thread-safe pool | `python -c "import redis; print(redis.__version__)"` | `ConnectionPool` thread-safety (7.4.0 ✓) |
 | Resilient client present (#1814) | `test -f config/redis_bootstrap.py && echo ok` | Off-thread calls use the retry/backoff client |
-| #1815 tick present | `grep -c "_loop_tick_task\|bump_loop_tick" worker/__main__.py` | Composition target exists |
+| #1815 tick present | `grep -c _loop_tick_task worker/__main__.py` | Composition target exists (tick beacon defined + created) |
 
 ## Solution
 
@@ -288,7 +304,7 @@ slow Redis. Startup is left entirely untouched.
     thread_name_prefix="redis-io-")` (default 4, clamped ≥1) — the bulkhead.
   - `async def offload_redis(fn, *args, **kwargs)` — `await loop.run_in_executor(_redis_io_pool, functools.partial(fn, *args, **kwargs))`, timing the call, updating latency gauges, and emitting a threshold-gated WARNING. A `REDIS_OFFLOAD_ENABLED` kill switch (default true) makes it a synchronous pass-through for rollback.
   - Latency gauges (`get_last_redis_latency()`, `get_max_redis_latency()`, `reset_max`) — module-global floats, GIL-atomic.
-- **Hot-path cut-over (the ONLY code cut-over)** (`agent_session_queue.py:1367-1376`):
+- **Hot-path cut-over (the ONLY code cut-over)** (`agent_session_queue.py:1649-1658`):
   replace the synchronous `_has_pending = bool(AgentSession.query.filter(...))` with the
   awaited `offload_redis(...)` form, **preserving the check-before-`event.clear()` ordering**.
   No sync fallback left. Every offloaded Redis call in the codebase after this change goes
@@ -359,7 +375,7 @@ async def offload_redis(fn, *args, **kwargs):
 ```
 Plus `get_last_redis_latency()` / `get_max_redis_latency()` accessors.
 
-**2. Hot-path cut-over (`agent_session_queue.py:1367-1376`):**
+**2. Hot-path cut-over (`agent_session_queue.py:1649-1658`):**
 ```python
 from agent.redis_offload import offload_redis  # module-level import
 
@@ -570,8 +586,10 @@ No new ordering risk introduced.
   via blocking checkout; the pool stays unbounded.
 - **[SEPARATE #1814] Fix #2 (SQLite secondary store) and Fix #5 (Redis replication + Sentinel).**
   Deferred by #1814; not part of this plan.
-- **[SEPARATE #1820/#1821] The deferred liveness fixes** (lease semaphore, progress-deadline
-  cancel scope, out-of-domain recovery). This plan composes with #1815 but does not extend it.
+- **[SEPARATE #1820/#1821] The liveness fixes** (lease semaphore, progress-deadline
+  cancel scope, out-of-domain recovery) — now merged separately. This plan composes with #1815
+  and with #1820's lease registry (slot released before the idle-check, so the added `await`
+  holds no lease) but does not extend or modify either.
 
 ## Update System
 
@@ -625,7 +643,7 @@ No agent integration required — this is a worker-internal performance/resilien
 
 ## Success Criteria
 
-- [ ] The hot-path drain query (`agent_session_queue.py:1367-1376`) executes off the event
+- [ ] The hot-path drain query (`agent_session_queue.py:1649-1658`) executes off the event
       loop via `offload_redis`; no synchronous `AgentSession.query.filter(...)` remains on the
       loop at that site (no parallel sync path). This is the ONLY offloaded site.
 - [ ] The startup scans (`worker/__main__.py:691,699,772,786,811,827,841,849,931`) are
@@ -656,7 +674,7 @@ NEVER builds directly.
 
 - **Builder (redis-offload)**
   - Name: offload-builder
-  - Role: `agent/redis_offload.py` + hot-path cut-over (`agent_session_queue.py:1367-1376`) + metric gauges
+  - Role: `agent/redis_offload.py` + hot-path cut-over (`agent_session_queue.py:1649-1658`) + metric gauges
   - Agent Type: async-specialist
   - Resume: true
 
@@ -689,7 +707,7 @@ NEVER builds directly.
 - **Parallel**: true
 - Create `agent/redis_offload.py`: `_redis_io_pool` (clamped ≥1), `offload_redis` (pass-through
   when disabled; latency gauges in `finally`; slow-call WARNING), gauge accessors.
-- Cut over `agent_session_queue.py:1367-1376` to `await offload_redis(lambda: list(...))`,
+- Cut over `agent_session_queue.py:1649-1658` to `await offload_redis(lambda: list(...))`,
   preserving the check-before-`event.clear()` ordering. Leave NO sync fallback at the site.
 
 ### 2. Dashboard metric block
