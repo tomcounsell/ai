@@ -66,7 +66,11 @@ def _latest_issue_comment_id(issue_number: str) -> str | None:
             check=True,
             timeout=15,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ):
         return None
 
     try:
@@ -79,15 +83,19 @@ def _latest_issue_comment_id(issue_number: str) -> str | None:
         return None
 
     last = comments[-1]
-    # ``gh issue view`` returns comments with a ``url`` field; the comment
-    # id is the trailing path segment. Some gh versions also return an
-    # ``id`` field directly -- try it first.
+    # ``gh issue view --json comments`` is backed by GraphQL, so its ``id``
+    # field is a GraphQL node id (e.g. ``IC_kwDO...``) -- NOT the numeric
+    # REST comment id. ``/do-plan`` (SKILL.md) writes ``last_comment_id``
+    # via ``gh api .../issues/{n}/comments --jq '.[-1].id'``, which hits the
+    # REST endpoint and returns the numeric id. To compare like with like,
+    # always prefer the numeric id embedded in the trailing path segment of
+    # the ``url`` field; only fall back to ``id`` if no url is present.
     if isinstance(last, dict):
-        if "id" in last and last["id"]:
-            return str(last["id"])
         url = last.get("url") or ""
         if "#issuecomment-" in url:
             return url.rsplit("#issuecomment-", 1)[-1]
+        if "id" in last and last["id"]:
+            return str(last["id"])
     return None
 
 
