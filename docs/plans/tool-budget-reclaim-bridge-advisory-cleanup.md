@@ -47,9 +47,12 @@ moves.
 
 **Desired outcome:**
 - Reclaim-dedup clearing uses a non-blocking `SCAN`-based iterate-and-delete.
-- The terminal-owner determination over `leases_snapshot` happens once per reap
-  tick and is shared, eliminating the redundant re-reads while preserving the
-  deliberate #1868 divergence in how `None` (not-found) is treated.
+- The read-only bridge-contract-stale check no longer runs its own
+  `get_by_id` loop over `leases_snapshot`; it consumes an owner→record map the
+  reap pass already holds. The Phase-2 reclaim decision keeps reading each owner
+  FRESH at reclaim time (it must — see Risk 1), so this is a structural
+  decoupling of the stale-check, not a reduction in total Redis reads. The
+  deliberate #1868 divergence in how `None` (not-found) is treated is preserved.
 - `record_budget_trip` never collapses distinct id-less sessions into one dedup
   slot — trips surface reliably even when a session has no resolvable id.
 - The deny-but-don't-halt tradeoff is documented. The per-denial instrumentation
@@ -114,7 +117,7 @@ publishes lease snapshot → on a *healthy* watchdog tick with no terminal owner
 a future re-leak re-triggers a fresh reclaim-request. The only change is *how* the
 markers are enumerated for deletion (KEYS → SCAN).
 
-**Item 2 (terminal-owner determination):** `_reap_slot_leases`
+**Item 2 (bridge-contract-stale read decoupling):** `_reap_slot_leases`
 (`agent/session_health.py:2670`) reads
 `leases_snapshot = list(registry.leases())` once per tick (line 2717), then calls
 `_drain_reclaim_requests(registry, leases_snapshot)` (line 2772), whose final line
@@ -122,14 +125,26 @@ markers are enumerated for deletion (KEYS → SCAN).
 consumers independently fetch owner status: `_drain_reclaim_requests` itself
 (reads *request* owners popped from Redis, a distinct set — no overlap with the
 lease snapshot), `_maybe_emit_bridge_contract_stale` (iterates `leases_snapshot`
-at line 2969), and the Phase-2 reap loop back in `_reap_slot_leases` (iterates
-`leases_snapshot` at line 2778). The two `leases_snapshot` consumers
-(stale-check + Phase-2 loop) do the redundant per-owner `get_by_id`. **Critical
-call-site fact:** the stale-check call is NOT in `_reap_slot_leases` — it is the
-tail of `_drain_reclaim_requests`, which has no access to the Phase-2 loop's
-scope. So the fix builds the owner→record map in `_reap_slot_leases`, passes it as
-a new parameter to `_drain_reclaim_requests`, which forwards it to
-`_maybe_emit_bridge_contract_stale`; the Phase-2 loop reads the same map directly.
+at line 2969, a read-only observability decision), and the Phase-2 reap loop back
+in `_reap_slot_leases` (iterates `leases_snapshot` at line 2778, a permit-strip
+decision that MUST read fresh — see below).
+
+**Temporal-window hazard (the reason this stays narrow).** The drain at line 2772
+is a bounded LPOP loop; during that window an operator can run
+`valor-session resume` and un-terminal an owner that was terminal moments earlier.
+So the Phase-2 reclaim decision CANNOT be made off any snapshot captured before
+the drain — it would strip a now-live session's permit (semaphore
+over-admission). Phase-2 therefore keeps its FRESH `get_by_id` at reclaim time
+(line 2780), unchanged from the shipped code.
+
+The only safe consolidation is the read-only stale-check, which merely decides
+whether to emit a WARNING and tolerates a momentarily stale view. The fix: (a)
+`_drain_reclaim_requests` returns `drained: int` and no longer calls the
+stale-check; (b) `_reap_slot_leases` builds an owner→record map once (only when
+`drained == 0`, the only case the stale-check inspects owners) and calls
+`_maybe_emit_bridge_contract_stale(drained, owner_records)` directly, in the
+always-run region before the Phase-2 gate. The map is NOT threaded through the
+drain (no tramp parameter) and is NEVER consulted by Phase-2.
 
 **Item 3 (trip dedup):** PreToolUse hook (both `agent/hooks/pre_tool_use.py` and
 `.claude/hooks/pre_tool_use.py`) → `evaluate_tool_budget(session)` → on deny,
@@ -162,11 +177,13 @@ external dependencies. Redis is already a hard dependency of every touched modul
 
 - **SCAN-based dedup clear** (`_clear_reclaim_dedup`): iterate matching keys with
   `scan_iter` and delete in bounded batches, replacing the blocking `KEYS`.
-- **Single-pass owner map** (`_reap_slot_leases`): fetch each `leases_snapshot`
-  owner once, build an owner→record map in `_reap_slot_leases`, pass it as a new
-  parameter to `_drain_reclaim_requests` (which forwards it to
-  `_maybe_emit_bridge_contract_stale`), and reuse it in the Phase-2 reap loop —
-  each consumer applying its own `None` policy.
+- **Stale-check owner map** (`_reap_slot_leases` + `_maybe_emit_bridge_contract_stale`):
+  `_drain_reclaim_requests` returns `drained: int`; `_reap_slot_leases` builds an
+  owner→record map once (only when `drained == 0`) and passes it to the hoisted
+  `_maybe_emit_bridge_contract_stale`, which reads the map instead of running its
+  own `get_by_id` loop. The Phase-2 reclaim loop is UNCHANGED — it re-reads each
+  owner FRESH at reclaim time and never consults the map (Risk 1). Each consumer
+  applies its own `None` policy.
 - **Id-safe trip dedup** (`record_budget_trip`): when no session id resolves,
   skip the shared-key dedup gate rather than write `...:None`. No new counter in
   this plan.
@@ -178,10 +195,12 @@ external dependencies. Redis is already a hard dependency of every touched modul
 Watchdog healthy tick → `_clear_reclaim_dedup` → `scan_iter(match)` → batched
 `delete` (no keyspace block).
 
-Reap tick → `_reap_slot_leases` builds owner→record map once → passes it to
-`_drain_reclaim_requests(registry, leases_snapshot, owner_records)` → forwarded to
-`_maybe_emit_bridge_contract_stale(drained, owner_records)` → Phase-2 loop reads
-the same map → same result, half the Redis reads.
+Reap tick → `drained = _drain_reclaim_requests(registry, leases_snapshot)` →
+`_reap_slot_leases` builds owner→record map once (when `drained == 0`) →
+`_maybe_emit_bridge_contract_stale(drained, owner_records)` reads the map (no
+`get_by_id`) → Phase-2 loop re-reads each owner FRESH and reclaims. Total Redis
+reads are unchanged; the stale-check is decoupled from the drain and no longer
+does its own DB reads.
 
 Tool deny → `record_budget_trip` → resolve id → if id present: NX-dedup gate as
 today; if id absent: skip gate, surface every time.
@@ -198,51 +217,62 @@ today; if id absent: skip gate, surface every time.
   model keys, so raw `scan_iter`/`delete` is permitted (the existing `delete` on
   the same keys already passes `validate_no_raw_redis_delete.py`).
 
-- **Item 2** — The redundant reads are the stale-check's loop
-  (`_maybe_emit_bridge_contract_stale`, line 2969) and the Phase-2 reap loop
-  (`_reap_slot_leases`, line 2778), both iterating `leases_snapshot` and calling
-  `AgentSession.get_by_id(lease.owner_session_id)`. **The stale-check is invoked
-  from the tail of `_drain_reclaim_requests` (line 2938), not from
-  `_reap_slot_leases`** — so the shared map must be threaded through the drain,
-  not handed directly to the stale-check.
+- **Item 2** — The original advisory (from #1872 review) is narrow: the read-only
+  `_maybe_emit_bridge_contract_stale` re-reads lease owners it need not re-read.
+  Fix ONLY that read, and decouple the stale-check from the drain. **Do NOT touch
+  the Phase-2 reclaim read** — it must stay fresh (see the temporal-window hazard
+  in Data Flow and Risk 1). Concretely:
 
-  1. In `_reap_slot_leases`, immediately after `leases_snapshot = list(...)` and
-     before the `_drain_reclaim_requests(...)` call (line 2772), build
-     `owner_records: dict[str, AgentSession | None]` by fetching each
-     `lease.owner_session_id` once. Distinguish three states so the deliberate
-     #1868 divergence survives: key present with a record, key present with `None`
-     (positively not-found), key ABSENT (lookup raised → unknown). Fail-quiet: map
-     construction is wrapped so a per-owner fetch error records "absent key"
-     (leaves the key absent / unknown) rather than raising.
-  2. Change the signature to
-     `_drain_reclaim_requests(registry, leases_snapshot, owner_records)` and update
-     the call site in `_reap_slot_leases` (line 2772) to pass `owner_records`.
-     `_drain_reclaim_requests`'s own request-owner reads (line 2886, a DISTINCT
-     owner set popped from Redis) are unchanged — the map is only forwarded, not
-     consulted, by the drain body.
-  3. Change the tail call (line 2938) to
-     `_maybe_emit_bridge_contract_stale(drained, owner_records)`; its
-     `terminal_owner_present` check reads the map instead of re-fetching and keeps
-     its "found record AND status terminal" policy (a `None` value or absent key is
-     NOT terminal → skip, unchanged — the #1868 stale-side policy).
-  4. The Phase-2 reap loop (line 2778) reads the same `owner_records` map and keeps
-     its "record is `None` (not-found) OR status terminal → reclaim" policy; an
-     ABSENT key (lookup error) still logs+continues without reclaiming, exactly as
-     the current per-iteration `try/except` does (the #1868 reaper-side policy).
+  1. Define a module-level sentinel `_ABSENT = object()` (distinct from `None`, so
+     a positively-not-found owner and a lookup-error owner are distinguishable in
+     the map).
+  2. Change `_drain_reclaim_requests` to `return drained` (an `int`) and DELETE its
+     tail call to `_maybe_emit_bridge_contract_stale` (line 2938). Its own
+     request-owner reads (line 2886, a DISTINCT owner set popped from Redis) are
+     unchanged. The map is NOT a parameter of the drain — no tramp parameter.
+  3. In `_reap_slot_leases`, capture `drained = _drain_reclaim_requests(...)`. Then,
+     **only when `drained == 0`** (the sole case the stale-check inspects owners —
+     when `drained > 0` it just records the beacon and returns), build
+     `owner_records: dict[str, AgentSession | object]` by fetching each
+     `lease.owner_session_id` once. A per-owner fetch error stores `_ABSENT` for
+     that key AND emits `logger.warning(..., exc_info=True)` (the same
+     transient-DB-error signal the Phase-2 loop emits at lines 2797-2801 — do NOT
+     silently swallow it). Building only when `drained == 0` matches the shipped
+     read cost (the shipped stale-check also reads owners only when `drained == 0`).
+  4. Call `_maybe_emit_bridge_contract_stale(drained, owner_records)` directly from
+     `_reap_slot_leases`, in the always-run region BEFORE the `if reap_disabled:
+     return` gate (so it still fires under `SLOT_LEASE_REAP_DISABLED=1`, unchanged).
+     Change its signature to `(drained, owner_records)`; its `terminal_owner_present`
+     check reads the map (`rec is not None and rec is not _ABSENT and status in
+     _TERMINAL_STATUSES`) instead of calling `get_by_id`. `None`/`_ABSENT` are NOT
+     terminal → skip (unchanged #1868 stale-side policy).
+  5. The Phase-2 reap loop (line 2778) is LEFT UNCHANGED: it re-reads each owner
+     with a FRESH `AgentSession.get_by_id` at reclaim time and keeps its "record is
+     `None` (not-found) OR status terminal → reclaim" policy and its existing
+     `logger.warning(..., exc_info=True)` on per-owner error. This fresh read is
+     the guard against the resume-during-drain live-permit-strip race.
 
-  Net effect: one fetch per lease owner per tick (down from two), threaded through
-  the real call chain, both #1868 policies byte-for-byte preserved.
+  Net effect: the stale-check no longer runs its own owner-read loop (original
+  advisory satisfied) and is no longer coupled to the drain (tramp parameter
+  removed). Total Redis reads are unchanged — Phase-2 still reads fresh, by design.
+  Both #1868 policies (stale-side: `None`/`_ABSENT` → not terminal; reaper-side:
+  `None` → terminal) are preserved.
 
-- **Item 3** — In `record_budget_trip` (`agent/tool_budget.py:199`): when
-  `session_id` is falsy (both `session_id` and `agent_session_id` absent), bypass
-  the NX dedup gate entirely (surface flag/log on every id-less deny) rather than
-  reading/writing the shared `...:tripped_applied:None` key. When `session_id` is
-  present, behavior is unchanged (NX gate on `...:tripped_applied:{session_id}`,
-  the `tripped` counter increment keeps its existing isolated inner `try/except`
-  at line 210). The `budget_tripped` field write is naturally idempotent per
-  session object, so ungated surfacing for id-less sessions is safe. All still
-  inside the outer fail-quiet `try/except`. **No `denied_calls` counter is added
-  in this plan** — that per-denial instrument belongs to #1886.
+- **Item 3** — In `record_budget_trip` (`agent/tool_budget.py:199`): add a single
+  `if not session_id:` guard that bypasses the NX dedup gate (line 206) entirely
+  when both `session_id` and `agent_session_id` are absent — surface on every
+  id-less deny rather than reading/writing the shared `...:tripped_applied:None`
+  key. When `session_id` is present, behavior is unchanged (NX gate on
+  `...:tripped_applied:{session_id}`, the `tripped` counter increment keeps its
+  existing isolated inner `try/except` at line 210). **Observable surface for an
+  id-less deny is the WARNING log + the `tripped` counter increment only.** The
+  `budget_tripped` flag write via `_set_budget_tripped_flag` calls
+  `session.save(update_fields=...)`, which cannot persist for a keyless (unsaved)
+  session, so the id-less test asserts log + counter, NOT flag persistence. All
+  still inside the outer fail-quiet `try/except`. This is a minimal guard — **no
+  `denied_calls` counter is added in this plan** (that per-denial instrument
+  belongs to #1886), and no separate docstring section is spent on the collapse
+  beyond a one-line inline note on the guard.
 
 - **Item 4** — No behavioral code change to the deny/pause logic and no new
   counter. Document the deny-but-don't-halt tradeoff (why auto-pause ships off,
@@ -258,12 +288,15 @@ today; if id absent: skip gate, surface every time.
 - [ ] `_clear_reclaim_dedup` keeps its `except Exception … logger.debug(...)`
   wrapper — add/keep a test asserting a raising Redis client is swallowed (no
   raise out of the function).
-- [ ] The new owner-map construction in `_reap_slot_leases` keeps a fail-quiet
-  wrapper — assert a per-owner fetch that raises leaves that key ABSENT (unknown),
-  does not raise into the reap pass, and (driving `_reap_slot_leases()`
-  end-to-end) does not reclaim on unknown and does not emit stale on unknown.
+- [ ] The new owner-map construction in `_reap_slot_leases` is fail-quiet but NOT
+  silent — assert a per-owner fetch that raises stores `_ABSENT` for that key,
+  emits a `logger.warning(..., exc_info=True)` (caplog assertion — the
+  transient-DB-error signal must survive, concern #3), does not raise into the reap
+  pass, and (driving `_reap_slot_leases()` end-to-end) does not emit stale on an
+  `_ABSENT`/`None` owner. Phase-2 reclaim reads fresh, so an `_ABSENT` map entry
+  never drives a reclaim.
 - [ ] `_maybe_emit_bridge_contract_stale` reads the passed map and keeps its
-  fail-quiet wrapper — assert an absent/`None` owner in the map yields no stale
+  fail-quiet wrapper — assert an `_ABSENT`/`None` owner in the map yields no stale
   emission and no raise.
 - [ ] `record_budget_trip` keeps its outer `try/except` — the existing
   `test_surfacing_error_is_fail_quiet` must still pass unchanged (no new counter
@@ -274,7 +307,8 @@ today; if id absent: skip gate, surface every time.
   batch) and not raise.
 - [ ] `record_budget_trip` with a session whose `session_id` AND
   `agent_session_id` are both `None` must NOT write a `...:tripped_applied:None`
-  dedup key and must surface (flag + WARNING log) on every call.
+  dedup key and must surface (WARNING log + `tripped` counter increment — NOT flag
+  persistence, which a keyless `save()` cannot achieve) on every call.
 - [ ] `_maybe_emit_bridge_contract_stale` with an empty owner map → no stale
   emission, no raise.
 
@@ -292,20 +326,26 @@ today; if id absent: skip gate, surface every time.
   — UPDATE (verify unchanged): the double `record_budget_trip` call still surfaces
   once for an id-bearing session (NX dedup path unchanged); `tripped == 1`. No
   `denied_calls` assertion.
-- [ ] `tests/integration/test_tool_budget_enforcement.py` — ADD
+- [ ] `tests/integration/test_tool_budget_enforcement.py` — ADD ONE test
   `test_id_less_session_does_not_collapse_dedup`: two sessions with `session_id`
-  and `agent_session_id` both `None` each trip; assert both surface (flag set + two
-  WARNING logs), no shared `...:tripped_applied:None` dedup key is written, and the
-  second id-less trip is NOT silently deduped away.
+  and `agent_session_id` both `None` each trip; assert both surface (two WARNING
+  logs + `tripped` counter incremented on each — NOT flag persistence, which a
+  keyless `save()` cannot achieve), no shared `...:tripped_applied:None` dedup key
+  is written, and the second id-less trip is NOT silently deduped away. This is the
+  single behavioral test that gates item 3 (concern #5 — do not over-invest).
 - [ ] `tests/integration/test_out_of_domain_reclaim.py` — UPDATE: this file
   already covers the reclaim/dedup/bridge-contract-stale paths. Add/adjust cases
   that **drive `_reap_slot_leases()` end-to-end** (not the callees in isolation)
   for (a) `_clear_reclaim_dedup` uses SCAN and deletes matching markers, (b) the
-  single owner→record map built in `_reap_slot_leases` and threaded through
-  `_drain_reclaim_requests` into `_maybe_emit_bridge_contract_stale` yields the
-  same reclaim + stale-emit decisions as the pre-refactor double-read — explicitly
-  covering a terminal owner, a not-found (`None`) owner, and a lookup-error
-  (absent-key) owner, to prove the #1868 `None`-is-unknown-for-stale vs.
+  stale-check reading the `_reap_slot_leases`-built owner map (no `get_by_id` in
+  `_maybe_emit_bridge_contract_stale`) yields the same stale-emit decisions as the
+  shipped self-read, and (c) Phase-2 reclaim reads FRESH — explicitly covering a
+  terminal owner (reclaim), a not-found (`None`) owner (reclaim, reaper-side
+  policy), a lookup-error (`_ABSENT`) owner (no reclaim, no stale-emit), and — the
+  regression the first revision introduced — an owner that is terminal at snapshot
+  time but re-reads as non-terminal at Phase-2 reclaim time (a resume-during-drain
+  simulation) is NOT reclaimed, proving the fresh read prevents the live-permit
+  strip. Together these prove the #1868 `None`-is-unknown-for-stale vs.
   `None`-is-terminal-for-reap divergence survives.
 
 No other existing tests exercise these three functions (grep confirmed:
@@ -315,10 +355,17 @@ No other existing tests exercise these three functions (grep confirmed:
 
 ## Rabbit Holes
 
-- **Rewriting the reclaim-request / drain architecture.** Item 2 is a
-  read-deduplication, not a redesign. Do NOT merge the request-owner drain (a
-  different owner set) into the lease-snapshot map, and do NOT change when
-  reclaims fire. Touch only the double-read over `leases_snapshot`.
+- **Rewriting the reclaim-request / drain architecture.** Item 2 is a narrow
+  decoupling of the read-only stale-check, not a redesign. Do NOT merge the
+  request-owner drain (a different owner set) into the lease-snapshot map, and do
+  NOT change when reclaims fire. Touch only the stale-check's owner read.
+- **Reusing a pre-drain owner snapshot for the Phase-2 reclaim decision.** This is
+  the exact over-engineering the first revision introduced and the re-critique
+  blocked: capturing owner status before the drain and reclaiming off it in
+  Phase-2 opens a live-permit-strip race (an owner terminal at snapshot time can be
+  `valor-session resume`d during the bounded drain window, and Phase-2 would strip
+  the now-live session's permit). Phase-2 MUST re-read fresh at reclaim time. The
+  shared map is for the read-only stale-check ONLY.
 - **"Fixing" the #1868 None-divergence.** The stale-check treating `None` as
   unknown while the reaper treats `None` as terminal LOOKS inconsistent but is
   deliberate and load-bearing. Preserve both policies exactly; the refactor only
@@ -331,14 +378,21 @@ No other existing tests exercise these three functions (grep confirmed:
 
 ## Risks
 
-### Risk 1: Item-2 refactor silently changes reclaim or stale-emit behavior
-**Impact:** A shared owner map that flattens the not-found vs. lookup-error vs.
-found-record states would either over-reclaim (strip a live session's permit) or
-stop emitting `bridge_contract_stale`.
-**Mitigation:** The map preserves three distinct states; each consumer keeps its
-existing `None`/absent policy. Test parity against the pre-refactor decisions in
-`test_out_of_domain_reclaim.py`, explicitly covering a terminal record, a
-not-found (`None`) owner, and a lookup-error owner.
+### Risk 1: Item-2 change silently changes reclaim or stale-emit behavior
+**Impact:** Two failure modes. (a) If the Phase-2 reclaim read off any snapshot
+captured before the drain, an owner terminal at snapshot time but
+`valor-session resume`d during the bounded drain window would have its live
+permit stripped (semaphore over-admission — the exact bug the first revision
+introduced). (b) Flattening the not-found (`None`) vs. lookup-error (`_ABSENT`)
+vs. found-record states in the stale-check map would either over-signal or stop
+emitting `bridge_contract_stale`.
+**Mitigation:** (a) Phase-2 reclaim is LEFT UNCHANGED — it re-reads each owner
+FRESH via `get_by_id` at reclaim time and never consults the map; a dedicated
+resume-during-drain test asserts a snapshot-terminal-but-now-live owner is NOT
+reclaimed. (b) The map uses an `_ABSENT` sentinel distinct from `None`, and the
+stale-check treats both as not-terminal (skip). Test parity against the shipped
+decisions in `test_out_of_domain_reclaim.py`, explicitly covering a terminal
+record, a not-found (`None`) owner, and a lookup-error (`_ABSENT`) owner.
 
 ### Risk 2: SCAN swap regresses under a large keyspace or empty match
 **Impact:** An unbounded DEL arg list or a delete on an empty batch could error.
@@ -361,9 +415,12 @@ tick/hook execution:
 - Item 1 runs on the watchdog tick; SCAN + batched DELETE is not more racy than
   the current KEYS + DELETE (both non-atomic against concurrent marker writes,
   and both idempotent — a re-leak simply re-triggers).
-- Item 2 reads a single `leases_snapshot` captured once per tick and builds the
-  owner map inside the same synchronous tick before the drain runs; sharing the
-  fetch reduces, not increases, the read window.
+- Item 2 introduces NO new race. The read-only stale-check map is built inside the
+  same synchronous tick and only decides whether to emit a WARNING, where a
+  momentarily stale view is harmless. Crucially, the Phase-2 reclaim decision is
+  left on its existing FRESH per-owner `get_by_id` at reclaim time — it is never
+  made off a pre-drain snapshot — so the resume-during-drain live-permit-strip
+  race is not opened.
 - Item 3 only removes a write on the id-less path; the NX dedup gate semantics are
   unchanged for id-bearing sessions.
 
@@ -408,31 +465,38 @@ or surfaces are added by this plan.
   #1886 as the issue that owns both the per-denial `denied_calls` instrument and
   the eventual data-gated decision.
 - [ ] Update `docs/features/slot-lease-ownership.md` (or the reclaim doc it points
-  to) to note the SCAN-based dedup clear and the single-pass owner-map read (built
-  in `_reap_slot_leases`, threaded through `_drain_reclaim_requests`) in the reap
-  tick.
+  to) to note the SCAN-based dedup clear and the decoupled stale-check (owner map
+  built in `_reap_slot_leases`, `_drain_reclaim_requests` now returns `drained`,
+  Phase-2 reclaim still reads fresh) in the reap tick.
 
 ### Inline Documentation
 - [ ] Update the `_clear_reclaim_dedup`, `_reap_slot_leases` /
   `_drain_reclaim_requests` / `_maybe_emit_bridge_contract_stale`, and
-  `record_budget_trip` docstrings to reflect the SCAN clear, the shared owner map
-  threaded through the drain (and the preserved #1868 None-divergence), and the
-  id-less dedup guard respectively.
+  `record_budget_trip` docstrings to reflect the SCAN clear; the decoupled
+  stale-check (drain returns `drained`; owner map built in `_reap_slot_leases` and
+  passed to the stale-check; Phase-2 reclaim reads fresh; the preserved #1868
+  None-divergence); and the id-less dedup guard (a one-line inline note)
+  respectively.
 
 ## Success Criteria
 
 - [ ] `_clear_reclaim_dedup` contains no `.keys(` call and uses `scan_iter`
   (`grep -n "scan_iter" monitoring/session_watchdog.py` matches;
   `grep -n "\.keys(" monitoring/session_watchdog.py` in that function does not).
-- [ ] The owner→record map is built once in `_reap_slot_leases`, passed as a
-  parameter to `_drain_reclaim_requests`, and forwarded to
-  `_maybe_emit_bridge_contract_stale` — threading verified at the call site
-  (`_reap_slot_leases` builds it; `_drain_reclaim_requests` signature takes it),
-  not only in the callee body. `_maybe_emit_bridge_contract_stale` no longer calls
-  `AgentSession.get_by_id` (it reads the passed map).
-- [ ] `record_budget_trip` never forms a `tripped_applied:None` key; two id-less
-  sessions both surface (new test passes). No `denied_calls` counter is added.
-- [ ] The #1868 divergence (stale-check: `None`→unknown/skip; reaper:
+- [ ] `_drain_reclaim_requests` returns `drained: int` and no longer calls
+  `_maybe_emit_bridge_contract_stale`; the stale-check is called directly from
+  `_reap_slot_leases` with an owner map built there (only when `drained == 0`).
+  `_maybe_emit_bridge_contract_stale` no longer calls `AgentSession.get_by_id` (it
+  reads the passed map). The map is NOT a parameter of `_drain_reclaim_requests`
+  (no tramp parameter).
+- [ ] The Phase-2 reclaim loop is unchanged — it re-reads each owner FRESH via
+  `get_by_id` at reclaim time and never consults the map. A resume-during-drain
+  test asserts a snapshot-terminal-but-now-live owner is NOT reclaimed.
+- [ ] `record_budget_trip` has an `if not session_id:` guard before the SET-NX so
+  it never forms a `tripped_applied:None` key; two id-less sessions both surface
+  (WARNING log + `tripped` counter, not flag persistence — new test passes). No
+  `denied_calls` counter is added.
+- [ ] The #1868 divergence (stale-check: `None`/`_ABSENT`→unknown/skip; reaper:
   `None`→terminal/reclaim) is preserved and covered by a test that drives
   `_reap_slot_leases()` end-to-end.
 - [ ] Tests pass (`/do-test`).
@@ -447,7 +511,7 @@ built in one pass, then verified together.
 
 - **Builder (advisory-cleanup)**
   - Name: cleanup-builder
-  - Role: Implement items 1-3 code changes + item-4 counter and docs
+  - Role: Implement items 1-3 code changes + item-4 tradeoff doc (no new counter)
   - Agent Type: builder
   - Domain: async/Redis, Popoto data
   - Resume: true
@@ -474,22 +538,29 @@ built in one pass, then verified together.
 - Domain (Redis): these are plain watchdog marker keys, not Popoto model keys —
   raw scan/delete is permitted; keep it fail-quiet.
 
-### 2. Item 2 — single-pass owner→record map
+### 2. Item 2 — decouple the read-only stale-check (owner map for the stale-check only)
 - **Task ID**: build-owner-map
 - **Depends On**: none
 - **Validates**: tests/integration/test_out_of_domain_reclaim.py
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `_reap_slot_leases`, build `owner_records` (3-state: record / not-found
-  `None` / absent-key-on-error) once before the `_drain_reclaim_requests` call.
-- Add `owner_records` as a parameter to `_drain_reclaim_requests` and pass it at
-  the call site; forward it from the drain's tail into
-  `_maybe_emit_bridge_contract_stale(drained, owner_records)`. The drain's own
-  request-owner reads (distinct owner set) stay untouched.
-- Reuse the same map in the Phase-2 reap loop of `_reap_slot_leases`.
-- Preserve the #1868 divergence exactly: stale-check `None`/absent → not terminal
-  → skip; reaper `None` → terminal → reclaim; absent (lookup error) → skip.
+- Define a module-level `_ABSENT = object()` sentinel (distinct from `None`).
+- Change `_drain_reclaim_requests` to `return drained` (int) and DELETE its tail
+  call to `_maybe_emit_bridge_contract_stale`. The drain's own request-owner reads
+  (distinct owner set) stay untouched. The map is NOT a drain parameter.
+- In `_reap_slot_leases`, capture `drained = _drain_reclaim_requests(...)`, then
+  (only when `drained == 0`) build `owner_records` (record / not-found `None` /
+  `_ABSENT` on lookup error) once; a per-owner fetch error stores `_ABSENT` AND
+  emits `logger.warning(..., exc_info=True)`.
+- Call `_maybe_emit_bridge_contract_stale(drained, owner_records)` directly from
+  `_reap_slot_leases`, in the always-run region before the `if reap_disabled:
+  return` gate. The stale-check reads the map, no `get_by_id`.
+- LEAVE the Phase-2 reap loop UNCHANGED — it re-reads each owner FRESH at reclaim
+  time and never consults the map. Do NOT reuse any pre-drain snapshot for reclaim.
+- Preserve the #1868 divergence exactly: stale-check `None`/`_ABSENT` → not
+  terminal → skip; reaper (fresh read) `None` → terminal → reclaim; lookup error →
+  skip.
 
 ### 3. Item 3 — id-safe trip dedup
 - **Task ID**: build-trip-dedup
@@ -511,8 +582,10 @@ built in one pass, then verified together.
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Document the deny-but-don't-halt tradeoff and the #1886 decision criteria (which
-  owns the `denied_calls` instrument) in the tool-budget feature doc; note SCAN
-  clear + threaded owner-map in the slot-lease doc; update the docstrings.
+  owns the `denied_calls` instrument) in the tool-budget feature doc; note the SCAN
+  clear + the decoupled stale-check (drain returns `drained`, stale-check reads a
+  reap-built owner map, Phase-2 reads fresh) in the slot-lease doc; update the
+  docstrings.
 
 ### 5. Final validation
 - **Task ID**: validate-all
@@ -533,22 +606,33 @@ built in one pass, then verified together.
 | Item 1: SCAN used | `grep -c "scan_iter" monitoring/session_watchdog.py` | output > 0 |
 | Item 1: no KEYS in dedup clear | `sed -n '/def _clear_reclaim_dedup/,/^def /p' monitoring/session_watchdog.py \| grep -c "\.keys("` | match count == 0 |
 | Item 2: stale-check no longer refetches | `sed -n '/def _maybe_emit_bridge_contract_stale/,/^def /p' agent/session_health.py \| grep -c "get_by_id"` | match count == 0 |
-| Item 2: drain forwards the map (threading) | `sed -n '/def _drain_reclaim_requests/,/^def /p' agent/session_health.py \| grep -c "owner_records"` | output > 0 |
-| Item 2: map built in reap pass | `sed -n '/def _reap_slot_leases/,/^def _publish_slot_leases/p' agent/session_health.py \| grep -c "owner_records"` | output > 0 |
-| Item 3: no `:None` dedup collapse | `grep -c "tripped_applied:None" agent/tool_budget.py` | match count == 0 |
+| Item 2: drain takes no map param (no tramp) | `sed -n '/def _drain_reclaim_requests/,/^def /p' agent/session_health.py \| grep -c "owner_records"` | match count == 0 |
+| Item 2: drain no longer calls stale-check | `sed -n '/def _drain_reclaim_requests/,/^def /p' agent/session_health.py \| grep -c "_maybe_emit_bridge_contract_stale"` | match count == 0 |
+| Item 2: map built + stale-check called in reap pass | `sed -n '/def _reap_slot_leases/,/^def _publish_slot_leases/p' agent/session_health.py \| grep -Ec "owner_records\|_maybe_emit_bridge_contract_stale"` | output > 0 |
+| Item 2: Phase-2 still reads fresh + `_ABSENT` sentinel | `grep -c "_ABSENT" agent/session_health.py` | output > 0 |
+| Item 3: id-less guard exists before SET-NX | `sed -n '/def record_budget_trip/,/^def /p' agent/tool_budget.py \| grep -c "if not session_id"` | output > 0 |
+| Item 3: behavioral gate (not a grep) | `pytest tests/integration/test_tool_budget_enforcement.py::test_id_less_session_does_not_collapse_dedup -q` | exit code 0 |
 | Item 3: no denied_calls added here | `grep -c "denied_calls" agent/tool_budget.py` | match count == 0 |
 
 ## Resolved Decisions
 
-Both prior open questions are now resolved (critique NEEDS REVISION pass):
+Both prior open questions are now resolved (critique NEEDS REVISION pass, then a
+second re-critique NEEDS REVISION pass):
 
-1. **Item 2 scope — RESOLVED: full read-dedup.** Build the owner→record map once
-   in `_reap_slot_leases`, thread it as a parameter through `_drain_reclaim_requests`
-   into `_maybe_emit_bridge_contract_stale`, and reuse it in the Phase-2 reap loop —
-   removing BOTH redundant `leases_snapshot` reads. The narrower "stale-check only"
-   alternative is rejected: the stale-check is invoked from the drain's tail, so
-   threading through the drain is required regardless, and eliminating only one of
-   the two reads leaves the Phase-2 fetch redundant for no benefit. Both #1868
+1. **Item 2 scope — RESOLVED (second pass): stale-check decoupling only, Phase-2
+   reads fresh.** The first revision's "full read-dedup" — building a pre-drain
+   owner map and reusing it in the Phase-2 reclaim loop — was BLOCKED by the
+   re-critique: it opened a live-permit-strip race, because an owner terminal at
+   snapshot time can be `valor-session resume`d during the bounded drain window,
+   and Phase-2 would then strip a now-live session's permit (the exact semaphore
+   over-admission the fresh read prevents). The corrected, smaller approach: only
+   the read-only `_maybe_emit_bridge_contract_stale` consumes a shared owner map
+   (built in `_reap_slot_leases`, only when `drained == 0`); `_drain_reclaim_requests`
+   returns `drained: int` and no longer calls the stale-check (removing the tramp
+   parameter the first revision introduced); the Phase-2 reclaim loop is UNCHANGED
+   and re-reads each owner FRESH at reclaim time. This does NOT reduce total Redis
+   reads — Phase-2 still reads fresh, by design — so the earlier "half the reads /
+   byte-for-byte / same result" framing was false and has been removed. Both #1868
    policies are preserved exactly.
 2. **Item 4 / `denied_calls` — RESOLVED: deferred entirely to #1886.** This plan
    ships items 1-3 (code) plus the deny-but-don't-halt tradeoff doc only. The
