@@ -9,8 +9,10 @@ integration test.
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent.granite_container.container import (
@@ -18,6 +20,7 @@ from agent.granite_container.container import (
     ContainerResult,
     TurnRecord,
     _make_sandbox_cwd,
+    _transcript_path,
     result_to_json,
 )
 from agent.granite_container.pty_driver import PTYDriver
@@ -112,8 +115,14 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
         # PM transcript texts: startup (empty → _unknown_classification falls through
-        # before classify), then prime-relay "[/complete]\nShipped PR #42.".
-        pm_transcript_texts = iter(["[/complete]\nShipped PR #42."])
+        # before classify), then prime-relay "[/complete]\nShipped PR #42.". The text
+        # is duplicated: the startup loop's terminal-turn fast settle (issue #1881)
+        # reads the transcript once at the cycle where pm_saw_idle is true (a
+        # read-only classification that only decides whether to break), and the
+        # prime-turn relay independently re-reads the SAME on-disk transcript to
+        # deliver — in production both reads hit the same file and return
+        # identical content; the stub must mirror that idempotency.
+        pm_transcript_texts = iter(["[/complete]\nShipped PR #42.", "[/complete]\nShipped PR #42."])
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -186,8 +195,14 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
 
         # last_assistant_text is called for each PM classify and each Dev read.
         # PM path contains "mock-session-pm"; Dev path contains "mock-session-dev".
+        # The leading "" is duplicated: the startup loop's terminal-turn fast
+        # settle (issue #1881) reads the transcript once at the cycle where
+        # pm_saw_idle is true (read-only, empty text never fast-settles), and the
+        # prime-turn relay independently re-reads the SAME on-disk transcript —
+        # in production both reads hit the same file and return identical content.
         pm_transcript_texts = iter(
             [
+                "",  # startup: fast-settle read (empty → no fast settle)
                 "",  # prime-relay (unknown, compliance miss)
                 "[/dev]\nturn 0",  # turn 0 steady-state
                 "[/dev]\nturn 1",  # turn 1
@@ -280,8 +295,15 @@ class TestContainerRunWithMockedPtys(unittest.TestCase):
 
         # PM transcript texts (one per PM classify call):
         # prime-relay → no prefix (unknown), turn 0 → [/complete]\nDone.
+        # The leading text is duplicated: the startup loop's terminal-turn fast
+        # settle (issue #1881) reads the transcript once at the cycle where
+        # pm_saw_idle is true (read-only, unknown text never fast-settles), and
+        # the prime-turn relay independently re-reads the SAME on-disk
+        # transcript — in production both reads hit the same file and return
+        # identical content.
         pm_transcript_texts = iter(
             [
+                "I'm thinking out loud about the design.",  # startup: fast-settle read
                 "I'm thinking out loud about the design.",  # prime-relay: unknown
                 "[/complete]\nDone.",  # turn 0: complete
             ]
@@ -362,8 +384,13 @@ class TestContainerUserAddress(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: only the prime-relay call matters (returns [/user] text).
-        pm_transcript_texts = iter(["[/user]\nstatus update 1"])
+        # PM transcript: duplicated because the startup loop's terminal-turn
+        # fast settle (issue #1881) reads the transcript once at the cycle
+        # where pm_saw_idle is true — here that read itself classifies
+        # destination="user" and fast-settles — and the prime-turn relay
+        # independently re-reads the SAME on-disk transcript to deliver; in
+        # production both reads hit the same file and return identical content.
+        pm_transcript_texts = iter(["[/user]\nstatus update 1", "[/user]\nstatus update 1"])
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -554,8 +581,13 @@ class TestContainerStartupHardCeiling(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: prime-relay returns [/complete]\nDone.
-        pm_transcript_texts = iter(["[/complete]\nDone."])
+        # PM transcript: duplicated because the startup loop's terminal-turn
+        # fast settle (issue #1881) reads the transcript once at startup cycle
+        # 2 (the first cycle where pm_saw_idle is true — a non-empty [/complete]
+        # fast-settles immediately), and the prime-turn relay independently
+        # re-reads the SAME on-disk transcript to deliver; in production both
+        # reads hit the same file and return identical content.
+        pm_transcript_texts = iter(["[/complete]\nDone.", "[/complete]\nDone."])
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -780,9 +812,13 @@ class TestContainerOnTurnHook(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: next(pm_buffers)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript texts: prime-relay (unknown), turn 0 (complete).
+        # PM transcript texts: startup (fast-settle read, issue #1881),
+        # prime-relay (unknown), turn 0 (complete). The startup and
+        # prime-relay entries are duplicated because both reads hit the
+        # same on-disk transcript in production and return identical content.
         pm_transcript_texts_hook = iter(
             [
+                "no prefix here",  # startup: fast-settle read
                 "no prefix here",  # prime-relay: unknown
                 "[/complete]\nDone.",  # turn 0: complete
             ]
@@ -967,10 +1003,15 @@ class TestPrimeTurnRelay(unittest.TestCase):
 
         dev_mock.write.side_effect = _track_dev_write
 
-        # PM transcript texts: prime-relay (dev), then turn 0 steady-state (complete).
+        # PM transcript texts: startup (fast-settle read, issue #1881; a "dev"
+        # destination never fast-settles), prime-relay (dev), then turn 0
+        # steady-state (complete). The startup and prime-relay entries are
+        # duplicated because both reads hit the same on-disk transcript in
+        # production and return identical content.
         # Dev transcript: verbatim dev text.
         pm_transcript_texts = iter(
             [
+                "[/dev]\nBuild X",  # startup: fast-settle read
                 "[/dev]\nBuild X",  # prime-relay
                 "[/complete]\nDone.",  # turn 0 steady-state
             ]
@@ -1035,8 +1076,13 @@ class TestPrimeTurnRelay(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: prime-relay returns [/user] text.
-        pm_transcript_texts = iter(["[/user]\nStatus: all good."])
+        # PM transcript: duplicated because the startup loop's terminal-turn
+        # fast settle (issue #1881) reads the transcript once at the cycle
+        # where pm_saw_idle is true — here that read itself classifies
+        # destination="user" and fast-settles — and the prime-turn relay
+        # independently re-reads the SAME on-disk transcript to deliver; in
+        # production both reads hit the same file and return identical content.
+        pm_transcript_texts = iter(["[/user]\nStatus: all good.", "[/user]\nStatus: all good."])
 
         def _lat_stub(path, *, baseline_text_count=None):
             if not path or "mock-session-dev" in path:
@@ -1283,9 +1329,14 @@ class TestWrapupGuard(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: prime-relay (unknown/empty), wrapup response (prefix-less).
+        # PM transcript: startup (fast-settle read, issue #1881; empty text
+        # never fast-settles), prime-relay (unknown/empty), wrapup response
+        # (prefix-less). The startup and prime-relay entries are duplicated
+        # because both reads hit the same on-disk transcript in production
+        # and return identical content.
         pm_transcript_texts = iter(
             [
+                "",  # startup: fast-settle read
                 "",  # prime-relay: unknown (empty → fallback)
                 "Here is what I did: fixed the bug.",  # wrapup: non-empty, no prefix
             ]
@@ -1416,9 +1467,19 @@ class TestWrapupGuard(unittest.TestCase):
         pm_mock.read_until_idle.side_effect = lambda **kw: pm_buffers.pop(0)
         dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
 
-        # PM transcript: prime-relay (empty [/complete]), wrapup ([/user]\nReal summary.).
+        # PM transcript: startup (fast-settle read, issue #1881), prime-relay
+        # (both empty [/complete]), wrapup ([/user]\nReal summary.). The
+        # startup and prime-relay entries are duplicated because both reads
+        # hit the same on-disk transcript in production and return identical
+        # content. This exercises the new fast-settle branch directly: an
+        # empty-body [/complete] read at the pm_saw_idle-true cycle must NOT
+        # fast-settle (mirrors the relay's own "empty complete is not
+        # user-facing" guard) — it falls through to the ordinary settle and
+        # the wrap-up guard delivers the real [/user] summary, exactly as
+        # before the fast-settle branch existed.
         pm_transcript_texts = iter(
             [
+                "[/complete]",  # startup: fast-settle read (empty → no fast settle)
                 "[/complete]",  # prime-relay: empty complete body (not user-facing)
                 "[/user]\nReal summary.",  # wrapup response: delivers to user
             ]
@@ -1567,8 +1628,15 @@ class TestPerTurnContractReminder(unittest.TestCase):
         )
 
         dev_transcript_text = "Dev finished the task."
+        # The startup and prime-relay entries are duplicated: the startup
+        # loop's terminal-turn fast settle (issue #1881) reads the transcript
+        # once at the cycle where pm_saw_idle is true (a "dev" destination
+        # never fast-settles), and the prime-turn relay independently re-reads
+        # the SAME on-disk transcript — in production both reads hit the same
+        # file and return identical content.
         pm_transcript_texts = iter(
             [
+                "[/dev]\ndo the task",  # startup: fast-settle read
                 "[/dev]\ndo the task",  # prime-relay → dev route
                 "",  # turn 0: unknown (empty → compliance miss)
             ]
@@ -1661,8 +1729,6 @@ class TestTranscriptPathRealpath(unittest.TestCase):
         import os
         import tempfile
 
-        from agent.granite_container.container import _transcript_path
-
         with tempfile.TemporaryDirectory() as tmp:
             real = os.path.join(tmp, "real")
             link = os.path.join(tmp, "link")
@@ -1675,8 +1741,6 @@ class TestTranscriptPathRealpath(unittest.TestCase):
         """A symlink-crossing cwd produces the realpath slug, not the link slug."""
         import os
         import tempfile
-
-        from agent.granite_container.container import _transcript_path
 
         with tempfile.TemporaryDirectory() as tmp:
             # Resolve tmp itself (macOS /var -> /private/var) so the
@@ -1704,7 +1768,6 @@ class TestTranscriptPathRealpath(unittest.TestCase):
         shipped instead of the PM's real reply. Must stay in sync with
         bridge_adapter._transcript_path_from_spec.
         """
-        from agent.granite_container.container import _transcript_path
 
         # Non-existent path: realpath is an identity transform, so the slug is
         # deterministic without touching the filesystem.
@@ -1716,7 +1779,6 @@ class TestTranscriptPathRealpath(unittest.TestCase):
 
     def test_empty_cwd_does_not_crash_and_skips_realpath(self) -> None:
         """Empty cwd is not realpath'd (would return process CWD); slug stays empty-rooted."""
-        from agent.granite_container.container import _transcript_path
 
         path = _transcript_path("", "sess-uuid")
         # cwd == "" -> realpath skipped -> slug "" -> path ends with the file.
@@ -1800,6 +1862,211 @@ class TestTranscriptReadDiagnostic(unittest.TestCase):
         joined = "\n".join(cm.output)
         self.assertIn("transcript read: no-new-entry", joined)
         self.assertIn("wrap-up guard", joined)
+
+
+class TestStartupPmCompleteBeforeDevPrimes(unittest.TestCase):
+    """Issue #1881: PM emits [/complete] and goes idle before Dev primes.
+
+    These reproduction tests drive the REAL ``last_assistant_text`` reader
+    against an on-disk JSONL transcript fixture — NO stub. The fast-PM/slow-Dev
+    race the bug lives in is exactly a freshness-guard failure
+    (``last_assistant_text(..., baseline_text_count=pm_prime_baseline)`` returns
+    "" when ``len(texts) <= baseline``), so a stubbed reader would go green while
+    the bug persisted. The fixture is flushed to disk DURING the loop (after the
+    relocated pre-loop baseline snapshot), matching real PM ordering — PM primes,
+    works, emits [/complete], then goes idle — so the genuine content-identity
+    guard is what delivers the already-flushed terminal turn.
+    """
+
+    def _write_pm_transcript(self, path: str, text: str) -> None:
+        """Write a single text-bearing assistant JSONL entry to ``path``.
+
+        Mirrors Claude Code's transcript format closely enough for
+        ``_text_bearing_assistant_texts`` to parse: one ``{"type":"assistant",
+        "message":{"content":[{"type":"text","text": ...}]}}`` line.
+        """
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": text}]},
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def _fixture_paths(self) -> tuple[str, str]:
+        """Make a unique cwd + compute the PM transcript path the code will use.
+
+        Registers cleanup of both the temp cwd and the (home-rooted) transcript
+        directory so the test leaves no residue under ``~/.claude/projects/``.
+        """
+        cwd = tempfile.mkdtemp(prefix="granite-1881-")
+        self.addCleanup(shutil.rmtree, cwd, ignore_errors=True)
+        pm_path = _transcript_path(cwd, "mock-session-pm")
+        assert pm_path is not None
+        self.addCleanup(shutil.rmtree, str(Path(pm_path).parent), ignore_errors=True)
+        return cwd, pm_path
+
+    def test_pm_complete_before_dev_primes_delivers(self) -> None:
+        """Reported production incident: PM emits a non-empty [/complete] and
+        goes idle at an early cycle; Dev never reaches idle. The terminal-turn
+        fast settle delivers the payload and exits pm_complete (SC#1b).
+
+        Drives the REAL reader: the [/complete] is flushed to disk on PM's first
+        loop read (AFTER the pre-loop baseline snapshot of 0), so it is a genuinely
+        NEW text-bearing entry and the real
+        ``last_assistant_text(baseline_text_count=0)`` freshness guard returns it.
+        """
+        cwd, pm_path = self._fixture_paths()
+
+        delivered: list[str] = []
+        c = Container(
+            user_message="hello",
+            max_turns=3,
+            cwd=cwd,
+            on_complete_payload=lambda p: delivered.append(p),
+        )
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
+
+        # PM flushes its terminal [/complete] to disk on its first loop read
+        # (after the pre-loop baseline snapshot), then stays idle. Dev NEVER
+        # idles (the "Dev never primes" case) — only the fast settle can rescue.
+        def _pm_read(**kw):
+            self._write_pm_transcript(pm_path, "[/complete]\nDone.")
+            return _idle_result("", saw_idle=True)
+
+        pm_mock.read_until_idle.side_effect = _pm_read
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=False)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_close_pair_and_reap"),
+            patch.object(c, "_run_wrapup_guard"),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(
+            result.exit_reason,
+            "pm_complete",
+            f"got {result.exit_reason!r}: {result.exit_message!r}",
+        )
+        self.assertTrue(result.user_facing_routed, "PM [/complete] must reach the send path")
+        self.assertEqual(delivered, ["Done."])
+        self.assertEqual(len(delivered), 1, "on_complete_payload must fire exactly once")
+        self.assertIsNone(result.startup_failure_kind)
+        self.assertEqual(result.startup_settle_reason, "pm_terminal_fast")
+
+    def test_pm_latched_dev_idle_delivers_complete(self) -> None:
+        """SC#1a via the latch: PM goes idle early, Dev reaches idle on a LATER
+        cycle. The pm_ever_idle latch settles startup and the relocated pre-loop
+        baseline lets the relay deliver PM's already-flushed [/complete].
+
+        Fast settle is deliberately NOT the settling mechanism here: the
+        transcript is empty while PM is idle (cycle 0), so the fast-settle read
+        returns "" and skips; the [/complete] lands only when Dev idles (cycle 2),
+        at which point PM is no longer idle-this-cycle, so the latch gate fires.
+        """
+        cwd, pm_path = self._fixture_paths()
+
+        delivered: list[str] = []
+        c = Container(
+            user_message="hello",
+            max_turns=3,
+            cwd=cwd,
+            on_complete_payload=lambda p: delivered.append(p),
+        )
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
+        # PM idle cycle 0 (transcript still empty → fast settle skips), busy on
+        # cycles 1-2, then turn-end at the relay read.
+        pm_seq = [
+            _idle_result("", saw_idle=True),  # cycle 0: idle, no terminal turn yet
+            _idle_result("", saw_idle=False),  # cycle 1: busy
+            _idle_result("", saw_idle=False),  # cycle 2: busy (fast settle skipped)
+            _idle_result("", saw_idle=True),  # relay _cycle_idle: PM turn-end
+        ]
+        pm_mock.read_until_idle.side_effect = lambda **kw: pm_seq.pop(0)
+
+        dev_reads = {"n": 0}
+
+        def _dev_read(**kw):
+            dev_reads["n"] += 1
+            if dev_reads["n"] >= 3:
+                # Dev reaches idle on cycle 2 (~the reported-incident timing);
+                # PM's [/complete] has now flushed to disk.
+                self._write_pm_transcript(pm_path, "[/complete]\nDone.")
+                return _idle_result("", saw_idle=True)
+            return _idle_result("", saw_idle=False)
+
+        dev_mock.read_until_idle.side_effect = _dev_read
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_close_pair_and_reap"),
+            patch.object(c, "_run_wrapup_guard"),
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(
+            result.exit_reason,
+            "pm_complete",
+            f"got {result.exit_reason!r}: {result.exit_message!r}",
+        )
+        self.assertTrue(result.user_facing_routed)
+        self.assertEqual(delivered, ["Done."])
+        self.assertEqual(result.startup_settle_reason, "pm_latched_dev_idle")
+
+    def test_empty_complete_at_startup_not_user_facing(self) -> None:
+        """An empty-body [/complete] during startup must NOT fast-settle-deliver.
+
+        The fast settle requires a non-empty terminal classification, so an empty
+        [/complete] falls through; the container still settles (both idle) and the
+        relay routes the empty complete as NON user-facing — no delivery, no
+        on_complete_payload call. Drives the real reader (concern note #3).
+        """
+        cwd, pm_path = self._fixture_paths()
+
+        delivered: list[str] = []
+        c = Container(
+            user_message="hello",
+            max_turns=2,
+            cwd=cwd,
+            on_complete_payload=lambda p: delivered.append(p),
+        )
+        pm_mock, dev_mock = _mock_pm(""), _mock_dev("")
+
+        # PM flushes an EMPTY-body [/complete] on its first loop read (after the
+        # pre-loop baseline of 0) so the relay sees it as a new entry but routes
+        # it as non-user-facing.
+        def _pm_read(**kw):
+            self._write_pm_transcript(pm_path, "[/complete]")
+            return _idle_result("", saw_idle=True)
+
+        pm_mock.read_until_idle.side_effect = _pm_read
+        dev_mock.read_until_idle.return_value = _idle_result("", saw_idle=True)
+
+        with (
+            patch.object(c, "_spawn_pair"),
+            patch.object(c, "_close_pair"),
+            patch.object(c, "_prime_session"),
+            patch.object(c, "_close_pair_and_reap"),
+            patch.object(c, "_run_wrapup_guard"),  # isolate: no wrap-up delivery
+        ):
+            c._pm_pty = pm_mock
+            c._dev_pty = dev_mock
+            result = c.run()
+
+        self.assertEqual(result.exit_reason, "pm_complete")
+        self.assertFalse(result.user_facing_routed, "empty [/complete] is not user-facing")
+        self.assertEqual(delivered, [], "on_complete_payload must NOT fire for empty [/complete]")
+        # Empty [/complete] does not fast-settle; it settles via the both-idle gate.
+        self.assertEqual(result.startup_settle_reason, "both_idle")
 
 
 if __name__ == "__main__":
