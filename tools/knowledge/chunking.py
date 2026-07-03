@@ -61,9 +61,10 @@ def truncate_to_tokens(text: str | None, max_tokens: int = 8000) -> str | None:
 
     Fallback behavior:
         If tiktoken encoding/decoding raises, falls back to a conservative
-        char-based cap (`text[:max_tokens * 4]`), mirroring the fallback
-        style already used by `_count_tokens` in this module. This keeps
-        the function from ever raising due to a tokenizer failure.
+        char-based cap (`text[:int(max_tokens * 3)]`), kept strictly below
+        the ~3.66 chars/token ratio that causes dense docs to still exceed
+        the caller's budget after truncation. This keeps the function from
+        ever raising due to a tokenizer failure.
 
     Logging:
         Logs a WARNING with the before/after token counts only when
@@ -89,7 +90,7 @@ def truncate_to_tokens(text: str | None, max_tokens: int = 8000) -> str | None:
         logger.warning(
             f"tiktoken encoding failed in truncate_to_tokens, falling back to char cap: {e}"
         )
-        return text[: max_tokens * 4]
+        return text[: int(max_tokens * 3)]
 
 
 def _split_by_headings(content: str) -> list[tuple[str, str]]:
