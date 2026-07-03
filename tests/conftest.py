@@ -11,6 +11,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
+# ---------------------------------------------------------------------------
+# Production-Sentry guard
+# ---------------------------------------------------------------------------
+# bridge/telegram_bridge.py calls sentry_sdk.init() at module import time,
+# gated only on SENTRY_DSN — which its dotenv load pulls from the real .env.
+# 31 test files import that module (directly or transitively), so every
+# pytest process was shipping deliberate failure-path logger.error() calls
+# into production Sentry as real events (issue #1460: 1,650+ events/period
+# across VALOR-2M/6/1Y/2J, all traced to test payloads). Pre-seed an empty
+# DSN at conftest import time — before any test module import — so the
+# bridge's `if _sentry_dsn:` guard stays falsy. load_dotenv(override=False)
+# never replaces a key already present in os.environ, so the real .env
+# cannot re-pollute it. Production code is untouched.
+os.environ["SENTRY_DSN"] = ""
+
 
 # ---------------------------------------------------------------------------
 # Production-Redis (db=0) flush guard
