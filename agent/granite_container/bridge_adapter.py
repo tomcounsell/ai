@@ -75,7 +75,11 @@ from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
     read_transcript_telemetry,
 )
-from agent.steering import pop_all_steering_messages, pop_wedge_nudges
+from agent.steering import (
+    clear_wedge_nudge_latch,
+    pop_all_steering_messages,
+    pop_wedge_nudges,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +431,7 @@ class BridgeAdapter:
         project_key: str,
         transport: str,
         pool: PTYPool,
-        resolve_callbacks: Callable[[str, str], tuple[Callable | None, Any]] | None = None,
+        resolve_callbacks: (Callable[[str, str], tuple[Callable | None, Any]] | None) = None,
         delivery_timeout_s: float = DEFAULT_DELIVERY_TIMEOUT_S,
         session_env: dict[str, str] | None = None,
         pm_system_prompt: str | None = None,
@@ -594,7 +598,11 @@ class BridgeAdapter:
             pm_transport=pm_transport,
             dev_transport=dev_transport,
         )
-        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev, pty_slot):
+        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (
+            pm,
+            dev,
+            pty_slot,
+        ):
             # Hand the pool's pre-warmed pair to Container so it
             # reuses them instead of spawning a fresh pair. The
             # pre-warm is the pool's whole point — discarding it
@@ -992,6 +1000,33 @@ class BridgeAdapter:
                 save(update_fields=["last_turn_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("[bridge-adapter] last_turn_at bump failed: %s", e)
+        # Wedge-nudge recovery bookkeeping (issue #1879, critique concerns 1 & 2).
+        # A completed turn (this ``on_turn`` hook fires only on a genuine
+        # ``Stop``-edge turn end, never on the injected ``continue`` echo —
+        # spike-2) is the authoritative "the session is making progress" signal.
+        # Clearing the wedge-nudge latch here — keyed by ``session_id``, the same
+        # key the producer set and the ``_poll_wedge_nudge`` consumer drains —
+        # frees a session that a nudge un-stuck to earn a fresh nudge if it
+        # wedges again on a LATER turn, instead of being gagged for the whole
+        # fixed latch TTL (the recovered-then-re-wedged defect). ``clear`` reports
+        # whether a latch was actually held; a True here means THIS session had
+        # been nudged and just recovered, so it also feeds the efficacy counter
+        # ``{project_key}:session-health:wedge_nudge_recovered`` (paired with the
+        # producer's ``wedge_nudge_sent``). Entirely fail-silent — recovery
+        # bookkeeping must never crash a turn.
+        try:
+            session_id = str(getattr(self._agent_session, "session_id", "") or "")
+            if session_id and clear_wedge_nudge_latch(session_id):
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _R_WEDGE_REC
+
+                    project_key = getattr(self._agent_session, "project_key", None)
+                    if project_key:
+                        _R_WEDGE_REC.incr(f"{project_key}:session-health:wedge_nudge_recovered")
+                except Exception:
+                    logger.debug("[bridge-adapter] wedge_nudge_recovered counter incr failed")
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("[bridge-adapter] wedge-nudge latch clear failed: %s", e)
 
     def _make_pty_read_callback(self) -> Callable[[str], None]:
         """Build the sync callable for PTY read-loop liveness stamps (#1724).
@@ -1214,7 +1249,9 @@ class BridgeAdapter:
                         if exc is not None:
                             recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
                             self._record_delivery_event(
-                                _payload, f"{type(exc).__name__}: {exc}", recovered=recovered
+                                _payload,
+                                f"{type(exc).__name__}: {exc}",
+                                recovered=recovered,
                             )
                     except Exception:  # pragma: no cover - defensive
                         logger.exception("[bridge-adapter] same-thread re-enqueue callback failed")

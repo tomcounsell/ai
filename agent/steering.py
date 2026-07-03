@@ -349,7 +349,9 @@ def push_wedge_nudge(session_id: str, sender: str = "wedge-nudge") -> None:
         logger.info(f"[steering] Pushed wedge-nudge to {key} (from {sender})")
     except Exception:
         logger.warning(
-            "[steering] Failed to push wedge-nudge for session %s", session_id, exc_info=True
+            "[steering] Failed to push wedge-nudge for session %s",
+            session_id,
+            exc_info=True,
         )
 
 
@@ -387,7 +389,9 @@ def pop_wedge_nudges(session_id: str) -> list[dict]:
         return messages
     except Exception:
         logger.warning(
-            "[steering] Failed to pop wedge-nudges for session %s", session_id, exc_info=True
+            "[steering] Failed to pop wedge-nudges for session %s",
+            session_id,
+            exc_info=True,
         )
         return []
 
@@ -428,7 +432,9 @@ def set_wedge_nudge_latch(
         return bool(acquired)
     except Exception:
         logger.warning(
-            "[steering] Failed to set wedge-nudge latch for session %s", session_id, exc_info=True
+            "[steering] Failed to set wedge-nudge latch for session %s",
+            session_id,
+            exc_info=True,
         )
         return False
 
@@ -457,6 +463,55 @@ def has_wedge_nudge_latch(session_id: str) -> bool:
     except Exception:
         logger.warning(
             "[steering] Failed to check wedge-nudge latch for session %s",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
+def clear_wedge_nudge_latch(session_id: str) -> bool:
+    """Clear a session's wedge-nudge latch and report whether one was held.
+
+    Called on a genuine turn completion (``saw_turn=True``) — the point at
+    which a wedged-then-nudged session has demonstrably un-stuck (issue
+    #1879, critique concern 1). Clearing the latch here — rather than
+    relying only on its TTL — is what prevents the *recovered-then-re-wedged*
+    false-suppression defect: a session that a nudge un-sticks completes a
+    turn, the latch is dropped, and a fresh wedge on the NEXT turn is
+    eligible for its own nudge instead of being silently gagged for the
+    remainder of the original fixed-TTL window.
+
+    This does NOT weaken the one-nudge-per-window guarantee: the clear fires
+    only on a real ``Stop``-edge turn completion, never on the injected
+    ``continue`` echo (which advances ``last_pty_activity_at`` but not
+    ``last_turn_at`` — spike-2). A still-wedged turn never completes, so its
+    latch is never cleared here and it keeps its at-most-one-nudge guarantee.
+
+    Non-destructive to the signal channel (``steering:nudge:{session_id}``)
+    and the ordinary steering queue (``steering:{session_id}``) — only the
+    latch key is deleted.
+
+    Fail-silent: a Redis error is caught, logged at ``warning``, and this
+    returns False.
+
+    Args:
+        session_id: The session whose latch to clear.
+
+    Returns:
+        True iff a latch was actually held (and is now cleared) — the
+        caller uses this as the "this session had been nudged and just
+        recovered" signal (e.g. to bump a ``wedge_nudge_recovered``
+        efficacy counter). False if no latch was held, or on Redis failure.
+    """
+    try:
+        r = _get_redis()
+        key = _wedge_nudge_latch_key(session_id)
+        # r.delete returns the number of keys removed (0 or 1). A truthy
+        # value means a latch was genuinely held at clear time.
+        return bool(r.delete(key))
+    except Exception:
+        logger.warning(
+            "[steering] Failed to clear wedge-nudge latch for session %s",
             session_id,
             exc_info=True,
         )

@@ -53,7 +53,10 @@ class TestSelfDraftAttempts:
         fake_r, _ = self._make_fake_redis()
 
         with patch("agent.steering._get_redis", return_value=fake_r):
-            from agent.steering import _SELF_DRAFT_ATTEMPTS_TTL, bump_self_draft_attempts
+            from agent.steering import (
+                _SELF_DRAFT_ATTEMPTS_TTL,
+                bump_self_draft_attempts,
+            )
 
             bump_self_draft_attempts("sess-ttl")
             assert len(fake_r._expire_calls) == 1
@@ -77,14 +80,23 @@ class TestSelfDraftAttempts:
 
             results = [bump_self_draft_attempts("sess-atomic") for _ in range(5)]
 
-        assert results == [1, 2, 3, 4, 5], "Each bump must return a unique, increasing value"
+        assert results == [
+            1,
+            2,
+            3,
+            4,
+            5,
+        ], "Each bump must return a unique, increasing value"
 
     def test_reset_deletes_key(self):
         """reset_self_draft_attempts deletes the key so the next bump starts at 1."""
         fake_r, store = self._make_fake_redis()
 
         with patch("agent.steering._get_redis", return_value=fake_r):
-            from agent.steering import bump_self_draft_attempts, reset_self_draft_attempts
+            from agent.steering import (
+                bump_self_draft_attempts,
+                reset_self_draft_attempts,
+            )
 
             bump_self_draft_attempts("sess-reset")
             bump_self_draft_attempts("sess-reset")
@@ -187,11 +199,23 @@ class TestAC4CounterCleanupDualSeat:
         with (
             # Patch away the Popoto / Redis / telemetry side effects we don't want to exercise.
             patch("models.session_lifecycle.get_authoritative_session", return_value=None),
-            patch("models.session_lifecycle.record_telemetry_event", MagicMock(), create=True),
-            patch("agent.session_telemetry.record_telemetry_event", MagicMock(), create=True),
+            patch(
+                "models.session_lifecycle.record_telemetry_event",
+                MagicMock(),
+                create=True,
+            ),
+            patch(
+                "agent.session_telemetry.record_telemetry_event",
+                MagicMock(),
+                create=True,
+            ),
             patch("agent.session_telemetry.finalize_session", MagicMock(), create=True),
             patch("models.session_lifecycle.auto_tag_session", MagicMock(), create=True),
-            patch("models.session_lifecycle.checkpoint_branch_state", MagicMock(), create=True),
+            patch(
+                "models.session_lifecycle.checkpoint_branch_state",
+                MagicMock(),
+                create=True,
+            ),
             patch("agent.steering._get_redis", return_value=fake_r),
             patch.object(session, "log_lifecycle_transition", MagicMock()),
             patch.object(session, "save", MagicMock()),
@@ -213,7 +237,10 @@ class TestAC4CounterCleanupDualSeat:
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from agent.session_health import MAX_RECOVERY_ATTEMPTS, _apply_recovery_transition
+        from agent.session_health import (
+            MAX_RECOVERY_ATTEMPTS,
+            _apply_recovery_transition,
+        )
 
         # Build a minimal entry for the failed branch.
         saves: list = []
@@ -267,7 +294,10 @@ class TestAC4CounterCleanupDualSeat:
                 new_callable=AsyncMock,
             ),
             patch("models.session_lifecycle.finalize_session", side_effect=_fake_finalize),
-            patch("models.session_lifecycle.transition_status", side_effect=_fake_transition),
+            patch(
+                "models.session_lifecycle.transition_status",
+                side_effect=_fake_transition,
+            ),
             patch("models.session_lifecycle.StatusConflictError", Exception),
             patch("agent.agent_session_queue._ensure_worker"),
             patch("agent.session_health._active_events", {}),
@@ -307,7 +337,10 @@ class TestAC4CounterCleanupDualSeat:
         from types import SimpleNamespace
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        from agent.session_health import MAX_RECOVERY_ATTEMPTS, _apply_recovery_transition
+        from agent.session_health import (
+            MAX_RECOVERY_ATTEMPTS,
+            _apply_recovery_transition,
+        )
 
         saves: list = []
         entry = SimpleNamespace(
@@ -358,7 +391,10 @@ class TestAC4CounterCleanupDualSeat:
                 new_callable=AsyncMock,
             ),
             patch("models.session_lifecycle.finalize_session", side_effect=_fake_finalize),
-            patch("models.session_lifecycle.transition_status", side_effect=_fake_transition),
+            patch(
+                "models.session_lifecycle.transition_status",
+                side_effect=_fake_transition,
+            ),
             patch("models.session_lifecycle.StatusConflictError", Exception),
             patch("agent.agent_session_queue._ensure_worker"),
             patch("agent.session_health._active_events", {}),
@@ -439,8 +475,11 @@ class TestWedgeNudgeChannel:
                 return 1 if key in kv else 0
 
             def delete(self, key):
+                # Real Redis DELETE returns the number of keys removed (0/1).
+                existed = key in kv or key in lists
                 kv.pop(key, None)
                 lists.pop(key, None)
+                return 1 if existed else 0
 
         return FakeRedis(), lists, kv
 
@@ -576,6 +615,69 @@ class TestWedgeNudgeChannel:
 
             assert has_wedge_nudge_latch("sess-expire") is False
             assert set_wedge_nudge_latch("sess-expire") is True
+
+    def test_clear_latch_returns_true_when_held_and_false_when_absent(self):
+        """clear_wedge_nudge_latch reports whether a latch was actually held.
+
+        The True/False return is load-bearing (critique concern 2): the turn-
+        completion caller uses it as the "this session had been nudged and
+        just recovered" signal for the wedge_nudge_recovered efficacy counter.
+        """
+        fake_r, _, _ = self._make_fake_redis()
+
+        with patch("agent.steering._get_redis", return_value=fake_r):
+            from agent.steering import (
+                clear_wedge_nudge_latch,
+                has_wedge_nudge_latch,
+                set_wedge_nudge_latch,
+            )
+
+            # No latch yet — clear reports False.
+            assert clear_wedge_nudge_latch("sess-clear") is False
+
+            set_wedge_nudge_latch("sess-clear")
+            assert has_wedge_nudge_latch("sess-clear") is True
+
+            # Clear reports True (a latch was held) and removes it.
+            assert clear_wedge_nudge_latch("sess-clear") is True
+            assert has_wedge_nudge_latch("sess-clear") is False
+
+            # After clear, the latch can be re-acquired (recovered-then-re-wedged).
+            assert set_wedge_nudge_latch("sess-clear") is True
+
+    def test_clear_latch_does_not_touch_signal_channel(self):
+        """Clearing the latch must not drain or disturb the nudge signal channel."""
+        fake_r, _, _ = self._make_fake_redis()
+
+        with patch("agent.steering._get_redis", return_value=fake_r):
+            from agent.steering import (
+                clear_wedge_nudge_latch,
+                pop_wedge_nudges,
+                push_wedge_nudge,
+                set_wedge_nudge_latch,
+            )
+
+            push_wedge_nudge("sess-clear-iso")
+            set_wedge_nudge_latch("sess-clear-iso")
+
+            clear_wedge_nudge_latch("sess-clear-iso")
+
+            # The pending nudge on the signal channel is untouched.
+            nudges = pop_wedge_nudges("sess-clear-iso")
+            assert len(nudges) == 1
+            assert nudges[0]["text"] == "continue"
+
+    def test_clear_latch_fail_silent_on_redis_error(self):
+        """A raising Redis client during latch-clear returns False instead of raising."""
+
+        class RaisingRedis:
+            def delete(self, key):
+                raise RuntimeError("Redis down")
+
+        with patch("agent.steering._get_redis", return_value=RaisingRedis()):
+            from agent.steering import clear_wedge_nudge_latch
+
+            assert clear_wedge_nudge_latch("sess-fail") is False
 
     def test_push_wedge_nudge_message_shape(self):
         """The pushed nudge dict has the expected fields (text/sender/timestamp/is_abort)."""
