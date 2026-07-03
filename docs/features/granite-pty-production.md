@@ -401,7 +401,7 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_delivery_recovered_via_outbox` | delivery timeout or loop-closed condition in `_deliver_sync` where the payload was successfully re-enqueued to the outbox; also written when the same-thread done-callback fires on task failure/cancellation and re-enqueue succeeds | `event_type`, `text`, `payload_chars`, `reason` (`recovered_via_outbox`), `failure_reason` (exception detail; tagged `[future_uncancellable_possible_duplicate]` when `future.cancel()` returned `False`), `recovered` (`True`), `ts` |
 | `granite_delivery_dropped` | delivery timeout or loop-closed condition in `_deliver_sync` where **both** the primary send and the outbox re-enqueue failed (double-failure, permanent loss) | `event_type`, `text`, `payload_chars`, `reason` (`dropped`), `failure_reason` (exception detail), `recovered` (`False`), `ts` |
-| `delivery_failure` | a mid-loop `send_cb` raised (older alias — `type` field on all delivery-failure events for back-compat; matches legacy events in Redis before the `granite_delivery_*` rename) | `payload_chars`, `reason`, `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (back-compat `type` value carried by all delivery-failure events, matching entries already written to Redis prior to the `granite_delivery_*` rename) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
@@ -1102,7 +1102,8 @@ Hardenings landed by the same audit: mid-loop delivery now schedules onto the
 worker loop captured in `BridgeAdapter.run` (previously every delivery from
 the pexpect thread was skipped as `no_event_loop`); `Container` teardown reaps
 only its own self-spawned PTY process groups via `os.killpg` and never touches
-pool-owned pairs (the machine-wide `pkill -f` fallback was removed in #1816 —
+pool-owned pairs (#1816 dropped the machine-wide `pkill -f` fallback in favor of this
+scoped reaping —
 see [Worker Fault Containment](worker-fault-containment.md)); the pool respawns with the
 original `cwd`, checks pair liveness at acquire, clears the slot event at
 release, and prunes completed respawn tasks; `read_until_idle` declares idle
