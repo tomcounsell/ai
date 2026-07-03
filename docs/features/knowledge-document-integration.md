@@ -65,7 +65,7 @@ The resolver loads `~/Desktop/Valor/projects.json`, extracts `knowledge_base` pa
 
 1. Validate file type and check it is not hidden/archived
 2. Resolve scope via `resolve_scope()`
-3. Upsert `KnowledgeDocument` via `safe_upsert()` -- skips re-indexing if content hash (SHA-256) is unchanged
+3. Upsert `KnowledgeDocument` via `safe_upsert()` -- skips re-indexing only when the content hash (SHA-256) is unchanged **and** the existing record already has a populated embedding; a hash match on a record with a missing embedding (e.g. a prior provider failure) is re-embedded instead of silently skipped
 4. Create companion Memory records with Haiku-generated summaries
 
 `full_scan(vault_path)` walks the vault directory and calls `index_file()` for any file whose mtime exceeds the stored `last_modified` timestamp.
@@ -88,6 +88,12 @@ A Popoto Redis model storing indexed documents:
 | `last_modified` | FloatField | File mtime at time of indexing |
 
 Embeddings are generated automatically by Popoto's `EmbeddingField` using the globally configured `OpenAIProvider`. The provider is set via `popoto.configure(embedding_provider=OpenAIProvider())` at bridge startup.
+
+**Content truncation before embedding**: Before `content` is assigned to the `EmbeddingField` source, `safe_upsert()` truncates it with `truncate_to_tokens(content, 8000)` (`tools/knowledge/chunking.py`), which counts tokens with the same `cl100k_base` encoding `text-embedding-3-small` uses, not characters. This guards the provider's 8,192-token hard limit: an earlier `content[:30000]` character cap assumed roughly 3.66 chars/token, but dense content -- tables, meeting transcripts, converted PDF/XLSX sidecars -- tokenizes denser than that, so the character budget still overflowed 8,192 tokens for some documents and their embedding calls failed with a 400. `truncate_to_tokens` reuses the module's cached encoding, decodes back to a string within the token budget, logs a WARNING only when content is actually dropped, and falls back to a conservative character cap if tiktoken itself raises. The same helper truncates embedding input at the sibling call site, `tools/impact_finder_core.py::_embed_openai()`.
+
+This truncation only bounds the coarse document-level embedding vector used for whole-document similarity. It does not affect chunk embeddings (see Document Chunking below), which are built independently from the full raw file and bounded per-chunk to 1,500 tokens, so fine-grained retrieval coverage is unchanged regardless of how the document-level vector is truncated.
+
+**Skip-gate requires a populated embedding**: `safe_upsert()`'s unchanged-content skip (`doc.content_hash == content_hash`) also checks `doc.embedding` is populated before skipping. `content_hash` is computed from the full pre-truncation file, so a hash match alone can mask a record that was persisted without a usable vector -- Popoto's `EmbeddingField.on_save()` still completes the save when the provider returns no vector for the content (it only raises on a hard provider error, which aborts the whole save). Gating on both conditions means a record left with a missing embedding gets re-embedded on its next scan even without a content change, instead of being silently skipped forever.
 
 ### 5. Document Chunking
 
@@ -200,6 +206,7 @@ The watcher is designed to never take down the bridge:
 | Setting | Value | Location |
 |---------|-------|----------|
 | Embedding model | `text-embedding-3-small` (1536-dim) | `popoto.embeddings.openai.OpenAIProvider` |
+| Doc-level embedding truncation cap | 8,000 tokens (`cl100k_base`) | `tools/knowledge/chunking.py::truncate_to_tokens` |
 | Debounce delay | 2 seconds | `bridge/knowledge_watcher.py` |
 | Large doc threshold | 2000 words | `tools/knowledge/indexer.py` |
 | Knowledge importance | 3.0 | `tools/knowledge/indexer.py` |

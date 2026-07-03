@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from config.models import HAIKU
+from tools.knowledge.chunking import truncate_to_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +130,7 @@ def _embed_openai(texts: list[str]) -> list[list[float]]:
 
     client = openai.OpenAI()
 
-    texts = [t[:30000] for t in texts]
+    texts = [truncate_to_tokens(t, 8000) for t in texts]
 
     if len(texts) <= EMBEDDING_BATCH_SIZE:
         response = client.embeddings.create(model="text-embedding-3-small", input=texts)

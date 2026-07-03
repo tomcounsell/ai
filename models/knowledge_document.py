@@ -21,6 +21,8 @@ from popoto import (
 from popoto.fields.content_field import ContentField
 from popoto.fields.embedding_field import EmbeddingField
 
+from tools.knowledge.chunking import truncate_to_tokens
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,7 +55,9 @@ class KnowledgeDocument(Model):
     ) -> "KnowledgeDocument | None":
         """Read a file and create/update a KnowledgeDocument.
 
-        Skips re-indexing if content hash is unchanged.
+        Skips re-indexing only when the content hash is unchanged AND the
+        existing record already carries a populated embedding; a record with
+        a matching hash but a missing embedding is re-embedded.
         Returns the KnowledgeDocument instance, or None on failure.
         """
         try:
@@ -72,14 +76,24 @@ class KnowledgeDocument(Model):
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             mtime = os.path.getmtime(abs_path)
 
-            # Truncate content to avoid exceeding OpenAI embedding token limit
-            content = content[:30000]
+            # Truncate content by token count (not char count) to avoid
+            # exceeding the OpenAI embedding provider's 8,192-token limit
+            content = truncate_to_tokens(content, 8000)
 
             # Check for existing document with same content hash
             existing = cls.query.filter(file_path=abs_path)
             if existing:
                 doc = existing[0]
-                if doc.content_hash == content_hash:
+                # Skip re-embedding only when the content is unchanged AND a
+                # populated embedding already exists. content_hash is computed
+                # from the full pre-truncation file, so a matching hash alone
+                # can mask a record that was persisted without a usable
+                # embedding (e.g. an earlier provider failure that returned no
+                # vector). doc.embedding holds the embedding dimension count
+                # (a positive int) once embedded and is None/0 otherwise;
+                # gating on it forces a re-embed in that case instead of
+                # silently no-op'ing the truncation fix. (issue #1876)
+                if doc.content_hash == content_hash and doc.embedding:
                     logger.debug(f"KnowledgeDocument: unchanged, skipping: {abs_path}")
                     return doc
                 # Update existing document
