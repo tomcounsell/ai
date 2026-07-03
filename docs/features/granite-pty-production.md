@@ -760,19 +760,79 @@ changing its gating logic. See
 [pm-session-liveness.md — PTY-liveness gates (Gate 2)](pm-session-liveness.md#pty-liveness-gates-for-kill-paths)
 for the gate's branch logic, which is unchanged by this fix.
 
-**Why no `continue`-nudge recovery rung was added here.** The original #1878
-plan also scoped a rung that would send a `continue` nudge to a wedged/no-progress
-session before killing it, as a cheaper first recovery attempt. That rung was
-split out to follow-up issue **#1879** after plan critique found it structurally
-infeasible on current main: the external steering queue (`agent/steering.py`,
+### Mid-run steering drain / wedge-nudge recovery rung (issue #1879)
+
+The original #1878 plan scoped a rung that would send a `continue` nudge to a
+wedged session before killing it, as a cheaper first recovery attempt. Plan
+critique found it structurally infeasible on the then-current main: the ordinary
+external steering queue (`agent/steering.py`,
 [Mid-run steering](#mid-run-steering-issue-1779) above) is drained only at the
-**top of a completed turn** in the steady-state loop. A session that is
-wedged or stuck in `no_progress` by definition never reaches that drain point —
-it is still inside an in-flight turn (or, for priming, hasn't reached the
-steady-state loop at all). The drain point and the wedge condition are mutually
-exclusive on the current architecture, so there is no live consumer for a
-nudge to reach. #1879 will build the mid-run steering-drain infrastructure a
-nudge rung requires before that recovery path can be added.
+**top of a completed turn**. A wedged session — parked inside `_await_turn_end`
+with a frozen normalized frame — by definition never reaches that drain point,
+so there was no live consumer for a nudge to reach. The rung was split to #1879,
+which built the missing mid-run drain consumer and its producer.
+
+**The consumer — a separate channel drained mid-turn.** The wedge-nudge rides
+its own Redis key (`steering:nudge:{session_id}`), entirely distinct from the
+ordinary operator-steering key (`steering:{session_id}`). `_await_turn_end`
+(`agent/granite_container/container.py`) drains this channel on each liveness
+tick via an optional `poll_wedge_nudge` callback (a `bridge_adapter.py` closure
+keyed on the session's `session_id`, mirroring `poll_steering`) and injects
+`CRASH_RESUME_CONTINUE` — the exact same `"continue"` token/call the crash-resume
+path already uses — into the parked PTY. The drain is placed **after** the
+crash-detection/crash-resume block, where `pty` is guaranteed live: draining
+earlier would risk writing to a PTY that just died on that tick, silently
+spending the one-nudge budget with zero keystrokes reaching anything alive. No
+`_cycle_idle` gate is used — channel isolation (the nudge never consumes ordinary
+operator steering) plus the idempotent `continue` token make it unnecessary, and
+a `continue` to a *parked* PTY (no in-flight turn to interrupt while waiting on
+the Stop edge) carries no corruption risk.
+
+**The producer — the 30s session-health running-scan.** A material premise
+correction from the plan's spikes: `_hook_turn_end_wait_s` defaults to **600s**,
+so a session parked in `_await_turn_end` with a frozen frame self-terminates to
+`pm_hang` at 600s — *before* the 1800s `SESSION_PROGRESS_DEADLINE_S` the issue
+originally named as the live-session killer. The reachable producer is therefore
+the 30s session-health loop, and the escalation backstop is the existing 600s
+`pm_hang` teardown (no new kill path). The producer adds a sibling branch in the
+running-scan for the `in_scope_handle is not None` population (a live worker
+handle). It gates on: granite-PTY transport (`_is_granite_pty_session`, the same
+`last_pty_read_loop_at is not None` check `_prime_pty_alive` uses so non-PTY
+SDK/headless sessions are excluded by construction) AND a normalized frame frozen
+past `NUDGE_WEDGE_THRESHOLD_S` (~240s, env-overridable) AND the atomic latch
+acquire succeeds. On match it pushes one nudge and bumps
+`{project_key}:session-health:wedge_nudge_sent`. It takes **no** recovery action
+— never sets `should_recover`, never calls `_apply_recovery_transition`, never
+touches `recovery_attempts`. This re-enters the `in_scope_handle is not None`
+population #1820 narrowed away for Fix #3's progress-deadline cancel scope, but
+does not re-widen that split: #1820 split *recovery/kill* ownership, not
+*observation*; the nudge and the cancel act on disjoint verbs and disjoint time
+windows (the 600s `pm_hang` preempts Fix #3's 1800s deadline for this shape).
+
+**The two-key latch (one nudge per window) and the injected-echo hazard.** The
+one-nudge-per-turn-wait-window guarantee is enforced by a *durable TTL latch*
+(`steering:nudge:latch:{session_id}`, `SET NX EX`), a key deliberately separate
+from the signal channel so it **survives** the consumer's drain — a single
+self-clearing `GETDEL` flag would re-open the window and let a second nudge fire.
+Crucially, the injected `continue` echo is genuine new text, so it advances
+`last_pty_activity_at` once (`_normalize_pty_buffer` strips only animation noise).
+That field is therefore **not** a valid "the nudge worked" signal after a nudge;
+genuine recovery is judged on `last_turn_at`/`last_tool_use_at` advancing (a real
+turn/tool, which the echo cannot fake). On a genuine turn completion the bridge
+adapter's `on_turn` hook clears the latch (`clear_wedge_nudge_latch`) so a
+recovered-then-re-wedged session is not falsely suppressed for the rest of the
+fixed TTL, and — when a latch was actually held — bumps the paired efficacy
+counter `{project_key}:session-health:wedge_nudge_recovered`. Every step of the
+rung (push, drain, PTY write, latch ops, counters) is fail-silent.
+
+> **Value-premise caveat (#1879):** the premise that a bare `continue` keystroke
+> actually un-sticks a wedged interactive TUI is validated by the crash-resume
+> path's reuse of the same token, but was **not** validated by a dedicated spike
+> against a live wedge. The rung is safe regardless — a `continue` to a busy or
+> parked TUI is a no-op keystroke, and the 600s `pm_hang` backstop still reclaims
+> a persistent wedge — but the `wedge_nudge_sent` vs `wedge_nudge_recovered`
+> counters exist precisely to measure real-world efficacy before this rung is
+> relied upon as a primary recovery path.
 
 ### Startup hard ceiling
 
