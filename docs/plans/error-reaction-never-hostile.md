@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1882
 last_comment_id:
+revision_applied: true
 ---
 
 # Error/terminal reactions must never be hostile toward the user
@@ -21,7 +22,7 @@ When a session ends in an error or non-clean terminal state, the bridge sets an 
 
 **Desired outcome:**
 - A reaction placed on a user's message can never be mean/hostile. `👎 🤬 😡 🤮` are unreachable for any user-facing reaction, by construction.
-- The terminal-error reaction is **deterministic** and apologetic/neutral (e.g. 🫡 "understood, on it"), not a semantic lottery.
+- The terminal-error reaction is **deterministic** and neutral/attentive (🤔 "hmm, looking into it"), not a semantic lottery.
 - The fix reuses the existing precedent (`BLOCKED_REACTION_EMOJIS`, the 🖕 filter from PR #1505) rather than inventing a parallel mechanism.
 
 ## Freshness Check
@@ -76,7 +77,7 @@ The bug lives at steps 3-4: an error feeling maps to a sampled member of the neg
 **Team:** Solo dev, plus one validator pass.
 
 **Interactions:**
-- PM check-ins: 0-1 (only the emoji-choice Open Question)
+- PM check-ins: 0 (emoji choice and deny-list membership are now locked — see Decisions)
 - Review rounds: 1
 
 ## Prerequisites
@@ -87,24 +88,24 @@ No prerequisites — this work has no external dependencies. `find_best_emoji`'s
 
 ### Key Elements
 
-- **Pinned error reaction:** `REACTION_ERROR` becomes a fixed, non-hostile emoji (recommend 🫡) resolved without calling `find_best_emoji`. Deterministic and apologetic.
-- **Extended hostile deny-list:** `BLOCKED_REACTION_EMOJIS` grows from `{🖕}` to also cover the hostile faces (`👎 🤬 😡 🤮`, plus 😱 — see Open Questions). Because `find_best_emoji` already filters this set out of every candidate, no semantically-resolved reaction (success/complete/processing) can ever draw a hostile face at a user. This is the issue's "USER_SAFE / HOSTILE deny-list" requirement, implemented via the established precedent.
+- **Pinned error reaction:** `REACTION_ERROR` becomes a fixed, non-hostile emoji — **locked to 🤔** (U+1F914) — resolved without calling `find_best_emoji`. Deterministic and neutral/attentive. See the Decisions section for the rationale (chosen over 🫡 to avoid the `REACTION_ABORT` collision).
+- **Extended hostile deny-list:** `BLOCKED_REACTION_EMOJIS` grows from `{🖕}` to the **locked frozenset `{🖕, 👎, 🤬, 😡, 🤮, 😱}`** (U+1F595, U+1F44E, U+1F92C, U+1F621, U+1F92E, U+1F631). The sad/worried faces 😢 😭 😨 stay selectable (self-directed sadness, not hostility toward the user). Because `find_best_emoji` already filters the deny-list out of every candidate, no semantically-resolved reaction (success/complete) can ever draw a hostile face at a user. This is the issue's "USER_SAFE / HOSTILE deny-list" requirement, implemented via the established precedent.
 - **Deterministic test:** asserts the pinned error emoji is fixed and safe, and that no terminal reaction constant can resolve to a hostile emoji.
 
 ### Flow
 
-Session errors → executor sets `REACTION_ERROR` → constant resolves to the **fixed** 🫡 (no semantic draw) → `set_reaction` places 🫡 on the user's message. Success/complete reactions still resolve semantically, but `find_best_emoji` can no longer return any hostile face because the deny-list filters them out of candidate scoring.
+Session errors → executor sets `REACTION_ERROR` → constant resolves to the **fixed** 🤔 (no semantic draw) → `set_reaction` places 🤔 on the user's message. Success/complete reactions still resolve semantically, but `find_best_emoji` can no longer return any hostile face because the deny-list filters them out of candidate scoring.
 
 ### Technical Approach
 
-1. **Pin `REACTION_ERROR` in `agent/constants.py`.** Route `REACTION_ERROR` to a fixed `EmojiResult(emoji="🫡")` and stop calling `find_best_emoji` for it. Preserve the existing contract: it must remain an `EmojiResult`, resolved lazily via the same `__getattr__` / `_TERMINAL_EMOJI_CACHE` machinery (so `from agent.constants import REACTION_ERROR` in `bridge/response.py` and the `patch("agent.session_executor.REACTION_ERROR", ...)` test seams keep working, and no import cycle is introduced). Implementation option: mark `REACTION_ERROR` as "pinned" in `_TERMINAL_EMOJI_CONFIG` (e.g. a third tuple element `pinned=True`, or a small `_PINNED_TERMINAL` set) so `_resolve_terminal_emoji` returns `EmojiResult(emoji=pinned)` directly, skipping the `find_best_emoji` branch. `REACTION_SUCCESS` / `REACTION_COMPLETE` keep semantic resolution (positive variety is desirable and now provably safe via the deny-list).
+1. **Pin `REACTION_ERROR` in `agent/constants.py`.** Route `REACTION_ERROR` to a fixed `EmojiResult(emoji="\U0001f914")` (🤔) and stop calling `find_best_emoji` for it. Preserve the existing contract: it must remain an `EmojiResult`, resolved lazily via the same `__getattr__` / `_TERMINAL_EMOJI_CACHE` machinery (so `from agent.constants import REACTION_ERROR` in `bridge/response.py` and the `patch("agent.session_executor.REACTION_ERROR", ...)` test seams keep working, and no import cycle is introduced). Implementation option: mark `REACTION_ERROR` as "pinned" in `_TERMINAL_EMOJI_CONFIG` (e.g. a third tuple element `pinned=True`, or a small `_PINNED_TERMINAL` set) so `_resolve_terminal_emoji` returns `EmojiResult(emoji=pinned)` **directly**, skipping the `find_best_emoji` branch. **Important:** the pin must return the `EmojiResult` before the `if result.emoji == DEFAULT_EMOJI: raise ValueError` degraded-path check (`agent/constants.py:75`) — 🤔 *is* `DEFAULT_EMOJI`, so routing the pinned value through that branch would wrongly treat it as a resolution failure. `REACTION_SUCCESS` / `REACTION_COMPLETE` keep semantic resolution (positive variety is desirable and now provably safe via the deny-list).
 2. **Extend `BLOCKED_REACTION_EMOJIS` in `tools/emoji_embedding.py:89`.** Add the hostile faces to the frozenset. Update the inline comment to state the broadened intent ("never aim hostility at a user"). Keep `VALIDATED_REACTIONS` unchanged — those emojis remain valid Telegram reactions; they are simply unselectable by the resolver. Single source of truth for "hostile" lives here.
-3. **Verify consistency.** The pinned 🫡 must be in `VALIDATED_REACTIONS` and NOT in `BLOCKED_REACTION_EMOJIS`. `ACTION_EMOJI_MAP` must contain no member of the extended block-list (already true; keep the existing `test_emoji_embedding.py:347` guard green).
+3. **Verify consistency.** The pinned 🤔 must be in `VALIDATED_REACTIONS` and NOT in `BLOCKED_REACTION_EMOJIS`. `ACTION_EMOJI_MAP` must contain no member of the extended block-list (already true; keep the existing `test_emoji_embedding.py:347` guard green).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_resolve_terminal_emoji` (`agent/constants.py:79`) has a broad `except Exception` that falls back to a hardcoded `EmojiResult`. For the pinned `REACTION_ERROR`, no `find_best_emoji` call occurs so this handler is not on its path — add a test asserting the pinned value is returned **even with `OPENROUTER_API_KEY` unset / embeddings unavailable** (the degraded environment must still yield 🫡, not 😢).
+- [ ] `_resolve_terminal_emoji` (`agent/constants.py:79`) has a broad `except Exception` that falls back to a hardcoded `EmojiResult`. For the pinned `REACTION_ERROR`, no `find_best_emoji` call occurs so this handler is not on its path — add a test asserting the pinned value is returned **even with `OPENROUTER_API_KEY` unset / embeddings unavailable** (the degraded environment must still yield 🤔, not the old 😢 fallback).
 - [ ] The `react_cb` call site wraps `set_reaction` in `try/except Exception` logging a warning (`agent/session_executor.py:2272-2273`) — unchanged by this work; no new swallowing introduced.
 
 ### Empty/Invalid Input Handling
@@ -112,11 +113,11 @@ Session errors → executor sets `REACTION_ERROR` → constant resolves to the *
 - [ ] Add a test that `BLOCKED_REACTION_EMOJIS` filtering holds even if a hostile emoji were the top-scoring candidate (mock/inject scoring so a hostile face would win, assert it is skipped).
 
 ### Error State Rendering
-- [ ] The user-visible output here IS the error reaction. Test asserts the error path renders 🫡 (deterministic), not a hostile face — this is the core acceptance test.
+- [ ] The user-visible output here IS the error reaction. Test asserts the error path renders 🤔 (deterministic), not a hostile face — this is the core acceptance test.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_worker_entry.py:236-262` — UPDATE: currently asserts `REACTION_ERROR` is an `EmojiResult` whose `.emoji in VALIDATED_REACTIONS`. Still passes with pinned 🫡 (🫡 ∈ VALIDATED_REACTIONS). Extend it to also assert `REACTION_ERROR.emoji not in BLOCKED_REACTION_EMOJIS` and equals the fixed pinned value.
+- [ ] `tests/unit/test_worker_entry.py:236-262` — UPDATE: currently asserts `REACTION_ERROR` is an `EmojiResult` whose `.emoji in VALIDATED_REACTIONS`. Still passes with pinned 🤔 (🤔 ∈ VALIDATED_REACTIONS). Extend it to also assert `REACTION_ERROR.emoji not in BLOCKED_REACTION_EMOJIS` and equals the fixed pinned value `"\U0001f914"` (🤔).
 - [ ] `tests/unit/test_session_executor_granite.py:722-724` — no change needed: it patches `REACTION_ERROR` with a sentinel object, independent of the constant's real value. Verify it still passes.
 - [ ] `tests/integration/test_reply_delivery.py:130-133` — no change needed: asserts `REACTION_COMPLETE.emoji in VALIDATED_REACTIONS`; success/complete path unchanged. Verify still green.
 - [ ] `tests/unit/test_emoji_embedding.py:68-70, 347-349` — UPDATE: extend the `BLOCKED_REACTION_EMOJIS` membership assertions to cover the new hostile faces; keep the `ACTION_EMOJI_MAP ∩ BLOCKED == ∅` guard (already satisfied).
@@ -133,11 +134,11 @@ Session errors → executor sets `REACTION_ERROR` → constant resolves to the *
 
 ### Risk 1: Pinning `REACTION_ERROR` breaks a test that expects semantic resolution
 **Impact:** A test asserting `REACTION_ERROR` varies or calls `find_best_emoji` could fail.
-**Mitigation:** Grep confirmed the only assertions are "is an `EmojiResult` in `VALIDATED_REACTIONS`" (`test_worker_entry.py`) and sentinel-patching (`test_session_executor_granite.py`). Both remain valid with a pinned 🫡. No test currently asserts error-reaction variability.
+**Mitigation:** Grep confirmed the only assertions are "is an `EmojiResult` in `VALIDATED_REACTIONS`" (`test_worker_entry.py`) and sentinel-patching (`test_session_executor_granite.py`). Both remain valid with a pinned 🤔. No test currently asserts error-reaction variability.
 
 ### Risk 2: The chosen pinned emoji reads wrong in context
-**Impact:** 🫡 already means "steering abort acknowledged" (`REACTION_ABORT`), so error+abort could look similar.
-**Mitigation:** Surfaced as an Open Question. Alternatives: 😢 (current fallback — apologetic, visually distinct from abort, but in the negative-faces block) or `None` (clear the processing reaction, leaving no negative signal). Recommend 🫡 as issue's first suggestion; defer final choice to the human.
+**Impact:** 🤔 shares its codepoint with `REACTION_PROCESSING` / `DEFAULT_EMOJI` (both U+1F914).
+**Mitigation:** `REACTION_PROCESSING` is defined but **never actually placed on a message** — the only reactions `set_reaction` writes are `REACTION_RECEIVED` (👀), `REACTION_ABORT` (🫡), and the terminal constants (`bridge/telegram_bridge.py`). So there is no live on-message collision: an errored message shows 🤔 replacing the earlier 👀, distinct from the abort salute 🫡. The earlier candidate 🫡 was rejected precisely because it *does* collide with `REACTION_ABORT` — see the Decisions section. The `DEFAULT_EMOJI` sharing is handled by returning the pin before the `DEFAULT_EMOJI` degraded-path check (Technical Approach step 1).
 
 ### Risk 3: Extending the deny-list silently starves a legitimate reaction
 **Impact:** If some code path *wanted* a negative face for a non-user target, blocking it would change behavior.
@@ -171,8 +172,8 @@ No agent integration required — this is a bridge/worker-internal change to the
 
 ## Success Criteria
 
-- [ ] `REACTION_ERROR.emoji` is a fixed, non-hostile value (recommend 🫡), stable across repeated attribute access and across `find_best_emoji` availability (asserted with `OPENROUTER_API_KEY` absent).
-- [ ] `BLOCKED_REACTION_EMOJIS ⊇ {👎, 🤬, 😡, 🤮}` (final membership per Open Question 2).
+- [ ] `REACTION_ERROR.emoji == "\U0001f914"` (🤔) — a fixed, non-hostile value, stable across repeated attribute access and across `find_best_emoji` availability (asserted with `OPENROUTER_API_KEY` absent).
+- [ ] `BLOCKED_REACTION_EMOJIS == frozenset({"\U0001f595", "\U0001f44e", "\U0001f92c", "\U0001f621", "\U0001f92e", "\U0001f631"})` (🖕 👎 🤬 😡 🤮 😱) — exact locked membership.
 - [ ] `find_best_emoji` can never return a member of `BLOCKED_REACTION_EMOJIS` (asserted even when a hostile face would be the top candidate).
 - [ ] No terminal reaction constant (`REACTION_ERROR/SUCCESS/COMPLETE`) resolves to a hostile emoji (parametrized deterministic test).
 - [ ] `REACTION_ERROR.emoji ∈ VALIDATED_REACTIONS` and `∉ BLOCKED_REACTION_EMOJIS`.
@@ -211,8 +212,8 @@ No agent integration required — this is a bridge/worker-internal change to the
 - **Assigned To**: reaction-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `agent/constants.py`: mark `REACTION_ERROR` as pinned so it resolves to a fixed `EmojiResult(emoji="🫡")` (final emoji per Open Question 1) without calling `find_best_emoji`; preserve the lazy `__getattr__`/cache contract and EmojiResult type.
-- In `tools/emoji_embedding.py`: extend `BLOCKED_REACTION_EMOJIS` to include the hostile faces; update the comment.
+- In `agent/constants.py`: mark `REACTION_ERROR` as pinned so it resolves to a fixed `EmojiResult(emoji="\U0001f914")` (🤔) without calling `find_best_emoji`, returning before the `DEFAULT_EMOJI` degraded-path check; preserve the lazy `__getattr__`/cache contract and EmojiResult type.
+- In `tools/emoji_embedding.py`: extend `BLOCKED_REACTION_EMOJIS` to the locked frozenset `{"\U0001f595", "\U0001f44e", "\U0001f92c", "\U0001f621", "\U0001f92e", "\U0001f631"}` (🖕 👎 🤬 😡 🤮 😱); update the comment to state the "never aim hostility at a user" intent.
 - Update inline docstrings/comments in both files.
 
 ### 2. Write deterministic tests
@@ -255,7 +256,8 @@ No agent integration required — this is a bridge/worker-internal change to the
 | New reaction tests pass | `pytest tests/unit/test_reaction_never_hostile.py -q` | exit code 0 |
 | Affected emoji/worker tests pass | `pytest tests/unit/test_emoji_embedding.py tests/unit/test_worker_entry.py -q` | exit code 0 |
 | Error reaction is pinned (no semantic draw) | `grep -n "find_best_emoji" agent/constants.py \| grep -i error` | exit code 1 |
-| Hostile faces are in the deny-list | `python -c "from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS as b; assert {'\U0001f44e','\U0001f92c','\U0001f621','\U0001f92e'} <= b"` | exit code 0 |
+| Error reaction equals the locked 🤔 | `python -c "from agent.constants import REACTION_ERROR; assert REACTION_ERROR.emoji == '\U0001f914'"` | exit code 0 |
+| Deny-list is the exact locked frozenset | `python -c "from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS as b; assert b == frozenset({'\U0001f595','\U0001f44e','\U0001f92c','\U0001f621','\U0001f92e','\U0001f631'})"` | exit code 0 |
 | Error reaction is not hostile | `python -c "from agent.constants import REACTION_ERROR; from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS as b; assert REACTION_ERROR.emoji not in b"` | exit code 0 |
 | Lint clean | `python -m ruff check agent/constants.py tools/emoji_embedding.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/constants.py tools/emoji_embedding.py` | exit code 0 |
@@ -266,7 +268,22 @@ No agent integration required — this is a bridge/worker-internal change to the
 
 ---
 
-## Open Questions
+## Decisions
 
-1. **Pinned error emoji:** Recommend 🫡 ("understood, on it" — apologetic, in `VALIDATED_REACTIONS`, not hostile). It already doubles as `REACTION_ABORT`, so error and abort would look similar. Acceptable, or prefer 😢 (visually distinct, apologetic, but a negative-block face) or `None` (clear the processing reaction, leaving no negative signal)?
-2. **Deny-list membership:** Mandatory to block `👎 🤬 😡 🤮`. The issue says "arguably no 😱 😭 😨" as well. Recommend also blocking 😱 (scream reads as alarm/blame). Block the milder 😭 😨 😢 too, or keep those selectable for non-error semantic reactions?
+Both prior open questions are resolved. These are bounded engineering choices inside the issue's stated bounds (the issue sanctions 🫡, 🤔, or clearing for the error emoji, and mandates blocking `👎 🤬 😡 🤮` with 😱/😭/😨 "arguably" up for debate).
+
+### Decision 1 — Pinned error emoji: **🤔** (U+1F914)
+
+`REACTION_ERROR` is pinned to 🤔. Rationale:
+- **Resolves the CRITIQUE concern.** The originally-recommended 🫡 is `REACTION_ABORT` (`bridge/response.py:117`); an errored session and a user-steered abort would render identically. Choosing a distinct emoji removes that ambiguity outright rather than accepting a dual-use.
+- **Non-hostile and honest.** 🤔 reads as "hmm, something to look into" — attention/puzzlement directed inward, never blame at the user. 🫡 ("acknowledged, standing down") is semantically wrong for an error.
+- **Within issue bounds.** The issue explicitly sanctions 🤔.
+- **Contract-safe.** 🤔 ∈ `VALIDATED_REACTIONS`, ∉ `BLOCKED_REACTION_EMOJIS`, and remains an `EmojiResult` (unlike the `None`/clear option, which would break the `REACTION_ERROR.emoji` contract used in `bridge/response.py` and the test seams).
+- **Codepoint sharing is inert.** 🤔 equals `REACTION_PROCESSING`/`DEFAULT_EMOJI`, but `REACTION_PROCESSING` is never placed on a message, so there is no live on-message collision (see Risk 2). The pin returns before the `DEFAULT_EMOJI` degraded-path check so it is never mistaken for a resolution failure.
+
+### Decision 2 — Deny-list: **`frozenset({🖕, 👎, 🤬, 😡, 🤮, 😱})`**
+
+Locked codepoints: U+1F595, U+1F44E, U+1F92C, U+1F621, U+1F92E, U+1F631.
+- **Mandatory hostile faces blocked:** 👎 🤬 😡 🤮 (dismissive / swearing / anger / disgust), plus the pre-existing 🖕.
+- **😱 added:** "face screaming in fear" is a high-arousal, outward-directed shock reaction — it reads as "you horrified me," i.e. blame aimed at the user. Blocked.
+- **😢 😭 😨 kept selectable:** these express self-directed sadness or worry, not hostility toward the user. The mandate is "never hostile," and blocking apologetic/empathetic sadness would over-broaden the deny-list and starve legitimate negative-emotion vocabulary (e.g. an empathetic reaction to bad news a user shares). The distinguishing axis is outward high-arousal shock/aggression (blocked) vs. inward-directed distress (kept).
