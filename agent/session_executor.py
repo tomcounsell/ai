@@ -32,7 +32,9 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-_CLEAN_GRANITE_EXIT_REASONS = frozenset({"pm_complete", "pm_user", "pm_floor_delivered"})
+_CLEAN_GRANITE_EXIT_REASONS = frozenset(
+    {"pm_complete", "pm_user", "pm_floor_delivered", "steer_abort"}
+)
 
 
 def _is_non_clean_granite_exit(agent_session) -> bool:
@@ -41,7 +43,9 @@ def _is_non_clean_granite_exit(agent_session) -> bool:
     None exit_reason = non-granite session or not yet set = clean (default behavior).
     Clean granite exits: pm_complete (normal end), pm_user (user message sent),
     pm_floor_delivered (wrap-up guard delivered PM's last assistant message directly
-    when the PM produced a real but prefix-less response — issue #1719).
+    when the PM produced a real but prefix-less response — issue #1719),
+    steer_abort (operator-requested abort via a steering message; the user-facing
+    "Session stopped at your request." is delivered before the loop breaks — #1779).
     Everything else (exception, pm_hang, dev_hang, startup_unresolved, pm_no_user_message,
     pm_max_turns) is non-clean → REACTION_ERROR.
 
@@ -76,6 +80,38 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
         return explicit
     fallback = settings.models.session_default_model
     return fallback or None
+
+
+# Per-role transport hedge (plan #1842). The concept is named ``role_transports``
+# everywhere in code to avoid colliding with the existing *channel* ``transport``
+# (telegram/email) at session_executor.py:1083-1091 and BridgeAdapter(transport=).
+_VALID_ROLE_TRANSPORTS = ("pty", "headless")
+
+
+def _resolve_role_transports(project_config: dict | None) -> dict[str, str]:
+    """Resolve the per-role transport map from config precedence (plan #1842).
+
+    Precedence, closest wins:
+      1. project block ``projects.<key>.transport.{pm,dev}``
+      2. ``settings.granite.pm_transport`` / ``dev_transport``
+         (env ``GRANITE__PM_TRANSPORT`` / ``GRANITE__DEV_TRANSPORT``)
+      3. literal ``"pty"``
+
+    Returns ``{"pm": <transport>, "dev": <transport>}``. Config validation at
+    update time (``bridge/config_validation.py::validate_transport``) is the
+    primary gate; this resolver assumes validated config but tolerates a raw
+    projects.json read (returns whatever it finds — the executor applies a
+    defensive fail-loud backstop on the resolved values).
+    """
+    block = {}
+    if isinstance(project_config, dict):
+        raw = project_config.get("transport")
+        if isinstance(raw, dict):
+            block = raw
+    return {
+        "pm": block.get("pm") or settings.granite.pm_transport or "pty",
+        "dev": block.get("dev") or settings.granite.dev_transport or "pty",
+    }
 
 
 def _tick_backstop_check_compaction(
@@ -164,7 +200,58 @@ def _tick_backstop_check_compaction(
 _pending_extraction_tasks: dict[str, asyncio.Task] = {}
 
 
-def _schedule_post_session_extraction(session_id: str, response_text: str) -> None:
+def _capture_turn_count(session_id: str) -> int | None:
+    """Re-fetch the persisted ``turn_count`` for a session at schedule time (Fix 2, #1822).
+
+    The in-scope executor ``session`` object is a *different* instance than the
+    one ``sdk_client`` persists ``turn_count`` onto (``sdk_client.py:2573-2584``),
+    so its in-memory ``session.turn_count`` is stale (typically ``0``). The
+    in-memory ``get_turn_count()`` tracker is also already cleared by the harness
+    ``finally`` (``sdk_client.py:1932``) by the time finalization runs here. The
+    durable, timing-independent source is the persisted ``AgentSession`` record —
+    re-fetch the newest by ``session_id`` (the ``sdk_client.py:2573-2576``
+    newest-by-``created_at`` pattern). Returns ``None`` on any failure so the
+    gate stays a safe no-op (never over-skips).
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if not sessions:
+            return None
+        sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
+        return sessions[0].turn_count
+    except Exception as exc:  # noqa: BLE001 - capture must never crash finalization
+        logger.debug(
+            "[memory_extraction] turn_count capture failed for %s (non-fatal): %s",
+            session_id,
+            exc,
+        )
+        return None
+
+
+def _is_conversational_session(session: AgentSession) -> bool:
+    """True when ``session`` originated from a real conversational channel (Fix 2, #1822).
+
+    Telegram-originated sessions (``create_eng`` / ``create_teammate`` / SDLC
+    children) carry an ``initial_telegram_message`` dict; local CLI sessions
+    (``create_local``) do not. Conversational sessions must ALWAYS extract — a
+    substantive single-turn Telegram correction is high-value — so they are
+    exempt from the trivial-session skip. Defaults to ``True`` (no-skip) when the
+    signal is unreadable, so the gate never over-skips.
+    """
+    try:
+        return bool(getattr(session, "initial_telegram_message", None))
+    except Exception:  # noqa: BLE001 - origin read must never crash finalization
+        return True
+
+
+def _schedule_post_session_extraction(
+    session_id: str,
+    response_text: str,
+    turn_count: int | None = None,
+    is_conversational: bool = True,
+) -> None:
     """Fire-and-forget post-session memory extraction (hotfix #1055).
 
     Synchronous — creates and registers an ``asyncio.create_task``; does NOT
@@ -200,7 +287,12 @@ def _schedule_post_session_extraction(session_id: str, response_text: str) -> No
         try:
             from agent.memory_extraction import run_post_session_extraction
 
-            await run_post_session_extraction(session_id, response_text)
+            await run_post_session_extraction(
+                session_id,
+                response_text,
+                turn_count=turn_count,
+                is_conversational=is_conversational,
+            )
         except asyncio.CancelledError:
             raise  # preserve cancellation semantics for shutdown drain
         except Exception as e:
@@ -545,11 +637,12 @@ async def re_enqueue_session(
 
 
 def steer_session(session_id: str, message: str) -> dict:
-    """Write a steering message to a session's queued_steering_messages.
+    """Push a steering message onto a session's Redis steering queue.
 
     Any process can call this to inject a message into a running or pending
-    session. The worker checks queued_steering_messages between turns and
-    injects any pending messages as user input for the next SDK turn.
+    session. The worker drains the Redis steering list (agent.steering)
+    between turns and injects any pending messages as user input for the
+    next SDK turn.
 
     Args:
         session_id: The session_id of the target AgentSession.
@@ -584,7 +677,9 @@ def steer_session(session_id: str, message: str) -> dict:
                 "error": f"Session is in terminal status {current_status!r} — steering rejected",
             }
 
-        session.push_steering_message(message)
+        from agent.steering import push_steering_message as _push_steering_message
+
+        _push_steering_message(session.session_id, message, "pm")
         try:
             _call_ensure_worker(session.worker_key, is_project_keyed=session.is_project_keyed)
         except RuntimeError:
@@ -1513,17 +1608,89 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 "name": session.project_key,
             }
 
-        # Check queued_steering_messages before starting this agent turn.
-        # If the session has pending steering messages (written by steer_session()
-        # or the PM), pop the first one and use it as the user input for this turn.
+        # Per-role transport hedge (plan #1842). Resolve once at dispatch and
+        # persist onto the AgentSession so all later reads (dashboard, analytics,
+        # resume-handle tagging, worker recovery) use the persisted value — a
+        # config flip mid-flight never mutates an in-flight session (Race 2).
+        # A revived session that already has a persisted map reuses it verbatim.
+        if agent_session is not None and getattr(agent_session, "role_transports", None):
+            role_transports = dict(agent_session.role_transports)
+        else:
+            role_transports = _resolve_role_transports(project_config)
+            if agent_session is not None:
+                try:
+                    agent_session.role_transports = role_transports
+                    agent_session.save(update_fields=["role_transports", "updated_at"])
+                except Exception as _rt_err:  # noqa: BLE001
+                    logger.debug(
+                        f"[{session.project_key}] Failed to persist role_transports "
+                        f"(non-fatal): {_rt_err}"
+                    )
+        # PM headless is not yet supported (plan #1842 v1). Config validation
+        # rejects ``transport.pm=headless``, but a ``GRANITE__PM_TRANSPORT`` env
+        # override or ``settings.granite.pm_transport`` bypasses that gate. Coerce
+        # defensively to ``pty`` so a stray pm=headless never reaches the
+        # PTY-coupled PM startup / login / plateau machinery.
+        if role_transports.get("pm") == "headless":
+            logger.warning(
+                "[executor-guard] session %s: transport.pm=headless is unsupported; "
+                "coercing to pty (PM headless not yet supported in v1)",
+                session.agent_session_id,
+            )
+            role_transports["pm"] = "pty"
+        # Defensive fail-loud backstop: config validation at update time is the
+        # primary gate, but an invalid resolved value must never silently default.
+        _bad = [
+            f"{role}={val!r}"
+            for role, val in role_transports.items()
+            if val not in _VALID_ROLE_TRANSPORTS
+        ]
+        if _bad:
+            _rt_reason = (
+                f"invalid_role_transport: {', '.join(_bad)} (valid: {list(_VALID_ROLE_TRANSPORTS)})"
+            )
+            logger.error(
+                "[executor-guard] session %s: %s",
+                session.agent_session_id,
+                _rt_reason,
+            )
+            try:
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                )
+
+                finalize_session(session, "failed", reason=_rt_reason)
+            except StatusConflictError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[executor-guard] role_transport finalize raised: %s", exc)
+            return
+
+        # Check the Redis steering queue before starting this agent turn. If the
+        # session has pending steering messages (written by steer_session() or
+        # the PM), pop the first one and use it as the user input for this turn.
         # This is the mechanism that replaces hardcoded nudge text — any process
-        # can write to queued_steering_messages to steer the session externally.
+        # can push to the Redis steering list (agent.steering) to steer the
+        # session externally.
+        #
+        # Single-consumer invariant: pop_all_steering_messages() drains via
+        # sequential LPOPs, not one atomic multi-pop. That is safe only because
+        # exactly one process drains a given session's list at a time (this
+        # turn-boundary read). Each individual LPOP is still atomic against a
+        # concurrent RPUSH, so a steer pushed mid-drain either lands in this
+        # pass or sits in the list for the next turn boundary — it is never
+        # silently lost. Do not assume whole-drain atomicity in future
+        # refactors, and do not add a second concurrent drainer for the same
+        # session_id without revisiting this invariant.
         _turn_input = enriched_text
         if agent_session:
             try:
-                steering_msgs = agent_session.pop_steering_messages()
+                from agent.steering import pop_all_steering_messages as _pop_all_steering
+
+                steering_msgs = _pop_all_steering(session.session_id)
                 if steering_msgs:
-                    _turn_input = steering_msgs[0]
+                    _turn_input = steering_msgs[0].get("text", "")
                     logger.info(
                         f"[{session.project_key}] Injecting steering message for session "
                         f"{session.session_id}: {_turn_input[:80]!r} "
@@ -1531,8 +1698,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     )
                     if len(steering_msgs) > 1:
                         # Re-queue remaining messages for future turns
+                        from agent.steering import push_steering_message as _push_steering
+
                         for _remaining in steering_msgs[1:]:
-                            agent_session.push_steering_message(_remaining)
+                            _push_steering(
+                                session.session_id,
+                                _remaining.get("text", ""),
+                                _remaining.get("sender", "unknown"),
+                                is_abort=_remaining.get("is_abort", False),
+                                target_agent=_remaining.get("target_agent"),
+                            )
             except Exception as _steer_err:
                 logger.debug(
                     f"[{session.project_key}] Steering check failed (non-fatal): {_steer_err}"
@@ -1578,11 +1753,15 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     pass
             return
 
-        # All session types route to the granite PTY container (plan #1572).
-        # The CLI harness in `agent/sdk_client.py` is preserved for the
-        # follow-on issue (per the plan's No-Gos) but no longer called from
-        # this path. The cutover is all-or-nothing: no fallback flag, no
-        # feature gate.
+        # All session types route through the granite container (plan #1572),
+        # but each role's transport is now config-selectable (plan #1842):
+        # ``role_transports`` (resolved above) picks ``pty`` (interactive TUI
+        # over a PTY, driven by PTYRoleDriver — the default, byte-identical to
+        # #1572) or ``headless`` (one ``claude -p`` subprocess per turn via
+        # HeadlessRoleDriver, reusing the preserved harness in
+        # ``agent/sdk_client.py``). Both legs share the Container orchestration
+        # loop; only the actor-turn driver differs. See
+        # docs/features/per-role-transport.md.
         from agent.granite_container.bridge_adapter import BridgeAdapter
         from agent.granite_container.pty_pool import get_pty_pool
         from agent.sdk_client import (
@@ -1690,6 +1869,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_env=_harness_env,
             pm_model=_effective_model,
             session_type=_session_type,
+            role_transports=role_transports,
         )
 
         # The message the container receives. The container has no
@@ -1913,7 +2093,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # and the #917 fallback at ~L1346). Extraction runs in the background;
         # its completion or failure does not delay the eng nudge. See
         # drain_pending_extractions() for shutdown wiring.
-        _schedule_post_session_extraction(session.session_id, task._result or "")
+        #
+        # Fix 2 (#1822): capture the trivial-session gate signals synchronously
+        # HERE (before teardown clears the in-memory turn-count tracker) and pass
+        # them by value. turn_count is re-fetched from the persisted AgentSession
+        # (the in-scope session.turn_count is a stale instance); origin comes from
+        # the in-scope session's initial_telegram_message.
+        _ext_turn_count = _capture_turn_count(session.session_id)
+        _ext_is_conversational = _is_conversational_session(session)
+        _schedule_post_session_extraction(
+            session.session_id,
+            task._result or "",
+            turn_count=_ext_turn_count,
+            is_conversational=_ext_is_conversational,
+        )
 
         # Save session snapshot for error cases
         if task.error:

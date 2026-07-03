@@ -308,6 +308,10 @@ tests/
 | unit | `granite_container/test_granite_classifier.py` | 46+ | PM prefix-token classification, harness selector (strict + fallback paths) |
 | unit | `test_pi_builder.py` | 39 | `parse_pi_final_text` edge cases; `PiSubprocessBuilder` init, run_turn, timeout, cwd, close |
 | unit | `granite_container/test_container_builder_gate.py` | 10 | `PI_SUBPROCESS_TIMEOUT_S` constant, `BuilderHarness` protocol, caller-owned gate |
+| unit | `granite_container/test_fault_injection.py` | 12 | Failure-simulation harness Substrate A — one deterministic seam-injector per failure class (red-first proven); recorded-fixture consumability; no-orphan invariant. See [`docs/features/granite-failure-simulation-harness.md`](../docs/features/granite-failure-simulation-harness.md) |
+| unit | `granite_container/test_ollama_env.py` | 12 | ollama env construction + OAuth-strip no-leak contract (the PR #1612 guard) + tool-capable model picker |
+| unit | `test_nightly_regression_tests.py` | 28 | Nightly runner incl. ollama Substrate B self-skip on unreachable ollama + version-pinned `claude` canary + `NIGHTLY_OLLAMA_EXPECTED` expected-machine alerting (issue #1841) |
+| integration | `test_granite_ollama_e2e.py` | 3 | Substrate B — real `claude` binary against ollama; gated on `GRANITE_OLLAMA_SMOKE=1` + reachable; asserts a session reaches a clean reply without wedging |
 | integration | `test_pi_builder_e2e.py` | 5 | Real `pi -p --mode json` against local `ollama/gemma4:31b`; skipped if pi/ollama absent |
 
 ### Other

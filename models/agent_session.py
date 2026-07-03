@@ -59,7 +59,6 @@ CHAT_LOG_MAX_ENTRIES = 50
 CHAT_LOG_DISPLAY_ENTRIES = 20
 
 HISTORY_MAX_ENTRIES = 20
-STEERING_QUEUE_MAX = 10  # Max buffered steering messages per session
 
 # SDLC stages in pipeline order
 SDLC_STAGES = ["ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS", "MERGE"]
@@ -106,7 +105,7 @@ class AgentSession(Model):
         create_child(): Create a child Eng session.
         create_local(): Create a local CLI session.
 
-    Status values (13 total):
+    Status values (14 total):
         Non-terminal (use transition_status()):
             pending              - Queued, waiting for worker
             running              - Worker picked up, agent executing
@@ -118,6 +117,9 @@ class AgentSession(Model):
                                    resumed by bridge-watchdog sustainability drip
             paused               - Paused mid-execution due to auth/API failure;
                                    resumed by bridge-watchdog session-resume-drip
+            paused_budget        - Paused by the per-tool budget backstop (#1821) when a session
+                                   exhausts its tool-call / cost budget; NON-drip, human-only
+                                   recovery (never re-queued by session-recovery-drip)
 
         Terminal (use finalize_session()):
             completed  - Work finished successfully
@@ -220,9 +222,6 @@ class AgentSession(Model):
     # === Semantic routing fields ===
     context_summary = Field(null=True)  # What this session is about
     expectations = Field(null=True)  # What the agent needs from the human
-
-    # === Steering fields ===
-    queued_steering_messages = ListField(null=True)
 
     # === PM self-messaging ===
     pm_sent_message_ids = ListField(null=True)
@@ -466,6 +465,51 @@ class AgentSession(Model):
     # `data.get("total_cost_usd")` (harness). Never recomputed from token
     # counts — this tracks upstream pricing automatically.
     total_cost_usd = FloatField(default=0.0)
+
+    # === Per-tool budget backstop (issue #1821, Fix #6) ===
+    # Hook-owned deny-surfacing fields set by the PreToolUse budget backstop
+    # (agent/tool_budget.py) when a session exhausts MAX_TOOL_CALLS_PER_SESSION
+    # or SESSION_COST_CAP_USD. Written ONLY by the budget hooks via a narrow
+    # save(update_fields=["budget_tripped", "budget_tripped_reason", ...]) —
+    # NEVER a status write (a hook-driven status write would race the granite
+    # bridge_adapter's partitioned update_fields saves). No other writer touches
+    # these fields, so they are always race-free; the dashboard,
+    # `valor-session status`, and the adapter/worker READ them. Both default
+    # falsy and Popoto is schema-on-read, so existing records need NO data
+    # migration.
+    budget_tripped = Field(default=False)
+    budget_tripped_reason = Field(null=True, default=None)
+
+    # === Per-role transport hedge (plan #1842) ===
+    # Resolved once at dispatch from config precedence
+    # (projects.<key>.transport.{pm,dev} > settings.granite.{pm,dev}_transport
+    # > "pty") and immutable for the session's lifetime. Shape:
+    # {"pm": "pty"|"headless", "dev": "pty"|"headless"}. Readers: dashboard,
+    # analytics, resume-handle tagging, and the worker recovery path (which
+    # MUST reuse this rather than re-resolving against a since-flipped config).
+    # Nullable — a pre-feature revived session with no persisted value degrades
+    # to the both-PTY default.
+    role_transports = DictField(null=True)
+
+    # Transport-agnostic resume handles (schema shared with #1721): a list of
+    # {"role", "claude_session_id", "transcript_path", "transport"} entries,
+    # persisted at spawn/first-turn capture for BOTH transports. This plan's
+    # DoD is "written and shaped correctly" only — CONSUMPTION (loop cursor,
+    # --resume re-entry, skip-priming) is #1721's scope.
+    resume_handles = ListField(null=True)
+
+    # === Metered-leg accounting (plan #1842) ===
+    # DISJOINT from the total_* scalars above. The transcript tailer writes the
+    # ABSOLUTE total_* scalars (PTY roles only); the headless leg writes these
+    # metered_* fields ADDITIVELY via accumulate_session_tokens(metered=True).
+    # Because the two writers target non-overlapping fields, mixed-transport
+    # accounting is non-clobbering by construction (Race 1). Displayed grand
+    # total = total_* + metered_*, summed at read time. Nullable/default 0 for
+    # forward-compat with pre-feature records.
+    metered_input_tokens = IntField(default=0)
+    metered_output_tokens = IntField(default=0)
+    metered_cache_read_tokens = IntField(default=0)
+    metered_cost_usd = FloatField(default=0.0)
 
     # Set by the worker's idle sweeper (`worker/idle_sweeper.py`) when a
     # dormant SDK-path session's persistent `ClaudeSDKClient` is proactively
@@ -907,18 +951,34 @@ class AgentSession(Model):
         return await super().async_create(**kwargs)
 
     # Fields whose partial saves intentionally omit ``updated_at`` at high
-    # frequency (liveness heartbeats and PID bookkeeping). Omitting the stamp
-    # here is by-design — the dedicated heartbeat fields carry freshness — so a
-    # WARNING per write is pure log noise (2 lines per 60s heartbeat per
-    # session) that buries genuine warnings. We downgrade these to DEBUG; any
-    # other omission (e.g. ``status``) still warns.
+    # frequency (liveness heartbeats, PID bookkeeping, and the granite
+    # wedge-detector's cross-tick state). Omitting the stamp here is by-design —
+    # the dedicated heartbeat/freshness fields ARE the freshness signal, so
+    # advancing ``updated_at`` would be redundant — and a WARNING per write is
+    # pure log noise (several lines per heartbeat per session, far worse for
+    # granite-container sessions whose PTY read-loop and per-tool boundaries
+    # fire at >=1 Hz) that buries genuine warnings. We downgrade these to DEBUG;
+    # any other omission (e.g. ``status``) still warns. A combined partial save
+    # is only downgraded when EVERY field in it is on this allowlist.
     _UPDATED_AT_OMISSION_OK_FIELDS = frozenset(
         {
+            # SDK / worker liveness heartbeats and PID bookkeeping
             "last_heartbeat_at",
             "last_sdk_heartbeat_at",
             "last_stdout_at",
             "claude_pid",
             "harness_pid",
+            # Turn-boundary liveness (sdk_client result handler + granite on_turn)
+            "last_turn_at",
+            # Tool-boundary liveness (Pre/PostToolUse hooks, fires per tool call)
+            "current_tool_name",
+            "last_tool_use_at",
+            # Granite PTY read-loop liveness stamps (#1724; fire at >=1 Hz)
+            "last_pty_read_loop_at",
+            "last_pty_activity_at",
+            # Granite stage-1 wedge-detector cross-tick state (per health tick)
+            "mid_run_quiescent_since",
+            "mid_run_pty_snapshot",
         }
     )
 
@@ -955,14 +1015,27 @@ class AgentSession(Model):
 
     @classmethod
     def _heal_future_updated_at(cls) -> int:
-        """One-shot heal for future-dated updated_at values written before fix #1645.
+        """One-shot DETECTION for future-dated updated_at values written before fix #1645.
 
-        Clamps any session whose updated_at is in the future down to
-        max(created_at, now). Idempotent: a re-run clamps only still-future
-        records (partial mid-heal restart is safe because the per-record guard
-        is a strict `if record.updated_at > utc_now()` check, not a bulk update).
+        C2 (#1817): this function previously persisted a clamped
+        ``updated_at`` (a re-save call) whenever it found a future-dated
+        record. That re-save was itself a hazard, not a cure: persisting
+        rewrites the ``created_at``-based sorted index on every call, so
+        healing one future-dated straggler reshuffled the index position of
+        every OTHER recently-created record too -- corrupting freshness
+        ordering for every reader, not just the one record being healed.
 
-        Returns the number of records healed.
+        Detection is now read-only: it logs any future-dated records it
+        still finds (for operator visibility) but never mutates or persists
+        a clamped value. Health staleness no longer depends on this heal
+        having run -- see ``agent/session_health.py``'s trusted-clock fix
+        (Redis ``TIME`` instead of local wall-clock), which makes a
+        future-dated (skew-written) ``updated_at`` harmless to read even
+        without ever being clamped: age is computed from a single shared
+        clock, not from comparing two different processes' local clocks.
+
+        Returns the number of future-dated records detected (NOT healed —
+        nothing is mutated or re-saved).
         """
         from bridge.utc import utc_now
 
@@ -988,31 +1061,13 @@ class AgentSession(Model):
                 if updated_at_utc <= now:
                     continue  # already sane, skip
 
-                # Clamp created_at first (dual-future-dated case, CONCERN — Adversary):
-                # ensures updated_at floor uses the already-clamped value so the
-                # invariant created_at <= updated_at <= now holds.
-                if record.created_at:
-                    created_at_utc = record.created_at
-                    if created_at_utc.tzinfo is None:
-                        created_at_utc = created_at_utc.replace(tzinfo=UTC)
-                    if created_at_utc > now:
-                        record.created_at = now
-                        logger.warning(
-                            f"_heal_future_updated_at: clamped future created_at on {record.id}"
-                        )
-
-                floor = record.created_at if record.created_at else now
-                # Normalize floor to tz-aware for max() comparison
-                if hasattr(floor, "tzinfo") and floor.tzinfo is None:
-                    floor = floor.replace(tzinfo=UTC)
-                record.updated_at = max(floor, now)
-                # Full save (no update_fields) so all changed fields are persisted
-                # and all popoto indexes (including SortedField created_at) are
-                # kept in sync. The save() override will re-stamp utc_now() for
-                # updated_at (idempotent — it will equal now).
-                record.save()
+                logger.warning(
+                    f"_heal_future_updated_at: detected future-dated updated_at on "
+                    f"{record.id} ({updated_at_utc.isoformat()} > now={now.isoformat()}) "
+                    "-- NOT re-saving (index-reshuffle hazard, see C2 #1817); "
+                    "staleness reads use a trusted-clock relative age instead"
+                )
                 count += 1
-                logger.info(f"_heal_future_updated_at: healed session {record.id}")
             except Exception as e:
                 logger.warning(
                     f"_heal_future_updated_at: skipped {getattr(record, 'id', '?')}: {e}"
@@ -1993,64 +2048,6 @@ class AgentSession(Model):
 
         sm = PipelineStateMachine(self)
         return sm.has_failed_stage()
-
-    # === Queued steering message helpers ===
-
-    def push_steering_message(self, text: str, front: bool = False) -> None:
-        """Buffer a human reply for the PM session.
-
-        Uses partial save (update_fields) to avoid clobbering status on stale
-        worker references. See #950.
-
-        Args:
-            text: The steering message text to enqueue.
-            front: When True, prepend to the queue (urgent advisory; trimmed
-                from the back so the new message is never dropped).  When
-                False (default), append as before (trimmed from the front).
-        """
-        current = self.queued_steering_messages
-        if not isinstance(current, list):
-            current = []
-        if front:
-            current.insert(0, text)
-            if len(current) > STEERING_QUEUE_MAX:
-                dropped = len(current) - STEERING_QUEUE_MAX
-                logger.warning(
-                    f"Steering queue overflow for session {self.session_id}: "
-                    f"dropping {dropped} oldest message(s) from back (front=True)"
-                )
-                current = current[:STEERING_QUEUE_MAX]
-        else:
-            current.append(text)
-            if len(current) > STEERING_QUEUE_MAX:
-                dropped = len(current) - STEERING_QUEUE_MAX
-                logger.warning(
-                    f"Steering queue overflow for session {self.session_id}: "
-                    f"dropping {dropped} oldest message(s)"
-                )
-                current = current[-STEERING_QUEUE_MAX:]
-        self.queued_steering_messages = current
-        try:
-            self.save(update_fields=["queued_steering_messages", "updated_at"])
-        except Exception as e:
-            logger.warning(f"Failed to save steering message for session {self.session_id}: {e}")
-
-    def pop_steering_messages(self) -> list[str]:
-        """Pop all buffered steering messages, clearing the queue.
-
-        Uses partial save (update_fields) to avoid clobbering status on stale
-        worker references. See #950.
-        """
-        current = self.queued_steering_messages
-        if not isinstance(current, list) or not current:
-            return []
-        messages = list(current)
-        self.queued_steering_messages = []
-        try:
-            self.save(update_fields=["queued_steering_messages", "updated_at"])
-        except Exception as e:
-            logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
-        return messages
 
     # === Session hierarchy helpers ===
 

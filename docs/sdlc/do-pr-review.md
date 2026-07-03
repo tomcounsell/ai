@@ -1,6 +1,91 @@
 # do-pr-review addendum — this repo only
 <!-- Do not duplicate content from the global skill (~/.claude/skills/do-pr-review/SKILL.md). Only include what is unique to this repo. Max 300 lines. -->
 
+## Substrate, Identity & Tooling (the generic body defers these here)
+
+The leaned body refers to these abstractly. The Multi-Judge Consensus and the
+verdict+marker finalize block are documented in their own sections below; this
+section adds what they don't cover.
+
+**Review identity (bot account, opt-in per machine).** Pipeline-driven reviews
+MAY post under a dedicated service account. Set `SDLC_AGENT_GH_TOKEN` only on the
+dedicated bot machine; standard machines leave it blank and post under the
+operator credential.
+
+- When `CLAUDE_AGENT_REVIEW=1` (set by `sdk_client.py` at session spawn) AND
+  `SDLC_AGENT_GH_TOKEN` is non-empty: inject `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` for
+  the single `gh pr review`/`gh pr comment` subprocess that posts the review, and
+  emit the marker `<!-- SDLC-AGENT-REVIEW v1 sha=<HEAD_SHA> -->` as the first line
+  of the body. All read-only `gh` calls use the operator credential. NEVER pass an
+  empty `GH_TOKEN` (it corrupts the stored credential).
+- Marker is forensic only — configure branch protection (CODEOWNERS or a Ruleset
+  with `bypass_actors`/`actors_can_approve=false` for the bot) separately. Full
+  runbook: `docs/features/do-pr-review-bot-identity.md`.
+
+**SDLC env vars (auto-injected by `sdk_client.py`):** `$SDLC_PR_NUMBER`,
+`$SDLC_PR_BRANCH`, `$SDLC_SLUG`, `$SDLC_PLAN_PATH`, `$SDLC_ISSUE_NUMBER`
+(last-resort hint only — primary is PR-body `Closes #N` extraction, #1731),
+`$SDLC_REPO` (`$GH_REPO`). Prefer these over manual resolution when present.
+
+**Cross-repo `gh` targeting:** `GH_REPO` is set automatically by `sdk_client.py`;
+`gh` respects it — no `--repo` flags needed.
+
+**Clean-git-state helper (before checkout):**
+
+```bash
+python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+```
+
+**Stage marker (REVIEW in_progress)** — write at the start (after § 1 resolves
+`ISSUE_NUMBER`), parse degraded mode:
+
+```bash
+sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER"
+```
+
+**Verification-table runner (§ 4.5):**
+
+```bash
+python -c "from agent.verification_parser import parse_verification_table, run_checks, format_results; ..."
+```
+
+**Verdict recording (global skill Step 6.6).** This runs **before** the OUTCOME
+block, not after it. In a local pipeline run (`/do-sdlc`) there are no hooks to
+write markers/verdicts for you — this `sdlc-tool` call is the ONLY thing that
+persists the verdict, and the router (`sdlc-tool next-skill`) re-dispatches REVIEW
+in a loop until it sees one. Skipping it is the #1 local-pipeline stall. Always
+pass `--issue-number` (quoted) — it is the authoritative session selector:
+
+```bash
+# APPROVED (status=success) — verdict + completion marker are ONE block (#1642):
+sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
+# Findings:
+sdlc-tool verdict record --stage REVIEW --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --issue-number "$ISSUE_NUMBER"
+# Preflight short-circuits:
+sdlc-tool verdict record --stage REVIEW --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
+sdlc-tool verdict record --stage REVIEW --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
+# Multi-judge: ONE record call with --judges-json/--consensus-json after
+# agent.sdlc_review_consensus.compute_consensus (single-writer invariant).
+# Read back to confirm persistence before emitting the OUTCOME block:
+sdlc-tool verdict get --stage REVIEW --issue-number "$ISSUE_NUMBER"
+```
+
+**Cross-vendor judge (opt-in, default OFF).** After collecting the Claude judge
+dicts and BEFORE `compute_consensus`, if `SDLC_REVIEW_CROSS_VENDOR=1` AND
+`shape == feature`, invoke `python -m tools.cross_vendor_judge --pr N` (equiv:
+`valor-cross-vendor-judge --pr N`). Append only an `"ok"` judge dict to the
+judges list; a `"skipped"`/error result is a non-fatal skip unless
+`SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1` (then inject a synthetic CHANGES REQUESTED
+so any-blocker-wins triggers). Never crash the review.
+
+**Real-Chrome session requirement (Surface).** Screenshot capture runs against
+the user's real, logged-in Chrome via BYOB MCP — there is no anonymous-headless
+fallback (retired #1256). The calling session must have `requires_real_chrome=True`;
+the bridge auto-infers for pipeline runs, or pass
+`valor-session create --needs-real-chrome ...` for manual runs. Two concurrent
+real-Chrome sessions race on the active tab.
+
 ## Documentation Gate
 
 Every PR must have a corresponding `docs/features/{slug}.md` if the plan's `## Documentation` section specified one. Verify this file exists before approving. Missing docs are a blocker.

@@ -46,18 +46,20 @@ def ensure_granite_model(
 ) -> tuple[bool, str]:
     """Verify the granite classifier model is present and responsive.
 
-    The granite classifier is the classification brain of the PTY
-    container: every PM/Dev turn is classified by a regex parse, but the
-    model must still be available for other uses of the granite PTY runner
-    (e.g. the PM/Dev PTY sessions themselves use the model via the TUI).
-    If the model is absent the worker would come up with an incomplete
-    setup, so worker startup treats this as a hard precondition.
+    This is the ONLY ollama call in the worker's startup path. Note:
+    - ``classify_pm_prefix`` is pure regex — zero ollama calls at runtime.
+    - PTY sessions (PM/Dev TUI) run on Claude OAuth subscription, not ollama.
+    - ollama is used exclusively for this startup health probe and the
+      background ``_granite_reprobe_loop`` circuit breaker in worker/__main__.py.
 
-    Checks, in order: the ollama python client is importable (the model
-    is used by the granite TUI runner itself), the ``ollama`` CLI/daemon
-    is reachable, and the model answers a trivial prompt. When
-    ``pull_if_missing`` and the probe fails, attempts ``ollama pull
-    <model>`` once before a final probe.
+    When the probe fails, worker starts in degraded mode (granite_available=False)
+    and defers ENG sessions to paused_circuit until the background reprobe loop
+    restores granite_available=True. This replaces the previous hard sys.exit(1).
+
+    Checks, in order: the ollama python client is importable, the ``ollama``
+    CLI/daemon is reachable, and the model answers a trivial prompt. When
+    ``pull_if_missing`` and the probe fails, attempts ``ollama pull <model>``
+    once before a final probe.
 
     Returns ``(ok, detail)`` — ``detail`` is a human-readable reason suitable
     for a log line.

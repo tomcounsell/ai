@@ -16,37 +16,18 @@ the mergeability preflight short-circuited (see §2b and §2c below).
 
 ### 0. Identity Setup
 
-Resolve the token to use for the review-post subprocess. This runs BEFORE
-any `gh pr review` or `gh pr comment` call.
+**Generic default:** post under the operator's `gh` credential — set
+`GH_TOKEN_FOR_REVIEW=""` and call `gh` directly.
 
-```bash
-GH_TOKEN_FOR_REVIEW=""
-HEAD_SHA=""
-
-if [ "${CLAUDE_AGENT_REVIEW:-0}" = "1" ] && [ -n "${SDLC_AGENT_GH_TOKEN:-}" ]; then
-  # Pipeline context AND a dedicated bot token is configured on this machine.
-  # Use bot identity and emit the forensic marker.
-  GH_TOKEN_FOR_REVIEW="$SDLC_AGENT_GH_TOKEN"
-  HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
-fi
-# Otherwise (no token, or local dev run): fall through to operator credential.
-# SDLC_AGENT_GH_TOKEN is opt-in per machine — most machines review under the
-# operator identity. Only the dedicated bot machine sets the token.
-```
-
-**Rules:**
-- When `GH_TOKEN_FOR_REVIEW` is non-empty: wrap EVERY `gh pr review` and
-  `gh pr comment` call in `env GH_TOKEN="$GH_TOKEN_FOR_REVIEW" gh ...`
-- When `GH_TOKEN_FOR_REVIEW` is empty: call `gh` directly (operator credential)
-- Never pass an empty `GH_TOKEN` to `gh` — that would corrupt the stored credential
-
-**Marker:** When `GH_TOKEN_FOR_REVIEW` is non-empty, prepend this line at the
-very top of every review body (before all other content):
-```
-<!-- SDLC-AGENT-REVIEW v1 sha=$HEAD_SHA -->
-```
-The marker is omitted for `BLOCKED_ON_CONFLICT` / `PR_CLOSED` comment-only paths
-(those are informational, not code-review verdicts).
+If the repo-context file declares a bot/service-account review identity, resolve
+its token here (BEFORE any `gh pr review`/`gh pr comment` call) and follow its
+rules:
+- When a bot token is resolved: wrap ONLY the review-post `gh` calls in
+  `env GH_TOKEN="$GH_TOKEN_FOR_REVIEW" gh ...`, and prepend the context file's
+  review marker as the first line of every code-review body. Never pass an empty
+  `GH_TOKEN` to `gh` (it corrupts the stored credential).
+- The marker is omitted for `BLOCKED_ON_CONFLICT` / `PR_CLOSED` comment-only
+  paths (informational, not code-review verdicts).
 
 ### 1. Detect Self-Authored PR
 
@@ -391,12 +372,12 @@ if [ -z "$REVIEW_URL" ]; then
 fi
 ```
 
-### 6. Mark Session Progress
+### 6. Mark Session Progress (only if the context file declares a substrate)
 
-```bash
-# On approval (no blockers):
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number {issue_number} 2>/dev/null || true
-```
+On approval (no blockers), if the repo-context file declares a stage-marker
+substrate, write the REVIEW completion marker (co-located with the verdict
+record — see the parent SKILL.md "Record the verdict"). In the generic case,
+skip — the posted GitHub review is the completion signal.
 
 ## Completion
 

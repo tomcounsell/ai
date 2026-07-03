@@ -1335,3 +1335,38 @@ async def test_degraded_notice_fires_on_genuine_post_recovery_exhaustion_issue17
         "``_deliver_tool_timeout_degraded_notice`` must fire on the genuine "
         "post-recovery exhaustion path (issue #1762 fix must not suppress it)"
     )
+
+
+# ---------------------------------------------------------------------------
+# AC2 non-regression: priming granite session with tool in flight and fresh PTY
+# must NOT be killed by the tool_timeout path (issue #1792)
+# ---------------------------------------------------------------------------
+
+
+def test_priming_granite_session_with_fresh_pty_not_killed_by_tool_timeout():
+    """AC2: priming granite session with current_tool_name + fresh PTY is NOT killed.
+
+    When a granite session has:
+    - A tool in flight (current_tool_name set, last_tool_use_at within budget)
+    - A fresh PTY read loop (last_pty_read_loop_at within HEARTBEAT_FRESHNESS_WINDOW)
+
+    The tool_timeout check (_check_tool_timeout) must return None (no timeout),
+    so the PTY-liveness gate in the D0 tool-timeout path is never even reached.
+
+    This is a non-regression guard: the tool_timeout path must not kill a session
+    that is still within its tool budget, regardless of PTY state.
+    """
+    now = datetime.now(tz=UTC)
+    # Session with a tool that has been running for only 10s (well within any budget)
+    # and a fresh PTY read loop.
+    entry = SimpleNamespace(
+        current_tool_name="Bash",
+        last_tool_use_at=now - timedelta(seconds=10),
+        last_pty_read_loop_at=now - timedelta(seconds=5),
+        mid_run_quiescent_since=None,
+    )
+    result = _check_tool_timeout(entry)
+    assert result is None, (
+        "A priming granite session with Bash in flight for 10s (within the 300s budget) "
+        "must NOT trigger a tool timeout — _check_tool_timeout must return None"
+    )

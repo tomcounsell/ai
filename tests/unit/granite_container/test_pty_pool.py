@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import agent.granite_container.pty_pool as pty_pool_mod
 from agent.granite_container.pty_pool import PTYPool, PTYPoolError
 
 
@@ -127,6 +128,80 @@ class TestSpawnTracking(unittest.TestCase):
             os.unlink(tmp.name)
 
 
+class TestRegisterUnregisterPid(unittest.TestCase):
+    """Crash-resume PID registration seam (plan #1851): the callback
+    entry points `PTYPool.register_pid`/`unregister_pid`, wired to
+    `Container(on_pty_spawn=..., on_pty_despawn=...)`."""
+
+    def test_register_pid_adds_and_persists(self) -> None:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        try:
+            pool = _make_pool(size=1, pid_registry=tmp.name)
+            pool.register_pid(54321)
+            self.assertIn(54321, pool.get_spawned_pids())
+            data = json.loads(Path(tmp.name).read_text())
+            self.assertIn(54321, data["pids"])
+        finally:
+            os.unlink(tmp.name)
+
+    def test_unregister_pid_discards_and_persists(self) -> None:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        try:
+            pool = _make_pool(size=1, pid_registry=tmp.name)
+            pool.register_pid(54321)
+            pool.unregister_pid(54321)
+            self.assertNotIn(54321, pool.get_spawned_pids())
+            data = json.loads(Path(tmp.name).read_text())
+            self.assertNotIn(54321, data["pids"])
+        finally:
+            os.unlink(tmp.name)
+
+    def test_unregister_pid_not_present_is_a_noop(self) -> None:
+        pool = _make_pool(size=1)
+        # Discarding a pid that was never registered must not raise.
+        pool.unregister_pid(99999)
+        self.assertNotIn(99999, pool.get_spawned_pids())
+
+    def test_register_pid_returns_without_hanging(self) -> None:
+        """Deadlock guard (round-2 BLOCKER): `_persist_pids` re-acquires
+        the non-reentrant `_pids_lock`. If `register_pid` ever called
+        `_persist_pids()` from inside its own `with self._pids_lock:`
+        block, this call would hang forever instead of returning."""
+        pool = _make_pool(size=1)
+        pool.register_pid(11111)  # must return promptly, not hang
+        self.assertIn(11111, pool.get_spawned_pids())
+
+    def test_register_pid_swallows_os_error(self) -> None:
+        """`_persist_pids`'s except stays narrow at OSError (plan #1851
+        round-2 NIT: reverted the round-1 broadening to Exception — the
+        `_pids_lock` snapshot already prevents the `RuntimeError` this
+        would have guarded against, so widening the catch would silently
+        hide unrelated future bugs). An OSError from a bad registry path
+        (e.g. permission denied, disk full) must still be swallowed and
+        not propagate out of `register_pid`; persistence is best-effort."""
+        pool = _make_pool(size=1)
+        with (
+            patch.object(Path, "write_text", side_effect=OSError("disk full")),
+            self.assertLogs("agent.granite_container.pty_pool", level="WARNING") as log_ctx,
+        ):
+            pool.register_pid(22222)  # must not raise, must log a warning
+        self.assertIn(22222, pool.get_spawned_pids())
+        self.assertTrue(any("could not persist pid registry" in msg for msg in log_ctx.output))
+
+    def test_unregister_pid_swallows_os_error(self) -> None:
+        """Same narrow-OSError coverage for the unregister path."""
+        pool = _make_pool(size=1)
+        pool.register_pid(33333)
+        with (
+            patch.object(Path, "write_text", side_effect=OSError("permission denied")),
+            self.assertLogs("agent.granite_container.pty_pool", level="WARNING"),
+        ):
+            pool.unregister_pid(33333)  # must not raise, must log a warning
+        self.assertNotIn(33333, pool.get_spawned_pids())
+
+
 class TestAcquireRelease(unittest.TestCase):
     def test_acquire_returns_pair(self) -> None:
         pool = _make_pool(size=2)
@@ -146,53 +221,55 @@ class TestAcquireRelease(unittest.TestCase):
             asyncio.run(_runner())
 
     def test_acquire_blocks_when_all_slots_locked(self) -> None:
-        pool = _make_pool(size=2)
-        with _patch_spawn_to_succeed():
-            asyncio.run(pool.initialize())
+        # Use a short acquire timeout so the test finishes quickly if the
+        # third acquirer is not properly blocked before slots free up.
+        with patch.object(pty_pool_mod, "PTY_POOL_ACQUIRE_TIMEOUT", 2):
+            pool = _make_pool(size=2)
+            with _patch_spawn_to_succeed():
+                asyncio.run(pool.initialize())
 
-            acquired_count = 0
-            release_event = asyncio.Event()
+                acquired_count = 0
+                release_event = asyncio.Event()
 
-            async def hold_slot() -> None:
-                nonlocal acquired_count
-                async with pool.acquire_pair():
-                    acquired_count += 1
-                    await release_event.wait()
-
-            async def try_acquire() -> None:
-                # Try to acquire a third slot. Should block.
-                try:
+                async def hold_slot() -> None:
+                    nonlocal acquired_count
                     async with pool.acquire_pair():
+                        acquired_count += 1
+                        await release_event.wait()
+
+                async def try_acquire() -> None:
+                    # Try to acquire a third slot. Should block until released.
+                    try:
+                        async with pool.acquire_pair():
+                            pass
+                    except (TimeoutError, PTYPoolError):
                         pass
-                except TimeoutError:
-                    pass
 
-            async def runner() -> None:
-                # Start two holders (uses both slots).
-                holders = [asyncio.create_task(hold_slot()) for _ in range(2)]
-                # Give the holders a moment to acquire.
-                await asyncio.sleep(0.05)
-                self.assertEqual(acquired_count, 2)
-                # Try to acquire a third; this should hang.
-                third = asyncio.create_task(try_acquire())
-                # If the third is hung, that's the assertion: it
-                # never completes within 0.2s.
-                try:
-                    await asyncio.wait_for(third, timeout=0.2)
-                except TimeoutError:
-                    pass  # Expected: blocked
-                # Release the holders and let the third try.
-                release_event.set()
-                await asyncio.gather(*holders, return_exceptions=True)
-                # After release, the semaphore frees up; the third
-                # task should now complete (if it had been given
-                # the chance to re-run). Cancel the third task
-                # because we are just asserting blocking.
-                third.cancel()
-                with __import__("contextlib").suppress(asyncio.CancelledError):
-                    await third
+                async def runner() -> None:
+                    # Start two holders (uses both slots).
+                    holders = [asyncio.create_task(hold_slot()) for _ in range(2)]
+                    # Give the holders a moment to acquire.
+                    await asyncio.sleep(0.05)
+                    self.assertEqual(acquired_count, 2)
+                    # Try to acquire a third; this should block initially.
+                    third = asyncio.create_task(try_acquire())
+                    # If the third is hung, that's the assertion: it
+                    # never completes within 0.2s.
+                    try:
+                        await asyncio.wait_for(asyncio.shield(third), timeout=0.2)
+                    except TimeoutError:
+                        pass  # Expected: blocked
+                    # Release the holders and let the third try.
+                    release_event.set()
+                    await asyncio.gather(*holders, return_exceptions=True)
+                    # After release the semaphore frees up; the third
+                    # task should now complete. Cancel it because we are
+                    # just asserting blocking behavior.
+                    third.cancel()
+                    with __import__("contextlib").suppress(asyncio.CancelledError):
+                        await third
 
-            asyncio.run(runner())
+                asyncio.run(runner())
 
     def test_release_schedules_respawn(self) -> None:
         pool = _make_pool(size=1)
@@ -226,6 +303,41 @@ class TestRespawnFailure(unittest.TestCase):
             self.assertEqual(slot.state, "respawning")
             # The event is NOT set; an acquirer would block.
             self.assertFalse(slot.event.is_set())
+
+    def test_stuck_respawning_slot_is_force_recycled_by_bounded_acquirer(self) -> None:
+        """A slot stuck in `respawning` with its event never set triggers
+        `_force_recycle_slot` via the bounded slot.event.wait() timeout,
+        and the next acquirer proceeds within PTY_POOL_WAIT_TIMEOUT."""
+        spawn_calls = {"count": 0, "fail": True}
+
+        def _controlled_spawn(self_driver) -> None:
+            spawn_calls["count"] += 1
+            if spawn_calls["fail"] and spawn_calls["count"] <= 2:
+                # First two spawns (pre-warm) fail → slot stuck in respawning.
+                raise RuntimeError("simulated pre-warm failure")
+            # Subsequent spawns (force-recycle path) succeed.
+
+        with patch("agent.granite_container.pty_pool.PTYDriver.spawn", _controlled_spawn):
+            pool = _make_pool(size=1)
+            asyncio.run(pool.initialize())
+            slot = pool._slots[0]
+            self.assertEqual(slot.state, "respawning")
+            self.assertFalse(slot.event.is_set())
+
+            # Now allow spawns to succeed for the force-recycle path.
+            spawn_calls["fail"] = False
+
+            # Use a very short wait timeout so the force-recycle fires quickly.
+            with patch.object(pty_pool_mod, "PTY_POOL_WAIT_TIMEOUT", 0.05):
+                with patch.object(pty_pool_mod, "PTY_POOL_ACQUIRE_TIMEOUT", 10):
+
+                    async def _try_acquire():
+                        async with pool.acquire_pair() as (pm, dev, slot_idx):
+                            return slot_idx
+
+                    result = asyncio.run(asyncio.wait_for(_try_acquire(), timeout=5.0))
+                    # The acquirer obtained a slot after the force-recycle.
+                    self.assertIsInstance(result, int)
 
 
 class TestEventClearFirstLine(unittest.TestCase):
@@ -284,6 +396,7 @@ class _SessionSpecDriver:
         env: dict | None = None,
         append_system_prompt: str | None = None,
         session_id: str | None = None,
+        settings_path: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
@@ -291,6 +404,7 @@ class _SessionSpecDriver:
         self.env = env
         self.append_system_prompt = append_system_prompt
         self._session_id = session_id
+        self._settings_path = settings_path
         self._child = None  # _pair_is_live treats None-child as live
         self.closed = False
         _SessionSpecDriver.instances.append(self)
@@ -415,6 +529,145 @@ class TestSpawnOnAcquire(unittest.TestCase):
 
         with patch("agent.granite_container.pty_pool.PTYDriver", _FlakyDriver):
             asyncio.run(_run())
+
+
+class _PidTrackingDriver:
+    """Fake PTYDriver for D2 pid-persist tests (issue #1817): allocates a
+    unique pid per instance on spawn(), optionally raising for one role to
+    simulate a dev.spawn() failure after a successful pm.spawn()."""
+
+    _pid_counter = [20000]
+    fail_role: str | None = None  # set per-test in setUp
+
+    class _FakeChild:
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+    def __init__(
+        self,
+        role: str = "pm",
+        cwd: str | None = None,
+        model: str | None = None,
+        env: dict | None = None,
+        session_id: str | None = None,
+        settings_path: str | None = None,
+    ) -> None:
+        self.role = role
+        self.cwd = cwd
+        self._child = None
+        self.closed = False
+
+    def spawn(self) -> None:
+        if _PidTrackingDriver.fail_role == self.role:
+            raise RuntimeError(f"simulated {self.role} spawn failure")
+        pid = _PidTrackingDriver._pid_counter[0]
+        _PidTrackingDriver._pid_counter[0] += 1
+        self._child = _PidTrackingDriver._FakeChild(pid)
+
+    def isalive(self) -> bool:
+        return True
+
+    def close(self, force: bool = True) -> None:
+        self.closed = True
+
+
+class TestD2ImmediatePidPersist(unittest.TestCase):
+    """D2 (issue #1817): `_spawn_session_pair` persists each child's pid
+    IMMEDIATELY after its own spawn() returns, not batched after both roles
+    spawn — so a dev.spawn() failure after a successful pm.spawn() doesn't
+    strand pm's pid unreapable. A headless role (#1842) leaves `pty` as
+    None — no PTY process, correctly nothing to record."""
+
+    def setUp(self) -> None:
+        _PidTrackingDriver.fail_role = None
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
+        tmp.close()
+        self.registry_path = tmp.name
+
+    def tearDown(self) -> None:
+        try:
+            os.unlink(self.registry_path)
+        except OSError:
+            pass
+
+    def _read_registry(self) -> list[int]:
+        with open(self.registry_path) as f:
+            return json.load(f).get("pids", [])
+
+    def test_pm_and_dev_pids_both_persisted_on_success(self) -> None:
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                await pool._spawn_session_pair(slot, spec)
+            pm, dev = slot.pty_pair
+            self.assertIn(pm._child.pid, pool.get_spawned_pids())
+            self.assertIn(dev._child.pid, pool.get_spawned_pids())
+            self.assertEqual(set(self._read_registry()), pool.get_spawned_pids())
+
+        asyncio.run(_run())
+
+    def test_dev_spawn_failure_leaves_pm_pid_persisted(self) -> None:
+        """The whole point of D2: a dev.spawn() failure after a successful
+        pm.spawn() must not strand pm's pid unpersisted/unreapable."""
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        _PidTrackingDriver.fail_role = "dev"
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                with self.assertRaises(RuntimeError):
+                    await pool._spawn_session_pair(slot, spec)
+            self.assertEqual(len(pool.get_spawned_pids()), 1)
+            self.assertEqual(set(self._read_registry()), pool.get_spawned_pids())
+
+        asyncio.run(_run())
+
+    def test_headless_pair_records_empty_pid_set_and_persists(self) -> None:
+        """A fully-headless spec spawns no PTY process; the registry is
+        still explicitly persisted with an empty pid set (not skipped)."""
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        # Seed stale content to prove the empty-set write actually happens.
+        with open(self.registry_path, "w") as f:
+            json.dump({"pids": [99999]}, f)
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x", pm_transport="headless", dev_transport="headless")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                await pool._spawn_session_pair(slot, spec)
+            pm, dev = slot.pty_pair
+            self.assertIsNone(pm)
+            self.assertIsNone(dev)
+            self.assertEqual(pool.get_spawned_pids(), set())
+
+        asyncio.run(_run())
+        self.assertEqual(self._read_registry(), [])
+
+    def test_mixed_pty_pm_headless_dev_persists_only_pm(self) -> None:
+        from agent.granite_container.pty_pool import PairSpawnSpec, _Slot
+
+        async def _run():
+            pool = PTYPool(pool_size=1, pid_registry_path=self.registry_path)
+            slot = _Slot(idx=0)
+            spec = PairSpawnSpec(cwd="/x", dev_transport="headless")
+            with patch("agent.granite_container.pty_pool.PTYDriver", _PidTrackingDriver):
+                await pool._spawn_session_pair(slot, spec)
+            pm, dev = slot.pty_pair
+            self.assertIsNotNone(pm)
+            self.assertIsNone(dev)
+            self.assertEqual(pool.get_spawned_pids(), {pm._child.pid})
+            self.assertEqual(self._read_registry(), [pm._child.pid])
+
+        asyncio.run(_run())
 
 
 class TestNoSleepPollWait(unittest.TestCase):

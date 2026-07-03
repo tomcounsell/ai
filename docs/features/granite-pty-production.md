@@ -11,9 +11,14 @@ PTYs, with a local `granite4.1:3b` model routing between them. A bounded
 `PTYPool` caps the number of concurrent interactive pairs the worker holds open.
 
 This is the production cutover of the container first landed in PR #1570
-(see [`granite-interactive-tui.md`](granite-interactive-tui.md)). The
-cutover is **all-or-nothing**: there is no runtime fallback flag. If a
-regression lands on `main`, the change is reverted (see
+(see [`granite-interactive-tui.md`](granite-interactive-tui.md)). All bridge
+sessions route through `Container`; **the transport per role is
+config-selectable** (plan #1842): each of PM / Dev runs on an interactive PTY
+(the default, flat-billed) or headless `claude -p` (metered). The default —
+both roles on PTY — reproduces the original cutover behavior exactly. See
+[`per-role-transport.md`](per-role-transport.md) for the selector, the headless
+role driver, cost surfacing, and the flip runbook. A regression in the PTY path
+is still reverted (see
 [Reverting the granite cutover](#reverting-the-granite-cutover)).
 
 ## Why
@@ -152,11 +157,17 @@ recovery backstop: [`docs/features/granite-login-recovery.md`](granite-login-rec
 
 ## Configuration
 
-One operator-facing setting, in `config/settings.py` under `GraniteSettings`:
+Operator-facing settings:
 
 - `granite.pty_pool_size` — hard maximum of concurrent PM+Dev PTY pairs.
   Default `3`. Override via the `GRANITE__PTY_POOL_SIZE` env var (note the
   **double underscore** — pydantic nested-settings delimiter).
+
+- `GRANITE_DELIVERY_TIMEOUT_S` — delivery timeout in seconds for the
+  `_deliver_sync` call that schedules a `[/user]` or `[/complete]` payload
+  back onto the event loop from the pexpect thread. Default `30.0`. Override
+  via the env var of the same name (`DEFAULT_DELIVERY_TIMEOUT_S` constant in
+  `agent/granite_container/bridge_adapter.py`).
 
 The pool size is intentionally **smaller** than `MAX_CONCURRENT_SESSIONS`
 (default 8) so the Redis queue absorbs over-cap sessions rather than
@@ -356,6 +367,26 @@ the operator does not want.
 > when the screen has been quiescent for `>= MID_RUN_QUIESCENCE_SECS (180s)`.
 > Worst-case recovery bound: ~330s (300s budget + ~30s tick cadence). SDK sessions
 > (no PTY) are unaffected — they continue to use the flat 300s age-only kill.
+>
+> **Never-started PTY-liveness gate (issue #1792):** the sibling gate for the D0
+> never-started kill path. Prime liveness is judged on `last_pty_activity_at`
+> freshness (not `mid_run_quiescent_since`, which is always `None` during
+> priming). The kill is deferred when the PTY read loop is fresh and
+> `last_pty_activity_at` is within `NEVER_STARTED_PTY_LIVENESS_SECS` (default
+> 90s, env-overridable). See
+> [pm-session-liveness.md — PTY-liveness gates](pm-session-liveness.md#pty-liveness-gates-for-kill-paths)
+> for the full side-by-side comparison of both gates.
+
+## Failure-simulation test harness
+
+The silent-wedge failures this production path is prone to (idle-heuristic
+breakage on a Claude Code UI revision, startup-dialog drift, process hang, loop,
+crash) are reproduced locally and at volume by the
+[Granite Failure-Simulation Test Harness](granite-failure-simulation-harness.md)
+(#1837). It pairs a deterministic seam-injection substrate (always-on, no model)
+with an ollama-backed real-`claude` E2E substrate (free, gated on
+`GRANITE_OLLAMA_SMOKE=1`) that doubles as a canary for new `claude` binary
+releases. Test-only: it changes nothing in this production path.
 
 ## Observability
 
@@ -368,8 +399,9 @@ The adapter writes non-user-visible progress to `agent_session.session_events`
 | `exit_anomaly` | `exit_reason in {pm_hang, dev_hang, startup_unresolved, pm_no_user_message, exception (soft→WARNING, hard→ERROR)}` | `exit_reason`, `ts` — logged at ERROR for hard exits (Sentry log-capture picks it up; on-call path for session-runner regressions); WARNING for soft exception exits (had turns → likely network blip, no Sentry alert). For `startup_unresolved` exits: also carries `startup_failure_kind` (`"plateau"` or `"ceiling"`) and `startup_diagnostic_frame` (truncated frame excerpt, up to 1000 chars). Note: `pm_floor_delivered` is a clean exit and does NOT emit `exit_anomaly`. |
 | `granite_user_routed` | on each `[/user]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
 | `granite_complete_routed` | on each `[/complete]` payload routing attempt | `event_type`, `text` (payload size + delivery result) |
-| `granite_delivery_failure` | a mid-loop `send_cb` raised | `event_type`, `text`, `payload_chars`, `reason`, `ts` |
-| `delivery_failure` | a mid-loop `send_cb` raised (older alias, kept for back-compat) | `payload_chars`, `reason`, `ts` |
+| `granite_delivery_recovered_via_outbox` | delivery timeout or loop-closed condition in `_deliver_sync` where the payload was successfully re-enqueued to the outbox; also written when the same-thread done-callback fires on task failure/cancellation and re-enqueue succeeds | `event_type`, `text`, `payload_chars`, `reason` (`recovered_via_outbox`), `failure_reason` (exception detail; tagged `[future_uncancellable_possible_duplicate]` when `future.cancel()` returned `False`), `recovered` (`True`), `ts` |
+| `granite_delivery_dropped` | delivery timeout or loop-closed condition in `_deliver_sync` where **both** the primary send and the outbox re-enqueue failed (double-failure, permanent loss) | `event_type`, `text`, `payload_chars`, `reason` (`dropped`), `failure_reason` (exception detail), `recovered` (`False`), `ts` |
+| `delivery_failure` | a mid-loop `send_cb` raised (older alias — `type` field on all delivery-failure events for back-compat; matches legacy events in Redis before the `granite_delivery_*` rename) | `payload_chars`, `reason`, `ts` |
 
 Normal completions (`pm_complete`, `pm_user`, `pm_max_turns`) do **not** emit
 `exit_anomaly`, because they are expected outcomes. `pm_no_user_message` emits
@@ -603,6 +635,53 @@ suspects and emit a `WARNING: "stage-1 CONFIRMED SUSPECT"` log when
 [Never-Started Session Recovery](never_started_session_recovery.md) for the
 full Path-A / Path-B design.
 
+#### Wired silent-wedge signals (issue #1843)
+
+Two signals that the session-health machinery already computed but that never
+reached a granite session are now wired:
+
+- **CLI-hook tool liveness arms the #1270 tier loop.** Granite's PM/Dev
+  `claude` PTY children run the repo CLI hooks (`.claude/hooks/pre_tool_use.py`,
+  `post_tool_use.py`), where `AGENT_SESSION_ID` is unset, so the SDK
+  in-process `record_tool_boundary` writer no-ops for them. The CLI hooks now
+  resolve the `AgentSession` from the on-disk sidecar and stamp
+  `current_tool_name` + `last_tool_use_at` directly: the PreToolUse hook sets
+  the tool name, the PostToolUse hook clears it, and both refresh the
+  timestamp. `last_tool_use_at` is written as a `datetime`
+  (`datetime.now(tz=UTC)`), the type `session_health._check_tool_timeout`
+  requires (it gates on `isinstance(last_at, datetime)` and short-circuits on a
+  float). With these fields populated, the #1270 per-tool timeout tier loop
+  arms for granite sessions that stall inside a single tool call. A file-based
+  per-session cooldown (`tool_liveness_cooldown` in the sidecar dir, 5s window)
+  bounds the write rate, since each CLI-hook invocation is a fresh process and
+  cannot share the SDK path's in-memory cooldown; the gate fails open so a
+  cooldown-file problem never masks a wedge. Both writes are fail-silent — an
+  unresolvable sidecar exits the hook cleanly.
+- **Per-iteration PTY-read callback refreshes `last_pty_read_loop_at`
+  mid-turn.** `PTYDriver.read_until_idle` now takes an optional
+  `on_read_iteration` callback, invoked once per inner poll tick.
+  `Container._cycle_idle` threads a throttled wrapper of `self._fire_pty_read`
+  through it, so the bridge-adapter freshness writer stamps
+  `last_pty_read_loop_at` on inner poll iterations rather than only once per
+  `_cycle_idle` return. The wrapper coalesces to at most one stamp per second
+  (`PTY_READ_ITER_MIN_INTERVAL_S`), matching the 5s coalescing philosophy of
+  the SDK-path liveness writer so verbose output cannot produce an
+  AgentSession write storm while still sampling far finer than the
+  once-per-cycle boundary fire. A wedge inside a long idle-fallback turn now
+  refreshes liveness far sooner than the cycle window. The hook-driven
+  `_await_turn_end` path (#1688) already fires `_fire_pty_read` per poll-tick;
+  Gap B closes the same window on the idle-fallback read loop. The callback is
+  best-effort — a raising callback is caught and never breaks the read loop.
+
+The `granite_wedged` verdict already actuates recovery: `reflections/stall_advisory.py`
+builds the session timeline, calls `classify_session_stall`, and runs its
+`_maybe_recover` kill-and-recover ladder (#1768/#1773), gated by
+`stall_recovery_enabled` (dry-run by default, reversible per-machine `.env`).
+The residual — reaping the granite PTY *process group* rather than a single PID
+— is owned by #1820's progress-deadline cancel scope and the #1816
+`container` `killpg` seam. Issue #1843 adds no kill path and does not touch
+`session_health.py`.
+
 ### Startup hard ceiling
 
 The startup loop polls both PTYs on short (`STARTUP_CYCLE_TIMEOUT_S` = 3s)
@@ -742,13 +821,65 @@ handles generic field addition per issues #1099/#1172).
   `_resolve_callbacks` returns `(None, None)`; the adapter installs
   logger-only no-op callbacks and the container still runs to completion. No
   crash, no user delivery.
-- **Mid-loop `send_cb` raises**: the adapter logs at WARNING, writes a
-  `delivery_failure` event, and continues to the next turn. The user does not
-  see a "delivery failed" message (no-spam rule).
+- **Mid-loop delivery timeout (outbox re-enqueue recovery)**: when the
+  event-loop future that delivers a `[/user]` or `[/complete]` payload does
+  not resolve within `GRANITE_DELIVERY_TIMEOUT_S` (default 30 s,
+  env-overridable), `_deliver_sync` re-enqueues the payload to
+  `telegram:outbox:{session_id}` via `_enqueue_to_outbox`. The payload is a
+  6-field JSON dict matching the shape used by `agent/output_handler.py`:
+  `chat_id`, `reply_to`, `text`, `session_id`, `timestamp`, and optional
+  `file_paths`; the key expires after 3600 s. The relay then delivers it so
+  the reply is never silently lost. The resulting session event is
+  `granite_delivery_recovered_via_outbox` when re-enqueue succeeds, or
+  `granite_delivery_dropped` on a double-failure (timeout AND re-enqueue both failed).
+  If `future.cancel()` returns `False` (the coroutine was already running and
+  cannot be cancelled), the event is additionally tagged
+  `[future_uncancellable_possible_duplicate]`; `bridge/redundancy_filter.py`
+  is the downstream backstop against duplicate delivery in that case. The same
+  re-enqueue path is also attached as a done-callback on the same-thread
+  fire-and-forget branch so task failure or cancellation likewise triggers
+  recovery. The user never sees a delivery-failed message (no-spam rule).
 - **Worker SIGKILL mid-run**: orphan PTY children survive. The next worker
   startup reads `data/granite_pty_pids.json` and PID-kills them. The kill is
   PID-targeted, so an operator's personal interactive `claude` session on
   another project is never touched.
+- **Crash-resume PID registration (plan #1851)**: `_resume_crashed_pty`
+  spawns its replacement `PTYDriver` OUTSIDE the pool's own spawn paths
+  (`_spawn_slot`/`_spawn_session_pair`), so before this fix the resumed
+  process's PID was never written to `data/granite_pty_pids.json` and could
+  leak as an orphan across a later worker crash/restart cycle. `Container`
+  now accepts `on_pty_spawn`/`on_pty_despawn` callbacks (the same injection
+  seam as `on_turn`/`on_pty_read`); `BridgeAdapter` wires them to
+  `PTYPool.register_pid`/`PTYPool.unregister_pid`. `_resume_crashed_pty`
+  calls `on_pty_spawn(new_pid)` immediately after the replacement PTY's
+  `spawn()` returns and BEFORE its `write()` call — the process is already
+  live at `spawn()`, and a `write()` failure must not leave a live,
+  unregistered `claude` process. It calls `on_pty_despawn(dead_pid)` from
+  the method's outer `finally` (so it fires on every exit path), gated on
+  the dead PTY's `close(force=True)` having actually succeeded — a
+  swallowed close failure means the old process may still be alive, so it
+  stays registered for the sweep to reap. `PTYPool.register_pid`/
+  `unregister_pid` are thread-safe (crash-resume callbacks fire from the
+  container's session thread, not the pool's event-loop thread) via a new
+  `_pids_lock` guarding every `_spawned_pids` mutation and the
+  `_persist_pids` snapshot. The self-spawned/test/CLI `Container` path (no
+  `PTYPool`) leaves both callbacks `None` and is unaffected — it already
+  tears its PTYs down synchronously via `_close_pair_and_reap` (#1816).
+- **PTY-master U-state block (issue #1767)**: when the worker's main thread
+  is blocking inside `os.read()` on the PTY master fd (e.g. waiting for the
+  granite Dev PTY to produce output), the kernel places it in uninterruptible
+  sleep (U-state). In this state `SIGKILL` is queued but not delivered until
+  the blocking syscall returns — the process cannot be killed by signal alone.
+  The worker watchdog's W3 rung (`launchctl bootout gui/<uid>/com.valor.worker`)
+  is the external backstop: removing the launchd job causes the kernel to clean
+  the process's fd table on exit, which makes the PTY-master `read()` return
+  EOF and unblocks the syscall so the process can exit and launchd can respawn.
+  Cross-process PTY fd close is not feasible on macOS (`os.close` only owns
+  the calling process's fds; `/proc` is Linux-only; `psutil.open_files` does
+  not surface PTY devices), so W3 bootout is the highest-leverage automated
+  action. If W3 does not free the process within 10 s, the watchdog escalates
+  to W4/W5 CRITICAL alerts requiring operator intervention. See
+  [Bridge Self-Healing §18](bridge-self-healing.md) for the full W1→W5 ladder.
 
 ## Dev relay and `BuilderHarness`
 
@@ -767,6 +898,131 @@ assignment and the empty-return fallback gate (`DEV_REPORT_UNAVAILABLE`). The
 builder returns only the final assistant text (or `""` on failure); it never
 touches those container-owned fields. See
 [Pluggable Builder Harness](pluggable-builder-harness.md) for the full seam design.
+
+## Mid-run steering (issue #1779)
+
+The steady-state loop supports two in-flight steering channels, both additive to
+the existing `for turn` loop — no new threads, no new synchronization primitives.
+
+### Part 1 — Bridge → PM steering injection
+
+When a Telegram message arrives while a granite session is running, the bridge's
+`_ack_steering_routed` RPUSHes a JSON payload onto the Redis list
+`steering:{session_id}` via `agent.steering.push_steering_message`. The granite
+container drains this list at the **top of each steady-state turn** using the
+`poll_steering` callback injected by `BridgeAdapter`:
+
+```python
+# BridgeAdapter.run — storage-agnostic closure
+def _poll_steering() -> list[dict]:
+    if not steering_session_id:
+        return []
+    try:
+        return pop_all_steering_messages(steering_session_id)
+    except Exception as e:
+        logger.warning("[granite-bridge-adapter] poll_steering drain failed ...")
+        return []
+```
+
+`pop_all_steering_messages` performs an atomic FIFO LPOP drain — race-free across
+the bridge process (writer) and the worker's container thread (sole consumer).
+
+**Why the Redis list, not a Popoto `queued_steering_messages` ListField.** A
+Popoto ListField would be consumed via a cross-process read-modify-write: the
+bridge reads [A], appends B, saves [A,B], while the container concurrently reads
+[A] and saves []. A message can be dropped in this race window with no way to
+close it without a distributed lock. The `steering:{session_id}` Redis list uses
+atomic RPUSH / LPOP — a message pushed between two drains is simply picked up on
+the next turn, never lost. This is why the Redis list is the sole steering inbox
+for every harness (SDK, CLI, and granite PTY) — there is no separate Popoto-field
+path to keep in sync.
+
+**Injection flow (per turn):**
+
+1. `_poll_steering()` drains the Redis list. The call is fail-silent — a raised
+   exception returns `[]` and never crashes the loop, matching the `_on_turn`
+   pattern.
+2. If any drained message has `is_abort=True`, the container delivers the fixed
+   user-facing string `"Session stopped at your request."` through
+   `_on_user_payload` and sets `result.user_facing_routed = True` **before**
+   breaking with `exit_reason="steer_abort"`. Output emitted after the break is
+   dropped, so delivery must precede it. `steer_abort` is listed in
+   `_CLEAN_GRANITE_EXIT_REASONS` in `agent/session_executor.py` — it is reported
+   as a controlled operator termination, not a `REACTION_ERROR`.
+3. For non-abort messages, the container calls `_cycle_idle(self._pm_pty)` to wait
+   for PM to finish any in-flight tool execution before writing. This is the whole
+   guarantee that steering does not corrupt PM's current turn — the write lands
+   only once PM is confirmed idle.
+4. Each message is written as `\n[Steering from {sender}]: {text}\n` to the PM
+   PTY. Empty or whitespace-only messages are skipped. The `sender` field comes
+   from the Redis payload (the bridge records the Telegram sender name when it
+   calls `push_steering_message`).
+5. The loop falls through to the existing per-turn idle read. The `pm_baseline`
+   content-identity guard (a snapshot of the text-bearing JSONL entry count taken
+   before the idle read) requires a **new** entry from PM, so PM's response to the
+   steering is captured cleanly and routed normally.
+
+**Latency:** at-most-one-turn. A message pushed between two drains is picked up on
+the very next PM turn boundary.
+
+**PM-hang during injection:** if `_cycle_idle(PM)` returns `pm_idle=False` after a
+non-empty drain, the messages are already atomically removed from Redis and cannot
+be re-queued without reintroducing the cross-process race. The container logs a
+`WARNING` naming the count and text of lost messages (so an operator can
+re-deliver via `valor-session steer --id <id>`) and exits as `pm_hang`.
+
+### Part 2 — PM → Dev `[/dev:steer]` injection
+
+The PM can queue a mid-task correction directly into the Dev PTY by emitting a
+`[/dev:steer]` prefix. Both forms are accepted:
+
+```
+[/dev:steer]
+Focus on the auth module; the migration work is done.
+```
+
+```
+[/dev:steer] Focus on the auth module; the migration work is done.
+```
+
+`classify_pm_prefix` parses both into `destination="dev", harness="steer"`. In
+`_route_pm_classification`, the module constant `STEER_HARNESS_SUFFIX = "steer"`
+is checked **before** `_get_builder` — `steer` is a reserved harness suffix that
+real builder harnesses (`claude`, `pi`) must never receive.
+
+**Token-strip (single-line edge case).** The single-line form `[/dev:steer] text`
+fails the anchored `PREFIX_TOKEN_RE` (which requires nothing after `]` on line 1)
+and falls to the fallback classifier, which returns the whole tail — including the
+literal `[/dev:steer]` token — as the payload with `compliance_miss=True`. Writing
+that verbatim to Dev would poison the instruction with the routing token. The
+`dev_steer` branch applies a defensive strip regardless of which classifier path
+produced the payload:
+
+```python
+clean = re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()
+```
+
+This is a no-op for the strict path (already token-free) and removes the leaked
+token for the single-line fallback path.
+
+**Write-and-continue semantics (not preemption).** In the synchronous alternating
+loop, PM only runs when Dev is idle. At the moment PM emits `[/dev:steer]`, Dev
+is always idle — the loop is single-threaded and PM never runs while Dev has an
+active turn. The steer text is therefore written directly to the Dev PTY
+(`self._dev_pty.write(clean + "\n")`) without any Dev-idle wait, and Dev picks it
+up as its next input on the following read. The PM persona describes `[/dev:steer]`
+as "queue a correction Dev sees immediately as its next input" — not "interrupt
+Dev now." True preemption of an in-flight Dev tool call would require PTY signal
+handling and is explicitly out of scope.
+
+After the Dev write, a one-line continuation ack (`PM_DEV_STEER_ACK`) is written
+to the PM PTY so PM produces its next turn rather than hanging on an empty idle
+read. The turn is recorded as `TurnRecord(classification="dev_steer")` and the
+loop continues.
+
+If the payload is empty after token-stripping (a token-only `[/dev:steer]` with no
+body), `PM_COMPLIANCE_NUDGE` is written to PM — the same path as an empty `[/dev]`
+— and no Dev write occurs.
 
 ## Known limitations (deep-dive audit, PR #1612)
 
@@ -792,8 +1048,10 @@ touches those container-owned fields. See
 
 Hardenings landed by the same audit: mid-loop delivery now schedules onto the
 worker loop captured in `BridgeAdapter.run` (previously every delivery from
-the pexpect thread was skipped as `no_event_loop`); `Container` skips its
-machine-wide `pkill` fallback for pool-owned pairs; the pool respawns with the
+the pexpect thread was skipped as `no_event_loop`); `Container` teardown reaps
+only its own self-spawned PTY process groups via `os.killpg` and never touches
+pool-owned pairs (the machine-wide `pkill -f` fallback was removed in #1816 —
+see [Worker Fault Containment](worker-fault-containment.md)); the pool respawns with the
 original `cwd`, checks pair liveness at acquire, clears the slot event at
 release, and prunes completed respawn tasks; `read_until_idle` declares idle
 only after `QUIESCENCE_S` (2.0s) of byte-silence, evaluated level-triggered
@@ -803,6 +1061,13 @@ an edge-triggered check could never observe) passes it on every poll. This
 replaced an earlier regex loading-spinner negative, which mid-turn cell-
 fragment repaints could both evade (false idle) and falsely latch (a stale
 spinner frame blocking idle for the rest of the call).
+
+> **#1688 update — `read_until_idle` is no longer the turn-completion
+> authority.** With hook-driven turn returns (default on), the parent `Stop`
+> hook edge is the completion signal; `read_until_idle` is demoted to a
+> running/idle badge, liveness, and crash detection. The idle heuristic above
+> is retained as the documented fallback (feature flag off / no edge file). See
+> [Granite Hook-Driven Turn Returns](granite-hook-driven-turn-returns.md).
 
 ## Reverting the granite cutover
 

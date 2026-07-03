@@ -343,7 +343,7 @@ Telegram → Python Bridge (Telethon) → Enqueues AgentSession to Redis (I/O on
                                               → Registers output callbacks for delivery
 
 Standalone Worker (python -m worker) → Sole session execution engine
-              (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → recovery → register_worker_pid (self-suicide guard)
+              (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → dead-worker sweep (Step 3a, issue #1767) → recovery (Step 3b) → register_worker_pid (self-suicide guard)
                                            → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
                                            → Executes Eng session (AgentSession session_type=eng)
                                                → Eng session handles SDLC work via granite PTY container (interactive claude TUI, PTYPool-bounded)
@@ -358,7 +358,7 @@ See `docs/features/bridge-worker-architecture.md` for the full bridge/worker sep
 - **Eng Session** (`session_type="eng"`) - Handles both SDLC work and conversational responses, full permissions, engineer persona
 - **Teammate Session** (`session_type="teammate"`) - Conversational, Teammate persona. Bash is open, audit-logged with `[teammate-audit]`. Writes restricted in code to `docs/`, `.claude/`, `.github/`, `wiki/`, `skills/`, top-level meta files, and `~/work-vault/`; source-code writes get a redirect to spawn an Eng session. See [`docs/features/teammate-session-permissions.md`](docs/features/teammate-session-permissions.md).
 - **Nudge loop** - Bridge output routing (deliver or nudge, no SDLC awareness)
-- **Session Steering** (see `docs/features/session-steering.md`): `AgentSession.queued_steering_messages` is the steering inbox — any process writes messages, worker injects at turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
+- **Session Steering** (see `docs/features/session-steering.md`): the Redis steering list (`agent/steering.py`) is the sole steering inbox — any process writes messages via `push_steering_message()`, the worker drains them at the turn boundary. `agent/output_router.py` contains routing decision logic extracted from executor. Use `valor-session steer --id <id> --message "..."` to steer externally.
 
 **Subconscious Memory** (see `docs/features/subconscious-memory.md`):
 - Human Telegram messages are saved as Memory records on receipt (importance=6.0)
@@ -401,6 +401,10 @@ This repo is the canonical source for skills that ship to **every machine**. The
 
 Example: `/do-debrief` (the TTS composite that wraps `valor-tts`) lives in `.claude/skills-global/do-debrief/` — that's why every machine already knows it. The client-facing CMA skills `/imagine-agent` and `/build-agent` follow the same pattern. A skill that only ever runs against the local bridge (e.g. `telegram`, `checking-system-logs`) stays in `.claude/skills/`.
 
+**Repo-specific behavior via the skill-context seam:** Global skill bodies stay generic. Repo-specific behavior is layered in via `.claude/skill-context/{skill}.md` (non-SDLC skills) or `docs/sdlc/{skill}.md` (SDLC pipeline skills). If the file is absent — the common case in any foreign repo — the skill runs its generic baseline. If the file is present, the skill reads it and honors its declarations. Every coupled skill body carries the canonical probe sentence: `"If <context-path> exists, read it and honor its declarations; otherwise use the generic defaults described below."` The `rule_13_coupling_signals` guard in `do-skills-audit` enforces probe presence for any body that references ai-repo executables (`sdlc-tool`, `valor-*`, `python -m tools.*`, etc.). See [`docs/features/skill-context-convention.md`](docs/features/skill-context-convention.md) for the full reference.
+
+**Bucket C (project-only infrastructure skills):** Some skills are too tightly coupled to this repo's infrastructure to generalize even with a probe step. `setup`, `prime`, `sdlc`, and `do-deploy` live in `.claude/skills/` (project-only) rather than `.claude/skills-global/`. They are never synced to `~/.claude/skills/` on other machines. If you move a skill into this category, add a `RENAMED_REMOVALS` entry in `scripts/update/hardlinks.py` to remove the stale hardlink on every machine.
+
 ## Testing Philosophy
 
 - **Real integration testing** - No mocks, use actual APIs
@@ -424,7 +428,7 @@ Work is DONE when:
 | **Abandoned** | Unfinished work, auto-revived |
 | **Complete** | Work done, signaled by 👍 reaction or `mark_work_done()` |
 
-See also: `docs/features/session-lifecycle.md` for the full 13-state reference (including `paused`, `paused_circuit`, `superseded`, `waiting_for_children`, and all terminal states).
+See also: `docs/features/session-lifecycle.md` for the full 14-state reference (including `paused`, `paused_circuit`, `paused_budget`, `superseded`, `waiting_for_children`, and all terminal states).
 
 - Fresh messages create new sessions (scoped by Telegram thread ID or local session ID)
 - Reply-to messages resume the original session and its context

@@ -140,6 +140,10 @@ class TestSessionNotifyListener:
 
         mock_conn = MagicMock()
         mock_conn.pubsub.return_value = mock_pubsub
+        # #1804: NUMSUB self-check — report 1 subscriber so the listener proceeds
+        # to pubsub.listen() rather than returning early.
+        # Use bytes-keyed list-of-tuples to match production decode_responses=False (#1811).
+        mock_conn.pubsub_numsub.return_value = [(b"valor:sessions:new", 1)]
 
         def fake_redis_constructor(**kwargs):
             captured_kwargs.append(kwargs)
@@ -187,4 +191,20 @@ class TestSessionNotifyListener:
         assert first_call.get("socket_connect_timeout") is None, (
             f"Expected socket_connect_timeout=None, got "
             f"{first_call.get('socket_connect_timeout')!r}."
+        )
+
+        # #1804: The NUMSUB self-check must run on the same socket_timeout=None
+        # connection.  Verify pubsub_numsub was called on the conn object that
+        # was constructed with socket_timeout=None (the single mock_conn here).
+        assert mock_conn.pubsub_numsub.called, (
+            "pubsub_numsub() was never called — the #1804 NUMSUB self-check is missing. "
+            "After subscribe(), _listen_in_thread must verify NUMSUB >= 1 on conn."
+        )
+        # The call must target the correct channel
+        call_args = mock_conn.pubsub_numsub.call_args
+        assert call_args is not None
+        called_channel = call_args[0][0] if call_args[0] else call_args[1].get("args", [None])[0]
+        assert called_channel == "valor:sessions:new", (
+            f"pubsub_numsub was called with channel {called_channel!r} instead of "
+            "'valor:sessions:new'"
         )

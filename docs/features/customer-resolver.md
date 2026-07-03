@@ -4,11 +4,20 @@
 
 The customer resolver feature replaces the static email allow-list with a
 dynamic per-project hook. When an inbound email arrives, the bridge calls
-a configurable resolver to identify the sender as a known customer. If the
-resolver returns a customer ID, the bridge spawns a `customer-service` persona
-session with that ID available in the system prompt and as the `CUSTOMER_ID`
-environment variable. If the resolver returns None, the message is dropped
-cleanly with no session created.
+a configurable resolver to identify the sender as a known customer. The
+resolver's outcome falls into one of three cases (issue #1817 A2):
+
+1. **Known customer** — returns a `customer_id` string. The bridge spawns a
+   `customer-service` persona session with that ID available in the system
+   prompt and as the `CUSTOMER_ID` environment variable.
+2. **Definitively not a customer** — the resolver ran to completion and
+   returned `None`. The message is dropped cleanly (stays `\Seen`), no
+   session is created.
+3. **Resolver unavailable** — the resolver failed to run to completion
+   (subprocess crash/timeout, malformed output, OAuth/gws error). This is
+   NOT case 2: `resolve_customer()` raises `ResolverUnavailable` instead of
+   returning `None`, so the caller never conflates an infrastructure outage
+   with "not a customer." See "Fail-Closed Behavior" below.
 
 This is used by projects like Cuttlefish where Valor acts as a customer
 service agent: the resolver calls the Cuttlefish API to look up the sender,
@@ -86,9 +95,11 @@ if customer:
 
 Output sanitization rules:
 - Single line only — multi-line output is treated as a resolver failure
-  (increment failure counter, apply `valor-retry` label, return None)
-- Must match `[A-Za-z0-9_\-:.]{1,128}` after stripping
-- Empty or whitespace-only = not a customer (no failure counter increment)
+  (increment failure counter, apply `valor-retry` label, raise `ResolverUnavailable`)
+- Must match `[A-Za-z0-9_\-:.]{1,128}` after stripping (garbage output is
+  also a resolver failure, same treatment as multi-line)
+- Empty or whitespace-only = definitively not a customer, returns `None`
+  (no failure counter increment — the resolver ran successfully)
 
 ### Callable form
 
@@ -111,27 +122,47 @@ Results are cached in Redis under `customer_resolver:{project_key}:{sender}`:
 Call `invalidate_customer_cache(project_key, sender_email)` to force a
 fresh resolver dispatch (e.g., when the CRM changes for a specific customer).
 
-## Fail-Closed Behavior
+## Fail-Closed Behavior (issue #1817 A2)
 
-On resolver failure (subprocess exits non-zero, timeout, or malformed output):
+On resolver failure (subprocess exits non-zero, timeout, or malformed output),
+`resolve_customer()` raises `ResolverUnavailable` rather than returning `None`
+— this is deliberately NOT the same code path as "not a customer":
 
 1. `resolver:failures:{project_key}` Redis counter is incremented
 2. Gmail `valor-retry` label is applied to the IMAP message (best-effort,
    skipped if IMAP context is unavailable — e.g., in unit tests)
-3. The function returns None: no session is created, message stays `\Seen`
+3. `resolve_customer()` raises `ResolverUnavailable`
+
+The caller (`bridge/email_bridge.py::_process_inbound_email`) catches
+`ResolverUnavailable` specifically:
+
+1. `logger.warning`s with the message id
+2. Un-marks `\Seen` on the message (`_unmark_seen()`) so the next IMAP poll
+   retries it — a resolver outage never permanently drops a customer email
+3. Once `resolver:failures:{project_key}` crosses `EMAIL_RESOLVER_ALERT_AFTER`
+   consecutive failures (default 3, env-overridable), arms the
+   `email:resolver_unavailable` operator alert (`logger.critical`), surfaced
+   on the dashboard's `email` health field — see
+   [Email Bridge — Operator Alerts](email-bridge.md#operator-alerts-issue-1817)
+
+Only a genuinely resolved "not a customer" (resolver ran successfully,
+returned `None`) keeps the original stays-`\Seen`, dropped-cleanly behavior.
 
 The `valor-retry` label preserves the message archive so a future retry
 mechanism can find it. Search Gmail for `label:valor-retry` to see archived
 failures. Check `redis-cli GET resolver:failures:{project_key}` for the
 current failure count.
 
-### Known Failure Mode (Seen-Before-Resolver)
+### Seen-Before-Resolver Race Window
 
-The `\Seen` flag is applied before resolver dispatch in the current IMAP
-polling flow. If the process crashes between `\Seen` and the resolver failure
-label-STORE, the message is marked Seen but not labeled `valor-retry`. The
-`resolver:failures:*` counter detects sustained failure even in this case.
-This gap will be addressed in a future watchdog feature.
+The `\Seen` flag is applied before resolver dispatch in the IMAP polling
+flow (`_fetch_unseen`, a concurrency guard against re-processing on
+overlapping polls). If the process crashes between the original `\Seen` mark
+and `_unmark_seen()`'s un-mark STORE, that one message stays stuck `\Seen`
+without being un-marked for retry. This is a narrow, best-effort race window
+— it does not defeat the `email:resolver_unavailable` alert, since that alert
+is armed from the `resolver:failures:*` counter (a distinct outage-level
+signal), not from any single message's retry outcome.
 
 ## Subject-Line Coalescing
 
@@ -186,18 +217,25 @@ marking or resolver cache stampedes.
 ## Monitoring
 
 - **Failure counter**: `redis-cli GET resolver:failures:{project_key}`
-  — incremented on every resolver error, deleted on success.
+  — incremented on every resolver error, deleted (along with any armed
+  `email:resolver_unavailable` alert) on the next successful dispatch.
+- **Persistent-outage alert**: `redis-cli GET email:resolver_unavailable`
+  — armed once the failure counter crosses `EMAIL_RESOLVER_ALERT_AFTER`
+  consecutive failures; value is `"{first_seen_ts}:{last_message_id}"`.
+  Surfaced on the dashboard (`GET /health`, `GET /dashboard.json` —
+  `health.email_alert == "resolver_unavailable"`). See
+  [Email Bridge — Operator Alerts](email-bridge.md#operator-alerts-issue-1817).
 - **Retry archive**: Gmail search `label:valor-retry` shows messages
   with resolver failures.
 - **Bridge log**: `tail -f logs/bridge.log | grep resolver` shows all
-  resolution events at INFO/WARNING level.
+  resolution events at INFO/WARNING/CRITICAL level.
 
 ## Followup Issues
 
-- Email bridge watchdog with Telegram alert when `resolver:failures:*`
-  exceeds threshold (planned)
 - `resolver_health` reflection (planned)
 - Active retry loop consuming `label:valor-retry` Gmail messages (planned)
+- Pipe the dashboard `email:resolver_unavailable` / `email:auth_failed`
+  alerts to a Telegram notification, not just the dashboard (planned)
 - Cuttlefish-side resolver script, CLAUDE.md, and customer tools (Cuttlefish
   repo)
 

@@ -792,3 +792,111 @@ class TestPrivateTagHookIngestion:
         # Real (non-private) content survives.
         assert "Refactor the auth handler" in saved_content
         assert "rotate" in saved_content.lower()
+
+
+class TestMemoryDeadlineGuard:
+    """The SIGALRM wall-clock deadline around ingest + prefetch (degraded-Redis guard).
+
+    A degraded Redis (5s-per-op socket timeout, no enforced retry budget) can
+    stack ingest + prefetch waits past the harness's 15s UserPromptSubmit
+    budget, causing "hook timed out after 15s -- output discarded". The hook
+    arms a SIGALRM alarm for MEMORY_HOOK_DEADLINE_SECONDS so it always returns
+    well under that limit, emitting no partial context on deadline.
+    """
+
+    def test_deadline_constant_exists_and_under_harness_limit(self):
+        """The deadline constant exists, is a positive int, and is < 15s harness budget."""
+        hook = _load_hook_module()
+        assert hasattr(hook, "MEMORY_HOOK_DEADLINE_SECONDS")
+        budget = hook.MEMORY_HOOK_DEADLINE_SECONDS
+        assert isinstance(budget, int)
+        assert 0 < budget < 15
+
+    def test_deadline_aborts_slow_memory_work_without_partial_output(self, monkeypatch, capsys):
+        """When prefetch hangs past the deadline, main() returns promptly emitting nothing.
+
+        Patches the deadline down to 1s and makes prefetch sleep well past it.
+        The SIGALRM handler interrupts the sleep, so the test takes ~1s (not 8s),
+        and no hookSpecificOutput JSON is printed (no partial context leaks).
+        """
+        import json as _json
+        import time as _time
+
+        hook = _load_hook_module()
+        # Shrink the deadline so the test is fast -- do NOT actually sleep 8s.
+        monkeypatch.setattr(hook, "MEMORY_HOOK_DEADLINE_SECONDS", 1)
+
+        fake_hook_input = {
+            "prompt": "investigate the redis recall path and bloom filter latency for memory",
+            "session_id": "claude-uuid-deadline-1",
+            "cwd": "/tmp",
+        }
+
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+
+        def _slow_prefetch(*_args, **_kwargs):
+            # Simulates a hung Redis socket. The alarm fires at 1s and raises
+            # _MemoryDeadlineExceeded (a BaseException), interrupting this sleep.
+            _time.sleep(30)
+            return "<thought>should never be emitted</thought>"
+
+        started = _time.monotonic()
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.prefetch", side_effect=_slow_prefetch),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            hook.main()  # Must not raise and must return promptly.
+        elapsed = _time.monotonic() - started
+
+        # The alarm interrupted the 30s sleep near the 1s deadline.
+        assert elapsed < 10, f"Deadline did not abort slow memory work (took {elapsed:.1f}s)"
+
+        # No partial context leaked to stdout.
+        captured = capsys.readouterr()
+        for line in captured.out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            assert "hookSpecificOutput" not in parsed, (
+                f"Partial context leaked on deadline: {captured.out!r}"
+            )
+
+    def test_deadline_alarm_cancelled_after_fast_memory_work(self, monkeypatch):
+        """After a fast happy path, the alarm is cancelled (no leftover pending alarm)."""
+        import signal as _signal
+
+        hook = _load_hook_module()
+
+        fake_hook_input = {
+            "prompt": "investigate the auth flow that broke after PR 800 deployment",
+            "session_id": "claude-uuid-deadline-2",
+            "cwd": "/tmp",
+        }
+        monkeypatch.delenv("SESSION_TYPE", raising=False)
+        monkeypatch.delenv("VALOR_PARENT_SESSION_ID", raising=False)
+
+        with (
+            patch.object(hook, "read_hook_input", return_value=fake_hook_input),
+            patch("hook_utils.memory_bridge.ingest"),
+            patch("hook_utils.memory_bridge.prefetch", return_value=None),
+            patch("hook_utils.memory_bridge.load_agent_session_sidecar", return_value={}),
+            patch("hook_utils.memory_bridge.save_agent_session_sidecar"),
+            patch("hook_utils.memory_bridge._get_project_key", return_value="ai"),
+        ):
+            hook.main()
+
+        # signal.alarm(0) returns the number of seconds left on any pending
+        # alarm; 0 means the hook correctly cancelled its alarm in finally.
+        remaining = _signal.alarm(0)
+        assert remaining == 0, f"Alarm was left pending after main() ({remaining}s remaining)"

@@ -63,13 +63,17 @@ headless harness is untouched" invariant.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pexpect
 import pexpect.exceptions
+
+logger = logging.getLogger(__name__)
 
 # The session UUID Claude embeds in stream-json `session_id` fields and
 # prints in its on-exit hint line: `claude --resume <uuid>`. Capturing it
@@ -132,6 +136,60 @@ QUIESCENCE_S = 2.0
 # The TUI may render this with whitespace collapsed (`Esctocancel`) or
 # with spaces (`Esc to cancel`); \s* matches both forms.
 OVERLAY_BAR = re.compile(r"esc\s*to\s*cancel", re.IGNORECASE)
+
+# === D1b: startup contract-check golden samples (issue #1817) ===
+#
+# Fingerprint check, not a live TUI spawn: a real `claude` PTY dry-spawn was
+# considered and rejected for the startup gate — it risks the same macOS
+# TCC/TTY hang the existing `claude -p` harness smoke test already guards
+# against under launchd (see `worker/__main__.py`'s VALOR_LAUNCHD-gated
+# `verify_harness_health` call), and costs several seconds on every worker
+# boot. Instead, each golden sample below is a literal reproduction of ACTUAL
+# observed CLI output already documented in this module's comments (IDLE_BAR,
+# SPINNER_EVIDENCE_RE above) and in `startup_parser.py` (trust-folder). The
+# contract-check (`verify_tui_marker_contract`) re-runs each marker regex
+# against its golden sample at worker startup: a mismatch means a code
+# refactor silently broke the marker (this repo's own regression), which is a
+# DIFFERENT failure mode than "the installed claude CLI's actual TUI output
+# drifted" (that's what D1a's version pin + a human re-verification pass
+# after a version bump covers — see docs/features/deployment.md).
+_CONTRACT_GOLDEN_SAMPLES: dict[str, str] = {
+    "IDLE_BAR": "  bypass permissions  ",
+    "PROMPT_GLYPH": "❯ ",
+    "SPINNER_EVIDENCE_RE": "✻ Sprouting… (esc to interrupt)",
+    "TRUST_FOLDER_PROMPT": "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder",
+}
+
+
+def verify_tui_marker_contract() -> tuple[bool, list[str]]:
+    """D1b (issue #1817): confirm the PTY driver's scraped TUI markers still
+    recognize their golden (known-good) sample text.
+
+    Checks IDLE_BAR, PROMPT_GLYPH, SPINNER_EVIDENCE_RE (this module) and the
+    trust-folder prompt pattern (`agent.granite_container.startup_parser`).
+    Returns ``(ok, failed_marker_names)`` — ``ok`` is True only when every
+    marker matches its golden sample. Never raises; a missing/broken import
+    is reported as a failed marker rather than propagating, so a startup
+    caller can decide how to react (see `worker/__main__.py`).
+    """
+    from agent.granite_container.startup_parser import StartupEvent, parse_startup_frame
+
+    failed: list[str] = []
+    if not IDLE_BAR.search(_CONTRACT_GOLDEN_SAMPLES["IDLE_BAR"]):
+        failed.append("IDLE_BAR")
+    if not PROMPT_GLYPH.search(_CONTRACT_GOLDEN_SAMPLES["PROMPT_GLYPH"]):
+        failed.append("PROMPT_GLYPH")
+    if not SPINNER_EVIDENCE_RE.search(_CONTRACT_GOLDEN_SAMPLES["SPINNER_EVIDENCE_RE"]):
+        failed.append("SPINNER_EVIDENCE_RE")
+    try:
+        match = parse_startup_frame(_CONTRACT_GOLDEN_SAMPLES["TRUST_FOLDER_PROMPT"])
+        if match is None or match.event != StartupEvent.TRUST_FOLDER_PROMPT:
+            failed.append("TRUST_FOLDER_PROMPT")
+    except Exception:
+        failed.append("TRUST_FOLDER_PROMPT")
+
+    return (not failed, failed)
+
 
 # C1: the submit key. Sent as a SEPARATE keystroke after the text body.
 SUBMIT_KEY = b"\r"
@@ -333,6 +391,8 @@ class PTYDriver:
         env: dict[str, str] | None = None,
         append_system_prompt: str | None = None,
         session_id: str | None = None,
+        settings_path: str | None = None,
+        resume_uuid: str | None = None,
     ) -> None:
         self.role = role
         self.cwd = cwd
@@ -361,6 +421,18 @@ class PTYDriver:
         # When set, the transcript path is deterministically known at spawn
         # time — no post-hoc UUID scraping required.
         self._session_id = session_id
+        # Per-session Claude Code settings file (plan #1688). When set,
+        # `spawn()` appends `--settings <path>`; the file registers the hook
+        # forwarder so turn-end (Stop) and needs-human edges land in the
+        # per-session edge file. None keeps the pre-#1688 spawn args (idle
+        # heuristic path — the documented fallback).
+        self._settings_path = settings_path
+        # Crash-resume handle (plan #1688). When set, `spawn()` resumes the
+        # existing claude session via `--resume <uuid>` instead of starting a
+        # fresh `--session-id <uuid>` — the crashed turn continues with full
+        # context. `--resume` and `--session-id` are mutually exclusive, so a
+        # resume spawn omits `--session-id`.
+        self._resume_uuid = resume_uuid
         self._child: pexpect.spawn | None = None
         self._spawned_at: float | None = None
         # Per-turn screen capture (raw, ANSI-laden). Accumulates every
@@ -396,8 +468,17 @@ class PTYDriver:
         model = self._explicit_model or _default_substrate_model(self.role)
 
         args = ["--model", model, "--permission-mode", "bypassPermissions"]
-        if self._session_id:
+        # `--resume <uuid>` (crash-resume, #1688) takes precedence over a fresh
+        # `--session-id`; the two flags are mutually exclusive.
+        if self._resume_uuid:
+            args += ["--resume", self._resume_uuid]
+        elif self._session_id:
             args += ["--session-id", self._session_id]
+        # Plan #1688: register the per-session hook forwarder via --settings so
+        # the Stop / needs-human edges are emitted deterministically. The
+        # --permission-mode bypassPermissions arg above is preserved.
+        if self._settings_path:
+            args += ["--settings", self._settings_path]
 
         env = _build_env()
         if self._extra_env:
@@ -491,6 +572,7 @@ class PTYDriver:
         self,
         min_content_bytes: int = DEFAULT_MIN_CONTENT_BYTES,
         timeout_s: float | None = None,
+        on_read_iteration: Callable[[str], None] | None = None,
     ) -> IdleResult:
         """Block until the TUI is idle, up to `timeout_s` (default driver timeout).
 
@@ -529,6 +611,26 @@ class PTYDriver:
         fires before the idle signal stabilizes. `buffer` is the
         ANSI-stripped text read during this call; `turn_buffer` is the
         ANSI-stripped capture since the last write.
+
+        `on_read_iteration` (optional, default `None` — byte-identical
+        behavior to before this param existed) is invoked once per inner
+        poll iteration of the read loop below, BEFORE that iteration's
+        PTY read, with the RAW (not ANSI-stripped) per-turn capture
+        accumulated so far (`_turn_text`). This lets a caller sample
+        per-poll liveness (e.g. stamping a freshness timestamp) far more
+        often than once per `read_until_idle` call — closing the
+        coarse-sampling gap where a wedge *inside* a long idle-path turn
+        left liveness signals stale until the whole call returned (#1843
+        Gap B). The callback is best-effort: any exception it raises is
+        caught and logged, never allowed to break or abort the read loop.
+
+        The text is intentionally passed RAW rather than pre-stripped:
+        `_strip_ansi` is O(len(_turn_text)) and this loop can spin many
+        times per second under verbose output, so stripping on every
+        iteration (up to `TURN_TEXT_MAX_CHARS` = 256 KB) would run at full
+        iteration rate rather than the caller's throttled write rate. A
+        caller that needs stripped text should strip it itself, after its
+        own throttle gate admits the call (see `Container._fire_pty_read`).
         """
         if self._child is None:
             raise PTYDriverError("PTYDriver.read_until_idle() called before spawn()")
@@ -541,6 +643,14 @@ class PTYDriver:
         last_chunk_at = start
 
         while time.monotonic() < deadline:
+            if on_read_iteration is not None:
+                try:
+                    on_read_iteration(self._turn_text)
+                except Exception as _read_iter_err:
+                    logger.debug(
+                        "[pty-driver] on_read_iteration callback raised: %s",
+                        _read_iter_err,
+                    )
             try:
                 chunk = self._child.read_nonblocking(size=8192, timeout=0.5)
             except pexpect.TIMEOUT:

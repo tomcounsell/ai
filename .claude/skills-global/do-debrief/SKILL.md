@@ -1,14 +1,20 @@
 ---
 name: do-debrief
-description: "Use when sending a spoken debrief to a Telegram chat. Collects context, drafts a 30-second executive brief, synthesizes it via TTS, and delivers it as a native voice message. Triggered by 'send a voice debrief', 'speak this update', 'do-debrief', or any request to deliver an audio summary."
+description: "Use when sending a spoken debrief to a chat. Collects context, drafts a 30-second executive brief, synthesizes it via TTS, and delivers it as a native voice message. Triggered by 'send a voice debrief', 'speak this update', 'do-debrief', or any request to deliver an audio summary."
 argument-hint: "<scope-or-notes> --chat <chat>"
 allowed-tools: Bash, Read, Grep
 user-invocable: true
 ---
 
-# /do-debrief — Spoken Executive Brief to Telegram
+# /do-debrief — Spoken Executive Brief to a Chat
 
-Construct a 30-second executive brief, speak it, deliver it as a Telegram voice message. The skill does the construction work — it does **not** just synthesize whatever text you hand it. The output is shaped for **decisions**, not information.
+Construct a 30-second executive brief, speak it, deliver it as a chat voice message. The skill does the construction work — it does **not** just synthesize whatever text you hand it. The output is shaped for **decisions**, not information.
+
+## Repo Context Probe
+
+If `.claude/skill-context/do-debrief.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its **collect-phase context sources** (which commands to pull raw material from beyond `git`/`gh`) and its **chat-delivery surface** (the command that sends a preface line and a voice note to a chat). When the file is absent, the collect phase uses only `git`/`gh`, and delivery requires a repo-provided chat-send command (see Delivery below).
 
 ## Why this exists
 
@@ -16,10 +22,10 @@ Executive bandwidth is the scarce resource. A brief earns its 30 seconds only wh
 
 ## Inputs
 
-- **scope** (required, positional) — Either a short framing of what to brief on (`"morning standup"`, `"deploy debrief"`, `"post-merge update for psyoptimal"`) or raw notes you want shaped into a brief.
-- **--chat** (required) — Target chat name (e.g. `"Dev: Valor"`) or numeric chat ID.
-- **--voice** (optional) — Voice name; defaults to `am_michael` (Kokoro). `bf_alice` is the female alternative. See `tools/tts/README.md`.
-- **--reply-to** (optional) — Telegram message ID to reply to (required for forum-group topics).
+- **scope** (required, positional) — Either a short framing of what to brief on (`"morning standup"`, `"deploy debrief"`, `"post-merge update"`) or raw notes you want shaped into a brief.
+- **--chat** (required) — Target chat name or numeric chat ID.
+- **--voice** (optional) — Voice name; the context file may declare a default. Passed through to `/do-voice-recording`.
+- **--reply-to** (optional) — Chat message ID to reply to (required for forum-group topics).
 - **--no-preface** (optional) — Suppress the one-line text preface that normally precedes the voice note. Default is to send the preface; pass this flag for pure-audio delivery.
 
 ## The brief shape (target: ~30s, ~70 words spoken)
@@ -35,15 +41,12 @@ Do these in order. Skipping phases produces flabby briefs.
 
 ### 1. Collect (parallel)
 
-Pull raw material in parallel — single message with multiple Bash calls:
+Pull raw material in parallel — single message with multiple Bash calls. The generic sources are:
 
 - `git log --oneline -20 origin/main` — recent commits
-- `gh pr list --state all --limit 10` — open + recently merged PRs
-- `python -m tools.valor_session list` — session activity
-- `valor-telegram read --chat "<scope-relevant>" --since "24 hours ago"` — outstanding chat threads (only if scope names a chat)
-- Calendar anomalies **only** for daily/morning briefs: `gws calendar events list --params '{...}'` — surface only items that **moved**, **conflict**, or are **net-new since yesterday**. Never read the agenda back.
+- `gh pr list --state all --limit 10` — open + recently merged PRs (when `gh` is available)
 
-If the user passed raw notes as the scope, skip the pulls and treat those notes as the corpus.
+If the context file declares additional repo context sources (session activity, chat threads, calendar anomalies), pull those too, in the same parallel batch. If the user passed raw notes as the scope, skip the pulls and treat those notes as the corpus.
 
 ### 2. Categorize
 
@@ -73,7 +76,7 @@ Write the brief in the shape above. Apply these rules verbatim:
 
 - **Default-and-confirm phrasing** on every decision: state your intended action + the unless-clause.
 - **Contractions** ("I'm", "don't", "we're") — written prose reads stiff aloud.
-- **Never recite issue/PR numbers** (or any multi-digit identifier). TTS reads "1195" as either "one thousand one hundred ninety-five" (cumbersome) or "one-one-nine-five" (meaningless) — both waste the listener's attention, and the number isn't actionable in audio anyway. Refer to the work by substance: "the continuation-PM crash," not "issue 1195." If the listener needs traceability, follow the voice message with a written brief that includes the numbers.
+- **Never recite issue/PR numbers** (or any multi-digit identifier). TTS reads "1195" as either "one thousand one hundred ninety-five" (cumbersome) or "one-one-nine-five" (meaningless) — both waste the listener's attention, and the number isn't actionable in audio anyway. Refer to the work by substance: "the continuation crash," not "issue 1195." If the listener needs traceability, follow the voice message with a written brief that includes the numbers.
 - **Proper-noun respelling** for TTS prosody. Product names benefit from hyphenation when they should sound like one word with multiple syllables (e.g., spell "Yudame" as `You-duh-may`). Dictionary-style hints only — never IPA in slashes; the phonemizer reads `/.../` literally and doubles the clip duration.
 
 ### 5. Pass B — cut and re-shape
@@ -101,26 +104,11 @@ Show the final transcript and preface to the user with one line: `Final transcri
 
 ## Delivery (only after confirmation)
 
-Synthesize the transcript with **`/do-voice-recording`** — that skill is the canonical TTS step and owns the portable `valor-tts` resolution. Pass the confirmed `$TRANSCRIPT` and the chosen `--voice`; it returns the path to the OGG file. Do not reimplement synthesis here.
+Synthesize the transcript with **`/do-voice-recording`** — that skill is the canonical TTS step and owns the portable resolution of the repo's TTS CLI. Pass the confirmed transcript and the chosen `--voice`; it returns the path to the audio file. Do not reimplement synthesis here.
 
-```bash
-# OUT = the file path /do-voice-recording prints (text → OGG/Opus).
-OUT=$(mktemp -t debrief).ogg
-# (Inside /do-voice-recording: resolve valor-tts portably, then synthesize to $OUT.)
-
-# Preface (skippable). Send before the voice note so it lands first in the chat.
-if [ -z "$NO_PREFACE" ]; then
-    valor-telegram send --chat "$CHAT" "$PREFACE"
-fi
-
-valor-telegram send \
-    --chat "$CHAT" \
-    --voice-note \
-    --cleanup-after-send \
-    --audio "$OUT"
-```
-
-The relay owns the audio file from the moment the payload is pushed — it deletes on successful send OR after dead-letter placement on retry exhaustion. Synchronous deletion races the relay's retry loop.
+Then deliver to the chat:
+- If the context file declares a chat-send command, send the preface (unless `--no-preface`) followed by the voice note exactly as it specifies.
+- If no context file is present, this skill's delivery dependency is unavailable — report the synthesized audio file path to the user and explain that delivering it as a chat voice note requires a repo-provided chat-send command this repo does not declare.
 
 ## Anti-patterns
 
@@ -130,21 +118,13 @@ The relay owns the audio file from the moment the payload is pushed — it delet
 - **Status-of-status.** "I'm working on the migration" isn't brief-worthy. Either it shipped (FYI) or it's blocked on a decision (Decision).
 - **Synthesizing raw notes verbatim.** That's a dictated memo, not a brief. The construction phases above are the value the skill adds.
 - **Reciting numbers in audio.** Issue numbers, PR numbers, port numbers, and dollar figures with many digits all read badly through TTS and don't help a listener anyway. Substance over identifier; numbers go in the written follow-up.
-- **Skipping the review gate.** TTS + Telegram is one-way; the wrong "I'm pushing the vendor call to Thursday unless you want it sooner" is permanent once it lands.
+- **Skipping the review gate.** TTS + chat delivery is one-way; the wrong "I'm pushing the vendor call to Thursday unless you want it sooner" is permanent once it lands.
 
 ## Error handling
 
-- **Synthesis (`/do-voice-recording`) fails** → STDERR carries `Error: <message>`. Surface it verbatim. The partial file is already deleted by that skill. Do not push to the outbox.
-- **`valor-telegram send` exits non-zero** → the payload was not enqueued. The temp file is still on disk; remove it manually so it doesn't leak.
-- **Bridge relay not running** → the payload sits in Redis until the relay starts. If you need synchronous confirmation, run `./scripts/valor-service.sh status` first.
+- **Synthesis (`/do-voice-recording`) fails** → STDERR carries `Error: <message>`. Surface it verbatim. The partial file is already deleted by that skill. Do not deliver.
+- **Chat-send fails** → follow the context file's delivery error guidance (e.g. the payload was not enqueued; clean up any temp file so it doesn't leak).
 
 ## Relationship to `/do-voice-recording`
 
-`/do-voice-recording` is the canonical raw-synthesis surface — "speak this text → audio file" — and owns the portable `valor-tts` resolution so TTS works from any cwd on any machine. `/do-debrief` is the composite: it *constructs* a 30-second executive brief (the categorize → gap-check → draft → review-gate phases above), defers to `/do-voice-recording` for the actual synthesis, and delivers the result as a Telegram voice note. Those construction phases are the value `/do-debrief` adds. When you just need audio from text, use `/do-voice-recording` directly; when you need a decision-shaped spoken brief delivered to a chat, use this skill.
-
-## Related references
-
-- `/do-voice-recording` — canonical TTS step (binary resolution, flags, voice catalog, prosody rules)
-- `tools/tts/README.md` — full TTS API, voice catalog, troubleshooting
-- `bridge/telegram_relay.py` — `_send_queued_message` voice-note branch + `cleanup_file` honoring
-- `docs/features/tts.md` — feature design + dual-backend rationale
+`/do-voice-recording` is the canonical raw-synthesis surface — "speak this text → audio file" — and owns the portable resolution of the repo's TTS CLI so TTS works from any cwd. `/do-debrief` is the composite: it *constructs* a 30-second executive brief (the categorize → gap-check → draft → review-gate phases above), defers to `/do-voice-recording` for the actual synthesis, and delivers the result as a chat voice note. Those construction phases are the value `/do-debrief` adds. When you just need audio from text, use `/do-voice-recording` directly; when you need a decision-shaped spoken brief delivered to a chat, use this skill.

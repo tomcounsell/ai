@@ -65,6 +65,41 @@ _REFUSAL_PATTERNS: tuple[str, ...] = (
     "no agent session was provided",  # 1540c270 / 796e1429
     "session was initialized with empty input",  # 1540c270 (placeholder echo)
     "no agent session response to analyze",  # 5be7da58 (canonical refusal opener)
+    # --- Extended refusal phrasings (issue #1822). Haiku rephrased its refusal
+    # in distinct ways that escaped the #1212 vocabulary and were saved as
+    # high-confidence noise. Each is appended as a narrow FULL phrase (never a
+    # bare keyword) and annotated with the originating Memory ID from the
+    # 2026-06-29 production investigation. The shared anchor is meta-commentary
+    # *about the session* ("the session response contains only…") rather than a
+    # real observation. Narrowness is guarded by TestRefusalPatternsNarrowness.
+    "the session response contains only metadata",  # 0208f60d
+    "the session response contains only system metadata",  # b0b24ef7
+    "the session response contains procedural documentation",  # 517ccf5
+    "does not contain any substantive observations",  # 9fd6006a
+    "the session response does not contain any",  # 1a572475
+    "no substantive observations to extract",  # 868869
+    "the session response appears to contain only",  # 8f2c9d5c
+)
+
+# -----------------------------------------------------------------------------
+# Session-scoping boilerplate filter (issue #1822, Fix 3).
+#
+# SDLC sub-sessions inject a scope-boundary preamble into their system prompt
+# ("this session is scoped to sdlc-local-N; do not include work from other
+# sessions"). Haiku occasionally reads that infrastructure text as session
+# context and extracts it as a high-confidence "observation" that recurs on
+# every SDLC cycle. These markers are STRUCTURAL, not observational, so any
+# parsed observation containing one is dropped before it can be persisted.
+#
+# Only substrings ACTUALLY OBSERVED in real noise records are listed here.
+# Earlier-proposed markers ("scope boundary", "cross-session") were UNCONFIRMED
+# and deliberately omitted — adding an unevidenced marker risks silently
+# dropping legitimate observations. Narrowness is guarded by
+# TestScopingMarkersNarrowness.
+# -----------------------------------------------------------------------------
+_SCOPING_MARKERS: tuple[str, ...] = (
+    "sdlc-local-",  # 1911b062 (e.g. "scoped to isolated session contexts (sdlc-local-96)")
+    "scoped to isolated session",  # 1911b062 (scope-boundary preamble echo)
 )
 
 # Single-line JSON-syntax fragment, e.g. '"tags": ["a", "b"]' or
@@ -193,6 +228,25 @@ def _looks_like_refusal(text: str) -> bool:
     return False
 
 
+def _is_scoping_boilerplate(text: str) -> bool:
+    """Return True if ``text`` echoes SDLC session-scoping boilerplate (Fix 3).
+
+    Case-insensitive substring match against ``_SCOPING_MARKERS``. These markers
+    are structural session-infrastructure text (scope-boundary preambles, session
+    slugs), never genuine observations — any parsed observation containing one is
+    dropped before persistence.
+
+    Narrow by construction: only full, evidenced markers are listed, so a
+    legitimate observation that merely mentions "session" or "scope" is NOT
+    dropped (guarded by ``TestScopingMarkersNarrowness``). Empty/whitespace input
+    returns ``False``.
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SCOPING_MARKERS)
+
+
 async def _llm_call(
     model: str,
     max_tokens: int,
@@ -271,8 +325,14 @@ def _record_extraction_error(
                 "project_key": project_key or "",
             },
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # D3 (issue #1817): was silently swallowed. Non-fatal by design
+        # (analytics must never crash extraction) but now observable.
+        logger.debug(
+            "[memory_extraction] record_metric(memory.extraction.error) failed for session %s: %s",
+            session_id,
+            e,
+        )
 
 
 # Extraction prompt for Haiku — structured JSON output
@@ -328,6 +388,8 @@ async def extract_observations_async(
     session_id: str,
     response_text: str,
     project_key: str | None = None,
+    turn_count: int | None = None,
+    is_conversational: bool = True,
 ) -> list[dict]:
     """Extract novel observations from agent response via Haiku.
 
@@ -335,8 +397,28 @@ async def extract_observations_async(
     Saves each as a Memory record with category-based importance (4.0 for
     corrections/decisions, 1.0 for patterns/surprises).
 
+    Fix 2 (#1822) — trivial-session gate: a CLI-origin single-turn session (e.g.
+    the user runs ``/update`` and the session ends) produces only low-signal
+    noise, so extraction is skipped when ``turn_count <= 1`` AND the session is
+    NOT conversational. A substantive single-turn *conversational* (Telegram)
+    message is high-value and still extracts. ``turn_count=None`` (unknown) and
+    ``is_conversational=True`` (the defaults) make the gate a no-op, preserving
+    backward-compatible behavior for direct callers and tests.
+
     Returns list of dicts with keys: content, memory_id.
     """
+    # Fix 2 (#1822) trivial-session gate — a pure early return placed BEFORE the
+    # try block so it cannot be swallowed and makes NO Haiku call. Only skips
+    # non-conversational (CLI-origin) single-turn sessions; conversational
+    # single-turn messages still extract.
+    if turn_count is not None and turn_count <= 1 and not is_conversational:
+        logger.debug(
+            "[memory_extraction] Trivial-session gate — skipping extraction for "
+            "session_id=%s (turn_count=%s, is_conversational=False)",
+            session_id,
+            turn_count,
+        )
+        return []
     # Guard order (issue #1212): the 50-char check is empirically working and
     # MUST stay first — Tom verified it catches true empties in the issue
     # comment IC_kwDOEYGa088AAAABAwQnJw. The new refusal-pattern + whitespace
@@ -458,8 +540,15 @@ async def extract_observations_async(
                     )
 
                     generate_title_async(m.memory_id, strip_private(obs_content[:500]))
-                except Exception:
-                    pass
+                except Exception as e:
+                    # D3 (issue #1817): title generation is best-effort — a
+                    # missing title never blocks the memory save — but was
+                    # previously invisible on failure.
+                    logger.debug(
+                        "[memory_extraction] generate_title_async failed for memory %s: %s",
+                        getattr(m, "memory_id", "?"),
+                        e,
+                    )
 
                 saved.append(
                     {
@@ -481,8 +570,13 @@ async def extract_observations_async(
                 float(len(saved)),
                 {"session_id": session_id, "project_key": project_key},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            # D3 (issue #1817): was silently swallowed.
+            logger.debug(
+                "[memory_extraction] record_metric(memory.extraction) failed for session %s: %s",
+                session_id,
+                e,
+            )
 
         return saved
 
@@ -536,6 +630,10 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
                     observation = item.get("observation", "")
                     if not observation or len(observation) < 10:
                         continue
+                    # Fix 3 (#1822): drop session-scoping boilerplate echoed as
+                    # an observation (e.g. "...scoped to ... (sdlc-local-96)...").
+                    if _is_scoping_boilerplate(observation):
+                        continue
                     importance = CATEGORY_IMPORTANCE.get(category, DEFAULT_CATEGORY_IMPORTANCE)
                     metadata = {
                         "category": category,
@@ -559,7 +657,10 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
     lines = [
         line.strip()
         for line in raw_text.split("\n")
-        if line.strip() and len(line.strip()) > 10 and not _looks_like_refusal(line)
+        if line.strip()
+        and len(line.strip()) > 10
+        and not _looks_like_refusal(line)
+        and not _is_scoping_boilerplate(line)  # Fix 3 (#1822)
     ]
     if not lines:
         return []
@@ -705,8 +806,14 @@ async def extract_post_merge_learning(
                 )
 
                 generate_title_async(m.memory_id, strip_private(content_text[:500]))
-            except Exception:
-                pass
+            except Exception as e:
+                # D3 (issue #1817): title generation is best-effort — was
+                # previously invisible on failure.
+                logger.debug(
+                    "[memory_extraction] generate_title_async failed for memory %s: %s",
+                    getattr(m, "memory_id", "?"),
+                    e,
+                )
 
             logger.info(f"[memory_extraction] Post-merge learning saved: {content_text[:100]}")
             return {
@@ -943,7 +1050,15 @@ def _persist_outcome_metadata(
 
             m.metadata = meta
             m.save()
-        except Exception:
+        except Exception as e:
+            # D3 (issue #1817): was silently swallowed ("fail-silent per
+            # record" is intentional — one bad record must not abort the
+            # rest of the batch — but the failure is now observable).
+            logger.debug(
+                "[memory_extraction] outcome update failed for memory %s: %s",
+                mid,
+                e,
+            )
             continue  # fail-silent per record
 
 
@@ -1062,6 +1177,8 @@ async def run_post_session_extraction(
     session_id: str,
     response_text: str,
     project_key: str | None = None,
+    turn_count: int | None = None,
+    is_conversational: bool = True,
 ) -> None:
     """Run full post-session extraction pipeline.
 
@@ -1069,11 +1186,21 @@ async def run_post_session_extraction(
     2. Detect outcomes for injected thoughts
     3. Clean up session state
 
+    ``turn_count`` / ``is_conversational`` carry the Fix 2 (#1822) trivial-session
+    gate signals, captured at schedule time and threaded by value (see
+    ``agent/session_executor.py``). Defaults make the gate a no-op.
+
     Called from BackgroundTask._run_work() after session completes.
     """
     try:
         # Extract observations
-        await extract_observations_async(session_id, response_text, project_key)
+        await extract_observations_async(
+            session_id,
+            response_text,
+            project_key,
+            turn_count=turn_count,
+            is_conversational=is_conversational,
+        )
 
         # Detect outcomes for injected thoughts
         from agent.memory_hook import get_injected_thoughts

@@ -13,9 +13,22 @@ enqueuing -- the reconciler treats the message as handled and skips it on its
 next 3-minute scan.
 
 Recovery paths (``bridge/catchup.py``, ``bridge/reconciler.py``) intentionally
-do NOT use this wrapper. They know they are writing to dedup and keep their
-explicit two-step pairing so future maintainers can see that these paths are
-different from the live handler's dispatch.
+do NOT use this wrapper function. They know they are writing to dedup and
+keep their explicit two-step pairing so future maintainers can see that these
+paths are different from the live handler's dispatch. The bypass is about the
+wrapper function only, NOT about skipping the concurrency gate: both recovery
+paths ALSO call :func:`bridge.dedup.claim_message` immediately before their
+own enqueue call sites, sharing the SAME claim key
+(``bridge:msgclaim:{chat_id}:{message_id}``) as this module (issue #1817,
+workstream B1, BLOCKER). Using a shared key -- not a distinct per-path key --
+is what closes the cross-path double-enqueue race: the live handler and a
+recovery scan racing on the same message contend for the same claim, so at
+most one of them wins and enqueues.
+
+The claim gate releases on ANY enqueue exception (see
+:func:`dispatch_telegram_session` below and the equivalent try/except around
+each recovery path's enqueue call) so a mid-flight process death never
+orphans the claim key beyond its short TTL.
 """
 
 from __future__ import annotations
@@ -23,7 +36,12 @@ from __future__ import annotations
 import logging
 
 from agent.agent_session_queue import enqueue_agent_session
-from bridge.dedup import record_last_processed, record_message_processed
+from bridge.dedup import (
+    claim_message,
+    record_last_processed,
+    record_message_processed,
+    release_message_claim,
+)
 from config.enums import SessionType
 
 logger = logging.getLogger(__name__)
@@ -90,7 +108,7 @@ async def dispatch_telegram_session(
     extra_context_overrides: dict | None = None,
     requires_real_chrome: bool = False,
     message_ts=None,
-) -> int:
+) -> int | None:
     """Enqueue a Telegram-originating session and record dedup.
 
     Signature mirrors :func:`agent.agent_session_queue.enqueue_agent_session`
@@ -101,39 +119,62 @@ async def dispatch_telegram_session(
     NOT record dedup -- the reconciler will pick the message up on its next
     scan, which is the correct recovery behavior.
 
-    This wrapper does NOT catch exceptions from ``enqueue_agent_session``.
-    A failed enqueue propagates so the caller can log/handle, and leaves
-    dedup unrecorded so the reconciler can retry.
+    Atomic per-message claim (issue #1817 B1, BLOCKER): before enqueueing,
+    this function claims ``(chat_id, telegram_message_id)`` via
+    :func:`bridge.dedup.claim_message`. If the claim is lost, a peer producer
+    (e.g. another machine live during iCloud config sync lag, or a recovery
+    scan racing the same message) already won -- this call returns ``None``
+    without enqueuing or recording dedup. If ``enqueue_agent_session`` raises
+    after the claim was won, the claim is released before re-raising so the
+    short TTL never orphans past what it takes to retry -- preserving the
+    documented propagate-and-retry contract (dedup stays unrecorded, the
+    reconciler will pick the message up on its next scan).
 
     Returns:
-        The queue depth returned by ``enqueue_agent_session``.
+        The queue depth returned by ``enqueue_agent_session``, or ``None``
+        if a peer producer already claimed this message.
     """
-    depth = await enqueue_agent_session(
-        project_key=project_key,
-        session_id=session_id,
-        working_dir=working_dir,
-        message_text=message_text,
-        sender_name=sender_name,
-        chat_id=chat_id,
-        telegram_message_id=telegram_message_id,
-        chat_title=chat_title,
-        priority=priority,
-        revival_context=revival_context,
-        sender_id=sender_id,
-        slug=slug,
-        task_list_id=task_list_id,
-        classification_type=classification_type,
-        auto_continue_count=auto_continue_count,
-        correlation_id=correlation_id,
-        scheduled_at=scheduled_at,
-        parent_agent_session_id=parent_agent_session_id,
-        telegram_message_key=telegram_message_key,
-        session_type=session_type,
-        scheduling_depth=scheduling_depth,
-        project_config=project_config,
-        extra_context_overrides=extra_context_overrides,
-        requires_real_chrome=requires_real_chrome,
-    )
+    if not await claim_message(chat_id, telegram_message_id):
+        logger.info(
+            "dispatch: lost message claim for chat=%s msg=%s -- a peer producer won, skipping",
+            chat_id,
+            telegram_message_id,
+        )
+        return None
+
+    try:
+        depth = await enqueue_agent_session(
+            project_key=project_key,
+            session_id=session_id,
+            working_dir=working_dir,
+            message_text=message_text,
+            sender_name=sender_name,
+            chat_id=chat_id,
+            telegram_message_id=telegram_message_id,
+            chat_title=chat_title,
+            priority=priority,
+            revival_context=revival_context,
+            sender_id=sender_id,
+            slug=slug,
+            task_list_id=task_list_id,
+            classification_type=classification_type,
+            auto_continue_count=auto_continue_count,
+            correlation_id=correlation_id,
+            scheduled_at=scheduled_at,
+            parent_agent_session_id=parent_agent_session_id,
+            telegram_message_key=telegram_message_key,
+            session_type=session_type,
+            scheduling_depth=scheduling_depth,
+            project_config=project_config,
+            extra_context_overrides=extra_context_overrides,
+            requires_real_chrome=requires_real_chrome,
+        )
+    except BaseException:
+        # No orphan: release the claim so a retry is not locked out for the
+        # TTL. Preserves the propagate-and-retry contract documented above.
+        await release_message_claim(chat_id, telegram_message_id)
+        raise
+
     # Record inbound message in the session's chat_message_log (issue #1192).
     # Called after enqueue so the AgentSession record exists in Redis.
     # Failures are non-fatal — the chat log is enrichment, not a critical path.
@@ -167,7 +208,20 @@ async def record_telegram_message_handled(chat_id, telegram_message_id: int) -> 
     outcomes from the enqueue path. The underlying
     :func:`bridge.dedup.record_message_processed` already swallows exceptions
     and logs at warning level, so this function never raises either.
+
+    Gated by the same atomic per-message claim as
+    :func:`dispatch_telegram_session` (issue #1817 B1) so a peer producer
+    racing on this SAME message is claimed exactly once, regardless of
+    whether the winner takes the enqueue branch or this non-enqueue branch.
     """
+    if not await claim_message(chat_id, telegram_message_id):
+        logger.debug(
+            "telegram message handled without enqueue: lost claim for chat=%s msg=%s "
+            "-- a peer producer won, skipping",
+            chat_id,
+            telegram_message_id,
+        )
+        return
     logger.debug(
         "telegram message handled without enqueue: chat=%s msg=%s",
         chat_id,

@@ -4,42 +4,33 @@ Steps 6-9 of the build workflow: documentation gate, PR creation, worktree clean
 
 ## Step 6: Documentation Gate
 
-After all validation tasks pass, run the documentation lifecycle checks.
-
-**Execute each command below exactly as written, including the parentheses.** The `(...)` subshell syntax ensures the `cd` happens in a child process — the orchestrator's CWD stays in the main repo.
+After all validation tasks pass, run the documentation lifecycle checks. Run doc
+checks inside the worktree so `git diff` sees the session branch changes — use a
+`(cd $TARGET_REPO/.worktrees/{slug} && ...)` subshell so the orchestrator's CWD
+stays in the main repo.
 
 ### 6.1 Validate Documentation Changes
 
-Run the doc validation script to verify documentation was created/updated. This script runs `git diff` internally and needs the worktree as CWD to see the session branch changes.
+Confirm the plan's required documentation was created/updated. Inspect the
+session branch diff for the doc paths the plan's `## Documentation` section
+named. If a required doc is missing, **STOP and report failure** — this gate
+BLOCKS PR creation.
 
-```bash
-(cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
-```
+If the context file declares a docs-validation script, run it (deterministic
+enforcement). Generic default: verify the plan's named doc paths appear in
+`git diff --name-only main...HEAD`.
 
-- **Exit 0**: Documentation requirements met, proceed to next step
-- **Exit 1**: Documentation missing or insufficient, **STOP and report failure**
-- This check BLOCKS PR creation if it fails
-- The script checks that documentation matching the plan was created in `docs/features/` or `docs/`
+### 6.2 Scan for Related Documentation (optional)
 
-### 6.2 Scan for Related Documentation
+If the context file declares a related-docs scanner, collect the changed files
+(`git diff --name-only main...HEAD`) and run it to identify existing docs that
+may need updates. Otherwise rely on the `/do-docs` cascade in Step 7.6.
 
-Collect all changed files from git and scan for related docs:
+### 6.3 Create Review Issues for Discrepancies (optional)
 
-```bash
-(cd $TARGET_REPO/.worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
-```
-
-This identifies existing documentation that may need updates based on code changes.
-
-### 6.3 Create Review Issues for Discrepancies
-
-Pipe the scan results to create GitHub issues for HIGH/MED-HIGH confidence matches:
-
-```bash
-cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
-```
-
-This creates tracking issues for documentation that should be reviewed for updates.
+If a scanner ran and the context file declares an issue-creation helper, file
+review issues for HIGH/MED-HIGH confidence matches. Otherwise skip — the
+`/do-docs` cascade flags conflicts itself.
 
 ## Step 6.5: Pre-PR Commit Verification
 
@@ -75,15 +66,14 @@ gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Testing
 - [x] Unit tests passing
 - [x] Integration tests passing
-- [x] Linting (ruff, black) passing
+- [x] Lint/format checks passing
 
 ## Documentation
 - [x] Docs created per plan requirements
 - [x] Related docs scanned for updates
 
-## Sentry
-[List any Sentry issues resolved by this PR, e.g. "Fixes VALOR-2", "Fixes VALOR-12".
-Sentry auto-resolves these when the PR merges. Omit this section if no Sentry issues apply.]
+<!-- If the repo integrates an error-tracker (the context file names it), add a
+     section linking any tracker issues this PR resolves; omit otherwise. -->
 
 ## Definition of Done
 - [x] Built: Code implemented and working
@@ -100,46 +90,31 @@ EOF
 
 ## Step 7.5: Worktree Cleanup
 
-After pushing and creating the PR, return to the repo root and clean up the worktree. The `cd` prevents CWD death if the shell is inside the worktree (issue #301):
+After pushing and creating the PR, return to the repo root and clean up the worktree. The `cd` to the repo root FIRST prevents CWD death if the shell is inside the worktree:
 
 ```bash
 # Return to repo root BEFORE cleanup (prevents CWD death)
-cd "${AI_REPO_ROOT:-$HOME/src/ai}"
+cd "$TARGET_REPO"
 
-python -c "
-from pathlib import Path
-from agent.worktree_manager import remove_worktree, prune_worktrees
-# Use TARGET_REPO for cross-repo builds, orchestrator repo for same-repo builds
-repo = Path('$TARGET_REPO')
-remove_worktree(repo, '{slug}', delete_branch=False)
-prune_worktrees(repo)
-"
+# Remove the worktree but KEEP the branch — the PR still references session/{slug}.
+git -C "$TARGET_REPO" worktree remove "$TARGET_REPO/.worktrees/{slug}"
+git -C "$TARGET_REPO" worktree prune
 ```
 
-Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged via the post-merge cleanup step (see below).
+If the context file declares a worktree manager, use its removal helper instead (it adds busy-session guards and stale-ref pruning). Do NOT delete the branch — it is cleaned up when the PR is merged (see below).
 
 ### Post-Merge Cleanup (after PR is merged)
 
-After the PR is merged (auto-merge for eligible PRs, or human-initiated via `gh pr merge --squash --delete-branch`), return to repo root and run the post-merge cleanup:
+After the PR is merged (auto-merge for eligible PRs, or human-initiated via `gh pr merge --squash --delete-branch`), return to repo root and remove the worktree so the local branch can be deleted:
 
 ```bash
-# Return to repo root BEFORE cleanup
-cd "${AI_REPO_ROOT:-$HOME/src/ai}"
-
-python scripts/post_merge_cleanup.py {slug}
+cd "$TARGET_REPO"
+git -C "$TARGET_REPO" worktree remove "$TARGET_REPO/.worktrees/{slug}" 2>/dev/null
+git -C "$TARGET_REPO" worktree prune
+git -C "$TARGET_REPO" branch -D session/{slug} 2>/dev/null || true
 ```
 
-This calls `cleanup_after_merge()` from `agent/worktree_manager.py`, which:
-1. Removes the worktree at `.worktrees/{slug}/` if it still exists
-2. Prunes stale git worktree references
-3. Deletes the local `session/{slug}` branch
-
-Without this step, `gh pr merge --delete-branch` fails to delete the local branch because git refuses to delete a branch referenced by an active worktree.
-
-**Exit codes** (issue #1357):
-- `0` — clean (worktree and branch removed)
-- `1` — generic error (git failure, unexpected exception)
-- `2` — **busy guard fired**: a non-terminal `AgentSession` still references the worktree as `working_dir`. The offending session id is printed to stderr. See [`docs/sdlc/merge-troubleshooting.md`](../../../docs/sdlc/merge-troubleshooting.md#worktree-cleanup-blocked-issue-1357) for the recovery workflow.
+`gh pr merge --delete-branch` cannot delete the local branch while a worktree still references it, so the worktree removal must happen first. If the context file declares a post-merge cleanup helper (with busy-session guards), use it instead.
 
 ## Step 7.6: Documentation Cascade
 
@@ -183,7 +158,7 @@ After plan migration completes, include the PR URL prominently in your final res
 - [x] Built: All code implemented and working
 - [x] Tested: Unit tests passing, integration tests passing
 - [x] Documented: Docs created per plan requirements (validated by docs gate)
-- [x] Quality: Ruff and Black checks pass
+- [x] Quality: the repo's lint/format checks pass
 - [x] Plans migrated: Plan moved from docs/plans/ to completed state
 
 ### Task Summary

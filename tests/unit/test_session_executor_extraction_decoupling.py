@@ -40,7 +40,7 @@ class TestScheduleExtractionDecoupling:
         """asyncio.TimeoutError inside the extraction task is swallowed by the wrapper."""
         from agent import session_executor as se
 
-        async def _raise_timeout(session_id, response_text, project_key=None):
+        async def _raise_timeout(session_id, response_text, project_key=None, **kwargs):
             raise TimeoutError("simulated extraction timeout")
 
         monkeypatch.setattr(
@@ -72,7 +72,7 @@ class TestScheduleExtractionDecoupling:
 
         # Stub extraction to suspend cooperatively — the task should still be
         # pending immediately after the scheduler returns.
-        async def _slow_extract(session_id, response_text, project_key=None):
+        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
             await asyncio.sleep(10)
 
         monkeypatch.setattr(
@@ -104,7 +104,7 @@ class TestScheduleExtractionDecoupling:
 
         caplog.set_level(logging.INFO, logger="agent.session_executor")
 
-        async def _slow_extract(session_id, response_text, project_key=None):
+        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
             await asyncio.sleep(5)
 
         monkeypatch.setattr(
@@ -179,7 +179,7 @@ class TestScheduleExtractionDecoupling:
         """
         from agent import session_executor as se
 
-        async def _slow_extract(session_id, response_text, project_key=None):
+        async def _slow_extract(session_id, response_text, project_key=None, **kwargs):
             await asyncio.sleep(30)
 
         monkeypatch.setattr(
@@ -193,3 +193,66 @@ class TestScheduleExtractionDecoupling:
 
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestTrivialSessionGateSignals:
+    """Issue #1822 Fix 2: capture helpers + signal threading through the scheduler."""
+
+    @pytest.mark.asyncio
+    async def test_turn_count_and_origin_threaded_to_extraction(self, monkeypatch):
+        """The scheduler forwards turn_count + is_conversational by value."""
+        from agent import session_executor as se
+
+        captured = {}
+
+        async def _capture(session_id, response_text, project_key=None, **kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr(
+            "agent.memory_extraction.run_post_session_extraction",
+            _capture,
+        )
+
+        se._schedule_post_session_extraction(
+            "sess-gate", "text", turn_count=1, is_conversational=False
+        )
+        task = se._pending_extraction_tasks.get("sess-gate")
+        if task is not None:
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert captured.get("turn_count") == 1
+        assert captured.get("is_conversational") is False
+
+    def test_is_conversational_session_telegram_origin(self):
+        """A session with initial_telegram_message is conversational (must always extract)."""
+        from types import SimpleNamespace
+
+        from agent import session_executor as se
+
+        tg = SimpleNamespace(initial_telegram_message={"message_text": "hi", "sender_name": "Tom"})
+        cli = SimpleNamespace(initial_telegram_message=None)
+        assert se._is_conversational_session(tg) is True
+        assert se._is_conversational_session(cli) is False
+
+    def test_is_conversational_session_defaults_true_on_error(self):
+        """Unreadable origin signal defaults to conversational (never over-skips)."""
+        from agent import session_executor as se
+
+        class _Boom:
+            @property
+            def initial_telegram_message(self):
+                raise RuntimeError("popoto exploded")
+
+        assert se._is_conversational_session(_Boom()) is True
+
+    def test_capture_turn_count_returns_none_on_query_failure(self, monkeypatch):
+        """A failed re-fetch yields None so the gate stays a safe no-op."""
+        from unittest.mock import MagicMock
+
+        from agent import session_executor as se
+
+        fake_cls = MagicMock()
+        fake_cls.query.filter.side_effect = RuntimeError("redis down")
+        monkeypatch.setattr("models.agent_session.AgentSession", fake_cls)
+
+        assert se._capture_turn_count("whatever") is None

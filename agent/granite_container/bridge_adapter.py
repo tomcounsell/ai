@@ -57,6 +57,7 @@ the container returns.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -68,18 +69,25 @@ from datetime import UTC, datetime
 from typing import Any
 
 from agent.granite_container.container import Container, ContainerResult
+from agent.granite_container.hook_edge import generate_hook_settings
 from agent.granite_container.pty_pool import PairSpawnSpec, PTYPool
 from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
     read_transcript_telemetry,
 )
+from agent.steering import pop_all_steering_messages
 
 logger = logging.getLogger(__name__)
 
 # Default timeout for the synchronous bridge-callback delivery. The
 # container's thread blocks for this long waiting on the asyncio
 # future. 30s matches the Telegram relay's standard send timeout.
-DEFAULT_DELIVERY_TIMEOUT_S = 30.0
+# Provisional/tunable — override with GRANITE_DELIVERY_TIMEOUT_S env var.
+DEFAULT_DELIVERY_TIMEOUT_S: float = float(os.environ.get("GRANITE_DELIVERY_TIMEOUT_S", "30.0"))
+
+# TTL for outbox re-enqueue entries. Mirrors output_handler.py::OUTBOX_TTL
+# so the bridge relay drains them within the same expiry window.
+_OUTBOX_TTL = 3600
 
 # Transcript tailer tick interval (seconds). Each tick reads only new bytes
 # since last tick (O(Δbytes)). Bounded by PTY pool size — total save
@@ -322,6 +330,36 @@ def _transcript_path_from_spec(cwd: str, session_id: str) -> str:
     return os.path.join(home, ".claude", "projects", slug, f"{session_id}.jsonl")
 
 
+def _hook_driven_enabled() -> bool:
+    """Whether hook-driven turn returns are enabled (feature flag, default on).
+
+    Reads ``settings.granite.hook_driven_turn_end``; defaults to True if
+    settings can not be loaded. Plan #1688.
+    """
+    try:
+        from config.settings import settings
+
+        return bool(settings.granite.hook_driven_turn_end)
+    except Exception:
+        return True
+
+
+def _hook_edge_base_dir() -> str:
+    """Base directory for per-session hook settings + edge files.
+
+    ``<data_dir>/granite_hook_edges`` when settings are available, else a temp
+    dir. Per-session subdirs are created under it by ``_generate_hook_settings``.
+    """
+    try:
+        from config.settings import settings
+
+        return str(settings.paths.data_dir / "granite_hook_edges")
+    except Exception:
+        import tempfile
+
+        return os.path.join(tempfile.gettempdir(), "granite_hook_edges")
+
+
 def _exception_is_benign(result: ContainerResult) -> bool:
     """Return True for soft exceptions that don't warrant an ERROR-level alert.
 
@@ -395,10 +433,18 @@ class BridgeAdapter:
         pm_system_prompt: str | None = None,
         pm_model: str | None = None,
         session_type: str | None = None,
+        role_transports: dict[str, str] | None = None,
     ) -> None:
         self._agent_session = agent_session
         self._project_key = project_key
         self._transport = transport
+        # Per-role transport map (plan #1842). "pty" (default) drives the role
+        # through a PTYDriver; "headless" drives it through HeadlessRoleDriver
+        # (one `claude -p` per turn). ``transport`` above is the unrelated
+        # *channel* (telegram/email) — do not conflate.
+        self._role_transports = (
+            dict(role_transports) if role_transports else {"pm": "pty", "dev": "pty"}
+        )
         self._pool = pool
         self._delivery_timeout_s = delivery_timeout_s
         # Per-session spawn requirements (PR #1612 review B1+B2). Env
@@ -468,6 +514,20 @@ class BridgeAdapter:
             self._on_user_payload = self._make_user_callback()
             self._on_complete_payload = self._make_complete_callback()
 
+    def _generate_hook_settings(self, role: str, session_id: str) -> tuple[str, str]:
+        """Generate a per-PTY settings file + edge file for the hook channel.
+
+        Returns ``(settings_path, edge_file_path)``. The edge file is per-PTY
+        (keyed by role + the PTY's session UUID) so PM and Dev — which share
+        one process env overlay — still write to separate per-session files;
+        the forwarder receives the edge path as its CLI argument (plan #1688).
+        """
+        session_key = str(getattr(self._agent_session, "session_id", "") or session_id)
+        base = os.path.join(_hook_edge_base_dir(), session_key)
+        settings_dir = os.path.join(base, role)
+        edge_file = os.path.join(base, f"{role}_hook_edges.ndjson")
+        return generate_hook_settings(settings_dir, edge_file)
+
     # -- Public API -------------------------------------------------------
 
     async def run(self, user_message: str, working_dir: str) -> str:
@@ -497,12 +557,42 @@ class BridgeAdapter:
         #   ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
         pm_session_id = str(uuid.uuid4())
         dev_session_id = str(uuid.uuid4())
+        # Plan #1688: generate per-PTY Claude Code settings registering the
+        # fail-silent hook forwarder so the turn-end (Stop) and needs-human
+        # edges land in per-session edge files. Gated by the feature flag
+        # (default on); on any failure the pair spawns without --settings and
+        # the container falls back to the idle-completion path.
+        pm_settings_path = dev_settings_path = None
+        pm_hook_edge_file = dev_hook_edge_file = None
+        hook_driven = _hook_driven_enabled()
+        if hook_driven:
+            try:
+                pm_settings_path, pm_hook_edge_file = self._generate_hook_settings(
+                    "pm", pm_session_id
+                )
+                dev_settings_path, dev_hook_edge_file = self._generate_hook_settings(
+                    "dev", dev_session_id
+                )
+            except Exception as e:
+                logger.warning(
+                    "[granite-bridge-adapter] hook settings generation failed; "
+                    "falling back to idle-completion path: %s",
+                    e,
+                )
+                pm_settings_path = dev_settings_path = None
+                pm_hook_edge_file = dev_hook_edge_file = None
+        pm_transport = self._role_transports.get("pm", "pty")
+        dev_transport = self._role_transports.get("dev", "pty")
         spawn_spec = PairSpawnSpec(
             cwd=working_dir,
             env=self._session_env,
             pm_model=self._pm_model,
             pm_session_id=pm_session_id,
             dev_session_id=dev_session_id,
+            pm_settings_path=pm_settings_path,
+            dev_settings_path=dev_settings_path,
+            pm_transport=pm_transport,
+            dev_transport=dev_transport,
         )
         async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev, pty_slot):
             # Hand the pool's pre-warmed pair to Container so it
@@ -512,9 +602,34 @@ class BridgeAdapter:
             # the orphan-leak acceptance criterion (issue #1572).
             # Mark the pair as pool-owned so Container._close_pair
             # does not double-close; the pool's __aexit__ owns the
-            # close + respawn lifecycle.
-            pm._released_to_pool = True
-            dev._released_to_pool = True
+            # close + respawn lifecycle. A headless role carries a None
+            # pool member (the pool spawns NO PTY for it), so guard each
+            # dereference — a None must flow through cleanly end-to-end
+            # (plan #1842 B2).
+            if pm is not None:
+                pm._released_to_pool = True
+            if dev is not None:
+                dev._released_to_pool = True
+            # Storage-agnostic steering-poll closure (mid-run steering, #1779).
+            # Container calls this once per steady-state turn; it drains the
+            # race-free Redis list (atomic LPOP) for this session and returns the
+            # message dicts. Fail-silent: any error yields [] and never crashes
+            # the run. Bound to the session_id resolved from the agent_session.
+            steering_session_id = str(getattr(self._agent_session, "session_id", "") or "")
+
+            def _poll_steering() -> list[dict]:
+                if not steering_session_id:
+                    return []
+                try:
+                    return pop_all_steering_messages(steering_session_id)
+                except Exception as e:
+                    logger.warning(
+                        "[granite-bridge-adapter] poll_steering drain failed for session %s: %s",
+                        steering_session_id,
+                        e,
+                    )
+                    return []
+
             container = Container(
                 user_message=user_message,
                 cwd=working_dir,
@@ -525,10 +640,48 @@ class BridgeAdapter:
                 pm_pty=pm,
                 dev_pty=dev,
                 session_type=self._session_type,
+                poll_steering=_poll_steering,
+                pm_session_id=pm_session_id,
+                dev_session_id=dev_session_id,
+                pm_hook_edge_file=pm_hook_edge_file,
+                dev_hook_edge_file=dev_hook_edge_file,
+                pm_settings_path=pm_settings_path,
+                dev_settings_path=dev_settings_path,
+                hook_driven=hook_driven,
+                role_transports=self._role_transports,
+                session_env=self._session_env,
+                agent_session_id=str(getattr(self._agent_session, "session_id", "") or ""),
+                on_pty_spawn=self._pool.register_pid,
+                on_pty_despawn=self._pool.unregister_pid,
             )
-            # Compute transcript paths for tailer (known at spawn time since we set the UUIDs).
-            pm_path = _transcript_path_from_spec(working_dir, pm_session_id)
-            dev_path = _transcript_path_from_spec(working_dir, dev_session_id)
+            # Compute transcript paths for the tailer. Plan #1842 tailer
+            # invariant guard: populate a role's transcript path ONLY when that
+            # role runs on PTY. A headless role's tokens flow through the
+            # disjoint metered_* fields (accumulate_session_tokens(metered=True)),
+            # so folding its transcript into total_* would double-count and
+            # violate the non-clobbering partition (Race 1). Passing None keeps
+            # the tailer from ever reading a headless role's transcript.
+            pm_path = (
+                _transcript_path_from_spec(working_dir, pm_session_id)
+                if pm_transport == "pty"
+                else None
+            )
+            dev_path = (
+                _transcript_path_from_spec(working_dir, dev_session_id)
+                if dev_transport == "pty"
+                else None
+            )
+            # Persist transport-tagged resume handles for BOTH roles at spawn
+            # (plan #1842 / #1721 schema). DoD is "written and shaped correctly";
+            # consumption (re-entry, cursor) is #1721's scope. PTY roles capture
+            # the spawn-time UUID; headless roles capture the same derivable UUID
+            # (the container's HeadlessRoleDriver re-derives the transcript path
+            # from the actual first-turn UUID at capture time).
+            self._persist_resume_handles(
+                working_dir,
+                {"pm": pm_session_id, "dev": dev_session_id},
+                {"pm": pm_transport, "dev": dev_transport},
+            )
             # Start the tailer task before handing the container to the worker thread.
             # The tailer reads new bytes from both transcripts every ~5s, merges counters,
             # and persists them to agent_session (diff-gated to avoid spurious saves).
@@ -557,6 +710,62 @@ class BridgeAdapter:
             self._publish_exit_summary(result)
             self._maybe_publish_exit_anomaly(result)
         return ""
+
+    def _persist_resume_handles(
+        self,
+        working_dir: str,
+        session_ids: dict[str, str],
+        transports: dict[str, str],
+    ) -> None:
+        """Persist transport-tagged resume handles for both roles (plan #1842).
+
+        Schema (shared with #1721): a list of
+        ``{role, claude_session_id, transcript_path, transport}``. PTY roles
+        spawn with ``claude --session-id <uuid>`` so their UUID + transcript
+        path are known at spawn time and fully populated here (transcript path
+        via the real codebase slugging fn ``_transcript_path_from_spec``).
+        Headless roles do not pass ``--session-id``; their claude UUID is
+        assigned by ``claude -p`` at first turn, so the handle is written
+        shaped (role + transport) with a null UUID here — the HeadlessRoleDriver
+        captures and re-derives it at first turn.
+
+        DoD is "written and shaped correctly" only. Consumption (re-entry,
+        cursor replay, skip-priming) is #1721's scope. Fail-silent —
+        observability must never crash the run.
+        """
+        if self._agent_session is None:
+            return
+        try:
+            handles: list[dict] = []
+            for role in ("pm", "dev"):
+                transport = transports.get(role, "pty")
+                if transport == "pty":
+                    uuid_val = session_ids.get(role)
+                    handles.append(
+                        {
+                            "role": role,
+                            "claude_session_id": uuid_val,
+                            "transcript_path": (
+                                _transcript_path_from_spec(working_dir, uuid_val)
+                                if uuid_val
+                                else None
+                            ),
+                            "transport": transport,
+                        }
+                    )
+                else:
+                    handles.append(
+                        {
+                            "role": role,
+                            "claude_session_id": None,
+                            "transcript_path": None,
+                            "transport": transport,
+                        }
+                    )
+            self._agent_session.resume_handles = handles
+            self._agent_session.save(update_fields=["resume_handles", "updated_at"])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[bridge-adapter] resume_handles persist failed: %s", e)
 
     # -- Session events ---------------------------------------------------
 
@@ -867,9 +1076,13 @@ class BridgeAdapter:
         captured loop ref is mandatory for async send_cbs. A sync
         send_cb is called directly on the calling thread.
 
-        Returns True on confirmed delivery, False on any failure or
-        timeout. The caller (_make_user_callback / _make_complete_callback)
-        uses the return value to set self._user_facing_routed (issue #1647).
+        Returns True when the payload is delivered synchronously or
+        re-enqueued to the outbox before returning; False when neither
+        happened (sync send_cb raised, a pre-scheduling error occurred,
+        or the same-thread fire-and-forget path where outbox recovery
+        is deferred to a done-callback). The caller
+        (_make_user_callback / _make_complete_callback) uses the return
+        value to set self._user_facing_routed (issue #1647).
 
         On a missing/closed loop or a delivery timeout, the error
         is logged and a session_events entry is appended. The
@@ -877,6 +1090,12 @@ class BridgeAdapter:
         """
         import inspect
 
+        future = None
+        coro = None  # coroutine object; closed explicitly on error paths to suppress RuntimeWarning
+        # True once we have reached the async scheduling path. Used to
+        # distinguish "sync send_cb raised" from "async loop closed/timed
+        # out", since only the latter warrants an outbox re-enqueue.
+        _async_delivery_started = False
         try:
             if not inspect.iscoroutinefunction(send_cb):
                 # Sync send_cb (test doubles, legacy wrappers): call
@@ -889,13 +1108,16 @@ class BridgeAdapter:
                 # run() was never awaited (direct Container use) or
                 # the worker loop is gone (shutdown). Without a live
                 # loop there is nowhere to schedule the coroutine.
+                # Re-enqueue to the outbox so the reply is not lost
+                # (_enqueue_to_outbox is sync Redis, needs no event loop).
                 logger.warning(
                     "[bridge-adapter] no captured event loop for send_cb; "
-                    "delivery skipped (loop=%r)",
+                    "re-enqueueing to outbox (loop=%r)",
                     loop,
                 )
-                self._record_delivery_failure(payload, "no_event_loop")
-                return False
+                recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+                self._record_delivery_event(payload, "no_event_loop", recovered=recovered)
+                return recovered
 
             coro = send_cb(chat_id, payload, reply_to, agent_session)
             try:
@@ -907,21 +1129,68 @@ class BridgeAdapter:
                 # asyncio thread, e.g. in tests). Blocking on a future
                 # here would deadlock the loop — schedule fire-and-
                 # forget instead.
-                loop.create_task(coro)
-                # Fire-and-forget: we cannot confirm delivery synchronously
-                # on the same event loop. Count as False so the caller does
-                # not set user_facing_routed prematurely.
+                #
+                # We cannot confirm delivery synchronously, but the reply
+                # must still never be silently lost (issue #1805 core
+                # criterion). Attach a done-callback that re-enqueues to
+                # the outbox iff the task failed or was cancelled. On
+                # success the callback is a no-op, so there is no duplicate
+                # delivery.
+                task = loop.create_task(coro)
+
+                def _reenqueue_same_thread_on_failure(
+                    t: asyncio.Task[Any],
+                    _payload: str = payload,
+                    _chat_id: Any = chat_id,
+                    _reply_to: Any = reply_to,
+                ) -> None:
+                    try:
+                        if t.cancelled():
+                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            self._record_delivery_event(
+                                _payload, "CancelledError", recovered=recovered
+                            )
+                            return
+                        exc = t.exception()
+                        if exc is not None:
+                            recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
+                            self._record_delivery_event(
+                                _payload, f"{type(exc).__name__}: {exc}", recovered=recovered
+                            )
+                    except Exception:  # pragma: no cover - defensive
+                        logger.exception("[bridge-adapter] same-thread re-enqueue callback failed")
+
+                task.add_done_callback(_reenqueue_same_thread_on_failure)
+                # Fire-and-forget: delivery is not yet confirmed, so return
+                # False; the caller will not set user_facing_routed. Recovery
+                # (if the task fails) is handled by the done-callback above.
                 return False
             # Production path: pexpect worker thread -> schedule on the
             # captured worker loop and block until delivered.
+            _async_delivery_started = True
             future = asyncio.run_coroutine_threadsafe(coro, loop)
             future.result(timeout=timeout_s)
             return True
         except RuntimeError as e:
+            if not _async_delivery_started:
+                # RuntimeError came from the sync send_cb call or pre-scheduling
+                # code (e.g. constructing the coroutine). No outbox fallback for
+                # non-delivery errors.
+                if coro is not None:
+                    coro.close()  # dispose unscheduled coroutine; suppresses RuntimeWarning
+                logger.warning("[bridge-adapter] send_cb raised before async scheduling: %s", e)
+                self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
+                return False
             # Loop closed between the check and the schedule (worker
-            # shutdown race).
+            # shutdown race). The coroutine was passed to run_coroutine_threadsafe
+            # but never scheduled (loop already closed). Close it explicitly to
+            # suppress "coroutine was never awaited" RuntimeWarning.
+            coro.close()
+            # Re-enqueue so the reply isn't lost.
             logger.warning("[bridge-adapter] send_cb delivery failed (loop closed): %s", e)
-            self._record_delivery_failure(payload, "loop_closed")
+            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+            self._record_delivery_event(payload, f"{type(e).__name__}: {e}", recovered=recovered)
+            return recovered
         except Exception as e:
             # Anything else (including FutureTimeoutError): log and
             # continue. The container must not crash on a delivery
@@ -931,27 +1200,106 @@ class BridgeAdapter:
                 e,
                 len(payload),
             )
-            # Include the exception type: TimeoutError stringifies to "".
-            self._record_delivery_failure(payload, f"{type(e).__name__}: {e}")
+            # Cancel the timed-out future before re-enqueueing to
+            # minimise the risk of duplicate delivery (the coroutine
+            # may still run after the timeout fires).
+            #
+            # concurrent.futures.Future.cancel() returns False once the
+            # coroutine is already running — cancellation is best-effort.
+            # When it fails the original send may still complete AND the
+            # outbox re-enqueue delivers, so we tag the event distinctly
+            # (possible duplicate). The downstream redundancy filter
+            # (bridge/redundancy_filter.py::should_suppress) is the
+            # backstop for that already-running edge case.
+            failure_reason = f"{type(e).__name__}: {e}"
+            if future is not None and not future.cancel():
+                failure_reason = f"{failure_reason} [future_uncancellable_possible_duplicate]"
+            recovered = self._enqueue_to_outbox(chat_id, payload, reply_to)
+            self._record_delivery_event(payload, failure_reason, recovered=recovered)
+            return recovered
         return False
 
     def _record_delivery_failure(self, payload: str, reason: str) -> None:
-        """Append a `session_events` entry when a mid-loop
-        delivery fails. The dashboard surfaces the error; we
-        do NOT emit a user-visible "I tried to send you a
-        message but it failed" delivery (would violate the
-        no-spam rule)."""
+        """Backward-compat wrapper: record a non-recovered delivery failure."""
+        self._record_delivery_event(payload, reason, recovered=False)
+
+    def _record_delivery_event(self, payload: str, failure_reason: str, *, recovered: bool) -> None:
+        """Append a `session_events` entry when a mid-loop delivery fails.
+
+        If `recovered` is True the payload was re-enqueued to the outbox
+        and will be delivered later — event type is `recovered_via_outbox`.
+        If `recovered` is False the payload is permanently lost — event
+        type is `dropped`.
+
+        The dashboard surfaces the event; we do NOT emit a user-visible
+        "message failed" reply (would violate the no-spam rule).
+        """
+        outcome = "recovered_via_outbox" if recovered else "dropped"
         _append_session_event(
             self._agent_session,
             {
-                "event_type": "granite_delivery_failure",
-                "text": f"delivery failed: {reason} ({len(payload)} chars)",
+                "event_type": f"granite_delivery_{outcome}",
+                "text": f"delivery {outcome}: {failure_reason} ({len(payload)} chars)",
                 "type": "delivery_failure",
                 "payload_chars": len(payload),
-                "reason": reason,
+                "reason": outcome,
+                "failure_reason": failure_reason,
+                "recovered": recovered,
                 "ts": _now_iso(),
             },
         )
+
+    def _enqueue_to_outbox(
+        self,
+        chat_id: Any,
+        payload: str,
+        reply_to: Any,
+        file_paths: list[str] | None = None,
+    ) -> bool:
+        """Write payload to `telegram:outbox:{session_id}` as a fallback
+        when the primary send_cb delivery times out or fails.
+
+        Uses the same Redis list key and payload shape as
+        `output_handler.py` so the bridge relay processes it identically.
+
+        Returns True if the rpush succeeded, False otherwise.
+        """
+        session_id = str(getattr(self._agent_session, "session_id", "") or "")
+        if not session_id:
+            logger.warning(
+                "[bridge-adapter] _enqueue_to_outbox: no session_id on agent_session, "
+                "cannot re-enqueue (%d chars)",
+                len(payload),
+            )
+            return False
+        queue_key = f"telegram:outbox:{session_id}"
+        outbox_payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "reply_to": reply_to,
+            "text": payload,
+            "session_id": session_id,
+            "timestamp": time.time(),
+        }
+        if file_paths:
+            outbox_payload["file_paths"] = file_paths
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB  # noqa: N811
+
+            POPOTO_REDIS_DB.rpush(queue_key, json.dumps(outbox_payload))
+            POPOTO_REDIS_DB.expire(queue_key, _OUTBOX_TTL)
+            logger.info(
+                "[bridge-adapter] re-enqueued to outbox %s (%d chars)",
+                queue_key,
+                len(payload),
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                "[bridge-adapter] _enqueue_to_outbox failed for %s: %s",
+                queue_key,
+                e,
+            )
+            return False
 
     # -- Transcript tailer (incremental telemetry, issue #1648) -----------
 

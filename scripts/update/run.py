@@ -38,6 +38,8 @@ from scripts.update import (  # noqa: E402
     officecli,
     persona_drift,
     readme_check,
+    redis_persistence,
+    redis_replication,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -140,6 +142,8 @@ class UpdateResult:
     sentry_cli_result: sentry_cli.InstallResult | None = None
     kokoro_result: kokoro.DownloadResult | None = None
     ffmpeg_result: kokoro.FfmpegResult | None = None
+    redis_persistence_result: redis_persistence.RedisPersistenceResult | None = None
+    redis_replication_result: redis_replication.RedisReplicationResult | None = None
     readme_check_result: readme_check.ReadmeCheckResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -493,21 +497,21 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log(f"WARN: projects.json: {projects_r.error}", v, always=True)
         result.warnings.append(f"projects.json: {projects_r.error}")
 
-    # Step 1.66: Ensure config/reflections.yaml is a symlink to the vault
+    # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
+    # symlink — the launchd worker's reflection scheduler reads it, and a
+    # symlink to ~/Desktop hangs the asyncio event loop under launchd TCC).
     log("Verifying config/reflections.yaml...", v)
     result.reflections_sync_result = env_sync.sync_reflections_yaml(project_dir)
     refl_r = result.reflections_sync_result
     if refl_r.created:
-        log(
-            f"config/reflections.yaml symlink created → {env_sync.VAULT_REFLECTIONS_PATH}",
-            v,
-            always=True,
-        )
+        log("config/reflections.yaml copied from vault (was symlink or stale)", v, always=True)
+    elif refl_r.ok:
+        log("config/reflections.yaml OK (real file copy)", v)
     elif refl_r.skipped:
         log("config/reflections.yaml: vault not found, using in-repo fallback", v)
     if refl_r.error:
         log(f"WARN: reflections.yaml: {refl_r.error}", v, always=True)
-        result.warnings.append(f"reflections.yaml symlink: {refl_r.error}")
+        result.warnings.append(f"reflections.yaml: {refl_r.error}")
 
     # Step 1.67: Bootstrap cross-machine zshenv loader.
     # Seeds ~/Desktop/Valor/zshenv.sh (vault) if missing and ensures ~/.zshenv
@@ -885,6 +889,65 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"WARN: ffmpeg: {fr.error}", v)
         result.warnings.append(f"ffmpeg: {fr.error}")
+
+    # Step 3.13: Redis durability configuration.
+    # Pins AOF persistence (appendonly yes, appendfsync everysec) and eviction
+    # policy (maxmemory-policy noeviction) on every machine. Idempotent: CONFIG SET
+    # is a no-op if already set. CONFIG REWRITE persists directives into redis.conf;
+    # if Redis was started without a config file, a stub redis.conf is written and a
+    # loud WARNING is emitted. Non-fatal: if redis-cli is absent or Redis is down,
+    # the result is logged and the update continues.
+    log("Configuring Redis durability (AOF + eviction policy)...", v)
+    try:
+        result.redis_persistence_result = redis_persistence.apply_redis_persistence()
+        rp = result.redis_persistence_result
+        if rp.success:
+            if rp.action == "applied":
+                log("Redis durability: AOF enabled and persisted to redis.conf", v, always=True)
+            else:
+                log(
+                    f"Redis durability: AOF enabled ({rp.action})",
+                    v,
+                    always=True,
+                )
+            if rp.warning:
+                log(f"WARN: Redis durability: {rp.warning}", v, always=True)
+                result.warnings.append(f"Redis durability: {rp.warning}")
+        elif rp.action == "skipped":
+            log(f"Redis durability: skipped — {rp.error}", v)
+        else:
+            log(f"WARN: Redis durability: {rp.error}", v, always=True)
+            result.warnings.append(f"Redis durability: {rp.error}")
+    except Exception as _rp_exc:
+        log(f"WARN: Redis durability step failed unexpectedly: {_rp_exc}", v, always=True)
+        result.warnings.append(f"Redis durability: unexpected error: {_rp_exc}")
+
+    # Step 3.14: Redis replication + Sentinel seeding (availability; #1827).
+    # Durability (3.13) before availability (3.14). BOOTSTRAP-ONLY / seed-once: this
+    # step is a clean no-op on every client-only machine (no data/redis-replication-
+    # enabled marker) and on any established cluster (presence-check early-exit). It
+    # NEVER CONFIG SET replicaof on a role:master node — seeding a virgin opted-in
+    # node is file-only. Non-fatal: failures are logged and the update continues.
+    log("Seeding Redis replication/Sentinel config (if opted in)...", v)
+    try:
+        result.redis_replication_result = redis_replication.apply_redis_replication()
+        rr = result.redis_replication_result
+        if rr.success:
+            if rr.action in ("applied", "applied_with_warning"):
+                log("Redis replication: seeded replica/Sentinel config", v, always=True)
+            else:
+                log(f"Redis replication: {rr.action}", v)
+            if rr.warning:
+                log(f"WARN: Redis replication: {rr.warning}", v, always=True)
+                result.warnings.append(f"Redis replication: {rr.warning}")
+        elif rr.action == "skipped":
+            log(f"Redis replication: skipped — {rr.error}", v)
+        else:
+            log(f"WARN: Redis replication: {rr.error}", v, always=True)
+            result.warnings.append(f"Redis replication: {rr.error}")
+    except Exception as _rr_exc:
+        log(f"WARN: Redis replication step failed unexpectedly: {_rr_exc}", v, always=True)
+        result.warnings.append(f"Redis replication: unexpected error: {_rr_exc}")
 
     # Step 4: Ollama generation model (full mode only).
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a

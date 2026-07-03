@@ -9,19 +9,24 @@ This skill evaluates existing web interfaces against premium design criteria. It
 
 Be opinionated. Call out what fails clearly. "Acceptable" is not a compliment.
 
+## Repo Context Probe
+
+If `.claude/skill-context/do-design-audit.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares how its session harness opts a session into real-Chrome mode (the exact CLI flag / config it uses). When the file is absent, the generic baseline applies: ensure your browser-automation session has whatever "use the real, logged-in browser" mode your harness provides before running the audit.
+
 ## Surface
 
 This skill runs against the user's real, logged-in Chrome via the BYOB
 MCP server (`mcp__byob__browser_*`). Public marketing pages and
 authenticated dashboards are audited the same way — BYOB just shows
 you the page the user would see. There is no anonymous-headless
-fallback; that surface was retired in #1256.
+fallback.
 
-The calling session **must** have `requires_real_chrome=True` set
-(bridge auto-infers from message text for "design audit" patterns;
-CLI users pass `valor-session create --needs-real-chrome ...`). Two
-concurrent real-Chrome sessions race on the active tab and corrupt
-each other's DOM.
+The calling session **must** be in real-Chrome mode (the harness may
+auto-infer this from the request, or expose an explicit flag — see the
+repo context file for the project-specific mechanism). Two concurrent
+real-Chrome sessions race on the active tab and corrupt each other's DOM.
 
 ## When to Use
 

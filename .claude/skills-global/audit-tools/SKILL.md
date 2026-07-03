@@ -10,6 +10,12 @@ argument-hint: "[tool-name] [--fix]"
 
 Validates every tool in `tools/` against STANDARD.md requirements and the interface documentation expectations defined here. Surfaces tools that are missing files, have incomplete docs, untested capabilities, or broken CLI help.
 
+## Repo Context Probe
+
+If `.claude/skill-context/audit-tools.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its CLI-naming convention (e.g. a `valor-*` entry-point prefix) and its skill-scaffolding command, so the `[cli-registered]` check and the "missing structure" next-step name the repo's real conventions. When the file is absent, the generic baseline applies: a tool is "cli-registered" when it has a console-script entry in `pyproject.toml [project.scripts]` under any name, and missing structure is scaffolded by hand.
+
 ## What this skill does
 
 1. Discovers all tool directories in `tools/` (skipping `_template`, `__pycache__`)
@@ -58,7 +64,7 @@ Present findings using this format:
 - [tests-exist] tests/ directory with test_sms_reader.py
 - [inputs-documented] All public functions have typed parameters
 - [examples] README has working code examples
-- [cli-registered] Registered in pyproject.toml as valor-sms-reader
+- [cli-registered] Registered in pyproject.toml [project.scripts] (under the repo's CLI-naming convention; see the repo context file if present)
 
 ---
 
@@ -82,7 +88,7 @@ This audit is **report only** — findings are presented for human review. If `-
 This skill produces findings only. Next steps are decided by the human:
 - Fix individual tools based on findings
 - Create GitHub issues for tools that need significant work
-- Use `/new-valor-skill` to scaffold missing structure for incomplete tools
+- Scaffold missing structure for incomplete tools using the repo's skill/tool scaffolding command if its context file declares one (otherwise scaffold by hand)
 - Delete tools that are abandoned (e.g., empty placeholders)
 
 ## Version history

@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import importlib
 import logging
+import os
+import signal
 import subprocess
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -635,3 +638,403 @@ class TestKickstartDetailed:
         assert ok is False
         assert rc == -1
         assert stderr == "timeout"
+
+
+# --- Verified-kill W1→W5 escalation ladder (issue #1767) ---------------------
+
+
+class TestPollPidDead:
+    """Unit tests for the _poll_pid_dead helper."""
+
+    def test_returns_true_when_pid_does_not_exist(self):
+        """Non-existent PID (99999999) returns True immediately."""
+        # Use a PID so large it can't exist on macOS (max PID is ~99999)
+        result = wwd._poll_pid_dead(99999999, timeout_sec=1.0, interval=0.1)
+        assert result is True
+
+    def test_returns_false_when_pid_is_alive(self):
+        """Our own PID is always alive — returns False after timeout."""
+        my_pid = os.getpid()
+        result = wwd._poll_pid_dead(my_pid, timeout_sec=0.2, interval=0.05)
+        assert result is False
+
+    def test_returns_true_when_kill_raises_process_lookup_error(self):
+        """If os.kill raises ProcessLookupError during poll, return True immediately."""
+        with patch("os.kill", side_effect=ProcessLookupError):
+            result = wwd._poll_pid_dead(12345, timeout_sec=5.0, interval=0.1)
+        assert result is True
+
+    def test_returns_true_when_kill_raises_permission_error(self):
+        """PermissionError (unmonitorable process) is treated as dead."""
+        with patch("os.kill", side_effect=PermissionError):
+            result = wwd._poll_pid_dead(12345, timeout_sec=5.0, interval=0.1)
+        assert result is True
+
+
+class TestRecoverW1SigtermSuccess:
+    """W1 path: SIGTERM kills the process before escalating."""
+
+    def test_w1_sigterm_kills_process(self, isolated_state, caplog):
+        """If _poll_pid_dead returns True after SIGTERM, recover() stops at W1."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead", return_value=True) as mock_poll,
+            ):
+                with caplog.at_level(logging.INFO, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        # SIGTERM was sent
+        mock_kill.assert_called_once_with(12345, signal.SIGTERM)
+        # Only one poll call (W1)
+        assert mock_poll.call_count == 1
+        assert any("exited after SIGTERM" in r.message for r in caplog.records)
+
+    def test_w1_already_gone_returns_early(self, isolated_state, caplog):
+        """If SIGTERM raises ProcessLookupError, recover() returns without escalating."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill", side_effect=ProcessLookupError),
+                patch.object(wwd, "_poll_pid_dead") as mock_poll,
+            ):
+                with caplog.at_level(logging.INFO, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_poll.assert_not_called()
+        assert any("already gone" in r.message for r in caplog.records)
+
+    def test_recover_no_pid_returns_early(self, isolated_state, caplog):
+        """recover() with missing PID logs an error and returns without acting."""
+        status = {"heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead") as mock_poll,
+            ):
+                with caplog.at_level(logging.ERROR, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_kill.assert_not_called()
+        mock_poll.assert_not_called()
+        assert any("no PID in status" in r.message for r in caplog.records)
+
+
+class TestRecoverW2SigkillEscalation:
+    """W2 path: SIGTERM didn't kill it, escalate to SIGKILL."""
+
+    def test_w2_sigkill_sent_when_sigterm_fails(self, isolated_state, caplog):
+        """When _poll_pid_dead returns False for W1 and True for W2, SIGKILL is sent."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        # First poll (W1) → alive; second poll (W2) → dead
+        poll_results = [False, True]
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill") as mock_kill,
+                patch.object(wwd, "_poll_pid_dead", side_effect=poll_results),
+                patch.object(wwd, "_bootout_worker") as mock_bootout,
+            ):
+                with caplog.at_level(logging.INFO, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        # SIGTERM then SIGKILL
+        calls = mock_kill.call_args_list
+        assert calls[0] == ((12345, signal.SIGTERM),)
+        assert calls[1] == ((12345, signal.SIGKILL),)
+        # Bootout was not needed
+        mock_bootout.assert_not_called()
+        assert any("exited after SIGKILL" in r.message for r in caplog.records)
+
+
+class TestRecoverW3BootoutEscalation:
+    """W3 path: SIGKILL didn't kill it, escalate to launchctl bootout."""
+
+    def test_w3_bootout_called_when_sigkill_fails(self, isolated_state, caplog):
+        """When W1 and W2 polls return False, W3 bootout is attempted."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        # W1 → alive, W2 → alive, W3 → dead
+        poll_results = [False, False, True]
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill"),
+                patch.object(wwd, "_poll_pid_dead", side_effect=poll_results),
+                patch.object(wwd, "_bootout_worker") as mock_bootout,
+            ):
+                with caplog.at_level(logging.INFO, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        mock_bootout.assert_called_once()
+        assert any("exited after bootout" in r.message for r in caplog.records)
+
+
+class TestRecoverW4CriticalAlert:
+    """W4 path: all signals failed, write CRITICAL Redis key."""
+
+    def test_w4_critical_log_and_redis_written(self, isolated_state, caplog):
+        """When all three polls return False, W4 CRITICAL log and Redis key are written."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        # All polls return False → W4 fires
+        mock_r = MagicMock()
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill"),
+                patch.object(wwd, "_poll_pid_dead", return_value=False),
+                patch.object(wwd, "_bootout_worker"),
+                patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+            ):
+                with caplog.at_level(logging.CRITICAL, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        # W4 CRITICAL log emitted
+        assert any(
+            "W4" in r.message and "U-state" in r.message
+            for r in caplog.records
+            if r.levelno == logging.CRITICAL
+        )
+        # Redis critical key written
+        assert mock_r.set.called
+        written_keys = [call[0][0] for call in mock_r.set.call_args_list]
+        assert any("worker:watchdog:critical:" in k for k in written_keys)
+
+    def test_w4_pty_close_required_key_written_by_default(self, isolated_state, monkeypatch):
+        """By default (env var not set), pty_close_required key is written."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        monkeypatch.delenv("WORKER_WATCHDOG_PTY_CLOSE_DISABLED", raising=False)
+        mock_r = MagicMock()
+        with (
+            patch("os.kill"),
+            patch.object(wwd, "_poll_pid_dead", return_value=False),
+            patch.object(wwd, "_bootout_worker"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+        ):
+            wwd.recover(status)
+
+        written_keys = [call[0][0] for call in mock_r.set.call_args_list]
+        assert any("pty_close_required" in k for k in written_keys)
+
+    def test_w4_pty_close_required_key_suppressed_when_disabled(self, isolated_state, monkeypatch):
+        """When WORKER_WATCHDOG_PTY_CLOSE_DISABLED is set, pty_close_required key is NOT written."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        monkeypatch.setenv("WORKER_WATCHDOG_PTY_CLOSE_DISABLED", "1")
+        mock_r = MagicMock()
+        with (
+            patch("os.kill"),
+            patch.object(wwd, "_poll_pid_dead", return_value=False),
+            patch.object(wwd, "_bootout_worker"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+        ):
+            wwd.recover(status)
+
+        written_keys = [call[0][0] for call in mock_r.set.call_args_list]
+        assert not any("pty_close_required" in k for k in written_keys)
+
+    def test_w4_redis_failure_does_not_raise(self, isolated_state):
+        """Redis unavailable during W4 must not propagate — logs error, continues to W5."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        mock_r = MagicMock()
+        mock_r.set.side_effect = RuntimeError("conn refused")
+        with (
+            patch("os.kill"),
+            patch.object(wwd, "_poll_pid_dead", return_value=False),
+            patch.object(wwd, "_bootout_worker"),
+            patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
+        ):
+            # Must not raise
+            wwd.recover(status)
+
+    def test_w5_final_log_emitted(self, isolated_state, caplog):
+        """W5 final CRITICAL log is always emitted after W4."""
+        status = {"pid": 12345, "heartbeat_age": 700.0}
+        wwd.logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch("os.kill"),
+                patch.object(wwd, "_poll_pid_dead", return_value=False),
+                patch.object(wwd, "_bootout_worker"),
+                patch("popoto.redis_db.POPOTO_REDIS_DB", MagicMock()),
+            ):
+                with caplog.at_level(logging.CRITICAL, logger=wwd.logger.name):
+                    wwd.recover(status)
+        finally:
+            wwd.logger.removeHandler(caplog.handler)
+
+        assert any(
+            "W5" in r.message and "no further automated action" in r.message
+            for r in caplog.records
+            if r.levelno == logging.CRITICAL
+        )
+
+
+class TestBootoutWorkerHelper:
+    """Direct tests for the _bootout_worker helper."""
+
+    def test_bootout_success(self, isolated_state):
+        fake = subprocess.CompletedProcess(
+            args=["launchctl", "bootout", "x"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=fake):
+            assert wwd._bootout_worker() is True
+
+    def test_bootout_failure_returncode(self, isolated_state):
+        fake = subprocess.CompletedProcess(
+            args=["launchctl", "bootout", "x"],
+            returncode=37,
+            stdout="",
+            stderr="No such service",
+        )
+        with patch("subprocess.run", return_value=fake):
+            assert wwd._bootout_worker() is False
+
+    def test_bootout_timeout_swallowed(self, isolated_state):
+        with patch(
+            "subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="launchctl", timeout=10),
+        ):
+            assert wwd._bootout_worker() is False
+
+    def test_bootout_exception_swallowed(self, isolated_state):
+        with patch("subprocess.run", side_effect=OSError("launchctl not found")):
+            assert wwd._bootout_worker() is False
+
+
+# --- Heartbeat isolation (issue #1767) ----------------------------------------
+
+
+class TestHeartbeatIsolation:
+    """Verify the heartbeat daemon thread is isolated from the asyncio executor.
+
+    These tests cover the two acceptance criteria from the issue #1767 plan:
+    1. The heartbeat thread writes independently of thread-pool saturation.
+    2. HEARTBEAT_THRESHOLD is env-tunable.
+
+    Under the issue #1815 dead-man's-switch inversion, this off-loop isolation
+    is no longer just "the thread keeps writing green" — it is precisely what
+    lets the thread observe a frozen on-loop beacon and SIGKILL for launchd
+    respawn while the loop itself is wedged. The thread now writes green ONLY
+    when the loop beacon is fresh (verified end-to-end in
+    ``tests/unit/test_worker_deadman.py``); the property exercised below is the
+    surviving-thread half that powers that abort.
+    """
+
+    def test_heartbeat_thread_writes_independent_of_executor(self, tmp_path):
+        """Heartbeat thread writes even when the default thread-pool executor is saturated.
+
+        Fills the default ThreadPoolExecutor with long-running blocking tasks,
+        then starts a heartbeat thread and verifies it writes the heartbeat file.
+        The heartbeat thread runs independently of the executor, so its writes
+        must complete before the executor tasks finish.
+        """
+        import concurrent.futures
+        import time
+
+        heartbeat_file = tmp_path / "last_worker_connected"
+
+        write_count = [0]
+        write_done = threading.Event()
+
+        def fake_write_heartbeat():
+            heartbeat_file.write_text("ok")
+            write_count[0] += 1
+            write_done.set()
+
+        stop_event = threading.Event()
+
+        def heartbeat_loop():
+            while not stop_event.wait(timeout=0.05):
+                try:
+                    fake_write_heartbeat()
+                except Exception:
+                    pass
+
+        # Saturate the default thread-pool executor with blocking sleeps.
+        # This simulates PTY reads blocking executor threads (the root cause of #1767).
+        cpu_count = (os.cpu_count() or 4) + 4  # exceed default pool size
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=cpu_count)
+        # Submit blocking tasks to fill the pool; futures deliberately unused —
+        # we only need the slots occupied, not the results.
+        for _ in range(cpu_count):
+            executor.submit(time.sleep, 5)
+
+        # Start heartbeat thread — must be independent of the executor.
+        heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
+        heartbeat_thread.start()
+
+        try:
+            # The heartbeat should write within 1 second despite the saturated executor.
+            wrote = write_done.wait(timeout=1.0)
+            assert wrote, "Heartbeat thread did not write within 1s (executor was saturated)"
+            assert heartbeat_file.exists(), "Heartbeat file was not written"
+            assert write_count[0] > 0, "write_count did not increment"
+        finally:
+            stop_event.set()
+            heartbeat_thread.join(timeout=2)
+            # Cancel the saturating futures immediately.
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def test_frozen_loop_surviving_thread_self_kills(self):
+        """The surviving off-loop thread fires the SIGKILL when the loop is frozen.
+
+        Inversion meaning of #1767 isolation (#1815): because the heartbeat
+        thread runs independently of the (now-frozen) event loop, it observes
+        the stale beacon and triggers ``_self_kill`` so launchd can respawn a
+        healthy worker — exactly the kill path the loop itself could never run.
+        """
+        import time
+        from unittest.mock import patch
+
+        import worker.__main__ as wm
+
+        now = time.monotonic()
+        stale_tick = now - 999.0  # far beyond any threshold — loop is wedged
+
+        kills: list[str] = []
+        with (
+            patch.object(wm, "WORKER_DEADMAN_ENABLED", True),
+            patch.object(wm, "WORKER_DEADMAN_STALENESS_THRESHOLD", 90.0),
+            patch.object(wm, "_self_kill", lambda: kills.append("killed")),
+            patch.object(wm, "_green_heartbeat_write", lambda: None),
+            patch("agent.session_state.get_loop_tick", return_value=stale_tick),
+            patch.object(wm.time, "monotonic", return_value=now),
+        ):
+            wm._heartbeat_cycle(armed=True, thread_start=now - 200.0, beacon_log_next=0.0)
+
+        assert kills == ["killed"], "Surviving off-loop thread must self-kill on a frozen loop"
+
+    def test_heartbeat_threshold_env_override(self, monkeypatch):
+        """HEARTBEAT_THRESHOLD uses the HEARTBEAT_THRESHOLD env var when set."""
+        import importlib
+
+        monkeypatch.setenv("HEARTBEAT_THRESHOLD", "90")
+        # Reload the module so the module-level constant is re-evaluated.
+        importlib.reload(wwd)
+        assert wwd.HEARTBEAT_THRESHOLD == 90
+
+    def test_heartbeat_threshold_default_is_180(self, monkeypatch):
+        """HEARTBEAT_THRESHOLD defaults to 180 when env var is not set."""
+        import importlib
+
+        monkeypatch.delenv("HEARTBEAT_THRESHOLD", raising=False)
+        importlib.reload(wwd)
+        assert wwd.HEARTBEAT_THRESHOLD == 180

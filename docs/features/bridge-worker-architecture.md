@@ -130,7 +130,8 @@ The worker's startup sequence is deterministic:
 |------|----------|---------|
 | 1 | `AgentSession.rebuild_indexes()` | Repair stale/corrupt Redis index entries |
 | 2 | `cleanup_corrupted_agent_sessions()` | Remove malformed session records and reap cross-process orphan `claude`/MCP processes; phantom-filter guarded and calls `repair_indexes()` to clear orphan `$IndexF` members (issues #1069, #1271). Returns `{"corrupted": int, "orphans": int}`. Also prunes JSONL telemetry files under `logs/session_telemetry/` older than 14 days (see [Session Telemetry](session-telemetry.md)). |
-| 3 | `_recover_interrupted_agent_sessions_startup()` | Reset running sessions to pending (orphaned from prior process) |
+| 3a | `_sweep_dead_worker_sessions()` | Finalize `running` sessions whose `claude_pid` is dead (`os.kill(pid, 0)` raises `OSError`) to `killed`, then trigger `bridge.agent_catchup` so unanswered messages re-enqueue (issue #1767). **Must run before Step 3b** — once 3b resets all `running` sessions to `pending`, there are no `running` sessions left to inspect by PID. |
+| 3b | `_recover_interrupted_agent_sessions_startup()` | Reset remaining `running` sessions to `pending` (orphaned from prior process with a live or absent PID) |
 | 3.5 | `register_worker_pid()` | Write `worker:registered_pid:{hostname}:{pid}` (TTL 24h) so the cross-process reaper's skip-set excludes this worker (issue #1271 self-suicide guard) |
 | 4 | `_cleanup_orphaned_claude_processes()` | Backward-compat shim — delegates to `_reap_orphan_session_processes()`. The hourly `agent-session-cleanup` reflection now covers the same OS-table scan, so startup is no longer the only call site (issue #1271). |
 | 4.5 | `verify_harness_health()` | Verify CLI harness binary (`claude`) is available and healthy; fatal if missing (see [Harness Abstraction](harness-abstraction.md)) |
@@ -231,8 +232,8 @@ clients well before that window.
 worker/__main__.py startup
     |
     v
-asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
-    |
+supervise("idle-sweeper", run_idle_sweep)   # respawns on unexpected death
+    |                                        # (see Worker Fault Containment #1816)
     v
 loop every IDLE_SWEEP_INTERVAL seconds:
     _sweep_once()
@@ -328,7 +329,7 @@ Sessions belonging to the same `worker_key` always execute **strictly one at a t
 
 ### Global Session Ceiling (`MAX_CONCURRENT_SESSIONS`)
 
-A single global asyncio semaphore limits how many sessions can execute simultaneously across **all** worker keys and **all** session types:
+A global, owner-keyed `SlotLeaseRegistry` limits how many sessions can execute simultaneously across **all** worker keys and **all** session types:
 
 ```bash
 # Set the ceiling (default: 8)
@@ -339,14 +340,16 @@ MAX_CONCURRENT_SESSIONS=8
 ```
 
 **Implementation details:**
-- `_global_session_semaphore` is a module-level `asyncio.Semaphore | None` in `agent/session_state.py` (re-exported from `verify if this module exists or reference correct import path`)
+- `_slot_registry` is a module-level `SlotLeaseRegistry | None` in `agent/session_state.py`, wrapping one `asyncio.Semaphore` for backpressure plus an `{owner_session_id: Lease}` map (issue #1820, replacing the prior ownerless `_global_session_semaphore`). See [Slot-Lease Ownership](slot-lease-ownership.md) for the full design.
 - Initialized by `_run_worker()` in `worker/__main__.py` **before** any worker loop is created
 - Clamped to minimum 1 to prevent deadlock (`MAX_CONCURRENT_SESSIONS=0` → 1 with a warning log)
-- The semaphore is acquired **before** `_pop_agent_session()` is called, so `transition_status("running")` never occurs without a slot — the dashboard count stays accurate
-- Released after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`)
+- `registry.acquire()` blocks **before** `_pop_agent_session()` is called, so `transition_status("running")` never occurs without a slot — the dashboard count stays accurate. `registry.bind(owner)` records the lease synchronously right after the pop resolves a session (no lease exists during the pop gap itself)
+- Released via `registry.release(owner)` after `_execute_agent_session()` completes (in the `finally` block, via all code paths including `CancelledError`); an out-of-band kill instead calls `registry.reclaim(owner)` from `_apply_recovery_transition`, and a hoisted top-of-tick reap pass in the health check reclaims any lease still held by a session that has already reached a terminal status
 - When `None` (e.g., in tests that don't call `_run_worker()`), no ceiling applies
 
 **PM/dev deadlock prevention:** There is no session-type-specific cap. PM sessions that spawn child dev sessions transition to `waiting_for_children`, which triggers `output_router.route_session_output` to return `"deliver"` — the PM releases its global slot before the child needs it. Child dev sessions sort ahead of peers via the child-boost ordering in `sort_key`, so they acquire the freed slot next. See issues #1004 and #1021 for the history.
+
+**Wedge detection and self-heal:** When the registry is exhausted (`registry.permits_free() == 0`) and running sessions are fewer than `MAX_CONCURRENT_SESSIONS`, the health monitor's hoisted reap pass (`_agent_session_health_check`) emits a `WARNING` leaked-slot fingerprint log line, then reclaims any lease whose owner has reached a terminal status — no process restart required (issue #1820, closing the #1537/#1808 leak class the old logging-only fingerprint could only report on). The most common production path is H3 (PTY-pool saturation): sessions hold a global slot while blocked inside `_execute_agent_session` waiting for a granite PTY pair, which can exhaust the registry when `GRANITE__PTY_POOL_SIZE < MAX_CONCURRENT_SESSIONS`. See [Worker Wedge Investigation](worker-wedge-investigation.md) for the root-cause analysis and [Slot-Lease Ownership](slot-lease-ownership.md) for the reclaim path.
 
 ### Redis Pop Lock (TOCTOU Prevention)
 
@@ -416,6 +419,11 @@ The fast path covers normal operation. The health check catches edge cases: miss
 **CLI path** (`python -m tools.valor_session create`): Same — `_push_agent_session()` publishes to `valor:sessions:new` → worker receives within ~1s. Prior to issue #778, CLI-created sessions relied solely on the health check (worst case: 10 minutes).
 
 **Implementation note**: `_session_notify_listener` uses a **dedicated** `redis.Redis` connection (created inside `_listen_in_thread`) with `socket_timeout=None` and `socket_connect_timeout=None`. It reads `host`/`port`/`db` from `POPOTO_REDIS_DB.connection_pool.connection_kwargs` but passes both timeout parameters explicitly. This is required because the global `POPOTO_REDIS_DB` pool has `socket_timeout=5` (tuned for request-response commands), which would cause the blocking `pubsub.listen()` iterator to raise a socket timeout exception after 5 idle seconds — triggering an unnecessary reconnect cycle with a 5-second dead window during which any published notification would be lost (issue #824).
+
+**Subscribe-time NUMSUB self-verification (issue #1804)**: after `pubsub.subscribe()` returns, `_listen_in_thread` verifies `PUBSUB NUMSUB valor:sessions:new >= 1` on the same `socket_timeout=None` connection. It retries up to 3 times (~300 ms total) to absorb registration latency. If NUMSUB still reports 0, a WARNING is logged and the function returns early — falling through the existing `finally` teardown — so the outer `while True` loop re-subscribes after its 5 s backoff. All of this runs in the listener's own thread (no cross-thread machinery). Post-subscribe drift (NUMSUB → 0 after a previously-good subscribe) is left to the existing 300 s `_agent_session_health_check` backstop (`agent/session_health.py`), which re-scans `pending` sessions and nudges/starts workers.
+
+**`VALOR_WORKER_MODE=standalone` in worker plist**: `com.valor.worker.plist` now sets `VALOR_WORKER_MODE=standalone` in `EnvironmentVariables`. The runtime behavior was already standalone (via `os.environ.setdefault("VALOR_WORKER_MODE", "standalone")` in `worker/__main__.py:main()` before the worker loop), but the explicit plist entry makes `ps eww` inspection unambiguous — the variable is visible in the launchd launch environment, not just the mutated runtime environment.
+
 ## Worker Restart Recovery
 
 Worker restarts (SIGTERM, crash, or explicit `verify command exists or correct syntax`) are non-destructive. Sessions in `pending` or `running` state at restart time are both preserved and will be executed by the new worker process.
@@ -426,7 +434,10 @@ Worker restarts (SIGTERM, crash, or explicit `verify command exists or correct s
 
 ### Interrupted `running` sessions are re-queued on next startup
 
-When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, step 3 of the startup sequence (`_recover_interrupted_agent_sessions_startup()`) detects stale `running` sessions and transitions them back to `pending` so they are retried by the new worker.
+When the worker process is killed mid-execution, the `asyncio.CancelledError` handler does **not** finalize the session. The session remains in `running` state in Redis. On the next worker startup, two steps handle stale `running` sessions in order:
+
+1. **Step 3a — `_sweep_dead_worker_sessions()`** (issue #1767): checks `claude_pid` liveness via `os.kill(pid, 0)`. Sessions whose subprocess is provably dead are finalized to `killed` and `bridge.agent_catchup` is triggered so the user's unanswered message re-enqueues. This step must run first — otherwise Step 3b would reset all `running` sessions to `pending` before PID liveness can be checked.
+2. **Step 3b — `_recover_interrupted_agent_sessions_startup()`**: handles the remaining `running` sessions (those with a live PID or no PID yet) and transitions them back to `pending` so they are retried by the new worker.
 
 ### Local session recovery is `session_type`-aware (#1092)
 
@@ -477,7 +488,7 @@ The bridge and worker share a single contract: the `AgentSession` Popoto model i
 | `chat_id` | Yes | Yes (computes `worker_key` for teammate sessions; slugged dev sessions use `slug` instead, PM and slugless dev use `project_key`) |
 | `message_text` | Yes | Yes (passed to Claude) |
 | `session_type` | Yes | Yes (PM/dev/teammate persona selection) |
-| `queued_steering_messages` | Any process | Worker injects at turn boundary |
+| Redis steering list (`steering:{session_id}`, `agent/steering.py`) | Any process | Worker injects at turn boundary |
 
 The bridge also reads `AgentSession.status` to determine if a session is already active (dedup logic).
 

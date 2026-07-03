@@ -184,6 +184,27 @@ SHUTTING_DOWN = False
 # Pattern established by worker graceful shutdown (PR #742).
 _background_tasks: list = []
 
+
+def _log_bg_task_exception(task: asyncio.Task) -> None:
+    """Done-callback: log an unhandled exception from a fire-and-forget task.
+
+    D3 (issue #1817): a bare ``asyncio.create_task(...)`` with no held
+    reference and no done-callback lets the GC collect the task mid-flight
+    and silently drops any exception it raised (only visible, if at all, as
+    an "exception was never retrieved" warning at GC time). This callback
+    makes that failure loud without changing task semantics — task-internal
+    ``except Exception`` blocks still handle expected failures; this is the
+    defense-in-depth backstop for anything that slips past them (e.g. a bug
+    in the handler itself). ``CancelledError`` is expected during shutdown
+    and is not logged as an error.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(f"[bg-task] {task.get_name()} raised: {exc}")
+
+
 # Project directory (for running scripts, checking flags, etc.)
 _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 
@@ -455,15 +476,21 @@ SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 
 
 def _get_active_projects() -> list[str]:
-    """Determine active projects for this machine from config."""
-    from bridge.routing import _resolve_config_path
+    """Determine active projects for this machine from config.
+
+    Uses the same guarded reader as `bridge.routing.load_config` so a
+    partial/corrupt config (e.g. mid-iCloud-write, racing a launchd
+    KeepAlive respawn) falls back to the last-known-good sidecar and logs,
+    instead of raising at import time (module-level call at
+    `ACTIVE_PROJECTS = _get_active_projects()` below).
+    """
+    from bridge.routing import _guarded_json_load, _resolve_config_path
 
     config_path = _resolve_config_path()
     if not config_path.exists():
         return ["valor"]
 
-    with open(config_path) as f:
-        config = json.load(f)
+    config = _guarded_json_load(config_path)
 
     # Get this machine's name (e.g. "Valor the Captain")
     try:
@@ -873,13 +900,11 @@ async def _ack_steering_routed(
     sender_name: str,
     text: str,
     log_context: str,
-    agent_session=None,
 ) -> None:
     """Bundle the terminal sequence shared by every steering routing branch.
 
-    Detects abort keywords, optionally writes to the AgentSession Popoto
-    model (when ``agent_session`` is given — durable, PM-visible),
-    pushes to the Redis steering queue, reacts to the user's message
+    Detects abort keywords, pushes to the Redis steering queue (the sole
+    steering inbox — see agent/steering.py), reacts to the user's message
     with the appropriate emoji, logs, and marks the message handled.
 
     Caller is responsible for ``return`` after this call. ``log_context``
@@ -941,11 +966,6 @@ async def _ack_steering_routed(
                 logger.warning(f"[steering-ingest] Failed to schedule task: {e}")
 
     is_abort = text.strip().lower() in ABORT_KEYWORDS
-    if agent_session is not None:
-        # Dual-push: the durable PM-visible write goes to the Popoto model's
-        # queued_steering_messages field BEFORE the Redis push, so the PM
-        # session sees it even before the worker drains the queue.
-        agent_session.push_steering_message(text)
     push_steering_message(session_id, text, sender_name, is_abort=is_abort)
 
     if not message.media:
@@ -1065,6 +1085,13 @@ async def main():
     if not API_ID or not API_HASH:
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         sys.exit(1)
+
+    # Configure resilient Redis connection before any Popoto model is accessed.
+    # Degrade-don't-die: if Redis is unreachable at boot this logs a warning
+    # and returns without raising so operators can start Redis and restart.
+    from config.redis_bootstrap import configure_resilient_redis  # noqa: PLC0415
+
+    configure_resilient_redis()
 
     # Validate agent definition files are usable on disk. Missing, malformed,
     # or unreadable files are not fatal — the SDK falls back gracefully — but
@@ -1447,10 +1474,10 @@ async def main():
         # this turn to reason about wrapped content. `safe_clean_text`
         # (built from `safe_text`) flows into AgentSession.message_text and
         # any other persisted derivative.
-        clean_text = clean_message(text, project)
+        clean_text = clean_message(text)
         if not clean_text:
             clean_text = "--file attachment only--" if message.media else "--empty message--"
-        safe_clean_text = clean_message(safe_text, project)
+        safe_clean_text = clean_message(safe_text)
         if not safe_clean_text:
             safe_clean_text = "--file attachment only--" if message.media else "--empty message--"
 
@@ -1609,7 +1636,14 @@ async def main():
             except Exception as e:
                 logger.warning(f"Emoji reaction selection failed (non-fatal): {e}")
 
-        asyncio.create_task(select_and_set_emoji_reaction())
+        # Held in _background_tasks + a done-callback (D3, issue #1817) so the
+        # GC cannot collect this task mid-flight and any exception that slips
+        # past the handler's own try/except is logged instead of vanishing.
+        _emoji_task = asyncio.create_task(
+            select_and_set_emoji_reaction(), name="select_and_set_emoji_reaction"
+        )
+        _emoji_task.add_done_callback(_log_bg_task_exception)
+        _background_tasks.append(_emoji_task)
 
         # 3. Work-type classification (separate async task, non-blocking)
         classification_result = {}  # Mutable container for async classification result
@@ -1629,7 +1663,11 @@ async def main():
             except Exception as e:
                 logger.debug(f"Work classification failed (non-fatal): {e}")
 
-        asyncio.create_task(classify_work_type())
+        # Held in _background_tasks + a done-callback (D3, issue #1817) — see
+        # the emoji-reaction task above for the rationale.
+        _classify_task = asyncio.create_task(classify_work_type(), name="classify_work_type")
+        _classify_task.add_done_callback(_log_bg_task_exception)
+        _background_tasks.append(_classify_task)
 
         # Synchronous fast-path: PR/issue references always mean SDLC work.
         # The async classifier above may not finish before enqueue_agent_session runs,
@@ -1979,7 +2017,6 @@ async def main():
                             )
 
                         if guard_sessions:
-                            guard_session = guard_sessions[0]
                             await _ack_steering_routed(
                                 client,
                                 event,
@@ -1992,7 +2029,6 @@ async def main():
                                     f"merged message into session {guard_session_id} "
                                     f"(age={guard_age:.3f}s)"
                                 ),
-                                agent_session=guard_session,
                             )
                             return
                         else:
@@ -2089,7 +2125,6 @@ async def main():
                                     f"interjection to session "
                                     f"{fresh_session.session_id}"
                                 ),
-                                agent_session=fresh_session,
                             )
                             return
                         else:
@@ -2792,19 +2827,41 @@ async def main():
     # mismatch loudly. This is a warn-not-crash gate: a misconfigured bot entry
     # must not take down a running bridge, but it must be impossible to miss.
     if BOT_ID_TO_PROJECT:
-        from bridge.config_validation import ConfigValidationError, validate_bot_live_flags
+        from bridge.config_validation import validate_bot_live_flags
 
         async def _resolve_bot_entity(bot_id: int):
             return await client.get_entity(bot_id)
 
-        try:
-            await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+        quarantine_ids, detail = await validate_bot_live_flags(CONFIG, _resolve_bot_entity)
+
+        if quarantine_ids:
+            # Confirmed non-bot ids: pop them from the registry so the loop-guard
+            # no longer suppresses their messages. This relies on the dict-aliasing
+            # invariant: BOT_ID_TO_PROJECT was aliased to
+            # _routing_module.BOT_ID_TO_PROJECT at line ~652 above; both names point
+            # to the same object, so a pop here clears the routing copy too. Only
+            # CONFIRMED non-bot ids (resolver returned User.bot=False) are popped —
+            # probe failures (resolver raised) are conservatively left registered.
+            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", detail)
+            for bot_id in quarantine_ids:
+                BOT_ID_TO_PROJECT.pop(bot_id, None)
+            if not BOT_ID_TO_PROJECT:
+                logger.warning(
+                    "Bot registry empty after quarantine (%d id(s) removed) — "
+                    "no registered bots remain",
+                    len(quarantine_ids),
+                )
+        elif detail is not None:
+            # Probe failures only — could not confirm human or bot, nothing popped.
+            logger.warning(
+                "Bot live-flag probe inconclusive (could not confirm non-bot): %s",
+                detail,
+            )
+        else:
             logger.info(
                 "Registered bot live-flag validation passed (%d bot(s))",
                 len(BOT_ID_TO_PROJECT),
             )
-        except ConfigValidationError as e:
-            logger.error("REGISTERED BOT MISCONFIGURATION (#1574): %s", e)
 
     # Register session queue callbacks for each project
     from agent.agent_session_queue import cleanup_stale_branches

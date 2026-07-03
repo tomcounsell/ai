@@ -6,6 +6,15 @@ owner: [Name]
 created: [YYYY-MM-DD]
 tracking: [GitHub Issue URL - added automatically]
 last_comment_id: [Latest issue comment ID incorporated into this plan - updated automatically]
+<!-- Template adaptability: the universal sections below (Problem, Solution,
+     Step by Step Tasks, Verification, Risks, etc.) apply to any repo. Sections
+     and frontmatter fields that encode a specific repo's conventions — the
+     mandated `## Documentation` / `## Update System` / `## Agent Integration` /
+     `## Test Impact` set, and any tool/path references in their guidance — are
+     this repo's requirements, declared in `docs/sdlc/do-plan.md`. A repo without
+     those conventions keeps the universal sections and adapts or omits the
+     repo-specific ones. -->
+
 ---
 
 # [Feature Name]
@@ -157,7 +166,7 @@ Solo dev work is fast — the bottleneck is alignment and review. Appetite measu
 |-------------|---------------|---------|
 | Example: `EXAMPLE_API_KEY` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('EXAMPLE_API_KEY')"` | Example service access |
 
-Run all checks: `python scripts/check_prerequisites.py docs/plans/{slug}.md`
+Run all checks via the repo's prerequisite checker if it has one (this repo: `python scripts/check_prerequisites.py docs/plans/{slug}.md`); otherwise run each Check Command above directly.
 
 ## Solution
 
@@ -280,22 +289,27 @@ outcomes). See `docs/features/machine-readable-dod.md` for examples.]
 - [ORDERED] [Item blocked by a human-gated event — name the event]
 - [SEPARATE-SLUG #NNN] [Item filed as separate issue — link the issue]
 
+<!-- The two sections below are repo-convention sections (see the template
+     adaptability note at the top). Their guidance is framed for THIS repo;
+     `docs/sdlc/do-plan.md` is the authority. A repo with a different deployment
+     or agent-integration model adapts the prompts accordingly, or omits these
+     sections if its plan conventions don't require them. -->
+
 ## Update System
 
-[This system is deployed across multiple machines via the `/update` skill. Consider whether the update process needs changes.]
+[If this system is deployed/propagated to multiple environments, consider whether the deploy/update process needs changes. In this repo that means the `/update` skill.]
 
-- Whether the update script or update skill needs changes
+- Whether the update/deploy process needs changes
 - New dependencies or config files that must be propagated
 - Migration steps for existing installations
 - If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
 
 ## Agent Integration
 
-[The agent receives Telegram messages via the bridge and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.]
+[If new functionality must be reachable by an agent/tool surface, describe the wiring. In this repo the agent receives Telegram messages via the bridge and uses tools exposed through MCP servers registered in `.mcp.json`; new Python functions in `tools/` are invisible until wrapped.]
 
-- Whether a new or existing MCP server in `mcp_servers/` needs to expose this functionality
-- Changes to `.mcp.json` registration
-- Whether the bridge itself (`bridge/telegram_bridge.py`) needs to import/call the new code directly
+- Whether a new or existing tool/MCP surface needs to expose this functionality (this repo: `mcp_servers/` + `.mcp.json`)
+- Whether the entry point (this repo: `bridge/telegram_bridge.py`) needs to import/call the new code directly
 - Integration tests that verify the agent can actually invoke the new capability
 - If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
 
@@ -363,23 +377,19 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - `plan-maker` - Planning subagent
 - `frontend-tester` - Browser testing
 
-**Tier 2 — Specialists (recruit for specific needs):**
-- `debugging-specialist` - Complex bug investigation, memory leaks, async debugging
-- `async-specialist` - Concurrency, rate limiting, circuit breakers, event loop optimization
-- `security-reviewer` - OWASP vulnerability scanning, auth review, secrets detection
-- `performance-optimizer` - Query optimization, multi-tier caching, profiling
-- `mcp-specialist` - MCP server development and tool integration
-- `agent-architect` - Agent systems, context management, living codebase patterns
-- `api-integration-specialist` - External API auth, rate limiting, error strategies
-- `data-architect` - Schema design, migrations, audit triggers, archival
-- `migration-specialist` - Data migration, traffic routing, rollback procedures
-- `documentation-specialist` - Doc format standards, templates, Mermaid diagrams
-- `test-writer` - Edge case generation, assertion patterns, async testing
-- `ui-ux-specialist` - Conversational UX, error humanization, accessibility
-- `designer` - UI implementation, atomic design, design system adherence
+**Domain expertise (no dedicated agent — prompt a Tier 1 agent):**
+There is no standing pool of "specialist" agents. For domain-specific work
+(async/concurrency, Redis/Popoto data, security/untrusted-input, debugging,
+MCP-tool/API integration, conversational-UX/testing), assign a `builder` (or
+`code-reviewer` for review-only work), add a `Domain: <tag>` line to the task,
+and paste the matching rules from [`DOMAIN_FRAMING.md`](DOMAIN_FRAMING.md) into
+the task's assignment. That cheatsheet is the salvaged, repo-specific signal from
+the retired specialist agents. For broad recon use the built-in `Explore` /
+`general-purpose` agents.
 
 **Service Agents (domain-specific task delegation):**
-- `linear`, `notion`, `sentry`, `stripe`, `render`
+- `linear`, `notion`, `sentry`, `stripe`, `render` — portable agents that wrap a
+  SaaS/MCP integration; available in any repo via the synced `~/.claude/agents/`.
 
 ## Step by Step Tasks
 

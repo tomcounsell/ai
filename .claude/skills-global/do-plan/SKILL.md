@@ -6,22 +6,13 @@ allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion, ToolSearch, WebSe
 
 # Make a Plan (Shape Up Methodology)
 
-## Stage Marker
+## Repo Context Probe
 
-At the very start of this skill, write an in_progress marker:
+If `docs/sdlc/do-plan.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-```bash
-sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number {issue_number} 2>/dev/null || true
-```
+The context file is where a repo layers its planning automation onto this generic baseline: stage/status markers, a recon-validation gate, blast-radius and memory tools, the plans/infra directory conventions, required plan sections and frontmatter fields, the commit-on-main rule, and a plan-revising lock. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, the Read/Write tools, and optionally WebSearch — it writes a structured plan document and links a tracking issue, with no repo-specific tooling required.
 
-After the plan document is committed and pushed (end of Step 5), write the completion marker:
-
-```bash
-sdlc-tool stage-marker --stage PLAN --status completed --issue-number {issue_number} 2>/dev/null || true
-```
-
-
-Creates structured feature plans in `docs/plans/` following Shape Up principles: narrow the problem, set appetite, rough out the solution, identify rabbit holes, and define boundaries.
+Creates structured feature plans (by default under `docs/plans/`) following Shape Up principles: narrow the problem, set appetite, rough out the solution, identify rabbit holes, and define boundaries.
 
 ## What this skill does
 
@@ -40,7 +31,7 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+By default `gh` targets the repository of the current working directory. If the context file declares a cross-repo targeting mechanism (e.g. a `GH_REPO` env var), honor it so `gh` commands hit the intended repository.
 
 ## When to Use
 
@@ -54,13 +45,12 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 
 ### Phase 0: Validate Recon (ISSUE → PLAN gate)
 
-Before planning, verify the source issue has reconnaissance evidence:
-
-```bash
-python .claude/hooks/validators/validate_issue_recon.py ISSUE_NUMBER
-```
-
-If this fails, the issue needs a `## Recon Summary` section added via `/do-issue` Step 3 (the reconnaissance routine). Do not proceed with planning until recon is validated — plans built on unverified assumptions produce rework.
+Before planning, verify the source issue has reconnaissance evidence — a
+`## Recon Summary` (or equivalent) section grounding the issue's claims in the
+actual code. If the context file declares a recon-validation gate, run it and do
+not proceed until it passes. Otherwise, read the issue and confirm by hand that
+its claims are evidence-backed. Plans built on unverified assumptions produce
+rework.
 
 ### Phase 0.5: Freshness Check (has the world moved since the issue was filed?)
 
@@ -127,11 +117,7 @@ Gather relevant external context before planning. This surfaces current document
 
 4. **Filter results** — Only retain findings that are directly relevant to the technical approach. Discard generic results, marketing content, or tangentially related material.
 
-5. **Save valuable findings as memories** for future plan reuse:
-   ```bash
-   "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.memory_search save "Finding: [concise description with source URL]" --importance 5.0 --source agent
-   ```
-   Memory saves are fire-and-forget — if they fail, continue without error.
+5. **Save valuable findings for future reuse** — if the context file declares a memory/notes store, save each finding there (fire-and-forget — if it fails, continue without error). Otherwise capture the findings inline in the plan's `## Research` section (next step) and skip the external save.
 
 6. **Write the `## Research` section** in the plan document with the findings. Include:
    - The search queries used
@@ -149,18 +135,7 @@ Gather relevant external context before planning. This surfaces current document
    2. Read the `## Recon Summary` section of the issue if present. Extract the "Confirmed," "Revised," "Pre-requisites," and "Dropped" buckets — these are direct inputs to the plan's Solution and No-Gos sections.
    3. Follow every cited sibling issue or PR referenced in the issue body. For each, summarize its relevance to the current work in one sentence. Record these under Prior Art.
 2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed)
-3. **Blast radius analysis** - If the change involves code modifications, run the code impact finder:
-   ```bash
-   "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
-   ```
-   Use results to inform plan sections:
-   - `impact_type="modify"` -> **Solution** section
-   - `impact_type="dependency"` -> **Risks** section
-   - `impact_type="test"` -> **Success Criteria** section
-   - `impact_type="config"` -> **Solution** section
-   - `impact_type="docs"` -> **Documentation** section
-   - Tangentially coupled files (< 0.5 relevance) -> **Rabbit Holes** section
-   Skip if the change is purely documentation or process-related.
+3. **Blast radius analysis** - If the change involves code modifications, map the affected files. If the context file declares a blast-radius / code-impact tool, run it and route its results to plan sections (modify → **Solution**, dependency → **Risks**, test → **Success Criteria**, config → **Solution**, docs → **Documentation**, tangential coupling → **Rabbit Holes**). Otherwise use `git grep` and `Grep`/`Glob` over the symbols and paths the issue names to estimate the blast radius by hand. Skip if the change is purely documentation or process-related.
 
 4. **Prior art search** - Search closed issues and merged PRs for related work. This prevents
    proposing solutions that have already been tried (and failed) or re-solving problems that
@@ -264,7 +239,7 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
 
 Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 
-**Conditional INFRA doc creation:** If the plan introduces new dependencies, services, external API calls, or deployment changes, create `docs/infra/{slug}.md` using this structure:
+**Conditional INFRA doc creation (only if the context file declares an infra-docs convention):** If the plan introduces new dependencies, services, external API calls, or deployment changes AND the repo keeps durable infrastructure docs, create one (this repo: `docs/infra/{slug}.md`) using this structure:
 
 ```markdown
 # {Feature Name} — Infrastructure
@@ -452,13 +427,7 @@ git add docs/plans/{slug}.md && git commit -m "Plan revision ({slug}): address c
 git push
 ```
 
-2b. **Clear the plan-revising lock** — immediately after committing and pushing, clear the lock so the SDLC router can route to build. The lock and `revision_applied` must move together; both reflect "plan is settled":
-```bash
-# Clear the plan_revising lock (G7 guard will self-heal even if this is skipped,
-# but clearing explicitly is the correct signal that the revision is complete)
-sdlc-tool meta-set --key plan_revising --value false \
-  --issue-number {issue_number} 2>/dev/null || true
-```
+2b. **Clear the plan-revising lock (only if the context file declares one)** — immediately after committing and pushing, if the repo uses a plan-revising lock to gate build dispatch, clear it so the pipeline can route to build. The lock and `revision_applied` must move together; both reflect "plan is settled". Follow the context file's exact invocation. In the generic case there is no lock — `revision_applied: true` in the frontmatter is the settled signal.
 
 3. **Invite discussion**:
 

@@ -130,6 +130,89 @@ def _get_redis():
     return redis.Redis.from_url(redis_url, decode_responses=True)
 
 
+# --- Per-message atomic producer claim (issue #1817, workstream B1) ----------
+#
+# `bridge:msgclaim:{chat_id}:{message_id}` is a plain (non-Popoto-managed)
+# SETNX gate that stops two near-simultaneous producers -- e.g. two machines
+# both live during iCloud `projects.json` sync lag -- from BOTH passing the
+# pre-enqueue `is_duplicate_message` check and both enqueueing the same
+# inbound message. It is NOT a replacement for the durable 2h DedupRecord
+# membership set above: that set covers catchup/reconciler replay across the
+# ~1h sync-lag window. This claim only needs to survive the brief overlap
+# between two producers racing on the SAME message.
+#
+# GRAIN OF SALT: keep CLAIM_TTL_SECONDS short. A long TTL here was a BLOCKER
+# in an earlier critique round -- it would orphan the claim key for up to an
+# hour on a mid-window process death, and the reconciler's retry (which also
+# calls claim_message) would then hit the orphaned key, fail SET NX, wrongly
+# conclude "a peer won", and silently drop the message for up to an hour --
+# recreating the exact bug this claim exists to fix. Sized to cross-actor
+# processing skew (seconds), not the sync-lag/replay window.
+_MSG_CLAIM_KEY_PREFIX = "bridge:msgclaim:"
+
+
+def _claim_ttl_seconds() -> int:
+    """Resolve the provisional short TTL, env-overridable via config/settings.py."""
+    try:
+        from config.settings import settings
+
+        return settings.features.bridge_msg_claim_ttl_seconds
+    except Exception:
+        # Settings unavailable (e.g. isolated unit test import order) -- fall
+        # back to the documented provisional default.
+        return 60
+
+
+CLAIM_TTL_SECONDS = _claim_ttl_seconds()
+
+
+async def claim_message(chat_id, message_id: int, ttl: int | None = None) -> bool:
+    """Atomically claim the right to enqueue/handle this message.
+
+    Returns ``True`` if this caller won the claim (must proceed to
+    enqueue/handle the message). Returns ``False`` if another producer
+    already holds the claim (a peer won -- this caller must skip the
+    message without enqueuing or recording durable dedup).
+
+    Fails OPEN (returns ``True``) on Redis errors -- a Redis hiccup must not
+    silently drop messages; the durable 2h membership set and the caller's
+    own dedup checks remain as the fallback safety net.
+    """
+    try:
+        r = _get_redis()
+        key = f"{_MSG_CLAIM_KEY_PREFIX}{chat_id}:{message_id}"
+        acquired = r.set(key, "1", nx=True, ex=ttl if ttl is not None else CLAIM_TTL_SECONDS)
+        return bool(acquired)
+    except Exception as e:
+        logger.warning(
+            "message claim failed for chat=%s msg=%s (failing open): %s",
+            chat_id,
+            message_id,
+            e,
+        )
+        return True
+
+
+async def release_message_claim(chat_id, message_id: int) -> None:
+    """Release the claim on this message so a retry can re-acquire it.
+
+    Callers use this on the fail-safe path: if enqueue raises after the
+    claim was won, the claim must be released so a peer's retry (or this
+    same actor's own retry) is not permanently locked out by an orphaned
+    key sitting at its TTL. Never raises; best-effort.
+    """
+    try:
+        r = _get_redis()
+        r.delete(f"{_MSG_CLAIM_KEY_PREFIX}{chat_id}:{message_id}")
+    except Exception as e:
+        logger.warning(
+            "message claim release failed for chat=%s msg=%s: %s",
+            chat_id,
+            message_id,
+            e,
+        )
+
+
 async def record_last_event(chat_id, event_ts=None) -> None:
     """Record the timestamp of the most recent received event for a chat.
 

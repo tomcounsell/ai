@@ -7,38 +7,11 @@ description: "Use when cascading documentation updates after code changes. Finds
 
 After a code change lands, find every document that references the changed area and make targeted, surgical updates so docs match the actual implementation.
 
-## Stage Marker
+## Repo Context Probe
 
-At the very start of this skill, write an in_progress marker:
+If `.claude/skill-context/do-docs.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-```bash
-sdlc-tool stage-marker --stage DOCS --status in_progress --issue-number {issue_number} 2>/dev/null || true
-```
-
-After all documentation updates are complete and committed (Step 4), write the completion marker:
-
-```bash
-sdlc-tool stage-marker --stage DOCS --status completed --issue-number {issue_number} 2>/dev/null || true
-```
-
-## Goal Alignment
-
-When invoked by `do-build`, this skill should receive the **plan context** (high-level goal, tracking issue, and acceptance criteria) so doc updates are aligned with the feature's intent — not just the raw diff.
-
-**How to get plan context** (in priority order):
-1. If the caller passed plan context inline (e.g., `do-build` includes it in the prompt), use that directly
-2. Check the PR body for `Closes #N` — fetch the issue, then look for `docs/plans/{slug}.md`
-3. Check the current git branch — if `session/{slug}`, look for `docs/plans/{slug}.md`
-4. If no plan found, proceed without it — the diff alone is sufficient for doc cascading
-
-When plan context is available, use it to:
-- Understand the *purpose* of the change (not just what moved)
-- Identify which docs are conceptually related even without keyword overlap
-- Write doc updates that explain the "why" alongside the "what"
-
-## Cross-Repo Resolution
-
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+The context file is where a repo layers its own automation onto this generic baseline. It may declare: a stage/status marker command to run at the start and end of the cascade; how to resolve plan context for the change; the canonical doc locations and index files to scan; a semantic doc-impact tool; an auto-fix substrate to run before manual edits; index tables to maintain; and how to mark an associated plan complete. When the file is absent (the common case), this skill runs entirely on `git` and `gh` — no repo-specific tooling required.
 
 ## Principles
 
@@ -52,7 +25,7 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 
 ## Step 1: Understand the Change (Parallel Exploration)
 
-Launch three agents in parallel using the Task tool.
+Launch the exploration agents in parallel using the Task tool. Agents A and B are always run; Agent C runs only if the context file declares a semantic doc-impact tool; Agent D runs only when `gh` is available and the host has GitHub issues.
 
 ### Agent A — Change Explorer
 
@@ -112,57 +85,32 @@ Spawn a sub-agent with this prompt:
 ```
 Inventory all documentation in this repository. For each file, note its purpose and what it references.
 
-Scan these locations:
-| Location | What lives there |
-|----------|-----------------|
-| CLAUDE.md | Primary project guidance, architecture, rules |
-| docs/features/*.md | Feature documentation |
-| docs/plans/*.md | Plans that may reference this as prerequisite |
-| .claude/skills-global/*/SKILL.md | Workflow skill definitions (cross-repo) |
-| .claude/skills/*/SKILL.md | Workflow skill definitions (project-only) |
-| .claude/commands/*.md | Slash commands |
-| config/identity.json | Structured identity data |
-| docs/*.md (top-level) | Deployment, tools-reference, etc. |
-| docs/features/README.md | Feature index table |
+Discover documentation with git rather than assuming a fixed layout:
+  git ls-files '*.md' 'docs/**' 'README*'
+
+If the repo-context file declares canonical doc locations or an index file, scan those
+first and in the priority order it gives. Otherwise, prioritize by convention:
+  1. README.md and any top-level project guidance file (e.g. CONTRIBUTING.md)
+  2. docs/**/*.md
+  3. Any documentation index/table-of-contents file
+  4. Everything else returned by git ls-files
 
 For each doc file found, produce one line:
   <filepath> | <one-line purpose> | <key topics/identifiers referenced>
 
-Sort by importance: CLAUDE.md first, then features, then commands, then plans, then everything else.
 Do NOT read file contents in full — scan headings, section titles, and grep for key identifiers.
 ```
 
-### Agent C — Semantic Impact Finder
+### Agent C — Semantic Impact Finder (only if the context file declares a tool)
 
-Spawn a sub-agent with this prompt:
+Run this agent **only** if the repo-context file declares a semantic doc-impact tool. The
+context file gives the exact invocation. Spawn a sub-agent that runs the declared tool with a
+2-3 sentence natural-language summary of the change, and report the ranked results.
 
-```
-Run the semantic doc impact finder to identify conceptually related documentation
-that may need updating, even if there are no shared keywords.
+If no semantic tool is declared (the generic case), skip Agent C — lexical matching from
+Agents A and B plus the stale-reference sweep (Step 2b) is sufficient.
 
-1. First, ensure the doc index is current:
-   python3 -c "import sys; sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}'); from tools.doc_impact_finder import index_docs; index_docs()"
-
-2. Then find affected docs using the change summary:
-   python3 -c "
-   import sys, json
-   sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}')
-   from tools.doc_impact_finder import find_affected_docs
-   results = find_affected_docs('''<CHANGE_SUMMARY>''')
-   for r in results:
-       print(f'{r.relevance:.2f} | {r.path} | {r.sections} | {r.reason}')
-   "
-
-Replace <CHANGE_SUMMARY> with a 2-3 sentence natural language summary of the code change.
-
-Report the results as a ranked list. If no embedding API key is configured, report
-that gracefully — the cascade continues with Agents A and B alone.
-```
-
-**Note**: Agent C may return zero results if no embedding API key is configured.
-This is expected — the cascade degrades gracefully to lexical-only matching.
-
-### Agent D — Issue Impact Scanner
+### Agent D — Issue Impact Scanner (only if `gh` and issues are available)
 
 Spawn a sub-agent with this prompt:
 
@@ -203,13 +151,11 @@ IMPORTANT: Only comment on issues where the impact is concrete and actionable.
 Do not comment on tangentially related issues. Quality over quantity.
 ```
 
-Wait for all four agents to complete before proceeding. If Agent C or D failed or returned no results, proceed with the remaining agents' output only.
+Wait for the launched agents to complete before proceeding. If an optional agent (C or D) was skipped or returned no results, proceed with the remaining agents' output only.
 
 ## Step 2: Triage — Cross-Reference Changes Against Docs
 
-Using the outputs from Agent A (change summary), Agent B (doc inventory), Agent C (semantic impact finder — if available), and Agent D (issue impact scanner — if available), evaluate every doc file against these four triage questions:
-
-For each document in the inventory, ask:
+Using the outputs from Agent A (change summary), Agent B (doc inventory), and Agents C/D when run, evaluate every doc file against these four triage questions:
 
 | # | Question | If YES |
 |---|----------|--------|
@@ -222,13 +168,11 @@ If ALL four answers are NO, skip that doc.
 
 ### Merge Semantic Results
 
-If Agent C returned results, add any documents it identified that aren't already in the affected list from the triage questions above. Agent C catches conceptual coupling that keyword matching misses (e.g., "changed session scoping" finding session-isolation.md even without shared identifiers).
-
-For each Agent C result with relevance >= 0.5:
+If Agent C ran and returned results, add any documents it identified that aren't already in the affected list. Agent C catches conceptual coupling that keyword matching misses. For each result with relevance >= 0.5:
 - If already in the affected list: note the semantic reason as additional context
 - If NOT in the affected list: add it with Agent C's reason as the justification
 
-Produce an ordered task list of affected docs. Order by dependency — foundational docs first (CLAUDE.md, feature docs), then derivative docs (commands, plans, skills).
+Produce an ordered task list of affected docs, ordered by dependency — foundational docs first (primary guidance, feature docs), then derivative docs (commands, plans, skills).
 
 Format:
 ```
@@ -247,71 +191,38 @@ If zero documents are affected, report that clearly and stop.
 
 ## Step 2b: Stale Reference Sweep
 
-Using the **Retired terms** from Agent A's summary, grep across ALL docs for old keywords that the change replaced. This catches references the triage questions miss — docs that use an old name, old pattern, or old concept without directly depending on the changed file.
+Using the **Retired terms** from Agent A's summary, grep across all tracked docs for old keywords that the change replaced. This catches references the triage questions miss — docs that use an old name, pattern, or concept without directly depending on the changed file.
 
 ```bash
-# For each retired term, search all doc locations
-rg "<retired-term>" docs/ CLAUDE.md config/identity.json config/personas/segments/ .claude/commands/ .claude/skills/ .claude/skills-global/
+# Search every tracked markdown/doc file for each retired term
+git grep -n "<retired-term>" -- '*.md' docs/ 2>/dev/null
 ```
 
-Add any new hits to the affected documents list from Step 2.
+If the context file declares additional doc locations (config files, persona segments, etc.), include them in the sweep. Add any new hits to the affected documents list from Step 2.
 
 ## Step 2c: What's Missing
 
 After identifying docs that need updating, ask what docs *should exist but don't*:
 
-- Did the change introduce a new feature that has no `docs/features/*.md` entry?
+- Did the change introduce a new feature that has no documentation entry?
 - Did it add a new command or skill with no corresponding documentation?
 - Did it create a new config key or environment variable not listed in setup/deployment docs?
-- Is there a new cross-file pattern or data flow that warrants a feature doc?
+- Is there a new cross-file pattern or data flow that warrants a dedicated doc?
 
 If something is missing, add a task to create it (not just update existing docs).
 
-## Step 2d: Run Auto-Fix Substrate (PR-changed files)
+## Step 2d: Auto-Fix Substrate (only if the context file declares one)
 
-Before doing manual edits, run the unified docs-auditor substrate against the
-PR-changed files. The substrate handles four classes of mechanical fix
-automatically — renamed markdown links, renamed paths/symbols, README index
-entries pointing at deleted files, and stale-term renames — so manual editing
-in Step 3 only handles cases the substrate can't auto-detect.
+If the repo-context file declares an auto-fix substrate, run it against the changed files
+**before** doing manual edits. Such a substrate typically handles mechanical fixes —
+renamed markdown links, renamed paths/symbols, index entries pointing at deleted files, and
+stale-term renames — so Step 3 only handles cases requiring human judgment. Follow the
+context file's invocation and output-handling instructions exactly, and do not re-commit
+changes the substrate commits itself.
 
-```bash
-python -c "
-from reflections.docs_auditor import audit
-import json, sys, os
-result = audit(
-    primary_path=None,
-    scope_mode='pr-changed-files',
-    apply_mode='apply',
-    project_key=os.environ.get('VALOR_PROJECT_KEY', 'valor'),
-)
-print(json.dumps(result))
-sys.exit(0 if result['status'] != 'error' else 1)
-"
-```
-
-The substrate:
-- Applies fixes directly to the working tree (or no-ops if nothing to fix)
-- Commits the fixes to the **current branch** (not a new branch)
-- Fires the memory-refresh hook after the commit (forward-compat with #1249)
-- Files GitHub issues (deduped) for cases requiring human judgment (deleted
-  targets, stub docs, orphan plans)
-
-Parse the JSON output:
-- `status: "ok"` — proceed to Step 3 for any remaining manual edits
-- `status: "error"` — abort and report; do NOT proceed to stage marker
-- `status: "disabled"` — auth probe failed; proceed in skill-only mode (no auto-fixes)
-
-Do not re-commit the substrate's changes — they are already committed by the
-substrate itself.
+If no substrate is declared (the generic case), skip this step — all edits are made manually in Step 3.
 
 ## Step 3: Make Surgical Edits
-
-The substrate from Step 2d handled mechanical fixes (renamed links/symbols,
-README index, stale-term renames). Step 3 handles the cases that require
-human judgment — behavioral descriptions, workflow steps, code examples that
-need rewording rather than mechanical rename, and any docs the substrate
-flagged but couldn't auto-fix.
 
 For each affected document still needing edits, in dependency order:
 
@@ -325,7 +236,7 @@ Rules for edits:
 - Update file paths if files moved or renamed
 - Update behavioral descriptions if defaults or workflows changed
 - Update tables/lists if entries were added, removed, or renamed
-- Add new entries to index tables (like `docs/features/README.md`) if a new feature doc was created as part of the change
+- Add new entries to any index/table-of-contents file if a new doc was created as part of the change (the context file names this repo's index file, if any)
 - Do NOT rewrite sections that are still accurate
 - Do NOT add speculative documentation about future changes
 - Do NOT change formatting style or section ordering unless the change requires it
@@ -347,7 +258,7 @@ After all edits are complete:
    Each change should be a targeted update, not a rewrite.
 
 3. **Flag conflicts for human review:**
-   If any document has contradictory information that cannot be resolved from the code alone (e.g., a plan doc describes future work that may or may not still be valid), create a GitHub issue:
+   If any document has contradictory information that cannot be resolved from the code alone (e.g., a plan doc describes future work that may or may not still be valid), create a GitHub issue (when `gh` is available):
    ```bash
    gh issue create --title "Doc conflict: <filepath> may need human review" \
      --body "The /do-docs cascade found a potential conflict in <filepath> after <change description>. The doc references <X> but the code now does <Y>. Human judgment needed to resolve."
@@ -375,51 +286,18 @@ After all edits are complete:
    **No changes needed**: (list if applicable)
    ```
 
-5. **Mark plan as docs-complete (if plan file exists):**
-
-   Locate the plan file using the current branch slug or PR context:
+5. **Commit changes:**
    ```bash
-   BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-   SLUG=$(echo "$BRANCH" | sed 's|^session/||')   PLAN_PATH="docs/plans/${SLUG}.md"
+   git add -A && git commit -m "Docs: cascade updates for <brief change description>"
    ```
-
-   If the plan file exists, add `status: docs_complete` to its YAML frontmatter:
-   ```python
-   import re
-   from pathlib import Path
-
-   plan_path = Path('docs/plans/{slug}.md')
-   if plan_path.exists():
-       text = plan_path.read_text()
-       if text.startswith('---\n'):
-           end = text.index('\n---', 4)
-           frontmatter = text[4:end]
-           if 'status:' not in frontmatter:
-               new_fm = frontmatter + '\nstatus: docs_complete'
-           else:
-               new_fm = re.sub(r'status:\s*\S+', 'status: docs_complete', frontmatter)
-           plan_path.write_text('---\n' + new_fm + '\n---' + text[end + 4:])
-       else:
-           plan_path.write_text('---\nstatus: docs_complete\n---\n\n' + text)
-       print(f'Marked {plan_path} as docs_complete')
-   else:
-       print(f'No plan found at {plan_path} — skipping plan marker')
-   ```
-
-   This marks the plan ready for deletion at merge time.
-
-6. **Commit and push changes:**
-   ```bash
-   git add -A && git commit -m "Docs: cascade updates for <brief change description>" && git push
-   ```
-   Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed."
+   Documentation changes must be persisted. If this fails (e.g., nothing to commit), that's fine — report "no changes needed." Push if the workflow expects it (`git push`).
 
 ## Edge Cases
 
 - **New feature with no existing docs**: Nothing to cascade. Report "no existing docs reference this area."
 - **Deleted feature**: Remove references from docs, but do NOT delete the feature doc itself — flag for human review.
 - **Renamed function/file**: Use grep to find all references across docs and update each one.
-- **Config key change**: Check CLAUDE.md, .env references in docs, setup commands, and deployment docs.
+- **Config key change**: Check primary guidance docs, `.env` references in docs, setup commands, and deployment docs.
 
 ## Integration
 

@@ -24,7 +24,7 @@ INTAKE CLASSIFIER (new, #320)
     |  find active/running/dormant sessions in same chat
     |  call classify_message_intent_async() with session context
     |
-    +-- interjection -> push to queued_steering_messages + Redis steering queue
+    +-- interjection -> push to the Redis steering queue (agent/steering.py)
     |                   (ack: 👀 reaction on user's message, or 🫡 for abort keywords)
     |
     +-- acknowledgment -> mark dormant session as completed
@@ -89,9 +89,8 @@ This prevents "ok" from accidentally completing a running session (Risk 3).
 | Component | How It Connects |
 |-----------|-----------------|
 | `bridge/telegram_bridge.py` | Calls `classify_message_intent_async()` after the reply-to fast path |
-| `models/agent_session.py` | `push_steering_message()` buffers interjections for Observer |
-| `agent/steering.py` | `push_steering_message()` pushes to Redis for PostToolUse hook |
-| `agent/agent_session_queue.py` | Nudge loop processes `queued_steering_messages` populated by the intake classifier |
+| `agent/steering.py` | `push_steering_message()` buffers interjections and pushes them to the Redis steering list for the PostToolUse hook |
+| `agent/session_executor.py` | Turn-boundary drain (`pop_all_steering_messages()`) consumes messages populated by the intake classifier |
 
 ## Testing
 
@@ -100,7 +99,7 @@ This prevents "ok" from accidentally completing a running session (Risk 3).
 - **Unit tests (fast path)**: Empty messages, no session context, response structure
 - **Unit tests (mocked API)**: All three intents, confidence threshold, API failure, invalid types, markdown code blocks
 - **Prompt validation**: All intents present, JSON format, context placeholders
-- **AgentSession integration**: push/pop steering messages
+- **Redis steering queue integration**: push/pop steering messages
 - **Real Haiku integration**: Classification accuracy for representative messages across all three intent types
 
 ## Key Files
@@ -109,5 +108,5 @@ This prevents "ok" from accidentally completing a running session (Risk 3).
 |------|---------|
 | `tools/classifier.py` | Intent classification functions and prompt |
 | `bridge/telegram_bridge.py` | Integration point in the message handler |
-| `models/agent_session.py` | `queued_steering_messages` field and push/pop helpers |
+| `agent/steering.py` | Redis steering list and push/pop/peek helpers |
 | `tests/test_intake_classifier.py` | 30 tests covering all routing paths |

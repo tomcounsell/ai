@@ -337,27 +337,187 @@ def create_app() -> FastAPI:
             pass
         return {"status": "error", "age_s": None}
 
+    def _get_slot_reclaims_total() -> int:
+        """Sum the per-project ``slot_reclaims`` Redis counters for projects
+        this machine serves (issue #1820).
+
+        ``slot_reclaims`` is incremented by the slot-lease reap pass
+        (``agent/session_health.py::_reap_slot_leases``) and by
+        ``_apply_recovery_transition`` whenever a leaked concurrency slot is
+        auto-reclaimed without a worker restart. Surfacing the total makes the
+        self-heal operator-visible: a rising count signals a recurring leak
+        worth root-causing (see docs/features/slot-lease-ownership.md).
+        Fail-quiet — never blocks the health payload.
+        """
+        try:
+            import redis as redis_lib
+
+            from ui.data.machine import get_machine_project_keys
+
+            r = redis_lib.Redis.from_url(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            total = 0
+            for project_key in get_machine_project_keys():
+                val = r.get(f"{project_key}:session-health:slot_reclaims")
+                if val:
+                    total += int(val)
+            return total
+        except Exception:
+            return 0
+
+    def _get_worker_slot_health() -> dict:
+        """Read the Fix #5 (#1821) out-of-domain recovery surface for the dashboard.
+
+        Additive-only fields for the ``worker`` health block: the current slot-lease
+        occupancy (``permits_free``/``held`` from ``worker:slot:leases:{host}``), the
+        recovery counters (``bridge_reclaims``, ``loop_wedged_detected``,
+        ``bridge_contract_stale``), the Fix #6 budget counters
+        (``tool_budget_tripped``, ``tool_budget_resolution_errors``), and the last few
+        ``worker:watchdog:actions`` entries. Fail-quiet — never blocks the health
+        payload; every field defaults to a safe zero/None on any Redis error.
+        """
+        result: dict = {
+            "permits_free": None,
+            "held": None,
+            "bridge_reclaims": 0,
+            "loop_wedged_detected": 0,
+            "bridge_contract_stale": 0,
+            "tool_budget_tripped": 0,
+            "tool_budget_resolution_errors": 0,
+            "recent_actions": [],
+        }
+        try:
+            import socket
+
+            import redis as redis_lib
+
+            from ui.data.machine import get_machine_project_keys
+
+            r = redis_lib.Redis.from_url(
+                os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+                decode_responses=True,
+            )
+            host = socket.gethostname()
+
+            raw_leases = r.get(f"worker:slot:leases:{host}")
+            if raw_leases:
+                import json as _json
+
+                leases = _json.loads(raw_leases)
+                result["permits_free"] = leases.get("permits_free")
+                result["held"] = leases.get("held")
+
+            def _sum_project_counter(suffix: str) -> int:
+                total = 0
+                for project_key in get_machine_project_keys():
+                    val = r.get(f"{project_key}:{suffix}")
+                    if val:
+                        total += int(val)
+                return total
+
+            result["bridge_reclaims"] = _sum_project_counter("session-health:bridge_reclaims")
+            result["tool_budget_tripped"] = _sum_project_counter("tool-budget:tripped")
+            result["tool_budget_resolution_errors"] = _sum_project_counter(
+                "tool-budget:resolution_errors"
+            )
+
+            lw = r.get(f"{host}:worker-watchdog:loop_wedged_detected")
+            if lw:
+                result["loop_wedged_detected"] = int(lw)
+            bcs = r.get(f"{host}:worker-watchdog:bridge_contract_stale")
+            if bcs:
+                result["bridge_contract_stale"] = int(bcs)
+
+            try:
+                import json as _json2
+
+                raw_actions = r.lrange(f"worker:watchdog:actions:{host}", 0, 4)
+                result["recent_actions"] = [_json2.loads(a) for a in raw_actions]
+            except Exception:
+                result["recent_actions"] = []
+        except Exception:
+            pass
+        return result
+
     def _get_worker_health() -> dict:
         """Check worker health from last_worker_connected file freshness."""
 
         # TODO: migrate to _resolve_heartbeat_path if the UI ever runs from a worktree
         heartbeat_file = Path(__file__).parent.parent / "data" / "last_worker_connected"
+        # Additive scalar (issue #1820) — sits beside age_s in this same dict,
+        # not a new top-level key or a per-project map.
+        slot_reclaims = _get_slot_reclaims_total()
+        # Additive Fix #5/#6 (#1821) operator surface — merged into every return.
+        slot_health = _get_worker_slot_health()
         try:
             if heartbeat_file.exists():
                 mtime = heartbeat_file.stat().st_mtime
                 age_s = round(time.time() - mtime)
                 if age_s < HEARTBEAT_STALENESS_THRESHOLD_S:
-                    return {"status": "ok", "age_s": age_s}
+                    status = "ok"
                 elif age_s < WORKER_DOWN_THRESHOLD_S:
-                    return {"status": "running", "age_s": age_s}
+                    status = "running"
                 else:
-                    return {"status": "error", "age_s": age_s}
+                    status = "error"
+                return {
+                    "status": status,
+                    "age_s": age_s,
+                    "slot_reclaims": slot_reclaims,
+                    **slot_health,
+                }
         except OSError:
             pass
-        return {"status": "error", "age_s": None}
+        return {
+            "status": "error",
+            "age_s": None,
+            "slot_reclaims": slot_reclaims,
+            **slot_health,
+        }
+
+    def _get_claude_auth_health() -> dict:
+        """Check Claude Code subscription auth via `claude auth status`."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["claude", "auth", "status"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode != 0:
+                return {"status": "error", "logged_in": False, "auth_method": None}
+            import json as _json
+
+            data = _json.loads(result.stdout)
+            logged_in = bool(data.get("loggedIn"))
+            auth_method = data.get("authMethod")
+            subscription_type = data.get("subscriptionType")
+            return {
+                "status": "ok" if logged_in else "error",
+                "logged_in": logged_in,
+                "auth_method": auth_method,
+                "subscription_type": subscription_type,
+            }
+        except Exception:
+            return {"status": "error", "logged_in": False, "auth_method": None}
 
     def _get_email_health() -> dict:
-        """Check email bridge health: process liveness first, then Redis heartbeat age."""
+        """Check email bridge health: process liveness first, then Redis heartbeat age.
+
+        Also surfaces two operator alert keys set by the IMAP poll loop
+        (issue #1817): ``email:auth_failed`` (A3 — a permanent IMAP auth
+        failure, e.g. a revoked app password) and ``email:resolver_unavailable``
+        (A2 — the customer resolver has failed persistently, e.g. an expired
+        OAuth token). Either alert, if armed, downgrades status to "error"
+        regardless of heartbeat freshness, since a fresh poll timestamp can
+        coexist with every inbound customer email failing to resolve. Reuses
+        this existing health field/surface rather than inventing a new one —
+        both keys are cleared by the bridge on the first successful poll/resolve
+        after the outage.
+        """
         import subprocess
 
         proc_running = bool(
@@ -367,6 +527,9 @@ def create_app() -> FastAPI:
             ).stdout.strip()
         )
 
+        alert: str | None = None
+        alert_detail: str | None = None
+        age_s: int | None = None
         try:
             import os
 
@@ -376,22 +539,38 @@ def create_app() -> FastAPI:
                 os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
                 decode_responses=True,
             )
+            auth_failed = r.get("email:auth_failed")
+            resolver_unavailable = r.get("email:resolver_unavailable")
+            if auth_failed:
+                alert = "auth_failed"
+                alert_detail = auth_failed
+            elif resolver_unavailable:
+                alert = "resolver_unavailable"
+                alert_detail = resolver_unavailable
+
             ts = r.get("email:last_poll_ts")
             if ts:
                 age_s = round(time.time() - float(ts))
-                if not proc_running:
-                    return {"status": "error", "age_s": age_s}
-                if age_s < 120:
-                    return {"status": "ok", "age_s": age_s}
-                elif age_s < 300:
-                    return {"status": "running", "age_s": age_s}
-                else:
-                    return {"status": "error", "age_s": age_s}
         except Exception:
             pass
+
+        # An armed alert always downgrades to "error", independent of ts/proc
+        # freshness — a fresh poll timestamp can coexist with every resolve
+        # call failing, and the alert itself is the loud signal here.
+        if alert:
+            return {"status": "error", "age_s": age_s, "alert": alert, "alert_detail": alert_detail}
+        if age_s is not None:
+            if not proc_running:
+                return {"status": "error", "age_s": age_s, "alert": None, "alert_detail": None}
+            if age_s < 120:
+                return {"status": "ok", "age_s": age_s, "alert": None, "alert_detail": None}
+            elif age_s < 300:
+                return {"status": "running", "age_s": age_s, "alert": None, "alert_detail": None}
+            else:
+                return {"status": "error", "age_s": age_s, "alert": None, "alert_detail": None}
         if not proc_running:
-            return {"status": "error", "age_s": None}
-        return {"status": "running", "age_s": None}
+            return {"status": "error", "age_s": None, "alert": None, "alert_detail": None}
+        return {"status": "running", "age_s": None, "alert": None, "alert_detail": None}
 
     def _session_to_json(s) -> dict:
         """Serialize a PipelineProgress to JSON dict for the dashboard API."""
@@ -430,6 +609,18 @@ def create_app() -> FastAPI:
             "total_output_tokens": s.total_output_tokens,
             "total_cache_read_tokens": s.total_cache_read_tokens,
             "total_cost_usd": s.total_cost_usd,
+            # Per-role transport hedge (plan #1842). ``role_transports`` labels
+            # which transport each role ran on; the metered_* fields are the
+            # DISJOINT headless-leg accounting (tailer owns total_*). The
+            # combined view sums both so operators see grand-total spend.
+            # getattr with defaults so pre-feature records never KeyError.
+            "role_transports": getattr(s, "role_transports", None),
+            "metered_input_tokens": getattr(s, "metered_input_tokens", 0) or 0,
+            "metered_output_tokens": getattr(s, "metered_output_tokens", 0) or 0,
+            "metered_cache_read_tokens": getattr(s, "metered_cache_read_tokens", 0) or 0,
+            "metered_cost_usd": getattr(s, "metered_cost_usd", 0.0) or 0.0,
+            "total_cost_usd_combined": (float(s.total_cost_usd or 0.0))
+            + (float(getattr(s, "metered_cost_usd", 0.0) or 0.0)),
             # In-flight visibility (issue #1172, Pillar A). Operators see
             # what the agent is doing right now without inferring from
             # staleness. ``last_evidence_at`` is the max of every evidence
@@ -437,6 +628,13 @@ def create_app() -> FastAPI:
             "current_tool_name": s.current_tool_name,
             "last_tool_use_at": s.last_tool_use_at,
             "last_turn_at": s.last_turn_at,
+            # Granite PTY read-loop freshness (#1724 / #1843 Gap B). The
+            # per-iteration read_until_idle callback refreshes
+            # last_pty_read_loop_at mid-turn, so a session wedged inside a long
+            # idle-path turn advances this field within ~1s — operators (and the
+            # stall-advisory actor) see the loop is still cycling.
+            "last_pty_read_loop_at": s.last_pty_read_loop_at,
+            "last_pty_activity_at": s.last_pty_activity_at,
             "recent_thinking_excerpt": s.recent_thinking_excerpt,
             "last_evidence_at": s.last_evidence_at,
             # BYOB scheduler-layer serialization (issue #1256, Decision 2).
@@ -489,6 +687,7 @@ def create_app() -> FastAPI:
         bridge = _get_bridge_health()
         worker = _get_worker_health()
         email = _get_email_health()
+        claude_auth = _get_claude_auth_health()
         sessions = get_all_sessions()
         reflections = get_all_reflections()
         analytics = get_analytics_summary()
@@ -501,8 +700,29 @@ def create_app() -> FastAPI:
                     "bridge_last_seen_s": bridge["age_s"],
                     "worker": worker["status"],
                     "worker_last_seen_s": worker["age_s"],
+                    # Additive-only (issue #1820): count of concurrency slots
+                    # auto-reclaimed from leaked leases without a worker restart.
+                    "worker_slot_reclaims": worker["slot_reclaims"],
+                    # Additive-only (Fix #5/#6, #1821): out-of-domain recovery +
+                    # tool-budget operator surface.
+                    "worker_permits_free": worker.get("permits_free"),
+                    "worker_slots_held": worker.get("held"),
+                    "worker_bridge_reclaims": worker.get("bridge_reclaims"),
+                    "worker_loop_wedged_detected": worker.get("loop_wedged_detected"),
+                    "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
+                    "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
+                    "worker_tool_budget_resolution_errors": worker.get(
+                        "tool_budget_resolution_errors"
+                    ),
+                    "worker_recent_actions": worker.get("recent_actions"),
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
+                    "email_alert": email.get("alert"),
+                    "email_alert_detail": email.get("alert_detail"),
+                    "claude_auth": claude_auth["status"],
+                    "claude_auth_logged_in": claude_auth["logged_in"],
+                    "claude_auth_method": claude_auth["auth_method"],
+                    "claude_auth_subscription_type": claude_auth["subscription_type"],
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,
@@ -522,6 +742,7 @@ def create_app() -> FastAPI:
         bridge = _get_bridge_health()
         worker = _get_worker_health()
         email = _get_email_health()
+        claude_auth = _get_claude_auth_health()
         return JSONResponse(
             {
                 "webserver": "ok",
@@ -529,8 +750,23 @@ def create_app() -> FastAPI:
                 "bridge_last_seen_s": bridge["age_s"],
                 "worker": worker["status"],
                 "worker_last_seen_s": worker["age_s"],
+                "worker_slot_reclaims": worker["slot_reclaims"],
+                # Additive-only (Fix #5/#6, #1821).
+                "worker_permits_free": worker.get("permits_free"),
+                "worker_slots_held": worker.get("held"),
+                "worker_bridge_reclaims": worker.get("bridge_reclaims"),
+                "worker_loop_wedged_detected": worker.get("loop_wedged_detected"),
+                "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
+                "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
+                "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
                 "email": email["status"],
                 "email_last_seen_s": email["age_s"],
+                "email_alert": email.get("alert"),
+                "email_alert_detail": email.get("alert_detail"),
+                "claude_auth": claude_auth["status"],
+                "claude_auth_logged_in": claude_auth["logged_in"],
+                "claude_auth_method": claude_auth["auth_method"],
+                "claude_auth_subscription_type": claude_auth["subscription_type"],
             }
         )
 
@@ -567,6 +803,13 @@ def create_app() -> FastAPI:
         else:
             email_label = "email"
 
+        claude_auth = _get_claude_auth_health()
+        if claude_auth["status"] == "ok":
+            method = claude_auth.get("auth_method") or "claude"
+            claude_label = f"claude ({method})"
+        else:
+            claude_label = "claude (auth error)"
+
         return HTMLResponse(
             f'<span class="health-label">Bridges</span>'
             f'<span class="badge badge-{bridge["status"]}">{bridge_label}</span>'
@@ -574,6 +817,8 @@ def create_app() -> FastAPI:
             f'<span class="health-label">Services</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
             f'<span class="badge badge-ok">web</span>'
+            f'<span class="health-label">Auth</span>'
+            f'<span class="badge badge-{claude_auth["status"]}">{claude_label}</span>'
         )
 
     # Exception handler for Redis connection failures

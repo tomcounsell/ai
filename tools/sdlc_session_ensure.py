@@ -191,11 +191,22 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             **kwargs,
         )
 
-        # Transition from default pending to running via lifecycle module
+        # Transition from default pending to running via lifecycle module.
+        # Narrow SETNX run-claim (issue #1817 B2): this session was just
+        # created by this call, so contention is unlikely, but the claim is
+        # applied uniformly at every pending->running call site so no actor
+        # (worker pop loop, CLI resume, catchup/reflections drip) is exempt.
+        # See models.session_lifecycle.claim_pending_run for the rationale.
         try:
-            from models.session_lifecycle import transition_status
+            from models.session_lifecycle import claim_pending_run, transition_status
 
-            transition_status(session, "running", "local SDLC session started")
+            if claim_pending_run(session.session_id, worker_id="sdlc-session-ensure"):
+                transition_status(session, "running", "local SDLC session started")
+            else:
+                logger.debug(
+                    "sdlc_session_ensure: lost run-claim for %s -- leaving pending",
+                    session.session_id,
+                )
         except Exception as e:
             logger.debug(f"sdlc_session_ensure: transition_status failed: {e}")
             # Session is created but in pending state — still usable

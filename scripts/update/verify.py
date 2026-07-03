@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -10,8 +11,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from config.models import OLLAMA_CLASSIFIER_MODEL
+from config.models import OLLAMA_CLASSIFIER_MODEL, PINNED_CLAUDE_VERSION
 from scripts.update.service import is_bridge_running
+
+logger = logging.getLogger(__name__)
 
 # Ensure PATH includes common tool locations (launchd has minimal PATH)
 _EXTRA_PATHS = [
@@ -93,6 +96,124 @@ def check_command(name: str, version_flag: str = "--version") -> ToolCheck:
         return ToolCheck(name=name, available=True, error="Timeout getting version")
     except Exception as e:
         return ToolCheck(name=name, available=True, error=str(e))
+
+
+# === D1a: native-installer version-assertion pin (issue #1817) ===
+#
+# The live `claude` CLI is installed via the NATIVE installer:
+# ~/.local/bin/claude is a symlink into
+# ~/.local/share/claude/versions/<version>/. It is NOT an npm package (not in
+# node_modules) and must NEVER be added to scripts/update/npm_tools.py's
+# MANAGED_PACKAGES — that would either no-op (npm doesn't own the binary) or
+# force-switch the fleet to the npm install path, which is not how this
+# machine's `claude` got there.
+#
+# PINNED_CLAUDE_VERSION is PROVISIONAL/grain-of-salt: it records the version
+# this repo's PTY scrapers (IDLE_BAR/PROMPT_GLYPH/SPINNER_EVIDENCE_RE in
+# pty_driver.py, the trust-folder patterns in startup_parser.py — see D1b's
+# contract-check) were last verified against. A version drift does not
+# necessarily mean anything broke — it means the CLI auto-updated and the
+# scraped markers have NOT been re-verified against the new build. Bumping
+# this constant is a DELIBERATE procedure (re-verify the D1b markers against
+# the new version's actual TUI output, then update the default in
+# config/models.py and the bump-log in docs/features/deployment.md), not
+# something to do reflexively on every drift warning.
+#
+# The value is the SINGLE SOURCE OF TRUTH in config/models.py (imported at the
+# top of this module), shared with the #1839 ollama-canary drift alert
+# (scripts/nightly_regression_tests.py) and mirrored as a typed catalog entry
+# at config/settings.py Settings.pinned_claude_version. config.models resolves
+# it via os.environ.get(...) at import, so a fleet override / test monkeypatch
+# of PINNED_CLAUDE_VERSION set before that module imports takes effect. Canary
+# provisioning against a not-yet-fleet version is tracked in issue #1854.
+
+# Shared with D1b's startup contract-check (worker/__main__.py) — one flag
+# governs whether EITHER "the claude CLI contract may have shifted" signal
+# (version pin drift here, or a scraped-marker mismatch in D1b) escalates
+# from a warning to a hard failure. Off by default: a version bump or a
+# marker mismatch does not necessarily break anything at read time, and a
+# false-positive hard-fail would block a healthy fleet from starting.
+CLAUDE_CONTRACT_CHECK_ENFORCE_ENV = "CLAUDE_CONTRACT_CHECK_ENFORCE"
+
+
+def _resolve_installed_claude_version() -> str | None:
+    """Best-effort resolve the installed `claude` CLI's version string.
+
+    Prefers `claude --version` stdout/stderr (works regardless of install
+    method). Falls back to parsing the native installer's symlink target
+    directory name (~/.local/bin/claude -> .../versions/<version>/claude)
+    when the version flag doesn't resolve a clean version string. Returns
+    None if neither source resolves — callers must treat that as "unknown",
+    not as a mismatch.
+    """
+    try:
+        result = run_cmd(["claude", "--version"], timeout=10)
+        out = (result.stdout or "").strip() or (result.stderr or "").strip()
+        if out:
+            m = re.search(r"(\d+\.\d+\.\d+)", out)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+
+    native_bin = Path.home() / ".local" / "bin" / "claude"
+    try:
+        if native_bin.is_symlink():
+            target = os.readlink(native_bin)
+            m = re.search(r"/versions/([\d.]+)/", target)
+            if m:
+                return m.group(1)
+    except OSError:
+        pass
+    return None
+
+
+def check_claude_version_pin() -> ToolCheck:
+    """Compare the installed `claude` CLI version to PINNED_CLAUDE_VERSION.
+
+    D1a (issue #1817): the native installer floats `claude` to latest on
+    auto-update; a version drift means the scraped TUI contract D1b's
+    startup probe depends on (agent/granite_container/pty_driver.py markers,
+    startup_parser.py trust-folder patterns) may have shifted underneath us
+    with no code change on our side. This check is a coarse, fast signal
+    (version string comparison); D1b's contract-check is the actual
+    behavioral proof.
+
+    Default (CLAUDE_CONTRACT_CHECK_ENFORCE unset/not "1"): drift logs a
+    WARNING and returns available=True (non-blocking) — a version bump does
+    not necessarily break anything. With CLAUDE_CONTRACT_CHECK_ENFORCE=1,
+    drift logs CRITICAL and returns available=False, matching the
+    check_projects_json / check_sdlc_tool green-light-gate convention (the
+    caller decides whether to skip a service restart on an unavailable
+    check).
+    """
+    installed = _resolve_installed_claude_version()
+    if installed is None:
+        return ToolCheck(
+            name="claude-version-pin",
+            available=True,
+            version="skipped (could not resolve installed claude version)",
+        )
+
+    if installed == PINNED_CLAUDE_VERSION:
+        return ToolCheck(
+            name="claude-version-pin",
+            available=True,
+            version=f"pinned ({installed})",
+        )
+
+    msg = (
+        f"claude CLI version drift: installed={installed}, "
+        f"pinned={PINNED_CLAUDE_VERSION}. The scraped TUI markers D1b depends "
+        "on have not been re-verified against this version. See "
+        "docs/features/deployment.md for the pin bump procedure."
+    )
+    enforce = os.environ.get(CLAUDE_CONTRACT_CHECK_ENFORCE_ENV) == "1"
+    if enforce:
+        logger.critical(msg)
+        return ToolCheck(name="claude-version-pin", available=False, error=msg)
+    logger.warning(msg)
+    return ToolCheck(name="claude-version-pin", available=True, version=f"drift: {installed}")
 
 
 def check_python_import(
@@ -1056,6 +1177,7 @@ def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> Ve
     result.valor_tools.append(check_google_token(project_dir))
     result.valor_tools.append(check_env_completeness(project_dir))
     result.valor_tools.append(check_valor_alias_shadow())
+    result.valor_tools.append(check_claude_version_pin())
 
     if check_ollama_model:
         from config.settings import settings as _settings

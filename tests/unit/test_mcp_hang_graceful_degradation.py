@@ -1,10 +1,15 @@
 """Unit tests for MCP hang graceful degradation (issue #1711).
 
 Covers:
-- AgentSession.push_steering_message with front=True / front=False (Component A)
 - _compose_tool_timeout_steering pure-function behaviour (Component B1)
 - _deliver_tool_timeout_degraded_notice idempotency and delivery (Component B2)
 - _apply_recovery_transition wiring: advisory injection + degraded notice (Component C)
+
+The urgent advisory push (front=True) now goes through the Redis-list
+primitive in agent.steering.push_steering_message rather than the removed
+AgentSession.push_steering_message ListField method (issue #1817 A1). See
+tests/integration/test_steering.py for direct coverage of
+push_steering_message(front=True) LPUSH ordering.
 """
 
 from __future__ import annotations
@@ -19,96 +24,6 @@ from agent.session_health import (
     _compose_tool_timeout_steering,
     _deliver_tool_timeout_degraded_notice,
 )
-
-# ---------------------------------------------------------------------------
-# Component A: AgentSession.push_steering_message(front=True/False)
-# ---------------------------------------------------------------------------
-
-
-class _FakeSession:
-    """Minimal stand-in for AgentSession's steering queue."""
-
-    def __init__(self, initial: list[str] | None = None):
-        self.session_id = "test-session"
-        self.queued_steering_messages = list(initial or [])
-        self._save_calls: list[list[str]] = []
-
-    def save(self, update_fields=None, **_kw):
-        self._save_calls.append(list(update_fields or []))
-
-    # Forward the real method under test from the module directly.
-    # We can't subclass AgentSession (Redis-backed), so we bind it manually.
-    push_steering_message = None  # populated in conftest below
-
-
-def _bind_push(session: _FakeSession):
-    """Attach the real push_steering_message to the fake session."""
-    from models.agent_session import AgentSession
-
-    session.push_steering_message = AgentSession.push_steering_message.__get__(
-        session, type(session)
-    )
-    return session
-
-
-@pytest.fixture()
-def fake_session():
-    return _bind_push(_FakeSession())
-
-
-def test_push_steering_message_append_default(fake_session):
-    """Default (front=False) appends to the end."""
-    fake_session.push_steering_message("first")
-    fake_session.push_steering_message("second")
-    assert fake_session.queued_steering_messages == ["first", "second"]
-
-
-def test_push_steering_message_front_prepends(fake_session):
-    """front=True inserts at position 0."""
-    fake_session.push_steering_message("first")
-    fake_session.push_steering_message("urgent", front=True)
-    assert fake_session.queued_steering_messages[0] == "urgent"
-    assert fake_session.queued_steering_messages[1] == "first"
-
-
-def test_push_steering_message_front_trim_keeps_head():
-    """When front=True overflows STEERING_QUEUE_MAX, the head (new message) is kept."""
-    from models.agent_session import STEERING_QUEUE_MAX
-
-    session = _bind_push(_FakeSession(initial=[f"msg-{i}" for i in range(STEERING_QUEUE_MAX)]))
-    session.push_steering_message("CRITICAL", front=True)
-    assert len(session.queued_steering_messages) == STEERING_QUEUE_MAX
-    # New message must survive — it was at index 0 before trim.
-    assert session.queued_steering_messages[0] == "CRITICAL"
-    # The last old message (tail) was dropped.
-    assert f"msg-{STEERING_QUEUE_MAX - 1}" not in session.queued_steering_messages
-
-
-def test_push_steering_message_append_trim_keeps_tail():
-    """When front=False overflows STEERING_QUEUE_MAX, the tail (new message) is kept."""
-    from models.agent_session import STEERING_QUEUE_MAX
-
-    session = _bind_push(_FakeSession(initial=[f"msg-{i}" for i in range(STEERING_QUEUE_MAX)]))
-    session.push_steering_message("LATEST", front=False)
-    assert len(session.queued_steering_messages) == STEERING_QUEUE_MAX
-    # Latest message must survive — it was appended last.
-    assert session.queued_steering_messages[-1] == "LATEST"
-    # The oldest message (head) was dropped.
-    assert "msg-0" not in session.queued_steering_messages
-
-
-def test_push_steering_message_front_saves(fake_session):
-    """front=True still calls save with the expected update_fields."""
-    fake_session.push_steering_message("x", front=True)
-    assert fake_session._save_calls, "save must be called"
-    assert "queued_steering_messages" in fake_session._save_calls[0]
-
-
-def test_push_steering_message_front_on_empty_queue(fake_session):
-    """front=True on an empty queue behaves identically to append."""
-    fake_session.push_steering_message("only", front=True)
-    assert fake_session.queued_steering_messages == ["only"]
-
 
 # ---------------------------------------------------------------------------
 # Component B1: _compose_tool_timeout_steering
@@ -190,7 +105,7 @@ def _mock_redis():
             yield mock
 
 
-def test_degraded_notice_calls_send_cb(fake_session, _mock_redis):
+def test_degraded_notice_calls_send_cb(_mock_redis):
     send_cb = AsyncMock()
     entry = _make_entry(session_id="sess-1")
 
@@ -278,15 +193,16 @@ def _recovery_entry(
     message_text: str = "original request",
     extra_context: dict | None = None,
 ) -> SimpleNamespace:
-    """Minimal fake AgentSession for recovery transition tests."""
+    """Minimal fake AgentSession for recovery transition tests.
+
+    The urgent advisory push now goes through agent.steering.push_steering_message
+    (module-level, Redis-backed) rather than an instance method — tests patch
+    that function directly instead of inspecting an attribute on this fake.
+    """
     saves: list = []
-    steered: list[tuple[str, bool]] = []
 
     def _save(update_fields=None, **_kw):
         saves.append(update_fields)
-
-    def _push_steering(text, front=False):
-        steered.append((text, front))
 
     return SimpleNamespace(
         agent_session_id=sid,
@@ -312,9 +228,7 @@ def _recovery_entry(
         last_turn_at=None,
         claude_session_uuid=None,
         save=_save,
-        push_steering_message=_push_steering,
         _saves=saves,
-        _steered=steered,
     )
 
 
@@ -373,25 +287,30 @@ def _run_recovery(entry, *, reason_kind="tool_timeout", worker_key="wk-1", is_lo
 def test_requeue_injects_steering_when_tool_timeout():
     """else-branch: tool_timeout + tool_name -> push_steering_message(front=True)."""
     entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
-    _run_recovery(entry, reason_kind="tool_timeout")
-    assert entry._steered, "steering message must be injected"
-    text, front = entry._steered[0]
-    assert front is True, "must be prepended (front=True)"
-    assert "mcp__svc" in text
+    with patch("agent.steering.push_steering_message") as mock_push:
+        _run_recovery(entry, reason_kind="tool_timeout")
+
+    mock_push.assert_called_once()
+    args, kwargs = mock_push.call_args
+    assert args[0] == entry.session_id
+    assert "mcp__svc" in args[1]
+    assert kwargs.get("front") is True, "must be prepended (front=True)"
 
 
 def test_requeue_no_steering_without_tool_name():
     """else-branch: tool_timeout but no tool_name -> no steering injection."""
     entry = _recovery_entry(current_tool_name=None, recovery_attempts=0)
-    _run_recovery(entry, reason_kind="tool_timeout")
-    assert not entry._steered, "no steering when tool_name is falsy"
+    with patch("agent.steering.push_steering_message") as mock_push:
+        _run_recovery(entry, reason_kind="tool_timeout")
+    mock_push.assert_not_called()
 
 
 def test_requeue_no_steering_for_non_tool_timeout():
     """else-branch: no_progress reason -> no steering injection regardless of tool."""
     entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
-    _run_recovery(entry, reason_kind="no_progress")
-    assert not entry._steered
+    with patch("agent.steering.push_steering_message") as mock_push:
+        _run_recovery(entry, reason_kind="no_progress")
+    mock_push.assert_not_called()
 
 
 def test_max_attempts_delivers_degraded_notice_for_tool_timeout():
@@ -428,27 +347,12 @@ def test_steering_message_includes_original_request():
         recovery_attempts=0,
         message_text="please look up the latest metrics",
     )
-    _run_recovery(entry, reason_kind="tool_timeout")
-    assert entry._steered
-    text, _ = entry._steered[0]
+    with patch("agent.steering.push_steering_message") as mock_push:
+        _run_recovery(entry, reason_kind="tool_timeout")
+
+    mock_push.assert_called_once()
+    text = mock_push.call_args[0][1]
     assert "please look up the latest metrics" in text
-
-
-def test_tool_timeout_prepend_when_queue_already_has_message():
-    """B1 ordering guard: pre-existing message → tool-skip at index 0, older at index 1."""
-    entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
-    # Pre-load a message in the steering queue.
-    entry.queued_steering_messages = ["pre-existing message"]
-    _run_recovery(entry, reason_kind="tool_timeout")
-    assert len(entry._steered) >= 1, "steering must be injected"
-    text, front = entry._steered[0]
-    assert front is True, "must be prepended (front=True)"
-    assert "mcp__svc" in text
-    # Simulate what push_steering_message(front=True) would do to the queue:
-    # new message goes to index 0, pre-existing stays at index 1.
-    # The _steered list records the push call as (text, front=True).
-    # Verify the pre-existing message was not displaced — it's already there.
-    assert entry.queued_steering_messages[0] == "pre-existing message"  # untouched by fake push
 
 
 def test_steering_push_failure_does_not_block_requeue():
@@ -458,8 +362,6 @@ def test_steering_push_failure_does_not_block_requeue():
     from agent.session_health import _apply_recovery_transition
 
     entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
-    # Override push_steering_message to raise.
-    entry.push_steering_message = MagicMock(side_effect=RuntimeError("push exploded"))
 
     transition_calls: list[str] = []
 
@@ -487,6 +389,10 @@ def test_steering_push_failure_does_not_block_requeue():
         _patch("agent.agent_session_queue._ensure_worker"),
         _patch("agent.session_health._active_events", {}),
         _patch("popoto.redis_db.POPOTO_REDIS_DB", MagicMock()),
+        _patch(
+            "agent.steering.push_steering_message",
+            side_effect=RuntimeError("push exploded"),
+        ),
     ):
         from agent.session_health import SubprocessKillResult
 
@@ -521,11 +427,10 @@ def test_failed_branch_does_not_inject_advisory_steering():
         current_tool_name="mcp__svc",
         recovery_attempts=MAX_RECOVERY_ATTEMPTS - 1,
     )
-    _run_recovery(entry, reason_kind="tool_timeout")
+    with patch("agent.steering.push_steering_message") as mock_push:
+        _run_recovery(entry, reason_kind="tool_timeout")
     # On the failed branch steering must NOT be injected — session won't be requeued.
-    assert not entry._steered, (
-        "steering injection must not occur on the failed branch (MAX_RECOVERY_ATTEMPTS)"
-    )
+    mock_push.assert_not_called()
 
 
 def _run_recovery_not_confirmed_dead(entry, *, reason_kind="tool_timeout", worker_key="wk-1"):
@@ -590,8 +495,9 @@ def test_tool_timeout_not_confirmed_dead_branch_delivers_degraded_notice():
 def test_not_confirmed_dead_does_not_inject_steering():
     """not_confirmed_dead branch: no requeue -> no steering injection."""
     entry = _recovery_entry(current_tool_name="mcp__svc", recovery_attempts=0)
-    _run_recovery_not_confirmed_dead(entry, reason_kind="tool_timeout")
-    assert not entry._steered, "steering must not be injected when subprocess is not confirmed dead"
+    with patch("agent.steering.push_steering_message") as mock_push:
+        _run_recovery_not_confirmed_dead(entry, reason_kind="tool_timeout")
+    mock_push.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

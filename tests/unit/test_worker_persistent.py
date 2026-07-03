@@ -80,6 +80,46 @@ class TestPersistentMode:
         assert chat_id not in _active_workers
 
     @pytest.mark.asyncio
+    async def test_status_conflict_during_pop_does_not_crash_loop(self):
+        """A StatusConflictError from _pop_agent_session (a session killed in the
+        race between pop reading status=pending and transition→running) must be
+        caught and skipped — the loop must survive and keep popping, not
+        propagate and die, stranding all other pending sessions (issue #1803)."""
+        from models.session_lifecycle import StatusConflictError
+
+        chat_id = "conflict_test"
+        event = asyncio.Event()
+        calls = {"n": 0}
+
+        def pop_side_effect(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise StatusConflictError(
+                    "session_x", "pending", "killed", reason="worker picked up session"
+                )
+            return None  # empty queue thereafter
+
+        async def wake_and_shutdown():
+            await asyncio.sleep(0.15)
+            asq._session_state._shutdown_requested = True
+            event.set()
+
+        with (
+            patch.dict(os.environ, {"VALOR_WORKER_MODE": "standalone"}),
+            patch(
+                "agent.agent_session_queue._pop_agent_session",
+                new=AsyncMock(side_effect=pop_side_effect),
+            ),
+        ):
+            wake_task = asyncio.create_task(wake_and_shutdown())
+            # Must NOT raise StatusConflictError out of the loop.
+            await _worker_loop(chat_id, event)
+            await wake_task
+
+        assert calls["n"] >= 2, "loop should have continued popping after the conflict"
+        assert chat_id not in _active_workers
+
+    @pytest.mark.asyncio
     async def test_bridge_mode_exits_on_empty_queue(self):
         """In bridge mode (no env var), worker exits on empty queue after timeout."""
         chat_id = "bridge_drain_test"

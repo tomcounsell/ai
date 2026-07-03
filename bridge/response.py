@@ -14,7 +14,10 @@ What remains here:
   bridge's send callback before enqueuing agent output.
 - `extract_files_from_response`: parses `<<FILE:/path>>` markers. Used by the
   bridge's direct send path to pull out file attachments.
-- `clean_message`: strips @-mention triggers from inbound user text.
+- `clean_message`: normalizes surrounding whitespace on inbound user text.
+  It does NOT remove mention triggers — the agent sees the message verbatim,
+  including its own name. Routing's @-mention detection is independent
+  (`bridge.routing.is_message_for_valor`).
 """
 
 from __future__ import annotations
@@ -235,20 +238,22 @@ def extract_files_from_response(
 # =============================================================================
 
 
-def clean_message(text: str, project: dict | None) -> str:
-    """Strip @-mention triggers from inbound user text."""
-    # Import here to avoid circular dependencies
-    from bridge.routing import DEFAULT_MENTIONS
+def clean_message(text: str) -> str:
+    """Normalize surrounding whitespace on inbound user text.
 
-    mentions = DEFAULT_MENTIONS
-    if project:
-        telegram_config = project.get("telegram", {})
-        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
+    The message is passed through verbatim apart from leading/trailing
+    whitespace — mention triggers (``@valor``, the bare name "Valor", etc.)
+    are deliberately NOT removed. The agent should see exactly what the user
+    typed, including its own name in a salutation ("Hi Valor, ...") or
+    mid-sentence ("Valor, here is a chat..."). Stripping the name corrupted
+    the prompt and served no purpose: routing decides whether a message is
+    addressed to Valor via independent @-mention detection
+    (``bridge.routing.is_message_for_valor``), never by mutating the body.
 
-    result = text
-    for mention in mentions:
-        result = re.sub(re.escape(mention), "", result, flags=re.IGNORECASE)
-    return result.strip()
+    Whitespace is stripped so callers can use a falsy check to detect an
+    empty/whitespace-only message and substitute a placeholder.
+    """
+    return text.strip()
 
 
 # =============================================================================

@@ -35,6 +35,8 @@ from email import encoders
 from pathlib import Path
 from typing import Any
 
+from config.settings import settings as _app_settings
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
@@ -56,6 +58,30 @@ SMTP_MAX_RETRIES = 3
 
 # Redis key for health monitoring
 REDIS_LAST_POLL_KEY = "email:last_poll_ts"
+
+# Redis operator-alert keys (issue #1817, workstreams A2/A3). Surfaced on the
+# dashboard's "email" health field (ui/app.py::_get_email_health) — not a new
+# alert surface, just two new keys read by the existing one.
+REDIS_AUTH_FAILED_KEY = "email:auth_failed"
+REDIS_RESOLVER_UNAVAILABLE_KEY = "email:resolver_unavailable"
+
+# Consecutive resolver:failures:{project_key} readings (A2) before the
+# email:resolver_unavailable alert arms. Provisional/tunable — take with a
+# grain of salt: chosen to absorb a one-off transient resolver blip without
+# paging, while still catching a genuinely stuck resolver (e.g. an expired
+# OAuth token) within a handful of inbound emails. Env: EMAIL_RESOLVER_ALERT_AFTER
+# (config/settings.py).
+EMAIL_RESOLVER_ALERT_AFTER = _app_settings.email_resolver_alert_after
+
+# IMAP auth-failure message signatures that indicate a PERMANENT credential
+# problem (revoked app password, disabled account) rather than a transient
+# network/server blip (A3). Matched case-sensitively against the raw
+# imaplib.IMAP4.error message text.
+IMAP_PERMANENT_AUTH_SIGNATURES = (
+    "AUTHENTICATIONFAILED",
+    "Invalid credentials",
+    "LOGIN failed",
+)
 
 # TTL for email:msgid reverse-mapping keys (48 hours)
 EMAIL_MSGID_TTL = 48 * 3600
@@ -1050,7 +1076,19 @@ def _query_non_terminal_sessions(project_key: str) -> list:
         List of AgentSession objects.
     """
     from models.agent_session import AgentSession
+
+    # C3 (#1817): AgentSession's 30-day TTL means a status-index ghost member
+    # (hash expired, index membership survives) can in principle outlive its
+    # backing session. query.filter() below already never returns such a
+    # ghost as a live record (popoto silently drops empty hashes), so
+    # subject-coalescing can never attach to a session that no longer exists
+    # -- this call only accelerates removing the stale index entry instead of
+    # waiting for the nightly popoto-index-cleanup sweep. Rate-limited
+    # internally; see models/ghost_reconcile.py.
+    from models.ghost_reconcile import reconcile_ghost_members
     from models.session_lifecycle import NON_TERMINAL_STATUSES
+
+    reconcile_ghost_members(AgentSession)
 
     min_created_at = time.time() - COALESCE_MAX_AGE_SECONDS
     sessions = []
@@ -1126,11 +1164,95 @@ def find_coalescing_session_id(
 # =============================================================================
 
 
+def _unmark_seen_sync(imap_config: dict, uid: bytes) -> None:
+    """Remove the \\Seen flag for a single message (sync, runs in a thread).
+
+    The connection ``_fetch_unseen`` used to mark the message \\Seen is
+    always closed (``conn.logout()``) before its caller returns, so a fresh
+    short-lived connection is opened here scoped to one STORE command.
+    Best-effort: any failure is logged by the caller, never raised, so an
+    un-mark failure can never crash the poll loop (untrusted-input domain —
+    infra errors must be classified and handled explicitly).
+    """
+    host = imap_config["host"]
+    port = imap_config["port"]
+    user = imap_config["user"]
+    password = imap_config["password"]
+    use_ssl = imap_config.get("ssl", True)
+    if use_ssl:
+        conn = imaplib.IMAP4_SSL(host, port, timeout=IMAP_SOCKET_TIMEOUT)
+    else:
+        conn = imaplib.IMAP4(host, port, timeout=IMAP_SOCKET_TIMEOUT)
+    try:
+        conn.login(user, password)
+        conn.select("INBOX")
+        conn.uid("store", uid, "-FLAGS", "\\Seen")
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+async def _unmark_seen(imap_config: dict, uid: bytes) -> None:
+    """Restore the \\Seen flag removal for ``uid`` so the next IMAP poll retries it.
+
+    Called from the ``ResolverUnavailableError`` branch of ``_process_inbound_email``
+    (issue #1817 A2) — a resolver outage must never permanently drop a
+    customer email, and the message is already \\Seen by the time this runs
+    (``_fetch_unseen`` marks it before fetch, as a concurrency guard against
+    re-processing on overlapping polls). Failures are logged, not raised.
+    """
+    try:
+        await asyncio.to_thread(_unmark_seen_sync, imap_config, uid)
+    except Exception as e:
+        logger.warning(f"[email] Failed to un-mark \\Seen for uid={uid!r}: {e}")
+
+
+def _arm_resolver_unavailable_alert_if_persistent(project_key: str, message_id: str) -> None:
+    """Arm the email:resolver_unavailable operator alert once the resolver has
+    failed EMAIL_RESOLVER_ALERT_AFTER consecutive times for this project.
+
+    Derives the threshold from the EXISTING resolver:failures:{project_key}
+    counter (bridge/routing.py::_on_resolver_failure) rather than introducing
+    a second, parallel tally (issue #1817 A2 builder note). The alert value
+    is ``"{first_seen_ts}:{last_message_id}"`` — first_seen_ts is set once,
+    on the poll that first crosses the threshold, and preserved on every
+    subsequent re-arm so operators can see how long the outage has persisted;
+    last_message_id is refreshed each time so operators can see the most
+    recently stuck message. Cleared by bridge/routing.py::resolve_customer on
+    the first successful resolve after the outage.
+    """
+    from bridge.routing import get_resolver_failure_count
+
+    try:
+        failures = get_resolver_failure_count(project_key)
+        if failures < EMAIL_RESOLVER_ALERT_AFTER:
+            return
+        r = _get_redis()
+        existing = r.get(REDIS_RESOLVER_UNAVAILABLE_KEY)
+        if existing:
+            if isinstance(existing, bytes):
+                existing = existing.decode("utf-8", errors="replace")
+            first_seen = existing.split(":", 1)[0]
+        else:
+            first_seen = str(time.time())
+        r.set(REDIS_RESOLVER_UNAVAILABLE_KEY, f"{first_seen}:{message_id}")
+        logger.critical(
+            f"[email] Resolver persistently unavailable for project={project_key!r} "
+            f"({failures} consecutive failures >= {EMAIL_RESOLVER_ALERT_AFTER}) — armed "
+            f"{REDIS_RESOLVER_UNAVAILABLE_KEY} (first_seen={first_seen}, "
+            f"last_msg_id={message_id!r})"
+        )
+    except Exception as e:
+        logger.warning(f"[email] Failed to arm resolver_unavailable alert: {e}")
+
+
 async def _process_inbound_email(
     parsed: dict,
     config: dict,
-    imap_conn=None,
-    imap_uid=None,
+    imap_uid: bytes | None = None,
+    imap_config: dict | None = None,
 ) -> None:
     """Process a single parsed inbound email.
 
@@ -1142,14 +1264,27 @@ async def _process_inbound_email(
         parsed: Dict from parse_email_message() with keys:
                 from_addr, subject, body, message_id, in_reply_to
         config: The loaded projects.json config dict.
-        imap_conn: Optional open imaplib connection passed through from
-                   _poll_imap so the resolver failure path can apply the
-                   valor-retry Gmail label.
-        imap_uid: Optional IMAP UID bytes for the message (for valor-retry label).
+        imap_uid: Optional IMAP UID bytes for the message. ``_fetch_unseen``
+                  always marks a fetched message \\Seen before it reaches this
+                  function (a concurrency guard against re-processing on
+                  overlapping polls); if the customer resolver turns out to be
+                  unavailable, this UID is used to un-mark \\Seen (see
+                  ``_unmark_seen``) so the next poll retries the message
+                  instead of silently losing it (issue #1817 A2).
+        imap_config: Optional IMAP connection config (host/port/user/password/ssl),
+                     required alongside ``imap_uid`` to un-mark \\Seen — the
+                     connection ``_fetch_unseen`` used is always closed by the
+                     time this function runs, so a fresh short-lived connection
+                     is opened on demand.
     """
     from agent.agent_session_queue import enqueue_agent_session
     from agent.byob_skill_triggers import infer_requires_real_chrome
-    from bridge.routing import ACTIVE_PROJECTS, find_project_for_email, resolve_customer
+    from bridge.routing import (
+        ACTIVE_PROJECTS,
+        ResolverUnavailableError,
+        find_project_for_email,
+        resolve_customer,
+    )
     from config.enums import SessionType
 
     from_addr = parsed["from_addr"]
@@ -1176,12 +1311,25 @@ async def _process_inbound_email(
     email_persona: str = project.get("email", {}).get("persona", "teammate")
 
     if project.get("customer_resolver"):
-        customer_id = await resolve_customer(
-            from_addr, project, imap_conn=imap_conn, imap_uid=imap_uid
-        )
+        try:
+            customer_id = await resolve_customer(from_addr, project, imap_uid=imap_uid)
+        except ResolverUnavailableError as e:
+            # Infrastructure error (e.g. an expired OAuth token) — this is NOT
+            # "not a customer." Leave the message unseen so the next IMAP poll
+            # retries it, and track the outage for the operator alert
+            # (issue #1817 A2).
+            logger.warning(
+                f"[email] Resolver unavailable for {from_addr!r} "
+                f"(msg_id={message_id!r}, project={project_key}): {e}. "
+                "Leaving message unseen for retry."
+            )
+            if imap_uid is not None and imap_config is not None:
+                await _unmark_seen(imap_config, imap_uid)
+            _arm_resolver_unavailable_alert_if_persistent(project_key, message_id)
+            return
         if customer_id is None:
-            # Resolver says "not a customer" (or failed) — drop cleanly.
-            # Message is already \Seen; valor-retry label applied by resolve_customer on failure.
+            # Resolver ran successfully and definitively found no match —
+            # this IS "not a customer." Drop cleanly; the message stays \Seen.
             logger.info(
                 f"[email] Resolver returned None for {from_addr!r}, discarding "
                 f"(project={project_key})"
@@ -1365,7 +1513,7 @@ def _build_imap_sender_query(known_senders: list[str]) -> str:
     return result
 
 
-async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]:
+async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[tuple[bytes, bytes]]:
     """Connect to IMAP and fetch unseen messages from known senders only.
 
     Filters at the IMAP search level using FROM criteria built from
@@ -1373,9 +1521,12 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]
     remain UNSEEN for other machines polling the same inbox.
 
     Marks fetched messages as SEEN immediately to prevent duplicate processing
-    across concurrent polls on this machine.
+    across concurrent polls on this machine. The UID is returned alongside
+    each message's raw bytes so a downstream resolver-unavailable outcome
+    (issue #1817 A2) can un-mark \\Seen and let the next poll retry it,
+    instead of the message being silently and permanently dropped.
 
-    Returns a list of raw message bytes.
+    Returns a list of (uid, raw_message_bytes) tuples.
     """
     if not known_senders:
         return []
@@ -1387,7 +1538,7 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]
     use_ssl = imap_config.get("ssl", True)
     sender_query = _build_imap_sender_query(known_senders)
 
-    def _fetch_unseen() -> list[bytes]:
+    def _fetch_unseen() -> list[tuple[bytes, bytes]]:
         if use_ssl:
             conn = imaplib.IMAP4_SSL(host, port, timeout=IMAP_SOCKET_TIMEOUT)
         else:
@@ -1410,7 +1561,7 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]
             if len(uids) > IMAP_MAX_BATCH:
                 uids = uids[-IMAP_MAX_BATCH:]
 
-            messages = []
+            messages: list[tuple[bytes, bytes]] = []
             for uid in uids:
                 # Mark as SEEN before fetching to prevent re-processing on concurrent polls
                 conn.uid("store", uid, "+FLAGS", "\\Seen")
@@ -1418,7 +1569,7 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]
                 if status == "OK" and msg_data:
                     for response_part in msg_data:
                         if isinstance(response_part, tuple):
-                            messages.append(response_part[1])
+                            messages.append((uid, response_part[1]))
             return messages
         finally:
             try:
@@ -1429,13 +1580,47 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[bytes]
     return await asyncio.to_thread(_fetch_unseen)
 
 
+def _is_permanent_imap_auth_error(err_text: str) -> bool:
+    """True if an IMAP4.error message matches a known permanent-auth signature.
+
+    Distinguishes a revoked/invalid credential (issue #1817 A3) — which will
+    never self-resolve by retrying — from a transient network/server blip,
+    which should keep the existing exponential backoff.
+    """
+    return any(sig in err_text for sig in IMAP_PERMANENT_AUTH_SIGNATURES)
+
+
+def _set_auth_failed_alert(err_text: str) -> None:
+    """Arm the email:auth_failed operator alert (A3). Best-effort."""
+    try:
+        r = _get_redis()
+        r.set(REDIS_AUTH_FAILED_KEY, f"{time.time()}:{err_text[:200]}")
+    except Exception as e:
+        logger.warning(f"[email] Failed to set {REDIS_AUTH_FAILED_KEY} alert: {e}")
+
+
+def _clear_auth_failed_alert() -> None:
+    """Clear the email:auth_failed operator alert on a successful poll. Best-effort."""
+    try:
+        r = _get_redis()
+        r.delete(REDIS_AUTH_FAILED_KEY)
+    except Exception as e:
+        logger.warning(f"[email] Failed to clear {REDIS_AUTH_FAILED_KEY} alert: {e}")
+
+
 async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
     """Main IMAP polling loop.
 
     Polls the IMAP inbox every IMAP_POLL_INTERVAL seconds. On each successful
     poll, updates email:last_poll_ts in Redis for health monitoring.
 
-    Implements exponential backoff on connection failures (up to 5 minutes max).
+    Implements exponential backoff on connection failures (up to 5 minutes
+    max) — EXCEPT a permanent IMAP auth failure (revoked app password,
+    disabled account; issue #1817 A3), which arms the email:auth_failed
+    operator alert and keeps retrying at the current (non-escalating)
+    interval instead of backing off to 5 minutes: a revoked credential won't
+    fix itself, and stretching the retry interval only delays detecting a
+    manual fix.
     """
     from bridge.routing import get_known_email_search_terms
 
@@ -1457,7 +1642,7 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
 
             if messages:
                 logger.info(f"[email] Fetched {len(messages)} unseen message(s)")
-                for raw_bytes in messages:
+                for uid, raw_bytes in messages:
                     parsed = parse_email_message(raw_bytes)
                     if parsed is None:
                         continue
@@ -1477,24 +1662,42 @@ async def _email_inbox_loop(imap_config: dict, config: dict) -> None:
                     _record_history(parsed)
                     _record_thread(parsed)
                     try:
-                        await _process_inbound_email(parsed, config)
+                        await _process_inbound_email(
+                            parsed, config, imap_uid=uid, imap_config=imap_config
+                        )
                     except Exception as e:
                         logger.error(
                             f"[email] Error processing email from "
                             f"{parsed.get('from_addr', 'unknown')}: {e}"
                         )
 
-            # Reset backoff on success
+            # Reset backoff on success — a successful poll also proves IMAP
+            # auth is healthy again, so clear any armed auth_failed alert.
             backoff = IMAP_POLL_INTERVAL
+            _clear_auth_failed_alert()
 
         except imaplib.IMAP4.error as e:
-            if "Too many simultaneous connections" in str(e):
+            err_text = str(e)
+            if _is_permanent_imap_auth_error(err_text):
+                _set_auth_failed_alert(err_text)
+                logger.critical(
+                    f"[email] Permanent IMAP auth failure: {e}. Armed "
+                    f"{REDIS_AUTH_FAILED_KEY} operator alert. Retrying at the "
+                    f"current interval ({backoff}s) — not backing off further, "
+                    "since a revoked credential will not self-resolve."
+                )
+                # Deliberately do NOT double backoff (A3): an expired/revoked
+                # credential needs a human to rotate it, and stretching the
+                # retry interval toward max_backoff only delays detecting a
+                # manual fix once it lands.
+            elif "Too many simultaneous connections" in err_text:
                 # Ghost connections from prior network drops linger on Gmail's side.
                 # Jump straight to max backoff so they have time to expire.
                 backoff = max_backoff
+                logger.error(f"[email] IMAP error: {e}. Retrying in {backoff}s...")
             else:
                 backoff = min(backoff * 2, max_backoff)
-            logger.error(f"[email] IMAP error: {e}. Retrying in {backoff}s...")
+                logger.error(f"[email] IMAP error: {e}. Retrying in {backoff}s...")
 
         except OSError as e:
             logger.error(f"[email] Network error during IMAP poll: {e}. Retrying in {backoff}s...")

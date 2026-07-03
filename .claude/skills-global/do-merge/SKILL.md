@@ -11,16 +11,26 @@ This skill is portable — it runs in any repo, not just `~/src/ai`.
 
 The gate is deterministic: every precondition is a checkable fact (PR state, CI
 rollup, review verdict, issue link). If any precondition fails, the skill
-refuses to merge, surfaces a clear reason, and does NOT create the
-authorization file or call the merge command.
+refuses to merge, surfaces a clear reason, and does NOT call the merge command.
+
+## Repo Context Probe
+
+If `docs/sdlc/do-merge.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+This addendum is where a repo layers SDLC automation onto the generic `git`/`gh`
+gate: a stage/verdict substrate (stage markers, recorded REVIEW verdicts), a
+merge-authorization hook, extra deterministic gates (lint, lockfile, full
+suite), plan migration, and post-merge cleanup/restart. When the file is absent
+(the common case in a foreign repo), this skill runs entirely on `git` and `gh`
+— no repo-specific tooling required.
 
 ## Variables
 
 PR_ARG: the PR number to merge (e.g. `42` or `#42`). Strip any leading `#`.
 
-If PR_ARG is empty, resolve it from the conversation context or the pipeline
-state (`sdlc-tool stage-query --issue-number N` → `_meta.pr_number`). If it
-still cannot be resolved, STOP and ask the caller for the PR number.
+If PR_ARG is empty, resolve it from the conversation context. If the repo-context
+file declares a pipeline-state tool, use it to recover the PR number. If it still
+cannot be resolved, STOP and ask the caller for the PR number.
 
 ## Dependabot Exemption
 
@@ -51,20 +61,15 @@ If both conditions hold, apply the exemption path:
 Announce the exemption at the top of your run:
 > "Dependabot PR detected — skipping pipeline steps (REVIEW verdict, issue link). Running mergeability and CI gate only."
 
-## Step 0: Substrate Probe (degraded-mode awareness)
+## Step 0: Stage Marker (only if the context file declares a substrate)
 
-Before anything else, probe whether the orchestration substrate (PM session +
-Redis) is reachable, mirroring the `do-docs` pattern. This lets a forked
-sub-skill announce degraded mode instead of silently lagging state:
+If the repo-context file declares a stage-marker substrate, write an
+`in_progress` marker for the MERGE stage now, following its exact invocation and
+degraded-mode handling. This lets a forked sub-skill announce degraded mode
+instead of silently lagging state. The gate itself depends only on `gh`, never
+on the substrate, so a missing or degraded substrate never blocks the merge.
 
-```bash
-sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number}
-```
-
-Parse the JSON output:
-- `{"stage": "MERGE", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
-- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". The merge gate still runs (it depends only on `gh`, not on the substrate), but stage markers will not be recorded. Proceed.
-- Non-zero exit — the substrate is present but the write genuinely failed; report the stderr diagnostic and proceed with the gate (do not silently swallow it).
+If no substrate is declared (the generic case), skip this step.
 
 ## Step 1: Verify PR State
 
@@ -91,21 +96,26 @@ observed value. Do NOT create the auth file. Do NOT call merge.
 > `mergeable`/`CLEAN` and stops; it never rebases, force-pushes, or resolves
 > conflicts.
 
-## Step 2: Verify REVIEW Approved
+## Step 2: Verify Review Approved
 
-Read the recorded REVIEW verdict from pipeline state:
+Confirm the PR has an approving review. **Generic baseline** — read GitHub's
+native review decision:
 
 ```bash
-sdlc-tool verdict get --stage REVIEW --issue-number {issue_number}
+gh pr view {PR} --json reviewDecision
 ```
 
-The verdict text must contain `APPROVED` (case-insensitive). A
-`CHANGES REQUESTED` / `NEEDS REVISION` verdict, or no verdict at all, FAILS the
-gate — route back to `/do-pr-review` or `/do-patch`, do not merge.
+`reviewDecision == "APPROVED"` passes. `CHANGES_REQUESTED`, `REVIEW_REQUIRED`,
+or an empty decision (no review) FAILS the gate — route back to review/patch, do
+not merge.
 
-In degraded mode (Step 0 reported degraded), the verdict tool may also return
-no data. If REVIEW approval cannot be confirmed, FAIL closed — never merge an
-unconfirmed-review PR.
+If the repo-context file declares a recorded-verdict substrate (e.g. an SDLC
+REVIEW verdict), use it as the authority instead, following its exact
+invocation. The verdict text must contain `APPROVED` (case-insensitive); any
+other value or no verdict FAILS.
+
+Whichever source is used: if review approval cannot be confirmed, FAIL closed —
+never merge an unconfirmed-review PR.
 
 ## Step 3: Verify Issue Link
 
@@ -118,48 +128,36 @@ correctly linked to its issue.
 
 Only after Steps 1-3 all pass:
 
-1. **Create the authorization file** the merge-guard hook
-   (`.claude/hooks/validators/validate_merge_guard.py`) requires. Without this
-   file, the hook blocks the merge command:
-   ```bash
-   touch data/merge_authorized_{PR}
-   ```
+1. **Satisfy any merge-authorization guard the repo-context file declares.** If
+   the repo gates `gh pr merge` behind a merge-guard hook that requires an
+   authorization file, create it now exactly as the context file specifies, and
+   delete it immediately after the merge (success or failure) so a stale auth
+   file never lingers. In the generic case there is no guard — skip straight to
+   the merge.
 2. **Squash-merge** the PR:
    ```bash
    gh pr merge {PR} --squash
    ```
-3. **Delete the authorization file** immediately after, success or failure, so
-   a stale auth file never lingers:
-   ```bash
-   rm -f data/merge_authorized_{PR}
-   ```
+3. **Clean up** any authorization file created in sub-step 1, on every path.
 
 If the merge command itself fails (e.g. a race where branch protection changed
-between Step 1 and now), report the failure, ensure the auth file is removed,
+between Step 1 and now), report the failure, ensure any auth file is removed,
 and do NOT retry blindly.
 
 ## Step 5: Record Completion
 
-Mark the MERGE stage complete (no-op / degraded marker if the substrate is
-absent — that is fine):
+If the repo-context file declares a stage-marker substrate, mark the MERGE stage
+`completed` now (no-op / degraded marker if the substrate is absent is fine).
+Otherwise skip — the merge itself is the completion signal.
 
-```bash
-sdlc-tool stage-marker --stage MERGE --status completed --issue-number {issue_number}
-```
+## Step 6: Apply Repo-Specific Addenda
 
-## Step 6: Repo-Specific Addenda
-
-This repo may define additional gate steps (extra lint gates, plan migration,
-worktree cleanup, post-merge restarts). Read and follow the repo's addendum if
-present:
-
-- **`docs/sdlc/do-merge.md`** — the canonical per-repo addendum. In `~/src/ai`
-  it covers ruff gates, the documentation gate, plan migration to
-  `docs/plans/completed/`, post-merge memory extraction, worktree cleanup
-  (`python scripts/post_merge_cleanup.py {slug}`), and bridge/worker restart.
-
-Apply those steps in addition to the deterministic gate above. The addendum is
-additive — it never relaxes the verify-then-merge contract.
+If the repo-context file (read in the Repo Context Probe) declares additional
+gate steps — extra lint gates, lockfile sync, full-suite runs, documentation
+gates, plan migration, worktree cleanup, post-merge restarts — apply them now,
+in addition to the deterministic gate above. The addendum is additive — it never
+relaxes the verify-then-merge contract. In the generic case there is no addendum
+and the merge is already complete.
 
 ## Critical Rules
 

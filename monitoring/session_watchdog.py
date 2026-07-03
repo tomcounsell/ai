@@ -35,6 +35,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -122,6 +123,41 @@ STALL_REACTION_DEDUP_TTL = 86400
 STALL_REACTION_OUTBOX_TTL = 3600
 
 
+# === Fix #5 (#1821): out-of-domain worker liveness + slot recovery ===
+#
+# The bridge process reads the worker's Redis-published loop beacon + lease
+# snapshot (published by agent/session_health.py) and drives a restart-free,
+# targeted slot reclamation via a Redis reclaim-request that the worker's
+# on-loop reap pass drains. This watchdog NEVER kills the worker — all process
+# recovery stays with the dead-man's-switch + monitoring/worker_watchdog.py.
+#
+# Config location (not a defect): raw os.environ.get() at module scope, matching
+# the sibling #1815/#1820 threshold constants. Values mirror the worker-side
+# constants in agent/session_health.py (each process reads env independently).
+WORKER_LOOP_BEACON_KEY_PREFIX = "worker:loop_beacon:"
+WORKER_SLOT_LEASES_KEY_PREFIX = "worker:slot:leases:"
+WORKER_SLOT_RECLAIM_REQUESTS_KEY_PREFIX = "worker:slot:reclaim_requests:"
+WORKER_SLOT_RECLAIM_DEDUP_KEY_PREFIX = "worker:slot:reclaim_dedup:"
+WORKER_WATCHDOG_ACTIONS_KEY_PREFIX = "worker:watchdog:actions:"
+# Beacon-freshness threshold: a beacon whose wall_ts is older than this (or a
+# missing beacon) reads as loop_wedged. Wall-clock ONLY — never the advisory
+# monotonic loop_beacon_age_s (Risk 1). Default 90s (matches the #1815 deadman).
+BRIDGE_WORKER_BEACON_STALE_S = int(os.environ.get("BRIDGE_WORKER_BEACON_STALE_S", "90"))
+# Master gate for the reclaim-request TRIGGER. Default ON — detection/logging
+# always runs; only the reclaim-request push is gated. Falsy → detect/log only.
+# (Uses the _env_flag_enabled helper below at call time.)
+BRIDGE_SLOT_RECLAIM_ENABLED_VAR = "BRIDGE_SLOT_RECLAIM_ENABLED"
+# Race 4: cap the reclaim-request list so a multi-owner leak burst cannot grow
+# it unboundedly. Mirrors the worker-side default.
+RECLAIM_REQUESTS_MAX = int(os.environ.get("RECLAIM_REQUESTS_MAX", "256"))
+WORKER_WATCHDOG_ACTIONS_MAX = 256
+# Per-owner reclaim-request dedup TTL (a few bridge ticks) so we do not re-push
+# the same owner every tick while the worker drains it. Cleared on a healthy tick.
+RECLAIM_REQUEST_DEDUP_TTL = 900
+# TTL for the reclaim-request list + action log so a dead worker's backlog expires.
+WORKER_SLOT_KEY_TTL_SECONDS = 900
+
+
 # Transcript liveness: if transcript.txt was modified within this many minutes,
 # the session is considered alive (doing sub-agent work) even if updated_at
 # in Redis is stale. See issue #360.
@@ -192,6 +228,11 @@ async def watchdog_loop(telegram_client=None) -> None:
             check_stalled_sessions()
         except Exception as e:
             logger.error("[watchdog] Error in stall check: %s", e, exc_info=True)
+
+        try:
+            check_worker_liveness_and_slots()
+        except Exception as e:
+            logger.error("[watchdog] Error in worker liveness/slot check: %s", e, exc_info=True)
 
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
@@ -644,6 +685,258 @@ def _clear_stall_reaction_dedup(session_id: str) -> None:
             session_id,
             e,
         )
+
+
+def check_worker_liveness_and_slots() -> None:
+    """Out-of-domain worker liveness + slot recovery (Fix #5, #1821).
+
+    Runs in the BRIDGE process — a different failure domain from the worker loop
+    it polices — so it can drive recovery even when the worker event loop is
+    synchronously frozen. Reads two Redis keys the worker publishes:
+
+      * ``worker:loop_beacon:{host}`` — wall-clock freshness beacon.
+      * ``worker:slot:leases:{host}`` — the current lease snapshot.
+
+    Behaviour each tick:
+
+      1. **Beacon missing / stale wall_ts** → the worker is not publishing (process
+         down or wedged). Record a ``loop_wedged`` action + increment
+         ``loop_wedged_detected``, log that we are DEFERRING the kill, and return
+         with NO kill action. Process recovery belongs to the dead-man's-switch +
+         ``worker_watchdog.py`` — this function NEVER sends any process signal, never
+         invokes launch tooling, and never writes the critical worker-recovery key
+         (No-Gos).
+      2. **Beacon fresh but unarmed** (loop has not ticked yet) → never treated as
+         wedged; nothing to reclaim; return.
+      3. **Beacon fresh + terminal-owner lease** (leak under a live loop), gated on
+         ``BRIDGE_SLOT_RECLAIM_ENABLED`` (default on) → push each terminal owner onto
+         ``worker:slot:reclaim_requests:{host}`` (per-owner ``SET NX`` dedup, LTRIM
+         cap for Race 4) and append a capped action-log entry. The actual
+         ``registry.reclaim()`` runs on the worker loop when it drains the request
+         (loop-affinity physics); the bridge only issues the TRIGGER.
+      4. **Beacon fresh + no terminal-owner leak** → healthy; clear the per-owner
+         dedup markers so a future re-leak re-triggers.
+
+    Freshness is keyed ONLY on the wall-clock ``wall_ts`` — never the advisory
+    monotonic ``loop_beacon_age_s`` (Risk 1). Fully fail-quiet: a malformed beacon
+    JSON or any Redis error logs and returns; nothing propagates into
+    ``watchdog_loop``.
+    """
+    host = socket.gethostname()
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("[watchdog] worker liveness check: redis unavailable: %s", e)
+        return
+
+    beacon_key = f"{WORKER_LOOP_BEACON_KEY_PREFIX}{host}"
+    now = time.time()
+
+    # --- Read + parse the beacon (fail-quiet on malformed JSON) ---
+    try:
+        raw_beacon = POPOTO_REDIS_DB.get(beacon_key)
+    except Exception as e:
+        logger.warning("[watchdog] worker liveness check: beacon read failed: %s", e)
+        return
+
+    if raw_beacon is None:
+        _record_loop_wedged(
+            POPOTO_REDIS_DB, host, now, "beacon missing (worker down or TTL expired)"
+        )
+        return
+
+    try:
+        if isinstance(raw_beacon, bytes):
+            raw_beacon = raw_beacon.decode("utf-8", "replace")
+        beacon = json.loads(raw_beacon)
+        wall_ts = float(beacon["wall_ts"])
+    except Exception as e:
+        # Malformed beacon → treat as "no usable beacon" but do not crash.
+        logger.warning("[watchdog] worker liveness check: malformed beacon JSON: %s", e)
+        _record_loop_wedged(POPOTO_REDIS_DB, host, now, "beacon JSON malformed")
+        return
+
+    # Freshness keyed ONLY on wall_ts (Risk 1 — never the monotonic advisory age).
+    if (now - wall_ts) > BRIDGE_WORKER_BEACON_STALE_S:
+        _record_loop_wedged(
+            POPOTO_REDIS_DB,
+            host,
+            now,
+            f"beacon stale (wall_ts age={now - wall_ts:.0f}s > {BRIDGE_WORKER_BEACON_STALE_S}s)",
+        )
+        return
+
+    # Fresh beacon. An unarmed beacon (loop not yet ticked) is never wedged and
+    # has nothing to reclaim (the reap drain will not run until the loop ticks).
+    if not beacon.get("armed", False):
+        logger.debug("[watchdog] worker liveness check: beacon fresh but unarmed — skipping")
+        return
+
+    # --- Read the lease snapshot ---
+    try:
+        raw_leases = POPOTO_REDIS_DB.get(f"{WORKER_SLOT_LEASES_KEY_PREFIX}{host}")
+    except Exception as e:
+        logger.warning("[watchdog] worker liveness check: lease snapshot read failed: %s", e)
+        return
+
+    owners: list[str] = []
+    if raw_leases is not None:
+        try:
+            if isinstance(raw_leases, bytes):
+                raw_leases = raw_leases.decode("utf-8", "replace")
+            leases = json.loads(raw_leases)
+            owners = [
+                o["owner_session_id"] for o in leases.get("owners", []) if o.get("owner_session_id")
+            ]
+        except Exception as e:
+            logger.warning("[watchdog] worker liveness check: malformed lease snapshot: %s", e)
+            return
+
+    # Identify terminal-owner leases. A None/error status read is "unknown → skip"
+    # (mirrors the worker drain's #1868 posture — the bridge only requests reclaim
+    # for owners it can positively confirm terminal).
+    terminal_owners: list[str] = []
+    for owner in owners:
+        try:
+            row = AgentSession.get_by_id(owner)
+        except Exception:
+            continue
+        if row is not None and getattr(row, "status", None) in _terminal_statuses():
+            terminal_owners.append(owner)
+
+    if not terminal_owners:
+        # Healthy tick — clear per-owner dedup markers so a future re-leak retriggers.
+        _clear_reclaim_dedup(POPOTO_REDIS_DB, host)
+        return
+
+    if not _env_flag_enabled(BRIDGE_SLOT_RECLAIM_ENABLED_VAR):
+        # Detection/logging only — no reclaim-request pushed (kill-switch off).
+        logger.info(
+            "[watchdog] worker liveness check: %d terminal-owner lease(s) observed but "
+            "%s is disabled — detection only, no reclaim-request pushed.",
+            len(terminal_owners),
+            BRIDGE_SLOT_RECLAIM_ENABLED_VAR,
+        )
+        return
+
+    _push_reclaim_requests(POPOTO_REDIS_DB, host, terminal_owners, now)
+
+
+def _terminal_statuses() -> frozenset:
+    """Return the canonical terminal-status set (imported lazily to avoid cycles)."""
+    from models.session_lifecycle import TERMINAL_STATUSES
+
+    return TERMINAL_STATUSES
+
+
+def _record_loop_wedged(redis_client, host: str, now: float, detail: str) -> None:
+    """Record a ``loop_wedged`` detection and DEFER the kill (Fix #5, #1821).
+
+    Appends a capped action-log entry + increments
+    ``{host}:worker-watchdog:loop_wedged_detected``. Takes NO kill action — the
+    dead-man's-switch + ``worker_watchdog.py`` own process recovery. Fail-quiet.
+    """
+    logger.warning(
+        "[watchdog] loop_wedged detected (%s) — DEFERRING kill to the dead-man's-switch / "
+        "worker_watchdog.py (this watchdog never kills).",
+        detail,
+    )
+    try:
+        _append_watchdog_action(
+            redis_client,
+            host,
+            {"action": "loop_wedged", "ts": now, "detail": detail, "deferring_kill": True},
+        )
+    except Exception as e:
+        logger.debug("[watchdog] loop_wedged action-log append failed: %s", e)
+    try:
+        redis_client.incr(f"{host}:worker-watchdog:loop_wedged_detected")
+    except Exception as e:
+        logger.debug("[watchdog] loop_wedged_detected counter increment failed: %s", e)
+
+
+def _push_reclaim_requests(redis_client, host: str, terminal_owners: list[str], now: float) -> None:
+    """Push reclaim-requests for terminal-owner leases (Fix #5 TRIGGER, #1821).
+
+    Non-blocking (concern #4): batched into at most TWO Redis round-trips
+    regardless of the owner count — a per-owner ``SET NX`` dedup pipeline, then a
+    single push/trim/action-log pipeline — so a multi-owner leak burst can never
+    serialize N × socket_timeout blocking calls on the single bridge event loop.
+
+    Race 4: after LPUSH the list is LTRIM'd to ``RECLAIM_REQUESTS_MAX`` and given a
+    TTL, so the list stays bounded and a dead worker's backlog expires. The worker
+    drain re-reads owner status fresh and ``registry.reclaim()`` is idempotent, so a
+    dropped-then-re-requested owner is harmless. Fail-quiet.
+    """
+    reclaim_key = f"{WORKER_SLOT_RECLAIM_REQUESTS_KEY_PREFIX}{host}"
+    actions_key = f"{WORKER_WATCHDOG_ACTIONS_KEY_PREFIX}{host}"
+    try:
+        # Round-trip 1: per-owner dedup markers (SET NX). Only owners whose marker
+        # was newly set are pushed — prevents re-pushing the same owner every tick.
+        dedup_pipe = redis_client.pipeline()
+        for owner in terminal_owners:
+            dedup_pipe.set(
+                f"{WORKER_SLOT_RECLAIM_DEDUP_KEY_PREFIX}{host}:{owner}",
+                "1",
+                nx=True,
+                ex=RECLAIM_REQUEST_DEDUP_TTL,
+            )
+        nx_results = dedup_pipe.execute()
+        new_owners = [
+            owner for owner, was_set in zip(terminal_owners, nx_results, strict=False) if was_set
+        ]
+        if not new_owners:
+            return
+
+        # Round-trip 2: push + trim + TTL + capped action log, all in one pipeline.
+        push_pipe = redis_client.pipeline()
+        for owner in new_owners:
+            push_pipe.lpush(reclaim_key, owner)
+        push_pipe.ltrim(reclaim_key, 0, RECLAIM_REQUESTS_MAX - 1)
+        push_pipe.expire(reclaim_key, WORKER_SLOT_KEY_TTL_SECONDS)
+        for owner in new_owners:
+            push_pipe.lpush(
+                actions_key,
+                json.dumps({"action": "reclaim_requested", "ts": now, "owner": owner}),
+            )
+        push_pipe.ltrim(actions_key, 0, WORKER_WATCHDOG_ACTIONS_MAX - 1)
+        push_pipe.expire(actions_key, WORKER_SLOT_KEY_TTL_SECONDS)
+        push_pipe.execute()
+
+        logger.warning(
+            "[watchdog] pushed %d reclaim-request(s) for terminal-owner lease(s): %s "
+            "(worker on-loop drain performs the actual reclaim).",
+            len(new_owners),
+            ", ".join(new_owners),
+        )
+    except Exception as e:
+        logger.warning("[watchdog] reclaim-request push failed (non-fatal): %s", e)
+
+
+def _clear_reclaim_dedup(redis_client, host: str) -> None:
+    """Clear per-owner reclaim-request dedup markers on a healthy tick (Fix #5).
+
+    So a future re-leak of a previously-requested owner re-triggers a fresh
+    reclaim-request. Fail-quiet; orphaned markers also age out via their TTL.
+    """
+    try:
+        pattern = f"{WORKER_SLOT_RECLAIM_DEDUP_KEY_PREFIX}{host}:*"
+        keys = list(redis_client.keys(pattern))
+        if keys:
+            redis_client.delete(*keys)
+    except Exception as e:
+        logger.debug("[watchdog] reclaim-dedup clear failed (non-fatal): %s", e)
+
+
+def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
+    """Append a capped entry to ``worker:watchdog:actions:{host}`` (Fix #5).
+
+    Capped LPUSH + LTRIM (newest first, bounded) + TTL. Fail-quiet.
+    """
+    actions_key = f"{WORKER_WATCHDOG_ACTIONS_KEY_PREFIX}{host}"
+    redis_client.lpush(actions_key, json.dumps(entry))
+    redis_client.ltrim(actions_key, 0, WORKER_WATCHDOG_ACTIONS_MAX - 1)
+    redis_client.expire(actions_key, WORKER_SLOT_KEY_TTL_SECONDS)
 
 
 def assess_session_health(session: AgentSession) -> dict[str, Any]:

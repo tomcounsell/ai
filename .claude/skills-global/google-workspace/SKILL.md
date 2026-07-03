@@ -9,6 +9,12 @@ user-invocable: true
 
 This guide provides behavioral instructions for effectively using the Google Workspace Extension tools. For detailed parameter documentation, refer to the tool descriptions in the extension itself.
 
+## Repo Context Probe
+
+If `.claude/skill-context/google-workspace.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares a faster project-local mail CLI to try *above* the generic Gmail ladder. When the file is absent (the common case in a foreign repo), start the mail ladder at `gws gmail` — the generic tiers below need nothing beyond a Google Workspace login or an interactive MCP session.
+
 ## 🧭 Tool Selection (read this first)
 
 Reach for the lightest tool that does the job. For every service, walk the
@@ -31,9 +37,10 @@ human OAuth step) must hand off to the next tier — do not stall on it.
 | Forms | `gws forms` | (no MCP) | BYOB |
 | Keep | `gws keep` | (no MCP) | BYOB |
 
-For reading/sending mail specifically, prefer the `/email` skill's ladder
-(`valor-email` → `gws gmail` → Gmail MCP → BYOB), which puts the Redis-cached
-`valor-email` CLI ahead of `gws`.
+For reading/sending mail specifically, prefer the `/email` skill's ladder, which
+starts at `gws gmail` → Gmail MCP → BYOB. If the repo context file declares a
+faster project-local mail CLI, the `/email` skill puts it ahead of `gws` as Tier 1;
+otherwise the generic `gws gmail` tier is the top of the mail ladder.
 
 ## 🎯 Core Principles
 

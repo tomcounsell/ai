@@ -280,7 +280,8 @@ class TestPositionalKeyRewrite:
     """The rewrite should replace only the session_type segment, not substring occurrences."""
 
     def test_rewrite_replaces_only_session_type_segment(self, redis_test_db):
-        """Key AgentSession:{id}:pm:{project}:... should become AgentSession:{id}:eng:{project}:..."""
+        """Key AgentSession:{id}:pm:{project}:... should become
+        AgentSession:{id}:eng:{project}:..."""
         import popoto
 
         from scripts.migrate_session_type_pm_to_eng import migrate

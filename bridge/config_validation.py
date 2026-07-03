@@ -305,14 +305,14 @@ def _iter_registered_bot_ids(config: dict) -> list[tuple[int, str]]:
     return out
 
 
-async def validate_bot_live_flags(config: dict, resolver) -> None:
+async def validate_bot_live_flags(config: dict, resolver) -> tuple[set[int], str | None]:
     """Validate each registered bot id against the live Telegram ``User.bot`` flag.
 
     Acceptance criterion 4 of issue #1574 ("the bot registry validates each entry
     against the live ``User.bot`` flag and surfaces mismatches"). The deterministic
     loop-guard suppresses *every* inbound message from a registered bot id. If a
     swapped token or typo'd id points at a **human** account, that human's messages
-    would be silently dropped — so we probe the live flag and fail loud.
+    would be silently dropped — so we probe the live flag and surface any mismatch.
 
     The probe is decoupled from a live Telethon client via an injectable
     ``resolver``: a coroutine ``resolver(bot_id: int) -> object`` returning the
@@ -322,19 +322,37 @@ async def validate_bot_live_flags(config: dict, resolver) -> None:
     runnable on machines with no Telegram session — the resolver is the only live
     dependency.
 
-    Each registered bot id must resolve to an entity whose ``.bot`` flag is truthy.
-    A non-bot (human) account, a missing/false ``.bot`` attribute, or a resolver
-    that raises is collected as a mismatch; all mismatches are reported together.
+    Two outcome buckets are maintained separately:
+
+    * **Confirmed non-bot** (``User.bot is False``): the id resolved successfully
+      and is definitively not a bot. These ids go into ``quarantine_ids`` so the
+      caller can pop them from ``BOT_ID_TO_PROJECT`` and stop suppressing their
+      messages.
+
+    * **Probe failure** (resolver raised): we could not confirm whether the id is a
+      bot or a human. Conservative stance: leave the id registered (keep suppressing
+      as if it were a bot). These ids appear in ``detail`` labeled as
+      "could not probe (left registered)" but are NEVER added to ``quarantine_ids``.
 
     Args:
         config: The full projects.json config dict.
         resolver: ``async def resolver(bot_id: int) -> entity``. May raise to
             signal an unresolvable id.
 
-    Raises:
-        ConfigValidationError: if any registered bot id is not a live bot.
+    Returns:
+        A ``(quarantine_ids, detail)`` tuple where:
+
+        * ``quarantine_ids`` — set of integer bot ids that are CONFIRMED non-bots
+          (``User.bot is False``). The caller should pop these from
+          ``BOT_ID_TO_PROJECT`` to stop suppressing their messages.
+        * ``detail`` — human-readable description of any issues found, or ``None``
+          if everything is clean. Probe failures are labeled
+          "could not probe (left registered)" to distinguish them from confirmed
+          mismatches.
     """
-    errors: list[str] = []
+    quarantine_ids: set[int] = set()
+    confirmed_mismatches: list[str] = []
+    probe_failures: list[str] = []
     seen: set[int] = set()
     for bot_id, proj_key in _iter_registered_bot_ids(config):
         if bot_id in seen:
@@ -342,22 +360,97 @@ async def validate_bot_live_flags(config: dict, resolver) -> None:
         seen.add(bot_id)
         try:
             entity = await resolver(bot_id)
-        except Exception as e:  # noqa: BLE001 — any resolver failure is a mismatch
-            errors.append(
-                f"bot id={bot_id} (project '{proj_key}') failed to resolve against Telegram: {e!r}"
+        except Exception as e:  # noqa: BLE001 — resolver failure means "could not confirm"
+            # Conservative: could not determine if human or bot — leave registered.
+            probe_failures.append(
+                f"bot id={bot_id} (project '{proj_key}') could not probe (left registered): {e!r}"
             )
             continue
         if not bool(getattr(entity, "bot", False)):
-            errors.append(
+            # Confirmed non-bot: id definitively resolves to a human account.
+            quarantine_ids.add(bot_id)
+            confirmed_mismatches.append(
                 f"bot id={bot_id} (project '{proj_key}') resolves to a NON-bot "
                 f"(User.bot is false) — a swapped token or typo'd id pointing at a "
                 f"human account would silently suppress that human's messages"
             )
 
+    if not quarantine_ids and not probe_failures:
+        return (set(), None)
+
+    parts: list[str] = []
+    if confirmed_mismatches:
+        parts.append(
+            "projects.json telegram.bots failed live User.bot validation:\n  - "
+            + "\n  - ".join(confirmed_mismatches)
+        )
+    if probe_failures:
+        parts.append("could not probe (left registered):\n  - " + "\n  - ".join(probe_failures))
+    detail = "\n\n".join(parts) if parts else None
+    return (quarantine_ids, detail)
+
+
+_VALID_TRANSPORTS = frozenset({"pty", "headless"})
+_VALID_TRANSPORT_ROLES = frozenset({"pm", "dev"})
+
+
+def validate_transport(config: dict) -> None:
+    """Enforce that every project ``transport`` block is well-formed (plan #1842).
+
+    A project may declare an optional ``transport`` block selecting the
+    per-role session transport::
+
+        "transport": {"pm": "pty", "dev": "headless"}
+
+    Rules (each violation names the offending project key):
+      - ``transport`` must be a dict (mapping) when present.
+      - keys must be within ``{"pm", "dev"}``.
+      - values must be within ``{"pty", "headless"}``.
+
+    An absent ``transport`` block is valid (the role defaults to ``pty`` via
+    ``settings.granite``). Raises ``ConfigValidationError`` aggregating every
+    problem so the operator sees them all at once.
+    """
+    projects = config.get("projects", {})
+    errors: list[str] = []
+
+    for proj_key, proj_cfg in projects.items():
+        if not isinstance(proj_cfg, dict):
+            continue
+        if "transport" not in proj_cfg:
+            continue
+        transport = proj_cfg.get("transport")
+        if not isinstance(transport, dict):
+            errors.append(f"project '{proj_key}' has a non-dict 'transport' block: {transport!r}")
+            continue
+        for role, value in transport.items():
+            if role not in _VALID_TRANSPORT_ROLES:
+                errors.append(
+                    f"project '{proj_key}' transport has unknown role key '{role}' "
+                    f"(valid roles: {sorted(_VALID_TRANSPORT_ROLES)})"
+                )
+                continue
+            if value not in _VALID_TRANSPORTS:
+                errors.append(
+                    f"project '{proj_key}' transport.{role} has invalid value {value!r} "
+                    f"(valid transports: {sorted(_VALID_TRANSPORTS)})"
+                )
+                continue
+            # PM headless is not yet supported (plan #1842 v1). The PM startup /
+            # login / plateau machinery is PTY-coupled and territory-restricted
+            # (#1843 owns the PTY read loop), so PM runs on PTY only. Dev headless
+            # is the metered worker leg that ships in v1. Reject pm=headless with a
+            # clear message rather than crashing deep in the container.
+            if role == "pm" and value == "headless":
+                errors.append(
+                    f"project '{proj_key}' transport.pm=headless is not yet supported "
+                    "(PM headless not yet supported — only the Dev role may run "
+                    "headless in v1; keep transport.pm=pty)"
+                )
+
     if errors:
         raise ConfigValidationError(
-            "projects.json telegram.bots failed live User.bot validation:\n  - "
-            + "\n  - ".join(errors)
+            "projects.json transport failed validation:\n  - " + "\n  - ".join(errors)
         )
 
 
@@ -375,6 +468,7 @@ def validate_projects_config(config: dict) -> None:
         validate_telegram_groups,
         validate_email_routing,
         validate_telegram_bots,
+        validate_transport,
     ):
         try:
             fn(config)

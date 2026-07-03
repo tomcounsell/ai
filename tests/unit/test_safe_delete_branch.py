@@ -84,7 +84,10 @@ class TestMergedViaAncestor:
         assert merged_via_ancestor(str(repo), "session/dev-ec1e7c6e", "main") is False
 
     def test_squash_merged_branch_returns_false(self, tmp_path):
-        """A squash-merged branch returns False — proving why squash sites cannot use this oracle."""
+        """A squash-merged branch returns False.
+
+        Proves why squash sites cannot use this oracle.
+        """
         repo = _make_repo(tmp_path)
         _git(repo, "checkout", "-b", "session/sdlc-1234")
         # Two commits (>=2 is mandatory per plan — single commit may coincidentally pass cherry)
@@ -98,7 +101,8 @@ class TestMergedViaAncestor:
         _git(repo, "checkout", "main")
         _git(repo, "merge", "--squash", "session/sdlc-1234")
         _git(repo, "commit", "-m", "squash merge sdlc-1234")
-        # is-ancestor returns False for a squash-merged branch (the branch tip is NOT in main's ancestry)
+        # is-ancestor returns False for a squash-merged branch
+        # (the branch tip is NOT in main's ancestry)
         assert merged_via_ancestor(str(repo), "session/sdlc-1234", "main") is False
 
 
@@ -209,7 +213,7 @@ class TestMergedViaTree:
         assert merged_via_tree(str(repo), "session/conflict", "main") is False
 
     def test_is_ancestor_refuses_squash_merged(self, tmp_path):
-        """merged_via_ancestor returns False for squash-merged branch, while merged_via_tree returns True.
+        """merged_via_ancestor returns False for squash-merged; merged_via_tree returns True.
 
         This is the key differentiation test proving the two oracles serve different contexts.
         """
@@ -389,7 +393,7 @@ class TestIncidentRegression:
     """Regression: dev session branch with unmerged commit survives cleanup (incident ec1e7c6e)."""
 
     def test_unmerged_branch_survives_auto_mark_cleanup(self, tmp_path, caplog):
-        """Reproduces the incident: safe_delete_branch with merged_via_ancestor preserves unmerged work.
+        """Reproduces the incident: safe_delete_branch with merged_via_ancestor preserves work.
 
         The incident: session ec1e7c6e committed work to session/dev-ec1e7c6e,
         then git branch -D was called unconditionally, destroying the commit.
@@ -437,7 +441,7 @@ class TestIncidentRegression:
         )
 
     def test_merged_branch_still_deleted(self, tmp_path):
-        """Positive case: a merged branch still gets cleaned up (no regression in SDLC happy path)."""
+        """Positive case: merged branches still get cleaned up (no SDLC happy-path regression)."""
         repo = _make_repo(tmp_path)
         _git(repo, "checkout", "-b", "session/sdlc-merged")
         (repo / "feature.py").write_text("# feature\n")

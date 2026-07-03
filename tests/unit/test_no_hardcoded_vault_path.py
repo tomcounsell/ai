@@ -71,7 +71,8 @@ ALLOWLIST_PREFIXES = (
     "ui/data/memories.py",
     "utils/api_keys.py",
     "scripts/migrate_model_relationships.py",
-    "scripts/migrate_reflections_yaml.py",  # migration helper: copies the legacy vault reflections.yaml
+    # Migration helper: copies the legacy vault reflections.yaml.
+    "scripts/migrate_reflections_yaml.py",
     "scripts/update/env_sync.py",
     "scripts/update/run.py",
     "scripts/update/service.py",
@@ -90,7 +91,8 @@ ALLOWLIST_PREFIXES = (
     "scripts/install_autoexperiment.sh",
     "scripts/install_nightly_tests.sh",
     "scripts/install_sdlc_reflection.sh",
-    "scripts/install_email_bridge.sh",  # copies legacy vault projects.json/reflections.yaml into config/
+    # Copies legacy vault projects.json/reflections.yaml into config/.
+    "scripts/install_email_bridge.sh",
     "scripts/start_bridge.sh",
     "scripts/valor-service.sh",
     "scripts/calendar_hook.sh",
@@ -102,9 +104,9 @@ ALLOWLIST_PREFIXES = (
     "scripts/autoexperiment.py",
     # Skill files: each documents the established default in prose; the M8
     # contract test in test_setup_skill.py enforces vault-aware bash usage.
-    ".claude/skills-global/setup/SKILL.md",
+    ".claude/skills/setup/SKILL.md",
     ".claude/skills/update/SKILL.md",
-    ".claude/skills-global/do-deploy/SKILL.md",
+    ".claude/skills/do-deploy/SKILL.md",
     ".claude/skills-global/do-pr-review/SKILL.md",
     # Project-only skill: documents the established vault default for its env vars.
     ".claude/skills/ebook-ingest/SKILL.md",

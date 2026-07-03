@@ -1,6 +1,6 @@
 ---
 name: new-skill
-description: Use when creating a new Claude Code skill, subagent, or Valor Python tool. Also use when the user says 'create a skill', 'new skill', 'add a skill', 'create an agent', 'new agent', 'create a tool', 'new tool', or 'add a tool'. Handles shared (~/.claude/skills/), project-specific (.claude/skills/), subagents (.claude/agents/), and Valor tools/ directory.
+description: Use when creating a new Claude Code skill, subagent, or project tool. Also use when the user says 'create a skill', 'new skill', 'add a skill', 'create an agent', 'new agent', 'create a tool', 'new tool', or 'add a tool'. Handles shared (~/.claude/skills/), project-specific (.claude/skills/), and subagents (.claude/agents/).
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<skill-name>"
 disable-model-invocation: true
@@ -8,17 +8,22 @@ disable-model-invocation: true
 
 # New Skill
 
+## Repo Context Probe
+
+If `.claude/skill-context/new-skill.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its own scaffolding conventions — most commonly how to create a **project tool / CLI** (entry-point registration, packaging, where reference implementations live) and its global-vs-project-only skill placement rules. When the file is absent, this skill creates Claude Code skills and subagents using the portable, spec-compliant patterns below; "create a tool" without a context file falls back to the generic project-tool guidance in `Quick start`.
+
 ## What this skill does
 
-Creates Claude Code skills, subagents, and Valor Python tools from scratch, following canonical patterns. Guides through naming, scoping, structuring with progressive disclosure, and registering the artifact. The result is a complete, spec-compliant artifact ready for use.
+Creates Claude Code skills and subagents from scratch, following canonical patterns. Guides through naming, scoping, structuring with progressive disclosure, and registering the artifact. The result is a complete, spec-compliant artifact ready for use. When a repo declares tool-creation conventions (see the probe above), it also scaffolds project tools to that repo's standard.
 
 ## When to load sub-files
 
 - Creating a Claude Code skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) for the skeleton
 - Creating a subagent (`.claude/agents/`) → read [AGENT.md](AGENT.md)
-- Creating a Valor Python tool (`tools/`) → read [VALOR_TOOL.md](VALOR_TOOL.md)
-- Need current Anthropic field specs or substitution variable docs → read `~/.claude/skills/do-skills-audit/references/anthropic-skills-docs.txt`
-- Need a real-world example of a canonical skill structure → read `~/.claude/skills/do-skills-audit/references/anthropic-skill-creator.md`
+- Creating a project tool / CLI → follow the repo's tool conventions declared in `.claude/skill-context/new-skill.md` if present; otherwise scaffold a small CLI with an entry point registered in the project's package manifest
+- Need current Anthropic field specs, substitution variable docs, or a canonical skill example → consult the `do-skills-audit` skill's bundled `references/` (installed alongside it on every machine), if available
 
 ## Quick start
 
@@ -108,5 +113,6 @@ If a skill is not being discovered or loaded:
 
 ## Version history
 
-- v2.0.0 (2026-05-11): Absorbed new-valor-skill (VALOR_TOOL.md) and add-feature (AGENT.md); unified entry point for skills, agents, and tools
-- v1.0.0 (2026-02-22): Initial — extracted from new-valor-skill as a generic, repo-agnostic skill creator
+- v2.1.0 (2026-06-26): Leaned to a repo-agnostic baseline (skill + subagent creation). Repo-specific project-tool scaffolding conventions relocated to `.claude/skill-context/new-skill.md`; added the repo-context probe.
+- v2.0.0 (2026-05-11): Absorbed the legacy project-tool-creation skill and add-feature (AGENT.md); unified entry point for skills, agents, and tools
+- v1.0.0 (2026-02-22): Initial — extracted as a generic, repo-agnostic skill creator

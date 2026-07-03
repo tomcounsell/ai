@@ -124,9 +124,9 @@ def _steer_child(session_id: str, message: str, parent_id: str, abort: bool) -> 
         )
         print(f"Aborted {session_id} (via Redis abort queue): {preview}")
     else:
-        # Non-abort messages use the turn-boundary inbox (queued_steering_messages).
-        # This works for both SDK-harness and CLI-harness Dev sessions.
-        # steer_session() looks up by session_id (the Popoto field), not agent_session_id.
+        # Non-abort messages go onto the Redis steering list (the sole inbox), drained
+        # at the next turn boundary. This works for both SDK-harness and CLI-harness Dev
+        # sessions. steer_session() looks up by session_id (the Popoto field).
         from agent.agent_session_queue import steer_session
 
         target_session_id = child.session_id or session_id

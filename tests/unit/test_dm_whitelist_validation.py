@@ -479,60 +479,68 @@ def _bot_cfg(bot_id: int = 8837490628) -> dict:
 
 @pytest.mark.asyncio
 async def test_live_flag_bot_true_passes():
-    """A registered id resolving to User.bot=True passes silently."""
+    """A registered id resolving to User.bot=True returns empty quarantine and no detail."""
 
     async def resolver(bot_id: int):
         assert bot_id == 8837490628
         return _Entity(bot=True)
 
-    # Must not raise.
-    await validate_bot_live_flags(_bot_cfg(), resolver)
+    quarantine_ids, detail = await validate_bot_live_flags(_bot_cfg(), resolver)
+    assert quarantine_ids == set()
+    assert detail is None
 
 
 @pytest.mark.asyncio
 async def test_live_flag_human_account_surfaces_mismatch():
-    """A registered id resolving to a NON-bot (human) account is surfaced."""
+    """A confirmed NON-bot id appears in quarantine_ids and detail describes the mismatch."""
 
     async def resolver(bot_id: int):
         return _Entity(bot=False)
 
-    with pytest.raises(ConfigValidationError) as exc:
-        await validate_bot_live_flags(_bot_cfg(), resolver)
-    msg = str(exc.value)
-    assert "id=8837490628" in msg
-    assert "NON-bot" in msg
+    quarantine_ids, detail = await validate_bot_live_flags(_bot_cfg(), resolver)
+    assert 8837490628 in quarantine_ids
+    assert detail is not None
+    assert "id=8837490628" in detail
+    assert "NON-bot" in detail
 
 
 @pytest.mark.asyncio
 async def test_live_flag_unresolvable_id_surfaces_error():
-    """A resolver that raises (unresolvable id) is collected as a mismatch."""
+    """An unresolvable id (resolver raises) is NOT quarantined; probe failure noted in detail."""
 
     async def resolver(bot_id: int):
         raise ValueError("Cannot find any entity corresponding to that id")
 
-    with pytest.raises(ConfigValidationError) as exc:
-        await validate_bot_live_flags(_bot_cfg(), resolver)
-    msg = str(exc.value)
-    assert "id=8837490628" in msg
-    assert "failed to resolve" in msg
+    quarantine_ids, detail = await validate_bot_live_flags(_bot_cfg(), resolver)
+    # Critical invariant: probe failure must NOT quarantine the id.
+    assert 8837490628 not in quarantine_ids
+    assert quarantine_ids == set()
+    # But it should appear in the detail as a "could not probe" note.
+    assert detail is not None
+    assert "id=8837490628" in detail
+    assert "could not probe" in detail
 
 
 @pytest.mark.asyncio
 async def test_live_flag_no_bots_makes_no_calls():
-    """With no registered bots, the resolver is never invoked and nothing raises."""
+    """With no registered bots, the resolver is never invoked; returns (set(), None)."""
     calls = []
 
     async def resolver(bot_id: int):
         calls.append(bot_id)
         return _Entity(bot=True)
 
-    await validate_bot_live_flags({"projects": {"a": {"machine": "Cowboy"}}}, resolver)
+    quarantine_ids, detail = await validate_bot_live_flags(
+        {"projects": {"a": {"machine": "Cowboy"}}}, resolver
+    )
     assert calls == []
+    assert quarantine_ids == set()
+    assert detail is None
 
 
 @pytest.mark.asyncio
 async def test_live_flag_deduplicates_repeated_ids():
-    """A bot id registered under two projects is probed once."""
+    """A bot id registered under two projects is probed once; valid bot returns empty quarantine."""
     cfg = {
         "projects": {
             "a": {"machine": "Cowboy", "telegram": {"bots": [{"id": 42}]}},
@@ -545,5 +553,47 @@ async def test_live_flag_deduplicates_repeated_ids():
         calls.append(bot_id)
         return _Entity(bot=True)
 
-    await validate_bot_live_flags(cfg, resolver)
+    quarantine_ids, detail = await validate_bot_live_flags(cfg, resolver)
     assert calls == [42]
+    assert quarantine_ids == set()
+    assert detail is None
+
+
+@pytest.mark.asyncio
+async def test_live_flag_probe_failure_not_quarantined():
+    """A resolver that raises for one id leaves it out of quarantine_ids (critique concern #1).
+
+    Only CONFIRMED non-bot ids (User.bot=False) go into quarantine_ids.
+    Probe failures (resolver raised) are conservatively left registered.
+    """
+    failing_id = 9999
+    good_bot_id = 1111
+    cfg = {
+        "projects": {
+            "proj_a": {
+                "machine": "Cowboy",
+                "telegram": {"bots": [{"id": failing_id, "username": "maybe_bot"}]},
+            },
+            "proj_b": {
+                "machine": "Cowboy",
+                "telegram": {"bots": [{"id": good_bot_id, "username": "real_bot"}]},
+            },
+        }
+    }
+
+    async def resolver(bot_id: int):
+        if bot_id == failing_id:
+            raise TimeoutError("Telegram lookup timed out")
+        return _Entity(bot=True)  # good_bot_id is a real bot
+
+    quarantine_ids, detail = await validate_bot_live_flags(cfg, resolver)
+
+    # The failing id must NOT be quarantined — we couldn't confirm it's human.
+    assert failing_id not in quarantine_ids
+    # The good bot id must also not be quarantined — it's a valid bot.
+    assert good_bot_id not in quarantine_ids
+    assert quarantine_ids == set()
+    # The failing id should appear in detail as "could not probe".
+    assert detail is not None
+    assert str(failing_id) in detail
+    assert "could not probe" in detail

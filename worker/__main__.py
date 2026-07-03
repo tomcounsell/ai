@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import faulthandler
 import logging
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -38,9 +40,360 @@ if not os.environ.get("VALOR_LAUNCHD"):
 
 logger = logging.getLogger("worker")
 
+# Shared mutable state (granite_available, shutdown_requested, etc.)
+
 # Set to True when SIGTERM is received; causes main() to exit with code 1
 # so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
 _shutdown_via_signal = False
+
+# Heartbeat thread interval: how often the dedicated daemon thread writes
+# data/last_worker_connected. Env-tunable for conservative rollout.
+WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"))
+
+# Dead-man's-switch constants (all env-overridable for conservative rollout).
+# Grain of salt: every default below is PROVISIONAL — tune after observing real
+# freeze / false-positive rates in logs/worker.log (per the plan's pre-merge spike).
+# On-loop bump cadence — how often the beacon task refreshes last_loop_tick.
+WORKER_DEADMAN_TICK_INTERVAL: float = float(os.environ.get("WORKER_DEADMAN_TICK_INTERVAL", "5"))
+# Abort once armed if the beacon is older than this. Generous (several multiples
+# of the tick + 30s watchdog cycle) so legitimate on-loop sync blocks don't trip it.
+# Provisional — tune after observing real freeze/false-positive rates.
+WORKER_DEADMAN_STALENESS_THRESHOLD: float = float(
+    os.environ.get("WORKER_DEADMAN_STALENESS_THRESHOLD", "90")
+)
+# Unarmed-grace ceiling: if the beacon is still None this long after the watchdog
+# thread starts, the loop wedged before the first tick (startup freeze) — abort
+# anyway. Provisional — tune after observing real freeze/false-positive rates.
+WORKER_DEADMAN_STARTUP_GRACE_MAX: float = float(
+    os.environ.get("WORKER_DEADMAN_STARTUP_GRACE_MAX", "300")
+)
+# Conservative rollback kill switch: false restores #1767's unconditional green
+# write (the switch only logs, never aborts). Provisional default — tune after
+# observing real freeze/false-positive rates.
+WORKER_DEADMAN_ENABLED: bool = os.environ.get(
+    "WORKER_DEADMAN_ENABLED", "true"
+).strip().lower() not in ("", "0", "false")
+
+# Stop event for the heartbeat daemon thread — set on worker shutdown.
+_heartbeat_stop_event = threading.Event()
+
+# Granite re-probe / circuit breaker — provisional, tunable via env.
+# Grain of salt: defaults below are PROVISIONAL — tune after observing real
+# ollama outage / false-positive rates in logs/worker.log.
+# How often to probe granite when the circuit is closed.
+GRANITE_REPROBE_INTERVAL_S: float = float(os.environ.get("GRANITE_REPROBE_INTERVAL_S", "30"))
+# Consecutive probe timeouts/failures before the circuit trips to OPEN.
+GRANITE_BREAKER_OPEN_THRESHOLD: int = int(os.environ.get("GRANITE_BREAKER_OPEN_THRESHOLD", "3"))
+# How long the circuit stays OPEN before allowing a half-open re-probe.
+GRANITE_BREAKER_COOLDOWN_S: float = float(os.environ.get("GRANITE_BREAKER_COOLDOWN_S", "120"))
+
+# Module-level alias — the authoritative flag lives in agent.session_state
+# (so agent_session_queue._worker_loop can read it without a circular import).
+# This alias is provided for readability in worker.__main__ code that writes the flag.
+# GRANITE_AVAILABLE is not a constant; it is mutated by _granite_reprobe_loop.
+
+# Background-task supervisor constants (Fix #4, #1816) — all env-overridable.
+# Grain of salt: defaults below are PROVISIONAL / conservative — tune after
+# observing real respawn cadence in logs/worker.log.
+# Max number of restarts within WORKER_SUPERVISOR_WINDOW_S before the storm
+# cap fires and recycles the process via SIGKILL. Erring toward NOT killing
+# legitimate work — a task that crashes once every few minutes is fine.
+WORKER_SUPERVISOR_MAX_RESTARTS: int = int(os.environ.get("WORKER_SUPERVISOR_MAX_RESTARTS", "5"))
+# Rolling window (seconds) for the restart-count denominator.
+# Provisional — tune based on longest legitimate startup transient.
+WORKER_SUPERVISOR_WINDOW_S: float = float(os.environ.get("WORKER_SUPERVISOR_WINDOW_S", "300"))
+# Base backoff (seconds) before the first respawn; doubles each restart.
+# Provisional — minimum viable grace window before hammering a failing factory.
+WORKER_SUPERVISOR_BASE_BACKOFF_S: float = float(
+    os.environ.get("WORKER_SUPERVISOR_BASE_BACKOFF_S", "1.0")
+)
+
+
+def _self_kill() -> None:
+    """Hard-kill this process (uncatchable, signal-based) so launchd respawns it.
+
+    Dumps all thread stacks to stderr first — a real production wedge then leaves
+    forensic evidence in logs/worker_error.log (better than the macOS .ips C-frame
+    report for a Python-level wedge; see #1808). Then delivers SIGKILL: equally
+    unswallowable as the former abort-based kill, but produces NO macOS crash-report
+    dialog and NO Python-*.ips file. Extracted as a seam so unit tests can assert the
+    call without killing the test process.
+
+    The dump is best-effort; the SIGKILL is in a `finally` so it fires even if the
+    dump raises (e.g. stderr closed/monkeypatched) — otherwise, inside the storm-cap
+    asyncio done-callback the exception would be swallowed and the guard would
+    silently fail to recycle, the exact trap the subprocess test exists to catch.
+    """
+    try:
+        faulthandler.dump_traceback(all_threads=True)
+        sys.stderr.flush()
+    finally:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+
+def supervise(
+    name: str,
+    factory,
+    *,
+    max_restarts: int = WORKER_SUPERVISOR_MAX_RESTARTS,
+    window_s: float = WORKER_SUPERVISOR_WINDOW_S,
+    base_backoff_s: float = WORKER_SUPERVISOR_BASE_BACKOFF_S,
+) -> asyncio.Task:
+    """Create and supervise a background asyncio Task with exponential-backoff respawn.
+
+    Wraps asyncio.create_task(factory()) and installs a done-callback that
+    respawns the task on unexpected death (any exit that is not a cancellation).
+    Restart timestamps are tracked in a rolling window; if the task crashes more
+    than ``max_restarts`` times within ``window_s`` seconds, the process is
+    recycled unconditionally via ``_self_kill()`` (SIGKILL) so launchd can
+    respawn it clean.
+
+    Backoff: the first respawn waits ``base_backoff_s``, the second waits
+    ``base_backoff_s * 2``, and so on (capped at ``window_s / 2``).
+
+    Storm-cap recycle is an UNCONDITIONAL ``_self_kill()`` (a faulthandler thread
+    dump then SIGKILL) — the same seam used by the dead-man's-switch (#1815).
+    Never a bare ``sys.exit(1)``: a ``SystemExit`` raised inside an asyncio done-callback is
+    swallowed by the event loop's callback-exception handler, so the process
+    would keep running and the cap would silently fail to recycle.
+
+    Shutdown guard: cancelled tasks are never respawned (cancellation is the
+    normal shutdown signal). The ``agent.session_state._shutdown_requested``
+    flag is also checked so in-flight tasks during a graceful SIGTERM shutdown
+    are not respawned.
+    """
+    restart_times: list[float] = []
+    restart_count = [0]
+
+    def _done_callback(t: asyncio.Task) -> None:
+        import agent.session_state as _ss_state  # noqa: PLC0415
+
+        if t.cancelled():
+            return  # Normal shutdown — never respawn a cancelled task.
+        if _ss_state._shutdown_requested:
+            return  # Graceful SIGTERM shutdown — suppress respawn.
+
+        exc = t.exception()
+        if exc is not None:
+            logger.warning(
+                "[supervisor] Task %r exited unexpectedly: %s(%s)",
+                name,
+                type(exc).__name__,
+                exc,
+            )
+
+        # Prune restart times outside the rolling window.
+        now = time.monotonic()
+        cutoff = now - window_s
+        while restart_times and restart_times[0] < cutoff:
+            restart_times.pop(0)
+
+        # Storm-cap check — UNCONDITIONAL _self_kill() if exceeded.
+        if len(restart_times) >= max_restarts:
+            logger.critical(
+                "[supervisor] Task %r hit storm cap (%d restarts in %.0fs) — "
+                "recycling process via SIGKILL so launchd can respawn clean.",
+                name,
+                max_restarts,
+                window_s,
+            )
+            # _self_kill() dumps threads then SIGKILLs — every branch reaches this, no exceptions.
+            # Never sys.exit(1): a SystemExit in a done-callback is swallowed by the
+            # event loop so the process would keep running with the cap silently failed.
+            _self_kill()
+            return  # Unreachable — _self_kill() (SIGKILL) terminates the process.
+
+        # Exponential backoff: 1s, 2s, 4s … capped at window_s/2.
+        backoff = min(base_backoff_s * (2 ** len(restart_times)), window_s / 2)
+        restart_count[0] += 1
+        restart_times.append(now)
+        logger.warning(
+            "[supervisor] Respawning task %r (restart #%d, backoff=%.1fs)",
+            name,
+            restart_count[0],
+            backoff,
+        )
+
+        async def _delayed_respawn() -> None:
+            await asyncio.sleep(backoff)
+            import agent.session_state as _ss_state  # noqa: PLC0415
+
+            if _ss_state._shutdown_requested:
+                logger.debug(
+                    "[supervisor] Shutdown requested; cancelling delayed respawn of %r", name
+                )
+                return
+            new_task = asyncio.create_task(factory(), name=name)
+            new_task.add_done_callback(_done_callback)
+
+        asyncio.create_task(_delayed_respawn())
+
+    task = asyncio.create_task(factory(), name=name)
+    task.add_done_callback(_done_callback)
+    return task
+
+
+def _asyncio_debug_enabled(env_value: str | None) -> bool:
+    """Return True if asyncio debug mode should be enabled.
+
+    Parses the ``WORKER_ASYNCIO_DEBUG`` environment variable value.
+    Only ``"1"`` and other non-empty, non-``"0"`` / non-``"false"`` strings
+    enable debug; ``None``, ``""``, ``"0"``, and ``"false"`` are all off.
+
+    This helper is a pure, always-shipping module-level function so test
+    assertions have a stable import target on **both** investigation outcome
+    branches (root-cause-found or not-reproducible) — resolving the B2
+    orphan-helper concern from revision 4 of issue #1808.
+
+    Ref: #1808 (wedged-but-alive worker investigation).
+    """
+    if env_value is None:
+        return False
+    stripped = env_value.strip().lower()
+    return stripped not in ("", "0", "false")
+
+
+def _green_heartbeat_write() -> None:
+    """Write data/last_worker_connected, swallowing FS errors.
+
+    The dead-man's switch NEVER aborts on a write failure — a transient
+    filesystem error must not be confused with a frozen event loop. Refreshes
+    the Redis worker PID as a side effect (issue #1271).
+    """
+    from agent.agent_session_queue import _write_worker_heartbeat  # noqa: PLC0415
+
+    try:
+        _write_worker_heartbeat()
+    except Exception as exc:
+        logger.warning("Heartbeat thread: write failed: %s", exc)
+
+
+def _heartbeat_cycle(
+    armed: bool, thread_start: float, beacon_log_next: float
+) -> tuple[bool, float]:
+    """Run ONE dead-man's-switch cycle and return ``(new_armed, new_beacon_log_next)``.
+
+    Pure per-cycle body extracted from :func:`_heartbeat_thread_main` so unit
+    tests can drive a single cycle deterministically (no threads/sleeps). The
+    only side effects are the green heartbeat write, logging, and — on a wedge —
+    the :func:`_self_kill` seam (gated by ``WORKER_DEADMAN_ENABLED``).
+
+    Semantics (issue #1815 fix #1):
+
+    - **Unarmed:** the switch stays unarmed until the first beacon tick newer
+      than ``thread_start`` is observed (writing green on process liveness, the
+      #1767 behaviour). ``None`` is unarmed, NEVER stale.
+    - **Startup-freeze guard:** while still unarmed, if the beacon is ``None``
+      past ``WORKER_DEADMAN_STARTUP_GRACE_MAX`` the event loop wedged before the
+      tick task could initialise — abort (the wedge would otherwise stay silent
+      forever, since ``None`` is never stale).
+    - **Armed:** if ``now - tick <= WORKER_DEADMAN_STALENESS_THRESHOLD`` the loop
+      is ticking → write green + low-cadence beacon-age audit. Otherwise the loop
+      is synchronously frozen → CRITICAL + ``_self_kill`` (SIGKILL) so launchd
+      respawns a healthy worker.
+
+    ``WORKER_DEADMAN_ENABLED=false`` is the rollback kill switch: stale/None-past-
+    ceiling beacons only log, then fall through to an unconditional green write
+    (restoring #1767).
+    """
+    from agent.session_state import get_loop_tick  # noqa: PLC0415
+
+    tick = get_loop_tick()
+    now = time.monotonic()
+
+    if not armed:
+        if tick is not None and tick > thread_start:
+            # First tick after thread start — arm the switch and fall through to
+            # the armed staleness check this same cycle.
+            armed = True
+            logger.info(
+                "[deadman] armed: first beacon tick observed %.1fs after thread start",
+                tick - thread_start,
+            )
+        elif tick is None and (now - thread_start) > WORKER_DEADMAN_STARTUP_GRACE_MAX:
+            # Beacon never ticked past the grace ceiling — startup-window freeze.
+            logger.critical(
+                "[deadman] beacon never ticked %.1fs after start; startup-window freeze — aborting",
+                now - thread_start,
+            )
+            if WORKER_DEADMAN_ENABLED:
+                _self_kill()
+            else:
+                logger.warning("[deadman] WORKER_DEADMAN_ENABLED=false — logging only, not killing")
+            # Rollback path (or _self_kill stubbed in tests): write green so the
+            # dashboard still reflects process liveness.
+            _green_heartbeat_write()
+            return armed, beacon_log_next
+        else:
+            # Still within startup grace, beacon not yet ticked — green write on
+            # process liveness (the #1767 behaviour).
+            _green_heartbeat_write()
+            return armed, beacon_log_next
+
+    # Armed (possibly just-armed this cycle): tick is non-None here.
+    beacon_age = now - tick  # type: ignore[operator]
+    if beacon_age <= WORKER_DEADMAN_STALENESS_THRESHOLD:
+        _green_heartbeat_write()
+        # Beacon-age audit: low cadence (~once/min) so operators can watch the
+        # live margin without spamming the log every cycle.
+        if now >= beacon_log_next:
+            logger.info("[deadman] beacon age=%.1fs", beacon_age)
+            beacon_log_next = now + 60
+        return armed, beacon_log_next
+
+    # Beacon stale — the event loop is synchronously frozen.
+    logger.critical(
+        "[deadman] loop beacon stale: age=%.1fs > %.1fs threshold — aborting for launchd respawn",
+        beacon_age,
+        WORKER_DEADMAN_STALENESS_THRESHOLD,
+    )
+    if WORKER_DEADMAN_ENABLED:
+        _self_kill()
+    else:
+        logger.warning("[deadman] WORKER_DEADMAN_ENABLED=false — logging only, not killing")
+    return armed, beacon_log_next
+
+
+def _heartbeat_thread_main() -> None:
+    """Dedicated daemon thread for worker heartbeat writes, inverted into a
+    dead-man's switch (issue #1815 fix #1).
+
+    Runs independently of the asyncio event loop so PTY/thread-pool
+    saturation (incident 2026-06-23, issue #1767) cannot prevent heartbeat
+    writes. The loop wakes every WORKER_HEARTBEAT_INTERVAL seconds and delegates
+    each cycle to :func:`_heartbeat_cycle`.
+
+    When the on-loop beacon (last_loop_tick) is fresh, writes the green
+    heartbeat as before. When the beacon goes stale beyond
+    WORKER_DEADMAN_STALENESS_THRESHOLD (or never ticks past the startup grace
+    ceiling), logs a CRITICAL and self-kills via SIGKILL so launchd can respawn
+    a healthy worker.
+
+    WORKER_DEADMAN_ENABLED=false restores the unconditional green-write
+    behaviour of issue #1767 (rollback kill switch).
+
+    Ref: #1055 for the executor-isolation pattern.
+    Ref: #1767 for the original off-loop thread design.
+    Ref: #1815 for the dead-man's-switch inversion.
+    """
+    thread_start = time.monotonic()
+    armed = False
+    beacon_log_next = 0.0
+
+    logger.info(
+        "Heartbeat thread started (interval=%ds, deadman=%s, threshold=%ds, grace=%ds)",
+        WORKER_HEARTBEAT_INTERVAL,
+        WORKER_DEADMAN_ENABLED,
+        WORKER_DEADMAN_STALENESS_THRESHOLD,
+        WORKER_DEADMAN_STARTUP_GRACE_MAX,
+    )
+
+    # wait() returns True only when the stop event is set, so the loop exits on
+    # graceful shutdown and never aborts during teardown (Race 3).
+    while not _heartbeat_stop_event.wait(timeout=WORKER_HEARTBEAT_INTERVAL):
+        armed, beacon_log_next = _heartbeat_cycle(armed, thread_start, beacon_log_next)
+
+    logger.info("Heartbeat thread stopped")
 
 
 class _UTCFormatter(logging.Formatter):
@@ -147,6 +500,204 @@ def _load_projects(project_filter: str | None = None) -> dict:
     return all_projects
 
 
+async def _granite_reprobe_loop() -> None:
+    """Background circuit breaker that re-probes granite and updates granite_available.
+
+    States:
+      CLOSED  — probe every GRANITE_REPROBE_INTERVAL_S; success keeps it closed;
+                failure increments the consecutive-failure counter.
+      OPEN    — entered when consecutive failures reach GRANITE_BREAKER_OPEN_THRESHOLD;
+                waits GRANITE_BREAKER_COOLDOWN_S then moves to HALF_OPEN.
+      HALF_OPEN — tries a single probe; success → CLOSED + granite_available=True;
+                  failure → back to OPEN (reset cooldown).
+
+    Logs every state transition. CancelledError exits cleanly (normal shutdown path).
+    The probe call uses asyncio.to_thread so the synchronous ensure_granite_model
+    does not block the event loop.
+    """
+    import agent.session_state as _ss  # noqa: PLC0415
+    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
+
+    # Circuit state strings (lowercase as required by ruff N806)
+    state_closed = "closed"
+    state_open = "open"
+    state_half_open = "half_open"
+
+    # Start closed; initial availability already set by the startup probe.
+    state = state_closed
+    consecutive_failures = 0 if _ss.granite_available else 1  # count startup failure
+
+    logger.debug(
+        "Granite reprobe loop started (state=%s, granite_available=%s)",
+        state,
+        _ss.granite_available,
+    )
+
+    try:
+        while True:
+            if state == state_closed:
+                await asyncio.sleep(GRANITE_REPROBE_INTERVAL_S)
+                ok, detail = await asyncio.to_thread(ensure_granite_model)
+                if ok:
+                    if not _ss.granite_available:
+                        logger.info(
+                            "Granite classifier recovered: %s. Resuming deferred sessions.",
+                            detail,
+                        )
+                        _ss.granite_available = True
+                        _resume_deferred_granite_sessions()
+                    consecutive_failures = 0
+                    # Stay closed
+                else:
+                    consecutive_failures += 1
+                    logger.warning(
+                        "Granite probe failed (%d/%d): %s",
+                        consecutive_failures,
+                        GRANITE_BREAKER_OPEN_THRESHOLD,
+                        detail,
+                    )
+                    if _ss.granite_available:
+                        _ss.granite_available = False
+                        logger.warning(
+                            "Granite unavailable — ENG sessions will be deferred to paused_circuit."
+                        )
+                    if consecutive_failures >= GRANITE_BREAKER_OPEN_THRESHOLD:
+                        state = state_open
+                        logger.warning(
+                            "Granite circuit breaker OPEN after %d consecutive failures. "
+                            "Cooling down for %.0fs before next probe.",
+                            consecutive_failures,
+                            GRANITE_BREAKER_COOLDOWN_S,
+                        )
+
+            elif state == state_open:
+                await asyncio.sleep(GRANITE_BREAKER_COOLDOWN_S)
+                state = state_half_open
+                logger.info("Granite circuit breaker HALF_OPEN — attempting re-probe.")
+
+            elif state == state_half_open:
+                ok, detail = await asyncio.to_thread(ensure_granite_model)
+                if ok:
+                    state = state_closed
+                    consecutive_failures = 0
+                    _ss.granite_available = True
+                    logger.info(
+                        "Granite circuit breaker CLOSED after half-open success: %s. "
+                        "Resuming deferred sessions.",
+                        detail,
+                    )
+                    _resume_deferred_granite_sessions()
+                else:
+                    state = state_open
+                    logger.warning(
+                        "Granite half-open probe failed: %s. Circuit back to OPEN, "
+                        "cooling down for %.0fs.",
+                        detail,
+                        GRANITE_BREAKER_COOLDOWN_S,
+                    )
+
+    except asyncio.CancelledError:
+        logger.debug("Granite reprobe loop cancelled (shutdown).")
+
+
+def _resume_deferred_granite_sessions() -> None:
+    """Set the worker:recovering Redis flag so session_recovery_drip re-queues
+    paused_circuit sessions that were deferred due to granite unavailability.
+
+    Uses a best-effort approach: if Redis is unreachable the drip will simply
+    not fire on the next tick, but granite will be available again at that point
+    so the next enqueue will proceed normally anyway.
+    """
+    try:
+        import os  # noqa: PLC0415
+
+        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+        project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
+        r = POPOTO_REDIS_DB
+        rec_key = f"{project_key}:worker:recovering"
+        r.set(rec_key, "1", ex=3600)  # TTL: 1 hour, drip clears it when queues drain
+        logger.info(
+            "Set %s flag — session_recovery_drip will re-queue paused_circuit sessions.",
+            rec_key,
+        )
+    except Exception as e:
+        logger.warning("Could not set worker:recovering flag for granite recovery: %s", e)
+
+
+def _any_pty_role_configured() -> bool:
+    """D1b (issue #1817): True if at least one role (globally or per-project)
+    resolves to PTY transport, anywhere across the fleet.
+
+    Runs at worker startup, before any specific session/project is known, so
+    this scans EVERY project's ``transport.pm``/``transport.dev`` override in
+    projects.json in addition to the global default
+    (``settings.granite.pm_transport`` / ``dev_transport``). A single
+    project overriding to "pty" while the global default is "headless" (or
+    vice versa) still counts — the D1b contract-check only needs ONE
+    PTY-transport role anywhere in the fleet to become load-bearing; a fully
+    headless fleet must not be hard-failed by a check that only matters for
+    the interactive TUI (#1842 — a headless role's ``claude -p`` one-shot
+    carries no PTY bytes and is immune to TUI-marker drift by construction).
+
+    Fails OPEN (returns True) on any config-read error: a false "no PTY role
+    configured" would silently disarm a load-bearing contract-check, which
+    is worse than running one extra fingerprint check unnecessarily.
+    """
+    from config.settings import settings
+
+    if settings.granite.pm_transport == "pty" or settings.granite.dev_transport == "pty":
+        return True
+
+    try:
+        from bridge.routing import load_config  # noqa: PLC0415
+
+        cfg = load_config()
+        projects_cfg = cfg.get("projects", {}) if isinstance(cfg, dict) else {}
+        for project in projects_cfg.values():
+            if not isinstance(project, dict):
+                continue
+            transport = project.get("transport")
+            if not isinstance(transport, dict):
+                continue
+            if transport.get("pm") == "pty" or transport.get("dev") == "pty":
+                return True
+    except Exception as e:
+        logger.debug(
+            "[worker-startup] projects.json transport scan failed (fail-open, "
+            "assuming a PTY role IS configured): %s",
+            e,
+        )
+        return True
+
+    return False
+
+
+def _evaluate_contract_check_gate(contract_ok: bool, pty_configured: bool, enforce: bool) -> str:
+    """Pure decision function for the D1b startup contract-check gate (issue #1817).
+
+    Separated from `_run_worker`'s I/O (logging, sys.exit) so the branching
+    logic is directly unit-testable without mocking worker startup.
+
+    Returns one of:
+      - "pass": markers matched their golden sample — nothing to report.
+      - "skip_headless": markers mismatched, but no PTY-transport role is
+        configured (fully headless fleet) — a headless `claude -p` one-shot
+        carries no PTY bytes and is immune to TUI-marker drift by
+        construction (#1842), so this is NOT an operator-actionable failure.
+      - "warn": markers mismatched, a PTY-transport role IS configured, but
+        CLAUDE_CONTRACT_CHECK_ENFORCE is not set — log CRITICAL and continue.
+      - "hard_fail": markers mismatched, a PTY-transport role IS configured,
+        AND CLAUDE_CONTRACT_CHECK_ENFORCE=1 — the caller must refuse to
+        start (sys.exit) rather than let sessions silently hang to timeout.
+    """
+    if contract_ok:
+        return "pass"
+    if not pty_configured:
+        return "skip_headless"
+    return "hard_fail" if enforce else "warn"
+
+
 async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
@@ -167,6 +718,8 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         _ensure_worker,
         _recover_interrupted_agent_sessions_startup,
         _session_notify_listener,
+        _sweep_dead_worker_sessions,
+        _sweep_stranded_waiting_for_children_parents,
         _write_worker_heartbeat,
         cleanup_corrupted_agent_sessions,
         register_callbacks,
@@ -176,13 +729,43 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     from agent.output_handler import FileOutputHandler, TelegramRelayOutputHandler
     from agent.session_health import _agent_session_tool_timeout_loop
 
-    # Initialize global concurrency semaphore BEFORE any worker loops are created.
-    # Clamp to minimum 1 to prevent deadlock if MAX_CONCURRENT_SESSIONS=0.
+    # Initialize the global concurrency slot registry BEFORE any worker loops
+    # are created. Clamp to minimum 1 to prevent deadlock if
+    # MAX_CONCURRENT_SESSIONS=0.
     _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
     import agent.session_state as _ss  # noqa: PLC0415
+    from agent.slot_lease import SlotLeaseRegistry  # noqa: PLC0415
 
-    _ss._global_session_semaphore = asyncio.Semaphore(_max_sessions)
-    logger.info(f"Global session semaphore initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
+    _ss._slot_registry = SlotLeaseRegistry(_max_sessions)
+    logger.info(f"Slot lease registry initialized: MAX_CONCURRENT_SESSIONS={_max_sessions}")
+
+    # Opt-in asyncio debug mode (issue #1808 investigation — Deliverable B / C-rev4).
+    # Catches *synchronous* loop blocks (hypotheses 2/3 of the wedge investigation)
+    # by logging any callback that exceeds slow_callback_duration.
+    # Default-off (WORKER_ASYNCIO_DEBUG unset / "0" / "" → no-op); fail-open.
+    # Ships on BOTH investigation outcome branches because the env flag makes it
+    # zero steady-state cost (C-rev4: the helper always has a production caller).
+    # IMPORTANT — C1 LIMITATION: set_debug only detects *synchronous* blocking
+    # callbacks (CPU-bound work, blocking syscall). It is structurally blind to
+    # coroutines cleanly parked at ``await semaphore.acquire()`` (hypothesis 1).
+    # For the suspension-wedge detection surface see the always-on slot-exhaustion
+    # forensic line in agent/session_health.py (Deliverable D, issue #1808).
+    try:
+        if _asyncio_debug_enabled(os.environ.get("WORKER_ASYNCIO_DEBUG")):
+            _loop = asyncio.get_event_loop()
+            _loop.set_debug(True)
+            _loop.slow_callback_duration = 0.1  # 100 ms; tune lower for finer resolution
+            logger.info(
+                "[worker-startup] asyncio debug mode enabled (WORKER_ASYNCIO_DEBUG): "
+                "slow callbacks logged above %.0f ms. "
+                "Note C1 limitation — does NOT detect await-suspension wedge; "
+                "use the slot-exhaustion forensic log in session_health.py for that.",
+                _loop.slow_callback_duration * 1000,
+            )
+    except Exception as _dbg_exc:
+        logger.warning(
+            "[worker-startup] WORKER_ASYNCIO_DEBUG set_debug failed (fail-open): %s", _dbg_exc
+        )
 
     handler = TelegramRelayOutputHandler(file_handler=FileOutputHandler())
     from bridge.email_bridge import EmailOutputHandler as _EmailOutputHandler
@@ -225,6 +808,55 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         sys.exit(1)
 
     logger.info("CLI harness 'claude' found on PATH")
+
+    # D1b (issue #1817): startup contract-check on the scraped TUI markers
+    # the PTY driver depends on for idle detection (IDLE_BAR, PROMPT_GLYPH,
+    # SPINNER_EVIDENCE_RE, the trust-folder prompt pattern). A routine
+    # `claude` auto-update that rewords one of these strings is otherwise a
+    # SILENT fleet-wide outage — every PTY session hangs to timeout instead
+    # of detecting idle, with no exception and no crash. This converts that
+    # into a loud, operator-visible signal. See `_evaluate_contract_check_gate`
+    # for the (independently unit-testable) decision logic.
+    try:
+        from agent.granite_container.pty_driver import verify_tui_marker_contract
+
+        _contract_ok, _failed_markers = verify_tui_marker_contract()
+        _pty_configured = True if _contract_ok else _any_pty_role_configured()
+        _enforce = os.environ.get("CLAUDE_CONTRACT_CHECK_ENFORCE") == "1"
+        _decision = _evaluate_contract_check_gate(_contract_ok, _pty_configured, _enforce)
+
+        if _decision == "pass":
+            logger.info("CLI harness contract-check passed (TUI markers OK)")
+        elif _decision == "skip_headless":
+            logger.info(
+                "CLI harness contract-check: marker(s) %s mismatched, but no "
+                "PTY-transport role is configured (fully headless fleet) — "
+                "skipping. Headless turns carry no PTY bytes and are immune "
+                "to TUI-marker drift by construction.",
+                ", ".join(_failed_markers),
+            )
+        elif _decision == "warn":
+            logger.critical(
+                "CLI harness contract-check FAILED — scraped TUI marker(s) "
+                "%s no longer match their golden sample and a PTY-transport "
+                "role is configured. A stale marker means every interactive "
+                "session silently hangs to timeout instead of detecting idle "
+                "(issue #1817 D1b). Continuing anyway — set "
+                "CLAUDE_CONTRACT_CHECK_ENFORCE=1 to refuse startup on this "
+                "condition.",
+                ", ".join(_failed_markers),
+            )
+        else:  # "hard_fail"
+            logger.critical(
+                "CLI harness contract-check FAILED — scraped TUI marker(s) "
+                "%s no longer match their golden sample and a PTY-transport "
+                "role is configured. Refusing to start "
+                "(CLAUDE_CONTRACT_CHECK_ENFORCE=1).",
+                ", ".join(_failed_markers),
+            )
+            sys.exit(1)
+    except Exception as e:
+        logger.warning(f"CLI harness contract-check error (non-fatal): {e}")
 
     # Under launchd (VALOR_LAUNCHD=1), skip the subprocess smoke test entirely.
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
@@ -325,24 +957,62 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Class-set orphan cleanup failed (non-fatal): {e}")
 
-    # Step 2c: Heal future-dated updated_at values written before fix #1645.
-    # Clamps any session whose updated_at is in the future (caused by popoto
-    # auto_now minting naive local time on non-UTC hosts). Idempotent.
+    # Step 2c: Detect future-dated updated_at values written before fix #1645.
+    # C2 (#1817): detection-only -- no longer clamps/re-saves (that reshuffled
+    # the created_at-based index; see _heal_future_updated_at's docstring).
+    # Purely an operator-visibility log; staleness reads no longer depend on
+    # this having run (agent/session_health.py uses a trusted-clock relative
+    # age instead of comparing local wall-clock to a possibly-skewed value).
     try:
         from models.agent_session import AgentSession as _AgentSession
 
         count = _AgentSession._heal_future_updated_at()
-        logger.info(f"_heal_future_updated_at: healed {count} records")
+        if count:
+            logger.info(f"_heal_future_updated_at: detected {count} future-dated record(s)")
     except Exception as e:
         logger.warning(f"_heal_future_updated_at non-fatal: {e}")
 
-    # Step 3: Recover any sessions that were running when the previous process died
+    # Step 3a: Sweep running sessions whose claude_pid is dead (issue #1767).
+    # MUST run BEFORE _recover_interrupted_agent_sessions_startup (Step 3b) — that
+    # function transitions all running→pending without checking PID liveness. If the
+    # sweep runs after, there are no running sessions left to inspect.
+    # This sweep finds sessions orphaned from a dead/U-state worker (dead claude_pid)
+    # and marks them killed so catchup can re-enqueue the unanswered human messages.
+    # Contrast: Step 3b re-queues sessions that are genuinely interruptible (alive PID
+    # or no PID yet) — the sweep handles the dead-worker subset first.
+    try:
+        swept = _sweep_dead_worker_sessions()
+        if swept:
+            logger.info("Startup recovery: swept %d dead-worker running session(s) → killed", swept)
+    except Exception as e:
+        logger.warning(f"Dead-worker session sweep failed (non-fatal): {e}")
+
+    # Step 3b: Recover any sessions that were running when the previous process died
     try:
         recovered = _recover_interrupted_agent_sessions_startup()
         if recovered:
             logger.info(f"Recovered {recovered} interrupted session(s)")
     except Exception as e:
         logger.warning(f"Session recovery failed (non-fatal): {e}")
+
+    # Step 3c: Re-finalize parents stranded in waiting_for_children by a crash
+    # window between the child's finalize save and the parent's own transition
+    # (issue #1817, C1). finalize_session() intentionally saves the child
+    # independently of the parent's best-effort finalize (see
+    # agent/session_health.py::_sweep_stranded_waiting_for_children_parents for
+    # the full non-coupling rationale) -- this sweep is what closes the
+    # resulting crash-window orphan. Safe to run unconditionally: it only
+    # transitions parents whose children are ALL terminal, and is a no-op for
+    # a parent still legitimately waiting or already finalized.
+    try:
+        respawned = _sweep_stranded_waiting_for_children_parents()
+        if respawned:
+            logger.info(
+                "Startup recovery: re-finalized %d stranded waiting_for_children parent(s)",
+                respawned,
+            )
+    except Exception as e:
+        logger.warning(f"Stranded waiting_for_children sweep failed (non-fatal): {e}")
 
     # Step 4: Kill orphaned Claude Code CLI subprocesses from prior runs
     try:
@@ -367,28 +1037,36 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
 
     # Step 4b.5: Verify the granite classifier model is present and responsive.
-    # Granite is the routing brain of the PTY container — every PM/Dev turn is
-    # routed by an ollama call against it. Without granite the worker would come
-    # up and silently mis-route every session, so this is a HARD startup
-    # precondition (the granite PTY path is all-or-nothing; there is no runtime
-    # fallback). Every restart path funnels through here — /update's inline
-    # restart, the cron deferred restart-flag → SIGTERM → launchd respawn
-    # (agent_session_queue._trigger_restart), and manual worker-restart — so
-    # gating at startup covers them all, not just the interactive /update path.
-    # Pulls once on miss; exits non-zero if granite still can't be made
-    # available (launchd respawns after ThrottleInterval, self-healing once
-    # granite becomes reachable).
-    from agent.granite_container.granite_classifier import ensure_granite_model
+    # The only ollama call is ensure_granite_model() — a one-time startup probe
+    # and a background re-probe loop. Classification of PM prefix tokens is pure
+    # regex (classify_pm_prefix); PTY sessions run on Claude OAuth subscription,
+    # not ollama. When the probe succeeds, granite_available is set True and ENG
+    # sessions are dispatched normally. When it fails, the worker starts in
+    # DEGRADED mode: granite_available stays False, ENG sessions are deferred to
+    # paused_circuit, and _granite_reprobe_loop retries in the background until
+    # the model becomes reachable (circuit breaker: OPEN after
+    # GRANITE_BREAKER_OPEN_THRESHOLD consecutive failures, COOLDOWN before
+    # half-open re-probe). Non-ENG sessions (TEAMMATE) proceed unaffected.
+    import agent.session_state as _ss_granite  # noqa: PLC0415
+    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
 
     granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)
     if not granite_ok:
-        logger.critical(
-            "Granite classifier unavailable: %s. The PTY container cannot route "
-            "sessions without it — exiting. Fix with 'ollama pull granite4.1:3b'.",
+        logger.warning(
+            "Granite classifier unavailable: %s. Starting in degraded mode — "
+            "ENG sessions will be deferred to paused_circuit until granite "
+            "becomes reachable. Fix with 'ollama pull granite4.1:3b'.",
             granite_detail,
         )
-        sys.exit(1)
-    logger.info("Granite classifier ready: %s", granite_detail)
+        _ss_granite.granite_available = False
+    else:
+        logger.info("Granite classifier ready: %s", granite_detail)
+        _ss_granite.granite_available = True
+
+    # Start _granite_reprobe_loop as a supervised background task — it doubles as the
+    # circuit breaker, toggling granite_available as the model appears/disappears.
+    # supervise() respawns with exponential backoff; storm cap → _self_kill() SIGKILL.
+    reprobe_task = supervise("granite-reprobe", _granite_reprobe_loop)
 
     # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
     # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
@@ -407,11 +1085,36 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
     # For startup, we need to kick workers for any pending sessions.
-    from models.agent_session import AgentSession
+    # Gate: when granite is unavailable, ENG sessions are deferred to paused_circuit
+    # so they are not silently mis-routed. Non-ENG sessions (TEAMMATE) proceed.
+    from models.agent_session import AgentSession  # noqa: PLC0415
+    from models.session_lifecycle import transition_status  # noqa: PLC0415
 
     pending_sessions = list(AgentSession.query.filter(status="pending"))
+    deferred_count = 0
     started_workers: set[str] = set()
     for session in pending_sessions:
+        session_type = getattr(session, "session_type", None)
+        if not _ss_granite.granite_available and session_type == "eng":
+            # Defer ENG sessions until granite becomes reachable.
+            try:
+                transition_status(
+                    session,
+                    "paused_circuit",
+                    reason="granite-degrade: startup probe failed; resumes when granite recovers",
+                )
+                deferred_count += 1
+                logger.info(
+                    "Deferred ENG session %s to paused_circuit (granite unavailable)",
+                    getattr(session, "session_id", "?"),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Could not defer ENG session %s to paused_circuit: %s",
+                    getattr(session, "session_id", "?"),
+                    e,
+                )
+            continue
         wk = session.worker_key
         if wk not in started_workers:
             _ensure_worker(wk, is_project_keyed=session.is_project_keyed)
@@ -420,105 +1123,90 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     logger.info(
         f"Worker started: {len(projects)} project(s), "
         f"{len(pending_sessions)} pending session(s), "
-        f"{len(started_workers)} worker loop(s)"
+        f"{len(started_workers)} worker loop(s), "
+        f"{deferred_count} ENG session(s) deferred (granite degraded)"
     )
 
     # Write heartbeat immediately so dashboard shows green without waiting
     # for the first 5-minute health loop tick.
     _write_worker_heartbeat()
 
-    # Start health monitor as background task
-    health_task = asyncio.create_task(_agent_session_health_loop(), name="session-health-monitor")
+    # Start on-loop liveness beacon task (issue #1815 fix #1).
+    # Must be started BEFORE the heartbeat thread so the thread can observe
+    # the first tick within its startup grace window.
+    async def _loop_tick_task() -> None:
+        """On-loop heartbeat: bumps last_loop_tick so the off-loop watchdog can
+        distinguish a ticking loop from a synchronously-frozen one."""
+        from agent.session_state import bump_loop_tick  # noqa: PLC0415
 
-    def _health_task_done(t: asyncio.Task) -> None:
+        bump_loop_tick()  # Initialize before first sleep so watchdog has a baseline
+        while True:
+            await asyncio.sleep(WORKER_DEADMAN_TICK_INTERVAL)
+            bump_loop_tick()
+
+    loop_tick_task = asyncio.create_task(_loop_tick_task(), name="loop-tick")
+
+    def _loop_tick_task_done(t: asyncio.Task) -> None:
         if t.cancelled():
             return  # Normal shutdown path
         exc = t.exception()
         if exc is not None:
-            # Guards against unexpected task exit — ordinary exceptions are already caught
-            # inside the loop's own try-except.
-            logger.error("Health monitor task exited unexpectedly: %s", exc)
+            # The beacon stopping means the watchdog will eventually self-kill;
+            # surface the cause so the crash is diagnosable.
+            logger.error("Loop-tick beacon task exited unexpectedly: %s", exc)
 
-    health_task.add_done_callback(_health_task_done)
+    loop_tick_task.add_done_callback(_loop_tick_task_done)
 
-    def _health_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Health monitor exited unexpectedly: %s", exc)
-
-    health_task.add_done_callback(_health_task_done)
-
-    # Start per-tool timeout sub-loop (issue #1270) — parallel to the main 5-min
-    # health loop on its own 30s cadence so the 30s internal-tier budget can fire
-    # within one tick of expiry. Independent done-callback so a crash here is
-    # logged distinctly from the main monitor.
-    tool_timeout_task = asyncio.create_task(
-        _agent_session_tool_timeout_loop(), name="session-tool-timeout-monitor"
+    # Start dedicated heartbeat daemon thread (issue #1767, inverted #1815).
+    # Runs outside the asyncio event loop so PTY/thread-pool saturation
+    # cannot starve heartbeat writes. daemon=True ensures it cannot outlive
+    # the worker process even on abnormal exit.
+    _heartbeat_stop_event.clear()
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_thread_main,
+        name="worker-heartbeat",
+        daemon=True,
     )
+    heartbeat_thread.start()
 
-    def _tool_timeout_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Tool-timeout sub-loop exited unexpectedly: %s", exc)
+    # Start health monitor as a supervised background task (#1816 Fix #4).
+    # supervise() respawns on unexpected death with exponential backoff;
+    # storm cap exceeds → _self_kill() SIGKILL so launchd can respawn clean.
+    health_task = supervise("session-health-monitor", _agent_session_health_loop)
 
-    tool_timeout_task.add_done_callback(_tool_timeout_task_done)
+    # Start per-tool timeout sub-loop (issue #1270) — supervised.
+    # Parallel to the main 5-min health loop on its own 30s cadence so the
+    # 30s internal-tier budget can fire within one tick of expiry.
+    tool_timeout_task = supervise("session-tool-timeout-monitor", _agent_session_tool_timeout_loop)
 
-    # Start unified reflection scheduler (moved from bridge — processing belongs in worker)
+    # Start unified reflection scheduler (moved from bridge — processing belongs in worker).
+    # Supervised so a scheduler crash is respawned rather than silently lost.
     reflection_task = None
     try:
         from agent.reflection_scheduler import ReflectionScheduler
 
         _reflection_scheduler = ReflectionScheduler()
-        reflection_task = asyncio.create_task(
-            _reflection_scheduler.start(), name="reflection-scheduler"
-        )
 
-        def _reflection_task_done(t: asyncio.Task) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.error("Reflection scheduler exited unexpectedly: %s", exc)
+        def _make_reflection_task():
+            return _reflection_scheduler.start()
 
-        reflection_task.add_done_callback(_reflection_task_done)
-        logger.info("Reflection scheduler started")
+        reflection_task = supervise("reflection-scheduler", _make_reflection_task)
+        logger.info("Reflection scheduler started (supervised)")
     except Exception as e:
         logger.error(f"Failed to start reflection scheduler: {e}")
 
-    # Start pub/sub listener — delivers ~1s session pickup vs 5-minute health check
-    notify_task = asyncio.create_task(_session_notify_listener(), name="session-notify-listener")
+    # Start pub/sub listener — supervised; delivers ~1s session pickup vs 5-min health check.
+    notify_task = supervise("session-notify-listener", _session_notify_listener)
 
-    def _notify_task_done(t: asyncio.Task) -> None:
-        if t.cancelled():
-            return  # Normal shutdown path
-        exc = t.exception()
-        if exc is not None:
-            logger.error("Session notify listener exited unexpectedly: %s", exc)
-
-    notify_task.add_done_callback(_notify_task_done)
-
-    # Start idle SDK-client sweeper (issue #1128). Worker-internal because
-    # `_active_clients` is process-local — the session-watchdog (separate
-    # process) cannot reach the registry. See `worker/idle_sweeper.py`.
+    # Start idle SDK-client sweeper (issue #1128) — supervised. Worker-internal because
+    # `_active_clients` is process-local — the session-watchdog (separate process)
+    # cannot reach the registry. See `worker/idle_sweeper.py`.
     idle_sweep_task = None
     try:
         from worker.idle_sweeper import run_idle_sweep
 
-        idle_sweep_task = asyncio.create_task(run_idle_sweep(), name="idle-sweeper")
-
-        def _idle_sweep_done(t: asyncio.Task) -> None:
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.error("Idle sweeper exited unexpectedly: %s", exc)
-
-        idle_sweep_task.add_done_callback(_idle_sweep_done)
-        logger.info("Idle SDK-client sweeper started")
+        idle_sweep_task = supervise("idle-sweeper", run_idle_sweep)
+        logger.info("Idle SDK-client sweeper started (supervised)")
     except Exception as e:
         logger.warning("Failed to start idle sweeper: %s", e)
 
@@ -573,10 +1261,30 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Extraction drain failed: {e}")
 
+    # Stop the dedicated heartbeat thread (issue #1767).
+    # Setting the event causes _heartbeat_thread_main's wait() to return
+    # immediately; the thread exits its loop and the join() completes quickly.
+    _heartbeat_stop_event.set()
+    heartbeat_thread.join(timeout=5)
+
     # Cancel health monitor
     health_task.cancel()
     try:
         await health_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel per-tool timeout sub-loop
+    tool_timeout_task.cancel()
+    try:
+        await tool_timeout_task
+    except asyncio.CancelledError:
+        pass
+
+    # Cancel on-loop liveness beacon (issue #1815 fix #1)
+    loop_tick_task.cancel()
+    try:
+        await loop_tick_task
     except asyncio.CancelledError:
         pass
 
@@ -594,6 +1302,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             await reflection_task
         except asyncio.CancelledError:
             pass
+
+    # Cancel granite re-probe / circuit breaker loop (Fix #1)
+    reprobe_task.cancel()
+    try:
+        await reprobe_task
+    except asyncio.CancelledError:
+        pass
 
     # Cancel idle-sweeper (issue #1128)
     if idle_sweep_task is not None:
@@ -636,6 +1351,13 @@ def main() -> None:
 
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
+
+    # Configure resilient Redis connection before any Popoto model is accessed.
+    # Degrade-don't-die: if Redis is unreachable at boot this logs a warning
+    # and returns without raising so operators can start Redis and restart.
+    from config.redis_bootstrap import configure_resilient_redis  # noqa: PLC0415
+
+    configure_resilient_redis()
 
     # Validate agent definition files are usable on disk. Missing, malformed,
     # or unreadable files are not fatal — the SDK falls back gracefully — but

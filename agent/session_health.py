@@ -13,17 +13,21 @@ See ``docs/features/pm-session-liveness.md`` for the full model.
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import re
 import signal
 import socket
+import subprocess
+import sys
 import time
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
+import agent.session_state as _session_state
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -43,8 +47,21 @@ logger = logging.getLogger(__name__)
 
 # === Cross-process orphan reaper constants (issue #1271) ===
 #
-# Compiled cmdline regex patterns. Two signatures match:
-#   - Claude CLI (``claude_agent_sdk/_bundled/claude``)
+# Compiled cmdline regex patterns. Three signatures match:
+#   - Claude CLI SDK bundle (``claude_agent_sdk/_bundled/claude``)
+#   - The native/PTY granite TUI process (D2, issue #1817): a bare or
+#     absolute-path ``claude`` invocation carrying ``--permission-mode
+#     bypassPermissions`` (see ``agent/granite_container/pty_driver.py``'s
+#     ``spawn()`` argv) that is NOT a one-shot. The two leading negative
+#     lookaheads exclude any cmdline containing a standalone ``-p`` token or
+#     ``--print`` — those are headless ``claude -p`` one-shot turns
+#     (``agent/granite_container/role_driver.py``'s ``HeadlessRoleDriver``,
+#     also carrying ``--permission-mode bypassPermissions``), which are
+#     ALREADY governed by the separate, narrower, age-gated
+#     ``_is_stale_print_oneshot`` matcher below. Overlapping the two would
+#     let this broader regex fast-track-match (via ``is_claude``) an
+#     in-flight headless turn before its own one-shot matcher's age gate
+#     even applies — do not remove the lookaheads.
 #   - Any MCP server module under ``mcp_servers/``
 #
 # The worker pattern (``python -m worker``) is INTENTIONALLY EXCLUDED:
@@ -53,7 +70,10 @@ logger = logging.getLogger(__name__)
 # signature + PPID==1 filter would match every live worker. As an additional
 # defense-in-depth layer, the reaper builds a positive-ID skip-set from
 # ``worker:registered_pid:*`` Redis keys.
-_CLAUDE_CMDLINE_RE = re.compile(r"claude_agent_sdk/_bundled/claude\b")
+_CLAUDE_CMDLINE_RE = re.compile(
+    r"claude_agent_sdk/_bundled/claude\b"
+    r"|^(?!.*(?:^|\s)-p(?:\s|$))(?!.*--print(?:\s|$)).*\bclaude\b.*--permission-mode\s+bypassPermissions"
+)
 _MCP_SERVER_CMDLINE_RE = re.compile(r"mcp_servers/[\w_]+\.py\b")
 
 # Heartbeat-freshness threshold for the per-PID gate (30 minutes).
@@ -81,6 +101,66 @@ _SHELL_WRAPPER_NAMES = frozenset({"sh", "zsh", "bash", "dash"})
 # the integer values to its skip-set.
 WORKER_REGISTERED_PID_KEY_PREFIX = "worker:registered_pid:"
 WORKER_REGISTERED_PID_TTL_SECONDS = 86400  # 24h
+
+# === Fix #5 (#1821): worker→bridge Redis-mediated liveness/slot contract ===
+#
+# The bridge process cannot touch the worker's in-memory SlotLeaseRegistry (its
+# asyncio.Semaphore is loop-affine) and cannot read last_loop_tick (a monotonic()
+# value meaningless outside the worker process). Every cross-process signal
+# therefore goes through Redis, published by the worker and read by the bridge.
+# All keys are per-host and TTL'd so a dead worker's records expire and the
+# bridge sees "no beacon" rather than a phantom-live registry.
+#
+# Config location (not a defect): read via raw os.environ.get() at module scope,
+# matching the sibling WORKER_HEARTBEAT_INTERVAL / #1815 deadman constants — no
+# config/settings.py entry is expected.
+WORKER_HEARTBEAT_INTERVAL = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL", "30"))
+WORKER_LOOP_BEACON_KEY_PREFIX = "worker:loop_beacon:"
+WORKER_SLOT_LEASES_KEY_PREFIX = "worker:slot:leases:"
+WORKER_SLOT_RECLAIM_REQUESTS_KEY_PREFIX = "worker:slot:reclaim_requests:"
+WORKER_SLOT_LAST_RECLAIM_DRAIN_KEY_PREFIX = "worker:slot:last_reclaim_request_drain:"
+WORKER_WATCHDOG_ACTIONS_KEY_PREFIX = "worker:watchdog:actions:"
+# TTL for the loop beacon: 3× the heartbeat cadence, so a couple missed off-loop
+# ticks still leave a fresh beacon; a dead worker's beacon expires within 90s.
+WORKER_LOOP_BEACON_TTL_SECONDS = 3 * WORKER_HEARTBEAT_INTERVAL
+# TTL for the lease snapshot + reclaim-request list: 3× the health-check tick
+# (AGENT_SESSION_HEALTH_CHECK_INTERVAL == 300s, defined below). Literal here to
+# avoid a forward-reference at module import.
+WORKER_SLOT_KEY_TTL_SECONDS = 3 * 300
+# Cap on the operator action log + reclaim-request list (Race 4: bound the list
+# so a multi-owner leak burst cannot grow it unboundedly). Env-overridable.
+WORKER_WATCHDOG_ACTIONS_MAX = 256
+RECLAIM_REQUESTS_MAX = int(os.environ.get("RECLAIM_REQUESTS_MAX", "256"))
+# Beacon-freshness / bridge-contract staleness threshold, REUSED for the
+# bridge_contract_stale signal (concern #5 — no dedicated staleness var). Matches
+# the #1815 deadman staleness threshold default (90s).
+BRIDGE_WORKER_BEACON_STALE_S = int(os.environ.get("BRIDGE_WORKER_BEACON_STALE_S", "90"))
+
+# --- B2-probe: observability-only duplicate-worker detection (issue #1817) --
+#
+# A SEPARATE, additive key namespace from WORKER_REGISTERED_PID_KEY_PREFIX
+# above -- this probe never reads or writes the reaper's positive-ID
+# self-protection keys, so it cannot regress that mechanism. One key per
+# (host, role): ``worker:role_pid:{hostname}:{role}`` holds the pid of the
+# most recently registered worker for that role, and
+# ``worker:pid_heartbeat_ts:{hostname}:{pid}`` holds a per-pid unix timestamp
+# refreshed alongside every registration write, used as the liveness
+# freshness signal (reuses HEARTBEAT_FRESHNESS_WINDOW as the staleness
+# threshold -- see ``_probe_duplicate_worker_registration``).
+_WORKER_ROLE_PID_KEY_PREFIX = "worker:role_pid:"
+_WORKER_PID_HEARTBEAT_TS_KEY_PREFIX = "worker:pid_heartbeat_ts:"
+
+
+def _current_worker_role() -> str:
+    """Return this process's worker role for B2-probe scoping.
+
+    Mirrors the ``VALOR_PROJECT_KEY`` fallback used elsewhere (e.g.
+    ``agent/session_pickup.py``): empty/whitespace falls back to a stable
+    default so writers and readers agree on the namespace.
+    """
+    v = os.environ.get("VALOR_PROJECT_KEY", "").strip()
+    return v or "default"
+
 
 # SIGKILL escalation queue for cross-process orphans.
 # Stages ``(pid, create_time)`` tuples. At drain time the reaper reconstructs
@@ -462,6 +542,72 @@ def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
     return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
 
 
+def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
+    """Return True if the PTY is alive during priming (defer D0 kill); False if kill-eligible.
+
+    **INVERTED POLARITY vs ``_pty_quiescent_long_enough``**: this helper returns
+    ``True = session is alive, defer the kill`` and ``False = kill-eligible``.
+    ``_pty_quiescent_long_enough`` is the exact opposite (True = proceed to kill).
+    Do NOT copy its return values verbatim — a literal copy kills live sessions.
+
+    This is the PTY-liveness gate for the D0 never-started kill path (issue #1792).
+    Granite SDLC sessions can be killed during priming because the inner ``claude``
+    TUI is still booting when the ``NEVER_STARTED_GRACE_SECS + CONFIRM_MARGIN`` window
+    expires. If the PTY read loop is alive and the screen has shown recent activity,
+    the session is still booting and the kill should be deferred.
+
+    Branch order is load-bearing — first matching branch wins:
+
+    1. **Kill-switch first** (before any field reads): ``NEVER_STARTED_PTY_LIVENESS_SECS <= 0``
+       → return ``False`` (kill-eligible — disables deferral for all sessions).
+       Must be first so the kill-switch is never defeated by None-field short-circuits below.
+
+    2. **Non-PTY escape**: ``last_pty_read_loop_at is None`` → return ``False``
+       (SDK/non-granite sessions have no PTY loop; age-only kill is preserved).
+
+    3. **Stale read loop**: ``last_pty_read_loop_at`` older than ``HEARTBEAT_FRESHNESS_WINDOW``
+       (90s) → return ``False`` (dead read loop cannot prove liveness).
+
+    4. **Alive case**: read ``last_pty_activity_at``; if None or not a datetime → ``False``;
+       otherwise tz-normalize and return ``True`` iff activity is within
+       ``NEVER_STARTED_PTY_LIVENESS_SECS``.
+
+    This helper NEVER raises — all unexpected exceptions return ``False`` (kill-eligible).
+    """
+    try:
+        # Branch 1: kill-switch — disable PTY deferral, revert to age-only kill.
+        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+        if NEVER_STARTED_PTY_LIVENESS_SECS <= 0:
+            return False
+
+        # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
+        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
+        if last_pty_read_loop_at is None:
+            return False
+
+        # Branch 3: stale read loop — a dead read loop cannot prove liveness.
+        if isinstance(last_pty_read_loop_at, datetime):
+            loop_at_aware = (
+                last_pty_read_loop_at
+                if last_pty_read_loop_at.tzinfo
+                else last_pty_read_loop_at.replace(tzinfo=UTC)
+            )
+            if (now - loop_at_aware).total_seconds() > HEARTBEAT_FRESHNESS_WINDOW:
+                return False
+
+        # Branch 4: alive case — PTY has a fresh read loop; check screen activity.
+        last_activity = getattr(entry, "last_pty_activity_at", None)
+        if not isinstance(last_activity, datetime):
+            return False
+        activity_aware = (
+            last_activity if last_activity.tzinfo else last_activity.replace(tzinfo=UTC)
+        )
+        return (now - activity_aware).total_seconds() <= NEVER_STARTED_PTY_LIVENESS_SECS
+    except Exception:
+        return False
+
+
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
 # ``(checked_at_monotonic, result)``. The cache amortizes psutil syscalls when
 # many sessions enter the recovery branch within the same health-check tick.
@@ -764,6 +910,178 @@ def _recover_interrupted_agent_sessions_startup() -> int:
     return bridge_count + local_dev_count
 
 
+def _sweep_dead_worker_sessions() -> int:
+    """Sweep running sessions whose claude_pid is dead after a worker restart.
+
+    Called during worker startup recovery (issue #1767). When a worker dies in
+    U-state, sessions remain status='running' with a stale claude_pid. Without
+    this sweep, those sessions are forever orphaned — the worker never picks them
+    up (it only re-kicks 'pending') and the human's message is silently dropped.
+
+    Guards against double-drop races:
+    - Only sweeps sessions with dead claude_pid (os.kill(pid, 0) raises OSError)
+    - Applies the AGENT_SESSION_HEALTH_MIN_RUNNING recency guard (300s)
+      so brand-new sessions from the fresh worker cannot be touched
+    - Relies on finalize_session's implicit status re-check: it re-reads the
+      session status and raises StatusConflictError if the status has already
+      changed, so a concurrent fresh-worker pickup wins and the session is skipped
+
+    Returns the count of sessions swept to 'killed'.
+    """
+    running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
+    if not running_sessions:
+        return 0
+
+    now = time.time()
+    cutoff = now - AGENT_SESSION_HEALTH_MIN_RUNNING
+
+    swept = 0
+    for entry in running_sessions:
+        pid = getattr(entry, "claude_pid", None)
+
+        # Skip sessions with no PID — they haven't been assigned a subprocess yet
+        if not pid:
+            continue
+
+        # Skip recently-started sessions — they may belong to the freshly-started worker
+        started_ts = _ts(getattr(entry, "started_at", None))
+        if started_ts is not None and started_ts > cutoff:
+            logger.debug(
+                "[dead-worker-sweep] Skipping recent session %s (pid=%s, started %ds ago)",
+                entry.agent_session_id,
+                pid,
+                int(now - started_ts),
+            )
+            continue
+
+        # Check PID liveness: os.kill(pid, 0) raises OSError if dead/not accessible
+        try:
+            os.kill(int(pid), 0)
+            # PID is alive — not a dead-worker orphan, skip it
+            logger.debug(
+                "[dead-worker-sweep] Session %s pid=%s is alive, skipping",
+                entry.agent_session_id,
+                pid,
+            )
+            continue
+        except OSError:
+            # PID is dead — this session is orphaned from the previous worker
+            pass
+
+        logger.warning(
+            "[dead-worker-sweep] Session %s has dead claude_pid=%s — sweeping to killed",
+            entry.agent_session_id,
+            pid,
+        )
+
+        try:
+            from models.session_lifecycle import StatusConflictError, finalize_session
+
+            finalize_session(
+                entry,
+                "killed",
+                reason=f"dead-worker-sweep: claude_pid={pid} not alive at worker restart (#1767)",
+            )
+            swept += 1
+        except StatusConflictError as e:
+            # Concurrent modification — another process already handled this session
+            logger.info(
+                "[dead-worker-sweep] Status conflict sweeping session %s (skipping): %s",
+                entry.agent_session_id,
+                e,
+            )
+        except Exception as e:
+            logger.warning(
+                "[dead-worker-sweep] Failed to sweep session %s: %s",
+                entry.agent_session_id,
+                e,
+            )
+
+    if swept > 0:
+        logger.info("[dead-worker-sweep] Swept %d dead-worker session(s) to killed", swept)
+        # Trigger catchup so unanswered human messages re-enqueue as fresh sessions
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "bridge.agent_catchup"],
+                timeout=30,
+                check=False,
+            )
+        except Exception as e:
+            logger.warning("[dead-worker-sweep] Catchup trigger failed (non-fatal): %s", e)
+
+    return swept
+
+
+def _sweep_stranded_waiting_for_children_parents() -> int:
+    """Re-finalize parents stranded in ``waiting_for_children`` after a crash (C1, #1817).
+
+    Background: ``finalize_session()`` (``models/session_lifecycle.py:221``)
+    finalizes the parent best-effort inside a non-fatal try/except
+    (``_finalize_parent_sync``, :440-451) and ALWAYS saves the child (:474) --
+    intentionally, so the child finalizes independently even if the parent
+    lookup/save raises (parent deleted, Redis blip, stale index). This is a
+    deliberate contract that must NOT be inverted by coupling the two writes:
+    an all-or-nothing pipeline would strand the CHILD on every parent-finalize
+    hiccup instead of the rarer case this sweep targets. See
+    ``docs/plans/correctness-delivery-integrity.md`` C1.
+
+    The gap this closes: a process crash AFTER the child save but BEFORE the
+    parent transitions out of ``waiting_for_children`` leaves the parent
+    stranded forever -- nothing else re-triggers ``_finalize_parent_sync`` for
+    it once the crash window has passed.
+
+    Why this is safe to run unconditionally on every worker startup:
+    ``_finalize_parent_sync`` is itself idempotent -- it no-ops if the parent
+    is already terminal or no longer exists (``session_lifecycle.py:719-732``),
+    and it recomputes the parent's fate from the children's CURRENT statuses
+    (not replayed/stale state) each time it runs. Calling it against a parent
+    that already finalized normally, or one still legitimately waiting on a
+    non-terminal child, is a no-op -- only genuinely-stranded parents (all
+    children terminal, parent still ``waiting_for_children``) actually
+    transition here. A concurrent finalize from another process is resolved
+    by the generic CAS in ``transition_status()`` (:604-648, preserved
+    untouched by this sweep); ``_transition_parent`` already swallows the
+    resulting ``StatusConflictError`` at INFO level (:817-828), so this
+    function never needs to special-case that race.
+
+    Returns the count of parents actually re-finalized (confirmed by a
+    post-call status check) -- NOT the count of stranded-looking parents
+    scanned, most of which are expected to be legitimate no-ops.
+    """
+    from models.session_lifecycle import _finalize_parent_sync
+
+    stranded = _filter_hydrated_sessions(AgentSession.query.filter(status="waiting_for_children"))
+    if not stranded:
+        return 0
+
+    reswept = 0
+    for parent in stranded:
+        parent_id = getattr(parent, "id", None)
+        if not parent_id:
+            continue
+        try:
+            _finalize_parent_sync(parent_id)
+        except Exception as e:
+            logger.warning(
+                "[waiting-for-children-sweep] Failed to re-finalize parent %s: %s",
+                parent_id,
+                e,
+            )
+            continue
+
+        refreshed = AgentSession.get_by_id(parent_id)
+        if refreshed is not None and refreshed.status != "waiting_for_children":
+            reswept += 1
+            logger.warning(
+                "[waiting-for-children-sweep] Re-finalized stranded parent %s -> %s "
+                "(crash-window recovery, #1817)",
+                parent_id,
+                refreshed.status,
+            )
+
+    return reswept
+
+
 # === Agent Session Health Monitor ===
 
 
@@ -827,6 +1145,39 @@ def _never_started_past_grace(
         return running_seconds > threshold
     except Exception:
         return False
+
+
+def _trusted_utc_now() -> datetime:
+    """Return "now" from Redis's own clock (the ``TIME`` command) rather than
+    this process's local wall-clock.
+
+    C2 (#1817): freshness checks in ``_has_progress`` compare a session's
+    last-write timestamp (``last_heartbeat_at``, ``last_tool_use_at``, ...)
+    against "now" to decide staleness. Using each reader's own local
+    wall-clock as "now" means a reader whose clock is skewed AHEAD of the
+    writer's can flag a genuinely fresh session as stale — a spurious
+    HEARTBEAT_FRESHNESS_WINDOW (90s) miss that triggers unnecessary
+    recovery/kill. Sourcing "now" from Redis's ``TIME`` command instead gives
+    every reader (across machines) the SAME shared reference clock, so an
+    individual reader's local clock skew drops out of the age computation
+    entirely — only the age relative to a single trusted source matters.
+
+    Falls back to local wall-clock on any Redis error (connection blip):
+    staleness evaluation must never hard-fail because the trusted-clock probe
+    itself failed. A rare fallback to local time on a Redis hiccup is no
+    worse than the pre-fix behavior it replaces.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        seconds, microseconds = POPOTO_REDIS_DB.time()
+        return datetime.fromtimestamp(seconds + microseconds / 1_000_000, tz=UTC)
+    except Exception as e:
+        logger.debug(
+            "[session-health] _trusted_utc_now: Redis TIME unavailable, using local clock: %s",
+            e,
+        )
+        return datetime.now(tz=UTC)
 
 
 def _has_progress(entry: AgentSession) -> bool:
@@ -906,7 +1257,10 @@ def _has_progress(entry: AgentSession) -> bool:
     (``_agent_session_health_check``) then evaluates ``_tier2_reprieve_signal``
     before deciding to recover.
     """
-    now_utc = datetime.now(tz=UTC)
+    # C2 (#1817): sourced from Redis TIME, not local wall-clock, so a reader
+    # whose clock is skewed ahead of the writer's does not flag a fresh
+    # session as stale. See _trusted_utc_now() docstring.
+    now_utc = _trusted_utc_now()
 
     # Compute sdk_ever_output once — used by both sub-check A and the own-progress
     # field guard. True iff last_tool_use_at or last_turn_at has ever been written.
@@ -1063,6 +1417,12 @@ def _tier2_reprieve_signal(
                      ``last_compaction_ts`` on every successful backup. Added
                      for issue #1099 Mode 3 — prevents false kills on
                      sessions that are legitimately idle post-compaction.
+      "pty_alive"  — granite transport gate (issue #1820 note 2): the session
+                     has no ``claude_pid`` (granite PTY, not SDK) and
+                     ``_pty_quiescent_long_enough`` reports the PTY read loop is
+                     alive/painting (not yet wedge-eligible). Evaluated before
+                     the psutil gates, which are a no-op for a pid-less granite
+                     session. SDK sessions never match this gate.
       "children"   — ``psutil.Process(pid).children()`` is non-empty.
                      Strongest signal: tool-subprocess execution is actively
                      happening right now. Returned in preference to "alive".
@@ -1123,6 +1483,28 @@ def _tier2_reprieve_signal(
             # Defensive: malformed timestamp on the entry — skip this gate.
             pass
 
+    # Granite transport-aware reprieve (issue #1820 note 2). A granite PTY
+    # session records no ``claude_pid`` (SDK-path-only,
+    # ``session_executor.py:1425``), so ``handle.pid`` is None and the psutil
+    # "children"/"alive" gates below are a structural no-op for it. Without a
+    # transport-specific gate, a legitimately-parked granite session (e.g. a
+    # ``waiting_for_children`` PM) whose PTY read loop is alive but momentarily
+    # quiet would be falsely killed at the progress deadline. Derive the
+    # reprieve from the PTY-liveness signal instead: ``_pty_quiescent_long_enough``
+    # returns False while the granite PTY read loop is alive and painting
+    # (defer the kill) and True only once it has been quiescent past the
+    # wedge-eligibility window (proceed to kill) — the exact "genuinely
+    # quiescent granite IS killed" boundary the plan requires. For SDK sessions
+    # (``last_pty_read_loop_at is None``) it returns True, so this gate never
+    # reprieves an SDK session and cannot interfere with the psutil path below.
+    if getattr(entry, "claude_pid", None) is None:
+        try:
+            if not _pty_quiescent_long_enough(entry, datetime.now(UTC)):
+                return "pty_alive"
+        except Exception as e:
+            # Defensive: never crash the health check from a PTY-liveness edge case.
+            logger.debug("[session-health] pty-liveness reprieve probe failed: %s", e)
+
     pid = handle.pid if handle is not None else None
     if pid is not None:
         try:
@@ -1146,6 +1528,85 @@ def _tier2_reprieve_signal(
             logger.debug("[session-health] psutil probe failed for pid=%s: %s", pid, e)
 
     return None
+
+
+def _should_kill_no_progress(
+    entry: AgentSession,
+    handle: "SessionHandle | None",
+    *,
+    emit_telemetry: bool,
+) -> bool:
+    """Shared Tier-2 reprieve gate for every ``no_progress``-shaped kill decision
+    (issue #1820 OQ3 — exactly one place this decision lives; NO-LEGACY).
+
+    Returns ``True`` if the session should be killed (no reprieve signal
+    applies), ``False`` if a Tier-2 reprieve (active children / compaction /
+    alive-but-quiet subprocess) applies and the caller must skip the kill.
+
+    This is a straight extraction of the reprieve decision that used to be
+    inlined in ``_apply_recovery_transition``'s ``reason_kind == "no_progress"``
+    branch — behavior is unchanged, only the call site moved, so every
+    ``no_progress``-shaped producer shares one reprieve policy instead of each
+    carrying its own copy:
+
+      * ``_apply_recovery_transition`` calls this for BOTH live ``no_progress``
+        producers — the never-started-past-grace path
+        (``session_health.py`` D0 branch) and the narrowed running-scan
+        ``no_progress`` elif (the #944 shared-``worker_key`` orphan net) —
+        passing ``emit_telemetry=True`` on its single per-recovery-decision
+        call (the same cadence the inlined block used before extraction).
+      * The progress-deadline cancel scope (issue #1820 Fix #3,
+        ``agent_session_queue.py``) re-invokes this every ``PROGRESS_POLL_S``
+        poll while a session is past its deadline, and passes
+        ``emit_telemetry=True`` ONLY on the first deadline-exceeded poll (a
+        loop-local latch) so a long-reprieved session's telemetry fires once,
+        not once per poll.
+
+    ``emit_telemetry=True`` increments the tier-1-flagged counter
+    unconditionally (the gate was evaluated), and — only when a reprieve
+    signal actually fires — increments ``tier2_reprieve_total:{reprieve}``,
+    saves the bumped ``entry.reprieve_count``, and logs the reprieve.
+    ``emit_telemetry=False`` still evaluates the gate (the kill/reprieve
+    decision itself is never skipped) but performs none of those side
+    effects — this predicate is
+    therefore NOT pure, but the caller fully controls when its side effects
+    fire (issue #1820 CONCERN r6).
+
+    Never raises — counter/save failures are logged and swallowed, matching
+    the pre-extraction inline block.
+    """
+    if emit_telemetry:
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
+        except Exception as _m_err:
+            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
+
+    reprieve = _tier2_reprieve_signal(handle, entry)
+    if reprieve is not None:
+        if emit_telemetry:
+            try:
+                from popoto.redis_db import POPOTO_REDIS_DB as _MR
+
+                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
+            except Exception as _m_err:
+                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
+            try:
+                entry.reprieve_count = (entry.reprieve_count or 0) + 1
+                entry.save(update_fields=["reprieve_count"])
+            except Exception as _rc_err:
+                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
+            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
+            log_fn(
+                "[session-health] Tier 2 reprieve (%s) for session %s — "
+                "skipping kill (reprieve_count=%s)",
+                reprieve,
+                entry.agent_session_id,
+                entry.reprieve_count,
+            )
+        return False
+    return True
 
 
 # Total wall-clock budget for the SIGTERM->SIGKILL escalation in
@@ -1412,31 +1873,182 @@ async def _deliver_tool_timeout_degraded_notice(
         )
 
 
+def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> None:
+    """Chokepoint flush for a never-redrafted deferred self-draft on terminal paths.
+
+    This is the synchronous flush invoked from the ``finalize_session``
+    chokepoint (``models/session_lifecycle.py``) so a held self-draft reply is
+    delivered on **every** qualifying terminal status — closing the gap where a
+    cleanly-``completed`` session that deferred a reply for self-draft and never
+    redrafted silently swallowed it.
+
+    Fully synchronous: it writes the payload directly to the outbox via ``rpush``
+    with no event loop involvement (no ``await``, no ``asyncio.create_task``, no
+    ``run_until_complete``). The ``completed`` path has no running event loop, so
+    the async ``_deliver_deferred_self_draft_fallback`` cannot be used here.
+
+    Transport / status gate (evaluated BEFORE the dedup SETNX so the key is not
+    burned on ineligible paths):
+
+    * **telegram** (or ``None``): proceeds for all terminal statuses — ``completed``,
+      ``failed``, ``abandoned``.  The async helper early-returns for telegram, so
+      this chokepoint owns telegram delivery exclusively.
+    * **email** + ``status == "completed"``: proceeds and writes to
+      ``email:outbox:{session_id}``.  The async helper handles email
+      ``failed``/``abandoned`` paths.
+    * **email** + any other status (``failed``, ``abandoned``, ``None``): early-returns.
+      The async helper owns those paths so there is no double-send.
+
+    Reads the deferral flag from a FRESH authoritative session via
+    ``get_authoritative_session`` — never the caller's possibly-stale
+    ``extra_context`` (the defer-time persist may post-date the caller's
+    in-memory copy).
+
+    Dedups on its OWN key ``self_draft_completed_flush_sent:{session_id}``
+    (SETNX, 1 h TTL) — DISTINCT from the async helper's
+    ``self_draft_fallback_sent:{session_id}``. Never raises; failures are logged
+    at WARNING and swallowed.
+
+    Args:
+        session: AgentSession to flush.
+        status: The terminal status being applied (e.g. ``"completed"``,
+            ``"failed"``, ``"abandoned"``).  Forwarded from
+            ``finalize_session`` so the email gate can restrict delivery to
+            the ``completed`` path only.
+    """
+    try:
+        session_id = getattr(session, "session_id", None)
+        if not session_id:
+            return
+
+        # Authoritative read: the defer-time persist may post-date the caller's
+        # in-memory copy, so read extra_context from a fresh re-read.
+        fresh = get_authoritative_session(session_id)
+        source = fresh if fresh is not None else session
+        extra_ctx = getattr(source, "extra_context", None) or {}
+
+        if not extra_ctx.get("deferred_self_draft_pending"):
+            return
+
+        # Transport / status gate — evaluated BEFORE the dedup SETNX so the key
+        # is not burned on ineligible paths (e.g. email + failed).
+        transport = extra_ctx.get("transport")
+        if transport == "email":
+            # Email: only proceed on the completed path.  The async fallback
+            # helper (_deliver_deferred_self_draft_fallback) owns failed/abandoned.
+            if status != "completed":
+                return
+        # telegram / None transport: proceed unconditionally (async helper
+        # early-returns for telegram, so no double-send risk).
+
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        # Atomic dedup on the NEW completed-path key (distinct from the async
+        # helper's dedup key). First caller wins.
+        lock_key = f"self_draft_completed_flush_sent:{session_id}"
+        acquired = _R.set(lock_key, "1", nx=True, ex=3600)
+        if not acquired:
+            logger.debug(
+                "[session-health] self-draft completed flush already sent for %s — skipping",
+                session_id,
+            )
+            return
+
+        # Recover the deferred text; apply the narration gate and the empty-text
+        # canned notice (parity with the async helper — kept inline, not shared).
+        deferred_text = extra_ctx.get("deferred_self_draft_text") or ""
+        if deferred_text and deferred_text.strip():
+            try:
+                from bridge.message_quality import (  # noqa: PLC0415
+                    NARRATION_FALLBACK_MESSAGE,
+                    is_narration_only,
+                )
+
+                if is_narration_only(deferred_text[:500]):
+                    message = NARRATION_FALLBACK_MESSAGE
+                else:
+                    message = deferred_text
+            except Exception:
+                message = deferred_text
+        else:
+            message = "I couldn't finish responding to that — please try again."
+
+        import json  # noqa: PLC0415
+
+        from agent.output_handler import TelegramRelayOutputHandler  # noqa: PLC0415
+
+        chat_id = getattr(source, "chat_id", None) or ""
+
+        if transport == "email":
+            # Email-completed branch: build the reply-all payload and push to
+            # email:outbox:{session_id} for the SMTP relay.
+            from agent.output_handler import build_email_outbox_payload  # noqa: PLC0415
+
+            email_payload = build_email_outbox_payload(source, chat_id, message)
+            queue_key = f"email:outbox:{session_id}"
+            _R.rpush(queue_key, json.dumps(email_payload))
+            _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
+        else:
+            # Telegram branch (unchanged): build the telegram outbox payload.
+            reply_to = int(getattr(source, "telegram_message_id", None) or 0) or None
+            payload = {
+                "chat_id": chat_id,
+                "reply_to": reply_to,
+                "text": message,
+                "session_id": session_id,
+                "timestamp": time.time(),
+            }
+            queue_key = f"telegram:outbox:{session_id}"
+            _R.rpush(queue_key, json.dumps(payload))
+            _R.expire(queue_key, TelegramRelayOutputHandler.OUTBOX_TTL)
+
+        logger.info(
+            "[session-health] flushed deferred self-draft on terminal path for %s "
+            "(%d chars, transport=%s)",
+            session_id,
+            len(message),
+            transport or "telegram",
+        )
+
+        # Best-effort telemetry counter.
+        try:
+            project_key = getattr(source, "project_key", None) or "unknown"
+            _R.incr(f"{project_key}:session-health:deferred_self_draft_completed_flush")
+        except Exception:
+            pass
+
+    except Exception as _err:
+        logger.warning(
+            "[session-health] flush_deferred_self_draft_sync failed for %s: %s",
+            getattr(session, "session_id", "?"),
+            _err,
+        )
+
+
 async def _deliver_deferred_self_draft_fallback(
     entry: "AgentSession",
 ) -> None:
-    """Deliver a fallback message when a deferred self-draft was never completed.
+    """Deliver an EMAIL-transport fallback when a deferred self-draft was never completed.
 
-    Called on every terminal recovery branch (``failed`` and ``abandoned``) when
-    ``entry.extra_context["deferred_self_draft_pending"]`` is truthy.  This flag
-    is written at defer time by ``TelegramRelayOutputHandler.send()`` — the
-    steering queue cannot be used because the agent drains it at turn start,
-    leaving it empty by finalization time.
+    Handles the EMAIL transport specifically: it early-returns for telegram via
+    ``if transport in (None, "telegram"): return`` (telegram is covered by the
+    synchronous ``flush_deferred_self_draft_sync`` chokepoint flush invoked from
+    ``finalize_session``). The deferral flag is written at defer time by
+    ``TelegramRelayOutputHandler.send()`` — the steering queue cannot be used
+    because the agent drains it at turn start, leaving it empty by finalization
+    time.
 
     Precedence over the generic degraded notice: callers invoke this helper
     *before* ``_deliver_tool_timeout_degraded_notice``; if the deferred flag is
     set, only the self-draft fallback fires (not the generic notice).
 
     Idempotent: the first caller wins via Redis SETNX on
-    ``self_draft_fallback_sent:{session_id}`` (1 h TTL).  The TTL is intentionally
-    NOT per-run — for legitimate resume scenarios, scope it per-run by including
-    ``started_at`` in the key if that becomes necessary.
+    ``self_draft_fallback_sent:{session_id}`` (1 h TTL) — DISTINCT from the sync
+    flush's ``self_draft_completed_flush_sent:{session_id}`` key. The TTL is
+    intentionally NOT per-run — for legitimate resume scenarios, scope it per-run
+    by including ``started_at`` in the key if that becomes necessary.
 
     Never raises; failures are logged at WARNING and swallowed.
-
-    Terminal-branch-only precondition: must only be called from the ``abandoned``
-    or ``failed`` finalization branches, never from the requeue (``else``) branch
-    where the session will run again and the agent may still deliver.
     """
     try:
         # Check the persisted detection signal — NOT the steering queue.
@@ -1486,6 +2098,12 @@ async def _deliver_deferred_self_draft_fallback(
 
         # Resolve transport from extra_context (no top-level transport field).
         transport = extra_ctx.get("transport")
+
+        # EMAIL-only: telegram is covered by the synchronous chokepoint flush
+        # (flush_deferred_self_draft_sync via finalize_session). Skip telegram here
+        # to avoid a double-send; the sync flush owns telegram delivery.
+        if transport in (None, "telegram"):
+            return
 
         # Resolve send callback — fall back to FileOutputHandler when none registered.
         from agent.agent_session_queue import _resolve_callbacks  # noqa: PLC0415
@@ -1544,6 +2162,13 @@ async def _apply_recovery_transition(
         is the evidence (issue #1270). A tool that has not returned within its
         tier budget is wedged regardless of whether the parent SDK subprocess
         is still alive.
+      * ``"progress_deadline"`` — skip Tier 2 reprieve HERE; the caller (issue
+        #1820 Fix #3's progress-deadline cancel scope in
+        ``agent_session_queue.py``) already ran the shared reprieve gate
+        (``_should_kill_no_progress``) itself before deciding to cancel and
+        call this function — evaluating it a second time here would be a
+        redundant, stale re-check (the caller's decision already stands).
+        Always called with ``handle=None`` (Fix #3 owns its own cancel).
 
     Project-scoped Redis counter
     ``{project_key}:session-health:recoveries:{reason_kind}`` is incremented
@@ -1565,6 +2190,35 @@ async def _apply_recovery_transition(
             "[session-health] recovery counter increment failed (non-fatal): %s",
             _counter_err,
         )
+
+    def _reclaim_slot_lease() -> None:
+        """Prompt slot reclaim (issue #1820, Fix #2) — called ONLY on the
+        branches below that land ``entry``'s row TERMINAL (completed /
+        abandoned / failed), never on the ``pending`` requeue branch.
+
+        This is the wiring that makes acceptance criterion #1 (leaked-slot
+        auto-recovery) fire on the health/tool-timeout cadence instead of
+        waiting for the 300s reap-pass tick: an out-of-band kill (this
+        function) may flip the DB row terminal while the owning worker
+        loop's own ``finally`` release is stuck (e.g. a granite session
+        whose PTY container thread never returns) — this reclaims the slot
+        immediately. ``registry.reclaim()`` is idempotent, so it safely
+        no-ops if the owning worker loop's normal release already fired
+        first. Never raises into the caller — the reclaim is a self-heal,
+        not a load-bearing part of the recovery transition.
+        """
+        try:
+            registry = _session_state._slot_registry
+            if registry is not None:
+                registry.reclaim(entry.agent_session_id)
+                from popoto.redis_db import POPOTO_REDIS_DB as _SR
+
+                _SR.incr(f"{entry.project_key}:session-health:slot_reclaims")
+        except Exception:
+            logger.exception(
+                "[session-health] slot lease reclaim failed for %s (non-fatal)",
+                entry.agent_session_id,
+            )
 
     # AC4 narrow telemetry counter (issue #1614): track recoveries that match
     # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
@@ -1611,6 +2265,7 @@ async def _apply_recovery_transition(
                 "completed",
                 reason="health check: already delivered",
             )
+            _reclaim_slot_lease()  # row is now terminal (completed)
         except StatusConflictError as e:
             logger.info(
                 "[session-health] Skipping finalize for already-delivered session %s: %s",
@@ -1633,34 +2288,11 @@ async def _apply_recovery_transition(
             entry.agent_session_id,
         )
     if reason_kind == "no_progress":
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-            _MR.incr(f"{entry.project_key}:session-health:tier1_flagged_total")
-        except Exception as _m_err:
-            logger.debug("[session-health] tier1_flagged counter failed: %s", _m_err)
-
-        reprieve = _tier2_reprieve_signal(handle, entry)
-        if reprieve is not None:
-            try:
-                from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                _MR.incr(f"{entry.project_key}:session-health:tier2_reprieve_total:{reprieve}")
-            except Exception as _m_err:
-                logger.debug("[session-health] tier2_reprieve counter failed: %s", _m_err)
-            try:
-                entry.reprieve_count = (entry.reprieve_count or 0) + 1
-                entry.save(update_fields=["reprieve_count"])
-            except Exception as _rc_err:
-                logger.debug("[session-health] reprieve_count save failed: %s", _rc_err)
-            log_fn = logger.warning if (entry.reprieve_count or 0) >= 3 else logger.info
-            log_fn(
-                "[session-health] Tier 2 reprieve (%s) for session %s — "
-                "skipping kill (reprieve_count=%s)",
-                reprieve,
-                entry.agent_session_id,
-                entry.reprieve_count,
-            )
+        # Reprieve decision + telemetry live in exactly one place — the shared
+        # predicate (issue #1820 OQ3, NO-LEGACY). This is the single
+        # per-recovery-decision call, so emit_telemetry=True unconditionally
+        # (same cadence as the pre-extraction inline block).
+        if not _should_kill_no_progress(entry, handle, emit_telemetry=True):
             return False
 
     # All Tier 2 gates failed (or skipped). Respect kill-switch.
@@ -1821,6 +2453,7 @@ async def _apply_recovery_transition(
                 skip_auto_tag=True,
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (abandoned)
             logger.info(
                 "[session-health] Marked local session %s as abandoned (chat=%s, attempts=%s)",
                 entry.agent_session_id,
@@ -1845,6 +2478,7 @@ async def _apply_recovery_transition(
                 ),
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (failed, MAX_RECOVERY_ATTEMPTS)
             logger.warning(
                 "[session-health] Finalized session %s as failed after %s recovery attempts",
                 entry.agent_session_id,
@@ -1875,6 +2509,7 @@ async def _apply_recovery_transition(
                 ),
                 emit_telemetry=False,
             )
+            _reclaim_slot_lease()  # row is now terminal (failed, subprocess not confirmed dead)
             logger.warning(
                 "[session-health] Escalated session %s to failed — subprocess "
                 "pid=%s not confirmed dead after cancel+SIGTERM+SIGKILL "
@@ -1900,10 +2535,14 @@ async def _apply_recovery_transition(
             #     them would be misleading and could mask the real issue.
             if reason_kind == "tool_timeout" and tool_name:
                 try:
-                    entry.push_steering_message(
+                    from agent.steering import push_steering_message as _push_steering_message
+
+                    _push_steering_message(
+                        entry.session_id,
                         _compose_tool_timeout_steering(
                             tool_name, getattr(entry, "message_text", None)
                         ),
+                        "session-health",
                         front=True,
                     )
                     try:
@@ -2000,6 +2639,369 @@ async def _apply_recovery_transition(
     return True
 
 
+def _reap_slot_leases() -> None:
+    """Top-of-tick slot-lease reap pass (issue #1820, Fix #2 — the reclaim
+    half of the ownerless-semaphore leak fix).
+
+    Hoisted OUT of the per-entry PENDING-session loop where the old
+    logging-only leaked-slot fingerprint used to live (nested inside
+    ``for entry in pending_sessions:``, gated on ``worker_alive``) into a
+    SINGLE pass, called once per health-check tick from the TOP of
+    ``_agent_session_health_check`` — independent of ``worker_alive``, of
+    whether there is any pending session at all, and (for phase 1) of the
+    kill-switch. A literal in-place edit of the old block would have run the
+    reap N-times-per-tick and skipped it entirely on a drained queue; this
+    hoisted single pass fires even with zero pending sessions, which is
+    exactly the parked-worker starvation case Acceptance #1 targets.
+
+    Two phases. Only phase 2 is gated on the kill-switch:
+
+      Phase 1 (detection) — ALWAYS runs, even when
+      ``SLOT_LEASE_REAP_DISABLED=1``. Computes and logs the leaked-slot
+      fingerprint (WARNING iff ``permits_free==0 AND running_count<max``;
+      INFO iff ``permits_free==0 AND running_count>=max`` — healthy
+      backpressure) plus a heartbeat. This replaces the deleted block's
+      detect-and-log role wholesale, so the kill-switch degrades to
+      detect-only — never to no-visibility (Operator CONCERN).
+
+      Phase 2 (reclaim) — gated on
+      ``os.environ.get("SLOT_LEASE_REAP_DISABLED") != "1"``. For each lease
+      in a SNAPSHOT of ``registry.leases()`` (mutation-during-iteration
+      safe), re-reads the owner's DB status fresh (terminal-status-guarded,
+      same pattern as the tool-timeout loop) and, iff the owner is terminal
+      (or its record no longer exists), calls ``registry.reclaim(owner)``
+      and increments the project-scoped ``slot_reclaims`` counter.
+      **Terminal-owner only — there is deliberately no wall-clock elapsed-time
+      reclaim arm** (see agent/slot_lease.py's "no reclaim deadline" note):
+      reclaiming a still-running, progressing owner would
+      strip its permit mid-execution, allowing semaphore over-admission
+      (concurrently-running sessions > max) and re-imposing exactly the
+      wall-clock duration cap issue #1172 removed.
+
+    Never raises into the health check — a single bad lease is logged and
+    the pass continues; the whole function is exception-wrapped.
+    """
+    try:
+        registry = _session_state._slot_registry
+        if registry is None:
+            return  # No ceiling configured (pre-init / unlimited-mode tests).
+
+        leases_snapshot = list(registry.leases())
+        reap_disabled = os.environ.get("SLOT_LEASE_REAP_DISABLED") == "1"
+
+        # === Phase 1: detection — ALWAYS runs (Operator CONCERN) ===
+        try:
+            _permits_free = registry.permits_free()
+            _max_sessions = max(1, int(os.environ.get("MAX_CONCURRENT_SESSIONS", "8")))
+            _running_count = len(list(AgentSession.query.filter(status="running")))
+            if _permits_free == 0 and _running_count < _max_sessions:
+                logger.warning(
+                    "[session-health] SLOT-LEASE FINGERPRINT: leases_held=%d, "
+                    "permits_free=0 AND running_count=%d < max_sessions=%d. "
+                    "Slot(s) held by non-running session(s) (#1537 class). "
+                    "reap_disabled=%s. See docs/features/slot-lease-ownership.md.",
+                    len(leases_snapshot),
+                    _running_count,
+                    _max_sessions,
+                    reap_disabled,
+                )
+            elif _permits_free == 0:
+                logger.info(
+                    "[session-health] leases_held=%d, permits_free=0, "
+                    "running_count=%d >= max_sessions=%d (healthy backpressure; "
+                    "no leak signal).",
+                    len(leases_snapshot),
+                    _running_count,
+                    _max_sessions,
+                )
+            else:
+                # Zero-reclaim heartbeat — proves the reap pass is alive even
+                # when there is nothing to report.
+                logger.debug(
+                    "[session-health] slot-lease heartbeat: leases_held=%d, "
+                    "permits_free=%d, running_count=%d, max_sessions=%d, "
+                    "reap_disabled=%s",
+                    len(leases_snapshot),
+                    _permits_free,
+                    _running_count,
+                    _max_sessions,
+                    reap_disabled,
+                )
+        except Exception:
+            logger.exception("[session-health] slot-lease detection phase failed")
+
+        # === Fix #5 (#1821): publish the lease snapshot (always-run region) ===
+        # A single atomic SET of the complete JSON blob so the bridge always
+        # reads a self-consistent snapshot (Race 1). Fail-quiet.
+        _publish_slot_leases(registry, leases_snapshot)
+
+        # === Fix #5 (#1821): drain bridge-pushed reclaim-requests ===
+        # MUST sit in the ALWAYS-RUN region — after Phase 1 detection, BEFORE the
+        # Phase-2 `if reap_disabled: return` gate below — so the drain still fires
+        # under SLOT_LEASE_REAP_DISABLED=1, where it is the ONLY reclaim lever (the
+        # autonomous Phase-2 reclaim is gated off). Placing it in/after the Phase-2
+        # loop would silently defeat the feature's headline capability (concern #5).
+        _drain_reclaim_requests(registry, leases_snapshot)
+
+        # === Phase 2: reclaim — gated on SLOT_LEASE_REAP_DISABLED ===
+        if reap_disabled:
+            return
+
+        for lease in leases_snapshot:
+            try:
+                fresh = AgentSession.get_by_id(lease.owner_session_id)
+                # A record that no longer exists is at least as terminal as
+                # one whose status field says so — reclaim either way.
+                if fresh is None or getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                    registry.reclaim(lease.owner_session_id)
+                    _project_key = getattr(fresh, "project_key", None) or "unknown"
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _SR
+
+                        _SR.incr(f"{_project_key}:session-health:slot_reclaims")
+                    except Exception:
+                        logger.debug(
+                            "[session-health] slot_reclaims counter increment failed "
+                            "(non-fatal) for owner=%s",
+                            lease.owner_session_id,
+                        )
+            except Exception:
+                logger.warning(
+                    "[session-health] slot-lease reap failed for owner=%s (non-fatal)",
+                    lease.owner_session_id,
+                    exc_info=True,
+                )
+    except Exception:
+        logger.exception("[session-health] _reap_slot_leases failed (non-fatal)")
+
+
+def _publish_slot_leases(registry, leases_snapshot) -> None:
+    """Publish the current lease snapshot to Redis (Fix #5, #1821).
+
+    Written as ONE atomic ``SET`` of a complete JSON blob so the bridge always
+    reads a self-consistent snapshot (Race 1 — never a partial, field-by-field
+    write). ``acquired_at`` is a wall-clock ``time.time()`` value (agent/slot_lease.py
+    Lease), so it maps straight onto ``acquired_at_wall_ts`` with no conversion.
+    Fail-quiet: a Redis error must never raise into the reap pass.
+    """
+    try:
+        try:
+            permits_free = registry.permits_free()
+        except Exception:
+            permits_free = None
+        held = len(leases_snapshot)
+        payload = {
+            "permits_free": permits_free,
+            "held": held,
+            "max": getattr(registry, "_max_concurrent", None),
+            "ts": time.time(),
+            "owners": [
+                {
+                    "owner_session_id": lease.owner_session_id,
+                    "acquired_at_wall_ts": lease.acquired_at,
+                }
+                for lease in leases_snapshot
+            ],
+        }
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        _R.set(
+            f"{WORKER_SLOT_LEASES_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}",
+            json.dumps(payload),
+            ex=WORKER_SLOT_KEY_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.debug("[session-health] slot-lease snapshot publish failed (non-fatal): %s", e)
+
+
+def _drain_reclaim_requests(registry, leases_snapshot) -> None:
+    """Drain bridge-pushed reclaim-requests and reclaim genuinely-terminal owners.
+
+    The out-of-domain half of Fix #5 (#1821): the bridge's
+    ``check_worker_liveness_and_slots`` pushes owner ids onto
+    ``worker:slot:reclaim_requests:{host}`` when it observes a terminal-owner
+    lease under a live loop; this drain (running on the worker loop, where the
+    semaphore actually lives) pops each request and performs the reclaim.
+
+    This is a DISTINCT code path from #1820's autonomous Phase-2 reclaim, so it
+    fires even when ``SLOT_LEASE_REAP_DISABLED=1`` gates the autonomous path off —
+    the whole reason the reclaim-request lever exists.
+
+    **#1868 trap (concern #2) — DELIBERATE divergence from the autonomous reaper.**
+    The autonomous Phase-2 reclaim treats ``get_by_id → None`` as terminal. This
+    request-driven drain MUST NOT: a transient Redis lookup failure returning
+    ``None`` (or any lookup exception) is "unknown → SKIP, do not reclaim", because
+    reclaiming on a blip would strip a LIVE session's permit (semaphore
+    over-admission). Reclaim ONLY on an EXPLICIT terminal ``status``.
+
+    Fail-quiet throughout; every swallow logs.
+    """
+    key = f"{WORKER_SLOT_RECLAIM_REQUESTS_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}"
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+    except Exception as e:
+        logger.debug("[session-health] reclaim-request drain: redis unavailable: %s", e)
+        return
+
+    drained = 0
+    try:
+        # Atomic LPOP loop — bounded by RECLAIM_REQUESTS_MAX to avoid an
+        # unbounded spin if the bridge is flooding the list faster than we drain.
+        for _ in range(RECLAIM_REQUESTS_MAX + 1):
+            owner = _R.lpop(key)
+            if owner is None:
+                break
+            if isinstance(owner, bytes):
+                owner = owner.decode("utf-8", "replace")
+            drained += 1
+            try:
+                fresh = AgentSession.get_by_id(owner)
+            except Exception:
+                # Transient lookup failure → unknown → SKIP (concern #2, #1868).
+                # Do NOT reclaim; a future tick re-evaluates if the bridge re-pushes.
+                logger.debug(
+                    "[session-health] reclaim-request drain: lookup failed for owner=%s "
+                    "(unknown → skip, not reclaiming)",
+                    owner,
+                )
+                continue
+            if fresh is None:
+                # #1868: None is "unknown", NOT terminal, for the request-driven
+                # drain — a deliberate divergence from the autonomous reaper.
+                logger.debug(
+                    "[session-health] reclaim-request drain: owner=%s not found "
+                    "(unknown → skip, not reclaiming)",
+                    owner,
+                )
+                continue
+            status = getattr(fresh, "status", None)
+            if status in _TERMINAL_STATUSES:
+                registry.reclaim(owner)
+                project_key = getattr(fresh, "project_key", None) or "unknown"
+                logger.warning(
+                    "[session-health] bridge-requested reclaim: freed leaked slot for "
+                    "terminal owner=%s (status=%s, project=%s)",
+                    owner,
+                    status,
+                    project_key,
+                )
+                try:
+                    _R.incr(f"{project_key}:session-health:bridge_reclaims")
+                except Exception as e:
+                    logger.debug(
+                        "[session-health] bridge_reclaims counter increment failed "
+                        "(non-fatal) for owner=%s: %s",
+                        owner,
+                        e,
+                    )
+            else:
+                # Requested owner is still live (Risk 3) — never strip its permit.
+                logger.debug(
+                    "[session-health] reclaim-request drain: owner=%s status=%s not "
+                    "terminal → skip (no reclaim)",
+                    owner,
+                    status,
+                )
+    except Exception as e:
+        logger.warning(
+            "[session-health] reclaim-request drain failed (non-fatal): %s", e, exc_info=True
+        )
+
+    _maybe_emit_bridge_contract_stale(drained, leases_snapshot)
+
+
+def _maybe_emit_bridge_contract_stale(drained: int, leases_snapshot) -> None:
+    """Emit ``bridge_contract_stale`` when a terminal-owner leak is observed but no
+    reclaim-request has been drained for a sustained window (concern #5, #1821).
+
+    Detects the new-worker / old-bridge direction: the worker keeps ONE Redis
+    timestamp (``worker:slot:last_reclaim_request_drain:{host}``, set whenever the
+    drain pops ≥1 request). On a tick where a terminal-owner leak IS present but
+    ``now − last_drain_ts > BRIDGE_WORKER_BEACON_STALE_S`` (the REUSED beacon
+    threshold — no new staleness var), emit ``bridge_contract_stale`` once (dedup
+    ``SET NX EX``) so the contract gap is operator-visible rather than a silent drop.
+
+    Fail-quiet — an observability signal must never raise into the reap pass.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        host = _ORPHAN_REAP_HOSTNAME
+        last_drain_key = f"{WORKER_SLOT_LAST_RECLAIM_DRAIN_KEY_PREFIX}{host}"
+        now = time.time()
+
+        if drained > 0:
+            # We drained a request → the contract is live; record the timestamp.
+            _R.set(last_drain_key, str(now), ex=WORKER_SLOT_KEY_TTL_SECONDS)
+            return
+
+        # No request drained this tick. Only interesting if a terminal-owner leak
+        # actually exists (else there is nothing for the bridge to have requested).
+        terminal_owner_present = False
+        for lease in leases_snapshot:
+            try:
+                fresh = AgentSession.get_by_id(lease.owner_session_id)
+            except Exception:
+                continue
+            if fresh is not None and getattr(fresh, "status", None) in _TERMINAL_STATUSES:
+                terminal_owner_present = True
+                break
+        if not terminal_owner_present:
+            return
+
+        raw = _R.get(last_drain_key)
+        last_drain_ts = None
+        if raw is not None:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            try:
+                last_drain_ts = float(raw)
+            except (TypeError, ValueError):
+                last_drain_ts = None
+
+        stale = last_drain_ts is None or (now - last_drain_ts) > BRIDGE_WORKER_BEACON_STALE_S
+        if not stale:
+            return
+
+        # Dedup so a persistent gap logs once per stale window, not every tick.
+        dedup_key = f"worker:slot:bridge_contract_stale_applied:{host}"
+        if not _R.set(dedup_key, "1", nx=True, ex=BRIDGE_WORKER_BEACON_STALE_S):
+            return
+
+        logger.warning(
+            "[session-health] bridge_contract_stale: terminal-owner lease present but no "
+            "reclaim-request drained for >%ss — bridge reclaim-request channel may be "
+            "absent (new-worker/old-bridge). Autonomous reap still covers the leak.",
+            BRIDGE_WORKER_BEACON_STALE_S,
+        )
+        _append_watchdog_action(
+            _R,
+            host,
+            {"action": "bridge_contract_stale", "ts": now},
+        )
+        try:
+            _R.incr(f"{host}:worker-watchdog:bridge_contract_stale")
+        except Exception as e:
+            logger.debug("[session-health] bridge_contract_stale counter increment failed: %s", e)
+    except Exception as e:
+        logger.debug("[session-health] bridge_contract_stale check failed (non-fatal): %s", e)
+
+
+def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:
+    """Append a capped entry to the ``worker:watchdog:actions:{host}`` operator log.
+
+    Capped LPUSH + LTRIM (newest first, bounded at WORKER_WATCHDOG_ACTIONS_MAX)
+    + TTL, mirroring the existing action-log bound. Fail-quiet.
+    """
+    try:
+        actions_key = f"{WORKER_WATCHDOG_ACTIONS_KEY_PREFIX}{host}"
+        redis_client.lpush(actions_key, json.dumps(entry))
+        redis_client.ltrim(actions_key, 0, WORKER_WATCHDOG_ACTIONS_MAX - 1)
+        redis_client.expire(actions_key, WORKER_SLOT_KEY_TTL_SECONDS)
+    except Exception as e:
+        logger.debug("[session-health] watchdog-action append failed (non-fatal): %s", e)
+
+
 async def _agent_session_health_check() -> None:
     """Health check for worker-managed sessions (running and pending).
 
@@ -2010,13 +3012,22 @@ async def _agent_session_health_check() -> None:
     Scans both 'running' and 'pending' sessions:
 
     For RUNNING sessions:
-    1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover.
-    2. If worker appears alive but running > AGENT_SESSION_HEALTH_MIN_RUNNING AND
-       ``_has_progress(entry)`` is False (no own-progress fields, no fresh
-       heartbeats, no live children): evaluate Tier 2 reprieve gates and recover
-       only if every gate also fails. Slugless dev sessions share ``worker_key``
-       with co-running PM sessions, so ``worker_alive`` alone does not prove
-       the dev session is being handled (#944).
+    1. If worker is dead/missing AND running > AGENT_SESSION_HEALTH_MIN_RUNNING: recover
+       (``reason_kind="worker_dead"``).
+    2. **NARROWED (issue #1820 Fix #3 + OQ3 + BLOCKER r6):** if worker appears alive
+       but there is NO live in-scope handle for this session
+       (``_active_sessions.get(entry.agent_session_id) is None``) AND running
+       > AGENT_SESSION_HEALTH_MIN_RUNNING AND ``_has_progress(entry)`` is False:
+       evaluate Tier 2 reprieve gates (via the shared ``_should_kill_no_progress``
+       predicate) and recover only if every gate also fails
+       (``reason_kind="no_progress"``). This is the #944 shared-``worker_key``
+       orphan net — a row left ``running`` by a crashed worker whose
+       ``worker_key`` was later reused by a respawned LIVE worker reads
+       ``worker_alive=True`` even though no live task executes it. A
+       worker-alive session WITH a live in-scope handle is instead owned by
+       the progress-deadline cancel scope in ``agent_session_queue.py``
+       (Fix #3) — the two are disjoint by construction on the in-scope-handle
+       test, so no running session has two killers.
     3. Legacy sessions without started_at and no worker: recover.
 
     For PENDING sessions:
@@ -2054,6 +3065,15 @@ async def _agent_session_health_check() -> None:
     checked = 0
     recovered = 0
     workers_started = 0
+
+    # === Slot-lease reap pass (issue #1820, Fix #2) ===
+    # Single top-of-tick pass, independent of worker_alive and of whether
+    # there are any pending sessions — replaces the deleted logging-only
+    # fingerprint that used to be nested inside the PENDING-session loop
+    # below (gated on worker_alive, re-run per pending entry). See
+    # _reap_slot_leases()'s docstring for the two-phase (detect-always,
+    # reclaim-gated) design.
+    _reap_slot_leases()
 
     # === SIGKILL escalation drain (issue #1218) ===
     # Snapshot-then-clear: PIDs added to _pending_sigkill on the previous tick
@@ -2145,22 +3165,35 @@ async def _agent_session_health_check() -> None:
             worker_key = entry.worker_key
             worker = _active_workers.get(worker_key)
             worker_alive = worker is not None and not worker.done()
+            # Computed once, alongside worker_alive (issue #1820 OQ3 + BLOCKER
+            # r6): whether the CURRENT worker loop holds a live in-scope
+            # handle for THIS session. The progress-deadline cancel scope
+            # (Fix #3, agent_session_queue.py) is the authoritative
+            # no-progress killer for exactly the sessions where this is
+            # non-None — the narrowed elif below owns the disjoint residual
+            # (a worker-alive row with NO live in-scope handle: the #944
+            # shared-worker_key orphan, e.g. a crashed-then-respawned
+            # worker_key).
+            in_scope_handle = _active_sessions.get(entry.agent_session_id)
 
             started_ts = _ts(getattr(entry, "started_at", None))
             running_seconds = (now - started_ts) if started_ts else None
 
             should_recover = False
             reason = ""
+            _reason_kind: str | None = None
 
             if not worker_alive:
                 if started_ts is None:
                     should_recover = True
+                    _reason_kind = "worker_dead"
                     reason = "worker dead/missing, no started_at (legacy session)"
                 elif (
                     running_seconds is not None
                     and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
                 ):
                     should_recover = True
+                    _reason_kind = "worker_dead"
                     reason = (
                         f"worker dead/missing, running for "
                         f"{int(running_seconds)}s (>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard)"
@@ -2173,35 +3206,35 @@ async def _agent_session_health_check() -> None:
                         int(running_seconds) if running_seconds else "?",
                         AGENT_SESSION_HEALTH_MIN_RUNNING,
                     )
-            # Project-keyed dev sessions share worker_key with PM; without a
-            # progress signal, worker_alive alone doesn't prove the dev session
-            # is being handled (#944).
+            # NARROWED (issue #1820 OQ3 + BLOCKER r6): this elif is now
+            # disjoint-by-construction from Fix #3's in-scope progress-deadline
+            # watcher, which owns worker-alive sessions the current worker
+            # loop is actively executing (in_scope_handle is not None). This
+            # elif retains ONLY the #944 shared-worker_key orphan net: PM and
+            # a project-keyed dev-without-slug share a worker_key, so a row
+            # left `running` by a crashed worker whose worker_key was later
+            # reused by a respawned LIVE worker reads worker_alive=True even
+            # though no live task is executing it — no in-scope handle exists.
+            # Fix #3 cannot reach this orphan (it only watches the session its
+            # own owned task is executing), so this net must NOT be deleted —
+            # only narrowed to the case Fix #3 provably cannot cover.
             elif (
-                running_seconds is not None
+                in_scope_handle is None
+                and running_seconds is not None
                 and running_seconds > AGENT_SESSION_HEALTH_MIN_RUNNING
                 and not _has_progress(entry)
             ):
                 should_recover = True
+                _reason_kind = "no_progress"
                 reason = (
-                    f"no progress signal observed in last {int(running_seconds)}s "
+                    f"no progress signal, orphaned running row (no in-scope handle, #944), "
+                    f"{int(running_seconds)}s "
                     f"(>{AGENT_SESSION_HEALTH_MIN_RUNNING}s guard, worker future not yet resolved, "
                     f"turn_count={entry.turn_count}, log_path={entry.log_path!r}, "
                     f"claude_session_uuid={entry.claude_session_uuid!r})"
                 )
 
             if should_recover:
-                # Classify the recovery reason up front — referenced below to
-                # gate Tier 2 reprieve logic to no_progress recoveries only.
-                # worker_dead recoveries skip reprieve: a dead worker cannot
-                # be reprieved by an "active children" signal. The "timeout"
-                # reason kind was retired by #1172 along with the wall-clock
-                # cap — only "no_progress" and "worker_dead" remain.
-                if "no progress signal" in reason:
-                    _reason_kind = "no_progress"
-                else:
-                    _reason_kind = "worker_dead"
-
-                handle = _active_sessions.get(entry.agent_session_id)
                 # Delegate to shared recovery helper (issue #1270). Both this
                 # loop and `_agent_session_tool_timeout_loop` go through the
                 # same code path so MAX_RECOVERY_ATTEMPTS, the OOM defer, the
@@ -2211,7 +3244,7 @@ async def _agent_session_health_check() -> None:
                     entry,
                     reason=reason,
                     reason_kind=_reason_kind,
-                    handle=handle,
+                    handle=in_scope_handle,
                     worker_key=worker_key,
                 ):
                     recovered += 1
@@ -2231,6 +3264,13 @@ async def _agent_session_health_check() -> None:
             worker_alive = worker is not None and not worker.done()
 
             if worker_alive:
+                # The leaked-slot fingerprint that used to be logged HERE
+                # (nested in this loop, gated on worker_alive, re-run once
+                # per pending entry) is now a single top-of-tick pass —
+                # see _reap_slot_leases(), called once at the start of
+                # _agent_session_health_check (issue #1820, Fix #2). It
+                # detects AND reclaims; this branch stays nudge-only.
+
                 # Worker exists — nudge its event in case it missed the original
                 # notify (e.g. startup-recovery race: session put to pending before
                 # the worker loop subscribed to its event).
@@ -2606,6 +3646,14 @@ def register_worker_pid() -> None:
     live worker is never reaped even if a future code change re-adds the
     worker pattern to the cmdline regex set. Failure is non-fatal: the reaper
     still has ``os.getpid()`` in its skip-set.
+
+    B2-probe (issue #1817, optional/observability-only): additionally runs a
+    liveness-gated duplicate-worker check scoped to the same host + role and
+    logs a WARNING when a genuinely live second worker is found. This probe
+    is diagnostic-only: it always lets registration proceed, never exits,
+    and never blocks -- see ``_probe_duplicate_worker_registration`` for the
+    full rationale. The original additive ``_R.set`` write above is
+    unchanged.
     """
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
@@ -2615,6 +3663,121 @@ def register_worker_pid() -> None:
         _R.set(key, pid, ex=WORKER_REGISTERED_PID_TTL_SECONDS)
     except Exception as e:
         logger.debug("[session-health] register_worker_pid write failed: %s", e)
+
+    try:
+        _probe_duplicate_worker_registration(os.getpid())
+    except Exception as e:
+        logger.debug("[session-health] duplicate-worker probe failed (non-fatal): %s", e)
+
+
+def _probe_duplicate_worker_registration(pid: int) -> None:
+    """Observability-only liveness-gated duplicate-worker probe (issue #1817 B2-probe).
+
+    Scoped to the SAME host + role: a different machine, or a worker running
+    a different role (``VALOR_PROJECT_KEY``), legitimately owns its own
+    registration and is never compared against. ``pid`` is always
+    ``os.getpid()`` of the caller -- a worker never flags itself, since the
+    comparison only considers a *different* pid found under the role key.
+
+    A competitor pid is only treated as a genuine conflict when it is
+    CONFIRMED LIVE: it must pass ``os.kill(pid, 0)`` AND have a heartbeat
+    timestamp fresher than ``HEARTBEAT_FRESHNESS_WINDOW``. A pid that fails
+    either check is dead-worker residue (the exact launchd-respawn case) --
+    it is silently superseded (this registration overwrites the role key)
+    with no log line, since logging a "conflict" for routine respawn churn
+    would be noise, not signal.
+
+    Only when a competitor pid is CONFIRMED LIVE does this emit
+    ``logger.warning`` and supersede the role key. Still never
+    exits/blocks/refuses in either branch.
+
+    Why this must NEVER refuse to start: under launchd ``KeepAlive``, an
+    unclean worker exit leaves the dead pid's TTL'd key present until its
+    TTL expires. A refuse-guard here would block the HEALTHY RESPAWNED
+    worker for that entire window -- an availability outage. The atomic
+    pending->running run-claim (``models.session_lifecycle.claim_pending_run``,
+    issue #1817 B2) is what makes exactly-one-actor-per-session correctness
+    hold; this probe is diagnostic only and always allows registration to
+    proceed.
+    """
+    from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+    role = _current_worker_role()
+    role_key = f"{_WORKER_ROLE_PID_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{role}"
+
+    existing_raw = _R.get(role_key)
+    if existing_raw is not None:
+        try:
+            existing_pid = int(existing_raw)
+        except (TypeError, ValueError):
+            existing_pid = None
+
+        if existing_pid is not None and existing_pid != pid:
+            is_live = _pid_is_live(existing_pid)
+            heartbeat_fresh = is_live and _worker_pid_heartbeat_fresh(existing_pid)
+
+            if is_live and heartbeat_fresh:
+                logger.warning(
+                    "[session-health] second live worker for host=%s role=%s "
+                    "(existing pid=%d, new pid=%d) -- superseding pid registration",
+                    _ORPHAN_REAP_HOSTNAME,
+                    role,
+                    existing_pid,
+                    pid,
+                )
+            # else: dead/stale residue (liveness or heartbeat check failed) --
+            # silently supersede, no log. This is the routine launchd-respawn
+            # case, not a real conflict.
+
+    # Additive: this registration always proceeds and always overwrites the
+    # role key + this pid's heartbeat timestamp, regardless of the liveness
+    # outcome above. Never refuses.
+    now_ts = datetime.now(UTC).timestamp()
+    _R.set(role_key, pid, ex=WORKER_REGISTERED_PID_TTL_SECONDS)
+    _R.set(
+        f"{_WORKER_PID_HEARTBEAT_TS_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{pid}",
+        now_ts,
+        ex=WORKER_REGISTERED_PID_TTL_SECONDS,
+    )
+
+
+def _pid_is_live(pid: int) -> bool:
+    """Return True if ``pid`` appears to be a live process on this host.
+
+    ``os.kill(pid, 0)`` sends no signal, only checks existence/permission.
+    A ``PermissionError`` means the process exists but is owned by another
+    user -- treated conservatively as live (we cannot confirm death, so we
+    do not silently supersede without evidence). Any other failure
+    (``ProcessLookupError``, etc.) means the pid is dead-worker residue.
+    """
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+def _worker_pid_heartbeat_fresh(pid: int) -> bool:
+    """Return True if ``pid``'s last B2-probe heartbeat timestamp is fresh.
+
+    Reuses ``HEARTBEAT_FRESHNESS_WINDOW`` as the staleness threshold. Missing
+    or unparseable timestamps are treated as stale (fail toward "silently
+    supersede", not toward "log a conflict").
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(f"{_WORKER_PID_HEARTBEAT_TS_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}:{pid}")
+        if raw is None:
+            return False
+        ts = float(raw)
+        return (datetime.now(UTC).timestamp() - ts) < HEARTBEAT_FRESHNESS_WINDOW
+    except Exception:
+        return False
 
 
 def _write_worker_heartbeat() -> None:
@@ -2635,6 +3798,50 @@ def _write_worker_heartbeat() -> None:
     except Exception as e:
         logger.debug("[session-health] register_worker_pid refresh failed: %s", e)
 
+    _publish_loop_beacon()
+
+
+def _publish_loop_beacon() -> None:
+    """Publish the wall-clock loop beacon to Redis (Fix #5, #1821).
+
+    The bridge process cannot read ``last_loop_tick`` directly — it is a
+    ``time.monotonic()`` value, meaningless in another process. So the off-loop
+    heartbeat thread translates the per-process monotonic loop age into a
+    **wall-clock** ``time.time()`` timestamp the bridge can key freshness on.
+
+    CRITICAL (Risk 1 — the #1 design risk): the bridge keys freshness ONLY on
+    ``wall_ts`` (a wall-clock ``time.time()`` value). ``loop_beacon_age_s`` (the
+    monotonic ``now - last_loop_tick`` age) is carried as an ADVISORY field only
+    and must NEVER be used for cross-process time math — mixing two unrelated
+    clocks yields nonsense. ``armed=False`` / age ``None`` means the loop has not
+    ticked yet (the beacon is unarmed) and is NEVER treated as wedged.
+
+    Fail-quiet: a Redis error here must never break the heartbeat — the disk
+    write already happened before this call, and the dead-man's-switch never
+    aborts on a beacon-publish failure.
+    """
+    try:
+        tick = _session_state.get_loop_tick()
+        now_monotonic = time.monotonic()
+        armed = tick is not None
+        loop_beacon_age_s = (now_monotonic - tick) if tick is not None else None
+        payload = {
+            # wall_ts is the ONLY field the bridge keys freshness on (Risk 1).
+            "wall_ts": time.time(),
+            # Advisory only — a per-process monotonic age, never cross-process math.
+            "loop_beacon_age_s": loop_beacon_age_s,
+            "armed": armed,
+        }
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        _R.set(
+            f"{WORKER_LOOP_BEACON_KEY_PREFIX}{_ORPHAN_REAP_HOSTNAME}",
+            json.dumps(payload),
+            ex=WORKER_LOOP_BEACON_TTL_SECONDS,
+        )
+    except Exception as e:
+        logger.debug("[session-health] loop-beacon publish failed (non-fatal): %s", e)
+
 
 async def _agent_session_health_loop() -> None:
     """Periodically check running sessions for liveness and timeout."""
@@ -2644,7 +3851,10 @@ async def _agent_session_health_loop() -> None:
     )
     while True:
         try:
-            _write_worker_heartbeat()
+            # Heartbeat write moved to dedicated daemon thread (issue #1767):
+            # worker/__main__.py::_heartbeat_thread_main(). Keeping it here
+            # meant PTY/thread-pool saturation could starve the write and
+            # produce a false "hung worker" signal to the watchdog.
             await _agent_session_health_check()
             await _agent_session_hierarchy_health_check()
             await _dependency_health_check()
@@ -2905,6 +4115,21 @@ async def _agent_session_tool_timeout_check() -> None:
                                 "increment failed: %s",
                                 _ns_ctr_err,
                             )
+                        # PTY-liveness gate (#1792): defer the D0 kill when the granite
+                        # PTY is demonstrably alive (screen activity within the window).
+                        # SDK/non-PTY sessions fall through (helper returns False).
+                        if _prime_pty_alive(fresh_ns, now):
+                            try:
+                                from popoto.redis_db import POPOTO_REDIS_DB as _R_PTY_DEFER
+
+                                _R_PTY_DEFER.incr(
+                                    f"{fresh_ns.project_key}:session-health:"
+                                    f"never_started_pty_deferred"
+                                )
+                            except Exception:
+                                logger.debug("Failed to incr never_started_pty_deferred counter")
+                            continue
+
                         handle_ns = _active_sessions.get(fresh_ns.agent_session_id)
                         await _apply_recovery_transition(
                             fresh_ns,

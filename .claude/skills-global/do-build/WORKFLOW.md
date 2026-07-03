@@ -47,6 +47,8 @@ Plan context: [relevant plan sections]
 
 Your assignment:
 - [specific actions from task]
+[If the task carries a `Domain: <tag>` line, read `../do-plan/DOMAIN_FRAMING.md` and
+append that domain's rules here so the builder/reviewer applies them.]
 
 When complete, commit your changes and update your task status.
 
@@ -124,8 +126,8 @@ When the final `validate-all` task completes, verify Definition of Done criteria
 - [x] **Built**: All code implemented and working
 - [x] **Tested**: All unit tests passing, integration tests passing
 - [x] **Documented**: Documentation created per plan's Documentation section
-- [x] **Quality**: Ruff and Black checks pass, no lint errors
-- [x] **Plans migrated**: Ready to migrate from docs/plans/ to docs/features/
+- [x] **Quality**: the repo's lint/format checks pass, no lint errors
+- [x] **Plans migrated**: Ready to migrate from docs/plans/ to the completed/docs location
 
 If any criterion is not met, report the issue and do NOT proceed to PR creation.
 

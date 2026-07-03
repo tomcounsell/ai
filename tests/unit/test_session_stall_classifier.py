@@ -17,6 +17,7 @@ from agent.session_stall_classifier import (
     GRANITE_WEDGED_READLOOP_FRESH_SECS,
     IDLE_STALL_SECS,
     IDLE_SUSPECT_SECS,
+    NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
     RECOVERY_SUSPECT_COUNT,
     TOOL_TIMEOUT_SUSPECT_COUNT,
@@ -181,6 +182,101 @@ class TestNeverStartedRule:
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "stalled"
         assert verdict.reason == "never_started"
+
+
+class TestNeverStartedProgressGuard:
+    """Granite PTY sessions emit no turn_start telemetry but still progress.
+
+    The progress-field guard must suppress the never_started false positive when
+    the AgentSession's own fields show work, while leaving genuinely-idle
+    sessions flagged.
+    """
+
+    def test_positive_turn_count_skips_never_started(self):
+        # No turn_start events, old created_at — but turn_count proves it started.
+        now = time.time()
+        session = SimpleNamespace(
+            status="running",
+            started_at=now - 700,
+            created_at=now - 700,
+            turn_count=28,
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.level == "healthy"
+        assert verdict.reason == "progress_fields_fresh"
+        assert verdict.signals["turn_count"] == 28
+
+    def test_fresh_last_tool_use_skips_never_started(self):
+        import datetime
+
+        now = time.time()
+        session = SimpleNamespace(
+            status="running",
+            started_at=now - 700,
+            created_at=now - 700,
+            turn_count=0,  # no completed turns yet
+            last_tool_use_at=datetime.datetime.now(datetime.UTC),  # firing now
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.level == "healthy"
+        assert verdict.reason == "progress_fields_fresh"
+
+    def test_fresh_last_pty_activity_skips_never_started(self):
+        import datetime
+
+        now = time.time()
+        session = SimpleNamespace(
+            status="running",
+            started_at=now - 700,
+            created_at=now - 700,
+            turn_count=0,
+            last_pty_activity_at=datetime.datetime.now(datetime.UTC),
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.level == "healthy"
+        assert verdict.reason == "progress_fields_fresh"
+
+    def test_stale_progress_fields_still_never_started(self):
+        # turn_count zero AND last activity well outside the suspect window →
+        # the guard must NOT fire; the session is genuinely never-started.
+        now = time.time()
+        session = SimpleNamespace(
+            status="running",
+            started_at=now - 700,
+            created_at=now - 700,
+            turn_count=0,
+            last_tool_use_at=now - (IDLE_SUSPECT_SECS + 200),
+            last_pty_activity_at=now - (IDLE_SUSPECT_SECS + 200),
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.level == "stalled"
+        assert verdict.reason == "never_started"
+
+    def test_confirm_margin_applied_below_threshold_is_healthy(self):
+        # Elapsed sits in the (grace, grace+margin] band → not yet stalled.
+        now = time.time()
+        elapsed = NEVER_STARTED_GRACE_SECS + (NEVER_STARTED_CONFIRM_MARGIN_SECS / 2)
+        session = SimpleNamespace(
+            status="running",
+            started_at=now - elapsed,
+            created_at=now - elapsed,
+            turn_count=0,
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.level == "healthy"
+        assert verdict.reason != "never_started"
+
+    def test_confirm_margin_reported_in_signals(self):
+        now = time.time()
+        session = SimpleNamespace(
+            status="running",
+            started_at=now - 700,
+            created_at=now - 700,
+            turn_count=0,
+        )
+        verdict = classify_session_stall([], session=session)
+        assert verdict.reason == "never_started"
+        assert verdict.signals["confirm_margin_secs"] == NEVER_STARTED_CONFIRM_MARGIN_SECS
 
 
 # ---------------------------------------------------------------------------
@@ -567,3 +663,50 @@ class TestGraniteWedgedRule:
         verdict = classify_session_stall([], session=session)
         assert verdict.reason != "granite_wedged"
         assert verdict.level in {"healthy", "stalled", "suspect", "unclassifiable"}
+
+
+# ---------------------------------------------------------------------------
+# NEVER_STARTED_PTY_LIVENESS_SECS constant (issue #1792)
+# ---------------------------------------------------------------------------
+
+
+class TestNeverStartedPtyLivenessSecs:
+    """Verify NEVER_STARTED_PTY_LIVENESS_SECS exists, has correct default, and is env-tunable."""
+
+    def test_constant_exists(self):
+        """NEVER_STARTED_PTY_LIVENESS_SECS must be importable from session_stall_classifier."""
+        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+        assert NEVER_STARTED_PTY_LIVENESS_SECS is not None
+
+    def test_constant_default_is_90(self):
+        """Default value must be 90 (mirrors HEARTBEAT_FRESHNESS_WINDOW)."""
+        import os
+
+        # Only assert the default when the env var is not set.
+        if os.environ.get("NEVER_STARTED_PTY_LIVENESS_SECS") is None:
+            from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+            assert NEVER_STARTED_PTY_LIVENESS_SECS == 90, (
+                f"Expected default 90, got {NEVER_STARTED_PTY_LIVENESS_SECS}. "
+                "Set NEVER_STARTED_PTY_LIVENESS_SECS env var to override in tests."
+            )
+
+    def test_constant_is_int(self):
+        """NEVER_STARTED_PTY_LIVENESS_SECS must be an int (not a float or str)."""
+        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
+
+        assert isinstance(NEVER_STARTED_PTY_LIVENESS_SECS, int)
+
+    def test_constant_is_env_overridable(self, monkeypatch):
+        """NEVER_STARTED_PTY_LIVENESS_SECS must be overridable via env var."""
+        import importlib
+
+        import agent.session_stall_classifier as sc
+
+        monkeypatch.setenv("NEVER_STARTED_PTY_LIVENESS_SECS", "42")
+        importlib.reload(sc)
+        try:
+            assert sc.NEVER_STARTED_PTY_LIVENESS_SECS == 42
+        finally:
+            importlib.reload(sc)  # Restore original value

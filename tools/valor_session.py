@@ -37,7 +37,7 @@ Project Key Resolution (for `create` subcommand):
     naming the cwd and listing the available project keys.
 
 This tool is the external interface for session steering. It writes to
-AgentSession.queued_steering_messages (via steer_session()) and manages
+the Redis steering list (via agent.steering / steer_session()) and manages
 session lifecycle without requiring bridge access.
 """
 
@@ -680,7 +680,9 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
 
     - Validates session is in RESUMABLE_STATUSES (not cancelled, not running/pending)
     - Validates session has a claude_session_uuid
-    - Stages steering message BEFORE transition (eliminates race window)
+    - Pushes the steering message onto the Redis steering list BEFORE transition
+      (eliminates the race window — the write is independent of any in-flight
+      ORM save on this instance)
     - Atomically transitions to pending via transition_status(..., reject_from_terminal=False)
 
     Returns a ResumeResult. Never raises — caller checks result.success.
@@ -722,12 +724,13 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
             ),
         )
 
-    # Stage steering message BEFORE transitioning to pending so the worker
+    # Push the steering message BEFORE transitioning to pending so the worker
     # always sees it — eliminates the two-write race (transition then save).
-    existing_steering = list(session.queued_steering_messages or [])
-    existing_steering.append(message)
-    session.queued_steering_messages = existing_steering
-    session.save()
+    # This RPUSHes directly to Redis, independent of session.save(), so it
+    # cannot be clobbered by a stale bound instance.
+    from agent.steering import push_steering_message
+
+    push_steering_message(session_id, message, f"resume:{source}")
 
     # Transition to pending (atomic — fails if another process raced us).
     # Steering message is already persisted above, so no race window.
@@ -840,7 +843,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def cmd_steer(args: argparse.Namespace) -> int:
-    """Write a steering message to a session's queued_steering_messages.
+    """Write a steering message to a session's Redis steering queue.
 
     ``--id`` accepts either ``session_id`` or ``agent_session_id`` (UUID); we
     resolve at the CLI boundary via :py:func:`_find_session` and then call
@@ -892,6 +895,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
         full_message = getattr(args, "full_message", False)
 
+        from agent.steering import peek_steering_messages
+
+        pending_steering = peek_steering_messages(session.session_id)
+
         # Check worker health when session is pending (compute gate avoids the
         # git subprocess on every status call; non-pending emits null fields)
         worker_healthy: bool | None = None
@@ -915,7 +922,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 if full_message
                 else (session.message_text or "")[:100],
                 "message_preview": (session.message_text or "")[:100],  # backward-compat alias
-                "queued_steering_messages": session.queued_steering_messages or [],
+                "queued_steering_messages": [m.get("text", "") for m in pending_steering],
                 "slug": getattr(session, "slug", None),
                 "branch_name": getattr(session, "branch_name", None),
                 "issue_url": getattr(session, "issue_url", None),
@@ -949,11 +956,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         else:
             print(f"  Message:       {(session.message_text or '')[:80]}")
 
-        steering = session.queued_steering_messages
-        if steering:
-            print(f"  Pending steering messages ({len(steering)}):")
-            for i, msg in enumerate(steering, 1):
-                print(f"    {i}. {str(msg)[:80]}")
+        if pending_steering:
+            print(f"  Pending steering messages ({len(pending_steering)}):")
+            for i, msg in enumerate(pending_steering, 1):
+                print(f"    {i}. {str(msg.get('text', ''))[:80]}")
         else:
             print("  Pending steering messages: none")
 

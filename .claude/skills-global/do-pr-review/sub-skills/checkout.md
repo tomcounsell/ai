@@ -69,10 +69,11 @@ the checkout, diff, or any Read of PR files.
 
 ## Checkout Steps
 
-1. **Clean git state:**
+1. **Clean git state** (abort any in-progress merge/rebase, stash uncommitted changes). Generic baseline:
    ```bash
-   python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+   git merge --abort 2>/dev/null; git rebase --abort 2>/dev/null; git stash --include-untracked 2>/dev/null
    ```
+   If the repo-context file declares a clean-git-state helper, use it instead.
 
 2. **Checkout PR branch:**
    ```bash

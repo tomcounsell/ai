@@ -403,6 +403,7 @@ class TestStatusConstants:
             "superseded",
             "paused_circuit",
             "paused",
+            "paused_budget",  # #1821: per-tool budget backstop (non-drip, human-owned)
         }
 
     def test_no_overlap(self):
@@ -414,8 +415,12 @@ class TestStatusConstants:
         assert ALL_STATUSES == TERMINAL_STATUSES | NON_TERMINAL_STATUSES
 
     def test_thirteen_total_statuses(self):
-        """There are exactly 13 statuses (5 terminal + 8 non-terminal)."""
-        assert len(ALL_STATUSES) == 13
+        """There are exactly 14 statuses (5 terminal + 9 non-terminal).
+
+        The 9th non-terminal is paused_budget (#1821), the non-drip status the
+        per-tool budget backstop moves a runaway session into.
+        """
+        assert len(ALL_STATUSES) == 14
 
 
 class TestImportSafety:

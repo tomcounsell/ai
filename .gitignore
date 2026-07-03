@@ -409,6 +409,9 @@ data/external/
 *.csv
 *.json
 *.parquet
+# Granite golden-recorder fixtures are committed (plan decision): un-ignore
+# the recorded metadata sidecar the broad *.json rule would otherwise hide.
+!tests/granite_faults/fixtures/recorded_meta.json
 
 # Configuration with secrets
 config/local.py

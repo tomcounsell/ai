@@ -25,6 +25,8 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from config.models import PINNED_CLAUDE_VERSION
+
 _logger = logging.getLogger(__name__)
 
 
@@ -625,6 +627,42 @@ class FeatureSettings(BaseModel):
             "Env: FEATURES__STALL_RECOVERY_PER_SESSION_BUDGET."
         ),
     )
+    reflection_pool_workers: int = Field(
+        default=2,
+        ge=1,
+        le=16,
+        description=(
+            "Thread-pool size for the reflection bulkhead executor. Sync reflections "
+            "run in this dedicated pool instead of the asyncio default pool, preventing "
+            "heavy scans from starving critical-path work (e.g. bridge routing). "
+            "Provisional/tunable. Env: FEATURES__REFLECTION_POOL_WORKERS."
+        ),
+    )
+
+    # --- Per-message producer claim (issue #1817 B1) ---
+    # GRAIN OF SALT: this TTL must stay SHORT -- sized to cross-actor
+    # processing skew (seconds), NOT the ~1h iCloud projects.json sync-lag
+    # window. The durable 2h DedupRecord membership set (models/dedup.py)
+    # already covers the sync-lag/replay window; this gate only needs to
+    # survive the brief overlap between two producers racing on the SAME
+    # message. A long TTL here was a BLOCKER in an earlier critique round:
+    # it would orphan the claim key for up to an hour on a mid-window
+    # process death, causing the reconciler's retry to wrongly conclude a
+    # peer won and silently drop the message for that entire window --
+    # recreating the exact bug this claim exists to fix.
+    bridge_msg_claim_ttl_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=300,
+        description=(
+            "Provisional short TTL (seconds) for the bridge:msgclaim:* SETNX "
+            "gate in bridge/dedup.py that prevents two near-simultaneous "
+            "producers (e.g. two machines during iCloud config sync lag) from "
+            "both enqueueing the same inbound Telegram message. Must stay "
+            "short (cross-actor skew, not sync-lag window) -- see the "
+            "comment above this field. Env: FEATURES__BRIDGE_MSG_CLAIM_TTL_SECONDS."
+        ),
+    )
 
 
 class GraniteSettings(BaseModel):
@@ -656,6 +694,32 @@ class GraniteSettings(BaseModel):
             "Plan #1572 / docs/features/granite-pty-production.md."
         ),
     )
+    reprobe_interval_s: float = Field(
+        default=30.0,
+        gt=0,
+        description=(
+            "How often (seconds) to re-probe granite when the circuit is CLOSED. "
+            "Provisional/tunable — tune after observing real ollama outage rates. "
+            "Override via GRANITE_REPROBE_INTERVAL_S env var."
+        ),
+    )
+    breaker_open_threshold: int = Field(
+        default=3,
+        ge=1,
+        le=100,
+        description=(
+            "Consecutive probe failures required to trip the circuit to OPEN. "
+            "Provisional/tunable. Override via GRANITE_BREAKER_OPEN_THRESHOLD env var."
+        ),
+    )
+    breaker_cooldown_s: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Seconds the circuit stays OPEN before allowing a half-open re-probe. "
+            "Provisional/tunable. Override via GRANITE_BREAKER_COOLDOWN_S env var."
+        ),
+    )
     pm_model: str = Field(
         default="opus",
         description=(
@@ -675,6 +739,94 @@ class GraniteSettings(BaseModel):
             "Dev role now owns the full SDLC pipeline (issue #1692) and fans "
             "out to Sonnet subagents for parallel work; opus is the default "
             "for the Dev TUI itself. Override via GRANITE__DEV_MODEL."
+        ),
+    )
+
+    # --- Per-role transport hedge (plan #1842) ---
+    pm_transport: str = Field(
+        default="pty",
+        description=(
+            "Global default transport for the PM role: ``pty`` (interactive TUI "
+            "over a PTY, flat-billed on the subscription) or ``headless`` "
+            "(one ``claude -p`` subprocess per turn, metered against the Agent "
+            "SDK credit pool). A per-project ``transport.pm`` block in "
+            "projects.json overrides this. Default ``pty`` reproduces today's "
+            "behavior exactly. Override via GRANITE__PM_TRANSPORT."
+        ),
+    )
+    dev_transport: str = Field(
+        default="pty",
+        description=(
+            "Global default transport for the Dev role: ``pty`` or ``headless``. "
+            "See ``pm_transport``. A per-project ``transport.dev`` block in "
+            "projects.json overrides this. Override via GRANITE__DEV_TRANSPORT."
+        ),
+    )
+
+    # --- Hook-driven turn returns (plan #1688) ---
+    hook_driven_turn_end: bool = Field(
+        default=True,
+        description=(
+            "Feature flag: when True (default), the granite container treats the "
+            "Claude Code ``Stop`` hook edge as the turn-completion authority and "
+            "reads the final assistant message from the hook payload's "
+            "transcript_path. The PTY idle heuristic (read_until_idle) is demoted "
+            "to a running/idle badge, liveness, and crash detection. When False, "
+            "the container falls back to the pre-#1688 idle-completion path (the "
+            "documented safety valve for a claude version that regresses the hook "
+            "contract). Override via GRANITE__HOOK_DRIVEN_TURN_END env var. "
+            "Plan #1688 / docs/features/granite-hook-driven-turn-returns.md."
+        ),
+    )
+    hook_turn_end_wait_s: float = Field(
+        default=600.0,
+        gt=0,
+        description=(
+            "Outer budget (seconds) the container waits for a ``Stop`` turn-end "
+            "edge before the crash/timeout watchdog trips. The wait is always a "
+            "race against PTY EOF / !isalive() — this bound only fires when the "
+            "PTY is alive but no Stop edge arrives (the silent-hook failure mode). "
+            "Override via GRANITE__HOOK_TURN_END_WAIT_S env var."
+        ),
+    )
+    hook_crash_resume_cap: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description=(
+            "Max crash-resume attempts on a single turn before the container "
+            "escalates with an operator-terminal message instead of looping "
+            "forever. Each crash (PTY EOF with no Stop edge) resumes the same "
+            "claude session via --resume <uuid> + a verified `continue` nudge. "
+            "Override via GRANITE__HOOK_CRASH_RESUME_CAP env var."
+        ),
+    )
+
+    # --- Background-task supervisor (Fix #4, issue #1816) ---
+    supervisor_max_restarts: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Max restarts within WORKER_SUPERVISOR_WINDOW_S before the storm cap fires "
+            "and recycles the process via SIGABRT. Conservative default — erring toward "
+            "NOT killing legitimate work. Provisional/tunable. "
+            "Override via WORKER_SUPERVISOR_MAX_RESTARTS env var."
+        ),
+    )
+    supervisor_window_s: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "Rolling window (seconds) for the restart-count denominator. "
+            "Provisional/tunable. Override via WORKER_SUPERVISOR_WINDOW_S env var."
+        ),
+    )
+    supervisor_base_backoff_s: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Base backoff (seconds) before the first respawn; doubles each restart. "
+            "Provisional/tunable. Override via WORKER_SUPERVISOR_BASE_BACKOFF_S env var."
         ),
     )
 
@@ -792,6 +944,68 @@ class Settings(BaseSettings):
             "Fail-closed: if True and cross-vendor judge skips, consensus returns "
             "CHANGES REQUESTED. Default OFF (degrade-to-Claude-only). "
             "Env: SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1."
+        ),
+    )
+
+    # Email resolver persistent-unavailability alert (issue #1817, workstream A2).
+    # Provisional/tunable — chosen to absorb a one-off transient resolver blip
+    # without paging, while still catching a genuinely stuck resolver (e.g. an
+    # expired OAuth token) within a handful of inbound emails. Derived from the
+    # existing per-project resolver:failures:{project_key} counter maintained by
+    # bridge/routing.py::_on_resolver_failure — not a parallel tally.
+    # Override via EMAIL_RESOLVER_ALERT_AFTER env var.
+    email_resolver_alert_after: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description=(
+            "Consecutive resolver failures (per project) before the "
+            "email:resolver_unavailable operator alert arms. "
+            "Provisional/tunable. Env: EMAIL_RESOLVER_ALERT_AFTER."
+        ),
+    )
+
+    # Correctness & delivery-integrity hardening (issue #1817). Documented
+    # here as the typed catalog entry; the runtime checks
+    # (scripts/update/verify.py, worker/__main__.py,
+    # agent/agent_session_queue.py) read these via `os.environ.get(...)`
+    # directly rather than through this `settings` singleton, so a value
+    # changed after process startup (e.g. via test monkeypatching) takes
+    # effect immediately instead of requiring a fresh Settings() instance.
+    # The version default itself lives in config/models.py
+    # (PINNED_CLAUDE_VERSION) as the single source of truth shared with the
+    # nightly ollama canary (scripts/nightly_regression_tests.py).
+    pinned_claude_version: str = Field(
+        default=PINNED_CLAUDE_VERSION,
+        description=(
+            "D1a: pinned claude CLI version the D1b scraped-TUI-marker "
+            "contract was last verified against (native installer: "
+            "~/.local/bin/claude -> "
+            "~/.local/share/claude/versions/<version>/). PROVISIONAL — "
+            "bumping requires re-verifying the D1b markers against the new "
+            "version's actual TUI output first; see "
+            "docs/features/deployment.md. Env: PINNED_CLAUDE_VERSION."
+        ),
+    )
+    claude_contract_check_enforce: bool = Field(
+        default=False,
+        description=(
+            "D1a/D1b: shared enforce flag for the claude-CLI-contract checks "
+            "(version pin drift in scripts/update/verify.py, TUI-marker "
+            "contract-check in worker/__main__.py). Default off (warn-only, "
+            "non-blocking). Env: CLAUDE_CONTRACT_CHECK_ENFORCE=1."
+        ),
+    )
+    notify_healthcheck_interval: float = Field(
+        default=15.0,
+        gt=0,
+        description=(
+            "D4: interval (seconds) for the session-notify pubsub liveness "
+            "watchdog in agent/agent_session_queue.py — a periodic PUBSUB "
+            "NUMSUB probe on a SEPARATE short-lived Redis connection (never "
+            "the listen() connection) that detects a silently-dropped "
+            "subscription and forces a resubscribe. Provisional/tunable. "
+            "Env: NOTIFY_HEALTHCHECK_INTERVAL."
         ),
     )
 

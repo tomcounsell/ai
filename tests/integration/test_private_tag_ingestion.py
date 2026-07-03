@@ -33,13 +33,13 @@ PRIVATE_WRAPPED = f"<private>{SECRET}</private>"
 USER_TEXT = f"Refactor the auth handler. The current key is {PRIVATE_WRAPPED}. Should we rotate?"
 
 
-def _bridge_compute_safe_pair(text: str, project: dict | None = None) -> tuple[str, str, str, str]:
+def _bridge_compute_safe_pair(text: str) -> tuple[str, str, str, str]:
     """Mirror the bridge handler's text computation:
     text → safe_text, clean_text (live), safe_clean_text (persisted).
     """
     safe_text = strip_private(text)
-    clean_text = clean_message(text, project) or text
-    safe_clean_text = clean_message(safe_text, project) or safe_text
+    clean_text = clean_message(text) or text
+    safe_clean_text = clean_message(safe_text) or safe_text
     return text, safe_text, clean_text, safe_clean_text
 
 

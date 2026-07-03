@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -173,6 +174,241 @@ def _check_redis() -> CheckResult:
             message=f"Redis check failed: {e}",
             fix="Start Redis: brew services start redis",
         )
+
+
+def _check_redis_durability() -> list[CheckResult]:
+    """Check Redis durability configuration: AOF and eviction policy.
+
+    Asserts:
+    - ``aof_enabled:1`` via ``redis-cli INFO persistence``
+    - ``maxmemory-policy == noeviction`` via ``redis-cli CONFIG GET maxmemory-policy``
+
+    Returns a list of two CheckResult objects (one per assertion) so each
+    failure is independently actionable.  Never raises — renders failure state
+    cleanly if Redis is unreachable or redis-cli is not installed.
+    """
+    results: list[CheckResult] = []
+
+    # --- AOF enabled ---
+    try:
+        proc = subprocess.run(
+            ["redis-cli", "INFO", "persistence"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        output = proc.stdout
+        aof_enabled = "aof_enabled:1" in output
+        results.append(
+            CheckResult(
+                name="redis_aof",
+                category="Services",
+                passed=aof_enabled,
+                message="AOF persistence enabled"
+                if aof_enabled
+                else "AOF persistence disabled (aof_enabled:0)",
+                fix=None
+                if aof_enabled
+                else "Enable AOF: run /update which sets appendonly yes in redis.conf",
+            )
+        )
+    except FileNotFoundError:
+        results.append(
+            CheckResult(
+                name="redis_aof",
+                category="Services",
+                passed=False,
+                message="redis-cli not found — cannot check AOF status",
+                fix="Install Redis CLI: brew install redis",
+            )
+        )
+    except Exception as e:
+        results.append(
+            CheckResult(
+                name="redis_aof",
+                category="Services",
+                passed=False,
+                message=f"AOF check failed: {e}",
+                fix="Run /update to apply Redis durability configuration",
+            )
+        )
+
+    # --- maxmemory-policy noeviction ---
+    try:
+        proc = subprocess.run(
+            ["redis-cli", "CONFIG", "GET", "maxmemory-policy"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
+        # redis-cli CONFIG GET returns two lines: key then value
+        policy = lines[1] if len(lines) >= 2 else ""
+        noeviction = policy == "noeviction"
+        results.append(
+            CheckResult(
+                name="redis_eviction_policy",
+                category="Services",
+                passed=noeviction,
+                message=f"maxmemory-policy={policy or '(unknown)'}"
+                + (" (correct)" if noeviction else " (should be noeviction)"),
+                fix=None
+                if noeviction
+                else "Set noeviction: run /update which configures maxmemory-policy noeviction",
+            )
+        )
+    except FileNotFoundError:
+        results.append(
+            CheckResult(
+                name="redis_eviction_policy",
+                category="Services",
+                passed=False,
+                message="redis-cli not found — cannot check maxmemory-policy",
+                fix="Install Redis CLI: brew install redis",
+            )
+        )
+    except Exception as e:
+        results.append(
+            CheckResult(
+                name="redis_eviction_policy",
+                category="Services",
+                passed=False,
+                message=f"Eviction policy check failed: {e}",
+                fix="Run /update to apply Redis durability configuration",
+            )
+        )
+
+    return results
+
+
+# Role-gate marker: a host opts in to being a Redis node by touching this file.
+# Mirrors scripts/update/redis_replication.py::REPLICATION_MARKER_FILE.
+_REPLICATION_MARKER_FILE = PROJECT_DIR / "data" / "redis-replication-enabled"
+
+# Provisional Sentinel master name / port — tunable, override via env if deployed.
+_SENTINEL_MASTER_NAME = os.environ.get("REDIS_SENTINEL_MASTER_NAME", "valor-redis")
+_SENTINEL_PORT = os.environ.get("REDIS_SENTINEL_PORT", "26379")
+
+
+def _check_redis_replication_health() -> CheckResult:
+    """Check Redis replication + Sentinel health on opted-in Redis nodes (#1827).
+
+    ROLE-GATED: on a client-only machine (no ``data/redis-replication-enabled``
+    marker — the common case) this returns a neutral ``passed=True`` SKIP and never
+    warns. Replication absence on a standalone localhost Redis is the expected
+    default posture, NOT a failure.
+
+    On an opted-in node it asserts ``role`` via ``redis-cli INFO replication``
+    (``master_link_status:up`` for a replica, ``connected_slaves`` for a master) and
+    probes Sentinel reachability. Degrades gracefully (``passed=True`` "(skipped)")
+    when redis-cli is absent or Redis is unreachable. Never raises.
+    """
+    name = "redis_replication_health"
+    category = "Services"
+
+    # ROLE GATE — neutral skip on client-only machines.
+    try:
+        opted_in = _REPLICATION_MARKER_FILE.exists()
+    except OSError:
+        opted_in = False
+    if not opted_in:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message="redis replication: client-only machine (skipped)",
+        )
+
+    # Opted-in node: probe INFO replication.
+    try:
+        proc = subprocess.run(
+            ["redis-cli", "INFO", "replication"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message="redis replication: redis-cli not found (skipped)",
+        )
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message=f"redis replication: probe failed, degraded (skipped): {e}",
+        )
+
+    if proc.returncode != 0:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=True,
+            message="redis replication: Redis unreachable (skipped)",
+        )
+
+    role: str | None = None
+    master_link: str | None = None
+    connected_slaves = 0
+    for raw in proc.stdout.splitlines():
+        line = raw.strip()
+        if line.startswith("role:"):
+            role = line.split(":", 1)[1].strip()
+        elif line.startswith("master_link_status:"):
+            master_link = line.split(":", 1)[1].strip()
+        elif line.startswith("connected_slaves:"):
+            try:
+                connected_slaves = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                connected_slaves = 0
+
+    # Sentinel reachability probe (best-effort, non-fatal).
+    sentinel_ok = False
+    try:
+        sproc = subprocess.run(
+            ["redis-cli", "-p", _SENTINEL_PORT, "SENTINEL", "master", _SENTINEL_MASTER_NAME],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        sentinel_ok = sproc.returncode == 0 and bool(sproc.stdout.strip())
+    except Exception:
+        sentinel_ok = False
+
+    sentinel_note = "Sentinel reachable" if sentinel_ok else "Sentinel unreachable"
+    runbook = "See failover runbook in docs/features/redis-durability.md"
+
+    if role == "slave":
+        healthy = master_link == "up"
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=healthy,
+            message=f"redis replication: replica, master_link_status={master_link or '(unknown)'}"
+            f"; {sentinel_note}",
+            fix=None if healthy else f"Replica not linked to master. {runbook}",
+        )
+
+    if role == "master":
+        healthy = connected_slaves >= 1
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=healthy,
+            message=f"redis replication: master, connected_slaves={connected_slaves}"
+            f"; {sentinel_note}",
+            fix=None if healthy else f"Master has no connected replicas. {runbook}",
+        )
+
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,
+        message=f"redis replication: role={role or '(unknown)'} (skipped); {sentinel_note}",
+    )
 
 
 def _check_bridge() -> CheckResult:
@@ -593,6 +829,8 @@ def get_checks(
         _check_python_deps,
         # Services
         _check_redis,
+        _check_redis_durability,
+        _check_redis_replication_health,
         _check_bridge,
         _check_worker,
         # Auth

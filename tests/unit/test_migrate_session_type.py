@@ -24,16 +24,6 @@ def _make_redis(keys: list[bytes]) -> MagicMock:
 
     def scan_side_effect(cursor, match=None, count=500):
         # Single-shot: return all keys, next cursor = 0
-        filtered = [
-            k
-            for k in keys
-            if not match
-            or k.startswith(
-                match.replace("*", b"").rstrip(b"*")
-                if isinstance(match, bytes)
-                else match.split("*")[0].encode()
-            )
-        ]
         return (0, keys)  # Return all keys, cursor 0 = done
 
     redis_mock.scan.side_effect = scan_side_effect

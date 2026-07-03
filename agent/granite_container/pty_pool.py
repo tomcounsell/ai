@@ -23,7 +23,10 @@ Slot lifecycle
     idle --acquire--> locked --release--> respawning --respawn done--> idle
                                   \\-> respawn failed: still in respawning
                                        (semaphore not released; respawn task
-                                        holds the slot, logs the failure)
+                                        logs the failure). The next bounded
+                                        acquirer that waits past
+                                        PTY_POOL_WAIT_TIMEOUT force-recycles
+                                        the slot, rescheduling the respawn.
 
 Contract for `_respawn_slot` (race-free, harden POOL-1 + ADV-4):
 
@@ -37,17 +40,20 @@ Contract for `_respawn_slot` (race-free, harden POOL-1 + ADV-4):
    only fire after the lock is released (i.e. after `event.set()`
    or after the spawn raised).
 3. `event.set()` only after the new pair is in place.
-4. On failure, the respawn task re-raises (or logs and exits) — the
-   per-slot state is left as `respawning` and the next acquirer
-   blocks on the event. The semaphore is NOT released (the
-   per-slot state machine recovers via the operator's intervention
-   — log loudly so it surfaces in dashboard.json's health view).
+4. On failure, the respawn task re-raises (or logs and exits) and
+   the per-slot state is left as `respawning` with its event unset.
+   The semaphore is NOT released. The next acquirer that waits on
+   this slot's event past `PTY_POOL_WAIT_TIMEOUT` calls
+   `_force_recycle_slot`, which reschedules `_respawn_slot` under
+   the per-slot lock. The slot recovers automatically (the failure
+   is still logged loudly so it surfaces in dashboard.json's health
+   view).
 
 Worker-shutdown drain: `worker/__main__.py` shutdown hook MUST
 `await asyncio.gather(*self._pool._respawn_tasks, return_exceptions=True)`
 before the PID-targeted kill step. Without it, a half-spawned slot
-can be left in `respawning` permanently and the next `acquire_pair`
-blocks forever on its event.
+can be left in `respawning` and the next `acquire_pair` waits up to
+`PTY_POOL_WAIT_TIMEOUT` on its event before force-recycling it.
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ import json
 import logging
 import os
 import signal
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +75,20 @@ logger = logging.getLogger(__name__)
 # Default on-disk location for the spawned-pid registry. The pool reads
 # this at startup to clear orphans from a prior worker process.
 DEFAULT_PID_REGISTRY_PATH = "data/granite_pty_pids.json"
+
+# Timeout (seconds) for the semaphore acquire in `acquire_pair`. If the
+# pool is fully locked for this long the pool is likely wedged (POOL-1).
+# Provisional default, tune after observing real acquire rates; override
+# with the PTY_POOL_ACQUIRE_TIMEOUT env var.
+PTY_POOL_ACQUIRE_TIMEOUT: float = float(os.environ.get("PTY_POOL_ACQUIRE_TIMEOUT", "120"))
+
+# Timeout (seconds) for individual waits inside `_wait_for_idle_slot`:
+# both the pool-level condition wait and the per-slot event wait.
+# A missed notify is re-scanned after this many seconds; a slot stuck
+# in `respawning` past this deadline triggers `_force_recycle_slot`.
+# Provisional default, tune after observing real wait rates; override
+# with the PTY_POOL_WAIT_TIMEOUT env var.
+PTY_POOL_WAIT_TIMEOUT: float = float(os.environ.get("PTY_POOL_WAIT_TIMEOUT", "60"))
 
 
 @dataclass
@@ -121,6 +142,18 @@ class PairSpawnSpec:
     # `claude --session-id <uuid>` sets the transcript basename to <uuid>.jsonl.
     pm_session_id: str | None = None
     dev_session_id: str | None = None
+    # Per-PTY Claude Code settings files (plan #1688). When set, each PTY is
+    # spawned with `--settings <path>` registering the hook forwarder so its
+    # turn-end (Stop) / needs-human edges land in the per-session edge file.
+    # None keeps the pre-#1688 spawn args (the idle-heuristic fallback path).
+    pm_settings_path: str | None = None
+    dev_settings_path: str | None = None
+    # Per-role transport (plan #1842). "pty" spawns a PTYDriver for that role;
+    # "headless" spawns NO PTY process (the role runs via HeadlessRoleDriver in
+    # the container, one `claude -p` per turn). Defaults keep both roles on PTY,
+    # so a spec that omits them reproduces the pre-#1842 spawn shape exactly.
+    pm_transport: str = "pty"
+    dev_transport: str = "pty"
 
 
 class PTYPool:
@@ -147,6 +180,20 @@ class PTYPool:
         self._slots: list[_Slot] = [_Slot(idx=i) for i in range(pool_size)]
         # Track spawned pids for orphan kill at worker startup.
         self._spawned_pids: set[int] = set()
+        # Guards every `_spawned_pids` mutation and the `_persist_pids`
+        # snapshot. The crash-resume callbacks (`register_pid`/
+        # `unregister_pid`) fire from the container's session thread
+        # (a `asyncio.to_thread` worker), while the pool's own spawn
+        # sites (`_spawn_slot`, `_spawn_session_pair`) mutate the same
+        # set from the pool's event-loop thread. Without this lock, a
+        # `.add()`/`.discard()` racing `_persist_pids`'s `sorted(...)`
+        # iteration raises an uncaught `RuntimeError: Set changed size
+        # during iteration`. NON-REENTRANT: `_persist_pids()` must
+        # NEVER be called while `_pids_lock` is held by the same
+        # thread — every call site guards only the bare mutation, then
+        # calls `_persist_pids()` as a separate statement after the
+        # `with` block closes.
+        self._pids_lock = threading.Lock()
         self._pid_registry_path = pid_registry_path
         self._respawn_tasks: list[asyncio.Task] = []
         self._initialized = False
@@ -171,7 +218,38 @@ class PTYPool:
         return set(self._spawned_pids)
 
     def clear_spawned_pids(self) -> None:
-        self._spawned_pids.clear()
+        with self._pids_lock:
+            self._spawned_pids.clear()
+        self._persist_pids()
+
+    def register_pid(self, pid: int) -> None:
+        """Add `pid` to the tracked/persisted spawned-pid set.
+
+        This is the crash-resume caller's entry point (wired by
+        `BridgeAdapter` as `Container(on_pty_spawn=pool.register_pid)`):
+        a crash-resumed PTY spawns OUTSIDE the pool's own spawn paths,
+        so it must register through this method rather than writing
+        `data/granite_pty_pids.json` directly — routing through the
+        pool avoids a second writer racing `_persist_pids`. Plain sync
+        and safe to call from any thread (guarded by `_pids_lock`); the
+        crash-resume callback fires from the container's session
+        thread, not the pool's event-loop thread.
+        """
+        with self._pids_lock:
+            self._spawned_pids.add(int(pid))
+        self._persist_pids()
+
+    def unregister_pid(self, pid: int) -> None:
+        """Discard `pid` from the tracked/persisted spawned-pid set.
+
+        Counterpart to `register_pid`, wired as
+        `Container(on_pty_despawn=pool.unregister_pid)`. Called by
+        crash-resume to drop the dead PID it replaced once the dead
+        PTY's process is confirmed closed. Plain sync and
+        cross-thread-safe via `_pids_lock` — see `register_pid`.
+        """
+        with self._pids_lock:
+            self._spawned_pids.discard(int(pid))
         self._persist_pids()
 
     # -- Lifecycle --------------------------------------------------------
@@ -226,18 +304,40 @@ class PTYPool:
             return
         try:
             data = json.loads(path.read_text())
-            for pid in data.get("pids", []):
-                self._spawned_pids.add(int(pid))
+            with self._pids_lock:
+                for pid in data.get("pids", []):
+                    self._spawned_pids.add(int(pid))
         except (OSError, ValueError, json.JSONDecodeError) as e:
             logger.warning("[pty-pool] could not read pid registry %s: %s", path, e)
 
     def _persist_pids(self) -> None:
-        """Write the spawned-pid set to the registry file. Best-effort."""
+        """Write the spawned-pid set to the registry file. Best-effort.
+
+        Takes the `sorted(...)` snapshot INSIDE `_pids_lock` so no other
+        thread can mutate `_spawned_pids` mid-iteration (the source of the
+        `RuntimeError: Set changed size during iteration` this lock
+        exists to prevent), then writes the JSON from that snapshot
+        OUTSIDE the lock so the write's I/O latency doesn't hold the
+        lock. `_pids_lock` is non-reentrant, and this method is itself
+        called by `register_pid`/`unregister_pid` and the pool's own
+        add-then-persist sites AFTER their `with self._pids_lock:` block
+        has closed — never call `_persist_pids()` while holding
+        `_pids_lock`, or the snapshot acquire below self-deadlocks.
+        """
+        with self._pids_lock:
+            snapshot = sorted(self._spawned_pids)
         path = Path(self._pid_registry_path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"pids": sorted(self._spawned_pids)}))
+            path.write_text(json.dumps({"pids": snapshot}))
         except OSError as e:
+            # Kept narrow at OSError (not broadened to Exception): the
+            # snapshot above is taken under `_pids_lock`, so no thread can
+            # mutate `_spawned_pids` mid-iteration and the
+            # `RuntimeError: Set changed size during iteration` this lock
+            # exists to prevent cannot reach this except clause. Only
+            # genuine OS/file errors remain here; swallowing anything
+            # wider would silently hide future bugs.
             logger.warning("[pty-pool] could not persist pid registry %s: %s", path, e)
 
     @staticmethod
@@ -282,7 +382,15 @@ class PTYPool:
         On exit: the slot is released, old PTYs are closed, and a
         background respawn is scheduled.
         """
-        await self._sem.acquire()
+        sem_acquired = False
+        try:
+            await asyncio.wait_for(self._sem.acquire(), PTY_POOL_ACQUIRE_TIMEOUT)
+            sem_acquired = True
+        except TimeoutError:
+            raise PTYPoolError(
+                f"PTY pool semaphore acquire timed out after {PTY_POOL_ACQUIRE_TIMEOUT:g}s;"
+                " pool may be wedged"
+            ) from None
         slot: _Slot | None = None
         recycles = 0
         try:
@@ -328,6 +436,7 @@ class PTYPool:
             if slot is not None:
                 # Release: close old PTYs, schedule respawn.
                 await self._release_pair(slot)
+            if sem_acquired:
                 self._sem.release()
 
     async def _wait_for_idle_slot(self) -> _Slot:
@@ -355,14 +464,56 @@ class PTYPool:
                 async with self._slot_available:
                     if any(s.state == "idle" and s.event.is_set() for s in self._slots):
                         continue
-                    await self._slot_available.wait()
+                    try:
+                        await asyncio.wait_for(self._slot_available.wait(), PTY_POOL_WAIT_TIMEOUT)
+                    except TimeoutError:
+                        # Missed notify or spurious timeout: fall through
+                        # to the outer `continue` and re-scan the slots.
+                        pass
                 continue
             # Wait on the first respawning slot we see.
             slot = respawning[0]
-            await slot.event.wait()
+            try:
+                await asyncio.wait_for(slot.event.wait(), PTY_POOL_WAIT_TIMEOUT)
+            except TimeoutError:
+                # The slot is stuck in `respawning` (POOL-1 hazard).
+                # Force-recycle it and re-scan.
+                await self._force_recycle_slot(slot)
+                continue
             # Loop again — the slot we just waited on might be
             # `idle` now, or a different one might have become
             # `idle` while we waited.
+
+    async def _force_recycle_slot(self, slot: _Slot) -> None:
+        """Force-recycle a slot that has been stuck in `respawning` past
+        `PTY_POOL_WAIT_TIMEOUT` seconds (POOL-1 hazard).
+
+        Reschedules `_respawn_slot` under the per-slot lock if (and only
+        if) the slot is still in `respawning` with its event unset. The
+        rescheduled spawn's SUCCESS path sets `slot.event` and notifies
+        `_slot_available`, so the caller MUST NOT do either; doing so
+        would race against the new spawn task (a busy-spin at the event
+        wait plus a spurious PTYPoolError via the non-idle-state guard).
+        """
+        logger.error(
+            "[pty-pool] slot %d stuck in respawning past %ss; force-recycling",
+            slot.idx,
+            PTY_POOL_WAIT_TIMEOUT,
+        )
+        try:
+            async with slot.lock:
+                if slot.state == "respawning" and not slot.event.is_set():
+                    # Prune done tasks first (same pattern as _release_pair).
+                    self._respawn_tasks = [t for t in self._respawn_tasks if not t.done()]
+                    task = asyncio.create_task(self._respawn_slot(slot))
+                    self._respawn_tasks.append(task)
+                else:
+                    logger.debug(
+                        "[pty-pool] slot %d no longer stuck; skipping force-recycle",
+                        slot.idx,
+                    )
+        except Exception as e:
+            logger.error("[pty-pool] slot %d force-recycle failed: %s", slot.idx, e)
 
     def _pair_is_live(self, slot: _Slot) -> bool:
         """Whether the slot holds a pair whose PTY children are both alive.
@@ -426,36 +577,78 @@ class PTYPool:
             old_pair = slot.pty_pair
             if old_pair is not None:
                 for pty in old_pair:
+                    if pty is None:
+                        continue
                     old_pid = getattr(getattr(pty, "_child", None), "pid", None)
                     try:
                         pty.close(force=True)
                     except Exception:
                         pass
                     if old_pid is not None:
-                        self._spawned_pids.discard(old_pid)
+                        with self._pids_lock:
+                            self._spawned_pids.discard(old_pid)
                 slot.pty_pair = None
             cwd = spec.cwd if spec.cwd is not None else self._cwd
-            pm = PTYDriver(
-                role="pm",
-                cwd=cwd,
-                model=spec.pm_model,
-                env=spec.env,
-                session_id=spec.pm_session_id,
-            )
-            dev = PTYDriver(
-                role="dev",
-                cwd=cwd,
-                model=spec.dev_model,
-                env=spec.env,
-                session_id=spec.dev_session_id,
-            )
-            pm.spawn()
-            dev.spawn()
+            # Per-role transport (plan #1842): spawn a PTYDriver only for roles
+            # configured "pty"; a "headless" role gets None (no PTY process) and
+            # runs via HeadlessRoleDriver in the container. The slot still holds
+            # a 2-tuple so slot semantics / release lifecycle are unchanged.
+            pm: PTYDriver | None = None
+            dev: PTYDriver | None = None
+            # D2 (issue #1817): persist each child's pid IMMEDIATELY after its
+            # own spawn() returns, not batched after both roles spawn. Before
+            # this, a dev.spawn() failure after a successful pm.spawn() left
+            # pm's pid unpersisted and unreapable as an orphan. Guarded with
+            # `pty is not None and pty._child is not None` because a #1842
+            # headless role leaves `pty` as None — no PTY process, correctly
+            # nothing to record.
+            if spec.pm_transport != "headless":
+                pm = PTYDriver(
+                    role="pm",
+                    cwd=cwd,
+                    model=spec.pm_model,
+                    env=spec.env,
+                    session_id=spec.pm_session_id,
+                    settings_path=spec.pm_settings_path,
+                )
+                pm.spawn()
+                if pm is not None and pm._child is not None:
+                    pm_pid = getattr(pm._child, "pid", None)
+                    if pm_pid is not None:
+                        with self._pids_lock:
+                            self._spawned_pids.add(pm_pid)
+                        self._persist_pids()
+            if spec.dev_transport != "headless":
+                dev = PTYDriver(
+                    role="dev",
+                    cwd=cwd,
+                    model=spec.dev_model,
+                    env=spec.env,
+                    session_id=spec.dev_session_id,
+                    settings_path=spec.dev_settings_path,
+                )
+                dev.spawn()
+                if dev is not None and dev._child is not None:
+                    dev_pid = getattr(dev._child, "pid", None)
+                    if dev_pid is not None:
+                        with self._pids_lock:
+                            self._spawned_pids.add(dev_pid)
+                        self._persist_pids()
             slot.pty_pair = (pm, dev)
-            for pty in (pm, dev):
-                pid = getattr(getattr(pty, "_child", None), "pid", None)
-                if pid is not None:
-                    self._spawned_pids.add(pid)
+            # D2's per-spawn blocks above already durably persisted each pid the
+            # instant it was known (so a dev.spawn() failure after pm.spawn()
+            # can't strand pm's pid). This consolidated pass re-adds under
+            # `_pids_lock` as idempotent belt-and-suspenders and, because the
+            # trailing `_persist_pids()` is unconditional, also writes the
+            # correct empty-set state for a fully-headless pair (nothing spawned,
+            # nothing to reap) rather than silently skipping the write.
+            with self._pids_lock:
+                for pty in (pm, dev):
+                    if pty is None:
+                        continue
+                    pid = getattr(getattr(pty, "_child", None), "pid", None)
+                    if pid is not None:
+                        self._spawned_pids.add(pid)
             self._persist_pids()
         logger.info(
             "[pty-pool] slot %d: spawned per-session pair (cwd=%s, env_keys=%d, pm_model=%s)",
@@ -475,6 +668,8 @@ class PTYPool:
         if slot.pty_pair is not None:
             pm, dev = slot.pty_pair
             for pty in (pm, dev):
+                if pty is None:
+                    continue
                 try:
                     pty.close(force=True)
                 except Exception:
@@ -506,8 +701,10 @@ class PTYPool:
         than `idle` with a stale pair.
 
         Failure logs and re-raises; the slot is left in
-        `respawning` (the event is not set, so the next acquirer
-        blocks — operator's intervention surfaces the issue).
+        `respawning` with its event unset. The next acquirer that
+        waits on this slot past `PTY_POOL_WAIT_TIMEOUT` force-recycles
+        it (reschedules this respawn), so the failure is recovered
+        automatically while still being logged loudly.
         """
         slot = self._slots[idx]
         slot.state = "respawning"
@@ -522,10 +719,11 @@ class PTYPool:
                 # Record pids for orphan kill.
                 pm_pid = pm._child.pid if pm._child is not None else None
                 dev_pid = dev._child.pid if dev._child is not None else None
-                if pm_pid is not None:
-                    self._spawned_pids.add(pm_pid)
-                if dev_pid is not None:
-                    self._spawned_pids.add(dev_pid)
+                with self._pids_lock:
+                    if pm_pid is not None:
+                        self._spawned_pids.add(pm_pid)
+                    if dev_pid is not None:
+                        self._spawned_pids.add(dev_pid)
                 self._persist_pids()
             slot.state = "idle"
             slot.event.set()
@@ -538,7 +736,8 @@ class PTYPool:
             # Re-raise so initialize can surface it; for respawn
             # tasks, the exception is captured by the task's own
             # state and the slot stays in `respawning` (event not
-            # set). Operator must intervene.
+            # set). The next bounded acquirer force-recycles the slot
+            # after PTY_POOL_WAIT_TIMEOUT.
             raise
 
     async def _respawn_slot(self, slot: _Slot) -> None:
@@ -562,9 +761,11 @@ class PTYPool:
             logger.info("[pty-pool] respawn for slot %d cancelled", slot.idx)
         except Exception as e:
             # Spawn failed. Slot is in `respawning`; event is not
-            # set. Next acquirer blocks. Log loudly.
+            # set. The next bounded acquirer force-recycles the slot
+            # after PTY_POOL_WAIT_TIMEOUT. Log loudly.
             logger.error("[pty-pool] respawn for slot %d failed: %s", slot.idx, e)
-            # Do not set the event; the slot remains unavailable.
+            # Do not set the event; the slot remains unavailable
+            # until a force-recycle reschedules the respawn.
 
 
 # -- Module-level singleton + worker hooks (plan #1572) ------------------------

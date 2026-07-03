@@ -64,10 +64,27 @@ This quote captures the core insight. PTY quiescence is a badge signal, not a co
 
 | Home tag | Practices |
 |----------|-----------|
-| **#1688** | 1, 2, 7 |
+| **#1688** | 1, 2, 3, 4, 5, 7, 8 (SHIPPED) + 6 (load-bearing minimum) |
 | **#1719** | 9 |
 | **#1721** | Fork-on-resume guard, dead-vs-stalled disambiguation |
-| **NEW** | 3, 4, 5, 6, 8 |
+| **NEW** | 6 (full >16 KB bracketed-paste overhaul — deferred) |
+
+### Consumed by #1688 (SHIPPED)
+
+The hook-driven turn-return feature (`docs/features/granite-hook-driven-turn-returns.md`) consumes these practices with the following implementing modules:
+
+| # | Practice | Implementing module |
+|---|----------|---------------------|
+| 1 | Stop as authoritative turn-end edge | `agent/granite_container/container.py::Container._await_turn_end` (turn-end keys on parent `Stop`; final message read from the payload `transcript_path`) |
+| 2 | PTY reduced to inject + running/idle badge | `container.py::_await_turn_end` uses `read_until_idle` for liveness/badge only; completion authority removed from it |
+| 3 | Hook writes edge to a file; consumer reads it | `agent/granite_container/hook_forwarder.py` (fail-silent atomic NDJSON append) + `hook_edge.HookEdgeConsumer` |
+| 4 | Durable, idempotent hook cursor | `hook_edge.HookCursor` `(event_cursor, byte_offset, fingerprint)`; truncation/replacement detection in `HookEdgeConsumer.poll` |
+| 5 | Subagent-hook filtering (child Stop must not end parent turn) | `hook_edge._classify` (`SubagentStop` → distinct `subagent_end` kind) + `container.py::_latest_turn_end` (keys on parent `Stop` + `session_id`). Native disambiguation — no filtering heuristic. Verified under Substrate B (`agent_id`/`agent_type` present on `SubagentStop`, absent on parent `Stop`). |
+| 6 | Verified-submit injection (LOAD-BEARING MINIMUM) | `container.py::_resume_crashed_pty` verified `continue` nudge on crash-resume + the existing prime submit. The full >16 KB bracketed-paste overhaul stays deferred (plan Rabbit Holes). |
+| 7 | Completion decoupled from injection | `container.py::_await_turn_end` — the write→wait block awaits the `turn_end` edge racing a watchdog; injection returns promptly. |
+| 8 | Compaction forwarded, not mistaken for completion | `hook_edge._classify` maps `PreCompact` / `SessionStart(source=compact)` to a `compaction` edge that never advances turn-boundary state. |
+
+Omnigent citation pin note: the Omnigent file:line references above are from the #1732 recon snapshot and are not re-verified per release; treat them as the design source, with the #1688 module paths as the shipped ground truth.
 
 ## Caveats
 

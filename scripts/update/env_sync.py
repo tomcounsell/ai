@@ -147,27 +147,39 @@ VAULT_REFLECTIONS_PATH = _vault_dir() / "reflections.yaml"
 
 @dataclass
 class ReflectionsSyncResult:
-    """Result of config/reflections.yaml symlink verification."""
+    """Result of config/reflections.yaml real-copy verification."""
 
-    symlink_ok: bool = False
+    ok: bool = False
     created: bool = False
     skipped: bool = False
     error: str | None = None
 
 
 def sync_reflections_yaml(project_dir: Path) -> ReflectionsSyncResult:
-    """Verify config/reflections.yaml is a symlink to the vault. Create it if missing.
+    """Ensure config/reflections.yaml is a real file copy of the vault version.
+
+    config/reflections.yaml must NEVER be a symlink — the launchd worker reads
+    it under VALOR_LAUNCHD=1 via the reflection scheduler, and macOS TCC /
+    iCloud eviction make open()/stat() on ~/Desktop files block indefinitely
+    from a launchd agent. A symlink here silently defeats the scheduler's
+    VALOR_LAUNCHD guard (it resolves the "local" path but follows the link
+    straight back to ~/Desktop), freezing the worker's asyncio event loop at
+    load time — alive but processing nothing. This mirrors sync_projects_json;
+    see the June 2026 worker wedge where the reflections symlink hung the loop.
 
     If the vault file doesn't exist, the in-repo fallback is left intact and
     the result is marked skipped (not an error). This allows fresh machines
     that haven't synced the vault to continue using the in-repo config.
 
     Returns ReflectionsSyncResult with:
-      - symlink_ok=True  if the symlink exists and points to the vault
-      - created=True     if the symlink was just created (was missing)
-      - skipped=True     if vault file doesn't exist (in-repo fallback active)
-      - error            set if symlink could not be created
+      - ok=True       if a current real-file copy exists
+      - created=True  if the copy was just created or refreshed (or a stale
+                      symlink was replaced)
+      - skipped=True  if vault file doesn't exist (in-repo fallback active)
+      - error         set if the copy could not be created
     """
+    import shutil
+
     result = ReflectionsSyncResult()
     config_reflections = project_dir / "config" / "reflections.yaml"
 
@@ -180,24 +192,28 @@ def sync_reflections_yaml(project_dir: Path) -> ReflectionsSyncResult:
         )
         return result
 
-    # Already a correct symlink — nothing to do.
+    vault_mtime = VAULT_REFLECTIONS_PATH.stat().st_mtime
+
+    # Already a real file that is up-to-date — nothing to do.
     if (
-        config_reflections.is_symlink()
-        and config_reflections.resolve() == VAULT_REFLECTIONS_PATH.resolve()
+        config_reflections.exists()
+        and not config_reflections.is_symlink()
+        and config_reflections.stat().st_mtime >= vault_mtime
     ):
-        result.symlink_ok = True
+        result.ok = True
         return result
 
-    # Replace with symlink
+    # Symlink (the old, launchd-unsafe shape), missing, or stale — replace with
+    # a real copy.
     try:
         if config_reflections.exists() or config_reflections.is_symlink():
             config_reflections.unlink()
-        config_reflections.symlink_to(VAULT_REFLECTIONS_PATH)
-        result.symlink_ok = True
+        shutil.copy2(str(VAULT_REFLECTIONS_PATH), str(config_reflections))
+        result.ok = True
         result.created = True
-        logger.info("Created config/reflections.yaml symlink → %s", VAULT_REFLECTIONS_PATH)
+        logger.info("Copied config/reflections.yaml from vault (real file, not symlink)")
     except OSError as exc:
         result.error = str(exc)
-        logger.warning("Failed to create config/reflections.yaml symlink: %s", exc)
+        logger.warning("Failed to copy config/reflections.yaml: %s", exc)
 
     return result

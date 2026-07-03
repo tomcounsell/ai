@@ -30,6 +30,8 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     # Retired skills — consolidated into new-skill
     ("skills", "add-feature"),
     ("skills", "new-valor-skill"),
+    # Orphan hardlink from an old repo version — removed with no source remaining
+    ("skills", "prepare-app"),
     # Retired skills — moved to reflections
     ("skills", "daily-integration-audit"),
     # Retired skills — superseded by byob MCP + bowser subagent
@@ -59,6 +61,12 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "telegram"),
     # Renamed: tts -> do-voice-recording (canonical TTS step the other skills defer to)
     ("skills", "tts"),
+    # Moved from skills-global to project-only .claude/skills/ (issue #1783, Bucket C —
+    # these only ever run from this repo's orchestrator context, never cross-repo).
+    ("skills", "setup"),
+    ("skills", "prime"),
+    ("skills", "sdlc"),
+    ("skills", "do-deploy"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
@@ -140,8 +148,9 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     # .claude/agents/ directory outside this repo.
     _sync_commands(project_dir / ".claude" / "agents", user_claude / "agents", result)
 
-    # Remove explicitly renamed commands/skills (by name, not inode)
-    _cleanup_renamed(user_claude, result)
+    # Remove explicitly renamed commands/skills (inode-guarded: a target still
+    # hardlinked to a live project source is preserved; only genuine orphans go)
+    _cleanup_renamed(user_claude, project_dir, result)
 
     # Clean up stale hardlinks that no longer have a source
     _cleanup_stale_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)
@@ -314,12 +323,47 @@ def _is_hardlinked_to_project(dst_file: Path, src_dir: Path) -> bool:
     return False
 
 
-def _cleanup_renamed(user_claude: Path, result: HardlinkSyncResult) -> None:
-    """Remove old-name commands/skills listed in RENAMED_REMOVALS."""
+def _target_is_hardlinked_to_project(target: Path, src_dir: Path) -> bool:
+    """True if ``target`` (file or directory) shares an inode with a live source under ``src_dir``.
+
+    For a file target this is a direct inode check. For a directory target
+    (a skill dir), any single file inside the directory that shares an inode
+    with a source file under ``src_dir`` proves the directory was synced from
+    that project — enough to mark it project-backed.
+    """
+    if target.is_dir():
+        for child in target.rglob("*"):
+            if child.is_file() and _is_hardlinked_to_project(child, src_dir):
+                return True
+        return False
+    return _is_hardlinked_to_project(target, src_dir)
+
+
+def _cleanup_renamed(user_claude: Path, project_dir: Path, result: HardlinkSyncResult) -> None:
+    """Remove old-name commands/skills listed in RENAMED_REMOVALS.
+
+    Inode-guarded (issue #1783, concern #2): a target that is still hardlinked
+    to a live source under this project's ``skills-global/`` (skills) or
+    ``commands/`` / ``agents/`` (commands) is legitimately synced and is
+    **preserved** — this protects a foreign repo that provides its own
+    same-named user-level skill (e.g. a moved Bucket C name like ``sdlc``)
+    from being deleted by our blanket ``RENAMED_REMOVALS`` sweep. Only genuine
+    orphans (not hardlinked to any live project source) are removed.
+    """
+    src_for_kind = {
+        "skills": project_dir / ".claude" / "skills-global",
+        "commands": project_dir / ".claude" / "commands",
+        "agents": project_dir / ".claude" / "agents",
+    }
     for kind, old_name in RENAMED_REMOVALS:
         target = user_claude / kind / old_name
         if not target.exists():
             continue
+
+        src_dir = src_for_kind.get(kind)
+        if src_dir is not None and src_dir.is_dir():
+            if _target_is_hardlinked_to_project(target, src_dir):
+                continue  # legitimately project-backed — preserve, do NOT remove
 
         rel = str(target).replace(str(Path.home()), "~")
         try:

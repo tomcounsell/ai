@@ -95,7 +95,7 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 | `agent/pipeline_state.py` | Pipeline state machine for stage tracking |
 | `agent/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` (canonical location; re-exported from `bridge/session_logs.py`) |
 | `agent/agent_session_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
-| `models/agent_session.py` | `is_sdlc` (property, 2-check: stage_states then classification_type), `has_remaining_stages()`, `has_failed_stage()` (both delegate to PipelineStateMachine), `queued_steering_messages` |
+| `models/agent_session.py` | `is_sdlc` (property, 2-check: stage_states then classification_type), `has_remaining_stages()`, `has_failed_stage()` (both delegate to PipelineStateMachine) |
 | `CLAUDE.md` | Auto-continue rules documentation |
 
 ## See Also

@@ -48,8 +48,8 @@ Sessions with status `dormant` show `expectations` as an italic subtitle in the 
 
 ### Lifecycle Iconography
 
-All 8 non-terminal lifecycle states render with distinct glyphs in the row template (see [Session Lifecycle](session-lifecycle.md) for state semantics):
-`running`, `pending`, `dormant`, `active`, `waiting_for_children`, `paused`, `paused_circuit`, `superseded`. Terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`, `superseded`) collapse the row into the terminal-status presentation.
+Of the 9 non-terminal lifecycle states, most render with distinct glyphs in the row template (see [Session Lifecycle](session-lifecycle.md) for state semantics):
+`running`, `pending`, `dormant`, `active`, `waiting_for_children`, `paused`, `paused_circuit`, `superseded`. `paused_budget` (#1821) has no dedicated glyph yet and renders as plain status text. Terminal statuses (`completed`, `failed`, `killed`, `abandoned`, `cancelled`, `superseded`) collapse the row into the terminal-status presentation.
 
 ## Liveness Signals
 

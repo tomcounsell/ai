@@ -9,103 +9,40 @@ allowed-tools: mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*)
 
 Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing screenshots of UI changes.
 
+## Repo Context Probe
+
+If `docs/sdlc/do-pr-review.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo layers its review automation onto this generic baseline: a bot/service-account review identity, SDLC env-var injection, stage/status markers and a verdict-recording substrate, cross-repo `gh` targeting, a verification-table runner, multi-judge and cross-vendor consensus, a shape classifier, and repo-specific gates (docs, plan-section compliance, lint). When the file is absent (the common case in a foreign repo), this skill runs entirely on `git`, `gh`, the Read/Grep tools, and a browser MCP for screenshots: it gathers PR context, runs the mergeability preflight, reviews the diff against the plan, captures UI screenshots, classifies findings, and posts a single review verdict to GitHub under the operator's `gh` credential — no repo-specific tooling required.
+
+Throughout, any action described as "if the context file declares X" is skipped in the generic case.
+
 ## Surface
 
-Screenshot capture in this skill runs against the user's real, logged-in
-Chrome via BYOB MCP (`mcp__byob__browser_*`). Public preview deploys
-and authenticated staging URLs are screenshotted the same way — BYOB
-just shows you the page the user would see. There is no
-anonymous-headless fallback; that surface was retired in #1256.
+Screenshot capture in this skill runs against a browser MCP
+(`mcp__byob__browser_*`) — by default the user's real, logged-in Chrome, so
+authenticated staging URLs are screenshotted the same way the user would see
+them. There is no anonymous-headless fallback in that surface.
 
-The calling session must have `requires_real_chrome=True` set. For
-SDLC pipeline runs, the bridge auto-infers from message content; for
-manual review runs, pass `valor-session create --needs-real-chrome
-...`. Two concurrent real-Chrome sessions race on the active tab.
+If the context file declares a real-Chrome session requirement (a flag the
+calling session must set, and how to request it), honor it — concurrent
+real-Chrome sessions can race on the active tab. In the generic case, drive the
+browser MCP directly.
 
 ## Review Identity
 
-### Bot Account Model (opt-in per machine)
+**Generic default:** post the review under the operator's `gh` credential.
 
-Pipeline-driven reviews MAY post under a dedicated service-account identity
-instead of the operator's `gh` credential. The bot identity is **opt-in per
-machine**: only the dedicated bot machine sets `SDLC_AGENT_GH_TOKEN`. Standard
-machines leave it blank, and pipeline reviews post under the operator's `gh`
-credential — reviewing our own commits is the accepted default.
-
-**Environment variables:**
-
-| Variable | Purpose | When set |
-|----------|---------|----------|
-| `CLAUDE_AGENT_REVIEW` | `1` when running in pipeline context | Set by `sdk_client.py` at session spawn |
-| `SDLC_AGENT_GH_TOKEN` | PAT for the bot account (e.g. `yudame-sdlc-bot`) | Optional. Set only on the dedicated bot machine in `${VALOR_VAULT_DIR}/.env` (default vault `~/Desktop/Valor/`) |
-
-**Rules:**
-- When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is non-empty: inject
-  `GH_TOKEN=$SDLC_AGENT_GH_TOKEN` for the single `gh pr review` / `gh pr comment`
-  subprocess that posts the review. Emit the `<!-- SDLC-AGENT-REVIEW v1 -->`
-  marker. All other `gh` calls (read-only queries) use the operator's credential.
-- When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is empty or unset:
-  post under the operator's `gh` credential without the marker. This is the
-  standard posture on every machine that is not the dedicated bot host.
-- When `CLAUDE_AGENT_REVIEW` is unset or `0`: post under the operator's `gh`
-  credential. Local developer behavior unchanged.
-
-**Important:** The `env GH_TOKEN=...` wrapper is ONLY applied when `SDLC_AGENT_GH_TOKEN`
-is non-empty. Passing an empty `GH_TOKEN` to `gh` would corrupt the stored credential.
-
-### Machine-Readable Marker
-
-Every agent-posted review body starts with the following line (before all other content):
-```
-<!-- SDLC-AGENT-REVIEW v1 sha=<HEAD_SHA> -->
-```
-
-Where `<HEAD_SHA>` is the PR head SHA at review time, resolved via:
-```bash
-HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
-```
-
-The marker:
-- Is present when `CLAUDE_AGENT_REVIEW=1` and the review body is composed
-- Is absent for local developer runs (no `CLAUDE_AGENT_REVIEW`)
-- Is absent for `BLOCKED_ON_CONFLICT` / `PR_CLOSED` comment-only paths (those are
-  informational, not code-review verdicts)
-- Survives GitHub UI rendering as an invisible HTML comment
-- Is queryable via `gh api repos/.../pulls/$N/reviews --jq '.[].body'` for forensics
-
-**The marker is forensic only.** It does NOT prevent the bot's `APPROVED` from
-satisfying branch protection. You must configure branch protection separately (see below).
-
-### Branch-Protection Configuration
-
-To prevent the bot's approval from satisfying the "N approving reviews required" gate:
-
-**Pattern A — CODEOWNERS:**
-1. Create `.github/CODEOWNERS` assigning critical paths to a human-only team
-   (e.g. `* @yudame/human-reviewers`).
-2. Enable "Require review from Code Owners" in branch protection.
-3. The bot's approval satisfies the general approval count but not the CODEOWNERS gate
-   (assuming the bot is not in the `human-reviewers` team).
-
-**Pattern B — GitHub Rulesets (recommended for new repos):**
-1. Create a Ruleset requiring N approvals.
-2. Set `bypass_actors` to include the bot account.
-3. Invert: add the bot account to the `actors_can_approve = false` list so its
-   approvals do not count toward the N-review gate.
-
-See `docs/features/do-pr-review-bot-identity.md` for the full provisioning runbook.
-
-### Historical Posture
-
-Existing reviews (e.g. on yudame/cuttlefish PR #354) that were posted under the
-operator credential before this fix are left untouched. The cutover applies only
-to reviews posted after this change is deployed. Backfilling markers retroactively
-is out of scope (GitHub's API does not support editing review bodies via the
-standard REST surface).
+If the context file declares a bot/service-account review identity (a dedicated
+token for pipeline-driven reviews, an injected `GH_TOKEN` for the posting
+subprocess, a machine-readable review marker, and branch-protection
+configuration so the bot's approval doesn't satisfy human-review gates), follow
+its rules for the single review-posting subprocess only. All read-only `gh`
+queries always use the operator's credential.
 
 ## Cross-Repo Resolution
 
-For cross-project work, the `GH_REPO` environment variable is automatically set by `sdk_client.py`. The `gh` CLI natively respects this env var, so all `gh` commands automatically target the correct repository. No `--repo` flags or manual parsing needed.
+By default `gh` targets the repository of the current working directory. If the context file declares a cross-repo targeting mechanism (e.g. a `GH_REPO` env var), honor it so `gh` commands hit the intended repository.
 
 ## When to Use
 
@@ -118,22 +55,12 @@ For cross-project work, the `GH_REPO` environment variable is automatically set 
 
 - `pr_number` (required): The PR number to review (e.g., `42` or `#42`)
 
-## SDLC Context Variables (auto-injected)
+## SDLC Context Variables (only if the context file declares them)
 
-When running in the SDLC pipeline, these environment variables are pre-resolved
-by `sdk_client.py` from the `AgentSession` (issue #420):
-
-| Variable | Description | Fallback |
-|----------|-------------|----------|
-| `$SDLC_PR_NUMBER` | PR number | Extract from args or `gh pr list` |
-| `$SDLC_PR_BRANCH` | PR head branch | `gh pr view --json headRefName` |
-| `$SDLC_SLUG` | Work item slug | Derive from branch name |
-| `$SDLC_PLAN_PATH` | Path to plan doc | Derive from slug |
-| `$SDLC_ISSUE_NUMBER` | Tracking issue (env hint) | **Last-resort only** for recorder calls — primary is PR-body `Closes #N` extraction (#1731) |
-| `$SDLC_REPO` | GitHub repo (org/name) | `$GH_REPO` |
-
-**Usage:** Prefer `$SDLC_PR_NUMBER` over `$PR_NUMBER` when available.
-Fall back to manual resolution if the env var is unset.
+If the repo runs this skill inside an SDLC pipeline, the context file may declare
+pre-resolved environment variables (PR number, branch, slug, plan path, tracking
+issue, repo). When present, prefer them and fall back to the manual resolution in
+§ 1. In the generic case, resolve everything from `$ARGUMENTS` and `gh`.
 
 ## Sub-Skills
 
@@ -167,35 +94,18 @@ catches reviews that APPROVED a PR without the reviewer actually evaluating
 acceptance criteria; this preflight (#1112) catches reviews that APPROVED a PR
 that mechanically cannot merge.
 
-## Stage Marker (with degraded-mode awareness)
+## Stage Marker (only if the context file declares a substrate)
 
-At the very start of this skill, write an in_progress marker and inspect its
-output for degraded mode (mirroring the `do-docs` substrate-probe pattern).
-Do NOT blanket-suppress the output with `2>/dev/null || true` — a forked
-sub-skill must announce degraded mode rather than silently lagging state:
+If the context file declares a stage-marker substrate, write the REVIEW
+`in_progress` marker at the start (after § 1 resolves the issue number) and
+follow its degraded-mode handling. The review itself depends only on `gh` and
+the diff, never the substrate. The REVIEW completion marker is written ONLY on
+the APPROVED path, co-located in the same block as the APPROVED verdict record
+(see "Record the verdict") so the marker can never desync from the verdict. On a
+findings (`CHANGES REQUESTED`) verdict, leave the marker `in_progress` — the
+dispatcher re-runs review after `/do-patch`.
 
-```bash
-sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER"
-```
-
-Note: `ISSUE_NUMBER` is resolved unconditionally in § 1 (PR Context Gathering) before this
-marker is written, so the variable is always a positive integer here (#1731).
-
-Parse the JSON output:
-- `{"stage": "REVIEW", "status": "in_progress"}` — substrate present, state persisted; proceed normally.
-- `{"status": "degraded", ...}` — **announce at the top of your run**: "running in degraded mode (state not persisted)". The review itself depends only on `gh` and the diff, not the substrate, so proceed.
-- Non-zero exit — substrate present but the write genuinely failed; report the stderr diagnostic and proceed (do not silently swallow it).
-
-After posting the review (Step 6), on approval (no blockers), the REVIEW completion marker is written in the **"Record the verdict (mandatory)"** section, **co-located in the same block as the APPROVED verdict record** (#1642). Do NOT write the completion marker as a separate, earlier step — verdict-record and completion-marker are a single unit on the approval path so the REVIEW marker can never desync from an APPROVED verdict:
-
-```bash
-# Written immediately after `sdlc-tool verdict record ... --verdict "APPROVED"`:
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
-```
-
-Apply the same degraded-vs-loud interpretation to the completion marker.
-
-Note: If blockers/findings exist, record `CHANGES REQUESTED` and leave the marker as in_progress — the SDLC dispatcher will invoke /do-patch and then re-run review, which will complete the stage after fixes. The completion marker is written ONLY on the APPROVED path, and ONLY co-located with the APPROVED verdict record.
+In the generic case (no substrate declared), skip stage markers entirely.
 
 ## Goal Alignment
 
@@ -300,8 +210,10 @@ gh pr view $PR_NUMBER --json title,body,headRefName,baseRefName,files,additions,
 
 **Checkout the PR branch (mandatory before any file reads):**
 ```bash
-# Ensure clean git state before switching branches
-python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+# Ensure clean git state before switching branches (abort any in-progress
+# merge/rebase, stash uncommitted changes). If the context file declares a
+# clean-git-state helper, use it instead.
+git merge --abort 2>/dev/null; git rebase --abort 2>/dev/null; git stash --include-untracked 2>/dev/null
 
 gh pr checkout $PR_NUMBER
 ```
@@ -433,21 +345,7 @@ For each requirement/acceptance criterion in the plan:
 
 ### 4.5. Verification Checks (if plan has ## Verification table)
 
-If the plan document has a `## Verification` section with a machine-readable table, run each check automatically on the PR branch:
-
-```bash
-python -c "
-from agent.verification_parser import parse_verification_table, run_checks, format_results
-from pathlib import Path
-plan = Path('${SDLC_PLAN_PATH}').read_text()
-checks = parse_verification_table(plan)
-if checks:
-    results = run_checks(checks)
-    print(format_results(results))
-else:
-    print('No verification table in plan.')
-"
-```
+If the plan document has a `## Verification` section with a machine-readable table, run each check on the PR branch. Generic baseline: read the table, run each `Command`, and compare against its `Expected` column. If the context file declares a verification-table runner, use it instead.
 
 Include the verification results in the review comment under a "Verification Results" section. If any check fails, classify it as a **blocker**.
 
@@ -534,17 +432,17 @@ review.
 This blocker is real and counts toward the verdict: the review MUST post as
 `CHANGES_REQUESTED`, not `APPROVED`, regardless of other findings.
 
-All review-posting logic lives in `sub-skills/post-review.md §3`. That
-sub-skill is the **single source of truth** for the review-post decision tree.
-It handles:
+If a `sub-skills/post-review.md` exists, it is the **single source of truth** for
+the review-post decision tree. The decision tree, in any configuration:
 
 - Preflight short-circuit paths (`BLOCKED_ON_CONFLICT`, `PR_CLOSED`) → `gh pr comment` only
-- Bot identity injection (`GH_TOKEN_FOR_REVIEW`) when `CLAUDE_AGENT_REVIEW=1`
 - Self-authored PR detection → `gh pr comment` fallback
 - Normal code-review paths (blockers / tech_debt / zero findings) → `gh pr review`
-- `<!-- SDLC-AGENT-REVIEW v1 sha=... -->` marker injection when agent context
+- Bot-identity token injection and a review marker → **only if the context file declares them** (see Review Identity)
 
-See `sub-skills/post-review.md §0` (Identity Setup) and `§3` (Post the Review).
+Generic baseline: post `gh pr review --approve` for a clean review, or
+`gh pr review --request-changes` when findings exist, under the operator's `gh`
+credential.
 
 ### 6.5. Verify Review Was Posted
 
@@ -573,6 +471,31 @@ if [ -z "$REVIEW_URL" ]; then
 fi
 ```
 Save this URL as `{review_url}` for the output summary.
+
+### 6.6. Record the verdict (only if the context file declares a substrate)
+
+In the generic case (no substrate declared) the posted GitHub review IS the
+verdict — skip this step.
+
+If the context file declares a verdict-recording substrate (so a pipeline router
+can consume the verdict programmatically), you MUST record the verdict **here,
+before emitting the OUTCOME block**. Recording is a terminal, non-optional action,
+not a trailing nicety. A locally-run pipeline (e.g. `/do-sdlc`) has no hooks to
+record on your behalf: if you skip this, the router never sees the verdict and the
+pipeline stalls in a re-review loop. Do NOT treat the OUTCOME block as your final
+action — the verdict record must already be written when you emit it.
+
+Follow the context file's exact invocation. The invariant that must hold: on the
+**APPROVED** path, the verdict record AND the REVIEW completion marker are ONE
+self-contained block — never record APPROVED without immediately writing the
+completion marker, or the marker desyncs from the verdict and the router stalls.
+On a findings (`CHANGES REQUESTED`) or preflight short-circuit
+(`BLOCKED_ON_CONFLICT` / `PR_CLOSED`) verdict, leave the marker `in_progress`. A
+failed recording must surface loudly (non-zero exit), never silently corrupt
+verdict state.
+
+After recording, read the verdict back (the context file's read-back command) to
+confirm it persisted, then proceed to the Output Summary and OUTCOME block.
 
 ### 7. Output Summary
 
@@ -605,7 +528,7 @@ Save this URL as `{review_url}` for the output summary.
 
 ## Outcome Contract
 
-After posting the review and verifying it was posted (Steps 6-6.5), emit a typed outcome as the **very last line** of output.
+After posting the review (Step 6), verifying it was posted (Step 6.5), and recording the verdict if a substrate is declared (Step 6.6), emit a typed outcome as the **very last line** of output. If the context file declares a verdict substrate, the verdict record from Step 6.6 must already be written before you emit this block — the OUTCOME block is the last line, not the last action.
 
 **Verdict taxonomy:**
 
@@ -643,13 +566,12 @@ After posting the review and verifying it was posted (Steps 6-6.5), emit a typed
 
 **Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output. Use `"partial"` — not `"success"` — whenever tech_debt or non-subjective nit findings exist. This ensures the pipeline routes to `/do-patch` before advancing to `/do-docs`. For `BLOCKED_ON_CONFLICT` and `PR_CLOSED`, `next_skill` is `null` — the pipeline should NOT auto-advance; the author must rebase or the PM must handle the closed-PR case manually.
 
-**Multi-judge OUTCOME variants:** when the multi-judge path runs (≥2 judges
-dispatched), include `judges_run` and `consensus_disagreement` inside
-`artifacts`. These mirror the side-fields recorded by `compute_consensus` and
-let operators grep session state for disagreement events without round-tripping
-through Redis. Single-judge / docs-only / lockfile-only / preflight short-circuit
-paths MUST NOT include these fields (they would mislead consumers into thinking
-multi-judge ran).
+**Multi-judge OUTCOME variants (only when a consensus model is active):** when the
+multi-judge path runs (≥2 judges dispatched), include `judges_run` and
+`consensus_disagreement` inside `artifacts` so operators can grep session state
+for disagreement events. Single-judge (the generic default) / docs-only /
+preflight short-circuit paths MUST NOT include these fields (they would mislead
+consumers into thinking multi-judge ran).
 
 **Multi-judge success (APPROVED via 2-of-2 consensus, all judges aligned):**
 ```
@@ -666,184 +588,31 @@ multi-judge ran).
 <!-- OUTCOME {"status":"partial","stage":"REVIEW","verdict":"CHANGES_REQUESTED","artifacts":{"review_url":"{review_url}","blockers":0,"tech_debt":2,"nits":1,"judges_run":2,"consensus_disagreement":false},"notes":"Changes requested via 2-of-2 consensus: 2 tech_debt and 1 nit findings. Routing to /do-patch.","next_skill":"/do-patch"} -->
 ```
 
-### Multi-judge consensus (optional, opt-in)
+### Multi-judge & cross-vendor consensus (optional, only if the context file declares it)
 
-When `SDLC_REVIEW_JUDGES` enables ≥2 judges, this skill orchestrates parallel
-review judges and aggregates their findings before recording a single verdict.
-See `docs/features/multi-judge-consensus.md` and
-`docs/plans/multi-judge-consensus-gates.md` for the full design.
+The generic baseline is a **single reviewer**: you evaluate the diff, classify
+findings, and post one verdict. The multi-judge OUTCOME variants above apply only
+when a repo opts into consensus review.
 
-**Env vars:**
-- `SDLC_REVIEW_JUDGES` — comma-separated judge IDs from the fixed roster
-  (`code-quality`, `risk`). Default: `code-quality,risk` (both enabled).
-  Set to `none` or empty to use the legacy single-judge path.
-- `SDLC_REVIEW_K` — K-of-N for consensus arithmetic. Default: 2.
-  Effective K is auto-clamped to `min(SDLC_REVIEW_K, len(enabled_judges))`.
+If the context file declares a multi-judge consensus model (≥2 parallel review
+judges aggregated into one verdict, an optional cross-vendor judge, a PR-diff
+shape classifier for cost containment, and a single-writer verdict recorder),
+orchestrate it exactly as the context file specifies. The invariants that hold in
+every consensus configuration:
 
-**Orchestration (when multi-judge active and PR is not docs-only / lockfile-only):**
+- Each judge fork RETURNS its dict — it does not post a PR comment or record state itself.
+- The parent posts per-judge comments under a heading prefix distinct from the aggregate `## Review:` comment, then posts the aggregate comment **last**.
+- ONE verdict-record call writes the scalar verdict plus any consensus metadata (single-writer invariant).
+- A failed/skipped optional judge is treated as a skip, never a crash (unless the repo marks it fail-closed).
 
-1. Spawn K agent forks via the same Task / `context: fork` pattern
-   `do-plan-critique` uses. Pass each fork a distinct `judge_id` and a
-   distinct system-prompt slice. **Each fork RETURNS its dict via stdout —
-   it does NOT write to Redis and does NOT post a PR comment.**
-2. Parent collects the K dicts.
-3. Parent posts each `## Review (Judge {id}):` per-judge comment
-   **sequentially** — the loop awaits each `gh pr comment` exit code
-   before posting the next. Per-judge headings use the distinct prefix
-   that does NOT match `do-merge.md`'s aggregate regex.
-4. Parent calls
-   `from agent.sdlc_review_consensus import compute_consensus` and runs
-   `compute_consensus(dicts, rule="any-blocker-wins")` to derive the scalar
-   verdict + consensus metadata.
-5. Parent makes ONE `record_verdict` call passing
-   `judges=dicts, consensus=meta` (or, via CLI, `--judges-json` and
-   `--consensus-json`). Single-writer invariant is preserved.
-6. Parent posts the aggregate `## Review: Approved` /
-   `## Review: Changes Requested` comment **last** — strictly after every
-   per-judge comment is confirmed posted. This is the comment
-   `do-merge.md`'s regex picks up.
+In the generic case, skip all of this — one reviewer, one verdict.
 
-**Cost containment:** before spawning judge forks, classify the PR's diff via
-the same module `/do-merge` uses:
+### Record the verdict
 
-```bash
-SHAPE_JSON=$(python -m scripts.pr_shape_classify --pr "$PR_NUMBER" 2>/dev/null \
-  || echo '{"shape":"feature"}')
-SHAPE=$(echo "$SHAPE_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('shape','feature'))")
-case "$SHAPE" in
-  docs-only|lockfile-only)
-    # Force legacy single-judge path — skip multi-judge orchestration.
-    SDLC_REVIEW_JUDGES=none
-    ;;
-esac
-```
-
-`scripts/pr_shape_classify.py` is the single source of truth — both
-`/do-merge` (`.claude/commands/do-merge.md`) and this skill invoke it via
-`python -m scripts.pr_shape_classify`. Do NOT inline shape logic or fork a
-parallel classifier. `SDLC_REVIEW_JUDGES=none` and `SDLC_REVIEW_K=1` remain
-independent operator kill switches.
-
-**Monitoring:** when multi-judge runs, the OUTCOME block records
-`judges_run` (count) and `consensus_disagreement` (bool, true when any pair
-of judges disagreed). Operators can grep these from session state.
-
-### Cross-vendor judge (opt-in)
-
-After collecting all Claude judge dicts and BEFORE calling `compute_consensus`,
-optionally invoke a cross-vendor (non-Claude) LLM judge to get an independent
-opinion. This is an operator opt-in gate — default OFF.
-
-**Env vars:**
-- `SDLC_REVIEW_CROSS_VENDOR` — set to `1` to enable. Default: `0` (off).
-- `SDLC_REVIEW_CROSS_VENDOR_REQUIRED` — set to `1` to treat a skip as a
-  blocker (fail-closed). Default: `0` (skip is non-fatal).
-
-**Shape gate:** the cross-vendor judge ONLY fires when `shape == "feature"`.
-Trivial shapes (`docs-only`, `lockfile-only`, `small-patch`, `mixed`) are
-NEVER sent to the cross-vendor judge regardless of env vars — the cost is not
-justified and the shapes carry minimal review signal.
-
-**Orchestration (insert after Claude judge dicts are collected):**
-
-```bash
-CROSS_VENDOR_ENABLED="${SDLC_REVIEW_CROSS_VENDOR:-0}"
-CROSS_VENDOR_REQUIRED="${SDLC_REVIEW_CROSS_VENDOR_REQUIRED:-0}"
-CROSS_VENDOR_SKIP_REASON=""
-
-if [ "$CROSS_VENDOR_ENABLED" = "1" ] && [ "$SHAPE" = "feature" ]; then
-  echo "cross-vendor judge: invoking for PR $PR_NUMBER (shape=feature)"
-  CV_RAW=$(python -m tools.cross_vendor_judge --pr "$PR_NUMBER" 2>/dev/null)
-  CV_STATUS=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status','error'))" 2>/dev/null || echo "error")
-  if [ "$CV_STATUS" = "ok" ]; then
-    # Append the cross-vendor judge dict to the judges list before consensus
-    CV_JUDGE=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)['judge']))")
-    # (Implementation: append CV_JUDGE to the in-memory judges list / JSON array)
-    # Post per-judge comment — same pattern as Claude judges, different heading prefix
-    gh pr comment "$PR_NUMBER" --body "## Review (Judge cross-vendor):
-$(echo "$CV_RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['judge'].get('reasoning_summary',''))")
-
-**Verdict:** $(echo "$CV_RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['judge'].get('verdict',''))")"
-  elif [ "$CV_STATUS" = "skipped" ]; then
-    CROSS_VENDOR_SKIP_REASON=$(echo "$CV_RAW" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason','unknown'))" 2>/dev/null || echo "unknown")
-    echo "cross-vendor judge: skipped — $CROSS_VENDOR_SKIP_REASON"
-    if [ "$CROSS_VENDOR_REQUIRED" = "1" ]; then
-      # Fail-closed: inject a synthetic CHANGES REQUESTED dict so any-blocker-wins triggers
-      SYNTHETIC_JUDGE='{"judge_id":"cross-vendor","verdict":"CHANGES_REQUESTED","blockers":1,"tech_debt":0,"nits":0,"reasoning_summary":"Cross-vendor judge unavailable — required by SDLC_REVIEW_CROSS_VENDOR_REQUIRED=1."}'
-      # (Implementation: append SYNTHETIC_JUDGE to the in-memory judges list)
-    fi
-  else
-    echo "cross-vendor judge: error parsing response (status=$CV_STATUS) — skipping"
-    CROSS_VENDOR_SKIP_REASON="parse error: status=$CV_STATUS"
-  fi
-else
-  echo "cross-vendor judge: disabled (gate=off or shape=$SHAPE)"
-fi
-```
-
-**Aggregate comment note:** if the cross-vendor judge was skipped (`CV_STATUS = "skipped"`
-or gate was off), include a visible note in the aggregate summary comment:
-
-```
-Note: cross-vendor judge skipped — {CROSS_VENDOR_SKIP_REASON}
-```
-
-Omit the note entirely when the cross-vendor judge ran successfully and its
-dict was appended to the judges list.
-
-**Invocation fallback:** prefer `python -m tools.cross_vendor_judge --pr N`
-(always available in the repo Python environment). The `valor-cross-vendor-judge
---pr N` entry point is equivalent if the CLI is on PATH — either form is
-acceptable, but `python -m tools.cross_vendor_judge` is the more reliable
-choice in skill context where PATH may not include project scripts.
-
-**Invariants:**
-- NEVER append a `"skipped"` envelope to the judges list — only `"ok"` judge dicts go in
-- NEVER modify the `compute_consensus(judges, rule="any-blocker-wins")` call signature
-- NEVER modify the `record_verdict` call — the cross-vendor judge dict flows through the same judges list, not a separate path
-- A failed cross-vendor invocation (non-zero exit, parse error) is treated as a skip — never crashes the review
-
-### Record the verdict (mandatory)
-
-After emitting the OUTCOME block, record the review verdict on the PM session so the SDLC router's Legal Dispatch Guards (G3, G4) can consume it:
-
-```bash
-# Single-judge (legacy / SDLC_REVIEW_JUDGES=none / docs-only / preflight):
-# For APPROVED reviews (OUTCOME status=success):
-# #1642: the verdict record AND the REVIEW completion marker are ONE mandatory,
-# self-contained unit on the approval path — never record APPROVED without
-# immediately writing the completion marker, or the marker desyncs from the
-# verdict and router row 9 (/do-docs) stalls on REVIEW != completed.
-# ISSUE_NUMBER is unconditionally resolved and validated in § 1 (#1731).
-sdlc-tool verdict record --stage REVIEW \
-  --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
-
-# For reviews with findings (OUTCOME status=partial or fail):
-sdlc-tool verdict record --stage REVIEW \
-  --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
-  --issue-number "$ISSUE_NUMBER"
-
-# For preflight short-circuit (branch cannot merge):
-sdlc-tool verdict record --stage REVIEW \
-  --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 \
-  --issue-number "$ISSUE_NUMBER"
-
-# For preflight short-circuit (PR not open):
-sdlc-tool verdict record --stage REVIEW \
-  --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 \
-  --issue-number "$ISSUE_NUMBER"
-
-# Multi-judge: pass --judges-json and --consensus-json after computing
-# consensus via agent.sdlc_review_consensus.compute_consensus. ONE record
-# call writes both the scalar AND the side-fields (single-writer invariant).
-sdlc-tool verdict record --stage REVIEW \
-  --verdict "$VERDICT" --blockers $BLOCKERS --tech-debt $TECH_DEBT \
-  --issue-number "$ISSUE_NUMBER" \
-  --judges-json "$JUDGES_JSON" --consensus-json "$CONSENSUS_JSON"
-```
-
-The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator sees the error in their session log, but it still prints `{}` to stdout for callers parsing JSON. A failed recording surfaces loudly; it does not silently corrupt verdict state. **Always pass `--issue-number "$ISSUE_NUMBER"` (quoted)** — it is the authoritative session selector, guaranteeing the verdict lands on the session the router reads for that issue. `ISSUE_NUMBER` is unconditionally resolved in § 1 (PR Context Gathering): `$ARGUMENTS` first, then PR-body extraction (`Closes #N`/`Fixes #N`), then `$SDLC_ISSUE_NUMBER` as a last-resort hint. `$SDLC_ISSUE_NUMBER` is never authoritative on its own — a stale inherited value is the exact divert mechanism this skill guards against (#1731/#1671/#1672).
+Canonical step is **6.6** (above) — verdict recording runs immediately after the
+review is posted and **before** the OUTCOME block, so a substrate-backed router
+always sees the verdict. Multi-judge: exactly ONE single-writer record call after
+`compute_consensus`.
 
 ## Hard Rules
 
@@ -851,10 +620,10 @@ The recorder exits non-zero on failure (e.g. Redis unreachable) so the operator 
 2. **Tech debt and nits get patched.** `/do-patch` fixes all tech debt and non-subjective nits. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 4. **Approval is reserved for zero-finding reviews ONLY.** If ANY tech_debt or nits exist, use `--request-changes`, never `--approve`. GitHub approval is a meaningful quality gate — it signals the PR is truly ready to merge with no outstanding work.
-5. **Pipeline-driven reviews use bot identity when configured (opt-in per machine).** When `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set, the review subprocess MUST use `GH_TOKEN=$SDLC_AGENT_GH_TOKEN`. When the token is unset or empty, post under the operator credential — this is the standard posture on machines that are not the dedicated bot host.
-6. **The `<!-- SDLC-AGENT-REVIEW v1 -->` marker MUST appear** in every review body when `CLAUDE_AGENT_REVIEW=1` AND `SDLC_AGENT_GH_TOKEN` is set. The marker is omitted when posting under the operator credential.
-7. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
-8. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one BYOB screenshot before posting an approval. If screenshots were not captured (BYOB unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. This rule exists because visual bugs in frontend changes are invisible to static analysis — see issue #1380.
+5. **Review identity follows the context file.** Generic default: post under the operator's `gh` credential. If the context file declares a bot/service-account identity and marker, apply it to the single review-posting subprocess only.
+6. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
+7. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one browser-MCP screenshot before posting an approval. If screenshots were not captured (browser unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. Visual bugs in frontend changes are invisible to static analysis.
+8. **If the context file declares a verdict substrate, recording the verdict (Step 6.6) is mandatory and terminal.** Emitting the OUTCOME block does NOT complete the skill — the `sdlc-tool verdict record` call (and, on APPROVED, the co-written completion marker) must run first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. This is the #1 local-pipeline failure mode — do not exit until the verdict reads back.
 
 ## Best Practices
 

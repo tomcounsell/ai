@@ -62,13 +62,20 @@ Within a machine, messages that match are marked `SEEN` immediately on fetch (be
 
 Projects can declare a `customer_resolver` hook in `projects.json` to replace
 static allow-list routing with dynamic customer identity resolution. When
-configured, the bridge calls the resolver for every inbound email; the resolver
-returns a `customer_id` string (known customer) or `None` (drop). Sessions for
-known customers use the `customer-service` persona and carry `customer_id` in
-`extra_context` and as a `CUSTOMER_ID` subprocess environment variable.
+configured, the bridge calls the resolver for every inbound email. The resolver
+either succeeds — returning a `customer_id` string (known customer) or `None`
+(definitively not a customer, dropped cleanly) — or fails with an
+infrastructure error, which raises `ResolverUnavailable` rather than being
+conflated with "not a customer" (issue #1817 A2). Sessions for known customers
+use the `customer-service` persona and carry `customer_id` in `extra_context`
+and as a `CUSTOMER_ID` subprocess environment variable.
 
-On resolver failure the message stays `\Seen`, a `valor-retry` Gmail label is
-applied for future retry, and `resolver:failures:{project_key}` is incremented.
+On a `ResolverUnavailable` infrastructure error, the message is left unseen for
+the next poll to retry, a `valor-retry` Gmail label is applied, and
+`resolver:failures:{project_key}` is incremented; once that counter crosses
+`EMAIL_RESOLVER_ALERT_AFTER` consecutive failures the `email:resolver_unavailable`
+operator alert arms (see "Operator Alerts" below). On a definitive non-customer
+result the message stays `\Seen` and is dropped as before.
 
 See [Customer Resolver](customer-resolver.md) for the full config schema,
 resolver interface contract, caching semantics, and monitoring guide.
@@ -273,7 +280,22 @@ After each successful IMAP poll, the bridge writes the current timestamp to:
 Redis key: email:last_poll_ts
 ```
 
-`email-status` reads this key and warns if the last poll is older than 5 minutes, indicating the IMAP poller has stalled or crashed.
+`email-status` reads this key and warns if the last poll is older than 5 minutes, indicating the IMAP poller has stalled or crashed. The same staleness check is surfaced on the web dashboard (`ui/app.py::_get_email_health`, `GET /health` and `GET /dashboard.json` under `health.email` / `health.email_last_seen_s`).
+
+### Operator Alerts (issue #1817)
+
+Two Redis keys arm loud, dashboard-visible alerts on the SAME `email` health field described above — no separate alert surface:
+
+| Key | Set by | Meaning | Cleared by |
+|-----|--------|---------|------------|
+| `email:auth_failed` | `_email_inbox_loop` on a permanent `imaplib.IMAP4.error` (message matches `AUTHENTICATIONFAILED`, `Invalid credentials`, or `LOGIN failed`) | Revoked/invalid IMAP credentials — will not self-resolve by retrying | The next successful poll |
+| `email:resolver_unavailable` | `_arm_resolver_unavailable_alert_if_persistent` once the per-project `resolver:failures:{project_key}` counter reaches `EMAIL_RESOLVER_ALERT_AFTER` (default 3) consecutive failures | The customer resolver has failed repeatedly (e.g. an expired OAuth token) — every inbound customer email for that project is currently unresolvable | `resolve_customer()`'s next successful dispatch (customer found OR definitively not a customer) |
+
+Either key, when set, downgrades `GET /health` and `GET /dashboard.json`'s `health.email` to `"error"` and populates `health.email_alert` (`"auth_failed"` or `"resolver_unavailable"`) and `health.email_alert_detail` (a `"{first_seen_ts}:{detail}"` string — the last stuck message id for `resolver_unavailable`, the raw IMAP error text for `auth_failed`) — even if `email:last_poll_ts` looks fresh, since a healthy poll cadence can coexist with every resolve call failing.
+
+**Permanent vs. transient IMAP errors.** On a permanent auth failure the poll loop stops doubling its backoff (a revoked credential won't fix itself, and stretching the retry interval only delays detecting a manual fix) and instead keeps retrying at the current interval while `email:auth_failed` stays armed. Any other `imaplib.IMAP4.error` (network blip, rate limit, "Too many simultaneous connections") keeps the existing exponential backoff (up to 5 minutes) unchanged.
+
+**Resolver-unavailable message handling.** `_fetch_unseen` always marks a fetched message `\Seen` immediately (a concurrency guard against re-processing on overlapping polls), before the resolver even runs. When `resolve_customer()` raises `ResolverUnavailable` (an infrastructure failure — see [Customer Resolver](customer-resolver.md)), `_process_inbound_email` un-marks `\Seen` via `_unmark_seen()` (a fresh short-lived IMAP connection scoped to one STORE command, since the connection `_fetch_unseen` used is already closed by this point) so the next poll retries the message. This is best-effort: a crash between the original `\Seen` mark and the un-mark STORE leaves the message stuck Seen for that one message — the persistent-failure alert above still fires from the resolver failure counter even in that case, so the outage itself is never silent even if one message's retry window is missed.
 
 ## Dead Letter Queue
 

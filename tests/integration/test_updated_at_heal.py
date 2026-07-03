@@ -1,14 +1,23 @@
-"""Integration tests for AgentSession updated_at UTC heal (bug #1645).
+"""Integration tests for AgentSession updated_at UTC heal (bug #1645, revised C2 #1817).
 
 Seeds future-dated updated_at values directly into Redis (bypassing the ORM,
 which now stamps correct UTC via the save() override) and verifies that
-_heal_future_updated_at() corrects them.
+_heal_future_updated_at() DETECTS them without mutating or persisting a clamp.
+
+C2 (#1817): the heal used to clamp a future-dated updated_at down to now and
+re-save() it. That re-save reshuffled the created_at-based sorted index on
+every heal -- a real hazard, not a cure. The heal is now detection-only:
+it logs and counts future-dated records but never mutates Redis. Health
+staleness reads no longer depend on this heal having run -- see
+agent/session_health.py's _trusted_utc_now() (Redis TIME, not local
+wall-clock), which makes a still-future-dated (skew-written) updated_at
+harmless to read even though it's never clamped.
 
 Why bypass the ORM for seeding?
-    The normal save() path now stamps utc_now() for updated_at, so future values
-    can no longer be created through the ORM. To reproduce the pre-fix condition
-    (popoto auto_now writing naive local time on UTC+7 hosts), we write the raw
-    Redis hash directly.
+    The normal save() path stamps utc_now() for updated_at, so future values
+    can no longer be created through the ORM. To reproduce the pre-fix
+    condition (popoto auto_now writing naive local time on UTC+7 hosts), we
+    write the raw Redis hash directly.
 
 Seed mechanism (CONCERN — Skeptic/Adversary):
     Popoto encodes datetime fields using msgpack with the schema:
@@ -23,7 +32,6 @@ Isolation:
     before/after each test. No production data is touched.
 """
 
-import subprocess
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -108,67 +116,63 @@ def future_session(redis_test_db):
 
 
 class TestHealIntegration:
-    """Integration tests: seed future-dated Redis records, heal, assert invariants."""
+    """Integration tests: seed future-dated Redis records, run detection,
+    assert nothing gets mutated or persisted."""
 
-    def test_heal_corrects_future_updated_at(self, future_session, redis_test_db):
-        """After heal, updated_at must be <= now (no longer in the future)."""
-        # Reload from Redis to confirm the seed took effect
+    def test_heal_detects_future_updated_at_without_persisting_a_clamp(
+        self, future_session, redis_test_db
+    ):
+        """Heal counts the future-dated record, but its persisted updated_at
+        in Redis is left completely untouched -- still future-dated."""
         reloaded = AgentSession.get_by_id(future_session.id)
         assert reloaded is not None
 
         now_before = datetime.now(UTC)
-        # Normalize to tz-aware for comparison (popoto strips tzinfo on read)
         reloaded_updated_at = _as_utc(reloaded.updated_at)
         assert reloaded_updated_at > now_before, (
             "Seed did not produce a future updated_at — test setup is broken. "
             f"updated_at={reloaded_updated_at!r}, now={now_before!r}"
         )
 
-        # Run heal
         count = AgentSession._heal_future_updated_at()
-        assert count >= 1, f"Expected at least 1 healed record, got {count}"
+        assert count >= 1, f"Expected at least 1 detected record, got {count}"
 
-        # Reload again and verify the invariant
-        healed = AgentSession.get_by_id(future_session.id)
-        assert healed is not None
-        now_after = datetime.now(UTC)
-
-        assert healed.updated_at is not None
-        healed_updated_at = _as_utc(healed.updated_at)
-        assert healed_updated_at <= now_after + timedelta(seconds=5), (
-            f"updated_at {healed_updated_at!r} is still in the future after heal "
-            f"(now={now_after!r})"
+        # Reload again — the persisted value must be UNCHANGED (still future).
+        after_heal = AgentSession.get_by_id(future_session.id)
+        assert after_heal is not None
+        after_heal_updated_at = _as_utc(after_heal.updated_at)
+        assert abs((after_heal_updated_at - reloaded_updated_at).total_seconds()) < 1, (
+            "The persisted updated_at must not change -- heal is detection-only "
+            f"(before={reloaded_updated_at!r}, after={after_heal_updated_at!r})"
+        )
+        assert after_heal_updated_at > datetime.now(UTC), (
+            "The record must STILL be future-dated after heal (no clamp/re-save)"
         )
 
-    def test_heal_preserves_created_at_lte_updated_at_invariant(
-        self, future_session, redis_test_db
-    ):
-        """After heal, created_at <= updated_at must hold."""
+    def test_heal_does_not_touch_created_at(self, future_session, redis_test_db):
+        """created_at is never read or mutated by the detection-only heal."""
+        before = AgentSession.get_by_id(future_session.id)
+        original_created_at = _as_utc(before.created_at)
+
         AgentSession._heal_future_updated_at()
 
-        healed = AgentSession.get_by_id(future_session.id)
-        assert healed is not None
-        assert healed.created_at is not None
-        assert healed.updated_at is not None
+        after = AgentSession.get_by_id(future_session.id)
+        after_created_at = _as_utc(after.created_at)
+        assert after_created_at == original_created_at
 
-        healed_created_at = _as_utc(healed.created_at)
-        healed_updated_at = _as_utc(healed.updated_at)
-
-        assert healed_created_at <= healed_updated_at, (
-            f"Invariant violated: created_at={healed_created_at!r} > "
-            f"updated_at={healed_updated_at!r}"
-        )
-
-    def test_heal_idempotent_on_redis_records(self, future_session, redis_test_db):
-        """Running heal twice must produce count=0 on the second pass."""
+    def test_heal_repeated_calls_agree_on_redis_records(self, future_session, redis_test_db):
+        """Since nothing is persisted, repeated heal calls against an
+        unchanged future-dated record detect it every time (not just once)."""
         count1 = AgentSession._heal_future_updated_at()
         count2 = AgentSession._heal_future_updated_at()
 
-        assert count1 >= 1, f"First heal should fix >=1 record, got {count1}"
-        assert count2 == 0, f"Second heal should fix 0 records (idempotent), got {count2}"
+        assert count1 >= 1, f"First heal should detect >=1 record, got {count1}"
+        assert count2 == count1, (
+            f"Repeated detection of an unmutated record must agree: {count1} != {count2}"
+        )
 
-    def test_sane_sessions_not_healed(self, redis_test_db):
-        """Sessions with updated_at already in the past are not touched by heal."""
+    def test_sane_sessions_not_detected(self, redis_test_db):
+        """Sessions with updated_at already in the past are not counted or touched."""
         uid = uuid.uuid4().hex[:8]
         session = AgentSession.create(
             session_id=f"sane-heal-{uid}",
@@ -181,78 +185,12 @@ class TestHealIntegration:
         original_updated_at = _as_utc(session.updated_at)
 
         count = AgentSession._heal_future_updated_at()
-        assert count == 0, f"Sane session must not be healed, got count={count}"
+        assert count == 0, f"Sane session must not be detected, got count={count}"
 
         reloaded = AgentSession.get_by_id(session.id)
         assert reloaded is not None
-        # updated_at should not have changed significantly (no heal save() was called)
         if original_updated_at is not None:
             reloaded_updated_at = _as_utc(reloaded.updated_at)
             assert abs((reloaded_updated_at - original_updated_at).total_seconds()) < 5, (
                 "Sane session's updated_at should not have been rewritten by heal"
             )
-
-    def test_valor_session_status_shows_no_future_timestamp(self, future_session, redis_test_db):
-        """After heal, valor-session status output must not contain a future timestamp.
-
-        This verifies the end-to-end CLI surface: operators viewing session
-        status should no longer see timestamps 7 hours in the future after
-        the heal has run.
-
-        Note: valor-session status reads from Redis via the ORM, so this also
-        verifies that the healed value was persisted to Redis correctly.
-        """
-        # First verify the session is future-dated before heal
-        pre_heal = AgentSession.get_by_id(future_session.id)
-        now = datetime.now(UTC)
-        pre_heal_updated_at = _as_utc(pre_heal.updated_at)
-        assert pre_heal_updated_at > now, (
-            f"Pre-heal session must be future-dated. "
-            f"updated_at={pre_heal_updated_at!r}, now={now!r}"
-        )
-
-        # Run heal
-        AgentSession._heal_future_updated_at()
-
-        # Reload and check that the value is now sane
-        post_heal = AgentSession.get_by_id(future_session.id)
-        now_after = datetime.now(UTC)
-        post_heal_updated_at = _as_utc(post_heal.updated_at)
-        assert post_heal_updated_at <= now_after + timedelta(seconds=5), (
-            f"Post-heal updated_at {post_heal_updated_at!r} is still in the future"
-        )
-
-        # Verify via CLI output — run valor-session status and check the timestamp
-        result = subprocess.run(
-            [
-                "python",
-                "-m",
-                "tools.valor_session",
-                "status",
-                "--id",
-                future_session.id,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        # CLI may fail if the session is in a terminal state or missing fields —
-        # we only check timestamp sanity if the command succeeds
-        if result.returncode == 0 and result.stdout:
-            output = result.stdout
-            # Parse out any timestamp-looking strings and verify none are 7h+ in future
-            # The output typically shows: "updated_at: 2026-06-12T..."
-            threshold = now_after + timedelta(hours=1)
-            import re
-
-            ts_pattern = r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
-            for match in re.finditer(ts_pattern, output):
-                try:
-                    ts_str = match.group(0).replace(" ", "T")
-                    ts = datetime.fromisoformat(ts_str).replace(tzinfo=UTC)
-                    assert ts <= threshold, (
-                        f"CLI output contains future timestamp {ts!r} "
-                        f"(threshold={threshold!r}): {output!r}"
-                    )
-                except ValueError:
-                    pass  # unparseable timestamp fragment, skip

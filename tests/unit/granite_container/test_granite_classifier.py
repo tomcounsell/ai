@@ -182,6 +182,45 @@ class TestClassifyPmPrefix(unittest.TestCase):
         self.assertEqual(result.harness, "pi")
         self.assertTrue(result.compliance_miss)
 
+    # -- [/dev:steer] reserved-suffix parse contract (issue #1779) --
+    #
+    # These two cases LOCK IN the REAL (not assumed) classifier contract for
+    # `[/dev:steer]`. They are the BLOCKER guard from the plan's Test Impact:
+    # the single-line form does NOT strip the token from `payload` (it retains
+    # it, with compliance_miss=True), which is exactly why the container's
+    # `dev_steer` routing branch must defensively re-strip the token before the
+    # Dev write. Do NOT "fix" the single-line assertion to expect a token-free
+    # payload — that mistaken assumption was the original blocker.
+
+    def test_dev_steer_strict_token_alone_on_line(self) -> None:
+        """Strict form: `[/dev:steer]` alone on line 1, instruction on line 2.
+
+        The strict PREFIX_TOKEN_RE matches, so harness='steer', the payload is
+        the token-free instruction, and compliance_miss is False.
+        """
+        result = classify_pm_prefix("[/dev:steer]\nfix the auth test")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "steer")
+        self.assertEqual(result.payload, "fix the auth test")
+        self.assertFalse(result.compliance_miss)
+
+    def test_dev_steer_single_line_fallback_retains_token(self) -> None:
+        """Single-line form: `[/dev:steer] fix the auth test` on one line.
+
+        The strict regex requires nothing after `]` (anchored ``\\s*$``), so the
+        single-line form FAILS strict, falls to PREFIX_TOKEN_FALLBACK_RE, and
+        returns the WHOLE tail INCLUDING the literal `[/dev:steer]` token as the
+        payload, with compliance_miss=True. This documents why the container's
+        dev_steer branch strips the token before writing to Dev (the leaked
+        token would otherwise poison Dev's instruction).
+        """
+        result = classify_pm_prefix("[/dev:steer] fix the auth test")
+        self.assertEqual(result.destination, "dev")
+        self.assertEqual(result.harness, "steer")
+        # The payload RETAINS the literal token (NOT "fix the auth test").
+        self.assertEqual(result.payload, "[/dev:steer] fix the auth test")
+        self.assertTrue(result.compliance_miss)
+
 
 # ---------------------------------------------------------------------------
 # ANSI stripping: defense-in-depth

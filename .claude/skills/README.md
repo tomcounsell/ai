@@ -1,45 +1,45 @@
 # Skills Index
 
-Human-readable index of all Claude Code skills in this project. Not loaded by Claude — this is for developer reference.
+Developer reference (not loaded by Claude). This repo has **two** skill trees:
 
-| Skill | Lines | Invocation | Context | Description |
-|-------|------:|------------|---------|-------------|
-| add-feature | 213 | User + Model | - | Extend the system with new skills, tools, and capabilities |
-| audit-next-tool | 160 | User + Model | - | Audit new/modified tools for quality and architecture compliance |
-| checking-system-logs | 66 | Model only | - | Find bridge events, agent responses, errors in system logs |
-| do-build | 115 | User + Model | fork | Execute a plan document using team orchestration |
-| do-docs | 268 | User + Model | - | Cascade documentation updates after code changes |
-| do-patch | 204 | User + Model | - | Targeted fix for failing tests or review blockers |
-| do-plan | 202 | User + Model | - | Create or update feature plan documents |
-| do-pr-review | 218 | User + Model | fork | Review PRs with code analysis and screenshots |
-| do-sdlc | 143 | User + Model | fork | Local pipeline supervisor — loops the /sdlc router via stage subagents (opus/sonnet per stage) until merge/blocked |
-| do-test | 247 | User + Model | - | Run the test suite with intelligent dispatch |
-| frontend-design | 134 | User + Model | - | Create production-grade frontend interfaces |
-| google-workspace | 249 | Model only | - | Gmail, Calendar, Docs, Sheets, Drive, Chat |
-| new-skill | 102 | Infra | - | Generic skill creator (repo-agnostic) |
-| new-valor-skill | 184 | User + Model | - | Valor-specific skill creator with repo patterns |
-| prime | 102 | Infra | - | Codebase onboarding and architecture guide |
-| pthread | 138 | User + Model | fork | Spawn parallel agents for independent tasks |
-| reading-sms-messages | 38 | Model only | - | Read SMS/iMessage from macOS Messages app |
-| reclassify | 52 | Infra | - | Reclassify plan type during Planning phase |
-| sdlc | 284 | User + Model | - | Single entry point — dispatcher for all development work (ground truth for pipeline stages) |
-| setup | 407 | Infra | - | Configure new machine for Valor bridge |
-| skillify | 148 | User only | - | Capture a session's repeatable process into a reusable skill |
-| telegram | 68 | Model only | - | Read and send Telegram messages |
-| update | 183 | Infra | - | Pull changes, sync deps, restart bridge |
+- **Global skills** (`.claude/skills-global/`) — hardlinked to `~/.claude/skills/` on
+  every machine; available in all repos. Catalogued in
+  [`docs/features/skills-global.md`](../../docs/features/skills-global.md).
+- **Project-only skills** (`.claude/skills/`, this directory) — too coupled to this
+  repo's infra (Telegram bridge, macOS Messages, system logs, deploy) to generalize;
+  **never synced**. Listed below.
 
-**Invocation types:**
-- **User + Model**: Both user and agent can trigger via `/skill-name`
-- **Model only**: Agent uses as background reference (`user-invocable: false`)
-- **Infra**: Infrastructure skill (`disable-model-invocation: true`)
+See [`docs/features/skill-context-convention.md`](../../docs/features/skill-context-convention.md)
+for how a global skill layers in repo-specific behavior, and
+[`docs/features/subagent-roster.md`](../../docs/features/subagent-roster.md) for the agents these skills dispatch.
 
-**Context:**
-- **fork**: Spawns sub-agents in separate context
-- **-**: Runs in current context
+## Project-only skills
 
-**Scope:**
-- Project-only (not synced to `~/.claude/skills/`): telegram, reading-sms-messages, checking-system-logs, google-workspace
-- All other skills sync to personal scope via `scripts/update/symlinks.py`
+| Skill | Invocation | Description |
+|-------|------------|-------------|
+| authenticity-pass | User + Model | Pre-publish human-signal gate for social content (required by `/linkedin`, `/x-com`) |
+| checking-system-logs | Model only | Find bridge events, agent responses, errors in system logs |
+| do-deploy | Infra | Deploy merged changes to production across bridge machines |
+| ebook-ingest | User + Model | Find, download, and prepare an ebook for AI ingestion |
+| linkedin | User + Model | Browse LinkedIn, read/post, comment, check DMs |
+| officecli | User + Model | Create, inspect, and edit Office docs (.docx/.xlsx/.pptx) |
+| prime | Infra | Codebase onboarding and architecture deep-dive |
+| reading-sms-messages | Model only | Read SMS/iMessage from the macOS Messages app |
+| sdlc | User + Model | Single-stage router — assess state, dispatch ONE sub-skill, return |
+| sentry | User + Model | Check Sentry for unresolved issues and run triage |
+| setup | Infra | Configure a new machine for the Valor bridge |
+| telegram | Model only | Read and send Telegram messages |
+| update | Infra | Pull changes, sync deps, restart the bridge |
+| x-com | User + Model | Browse x.com, post, reply, check DMs |
+
+`do-test` also has a directory here, but it is **not** a standalone project skill —
+it holds only `PYTHON.md`, a project override (mandating `scripts/pytest-clean.sh`)
+that the global `do-test` SKILL.md discovers and merges via the glob at `SKILL.md:28`.
+The canonical `do-test` skill lives in `skills-global/`.
+
+**Invocation types:** **User + Model** = triggerable via `/skill-name`;
+**Model only** = background reference (`user-invocable: false`);
+**Infra** = infrastructure skill (`disable-model-invocation: true`).
 
 ---
 
@@ -95,7 +95,7 @@ Level 2 — Sub-files (on-demand, when SKILL.md says "Read file:")
 └── Only loaded when a skill explicitly references them
 
 Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
-├── .claude/agents/*.md — prompt context for sub-agents (25 files)
+├── .claude/agents/*.md — prompt context for sub-agents (16 files)
 ├── Only loaded when a Task tool call uses that subagent_type
 └── Registered in agent_definitions.py: builder, validator, code-reviewer
 ```
@@ -123,13 +123,14 @@ Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
 | `plan-maker` | do-plan/PLAN_TEMPLATE.md | L2 |
 | `[dynamic]` | do-build reads agent type from plan task list | L1 |
 
-### Agent Roster (25 agents across 3 tiers)
+### Agent Roster (16 agents, 2 groups)
 
-**Tier 1 — Core (7):** Wired into automated SDLC pipeline.
-`builder`, `validator`, `code-reviewer`, `test-engineer`, `documentarian`, `plan-maker`, `frontend-tester`
+Canonical catalog: [`docs/features/subagent-roster.md`](../../docs/features/subagent-roster.md).
 
-**Tier 2 — Specialists (13):** Genuine unique expertise, recruitable by plans.
-`debugging-specialist`, `async-specialist`, `security-reviewer`, `performance-optimizer`, `mcp-specialist`, `agent-architect`, `api-integration-specialist`, `data-architect`, `migration-specialist`, `documentation-specialist`, `test-writer`, `ui-ux-specialist`, `designer`
+**Group A — SDLC pipeline (11):** Dispatched by the `/do-*` skills (and `analyze`).
+`builder`, `validator`, `code-reviewer`, `test-engineer`, `baseline-verifier`, `frontend-tester`, `plan-maker`, `plan-reviewer`, `documentarian`, `cruft-auditor`, `strategic-analyst`
 
-**Tier 2b — Service agents (5):** Domain-focused task delegation.
+**Group B — Service / MCP (5):** Portable per-service agents, dispatched on demand; synced to every machine.
 `linear`, `notion`, `sentry`, `stripe`, `render`
+
+The pre-pivot "specialist" pack and generic stubs were deleted as dead weight; their unique framing was salvaged into `do-plan/DOMAIN_FRAMING.md`. See the roster doc for the full rationale.

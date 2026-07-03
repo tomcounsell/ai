@@ -55,7 +55,7 @@ def _branch_exists(repo: Path, branch: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class TestSiteD_StalebranchCleanup:
+class TestSiteDStaleBranchCleanup:
     """Site D: session_revival.cleanup_stale_branches guard via merged_via_tree."""
 
     def test_stale_unmerged_branch_preserved(self, tmp_path, caplog):

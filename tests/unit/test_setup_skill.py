@@ -1,5 +1,5 @@
 """
-Contract tests for ``.claude/skills-global/setup/SKILL.md``.
+Contract tests for ``.claude/skills/setup/SKILL.md``.
 
 The setup skill is read by Claude (the agent) on `/setup`. These tests guard
 the structural invariants the vault-path-config refactor introduced:
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-SKILL = Path(".claude/skills-global/setup/SKILL.md").read_text()
+SKILL = Path(".claude/skills/setup/SKILL.md").read_text()
 
 
 def test_setup_skill_step_zero_exists():
@@ -95,7 +95,7 @@ def test_post_step_zero_sections_use_vault_var(section_label):
     "skill_path",
     [
         ".claude/skills/update/SKILL.md",
-        ".claude/skills-global/do-deploy/SKILL.md",
+        ".claude/skills/do-deploy/SKILL.md",
         ".claude/skills-global/do-pr-review/SKILL.md",
         ".claude/agents/baseline-verifier.md",
     ],

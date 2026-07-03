@@ -23,6 +23,7 @@ from agent.reflection_schedule import parse_every_duration
 from agent.reflection_scheduler import (
     DEFAULT_AGENT_TIMEOUT,
     DEFAULT_FUNCTION_TIMEOUT,
+    REFLECTION_STARTUP_MAX_CONCURRENT,
     ReflectionEntry,
     ReflectionScheduler,
     _get_memory_rss,
@@ -532,6 +533,111 @@ class TestReflectionScheduler:
             await scheduler.tick()
             # mark_skipped must NOT be called - it would overwrite "running" status
             mock_state.mark_skipped.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tick_caps_function_dispatches_at_max_concurrent(self):
+        """When more function-type reflections are due than the cap allows,
+        tick() dispatches at most REFLECTION_STARTUP_MAX_CONCURRENT and defers
+        the rest to the next tick.
+
+        This prevents event-loop saturation at worker startup when ~30 reflections
+        are simultaneously overdue (e.g. first boot after a long outage).
+        """
+        cap = REFLECTION_STARTUP_MAX_CONCURRENT
+        # Build cap+2 synthetic function-type entries — all overdue
+        entries = [
+            ReflectionEntry(
+                name=f"test-func-reflection-{i}",
+                description=f"Test function reflection {i}",
+                interval=300,
+                priority="low",
+                execution_type="function",
+                callable="agent.reflection_scheduler._get_memory_rss",
+                enabled=True,
+            )
+            for i in range(cap + 2)
+        ]
+
+        scheduler = ReflectionScheduler()
+        scheduler._entries = entries
+
+        dispatched_names: list[str] = []
+
+        def fake_create_task(coro, *, name=None):
+            # Record the task name but don't actually run the coroutine
+            coro.close()  # prevent "coroutine was never awaited" warnings
+            dispatched_names.append(name or "")
+            task = MagicMock()
+            task.add_done_callback = MagicMock()
+            return task
+
+        with (
+            patch("agent.reflection_scheduler.Reflection") as mock_reflection,
+            patch("agent.reflection_scheduler.asyncio.create_task", side_effect=fake_create_task),
+            patch("agent.reflection_scheduler.run_reflection"),
+        ):
+            mock_state = MagicMock()
+            mock_state.ran_at = None  # never run — always due
+            mock_state.last_status = "success"
+            mock_state.is_paused = MagicMock(return_value=False)
+            mock_reflection.get_or_create.return_value = mock_state
+
+            enqueued = await scheduler.tick()
+
+        assert enqueued == cap, f"Expected exactly {cap} dispatched (cap), got {enqueued}"
+        assert len(dispatched_names) == cap, (
+            f"Expected {cap} asyncio.create_task calls, got {len(dispatched_names)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_tick_small_batch_under_cap_unaffected(self):
+        """When the number of due function reflections is under the cap,
+        all of them are dispatched normally — throttle has no effect.
+        """
+        cap = REFLECTION_STARTUP_MAX_CONCURRENT
+        count = max(1, cap - 1)  # strictly under the cap
+        entries = [
+            ReflectionEntry(
+                name=f"test-small-func-{i}",
+                description=f"Small batch reflection {i}",
+                interval=300,
+                priority="low",
+                execution_type="function",
+                callable="agent.reflection_scheduler._get_memory_rss",
+                enabled=True,
+            )
+            for i in range(count)
+        ]
+
+        scheduler = ReflectionScheduler()
+        scheduler._entries = entries
+
+        dispatched_names: list[str] = []
+
+        def fake_create_task(coro, *, name=None):
+            coro.close()
+            dispatched_names.append(name or "")
+            task = MagicMock()
+            task.add_done_callback = MagicMock()
+            return task
+
+        with (
+            patch("agent.reflection_scheduler.Reflection") as mock_reflection,
+            patch("agent.reflection_scheduler.asyncio.create_task", side_effect=fake_create_task),
+            patch("agent.reflection_scheduler.run_reflection"),
+        ):
+            mock_state = MagicMock()
+            mock_state.ran_at = None
+            mock_state.last_status = "success"
+            mock_state.is_paused = MagicMock(return_value=False)
+            mock_reflection.get_or_create.return_value = mock_state
+
+            enqueued = await scheduler.tick()
+
+        assert enqueued == count, (
+            f"Expected all {count} dispatched (under cap {cap}), got {enqueued}"
+        )
+        assert len(dispatched_names) == count
 
 
 # === Registry File Integrity Tests ===

@@ -3,7 +3,7 @@
 Covers:
 1. steer_session() — happy path, terminal guard, empty message rejection
 2. output_router exports — all expected symbols accessible
-3. queued_steering_messages — turn-boundary injection logic (unit-level)
+3. Redis steering list — turn-boundary injection logic (unit-level)
 4. valor-session CLI — help output and basic argument parsing
 """
 
@@ -262,7 +262,7 @@ class TestSDLCRouterMergeGate:
         """
         import pathlib
 
-        skill_path = pathlib.Path(".claude/skills-global/sdlc/SKILL.md")
+        skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
         content = skill_path.read_text()
         assert "Row 10 merge gate" in content or "merge gate" in content.lower()
 
@@ -275,7 +275,7 @@ class TestSDLCRouterMergeGate:
         """
         import pathlib
 
-        skill_path = pathlib.Path(".claude/skills-global/sdlc/SKILL.md")
+        skill_path = pathlib.Path(".claude/skills/sdlc/SKILL.md")
         content = skill_path.read_text()
         assert "sdlc-tool next-skill" in content
 

@@ -289,6 +289,9 @@ def accumulate_session_tokens(
     output_tokens: int | None,
     cache_read_tokens: int | None,
     cost_usd: float | None,
+    *,
+    metered: bool = False,
+    role: str | None = None,
 ) -> None:
     """Add per-turn token + cost counts to an AgentSession record.
 
@@ -322,6 +325,16 @@ def accumulate_session_tokens(
         cache_read_tokens: Cache-read input tokens for this turn (fallback 0).
         cost_usd: Dollar cost for this turn, taken verbatim from the SDK/CLI.
             Never recomputed. Fallback 0.0 on None.
+        metered: When True (plan #1842, headless leg), write the DISJOINT
+            ``metered_*`` fields instead of the ``total_*`` scalars, and emit a
+            ``session.metered_cost_usd`` ledger metric. The transcript tailer
+            owns ``total_*`` (absolute writes, PTY roles only); the headless
+            leg owns ``metered_*`` (additive). Because the two writers target
+            non-overlapping fields, mixed-transport accounting is
+            non-clobbering by construction (Race 1). Default False keeps every
+            existing caller writing ``total_*``.
+        role: Role label ("pm"/"dev") for the metered ledger-metric dimension.
+            Ignored unless ``metered`` is True.
     """
     if not session_id:
         return
@@ -368,18 +381,57 @@ def accumulate_session_tokens(
         sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
         session = sessions[0]
         try:
-            session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
-            session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
-            session.total_cache_read_tokens = (session.total_cache_read_tokens or 0) + cache_delta
-            session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
-            session.save(
-                update_fields=[
-                    "total_input_tokens",
-                    "total_output_tokens",
-                    "total_cache_read_tokens",
-                    "total_cost_usd",
-                ]
-            )
+            if metered:
+                # Plan #1842: headless leg writes the DISJOINT metered_* fields.
+                # The tailer never touches these, so no clobber with total_*.
+                session.metered_input_tokens = (session.metered_input_tokens or 0) + in_delta
+                session.metered_output_tokens = (session.metered_output_tokens or 0) + out_delta
+                session.metered_cache_read_tokens = (
+                    session.metered_cache_read_tokens or 0
+                ) + cache_delta
+                session.metered_cost_usd = float(session.metered_cost_usd or 0.0) + cost_delta
+                session.save(
+                    update_fields=[
+                        "metered_input_tokens",
+                        "metered_output_tokens",
+                        "metered_cache_read_tokens",
+                        "metered_cost_usd",
+                    ]
+                )
+                # Emit the metered-cost ledger metric from this single
+                # accumulation point (best-effort — never crashes the run).
+                if cost_delta:
+                    try:
+                        from analytics.collector import record_metric
+
+                        record_metric(
+                            "session.metered_cost_usd",
+                            cost_delta,
+                            {
+                                "role": role or "unknown",
+                                "project": getattr(session, "project_key", None) or "unknown",
+                            },
+                        )
+                    except Exception as _metric_err:  # noqa: BLE001
+                        logger.debug(
+                            "accumulate_session_tokens: metered metric emit failed: %s",
+                            _metric_err,
+                        )
+            else:
+                session.total_input_tokens = (session.total_input_tokens or 0) + in_delta
+                session.total_output_tokens = (session.total_output_tokens or 0) + out_delta
+                session.total_cache_read_tokens = (
+                    session.total_cache_read_tokens or 0
+                ) + cache_delta
+                session.total_cost_usd = float(session.total_cost_usd or 0.0) + cost_delta
+                session.save(
+                    update_fields=[
+                        "total_input_tokens",
+                        "total_output_tokens",
+                        "total_cache_read_tokens",
+                        "total_cost_usd",
+                    ]
+                )
         except ModelException as e:
             logger.warning(
                 "accumulate_session_tokens: ModelException on save for session %s: %s",
@@ -1853,7 +1905,19 @@ class ValorAgent:
                 session_id,
                 query_timeout,
             )
-            asyncio.ensure_future(circuit.record_failure(TimeoutError("query timeout")))
+            # Awaited directly (D3, issue #1817) instead of fire-and-forget
+            # `asyncio.ensure_future` — a Redis write failure here used to
+            # vanish silently (the circuit breaker never trips). Wrapped so a
+            # failure to RECORD the failure can't mask the real TimeoutError.
+            try:
+                await circuit.record_failure(TimeoutError("query timeout"))
+            except Exception as breaker_exc:
+                logger.warning(
+                    "[circuit-breaker] record_failure raised — breaker may not "
+                    "trip for session %s: %s",
+                    session_id,
+                    breaker_exc,
+                )
             raise
 
         except asyncio.CancelledError:
@@ -1867,8 +1931,20 @@ class ValorAgent:
             raise
 
         except Exception as e:
-            # Record failure for circuit breaker
-            asyncio.ensure_future(circuit.record_failure(e))
+            # Record failure for circuit breaker. Awaited directly (D3, issue
+            # #1817) — a fire-and-forget `ensure_future` here meant a Redis
+            # write failure while RECORDING this very failure was invisible,
+            # so the breaker silently never tripped. Guarded so a breaker
+            # write failure can't mask the original exception `e`.
+            try:
+                await circuit.record_failure(e)
+            except Exception as breaker_exc:
+                logger.warning(
+                    "[circuit-breaker] record_failure raised — breaker may not "
+                    "trip for session %s: %s",
+                    session_id,
+                    breaker_exc,
+                )
 
             error_str = str(e)
             init_elapsed = time.time() - init_start
@@ -1933,8 +2009,17 @@ class ValorAgent:
             raise
 
         else:
-            # Query succeeded — record success for circuit breaker
-            asyncio.ensure_future(circuit.record_success())
+            # Query succeeded — record success for circuit breaker. Awaited
+            # directly (D3, issue #1817); see the `record_failure` sites above
+            # for why fire-and-forget hid Redis write failures.
+            try:
+                await circuit.record_success()
+            except Exception as breaker_exc:
+                logger.warning(
+                    "[circuit-breaker] record_success raised for session %s: %s",
+                    session_id,
+                    breaker_exc,
+                )
 
         finally:
             # Always unregister client from registry
@@ -2277,6 +2362,9 @@ async def get_response_via_harness(
     full_context_message: str | None = None,
     model: str | None = None,
     system_prompt: str | None = None,
+    settings_path: str | None = None,
+    metered: bool = False,
+    role: str | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
@@ -2352,6 +2440,16 @@ async def get_response_via_harness(
     if model:
         harness_cmd.extend(["--model", model])
         logger.info(f"[harness] Using --model {model} for session_id={session_id}")
+
+    # Plan #1842 (headless leg): inject the #1688 --settings hook set so the
+    # single-shot `claude -p` writes turn-end (Stop) / needs-human / compaction
+    # edges to the per-session NDJSON edge file, letting the HeadlessRoleDriver
+    # reconcile turn-end from a TURN_END envelope when it lands (else fall back
+    # to the subprocess result/clean-exit). --settings must precede the
+    # positional message.
+    if settings_path:
+        harness_cmd.extend(["--settings", settings_path])
+        logger.info(f"[harness] Using --settings {settings_path} for session_id={session_id}")
 
     # System prompt injection (issue #1148). Use --append-system-prompt
     # (NOT --system-prompt) so Claude Code's default tool-handling protocol is
@@ -2560,6 +2658,8 @@ async def get_response_via_harness(
             _usage_field(usage, "output_tokens"),
             _usage_field(usage, "cache_read_input_tokens"),
             cost_usd,
+            metered=metered,
+            role=role,
         )
         # Additive telemetry tap — no behavior change
         from agent.session_telemetry import record_telemetry_event

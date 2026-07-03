@@ -75,6 +75,7 @@ NON_TERMINAL_STATUSES = frozenset(
         "superseded",
         "paused_circuit",  # paused by api-health-gate when Anthropic circuit is OPEN
         "paused",  # paused mid-execution due to auth/API failure; resumed by session-resume-drip
+        "paused_budget",  # paused by the per-tool budget backstop (#1821); human-only recovery
     }
 )
 
@@ -91,6 +92,13 @@ RECOVERY_OWNERSHIP: dict[str, str] = {
     "superseded": "none",  # transitional; finalized immediately
     "paused_circuit": "bridge-watchdog",  # sustainability.py circuit drip
     "paused": "bridge-watchdog",  # hibernation.py session-resume-drip
+    # paused_budget is a NON-drip status by design (#1821). The per-tool budget
+    # backstop moves a runaway session here; recovery is HUMAN-only. It is
+    # deliberately excluded from session_recovery_drip.run() (which drips only
+    # "paused"/"paused_circuit" back to pending) so no
+    # pending→denied→paused→pending runaway can form — tool_call_count /
+    # total_cost_usd are cumulative and never reset, so an auto-drip would loop.
+    "paused_budget": "human",
 }
 
 # All known statuses
@@ -383,6 +391,33 @@ def finalize_session(
         except Exception as e:
             logger.debug(f"[lifecycle-cas] CAS re-read failed (non-fatal, proceeding): {e}")
 
+    # 0. Deferred self-draft chokepoint flush (telegram).
+    # A reply deferred for self-draft that is never redrafted must be delivered on
+    # EVERY terminal path. This is the single chokepoint that all terminal writes
+    # funnel through, so wiring the flush here covers completed, failed, abandoned,
+    # and any future terminal status by construction — replacing the fragile
+    # per-branch wiring in session_health.py.
+    #
+    # Placement invariant: this runs ONLY on a legitimate first-time terminal
+    # transition. It sits AFTER the idempotency early-return (already-terminal
+    # sessions returned above) AND AFTER the reject_from_terminal guard (illegal
+    # terminal->terminal re-transitions raised above), so a rejected re-transition
+    # never triggers a flush. The flush reads the FRESH authoritative session
+    # internally, so it is unaffected by the caller's possibly-stale extra_context.
+    #
+    # Synchronous by necessity: the completed path has no running event loop, so
+    # the async _deliver_deferred_self_draft_fallback cannot be awaited here.
+    # Exception-isolated: a flush failure (even an import error) must NEVER prevent
+    # the status write below — losing a reply is bad, but failing to finalize the
+    # session is worse. Lazy import avoids an import cycle (session_lifecycle is
+    # imported very early).
+    try:
+        from agent.session_health import flush_deferred_self_draft_sync
+
+        flush_deferred_self_draft_sync(session, status)
+    except Exception as e:
+        logger.warning(f"[lifecycle] Deferred self-draft flush failed (non-fatal): {e}")
+
     # 1. Lifecycle transition log
     try:
         session.log_lifecycle_transition(status, reason)
@@ -655,6 +690,67 @@ def transition_status(
             )
         except Exception:
             pass
+
+
+# Short-TTL SETNX gate protecting ONLY the pending->running acquisition
+# (issue #1817, workstream B2). GRAIN OF SALT for future maintainers:
+#
+# This is a narrow, ADDITIVE gate -- it is not, and must never become, a
+# replacement for the generic optimistic-concurrency CAS inside
+# transition_status() above (the `on_disk_status != current_status` compare).
+# That CAS governs EVERY non-terminal status edge in the system -- paused,
+# superseded, kill, finalize, and this same plan's own C1 fix, which
+# transitions a parent out of waiting_for_children via transition_status().
+# An earlier critique round flagged deleting/replacing that CAS as a
+# BLOCKER: it would strip optimistic-concurrency protection from every
+# other edge, a correctness regression far worse than the bug this claim
+# fixes. Do not delete it, and do not fold this claim's logic into it.
+#
+# Why pending->running specifically needs an extra gate: multiple
+# independent actors (the worker's pop loop, the valor-session CLI resume
+# path, catchup/reflections drip) can each read the SAME pending session
+# and race to become the one that runs it. The run-claim SETNX makes the
+# read-then-transition sequence atomic from the caller's perspective: only
+# the actor that wins the SETNX proceeds to call
+# transition_status(session, "running", ...); the loser skips the
+# candidate entirely. This guarantees at most one actor ever attempts the
+# transition for a given session_id -- the CAS above remains as the
+# second line of defense for the transition the winner performs, and as
+# the ONLY defense for every other status edge.
+RUN_CLAIM_TTL_SECONDS = 30  # short: only needs to cover the query -> transition_status window
+
+
+def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_SECONDS) -> bool:
+    """Atomically claim the right to transition ``session_id`` from pending to running.
+
+    Returns ``True`` if this caller won the claim -- it must proceed to call
+    ``transition_status(session, "running", ...)``. Returns ``False`` if
+    another actor already holds the claim -- the caller must skip this
+    session (a peer is handling it, or already did).
+
+    Backed by a plain (non-Popoto-managed) Redis key
+    ``session:runclaim:{session_id}``, matching the existing ``SET NX``
+    idiom used elsewhere for short-lived coordination locks (see
+    ``agent/session_health.py`` and ``agent/session_pickup.py``). This is
+    NOT a general-purpose lock manager -- it exists solely to gate this one
+    transition.
+
+    Fails OPEN (returns ``True``) on Redis errors: a Redis hiccup degrades
+    to today's CAS-only protection rather than starving the pending queue.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        key = f"session:runclaim:{session_id}"
+        acquired = _R.set(key, worker_id, nx=True, ex=ttl)
+        return bool(acquired)
+    except Exception as e:
+        logger.warning(
+            "[session-lifecycle] run-claim acquisition failed for %s (failing open): %s",
+            session_id,
+            e,
+        )
+        return True
 
 
 def _finalize_parent_sync(

@@ -2,7 +2,7 @@
 
 How sessions transition between states via the consolidated lifecycle module (`models/session_lifecycle.py`).
 
-## Session States (13 total)
+## Session States (14 total)
 
 ### Non-terminal (use `transition_status()`)
 
@@ -16,6 +16,7 @@ How sessions transition between states via the consolidated lifecycle module (`m
 | `superseded` | A newer session for the same session_id has taken over |
 | `paused_circuit` | Paused by api-health-gate when Anthropic circuit breaker is OPEN; resumed by bridge-watchdog sustainability drip |
 | `paused` | Paused mid-execution due to auth/API failure; resumed by bridge-watchdog session-resume-drip |
+| `paused_budget` | Paused by the per-tool budget backstop (#1821) when a session exhausts its tool-call/cost budget, only under `TOOL_BUDGET_AUTO_PAUSE` (default off); NON-drip, human-only recovery — never re-queued by `session_recovery_drip`. See [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md). |
 
 ### Terminal (use `finalize_session()`)
 
@@ -29,7 +30,7 @@ How sessions transition between states via the consolidated lifecycle module (`m
 
 ### Dashboard Iconography
 
-All 8 non-terminal states render with distinct glyphs in the dashboard row template (`ui/templates/_partials/sessions_table.html`) — including specific glyphs for `paused` (⏸), `paused_circuit` (⛌), `superseded` (→), `waiting_for_children`, `running`, `pending`, `dormant`, and `active`. Non-terminal rows additionally surface a row-level freshness chip (age since `last_evidence_at`) and a ghost badge when the harness PID probe reports a dead process. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
+Of the 9 non-terminal states, most render with distinct glyphs in the dashboard row template (`ui/templates/_partials/sessions_table.html`) — including specific glyphs for `paused` (⏸), `paused_circuit` (⛌), `superseded` (→), `waiting_for_children`, `running`, `pending`, `dormant`, and `active`. `paused_budget` has no dedicated glyph yet — it falls through to the template's default branch and renders as plain status text. Non-terminal rows additionally surface a row-level freshness chip (age since `last_evidence_at`) and a ghost badge when the harness PID probe reports a dead process. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
 
 ## Lifecycle Module
 
@@ -77,7 +78,7 @@ See [Session Recovery Mechanisms](session-recovery-mechanisms.md) for the full a
 
 ### Recovery Confirms Subprocess Death (issue #1537)
 
-When the liveness check recovers a no-progress `running` session, `_apply_recovery_transition()` (`agent/session_health.py`) calls `handle.task.cancel()` with a `TASK_CANCEL_TIMEOUT` of 0.25s. Cancellation alone does **not** guarantee the underlying `claude -p` subprocess exited — a true hang ignores `CancelledError` and orphans the PID. Once the DB record leaves `running`, that orphan is invisible to every detector (the forward scan only queries `status="running"`; the in-process and PPID==1 reapers only act on terminal-status / launchd-reparented processes), so it wedges the worker's execution slot until a human runs `worker-restart`. This was the root cause of the 2026-05-31 incident (a 25.5h hang).
+When the liveness check recovers a no-progress `running` session, `_apply_recovery_transition()` (`agent/session_health.py`) calls `handle.task.cancel()` with a `TASK_CANCEL_TIMEOUT` of 0.25s. Cancellation alone does **not** guarantee the underlying `claude -p` subprocess exited — a true hang ignores `CancelledError` and orphans the PID. Once the DB record leaves `running`, that orphan is invisible to every detector (the forward scan only queries `status="running"`; the in-process and PPID==1 reapers only act on terminal-status / launchd-reparented processes). At the time of the 2026-05-31 incident (a 25.5h hang) this also wedged the worker's execution slot until a human ran `worker-restart` — as of issue #1820, the slot itself no longer requires a restart to recover: `_apply_recovery_transition` reclaims the owner-keyed lease immediately after the row flips terminal, and the health check's top-of-tick reap pass catches any lease that slips through. See [Slot-Lease Ownership](slot-lease-ownership.md).
 
 Recovery now confirms subprocess termination before deciding how to transition:
 
@@ -262,8 +263,6 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | Method | Fields Written | File |
 |--------|---------------|------|
 | `set_link()` | `[field_name, "updated_at"]` | `models/agent_session.py` |
-| `push_steering_message()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
-| `pop_steering_messages()` | `["queued_steering_messages", "updated_at"]` | `models/agent_session.py` |
 | Heartbeat in `_heartbeat_loop` | `["updated_at"]` | `agent/agent_session_queue.py` |
 | Steering drain (async) | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
 | Steering drain (sync fallback) | `["initial_telegram_message", "updated_at"]` | `agent/agent_session_queue.py` |
@@ -278,6 +277,8 @@ Any `AgentSession` method that saves companion fields (non-status fields) **must
 | Idempotent reactivation | `["updated_at", "completed_at"]` | `.claude/hooks/user_prompt_submit.py` |
 
 **Rule**: When adding a new save site on `AgentSession` that modifies non-lifecycle fields, always use `save(update_fields=[...])` listing only the fields you modified plus `"updated_at"`. Never use a bare `save()` on a session object that might be stale.
+
+Steering is not in this table because it no longer touches the `AgentSession` model at all — `push_steering_message()` and `pop_all_steering_messages()` (`agent/steering.py`) operate on a dedicated Redis list (`steering:{session_id}`), so there is no stale-object partial-save risk to guard against. See [Session Steering](session-steering.md).
 
 ### Layer 1c: Defensive `srem` in `finalize_session` (#950)
 
@@ -338,17 +339,21 @@ When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visi
 
 **Implication:** there is a ≤5-minute window (one watchdog tick interval) where ⏳ can briefly persist on the user's message after the session recovers, before the next tick clears the dedup. The recovery message itself lands first, so the user sees the recovery before the reaction is reset for a future stall.
 
-## Deferred Self-Draft Fallback Delivery (issue #1730)
+## Deferred Self-Draft Fallback Delivery (issues #1730, #1794, #1797)
 
 When the message drafter flags an output as an "empty promise" (`needs_self_draft=True`),
 `TelegramRelayOutputHandler.send()` injects a `sender="drafter-fallback"` steering message asking
 the agent to rewrite and resend, then skips the outbox write.  This is called a *deferred delivery*:
 the user's message will be delivered on the agent's next SDK turn after it consumes the steering.
 
-**The failure mode:** if the session is killed by the health checker (`tool_timeout` or
-`no_progress`) before the self-draft completes, the deferred answer is silently lost.  The
+**The failure mode (issue #1730):** if the session is killed by the health checker (`tool_timeout`
+or `no_progress`) before the self-draft completes, the deferred answer is silently lost.  The
 steering queue is empty by finalization time — the agent drains it at turn start — so it cannot be
 used as a detection signal.
+
+**A second failure mode (issue #1794):** a session that deferred a reply for self-draft and then
+reached a *clean* `completed` state also silently lost its reply.  The original async helper only
+ran on the health-checker's `failed`/`abandoned` branches, never on the `completed` path.
 
 **The fix (issue #1730):**
 
@@ -358,20 +363,49 @@ used as a detection signal.
    - `"deferred_self_draft_pending"`: `True`
    - `"deferred_self_draft_text"`: the original output text
 
-2. **Fallback at finalization**: a new async helper `_deliver_deferred_self_draft_fallback(entry)`
-   in `agent/session_health.py` reads `entry.extra_context["deferred_self_draft_pending"]` on all
-   three terminal recovery branches (`failed` × 2, `abandoned` × 1).  On a truthy flag it delivers
-   the recovered `deferred_self_draft_text` — narration-gated inline via the imported
-   `is_narration_only` predicate and `NARRATION_FALLBACK_MESSAGE` constant from
-   `bridge.message_quality`, or an explicit "couldn't finish responding" notice when text is absent.
-   The helper is idempotent via Redis SETNX (`self_draft_fallback_sent:{session_id}`, 1 h TTL).
+2. **Fallback at finalization — EMAIL on failed/abandoned**: the async helper
+   `_deliver_deferred_self_draft_fallback(entry)` in `agent/session_health.py` remains on the
+   three health-checker terminal recovery branches (`failed` × 2, `abandoned` × 1), but is now
+   **EMAIL-ONLY**.  It early-returns for telegram via
+   `if transport in (None, "telegram"): return` (telegram is owned by the synchronous chokepoint
+   flush described below).  On an email-transport truthy flag it delivers the recovered
+   `deferred_self_draft_text` — narration-gated via `is_narration_only` and
+   `NARRATION_FALLBACK_MESSAGE` from `bridge.message_quality`, or an explicit "couldn't finish
+   responding" notice when text is absent.  Idempotent via Redis SETNX on its own key
+   `self_draft_fallback_sent:{session_id}` (1 h TTL).
 
-3. **Precedence**: the self-draft fallback fires *before* the generic degraded notice
+3. **Synchronous chokepoint flush — TELEGRAM on all paths, EMAIL on completed path (issues #1794, #1797)**: a new
+   fully-synchronous helper `flush_deferred_self_draft_sync(session)` in `agent/session_health.py`
+   delivers the held text on qualifying terminal statuses.  It is invoked once from `finalize_session`
+   in `models/session_lifecycle.py` — the single centralised terminal-transition chokepoint — with
+   the following placement invariants:
+   - Runs **after** the idempotency early-return (already-terminal sessions exit before reaching it).
+   - Runs **after** the `reject_from_terminal` guard (illegal re-transitions raise before reaching it).
+   - Runs **before** `session.save()`, inside the CAS region.
+   - **Exception-isolated**: a flush failure never blocks the status write.
+   - Reads the deferral flag from a **fresh authoritative session** via
+     `get_authoritative_session(session_id)` — not the caller's possibly-stale object.
+   - Deduplicates on its **own** SETNX key `self_draft_completed_flush_sent:{session_id}` (1 h TTL).
+   - **Transport/status gate** (evaluated before the dedup SETNX):
+     - **telegram** (or `None`): proceeds for **all** terminal statuses (`completed`, `failed`,
+       `abandoned`), writing directly to `telegram:outbox:{session_id}` via `rpush`.
+     - **email** + `completed`: proceeds and writes the payload (built via the shared
+       `build_email_outbox_payload` function in `agent/output_handler.py`) to
+       `email:outbox:{session_id}` via `rpush`.  The `build_email_outbox_payload` helper is pure
+       and synchronous — no I/O, no event loop — making it safe to call on the completed path.
+     - **email** + `failed`/`abandoned`: early-returns; the async helper owns those paths.
+
+4. **Disjoint-transport design**: the two helpers partition all paths without overlap — the sync
+   chokepoint owns **telegram** on all terminal statuses, and **email** on the `completed` path; the
+   async helper owns **email** on `failed`/`abandoned`.  The two distinct SETNX keys
+   (`self_draft_completed_flush_sent` vs. `self_draft_fallback_sent`) make double-send structurally
+   impossible regardless of execution order.
+
+5. **Precedence**: the self-draft fallback fires *before* the generic degraded notice
    (`_deliver_tool_timeout_degraded_notice`).  When `deferred_self_draft_pending` is set, the
-   generic notice is suppressed.  The two helpers use distinct SETNX keys so neither blocks the
-   other.
+   generic notice is suppressed.
 
-4. **Counter cleanup (AC4 dual-seat)**: `reset_self_draft_attempts(session_id)` is called at
+6. **Counter cleanup (AC4 dual-seat)**: `reset_self_draft_attempts(session_id)` is called at
    every terminal finalize to clean up the `steering:attempts:{session_id}` Redis counter instead
    of relying on its 1-hour TTL:
    - **Seat A** (`models/session_lifecycle.py::finalize_session`): outside the `emit_telemetry`

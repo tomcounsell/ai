@@ -57,5 +57,5 @@ Step 1 is fully scriptable/agent-doable. Step 2 is the only human step — Googl
 
 - [Google Workspace Auth](google-workspace-auth.md) — the Python `valor-calendar` OAuth path that uses the same vault OAuth client (different token store).
 - `CLAUDE.md` → "Google Workspace CLI (`gws`)" — usage patterns once authenticated.
-- `.claude/skills-global/do-deploy/SKILL.md` — references this doc as a per-machine manual step not covered by auto-update.
+- `.claude/skills/do-deploy/SKILL.md` — references this doc as a per-machine manual step not covered by auto-update.
 - `scripts/update/gws_auth.py` — the `/update` detection step.

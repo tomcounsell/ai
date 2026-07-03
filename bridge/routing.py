@@ -30,6 +30,9 @@ DM_USER_TO_PROJECT: dict[int, dict] = {}  # sender_id -> project config
 # the synchronous awaiter polls that history. This is the deterministic
 # loop-guard: a bot reply (which carries no reply_to) must never spawn a
 # session, or the bot↔bridge pair would loop forever.
+# This dict is overwritten at bridge startup by telegram_bridge.py (see line ~652).
+# The bridge's copy and this module's name point to the same object after startup —
+# a pop on the bridge's dict clears this name too. See validate_bot_live_flags quarantine wiring.
 BOT_ID_TO_PROJECT: dict[int, dict] = {}  # bot sender_id -> project config
 ALL_MONITORED_GROUPS = []
 ACTIVE_PROJECTS = []
@@ -59,13 +62,37 @@ def _resolve_config_path() -> Path:
     Resolution order:
     1. PROJECTS_CONFIG_PATH env var (explicit override) — honored even under launchd
     2. <vault>/projects.json (vault.projects_path) — skipped under launchd
+       when the vault sits on a TCC-restricted path (~/Desktop, ~/Documents,
+       iCloud/FileProvider mounts)
     3. config/projects.json (local copy, updated by install_worker.sh)
+
+    The launchd guard (VALOR_LAUNCHD) is authoritative: under launchd we NEVER
+    open a ~/Desktop path, even when PROJECTS_CONFIG_PATH points at one. macOS
+    TCC and iCloud file eviction both make open()/stat() on ~/Desktop block
+    indefinitely from a launchd agent, which silently wedges the bridge/worker
+    at import time (the process is alive but never connects — see the June 2026
+    outage where a Desktop PROJECTS_CONFIG_PATH hung both services for 17h).
     """
     import os
 
+    local_path = Path(__file__).parent.parent / "config" / "projects.json"
+    under_launchd = bool(os.environ.get("VALOR_LAUNCHD"))
+
     env_path = os.environ.get("PROJECTS_CONFIG_PATH")
     if env_path:
-        return Path(env_path).expanduser()
+        resolved = Path(env_path).expanduser()
+        # Under launchd, a ~/Desktop path is a hang risk — prefer the local
+        # copy if it exists; only fall back to the Desktop path when there is
+        # no local copy to use.
+        if under_launchd and _is_under_desktop(resolved) and local_path.exists():
+            logger.warning(
+                "[config] Ignoring Desktop PROJECTS_CONFIG_PATH (%s) under launchd "
+                "to avoid a TCC/iCloud open() hang; using local copy %s",
+                resolved,
+                local_path,
+            )
+            return local_path
+        return resolved
 
     # Under launchd, skip the vault path ONLY when the vault sits on a
     # TCC-protected location (~/Desktop, ~/Documents, ~/iCloud Drive).
@@ -77,7 +104,6 @@ def _resolve_config_path() -> Path:
     try:
         from config.settings import VaultNotResolved, vault
 
-        under_launchd = bool(os.environ.get("VALOR_LAUNCHD"))
         if not under_launchd or not vault.is_tcc_restricted:
             vault_path = vault.projects_path
             if vault_path.exists():
@@ -85,8 +111,89 @@ def _resolve_config_path() -> Path:
     except VaultNotResolved:
         pass  # vault not configured; fall through to local copy
 
-    # Local copy (updated by install_worker.sh) or in-repo fallback
-    return Path(__file__).parent.parent / "config" / "projects.json"
+    # Local copy (updated by install_worker.sh) or legacy in-repo fallback
+    return local_path
+
+
+def _is_under_desktop(path: Path) -> bool:
+    """True if ``path`` resolves to somewhere under ``~/Desktop``.
+
+    Used to detect launchd-unsafe config paths. Compares expanded, absolute
+    paths textually (no filesystem access — we must not stat a possibly-hung
+    Desktop path just to decide whether to avoid it).
+    """
+    try:
+        desktop = (Path.home() / "Desktop").expanduser()
+        return desktop in path.expanduser().parents
+    except (OSError, RuntimeError):
+        return False
+
+
+# Sidecar caching the last successfully-parsed projects.json, written atomically
+# (temp-file + os.replace, per the idiom at agent/session_health.py:3009-3011) on
+# every successful read. Served back when a read hits a partial/corrupt file —
+# e.g. a launchd KeepAlive respawn racing a mid-iCloud-write projects.json.
+_LAST_KNOWN_GOOD_PATH = Path(__file__).parent.parent / "data" / "projects.last_known_good.json"
+
+
+def _write_last_known_good_config(config: dict) -> None:
+    """Atomically cache a successfully-parsed config to the last-known-good sidecar.
+
+    Best-effort: any failure (e.g. read-only filesystem, missing data/ dir) is
+    logged at debug and swallowed — this is a cache, not a critical write.
+    """
+    import os
+
+    try:
+        _LAST_KNOWN_GOOD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _LAST_KNOWN_GOOD_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config))
+        os.replace(tmp, _LAST_KNOWN_GOOD_PATH)
+    except OSError as e:
+        logger.debug("[config] Failed to write last-known-good sidecar: %s", e)
+
+
+def _read_last_known_good_config() -> dict | None:
+    """Read the last-known-good sidecar, or None if absent/unreadable."""
+    try:
+        with open(_LAST_KNOWN_GOOD_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _guarded_json_load(config_path: Path) -> dict:
+    """Read and parse a projects.json-shaped file, never raising.
+
+    On success, caches the parsed config to the last-known-good sidecar. On a
+    `JSONDecodeError` (or an `OSError`/`UnicodeDecodeError` from a partial read
+    racing a concurrent writer — e.g. mid-iCloud-sync), logs the failure and
+    serves the last-known-good sidecar instead of propagating the exception.
+    This is what stops a launchd `KeepAlive` respawn storm on a transiently
+    corrupt config file: the bridge/worker keep serving the last good config
+    rather than crash-looping at import time.
+    """
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        logger.error(
+            "[config] Failed to parse %s (%s: %s); falling back to last-known-good",
+            config_path,
+            type(e).__name__,
+            e,
+        )
+        fallback = _read_last_known_good_config()
+        if fallback is not None:
+            return fallback
+        logger.error(
+            "[config] No last-known-good config available for %s; using empty defaults",
+            config_path,
+        )
+        return {"projects": {}, "defaults": {}}
+    else:
+        _write_last_known_good_config(config)
+        return config
 
 
 def load_config() -> dict:
@@ -96,6 +203,9 @@ def load_config() -> dict:
     via `VALOR_VAULT_DIR`; default is `~/Desktop/Valor/projects.json`).
     Override with `PROJECTS_CONFIG_PATH` env var.
     Falls back to `config/projects.json` if the vault path doesn't exist.
+    A partial/corrupt read (e.g. mid-iCloud-write) falls back to the
+    last-known-good sidecar and logs, instead of raising (see
+    `_guarded_json_load`).
     """
     config_path = _resolve_config_path()
 
@@ -103,8 +213,7 @@ def load_config() -> dict:
         logger.warning(f"Project config not found at {config_path}, using defaults")
         return {"projects": {}, "defaults": {}}
 
-    with open(config_path) as f:
-        config = json.load(f)
+    config = _guarded_json_load(config_path)
 
     # Expand ~ in working_directory values
     for _proj in config.get("projects", {}).values():
@@ -1352,6 +1461,19 @@ def _get_redis():
     return redis.Redis.from_url(redis_url, decode_responses=False)
 
 
+class ResolverUnavailableError(Exception):
+    """Raised by resolve_customer() when the resolver could not run to
+    completion due to an infrastructure error (subprocess/callable dispatch
+    failure, expired OAuth token, gws error, malformed output, etc.).
+
+    Distinct from a definitively-resolved "not a customer" (which returns
+    None from resolve_customer()). Callers MUST NOT treat this exception as
+    authoritative non-customer routing — the inbound email should be
+    retried on the next poll, not discarded (see
+    bridge/email_bridge.py::_process_inbound_email, issue #1817 A2).
+    """
+
+
 def _resolve_resolver_callable(dotted_path: str):
     """Resolve a dotted Python path to a callable.
 
@@ -1386,8 +1508,15 @@ async def resolve_customer(
     2. Reject malformed sender (conservative regex) — return None, no counter.
     3. Check Redis cache (cache hit returns cached value; cached "" means None).
     4. Dispatch subprocess (argv form) or importlib callable.
-    5. Cache result. On error: increment resolver:failures:{project_key},
-       attempt valor-retry IMAP label (best-effort), return None (fail-closed).
+    5. On dispatch error (infra failure — subprocess/callable crash, timeout,
+       malformed output): increment resolver:failures:{project_key}, attempt
+       valor-retry IMAP label (best-effort), then RAISE ResolverUnavailableError.
+       This is NOT a "not a customer" result — the caller must retry, never
+       silently drop (issue #1817 A2).
+    6. On a successful dispatch (customer found OR definitively not a
+       customer): cache the result, clear resolver:failures:{project_key}
+       and any armed email:resolver_unavailable alert (the resolver
+       mechanism itself is healthy again), and return customer_id or None.
 
     Args:
         sender: The sender's email address.
@@ -1396,7 +1525,12 @@ async def resolve_customer(
         imap_uid: Optional IMAP UID bytes (for valor-retry label on failure).
 
     Returns:
-        customer_id string on success, None if not a customer or on any error.
+        customer_id string on success, None if the resolver definitively
+        determined the sender is not a customer.
+
+    Raises:
+        ResolverUnavailableError: If the resolver dispatch failed (infrastructure
+            error) — the sender's customer status could not be determined.
     """
     resolver_config = project_config.get("customer_resolver")
     if not resolver_config:
@@ -1459,7 +1593,10 @@ async def resolve_customer(
     if dispatch_error is not None:
         logger.error(f"[resolver] Dispatch failed for {sender!r}: {dispatch_error}")
         _on_resolver_failure(project_key, imap_conn, imap_uid, r)
-        return None
+        raise ResolverUnavailableError(
+            f"Resolver dispatch failed for project={project_key!r} sender={sender!r}: "
+            f"{dispatch_error}"
+        ) from dispatch_error
 
     # Cache result (empty string for None)
     cache_value = customer_id if customer_id is not None else ""
@@ -1469,18 +1606,47 @@ async def resolve_customer(
     except Exception as e:
         logger.warning(f"[resolver] Redis cache write failed: {e}")
 
+    # Dispatch succeeded — whether or not this sender turned out to be a
+    # customer, the resolver mechanism itself is healthy again. Clear both
+    # the failure counter and any armed email:resolver_unavailable alert here
+    # (not gated on customer_id) so a transient/expired-token outage doesn't
+    # leave a stale alert if the first post-recovery message happens to be
+    # from a non-customer (issue #1817 A2).
+    try:
+        if r is not None:
+            r.delete(f"resolver:failures:{project_key}")
+            r.delete("email:resolver_unavailable")
+    except Exception:
+        pass
+
     if customer_id is not None:
-        # Success: clear failure counter
-        try:
-            if r is not None:
-                r.delete(f"resolver:failures:{project_key}")
-        except Exception:
-            pass
         logger.info(f"[resolver] Resolved {sender!r} -> {customer_id!r}")
     else:
         logger.debug(f"[resolver] {sender!r} is not a known customer")
 
     return customer_id
+
+
+def get_resolver_failure_count(project_key: str) -> int:
+    """Return the current resolver:failures:{project_key} counter value.
+
+    Read-only accessor used by bridge/email_bridge.py to gate the A2
+    persistent-unavailability operator alert (email:resolver_unavailable) —
+    reuses the existing failure counter maintained by
+    _on_resolver_failure()/resolve_customer() rather than a second, parallel
+    tally. Fails closed (returns 0) on any Redis error, matching the
+    best-effort nature of the surrounding alert machinery.
+    """
+    try:
+        r = _get_redis()
+        raw = r.get(f"resolver:failures:{project_key}")
+        if raw is None:
+            return 0
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        return int(raw)
+    except Exception:
+        return 0
 
 
 async def _dispatch_subprocess_resolver(

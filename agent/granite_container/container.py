@@ -31,7 +31,7 @@ import logging
 import os
 import re
 import shutil
-import subprocess
+import signal
 import tempfile
 import threading
 import time
@@ -51,10 +51,19 @@ from agent.granite_container.granite_classifier import (
     ClassificationResult,
     classify_pm_prefix,
 )
+from agent.granite_container.hook_edge import (
+    NEEDS_HUMAN,
+    TURN_END,
+    HookEdge,
+    HookEdgeConsumer,
+    record_hook_fallback,
+)
 from agent.granite_container.pty_driver import (
     DEFAULT_MIN_CONTENT_BYTES,
     PTYDriver,
+    _strip_ansi,
 )
+from agent.granite_container.role_driver import HeadlessRoleDriver
 from agent.granite_container.startup_parser import (
     StartupEvent,
     parse_startup_frame,
@@ -86,6 +95,46 @@ def _resolve_pm_prime_cmd(session_type: str | None) -> str:
     if session_type == "teammate":
         return TEAMMATE_PRIME_SLASH_CMD
     return PM_PRIME_SLASH_CMD
+
+
+# --- Hook-driven turn-return settings resolvers (plan #1688) ---
+# Each resolver takes an explicit override (used by tests / callers) and falls
+# back to settings.granite when None, with a hardcoded default if settings can
+# not be loaded (bare unit-test import). Kept as free functions so the wiring
+# has a single source of truth and stays testable without a Settings instance.
+
+
+def _resolve_hook_driven(override: bool | None) -> bool:
+    if override is not None:
+        return override
+    try:
+        from config.settings import settings
+
+        return bool(settings.granite.hook_driven_turn_end)
+    except Exception:
+        return True
+
+
+def _resolve_hook_turn_end_wait_s(override: float | None) -> float:
+    if override is not None:
+        return override
+    try:
+        from config.settings import settings
+
+        return float(settings.granite.hook_turn_end_wait_s)
+    except Exception:
+        return 600.0
+
+
+def _resolve_crash_resume_cap(override: int | None) -> int:
+    if override is not None:
+        return override
+    try:
+        from config.settings import settings
+
+        return int(settings.granite.hook_crash_resume_cap)
+    except Exception:
+        return 3
 
 
 # The trust-folder prompt dismissal (per the F-probe at
@@ -143,6 +192,48 @@ _STARTUP_FRAME_TOTAL_CAP = 6000
 # 12-hour ceiling only so a truly stuck loop cannot wait forever; the
 # recovery layer is expected to act long before this is reached.
 CYCLE_IDLE_TIMEOUT_S = 12 * 60 * 60.0  # 12 hours — sanity ceiling, not a hang signal
+
+# Per-poll interval for the hook-driven turn-end wait (plan #1688). Each tick
+# drains the hook edge file, then does a short liveness/badge read on the PTY
+# (read_until_idle with a tiny budget) so on_pty_read / byte accounting stay
+# live and a crash (EOF / !isalive) is observed promptly. Short enough that a
+# turn_end edge is picked up within ~1s of the Stop hook firing.
+HOOK_POLL_INTERVAL_S = 1.0
+
+# Minimum interval (seconds) between per-iteration PTY-read liveness stamps
+# (#1843 Gap B). The `read_until_idle` inner poll can spin many times per
+# second under verbose output; each unthrottled call would trigger an
+# AgentSession Redis write. Throttling to <=1 stamp/sec keeps
+# `last_pty_read_loop_at` fresh mid-turn without a write storm — matching the
+# 5s coalescing philosophy of the SDK-path liveness writer while sampling far
+# finer than the once-per-cycle `_cycle_idle` boundary fire.
+PTY_READ_ITER_MIN_INTERVAL_S = 1.0
+
+
+def _throttle(
+    fn: Callable[[str], None],
+    min_interval_s: float,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[str], None]:
+    """Wrap ``fn`` so it runs at most once per ``min_interval_s`` seconds.
+
+    The first call always runs; subsequent calls inside the window are dropped.
+    ``clock`` is injectable so the call-frequency bound is unit-testable without
+    real time. Used to gate the Gap B per-iteration PTY-read callback (#1843).
+    """
+    state = {"last": 0.0, "primed": False}
+
+    def _wrapped(arg: str) -> None:
+        now = clock()
+        if state["primed"] and (now - state["last"]) < min_interval_s:
+            return
+        state["primed"] = True
+        state["last"] = now
+        fn(arg)
+
+    return _wrapped
+
 
 # Per-cycle idle budget for the startup-phase poll loop. Short by
 # design: the loop's job is to detect transient startup events
@@ -270,6 +361,66 @@ PM_TURN_CONTRACT_REMINDER = (
 OPERATOR_TERMINAL_MESSAGE = (
     "I wasn't able to produce a response to this — please rephrase or follow up."
 )
+
+# RESERVED harness suffix. `[/dev:steer]` parses to harness="steer" but is NOT
+# a real builder harness — `_get_builder` must NEVER receive it (only `claude`/
+# `None` and `pi` are real harnesses). The dev-routing branch intercepts this
+# suffix before `_get_builder` and writes the (token-stripped) payload straight
+# to the Dev PTY as a mid-task steer, then continues without blocking on Dev idle.
+STEER_HARNESS_SUFFIX = "steer"
+
+# One-line continuation ack written to the PM PTY immediately after a
+# [/dev:steer] Dev write, so PM produces its next turn rather than hanging on
+# an empty idle read (Risk 3 — PM only runs when Dev is idle; with nothing
+# written to PM after the steer it would idle-timeout into a spurious pm_hang).
+PM_DEV_STEER_ACK = "Steering delivered to Dev; continuing."
+
+# User-facing message delivered when an operator aborts a running session via a
+# steering message flagged is_abort. Delivered through on_user_payload BEFORE the
+# loop breaks (post-break output is dropped).
+STEER_ABORT_USER_MESSAGE = "Session stopped at your request."
+
+# --- Hook-driven turn returns (plan #1688) ---
+# The verified-submit nudge written to a resumed claude session after a
+# crash-during-turn (Practice 6, load-bearing minimum). A dropped `continue`
+# re-wedges the crash path, so it is written like any other turn body.
+CRASH_RESUME_CONTINUE = "continue"
+
+# User-facing escalation delivered when repeated crashes on a single turn
+# exhaust the crash-resume cap. Guarantees the human gets a terminal message
+# instead of an infinite resume loop (issue acceptance criterion).
+CRASH_ESCALATION_MESSAGE = (
+    "This task kept crashing mid-response and I couldn't recover it after "
+    "several attempts. Please try again or follow up."
+)
+
+
+@dataclass
+class TurnWaitResult:
+    """Result of a single hook-driven (or idle-fallback) turn-boundary wait.
+
+    ``saw_turn`` plays the role of the legacy ``saw_idle`` so the routing code
+    downstream is unchanged. The extra fields drive the two edges the hook
+    channel adds (plan #1688):
+
+    - ``needs_human`` — a ``Notification`` / ``PermissionRequest`` /
+      ``AskUserQuestion`` edge fired; the caller routes to ``[/user]``
+      deterministically (no classifier guess).
+    - ``escalated`` — repeated crashes exhausted the crash-resume cap; the
+      caller delivers the operator-terminal escalation message.
+    - ``transcript_path`` — the ``Stop`` payload's transcript path, the
+      flush-safe source of the final assistant message (may be None on the
+      idle-fallback path, where the caller uses its precomputed transcript).
+    """
+
+    saw_turn: bool
+    buffer: str = ""
+    idle_marker: str = ""
+    elapsed_ms: int = 0
+    needs_human: HookEdge | None = None
+    escalated: bool = False
+    transcript_path: str | None = None
+    accumulated_bytes: int = 0
 
 
 @dataclass
@@ -583,9 +734,61 @@ class Container:
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
         session_type: str | None = None,
+        poll_steering: Callable[[], list[dict]] | None = None,
+        pm_session_id: str | None = None,
+        dev_session_id: str | None = None,
+        pm_hook_edge_file: str | None = None,
+        dev_hook_edge_file: str | None = None,
+        pm_settings_path: str | None = None,
+        dev_settings_path: str | None = None,
+        hook_driven: bool | None = None,
+        hook_turn_end_wait_s: float | None = None,
+        crash_resume_cap: int | None = None,
+        role_transports: dict[str, str] | None = None,
+        session_env: dict[str, str] | None = None,
+        agent_session_id: str | None = None,
+        headless_harness_fn: Callable[..., Any] | None = None,
+        on_pty_spawn: Callable[[int], None] | None = None,
+        on_pty_despawn: Callable[[int], None] | None = None,
     ) -> None:
         if not user_message.strip():
             raise ValueError("Container.user_message must be non-empty")
+        # Per-role transport map (plan #1842). Default both-PTY reproduces the
+        # pre-#1842 loop exactly. A "headless" role is driven by
+        # HeadlessRoleDriver (one `claude -p` per turn) instead of a PTYDriver;
+        # the orchestration loop (relay, steering, watchdog, exit
+        # classification) stays transport-agnostic.
+        self._role_transports = (
+            dict(role_transports) if role_transports else {"pm": "pty", "dev": "pty"}
+        )
+        # Headless-leg provisioning (plan #1842). A "headless" role runs one
+        # ``claude -p`` subprocess per turn via HeadlessRoleDriver instead of a
+        # PTYDriver. The driver needs the per-session hook settings + edge file
+        # (so the Stop hook writes TURN_END), the session env, and the bridge
+        # session_id (metered accounting lands on the AgentSession keyed by it).
+        self._pm_settings_path = pm_settings_path
+        self._dev_settings_path = dev_settings_path
+        self._dev_hook_edge_file = dev_hook_edge_file
+        self._session_env = dict(session_env) if session_env else None
+        # Bridge/Telegram session_id — the key ``accumulate_session_tokens`` and
+        # ``_store_claude_session_uuid`` use to land metered_* on the record.
+        self._agent_session_id = agent_session_id
+        # Test seam: inject a fake harness_fn so the headless dispatch can be
+        # driven end-to-end through the container without a real subprocess.
+        self._headless_harness_fn = headless_harness_fn
+        # Crash-resume PID registration seam (plan #1851). `_resume_crashed_pty`
+        # spawns a fresh PTYDriver OUTSIDE the pool's own spawn paths, so its
+        # new OS PID is invisible to the worker-startup orphan sweep unless
+        # something registers it. `BridgeAdapter` wires these to
+        # `pool.register_pid`/`pool.unregister_pid` (the established
+        # injection seam, mirroring `on_turn`/`on_pty_read`) — Container stays
+        # pool-agnostic so the self-spawned/test/CLI path (no PTYPool) is
+        # unaffected; both default to None there.
+        self._on_pty_spawn = on_pty_spawn
+        self._on_pty_despawn = on_pty_despawn
+        # Constructed once on the first headless Dev turn and reused across turns
+        # so the captured claude_session_id enables ``--resume`` (plan #1842 B3).
+        self._dev_role_driver: HeadlessRoleDriver | None = None
         self.user_message = user_message
         self.cwd = cwd
         self.max_turns = max_turns
@@ -608,6 +811,23 @@ class Container:
         # detector (#1724). Exceptions are swallowed — liveness signaling must
         # never crash the loop.
         self._on_pty_read = on_pty_read
+        # Per-iteration PTY-read liveness callback (#1843 Gap B). Threads the
+        # same freshness writer (_fire_pty_read_raw → _fire_pty_read →
+        # on_pty_read) into the read_until_idle inner poll loop so a session
+        # wedged mid-turn on the idle-fallback path refreshes
+        # last_pty_read_loop_at far sooner than the _cycle_idle window.
+        # Throttled to <=1 stamp/sec so verbose output can't produce a Redis
+        # write storm. None (byte-identical to pre-#1843) when there is no
+        # writer wired. `read_until_idle` passes RAW (un-stripped) text to
+        # this callback (see pty_driver.py); `_fire_pty_read_raw` strips it
+        # AFTER the throttle admits the call, so the O(n) ANSI strip runs at
+        # the throttled write rate rather than the inner poll's full
+        # iteration rate (perf finding, PR #1849 review).
+        self._pty_read_iteration_cb: Callable[[str], None] | None = (
+            _throttle(self._fire_pty_read_raw, PTY_READ_ITER_MIN_INTERVAL_S)
+            if on_pty_read is not None
+            else None
+        )
         # Optional pre-warmed PTY pair from the PTYPool. When both
         # are provided, Container skips _spawn_pair() and reuses
         # the pool's prewarmed pair (BridgeAdapter is the caller in
@@ -622,6 +842,18 @@ class Container:
         # all others → PM_PRIME_SLASH_CMD. Stored as a plain string (StrEnum is str-compatible
         # so SessionType.TEAMMATE == "teammate" is True; storing str avoids an import cycle).
         self._session_type = session_type
+        # Optional, storage-agnostic steering-poll callback (mid-run steering,
+        # issue #1779). Called once at the top of each steady-state turn; returns
+        # a list of pending steering message dicts, each with keys:
+        #   - "text"     (str):  the message body to inject into PM's PTY
+        #   - "sender"   (str):  who sent it (used in the [Steering from …] prefix)
+        #   - "is_abort" (bool): True signals a graceful operator-requested abort
+        # The Container NEVER imports Redis / agent.steering — the BridgeAdapter
+        # supplies the closure (it owns the Redis-list drain). Default None
+        # preserves every existing caller (CLI, tests) unchanged. Like _on_turn,
+        # the call site is fail-silent: a raising callback yields [] and never
+        # crashes the loop.
+        self._poll_steering = poll_steering
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -660,6 +892,65 @@ class Container:
         # spawning a real BYOBClient subprocess / driving a real browser.
         self._recover_login = recover_login
 
+        # --- Hook-driven turn returns (plan #1688) ---
+        # The turn-boundary authority. When hook-driven (the default, gated by
+        # settings.granite.hook_driven_turn_end), the container waits on the
+        # Claude Code `Stop` hook edge (via a HookEdgeConsumer over the
+        # per-session edge file) instead of the PTY idle heuristic. The idle
+        # heuristic (read_until_idle) is demoted to a running/idle badge,
+        # liveness, and crash detection — its code is retained, not removed.
+        # When no edge file is supplied, or the flag is off, the container falls
+        # back to the pre-#1688 idle-completion path (the documented safety
+        # valve).
+        self._pm_session_id = pm_session_id
+        self._dev_session_id = dev_session_id
+        self._hook_driven = _resolve_hook_driven(hook_driven)
+        self._hook_turn_end_wait_s = _resolve_hook_turn_end_wait_s(hook_turn_end_wait_s)
+        self._crash_resume_cap = _resolve_crash_resume_cap(crash_resume_cap)
+        self._pm_consumer: HookEdgeConsumer | None = (
+            HookEdgeConsumer(pm_hook_edge_file, session_id=pm_session_id)
+            if (self._hook_driven and pm_hook_edge_file)
+            else None
+        )
+        self._dev_consumer: HookEdgeConsumer | None = (
+            HookEdgeConsumer(dev_hook_edge_file, session_id=dev_session_id)
+            if (self._hook_driven and dev_hook_edge_file)
+            else None
+        )
+        # Deduped needs_human edges already routed to [/user] this run (keyed by
+        # ts) so a re-poll never re-delivers the same prompt.
+        self._needs_human_seen: set[float] = set()
+        # Concern #6 (resume-owner seam): True only while a crash-resume is
+        # actively re-spawning a dead PTY. The container owns the --resume for a
+        # crashed turn; external liveness-wedge recovery (#1815/#1823 granite
+        # liveness-wedge, #1728 stalled-session) that reacts to the SAME
+        # pexpect.EOF / !isalive signal must NOT also issue a --resume, or two
+        # systems fork one session. In-process callers (e.g. BridgeAdapter) can
+        # check crash_resume_in_flight() before acting; independently, the resume
+        # path bumps the liveness signals (on_turn → last_turn_at) so the
+        # cross-process wedge detector sees demonstrable progress and no-ops.
+        self._crash_resume_in_flight: bool = False
+
+    def crash_resume_in_flight(self) -> bool:
+        """Whether a crash-resume is actively re-spawning a dead PTY (concern #6).
+
+        The resume-owner seam: external liveness-wedge recovery should no-op
+        while this is True to avoid a double-resume/fork of one claude session.
+        """
+        return self._crash_resume_in_flight
+
+    # -- Transport helpers (plan #1842) -----------------------------------
+
+    def _transport_of(self, role: str) -> str:
+        """Resolved transport ("pty"/"headless") for a role; default "pty"."""
+        return self._role_transports.get(role, "pty")
+
+    def _dev_is_headless(self) -> bool:
+        return self._transport_of("dev") == "headless"
+
+    def _pm_is_headless(self) -> bool:
+        return self._transport_of("pm") == "headless"
+
     # -- Lifecycle --------------------------------------------------------
 
     def _spawn_pair(self) -> None:
@@ -668,8 +959,15 @@ class Container:
         Reuses a prewarmed pair when the ctor received one
         (production path: PTYPool -> BridgeAdapter -> Container).
         Spawns a fresh pair otherwise (tests, run_ping_pong_test).
+
+        Transport-aware (plan #1842): a "headless" role has NO PTY — its
+        prewarmed member is None by design and it is never self-spawned. The
+        pool-pair reuse and the self-spawn fallback each spawn a PTY only for
+        roles configured "pty".
         """
-        if self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None:
+        if self._uses_pool_pair():
+            # The pool supplies a PTY only for pty roles; a headless role's
+            # member is None and stays None (no PTY process for it).
             self._pm_pty = self._prewarmed_pm_pty
             self._dev_pty = self._prewarmed_dev_pty
             return
@@ -680,10 +978,12 @@ class Container:
         else:
             cwd = self.cwd
 
-        self._pm_pty = PTYDriver(role="pm", cwd=cwd, model=self._pm_model)
-        self._dev_pty = PTYDriver(role="dev", cwd=cwd, model=self._dev_model)
-        self._pm_pty.spawn()
-        self._dev_pty.spawn()
+        if not self._pm_is_headless():
+            self._pm_pty = PTYDriver(role="pm", cwd=cwd, model=self._pm_model)
+            self._pm_pty.spawn()
+        if not self._dev_is_headless():
+            self._dev_pty = PTYDriver(role="dev", cwd=cwd, model=self._dev_model)
+            self._dev_pty.spawn()
 
     def _close_pair(self) -> None:
         # Skip PTYs the pool already owns — its __aexit__ does the
@@ -711,37 +1011,59 @@ class Container:
     def _uses_pool_pair(self) -> bool:
         """Whether this container runs on a PTYPool-prewarmed pair.
 
-        Pool-backed runs must NEVER use the pkill fallback: the
-        pattern matches every `claude --permission-mode
-        bypassPermissions` process on the machine, which includes
-        the pool's other slots (idle prewarmed pairs and pairs
-        mid-run in concurrent granite sessions) and any operator-
-        owned interactive session. The pool owns its PTY lifecycle
-        (close-on-release + PID-targeted orphan kill at worker
-        startup); the machine-wide pkill is only safe for the
-        self-spawned single-container path (tests, ping-pong).
-        """
-        return self._prewarmed_pm_pty is not None and self._prewarmed_dev_pty is not None
+        Pool-backed containers receive a prewarmed PTY per pty-role from the
+        PTYPool; self-spawned containers (tests, ping-pong) create their own.
+        The pool owns its PTY lifecycle via close-on-release and PID-targeted
+        orphan kill at worker startup.
 
-    def _run_pkill_fallback(self) -> None:
-        """Last-ditch teardown: kill any orphaned `claude --bypassPermissions` PTYs.
-
-        Mirrors the probe's teardown at
-        `scripts/probe_slash_arguments.py:367-373`. The container
-        prefers `child.close(force=True)`; this is the safety net.
-        Skipped entirely for pool-backed runs — see `_uses_pool_pair`.
+        Transport-aware (plan #1842 B2): a "headless" role's prewarmed member is
+        None by design, so requiring BOTH members non-None would misroute a
+        headless-configured pool session into self-spawning a fresh PTY pair
+        (ignoring the headless selection). Instead, each role is "satisfied" when
+        it is headless (needs no PTY) OR its prewarmed member is present; and at
+        least one prewarmed member must be present to distinguish the pool path
+        from the no-prewarm self-spawn path (tests).
         """
-        if self._uses_pool_pair():
-            return
-        try:
-            subprocess.run(
-                ["pkill", "-f", "claude --permission-mode bypassPermissions"],
-                check=False,
-                timeout=5,
-                capture_output=True,
-            )
-        except Exception:
-            pass
+        pm_ok = self._pm_is_headless() or self._prewarmed_pm_pty is not None
+        dev_ok = self._dev_is_headless() or self._prewarmed_dev_pty is not None
+        any_prewarmed = self._prewarmed_pm_pty is not None or self._prewarmed_dev_pty is not None
+        return pm_ok and dev_ok and any_prewarmed
+
+    def _close_pair_and_reap(self) -> None:
+        """Close PTYs, then reap orphaned process groups on the self-spawned path only.
+
+        Pool-backed pairs are owned by the PTYPool (close-on-release + PID-targeted
+        orphan kill at worker startup); signalling their process groups races the
+        pool's respawn, so we never touch them. On the self-spawned path (tests,
+        ping-pong), pexpect's force-close does not signal grandchildren (MCP/bash
+        subprocesses in the child's pgroup), so we capture each PTY's pgid BEFORE
+        close (close nulls _child, after which .pid returns None) and SIGTERM/SIGKILL
+        the group after close.
+        """
+        reap_pgids: list[tuple[str, int]] = []
+        if not self._uses_pool_pair():
+            for _name, _pty in (("pm_pty", self._pm_pty), ("dev_pty", self._dev_pty)):
+                if _pty is None:
+                    continue
+                _pid = getattr(_pty, "pid", None)
+                if _pid is None:
+                    continue
+                try:
+                    reap_pgids.append((_name, os.getpgid(_pid)))
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+        self._close_pair()
+        for _name, _pgid in reap_pgids:
+            try:
+                os.killpg(_pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError) as _e:
+                logger.debug("Could not SIGTERM %s pgid %s: %s", _name, _pgid, _e)
+                continue
+            time.sleep(0.5)
+            try:
+                os.killpg(_pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass  # group already gone after SIGTERM — expected
 
     # -- Startup phase ----------------------------------------------------
 
@@ -890,20 +1212,21 @@ class Container:
         that don't populate `turn_buffer` (unit-test mocks).
         """
         result = pty.read_until_idle(
-            min_content_bytes=min_content_bytes, timeout_s=CYCLE_IDLE_TIMEOUT_S
+            min_content_bytes=min_content_bytes,
+            timeout_s=CYCLE_IDLE_TIMEOUT_S,
+            on_read_iteration=self._pty_read_iteration_cb,
         )
         buffer = result.turn_buffer or result.buffer
         # Fire the PTY read-loop hook (path-B mid-run wedge detector, #1724).
         # Called unconditionally on every _cycle_idle so the bridge-adapter can
         # stamp last_pty_read_loop_at and diff-gate last_pty_activity_at.
         # Exceptions are swallowed — liveness signaling must never crash the run.
-        # NOTE: on_pty_read fires once per _cycle_idle return (turn boundary), not
-        # per inner read_until_idle poll iteration (pty_driver.py). A session wedged
-        # mid-turn leaves last_pty_read_loop_at stale between _cycle_idle calls —
-        # stage-1 ABSTAINs for that interval rather than false-firing. Safe for
-        # observe-only stage-1; stamp the inner loop before stage-2 wires recovery
-        # (requires adding a per-iteration callback param to PTYDriver.read_until_idle
-        # and plumbing through Container + BridgeAdapter).
+        # The per-iteration callback is wired via on_read_iteration (#1843 Gap B):
+        # every inner read_until_idle poll tick stamps last_pty_read_loop_at through
+        # the same bridge-adapter freshness writer (throttled to <=1/sec), so a
+        # session wedged mid-turn on the idle-fallback path refreshes liveness far
+        # sooner than the _cycle_idle window. This turn-boundary fire remains the
+        # final unconditional stamp for the completed cycle.
         if self._on_pty_read is not None:
             try:
                 self._on_pty_read(buffer)
@@ -914,6 +1237,385 @@ class Container:
                     "[granite-container] on_pty_read hook raised: %s", _pty_read_err
                 )
         return (result.saw_idle, buffer, result.idle_marker, result.elapsed_ms)
+
+    # -- Hook-driven turn boundary (plan #1688) ---------------------------
+
+    def _cycle_turn(
+        self,
+        pty: PTYDriver,
+        consumer: HookEdgeConsumer | None,
+        session_id: str | None,
+        *,
+        role: str,
+    ) -> TurnWaitResult:
+        """Wait for a single turn to complete — hook-driven or idle-fallback.
+
+        When hook-driven (the default) and a consumer is present, the
+        turn-completion authority is the Claude Code ``Stop`` hook edge (via
+        :meth:`_await_turn_end`), racing a crash/timeout watchdog. Otherwise
+        this is a thin wrapper over the idle heuristic (:meth:`_cycle_idle`) —
+        the documented fallback path (feature flag off, or no edge file).
+
+        Returns a :class:`TurnWaitResult` whose ``saw_turn`` plays the role of
+        the old ``saw_idle`` so the routing code downstream is unchanged; extra
+        fields (``needs_human``, ``escalated``, ``transcript_path``) drive the
+        needs-human route and the crash-escalation terminal state.
+        """
+        if not self._hook_driven or consumer is None:
+            saw, buf, marker, ms = self._cycle_idle(pty)
+            return TurnWaitResult(saw_turn=saw, buffer=buf, idle_marker=marker, elapsed_ms=ms)
+        return self._await_turn_end(pty, consumer, session_id, role=role)
+
+    def _await_turn_end(
+        self,
+        pty: PTYDriver,
+        consumer: HookEdgeConsumer,
+        session_id: str | None,
+        *,
+        role: str,
+    ) -> TurnWaitResult:
+        """Wait for the ``Stop`` edge, racing PTY EOF / crash and a timeout.
+
+        The wait is level-triggered against the append-only edge file (a Stop
+        written before the wait arms is still read — Race 1). On each tick:
+
+        1. Drain the edge file. A ``needs_human`` edge returns immediately
+           (the deterministic ``[/user]`` route). A ``turn_end`` (parent
+           ``Stop``, never ``SubagentStop`` — Practice 5) completes the turn;
+           the final message is read from the payload's ``transcript_path``.
+        2. Do a short liveness/badge read (``read_until_idle`` with a tiny
+           budget) so ``on_pty_read`` and byte accounting stay live.
+        3. If the PTY is dead, drain the edge file ONCE more (Race 2: a late
+           ``Stop`` preceding a clean EOF is honored as completion, not a
+           crash). A genuine crash (EOF, no ``turn_end``) resumes the session
+           via ``--resume`` + a verified ``continue`` (bounded by the
+           crash-resume cap → escalate).
+        4. Past the outer budget with the PTY alive but silent → ``saw_turn``
+           False (the caller reports ``pm_hang``); never an unbounded block.
+        """
+        start = time.monotonic()
+        deadline = start + self._hook_turn_end_wait_s
+        crash_attempts = 0
+        accumulated_bytes = 0
+        last_buffer = ""
+
+        while True:
+            # 1. Drain the edge file (level-triggered).
+            edges = consumer.poll()
+            needs = self._first_new_needs_human(edges, session_id)
+            if needs is not None:
+                return TurnWaitResult(
+                    saw_turn=False,
+                    buffer=last_buffer,
+                    idle_marker="",
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    needs_human=needs,
+                    accumulated_bytes=accumulated_bytes,
+                )
+            turn_edge = self._latest_turn_end(edges, session_id)
+            if turn_edge is not None:
+                return TurnWaitResult(
+                    saw_turn=True,
+                    buffer=last_buffer,
+                    idle_marker="",
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    transcript_path=turn_edge.transcript_path,
+                    accumulated_bytes=accumulated_bytes,
+                )
+
+            # 2. Liveness / badge pump (never the completion authority).
+            alive = self._pty_alive(pty)
+            idle = pty.read_until_idle(min_content_bytes=0, timeout_s=HOOK_POLL_INTERVAL_S)
+            last_buffer = idle.turn_buffer or idle.buffer or last_buffer
+            accumulated_bytes += len(idle.buffer)
+            self._fire_pty_read(last_buffer)
+
+            # 3. Crash detection with a Race-2 re-drain.
+            if not alive:
+                late = self._latest_turn_end(consumer.poll(), session_id)
+                if late is not None:
+                    return TurnWaitResult(
+                        saw_turn=True,
+                        buffer=last_buffer,
+                        idle_marker="",
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        transcript_path=late.transcript_path,
+                        accumulated_bytes=accumulated_bytes,
+                    )
+                crash_attempts += 1
+                if crash_attempts > self._crash_resume_cap:
+                    logger.error(
+                        "[granite-container] %s crashed %d times on one turn — "
+                        "escalating (crash-resume cap=%d)",
+                        role,
+                        crash_attempts,
+                        self._crash_resume_cap,
+                    )
+                    return TurnWaitResult(
+                        saw_turn=False,
+                        buffer=last_buffer,
+                        idle_marker="",
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        escalated=True,
+                        accumulated_bytes=accumulated_bytes,
+                    )
+                resumed = self._resume_crashed_pty(pty, role)
+                if resumed is None:
+                    logger.error(
+                        "[granite-container] %s crash-resume failed (no resume "
+                        "handle or spawn error) — escalating",
+                        role,
+                    )
+                    return TurnWaitResult(
+                        saw_turn=False,
+                        buffer=last_buffer,
+                        idle_marker="",
+                        elapsed_ms=int((time.monotonic() - start) * 1000),
+                        escalated=True,
+                        accumulated_bytes=accumulated_bytes,
+                    )
+                pty = resumed
+                deadline = time.monotonic() + self._hook_turn_end_wait_s  # re-arm
+                continue
+
+            # 4. Bounded timeout: alive + quiet + no Stop past the budget.
+            if time.monotonic() > deadline:
+                logger.warning(
+                    "[granite-container] %s no Stop edge within %.0fs while PTY "
+                    "alive — reporting no-turn (idle-equivalent hang)",
+                    role,
+                    self._hook_turn_end_wait_s,
+                )
+                # Concern #3: record the silent-hook fallback. This is the
+                # observable, fleet-wide signal that the hook contract is
+                # degrading on the pinned ``claude`` (alive + quiet + no Stop
+                # past the watchdog) — a rising count is the trigger to
+                # investigate before the idle fallback is ever removed (plan
+                # No-Gos [ORDERED]). Fail-silent (never raises).
+                record_hook_fallback(session_id, "stop_wait_timeout")
+                return TurnWaitResult(
+                    saw_turn=False,
+                    buffer=last_buffer,
+                    idle_marker="",
+                    elapsed_ms=int((time.monotonic() - start) * 1000),
+                    accumulated_bytes=accumulated_bytes,
+                )
+
+    @staticmethod
+    def _pty_alive(pty: PTYDriver) -> bool:
+        try:
+            return bool(pty.isalive())
+        except Exception:
+            return False
+
+    def _fire_pty_read(self, buffer: str) -> None:
+        """Fire the on_pty_read liveness hook (fail-silent)."""
+        if self._on_pty_read is not None:
+            try:
+                self._on_pty_read(buffer)
+            except Exception as e:
+                logger.debug("[granite-container] on_pty_read hook raised: %s", e)
+
+    def _fire_pty_read_raw(self, raw_text: str) -> None:
+        """ANSI-strip raw per-iteration turn text, then fire the liveness hook.
+
+        Used as the throttled Gap-B per-iteration callback (#1843):
+        `read_until_idle` passes the RAW (un-stripped) `_turn_text` buffer to
+        `on_read_iteration` on every inner poll iteration, and `_throttle`
+        gates how often the wrapped function actually runs. Doing the strip
+        here — inside the throttled function — means the (up to 256 KB)
+        `_strip_ansi` cost only pays on an admitted call (<=1/sec), not on
+        every iteration (perf finding, PR #1849 review).
+        """
+        self._fire_pty_read(_strip_ansi(raw_text))
+
+    @staticmethod
+    def _latest_turn_end(edges: list[HookEdge], session_id: str | None) -> HookEdge | None:
+        """Return the last parent ``Stop`` edge for this session, or None.
+
+        Filters by ``session_id`` so a Dev/subagent Stop never ends a PM turn.
+        ``SubagentStop`` is a distinct edge kind and is never returned here
+        (Practice 5 — native disambiguation, no filtering heuristic).
+        """
+        matching = [
+            e
+            for e in edges
+            if e.kind == TURN_END and (session_id is None or e.session_id == session_id)
+        ]
+        return matching[-1] if matching else None
+
+    def _first_new_needs_human(
+        self, edges: list[HookEdge], session_id: str | None
+    ) -> HookEdge | None:
+        """Return the first not-yet-seen ``needs_human`` edge for this session."""
+        for e in edges:
+            if e.kind != NEEDS_HUMAN:
+                continue
+            if session_id is not None and e.session_id not in (None, session_id):
+                continue
+            if e.ts in self._needs_human_seen:
+                continue
+            self._needs_human_seen.add(e.ts)
+            return e
+        return None
+
+    def _resume_crashed_pty(self, dead_pty: PTYDriver, role: str) -> PTYDriver | None:
+        """Resume a crashed PTY's claude session and re-arm it for the turn.
+
+        Captures the ``--resume <uuid>`` handle from the dead PTY, spawns a
+        fresh PTYDriver resuming that session (same cwd / model / env / hook
+        settings), and verified-submits a ``continue`` nudge (Practice 6
+        minimum — a dropped ``continue`` re-wedges the crash path). Swaps the
+        container's PTY reference by role. Returns the new PTY, or None if no
+        resume handle was captured or the spawn failed (→ caller escalates).
+        """
+        try:
+            resume_uuid = dead_pty.last_resume_uuid()
+        except Exception:
+            resume_uuid = None
+        if not resume_uuid:
+            return None
+        # Concern #6: mark the resume-owner window so external liveness-wedge
+        # recovery (#1815/#1823/#1728) can see the container already owns this
+        # EOF's --resume and no-op rather than issue a competing resume/kill.
+        self._crash_resume_in_flight = True
+        # PID-registration bookkeeping (plan #1851). `dead_pid` and
+        # `closed_ok` are initialized here — before `dead_pty.close()` —
+        # so both are in scope for the outer `finally` below, which is
+        # the ONLY placement that fires on every exit path (success,
+        # spawn-fail `return None`, and close-ok/write-fail `return
+        # None`). Dropping the dead PID only after a successful swap
+        # would strand a confirmed-dead PID in the registry forever on
+        # the write-fail path.
+        dead_pid = getattr(getattr(dead_pty, "_child", None), "pid", None)
+        closed_ok = False
+        try:
+            try:
+                dead_pty.close(force=True)
+                closed_ok = True
+            except Exception:
+                # Close failed/swallowed: the old process may still be
+                # alive. Leave `closed_ok` False so the outer `finally`
+                # KEEPS `dead_pid` registered — the sweep must still be
+                # able to reap it.
+                pass
+            try:
+                new_pty = PTYDriver(
+                    role=role,
+                    cwd=dead_pty.cwd,
+                    model=dead_pty._explicit_model,
+                    env=dead_pty._extra_env,
+                    settings_path=dead_pty._settings_path,
+                    resume_uuid=resume_uuid,
+                )
+                new_pty.spawn()
+                # Register the new PID immediately after `spawn()` returns
+                # and BEFORE `write()`. The OS process is already live at
+                # this point; `write()` below can raise, and registering
+                # only after a successful write would leak a live,
+                # unregistered `claude` process on the spawn-ok/write-fail
+                # path (this exact path returns `None` two lines down).
+                if self._on_pty_spawn is not None:
+                    new_pid = getattr(getattr(new_pty, "_child", None), "pid", None)
+                    if new_pid is not None:
+                        try:
+                            self._on_pty_spawn(new_pid)
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] on_pty_spawn during crash-resume raised: %s",
+                                e,
+                            )
+                new_pty.write(CRASH_RESUME_CONTINUE)
+            except Exception as e:
+                logger.error("[granite-container] %s crash-resume spawn failed: %s", role, e)
+                return None
+            if role == "dev":
+                self._dev_pty = new_pty
+            else:
+                self._pm_pty = new_pty
+            # Concern #6: bump the liveness signal so the cross-process wedge
+            # detector (which reads last_turn_at / last_pty_activity_at from
+            # Redis, not this in-process flag) sees demonstrable progress across
+            # the resume and does not fire its own recovery. Fail-silent —
+            # liveness signaling must never crash the run (mirrors on_turn guard).
+            if self._on_turn is not None:
+                try:
+                    self._on_turn()
+                except Exception as e:
+                    logger.warning("[granite-container] on_turn during crash-resume raised: %s", e)
+            logger.info(
+                "[granite-container] %s resumed via --resume %s after crash; "
+                "verified `continue` submitted",
+                role,
+                resume_uuid,
+            )
+            return new_pty
+        finally:
+            # Cleared after the re-spawn completes (success or failure); the
+            # window is intentionally narrow — just the re-spawn itself.
+            self._crash_resume_in_flight = False
+            # Drop the dead PID here (not after the successful swap) so
+            # this fires on EVERY exit path — including the close-ok/
+            # write-fail `return None` above. Gated on `closed_ok`: a
+            # swallowed close failure means the old process may still be
+            # alive, so it must stay registered for the sweep to reap it.
+            if closed_ok and dead_pid is not None and self._on_pty_despawn is not None:
+                try:
+                    self._on_pty_despawn(dead_pid)
+                except Exception as e:
+                    logger.warning(
+                        "[granite-container] on_pty_despawn during crash-resume raised: %s",
+                        e,
+                    )
+
+    def _needs_human_message(self, edge: HookEdge) -> str:
+        """Build the human-facing text for a needs-human edge (best effort).
+
+        Prefers the hook payload's own message (Notification ``message``,
+        AskUserQuestion ``tool_input`` question); falls back to the PM's last
+        assistant text (the question it just asked) read from the edge's
+        transcript_path; then to a generic prompt. Never raises.
+        """
+        payload = edge.payload or {}
+        msg = payload.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+        tool_input = payload.get("tool_input")
+        if isinstance(tool_input, dict):
+            question = tool_input.get("question") or tool_input.get("prompt")
+            if isinstance(question, str) and question.strip():
+                return question.strip()
+        try:
+            if edge.transcript_path:
+                text = last_assistant_text(edge.transcript_path)
+                if text:
+                    return text
+        except Exception:
+            pass
+        return "This needs your input to continue — please reply."
+
+    def _deliver_needs_human(self, edge: HookEdge, result: ContainerResult) -> None:
+        """Route a needs-human edge to the human via the [/user] callback."""
+        message = self._needs_human_message(edge)
+        if self._on_user_payload is not None:
+            try:
+                self._on_user_payload(message)
+                result.user_facing_routed = True
+            except Exception as e:
+                logger.warning(
+                    "[granite-container] needs_human delivery via _on_user_payload failed: %s",
+                    e,
+                )
+        result.exit_message = message
+
+    def _deliver_crash_escalation(self, result: ContainerResult) -> None:
+        """Deliver the operator-terminal escalation after crash-resume exhaustion."""
+        if self._on_user_payload is not None:
+            try:
+                self._on_user_payload(CRASH_ESCALATION_MESSAGE)
+                result.user_facing_routed = True
+            except Exception as e:
+                logger.warning("[granite-container] crash escalation delivery failed: %s", e)
 
     # -- Startup phase ----------------------------------------------------
 
@@ -1046,7 +1748,24 @@ class Container:
         except Exception as e:
             result.exit_reason = "exception"
             result.exit_message = _truncate_exit_message(f"spawn failed: {e}")
-            self._run_pkill_fallback()
+            # Reap any partially-spawned PTY children — iterate BOTH PTYs
+            for _pty in [self._pm_pty, self._dev_pty]:
+                if _pty is not None:
+                    _pid = getattr(_pty, "pid", None)
+                    if _pid is not None:
+                        try:
+                            _pgid = os.getpgid(_pid)
+                            if _pty.isalive():
+                                os.killpg(_pgid, signal.SIGTERM)
+                                time.sleep(0.5)
+                                if _pty.isalive():
+                                    os.killpg(_pgid, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError, OSError) as _e:
+                            logger.debug(
+                                "Could not kill PTY pid %s during spawn cleanup: %s",
+                                _pid,
+                                _e,
+                            )
             return result
 
         logger.info(
@@ -1073,9 +1792,17 @@ class Container:
             _pm_prime_cmd = _resolve_pm_prime_cmd(self._session_type)
             self._prime_session(self._pm_pty, _pm_prime_cmd, include_user_message=True)
             logger.info("container: PM prime done")
-            logger.info("container: priming Dev")
-            self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=True)
-            logger.info("container: Dev prime done; entering startup loop")
+            # A headless Dev role has no PTY to prime here — HeadlessRoleDriver
+            # applies its own first-turn persona priming (slash command or
+            # --append-system-prompt) at the first [/dev] dispatch (plan #1842).
+            if not self._dev_is_headless():
+                logger.info("container: priming Dev")
+                self._prime_session(self._dev_pty, DEV_PRIME_SLASH_CMD, include_user_message=True)
+                logger.info("container: Dev prime done; entering startup loop")
+            else:
+                logger.info(
+                    "container: Dev is headless — skipping PTY prime; entering startup loop"
+                )
 
             # Startup-phase loop. Watch both PTYs for known startup
             # events (trust-folder, update notice — the parser
@@ -1107,7 +1834,14 @@ class Container:
 
             while time.monotonic() < startup_deadline:
                 pm_idle = self._startup_cycle_idle(self._pm_pty)
-                dev_idle = self._startup_cycle_idle(self._dev_pty)
+                # A headless Dev role has no PTY to cycle — it never participates
+                # in the PTY startup/idle machinery. Treat it as settled with an
+                # empty edge buffer so the both-idle break gates on PM alone
+                # (plan #1842). The default both-PTY path is byte-identical.
+                if self._dev_is_headless():
+                    dev_idle = (True, "", "", "", 0)
+                else:
+                    dev_idle = self._startup_cycle_idle(self._dev_pty)
                 pm_saw_idle, pm_edge, pm_level, pm_marker, pm_ms = pm_idle
                 dev_saw_idle, dev_edge, dev_level, dev_marker, dev_ms = dev_idle
 
@@ -1264,21 +1998,30 @@ class Container:
             # entry this cycle (content-identity guard; immune to intra-turn
             # tool_use/tool_result writes that defeated the old mtime guard).
             pm_prime_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
-            pm_prime_idle, pm_prime_buf, pm_prime_marker, pm_prime_ms = self._cycle_idle(
-                self._pm_pty
+            prime_wait = self._cycle_turn(
+                self._pm_pty, self._pm_consumer, self._pm_session_id, role="pm"
             )
-            if not pm_prime_idle:
+            pm_prime_buf = prime_wait.buffer
+            if prime_wait.needs_human is not None:
+                self._deliver_needs_human(prime_wait.needs_human, result)
+                result.exit_reason = "pm_user"
+            elif prime_wait.escalated:
+                self._deliver_crash_escalation(result)
+                result.exit_reason = "exception"
+                result.exit_message = "crash-resume cap exhausted during prime turn"
+            elif not prime_wait.saw_turn:
                 result.exit_reason = "pm_hang"
                 result.exit_message = (
-                    f"PM did not reach idle after prime within {CYCLE_IDLE_TIMEOUT_S}s"
+                    f"PM did not reach turn-end after prime within {CYCLE_IDLE_TIMEOUT_S}s"
                 )
             else:
-                result.total_pm_pty_bytes += len(pm_prime_buf)
+                result.total_pm_pty_bytes += prime_wait.accumulated_bytes or len(pm_prime_buf)
                 # Read PM's last assistant text verbatim from the JSONL
                 # transcript (zero-LLM path: no classify on painted pm_buf).
+                prime_read_path = prime_wait.transcript_path or pm_transcript
                 pm_prime_text = (
-                    last_assistant_text(pm_transcript, baseline_text_count=pm_prime_baseline)
-                    if pm_transcript
+                    last_assistant_text(prime_read_path, baseline_text_count=pm_prime_baseline)
+                    if prime_read_path
                     else ""
                 )
                 if pm_prime_text:
@@ -1328,28 +2071,115 @@ class Container:
                                 "PM buffer unchanged; falling through to fresh idle read"
                             )
 
+                    # Mid-run steering injection (Part 1, issue #1779). Drain any
+                    # pending steering messages and inject them into PM's PTY before
+                    # PM's next classification. The drain is fail-silent (a raising
+                    # callback must never crash the loop, mirroring _on_turn).
+                    drained: list[dict] = []
+                    if self._poll_steering is not None:
+                        try:
+                            drained = self._poll_steering() or []
+                        except Exception as e:
+                            logger.warning(
+                                "[granite-container] poll_steering callback raised: %s", e
+                            )
+                            drained = []
+                    if drained:
+                        # An abort message takes precedence: deliver the fixed
+                        # user-facing string and break cleanly (steer_abort). The
+                        # delivery MUST precede the break — output emitted after the
+                        # break is dropped (Task 2b strict ordering contract).
+                        if any(m.get("is_abort") for m in drained):
+                            if self._on_user_payload is not None:
+                                try:
+                                    self._on_user_payload(STEER_ABORT_USER_MESSAGE)
+                                    result.user_facing_routed = True
+                                except Exception as e:
+                                    logger.warning(
+                                        "[granite-container] steer_abort delivery via "
+                                        "_on_user_payload failed: %s",
+                                        e,
+                                    )
+                            result.exit_reason = "steer_abort"
+                            result.exit_message = STEER_ABORT_USER_MESSAGE
+                            break
+
+                        # Non-abort steering: cycle PM to idle BEFORE writing so the
+                        # injection lands as a fresh user turn and does NOT interrupt
+                        # PM's in-flight tool execution (_cycle_idle waits for PM to
+                        # finish whatever it is doing). This ordering is the whole
+                        # guarantee of "steering does not corrupt PM's current turn".
+                        steer_idle, _, _, _ = self._cycle_idle(self._pm_pty)
+                        if not steer_idle:
+                            # PM is wedged. The messages were already atomically
+                            # LPOP'd from Redis, so they are lost — no re-queue
+                            # (that would re-introduce the cross-process race). Log
+                            # the loss so an operator can re-deliver via
+                            # `valor-session steer`.
+                            logger.warning(
+                                "pm_hang during steering injection — %d msg(s) lost: %r",
+                                len(drained),
+                                [m.get("text") for m in drained],
+                            )
+                            result.exit_reason = "pm_hang"
+                            result.exit_message = (
+                                f"PM did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s "
+                                "during steering injection"
+                            )
+                            break
+                        for m in drained:
+                            text = (m.get("text") or "").strip()
+                            if not text:
+                                # Skip empty/whitespace steering messages.
+                                continue
+                            sender = m.get("sender") or "operator"
+                            self._pm_pty.write(f"\n[Steering from {sender}]: {text}\n")
+                        # Fall through to the existing per-turn idle read below, which
+                        # (via the content-identity pm_baseline guard) captures PM's
+                        # NEW response to the steering and routes it normally.
+
                     # Snapshot the count of text-bearing PM assistant entries
                     # before the idle read so last_assistant_text can require a
                     # NEW text-bearing entry this cycle (content-identity guard).
                     pm_baseline = text_bearing_count(pm_transcript) if pm_transcript else 0
 
-                    # Wait for PM idle.
-                    pm_idle, pm_buf, pm_marker, pm_ms = self._cycle_idle(self._pm_pty)
-                    if not pm_idle:
+                    # Wait for the PM turn to complete. Hook-driven (default):
+                    # the parent Stop edge is the authority (#1688); the idle
+                    # heuristic is the documented fallback. The needs-human and
+                    # crash-escalation edges are handled before classification.
+                    wait = self._cycle_turn(
+                        self._pm_pty, self._pm_consumer, self._pm_session_id, role="pm"
+                    )
+                    pm_buf = wait.buffer
+                    if wait.needs_human is not None:
+                        # Deterministic [/user] route — no classifier guess.
+                        self._deliver_needs_human(wait.needs_human, result)
+                        result.exit_reason = "pm_user"
+                        break
+                    if wait.escalated:
+                        self._deliver_crash_escalation(result)
+                        result.exit_reason = "exception"
+                        result.exit_message = "crash-resume cap exhausted"
+                        break
+                    if not wait.saw_turn:
                         result.exit_reason = "pm_hang"
                         result.exit_message = (
-                            f"PM did not reach idle within {CYCLE_IDLE_TIMEOUT_S}s"
+                            f"PM did not reach turn-end within {CYCLE_IDLE_TIMEOUT_S}s"
                         )
                         break
 
-                    result.total_pm_pty_bytes += len(pm_buf)
+                    result.total_pm_pty_bytes += wait.accumulated_bytes or len(pm_buf)
 
                     # Read PM's last assistant text verbatim from the JSONL
                     # transcript (zero-LLM: classify on transcript, not
-                    # painted PTY buffer pm_buf).
+                    # painted PTY buffer pm_buf). The hook edge's transcript_path
+                    # (the Stop payload) is preferred — it is the flush-safe
+                    # source confirmed by the Stop; falls back to the precomputed
+                    # session transcript on the idle path.
+                    read_path = wait.transcript_path or pm_transcript
                     pm_text = (
-                        last_assistant_text(pm_transcript, baseline_text_count=pm_baseline)
-                        if pm_transcript
+                        last_assistant_text(read_path, baseline_text_count=pm_baseline)
+                        if read_path
                         else ""
                     )
                     if pm_text:
@@ -1420,8 +2250,7 @@ class Container:
                     result.resume_uuid = self._pm_pty.last_resume_uuid()
             except Exception:
                 pass
-            self._close_pair()
-            self._run_pkill_fallback()
+            self._close_pair_and_reap()
 
         return result
 
@@ -1556,6 +2385,58 @@ class Container:
             self._pm_pty.write(PM_COMPLIANCE_NUDGE)
             return RouteOutcome(should_break=False, exit_reason=None)
 
+        # [/dev:steer] mid-task steering (Part 2, issue #1779). The classifier
+        # parses [/dev:steer] into harness="steer" — a RESERVED suffix that is NOT
+        # a real builder harness. Intercept it here, before _get_builder (which
+        # must never receive "steer"), and write the (token-stripped) payload
+        # straight to the Dev PTY as a Dev turn WITHOUT blocking on Dev idle:
+        # write-and-continue semantics — Dev picks it up on its next read (Risk 2).
+        if getattr(classification, "harness", None) == STEER_HARNESS_SUFFIX:
+            # Defensive token-strip: the single-line form `[/dev:steer] fix X`
+            # fails the strict PREFIX_TOKEN_RE, falls to the fallback, and returns
+            # the WHOLE tail INCLUDING the literal token as payload. Writing that
+            # verbatim would poison Dev's instruction. The re.sub is a no-op for
+            # the strict (already token-free) path and removes the leaked token
+            # for the single-line fallback path.
+            clean = re.sub(r"\[/dev:steer\]\s*", "", dev_prompt, count=1).strip()
+            if not clean:
+                # Token-only [/dev:steer] is a no-op steer — nudge PM (composes
+                # with the empty-[/dev] guard above).
+                self._pm_pty.write(PM_COMPLIANCE_NUDGE)
+                return RouteOutcome(should_break=False, exit_reason=None)
+            # Headless Dev has no persistent PTY to write-and-continue into; each
+            # turn is a fresh `claude -p` and the next turn carries context via
+            # --resume. Dispatch the cleaned steer payload as a normal headless
+            # Dev turn (plan #1842) rather than dereferencing a None PTY.
+            if self._dev_is_headless():
+                return self._run_dev_turn_headless(clean, turn_index, classification, result)
+            # Submit the steer as a Dev turn (no _get_builder, no Dev-idle wait).
+            self._dev_pty.write(clean + "\n")
+            # Write a one-line continuation ack to PM so it produces its next turn
+            # rather than hanging on an empty idle read (Risk 3).
+            self._pm_pty.write(PM_DEV_STEER_ACK)
+            turn_record = TurnRecord(
+                turn_index=turn_index,
+                pm_idle_ms=0,
+                dev_idle_ms=0,
+                classification="dev_steer",
+                compliance_miss=classification.compliance_miss,
+                pm_first_line=classification.raw_first_line,
+                routed_payload_chars=len(clean),
+                pm_idle_marker="",
+                dev_idle_marker="",
+            )
+            result.turns.append(turn_record)
+            return RouteOutcome(should_break=False, exit_reason=None)
+
+        # Headless Dev leg (plan #1842 B1/B3): when Dev runs headless, dispatch
+        # the turn through HeadlessRoleDriver.run_turn (metered `claude -p`)
+        # instead of the PTY builder harness. The container-owned post-turn logic
+        # (empty-return fallback, _last_dev_report, PM relay + contract reminder,
+        # TurnRecord append) is preserved in the shared _finish_dev_turn path.
+        if self._dev_is_headless():
+            return self._run_dev_turn_headless(dev_prompt, turn_index, classification, result)
+
         # Resolve the builder harness for this turn.
         # harness_name is None → default claude PTY path; unknown names
         # route a compliance nudge back to PM.
@@ -1614,6 +2495,118 @@ class Container:
             routed_payload_chars=len(dev_prompt),
             pm_idle_marker="",
             dev_idle_marker=builder.last_dev_marker,
+        )
+        result.turns.append(turn_record)
+        return RouteOutcome(should_break=False, exit_reason=None)
+
+    # -- Headless Dev leg (plan #1842) ------------------------------------
+
+    def _get_dev_headless_driver(self) -> HeadlessRoleDriver:
+        """Construct (once) and return the reusable Dev HeadlessRoleDriver.
+
+        Built lazily on the first headless Dev turn and reused across turns so
+        the captured claude_session_id enables ``--resume`` and first-turn
+        persona priming happens exactly once (plan #1842 B3). The driver reuses
+        #1688's hook plumbing: the per-session ``--settings`` file registers the
+        Stop-hook forwarder that writes TURN_END to ``dev_hook_edge_file``, and
+        the driver's own HookEdgeConsumer over that file reconciles turn-end.
+        """
+        if self._dev_role_driver is None:
+            self._dev_role_driver = HeadlessRoleDriver(
+                role="dev",
+                # Bridge session_id — the key accumulate_session_tokens uses to
+                # land metered_* on the AgentSession record.
+                session_id=self._agent_session_id or self._dev_session_id or "",
+                working_dir=self.cwd or "",
+                model=self._dev_model,
+                settings_path=self._dev_settings_path,
+                edge_file=self._dev_hook_edge_file,
+                env=self._session_env,
+                project_root=self.cwd,
+                harness_fn=self._headless_harness_fn,
+            )
+        return self._dev_role_driver
+
+    def _run_dev_turn_headless(
+        self,
+        dev_prompt: str,
+        turn_index: int,
+        classification: Any,
+        result: ContainerResult,
+    ) -> RouteOutcome:
+        """Dispatch one Dev turn through HeadlessRoleDriver (plan #1842 B3).
+
+        Mirrors the container-owned post-turn logic of the PTY builder path so
+        the orchestration is transport-agnostic: empty-return fallback →
+        ``DEV_REPORT_UNAVAILABLE``, ``_last_dev_report`` capture, PM relay with
+        ``PM_TURN_CONTRACT_REMINDER``, ``TurnRecord`` append, and hung → dev_hang.
+        The driver / harness own turn-end reconciliation (prefer the #1688
+        ``TURN_END`` HookEdge, fall back to clean exit) and metered accounting
+        (``metered_*`` on the AgentSession). A headless turn carries NO PTY bytes,
+        so ``total_dev_pty_bytes`` is left untouched — the disjoint metered_* /
+        total_* partition (Race 1) keeps mixed-transport accounting
+        non-clobbering.
+        """
+        import asyncio  # noqa: PLC0415
+
+        driver = self._get_dev_headless_driver()
+        # The container loop is sync (run() is executed via asyncio.to_thread, so
+        # this worker thread has no running loop); asyncio.run drives the single
+        # per-turn subprocess to completion.
+        try:
+            outcome = asyncio.run(driver.run_turn(dev_prompt))
+        except Exception as e:  # noqa: BLE001
+            logger.error("[granite-container] headless Dev turn raised: %s", e)
+            result.exit_message = _truncate_exit_message(f"headless Dev turn error: {e}")
+            return RouteOutcome(should_break=True, exit_reason="exception")
+
+        # Hung subprocess (bounded-wait timeout) → dev_hang, mirroring the PTY
+        # builder's last_hung branch.
+        if outcome.hung:
+            result.exit_message = "Dev headless turn timed out (hung subprocess)"
+            return RouteOutcome(should_break=True, exit_reason="dev_hang")
+
+        # Hard subprocess failure (binary missing, thinking-block corruption,
+        # nonzero exit). empty_output is NOT a hard failure — it takes the
+        # DEV_REPORT_UNAVAILABLE fallback below, mirroring the PTY empty-transcript
+        # path so the PM can still continue.
+        if outcome.exit_reason and outcome.exit_reason != "empty_output":
+            result.exit_message = _truncate_exit_message(
+                f"Dev headless turn failed: {outcome.exit_reason}"
+            )
+            return RouteOutcome(should_break=True, exit_reason="exception")
+
+        dev_text = outcome.reply_text
+        if not dev_text:
+            logger.warning(
+                "[granite-container] headless Dev returned empty; "
+                "falling back to transcript_fallback_count bump"
+            )
+            result.transcript_fallback_count += 1
+            dev_text = DEV_REPORT_UNAVAILABLE
+
+        # Container-owned: capture the Dev text for the wrap-up guard (issue #1647).
+        self._last_dev_report = dev_text
+
+        # Relay Dev's verbatim text to PM's PTY with the per-turn contract
+        # reminder (issue #1719), identical to the PTY path.
+        await_pm, _, _, _ = self._cycle_idle(self._pm_pty)
+        if not await_pm:
+            result.exit_message = "PM did not reach idle before Dev report"
+            return RouteOutcome(should_break=True, exit_reason="pm_hang")
+        self._pm_pty.write(dev_text + PM_TURN_CONTRACT_REMINDER)
+
+        turn_record = TurnRecord(
+            turn_index=turn_index,
+            pm_idle_ms=0,
+            dev_idle_ms=0,
+            classification="dev",
+            compliance_miss=classification.compliance_miss,
+            pm_first_line=classification.raw_first_line,
+            routed_payload_chars=len(dev_prompt),
+            pm_idle_marker="",
+            # Record which signal ended the headless turn (hook_edge / result).
+            dev_idle_marker=outcome.turn_end_source,
         )
         result.turns.append(turn_record)
         return RouteOutcome(should_break=False, exit_reason=None)
@@ -1818,8 +2811,7 @@ class Container:
             logger.warning("ping_pong failed: %s", e)
             return False
         finally:
-            self._close_pair()
-            self._run_pkill_fallback()
+            self._close_pair_and_reap()
 
 
 # ---------------------------------------------------------------------------
