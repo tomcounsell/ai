@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1826
 last_comment_id:
+revision_applied: true
 ---
 
 # Move Hot-Path Redis Off the Event Loop
@@ -106,8 +107,11 @@ site) has been updated in place to its current location.
   `_has_pending = bool(AgentSession.query.filter(..., status="pending"))` — **still
   synchronous, still on-loop, verbatim.** Was `:1367-1376` at plan time; drifted ~+282 lines.
   The lost-wakeup guard comment (`:1645-1648`), the `if _has_pending: continue` (`:1659`),
-  and `event.clear()` (`:1664`) → `await event.wait()` (`:1668`) ordering are all intact. The
-  plan's inline `1649-1658` references now point at the real site.
+  and `event.clear()` (`:1664`) → `await event.wait()` (`:1668`) ordering are all intact on
+  HEAD. The plan's inline `1649-1658` references now point at the real site. **Note:** the
+  build deliberately *inverts* this HEAD ordering to **clear-then-check** for the async form
+  (see Technical Approach §2 and Risk 1) — the sync check-before-clear is unsafe once an
+  `await` sits at the check.
 - **#1820 composition — verified safe.** #1820 (PR/commit `72ba5d50`) rewrote 513 lines of
   `agent_session_queue.py`, migrating the drain loop from `asyncio.Semaphore` to a
   `SlotLeaseRegistry`. Crucially, the slot is released via `registry.release_unbound()` at
@@ -211,11 +215,15 @@ against source (below): a real async client is infeasible because Popoto's entir
   unset — verified at `config/redis_bootstrap.py:122-129`). Concurrent offloaded calls each
   check out their own connection; there is no shared mutable client state to corrupt.
 - Offload runs on a **dedicated bounded** `ThreadPoolExecutor` (`_redis_io_pool`,
-  `REDIS_IO_POOL_MAX_WORKERS`, default 4, clamped ≥1) — a bulkhead mirroring
+  `REDIS_IO_POOL_MAX_WORKERS`, default **2**, clamped ≥1) — a bulkhead mirroring
   `_reflection_pool` so a slow Redis cannot exhaust the shared asyncio default pool that
-  granite probes / `session_executor` also use. There is exactly ONE offload seam
-  (`offload_redis` on `_redis_io_pool`); the plan does NOT mix in raw `asyncio.to_thread`
-  (which would route calls through the unmeasured shared default pool and defeat the metric).
+  granite probes / `session_executor` also use. A serialized drain-loop awaiter issues one
+  offload at a time, so 2 workers cover the realistic overlap of two drain loops idle-checking
+  concurrently without over-provisioning (see resolved Open Question 1). The read hot path uses
+  ONE instrumented seam (`offload_redis` on `_redis_io_pool`); the plan adds no NEW raw
+  `asyncio.to_thread` on that path (which would route calls through the unmeasured shared
+  default pool and defeat the metric). The six pre-existing enqueue-path `to_thread` offloads
+  are grandfathered, not migrated (out of scope).
 - **Invariant (documented + guarded by a No-Go):** executor `max_workers` must stay ≤ the
   redis-py pool capacity. Because the pool is unbounded today, any small worker count is
   safe; if anyone later sets `max_connections`, it must be ≥ `REDIS_IO_POOL_MAX_WORKERS +
@@ -228,12 +236,16 @@ against source (below): a real async client is infeasible because Popoto's entir
 ## Data Flow
 
 **Hot path (drain loop, `agent_session_queue.py`):**
-1. Per-worker drain loop pops a session; if `None`, releases the semaphore.
-2. **Idle-check (was on-loop, now off-loop):** `_has_pending = await offload_redis(lambda: bool(AgentSession.query.filter(..., status="pending")))` — runs on `_redis_io_pool`; the loop stays free while Redis is queried.
-3. If pending → `continue` (skip the wait). Else → `event.clear()` → `await event.wait()`
-   (standalone) / `asyncio.wait_for(event.wait(), DRAIN_TIMEOUT)` (bridge). **Ordering
-   preserved:** the pending-check still happens BEFORE `event.clear()` (the existing
-   lost-wakeup mitigation, `:1363-1366`).
+1. Per-worker drain loop pops a session; if `None`, releases the slot lease.
+2. **`event.clear()` FIRST** (the async-safe inversion — see Risk 1). Clearing before the
+   Redis query means any producer that enqueues + `event.set()`s *after* this clear is either
+   observed by the query below (Redis is source of truth) or leaves the event set so the
+   subsequent `event.wait()` returns immediately. There is no window where a set is swallowed.
+3. **Idle-check (was on-loop, now off-loop):** `_has_pending = bool(await offload_redis(lambda: list(AgentSession.query.filter(..., status="pending"))))` — runs on `_redis_io_pool`; the loop stays free while Redis is queried.
+4. If pending → `continue` (skip the wait). Else → bound the wait in **both** modes:
+   `await asyncio.wait_for(event.wait(), DRAIN_TIMEOUT)` — bridge already did this; standalone
+   is now bounded too (defensive belt-and-suspenders: on `TimeoutError` the loop re-checks
+   Redis rather than parking forever on a bare `await event.wait()`).
 
 **Startup (`worker/__main__.py`, sequential) — UNCHANGED by this plan:**
 1. `register_worker_pid()` → Redis-verify scan (`:699`) → cleanup/recovery scans
@@ -250,18 +262,23 @@ against source (below): a real async client is infeasible because Popoto's entir
    The tick task itself is untouched and stays on-loop.
 
 **Metric surface:**
-4. `offload_redis` times **every** offloaded call (there is only the one hot-path site),
-   updates module-global `last`/`max` latency gauges, and emits a threshold-gated WARNING;
-   `ui/app.py::dashboard_json` surfaces the gauges — so 100% of offloaded Redis I/O is measured.
+5. `offload_redis` times the **drain-loop idle-check** call it wraps, feeds a rolling
+   time-windowed latency buffer (recent samples, aged out by `REDIS_LATENCY_WINDOW_S`), and
+   emits a threshold-gated WARNING; `ui/app.py::dashboard_json` surfaces windowed **p95** and
+   windowed **max** (not a never-resetting lifetime high-water mark) under the label
+   *drain-loop idle-check latency*. The six pre-existing enqueue-path `asyncio.to_thread`
+   offloads and the `_reflection_pool` remain un-instrumented and grandfathered (see Success
+   Criteria) — the metric measures the read hot path's bulkhead-isolated seam, not all Redis I/O.
 
 ## Architectural Impact
 
 - **New dependencies:** none (stdlib `concurrent.futures.ThreadPoolExecutor`,
   `asyncio.get_running_loop().run_in_executor`).
 - **Interface changes:** a new `agent/redis_offload.py` with `offload_redis(fn, *args)`,
-  the `_redis_io_pool`, and latency-gauge accessors. No signature changes to existing
-  functions; one call site (the drain-loop idle-check) changes from sync to `await`, and
-  `ui/app.py::dashboard_json` gains a read-only metric block.
+  the `_redis_io_pool`, and windowed-latency accessors (`get_redis_latency_p95`,
+  `get_redis_latency_max`, `get_last_redis_latency`, `reset_max_redis_latency`). No signature
+  changes to existing functions; one call site (the drain-loop idle-check) changes from sync to
+  a clear-then-check `await`, and `ui/app.py::dashboard_json` gains a read-only metric block.
 - **Coupling:** slightly *reduces* on-loop coupling to Redis; adds a bounded, isolated
   bulkhead. The hot-path call site becomes `async`-aware (it is already inside an async
   function).
@@ -301,20 +318,24 @@ slow Redis. Startup is left entirely untouched.
 
 - **`agent/redis_offload.py`** — a new module holding:
   - `_redis_io_pool = ThreadPoolExecutor(max_workers=REDIS_IO_POOL_MAX_WORKERS,
-    thread_name_prefix="redis-io-")` (default 4, clamped ≥1) — the bulkhead.
-  - `async def offload_redis(fn, *args, **kwargs)` — `await loop.run_in_executor(_redis_io_pool, functools.partial(fn, *args, **kwargs))`, timing the call, updating latency gauges, and emitting a threshold-gated WARNING. A `REDIS_OFFLOAD_ENABLED` kill switch (default true) makes it a synchronous pass-through for rollback.
-  - Latency gauges (`get_last_redis_latency()`, `get_max_redis_latency()`, `reset_max`) — module-global floats, GIL-atomic.
-- **Hot-path cut-over (the ONLY code cut-over)** (`agent_session_queue.py:1649-1658`):
-  replace the synchronous `_has_pending = bool(AgentSession.query.filter(...))` with the
-  awaited `offload_redis(...)` form, **preserving the check-before-`event.clear()` ordering**.
-  No sync fallback left. Every offloaded Redis call in the codebase after this change goes
-  through the single instrumented `offload_redis` seam.
+    thread_name_prefix="redis-io-")` (default **2**, clamped ≥1) — the bulkhead.
+  - `async def offload_redis(fn, *args, **kwargs)` — `await loop.run_in_executor(_redis_io_pool, functools.partial(fn, *args, **kwargs))`, timing the call, appending the sample to a rolling time-windowed buffer, and emitting a threshold-gated WARNING. A `REDIS_OFFLOAD_ENABLED` kill switch (default true) makes it a synchronous pass-through for rollback.
+  - Windowed-latency accessors (`get_redis_latency_p95()`, `get_redis_latency_max()` over the recent window, `get_last_redis_latency()`, and `reset_max_redis_latency()`) — backed by a `deque` of `(timestamp, dt)` samples pruned to `REDIS_LATENCY_WINDOW_S` (default 300s). The window means a single slow blip ages out instead of latching the dashboard red forever.
+- **Hot-path cut-over (the ONLY read-hot-path cut-over)** (`agent_session_queue.py:1649-1668`):
+  invert the HEAD ordering to **clear-then-check** — `event.clear()` FIRST, then
+  `_has_pending = bool(await offload_redis(lambda: list(AgentSession.query.filter(...))))`,
+  then `if _has_pending: continue`, and only fall to a **bounded**
+  `await asyncio.wait_for(event.wait(), DRAIN_TIMEOUT)` on an empty post-clear query (both
+  standalone and bridge). This is the async-safe replacement for the old sync
+  check-before-clear (see Risk 1). No sync fallback left at the site.
 - **Startup scans left untouched** (`worker/__main__.py:691,699,772,786,811,827,841,849,931`):
   NOT offloaded. The beacon (`:985`) is created after all of them, so they protect no liveness,
   and their order is load-bearing — see No-Gos.
-- **Operator metric**: `ui/app.py::dashboard_json` gains a `redis_offload` block
-  (`last_latency_s`, `max_latency_s`); a WARNING logs when a single call exceeds
-  `REDIS_OFFLOAD_SLOW_THRESHOLD` (default ~1s).
+- **Operator metric**: `ui/app.py::dashboard_json` gains a `redis_offload` block labeled
+  *drain-loop idle-check latency* (`p95_latency_s`, `max_latency_s` — both over the rolling
+  window — plus `last_latency_s`); a WARNING logs when a single call exceeds
+  `REDIS_OFFLOAD_SLOW_THRESHOLD` (default ~1s). The block measures the read hot path only, not
+  the grandfathered enqueue-path `to_thread` offloads.
 - **#1815 tick untouched**: `_loop_tick_task` and `last_loop_tick` are neither moved nor
   reworked; the plan only *relieves* the loop of the blocking calls that starved them.
 
@@ -332,23 +353,64 @@ progressing → no loop-wide freeze, no false dead-man's-switch abort.
 **1. `agent/redis_offload.py` (new, mirrors `reflection_scheduler` bulkhead):**
 ```python
 import asyncio, functools, logging, os, time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
 # Bulkhead pool for off-loop Redis I/O. Isolated from the shared asyncio default
 # pool so a slow Redis cannot starve granite probes / session_executor offloads.
-# Grain of salt: default is PROVISIONAL — tune after observing real latency in logs.
-REDIS_IO_POOL_MAX_WORKERS = max(1, int(os.environ.get("REDIS_IO_POOL_MAX_WORKERS", "4")))
+# A serialized drain-loop awaiter issues ONE offload at a time; 2 covers realistic
+# two-drain-loop overlap without over-provisioning. Do NOT couple to
+# MAX_CONCURRENT_SESSIONS (offloads are per-idle-check, not per-session).
+REDIS_IO_POOL_MAX_WORKERS = max(1, int(os.environ.get("REDIS_IO_POOL_MAX_WORKERS", "2")))
 REDIS_OFFLOAD_SLOW_THRESHOLD = float(os.environ.get("REDIS_OFFLOAD_SLOW_THRESHOLD", "1.0"))
+REDIS_LATENCY_WINDOW_S = float(os.environ.get("REDIS_LATENCY_WINDOW_S", "300"))
 REDIS_OFFLOAD_ENABLED = os.environ.get("REDIS_OFFLOAD_ENABLED", "true").strip().lower() \
     not in ("", "0", "false")
 
 _redis_io_pool = ThreadPoolExecutor(
     max_workers=REDIS_IO_POOL_MAX_WORKERS, thread_name_prefix="redis-io-"
 )
+# Rolling time-windowed latency samples: (monotonic_ts, dt). A slow blip ages out
+# of the window instead of latching a lifetime high-water mark red forever.
+_samples: deque = deque()
+_samples_lock = Lock()
 _last_latency: float = 0.0
-_max_latency: float = 0.0
+
+def _record(dt: float) -> None:
+    global _last_latency
+    now = time.monotonic()
+    with _samples_lock:
+        _last_latency = dt
+        _samples.append((now, dt))
+        cutoff = now - REDIS_LATENCY_WINDOW_S
+        while _samples and _samples[0][0] < cutoff:
+            _samples.popleft()
+
+def _windowed_sorted():
+    cutoff = time.monotonic() - REDIS_LATENCY_WINDOW_S
+    with _samples_lock:
+        return sorted(dt for ts, dt in _samples if ts >= cutoff)
+
+def get_redis_latency_max() -> float:
+    vals = _windowed_sorted()
+    return vals[-1] if vals else 0.0
+
+def get_redis_latency_p95() -> float:
+    vals = _windowed_sorted()
+    if not vals:
+        return 0.0
+    return vals[min(len(vals) - 1, int(round(0.95 * (len(vals) - 1))))]
+
+def get_last_redis_latency() -> float:
+    return _last_latency
+
+def reset_max_redis_latency() -> None:
+    """Operator reset of the windowed max/p95 gauges."""
+    with _samples_lock:
+        _samples.clear()
 
 async def offload_redis(fn, *args, **kwargs):
     """Run a synchronous Popoto/redis-py callable off the event loop.
@@ -356,7 +418,6 @@ async def offload_redis(fn, *args, **kwargs):
     redis-py's ConnectionPool is thread-safe; each offloaded call checks out its
     own connection. When REDIS_OFFLOAD_ENABLED is false, runs inline (rollback).
     """
-    global _last_latency, _max_latency
     call = functools.partial(fn, *args, **kwargs)
     if not REDIS_OFFLOAD_ENABLED:
         return call()  # rollback: on-loop behavior
@@ -366,20 +427,23 @@ async def offload_redis(fn, *args, **kwargs):
         return await loop.run_in_executor(_redis_io_pool, call)
     finally:
         dt = time.monotonic() - t0
-        _last_latency = dt
-        if dt > _max_latency:
-            _max_latency = dt
+        _record(dt)
         if dt > REDIS_OFFLOAD_SLOW_THRESHOLD:
             logger.warning("[redis-offload] slow Redis call: %.2fs (threshold %.2fs)",
                            dt, REDIS_OFFLOAD_SLOW_THRESHOLD)
 ```
-Plus `get_last_redis_latency()` / `get_max_redis_latency()` accessors.
 
-**2. Hot-path cut-over (`agent_session_queue.py:1649-1658`):**
+**2. Hot-path cut-over — clear-then-check (`agent_session_queue.py:1649-1668`):**
+Adding an `await` at the idle-check makes the old *check-before-clear* ordering unsafe: a
+producer could `enqueue + event.set()` during the in-flight offload, and the later
+`event.clear()` would swallow that wakeup, parking a standalone worker on a bare
+`await event.wait()`. Invert to **clear-then-check** (Redis is source of truth):
 ```python
 from agent.redis_offload import offload_redis  # module-level import
 
-# ... inside the drain loop, session is None branch, BEFORE event.clear():
+# ... inside the drain loop, `session is None` branch, after releasing the slot lease:
+event.clear()  # CLEAR FIRST — async-safe ordering (see Risk 1)
+
 _has_pending = bool(
     await offload_redis(
         lambda: list(
@@ -390,10 +454,24 @@ _has_pending = bool(
         )
     )
 )
+if _has_pending:
+    continue  # work is pending — skip the wait
+
+# Empty post-clear query: wait for a signal, BOUNDED in both modes so a
+# truly-lost wakeup self-heals on the next iteration instead of parking forever.
+try:
+    await asyncio.wait_for(event.wait(), timeout=DRAIN_TIMEOUT)
+except TimeoutError:
+    pass  # fall through, re-pop / re-check at top of loop
 ```
-The `lambda` materializes the query result **inside the thread** (Popoto's
-`query.filter` returns a lazy result; wrap in `list(...)` so all Redis I/O happens
-off-loop, then `bool(...)` on the loop). The check stays BEFORE `event.clear()`.
+Why this is safe: because `event.clear()` runs *before* the query, any enqueue that fires
+after the clear is either (a) visible to the query → `continue`, or (b) fires after the query
+returns empty, leaving the event **set** so `event.wait()` returns immediately. No set is lost.
+The `lambda` materializes the lazy `query.filter` result with `list(...)` **inside the thread**
+so all Redis I/O happens off-loop; `bool(...)` runs on the loop. Bounding the standalone wait
+with `DRAIN_TIMEOUT` (was a bare `await event.wait()`) is a defensive belt-and-suspenders net —
+the clear-then-check ordering already prevents the lost wakeup; the timeout guarantees recovery
+even against an unforeseen edge. Preserve the existing slot-lease re-acquire before the retry pop.
 
 **3. Startup scans — NO code change (`worker/__main__.py`):** leave `:691` `register_worker_pid()`,
 the `:699` verify scan (incl. its `except → sys.exit(1)`), the `:772/786/811/827/841/849`
@@ -402,9 +480,10 @@ in-order. They run before the beacon is armed (`:985`), so offloading them prote
 and their order is load-bearing (3a before 3b, `:832-839`). Descoped — see No-Gos.
 
 **4. Metric surface (`ui/app.py::dashboard_json`):** add
-`"redis_offload": {"last_latency_s": get_last_redis_latency(), "max_latency_s": get_max_redis_latency()}`
-under `health`. Import the accessors lazily inside `dashboard_json` (matching the existing
-lazy-import style there).
+`"redis_offload": {"label": "drain-loop idle-check latency", "p95_latency_s": get_redis_latency_p95(), "max_latency_s": get_redis_latency_max(), "last_latency_s": get_last_redis_latency()}`
+under `health`. Both `p95`/`max` are over the rolling `REDIS_LATENCY_WINDOW_S` window (a blip
+ages out), NOT a lifetime high-water mark. Import the accessors lazily inside `dashboard_json`
+(matching the existing lazy-import style there).
 
 **5. #1815 composition (do NOT touch):** leave `_loop_tick_task`, `bump_loop_tick`,
 `get_loop_tick`, and the watchdog thread exactly as-is. The only interaction is that the
@@ -430,21 +509,40 @@ test.
 - [ ] `REDIS_OFFLOAD_ENABLED=false` runs the callable inline (rollback path) and still
       returns the correct result. Test the pass-through branch.
 - [ ] A `query.filter` returning an empty result → `_has_pending` is `False` and the loop
-      proceeds to `event.clear()` exactly as before. Test parity with the pre-cut-over path.
+      (having already cleared) proceeds to the bounded `event.wait()`. Test parity of the
+      clear-then-check path with the pre-cut-over drain semantics.
 
 ### Error State Rendering
 - [ ] A slow call (> `REDIS_OFFLOAD_SLOW_THRESHOLD`) emits the WARNING with the measured
       duration. Test captures the log record.
-- [ ] `dashboard_json` renders the `redis_offload` block with numeric latencies (never
-      `None`/`KeyError`) even before any call has run (gauges init to 0.0). Test the shape.
+- [ ] `dashboard_json` renders the `redis_offload` block with numeric windowed latencies
+      (`p95_latency_s`, `max_latency_s`, `last_latency_s` — never `None`/`KeyError`) even before
+      any call has run (accessors return 0.0 on an empty window). Test the shape + the label.
+- [ ] **Windowed decay (finding 2):** record a slow sample, advance the clock past
+      `REDIS_LATENCY_WINDOW_S`, record a fast sample, and assert `get_redis_latency_max()` drops
+      to the fast value — the max does NOT latch the old high-water mark. Also assert
+      `reset_max_redis_latency()` clears the window.
+
+### Lost-Wakeup / Clear-Then-Check Coverage (finding 1)
+- [ ] **Enqueue-during-offload does not park (acceptance):** in the drain loop with a slowed
+      offload (the offloaded idle-check sleeps), fire `enqueue_agent_session()` + `event.set()`
+      *while the offload is in flight*. Assert the loop does NOT park on `event.wait()`: because
+      `event.clear()` ran before the query, the enqueue is either seen by the (now-slow) query →
+      `continue`, or leaves the event set → `event.wait()` returns at once. The worker must pick
+      up the enqueued session, not stall.
+- [ ] **Bounded standalone wait:** with no enqueue, assert a standalone drain loop's
+      `event.wait()` is wrapped in `asyncio.wait_for(..., DRAIN_TIMEOUT)` and re-checks Redis on
+      `TimeoutError` rather than blocking on a bare unbounded `await event.wait()`.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_agent_session_queue_async.py` — UPDATE: the drain-loop idle-check is
-      now `await offload_redis(...)`. Any test that patches `AgentSession.query.filter` must
-      still observe the call (it now runs in a thread); assert the check-before-`event.clear()`
-      ordering and that a pending result still `continue`s. If a test asserts the call happens
-      synchronously on the loop, REPLACE that assertion with the offloaded form.
+      now `event.clear()` **then** `await offload_redis(...)` (clear-then-check inversion). Any
+      test that patches `AgentSession.query.filter` must still observe the call (it now runs in a
+      thread); assert the NEW clear-then-check ordering (clear precedes the query), that a
+      pending result still `continue`s, and that the standalone wait is bounded by
+      `asyncio.wait_for(..., DRAIN_TIMEOUT)`. If a test asserts the old sync check-before-clear
+      ordering, REPLACE it with the clear-then-check offloaded form.
 - [ ] `tests/unit/test_agent_session_queue.py` — UPDATE (verify-only): confirm drain
       semantics (pop → idle-check → clear → wait) are unchanged by the offload.
 - [ ] `tests/unit/test_worker_startup.py` / `tests/unit/test_worker_startup_validation.py` /
@@ -459,13 +557,16 @@ test.
 - [ ] `tests/unit/test_worker_session_sweep.py` — UPDATE (verify-only): `_sweep_dead_worker_sessions`
       is NOT offloaded (startup is descoped); confirm the sweep result/ordering is unchanged.
 - [ ] New: `tests/unit/test_redis_offload.py` — CREATE: pass-through when disabled; clamp
-      `max_workers` ≥ 1; exception propagation; latency gauge update in `finally`; slow-call
-      WARNING; concurrent calls run on distinct threads (thread-safety smoke).
+      `max_workers` ≥ 1; exception propagation; latency `_record` update in `finally`; slow-call
+      WARNING; concurrent calls run on distinct threads (thread-safety smoke); windowed p95/max
+      decay past `REDIS_LATENCY_WINDOW_S`; `reset_max_redis_latency()` clears the window.
 - [ ] New: `tests/integration/test_slow_redis_no_loop_freeze.py` — CREATE (the acceptance
       criterion): with an artificially slowed Redis (patch the offloaded callable / global
       client to `time.sleep(N)` inside the thread), assert (a) `get_loop_tick()` keeps
       advancing while the slow call is in flight, (b) an unrelated coroutine makes progress,
-      (c) no `_self_kill`/SIGABRT is triggered.
+      (c) no `_self_kill`/SIGABRT is triggered, and (d) an `enqueue_agent_session()` fired
+      *during* the in-flight offload does NOT park the drain loop — the clear-then-check ordering
+      picks the work up (finding 1).
 
 ## Rabbit Holes
 
@@ -489,22 +590,28 @@ test.
   combined executor workers (`REDIS_IO_POOL_MAX_WORKERS` + `REFLECTION_POOL_WORKERS` +
   default-pool peak). A too-tight pool turns off-loop calls into `BlockingConnectionPool`
   waits — re-introducing the very stall this plan removes. Leave the pool unbounded (current).
-- **Chasing a lost-wakeup fix in the drain loop.** The check-before-`event.clear()` race is
-  pre-existing (`:1363-1366`); the definitive fix is the notify-listener design, out of scope.
-  Preserve the existing ordering; do not attempt to redesign the wait/notify here.
+- **Redesigning the wait/notify machinery.** The clear-then-check inversion (Risk 1) is the
+  minimal async-safe fix for THIS cut-over — do NOT go further and rebuild the notify-listener
+  or event/lease protocol. Apply clear-then-check + the bounded `wait_for` exactly as specified;
+  a broader wait/notify redesign is out of scope.
 
 ## Risks
 
-### Risk 1: The added `await` in the drain loop widens the pre-existing lost-wakeup window
-**Impact:** Between the offloaded idle-check returning `False` and `event.clear()`, an
-`enqueue_agent_session()` `event.set()` could be lost, parking the worker (indefinitely in
-standalone mode) until the next notify.
-**Mitigation:** The window already exists with the sync check; the offload only lengthens it
-by the executor round-trip. The check stays BEFORE `event.clear()` (the existing mitigation),
-and bridge mode bounds the wait at `DRAIN_TIMEOUT=1.5s`. The pubsub notify listener
-(`agent_session_queue.py:939`) re-signals on new work. Document the ordering invariant inline;
-do not redesign the wait/notify (Rabbit Hole). Test asserts a pending result observed at the
-check still `continue`s without clearing.
+### Risk 1: An `await` at the idle-check makes the HEAD *check-before-clear* ordering lose wakeups
+**Impact:** With the old sync check-before-`event.clear()`, adding `await offload_redis(...)`
+at the check opens a real yield point: a producer can `enqueue + event.set()` during the
+in-flight offload, then the subsequent `event.clear()` swallows the wakeup and a standalone
+worker parks forever on a bare `await event.wait()`. This is a NEW lost-wakeup hole, not merely
+a widened pre-existing one — the async form demands a different ordering.
+**Mitigation (clear-then-check):** Invert to `event.clear()` FIRST, then the offloaded query,
+then `if _has_pending: continue`. Because the clear precedes the query and **Redis is the
+source of truth**, any enqueue after the clear is either seen by the query (`continue`) or
+leaves the event set so `event.wait()` returns immediately — no set is lost. This also still
+covers the original "notify fired during `_pop_agent_session`" case (the query re-observes the
+pending row). Defensively, bound the standalone wait with `asyncio.wait_for(event.wait(),
+DRAIN_TIMEOUT)` so even an unforeseen edge self-heals on the next iteration instead of parking.
+The pubsub notify listener (`agent_session_queue.py:1085`) re-signals on new work. A slow-Redis
+test fires an enqueue during the in-flight offload and asserts the loop does not park.
 
 ### Risk 2: A slow Redis saturates the bounded `_redis_io_pool`
 **Impact:** If more than `REDIS_IO_POOL_MAX_WORKERS` offloaded calls block on a slow Redis,
@@ -533,15 +640,16 @@ descope introduced no drift. No `gather`, no `await` reordering, no code change 
 ## Race Conditions
 
 ### Race 1: Idle-check offload result vs. a concurrent enqueue `event.set()`
-**Location:** `agent_session_queue.py` drain loop, `:1363-1382`.
+**Location:** `agent_session_queue.py` drain loop, `:1637-1691`.
 **Trigger:** `enqueue_agent_session()` fires `event.set()` while the offloaded idle-check is
-in flight or between its return and `event.clear()`.
+in flight (during the `await`) or just after it returns empty.
 **Data prerequisite:** The idle-check reads `status="pending"` for `worker_key`.
-**State prerequisite:** The check must run BEFORE `event.clear()` (lost-wakeup mitigation).
-**Mitigation:** Preserve the existing check-before-clear ordering; the offload does not
-reorder it. If work was pending at check time, `continue` skips the wait. The bounded
-`DRAIN_TIMEOUT` (bridge) and the pubsub notify listener re-signal, so a lost notify is
-recovered. Same guarantee as pre-fix, wider window by one executor round-trip (Risk 1).
+**State prerequisite:** `event.clear()` must run BEFORE the offloaded query (clear-then-check).
+**Mitigation:** With clear-then-check, the clear happens first, so a concurrent `event.set()`
+is never swallowed: the query (Redis = source of truth) either observes the newly-pending row
+→ `continue`, or the set survives to make the bounded `event.wait()` return immediately. The
+`DRAIN_TIMEOUT`-bounded wait (now both modes) and the pubsub notify listener are additional
+recovery nets. The offload's `await` no longer sits inside a check-before-clear window (Risk 1).
 
 ### Race 2: Concurrent offloaded calls checking out Redis connections
 **Location:** `_redis_io_pool` threads → shared `POPOTO_REDIS_DB` `ConnectionPool`.
@@ -624,10 +732,12 @@ No agent integration required — this is a worker-internal performance/resilien
 ### Feature Documentation
 - [ ] Update `docs/features/redis-durability.md` (created by #1814) — replace the "off-loop
       hot path" line in its deferred-roadmap section with a concrete "Off-Loop Redis Access"
-      section describing the `_redis_io_pool` bulkhead, the single `offload_redis` seam, the one
-      cut-over site (the drain-loop idle-check), why the startup scans are deliberately left
-      on-loop (beacon unarmed at boot), and the executor-vs-async decision. (Per the
-      no-historical-artifacts rule: describe the new status quo, not "was deferred, now done".)
+      section describing the `_redis_io_pool` bulkhead, the `offload_redis` seam for the read
+      hot path (the one drain-loop idle-check cut-over site, with clear-then-check ordering), the
+      windowed p95/max *drain-loop idle-check latency* metric, why the six enqueue-path
+      `to_thread` offloads are grandfathered and the startup scans deliberately left on-loop
+      (beacon unarmed at boot), and the executor-vs-async decision. (Per the no-historical-artifacts
+      rule: describe the new status quo, not "was deferred, now done".)
 - [ ] Forward-link from `docs/features/worker-liveness-recovery.md` (#1815) noting that the
       off-loop hot path is what keeps the dead-man's-switch tick from false-firing under a
       slow Redis (the composition guarantee).
@@ -639,25 +749,37 @@ No agent integration required — this is a worker-internal performance/resilien
       connection) and the `REDIS_OFFLOAD_ENABLED` rollback.
 - [ ] Comment the `_redis_io_pool` bulkhead rationale + the "executor workers ≤ pool capacity"
       invariant, and mark the env defaults "provisional, tune after observing real latency".
-- [ ] Comment at the hot-path cut-over that the pending-check MUST stay before `event.clear()`.
+- [ ] Comment at the hot-path cut-over that `event.clear()` MUST run BEFORE the offloaded query
+      (clear-then-check) — the async `await` makes the reverse ordering lose wakeups (Risk 1).
 
 ## Success Criteria
 
-- [ ] The hot-path drain query (`agent_session_queue.py:1649-1658`) executes off the event
-      loop via `offload_redis`; no synchronous `AgentSession.query.filter(...)` remains on the
-      loop at that site (no parallel sync path). This is the ONLY offloaded site.
+- [ ] The hot-path drain query (`agent_session_queue.py:1649-1668`) executes off the event
+      loop via `offload_redis` using **clear-then-check** ordering (`event.clear()` before the
+      offloaded query); no synchronous `AgentSession.query.filter(...)` remains on the loop at
+      that site. This is the ONLY read-hot-path offload site.
+- [ ] The standalone drain wait is bounded by `asyncio.wait_for(event.wait(), DRAIN_TIMEOUT)`
+      (no bare unbounded `await event.wait()`); an enqueue fired during the in-flight offload
+      does not park the loop (finding-1 acceptance test passes).
 - [ ] The startup scans (`worker/__main__.py:691,699,772,786,811,827,841,849,931`) are
       **unchanged** — still synchronous, on-loop, and in-order (incl. 3a-before-3b and the
       verify-scan `sys.exit(1)`). Descoped: the beacon is unarmed at boot, so there is no
       liveness to protect. Startup tests pass unchanged as a regression guard.
-- [ ] Every offloaded Redis call routes through the single instrumented `offload_redis` seam
-      on `_redis_io_pool` — no raw `asyncio.to_thread` offload is introduced — so 100% of
-      offloaded Redis I/O is latency-measured (the "operator-visible latency" criterion holds).
+- [ ] No NEW raw `asyncio.to_thread` is introduced on the read hot path — the drain-loop
+      idle-check routes through the instrumented `offload_redis` seam on the isolated
+      `_redis_io_pool` bulkhead. (The six pre-existing enqueue-path `to_thread` offloads at
+      `agent_session_queue.py:326,368,380,409,781,1085` and the `_reflection_pool` are
+      **grandfathered** — out of scope, deliberately un-instrumented. The operator-visible
+      latency criterion is satisfied for the read hot path, which is the site this plan moves
+      off-loop; the metric is bulkhead-isolated latency for that seam, not all Redis I/O.)
 - [ ] Under an artificially slowed Redis: `get_loop_tick()` keeps advancing, an unrelated
       coroutine makes progress, and no `_self_kill`/SIGABRT fires (acceptance test passes).
 - [ ] The #1815 `_loop_tick_task` and `last_loop_tick` beacon are unchanged (on-loop).
-- [ ] Redis-call latency is operator-visible: `/dashboard.json` exposes a `redis_offload`
-      block and a WARNING logs on calls exceeding `REDIS_OFFLOAD_SLOW_THRESHOLD`.
+- [ ] Drain-loop idle-check latency is operator-visible: `/dashboard.json` exposes a
+      `redis_offload` block labeled *drain-loop idle-check latency* with **windowed** `p95` and
+      `max` (a blip ages out of `REDIS_LATENCY_WINDOW_S` rather than latching red forever;
+      `reset_max_redis_latency()` clears it), and a WARNING logs on calls exceeding
+      `REDIS_OFFLOAD_SLOW_THRESHOLD`.
 - [ ] `REDIS_OFFLOAD_ENABLED=false` restores prior on-loop behavior at **every** cut-over site
       — because the sole cut-over site routes through `offload_redis`, the kill switch is a
       complete rollback (no un-reverted `to_thread` path exists).
@@ -686,7 +808,7 @@ NEVER builds directly.
 
 - **Validator (loop-freeze)**
   - Name: freeze-validator
-  - Role: verify off-loop cut-over, single-mechanism (`offload_redis`-only) invariant, slow-Redis acceptance test, #1815 tick composition, and that startup scans are unchanged
+  - Role: verify the clear-then-check off-loop cut-over + bounded wait (finding 1), no-NEW-raw-`to_thread`-on-read-hot-path invariant, windowed p95/max metric (finding 2), slow-Redis acceptance test, #1815 tick composition, and that startup scans are unchanged
   - Agent Type: validator
   - Resume: true
 
@@ -705,10 +827,14 @@ NEVER builds directly.
 - **Assigned To**: offload-builder
 - **Agent Type**: async-specialist
 - **Parallel**: true
-- Create `agent/redis_offload.py`: `_redis_io_pool` (clamped ≥1), `offload_redis` (pass-through
-  when disabled; latency gauges in `finally`; slow-call WARNING), gauge accessors.
-- Cut over `agent_session_queue.py:1649-1658` to `await offload_redis(lambda: list(...))`,
-  preserving the check-before-`event.clear()` ordering. Leave NO sync fallback at the site.
+- Create `agent/redis_offload.py`: `_redis_io_pool` (`max_workers=2`, clamped ≥1),
+  `offload_redis` (pass-through when disabled; rolling-window latency `_record` in `finally`;
+  slow-call WARNING), windowed accessors (`get_redis_latency_p95`, `get_redis_latency_max`,
+  `get_last_redis_latency`, `reset_max_redis_latency`).
+- Cut over `agent_session_queue.py:1649-1668` to **clear-then-check**: `event.clear()` FIRST,
+  then `_has_pending = bool(await offload_redis(lambda: list(...)))`, then `if _has_pending: continue`,
+  then a bounded `await asyncio.wait_for(event.wait(), DRAIN_TIMEOUT)` in BOTH modes (no bare
+  `await event.wait()`). Leave NO sync fallback at the site.
 
 ### 2. Dashboard metric block
 - **Task ID**: build-metric
@@ -729,9 +855,13 @@ NEVER builds directly.
 - **Agent Type**: validator
 - **Parallel**: false
 - Run the slow-Redis acceptance test: tick keeps advancing, unrelated coroutine progresses,
-  no SIGABRT. Confirm the ONLY offloaded site is the hot-path drain query via `offload_redis`
-  (no raw `to_thread` offload added). Confirm the startup scans are unchanged from HEAD (still
-  synchronous, in-order, `sys.exit(1)` intact). Confirm #1815 tick untouched.
+  no SIGABRT, and an enqueue fired during the in-flight offload does not park the loop
+  (clear-then-check, finding 1). Confirm the read hot path routes through `offload_redis` with
+  clear-then-check ordering and a bounded standalone wait, and that no NEW raw `to_thread` was
+  added on that path (the six grandfathered enqueue-path offloads are unchanged). Confirm the
+  windowed p95/max metric (finding 2) and its *drain-loop idle-check* label (finding 3). Confirm
+  the startup scans are unchanged from HEAD (still synchronous, in-order, `sys.exit(1)` intact).
+  Confirm #1815 tick untouched.
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -770,24 +900,36 @@ NEVER builds directly.
 | No async-redis ORM rewrite | `grep -rc "redis.asyncio" agent/redis_offload.py agent/agent_session_queue.py` | match count == 0 |
 | Metric on dashboard | `grep -c "redis_offload" ui/app.py` | output > 0 |
 | Rollback switch present | `grep -c "REDIS_OFFLOAD_ENABLED" agent/redis_offload.py` | output > 0 |
+| Pool default is 2 (finding 4) | `python3 -c "import re; print(1 if re.search(r'REDIS_IO_POOL_MAX_WORKERS\", \"2\"', open('agent/redis_offload.py').read()) else 0)"` | output `1` |
+| Not coupled to session concurrency (finding 4) | `grep -c "MAX_CONCURRENT_SESSIONS" agent/redis_offload.py` | match count == 0 |
+| Windowed p95 accessor present (finding 2) | `grep -c "def get_redis_latency_p95" agent/redis_offload.py` | output == 1 |
+| Windowed max + reset present (finding 2) | `grep -c "def reset_max_redis_latency\|def get_redis_latency_max" agent/redis_offload.py` | output == 2 |
+| No lifetime high-water gauge (finding 2) | `grep -c "get_max_redis_latency" agent/redis_offload.py ui/app.py` | match count == 0 |
+| Dashboard exposes windowed p95 (finding 2) | `grep -c "p95_latency_s" ui/app.py` | output > 0 |
+| Dashboard metric labeled idle-check (finding 3) | `grep -c "drain-loop idle-check" ui/app.py` | output > 0 |
+| Standalone wait is bounded (finding 1) | `grep -c "wait_for(event.wait()" agent/agent_session_queue.py` | output ≥ 1 |
+| No bare unbounded standalone wait (finding 1) | `python3 -c "import re; s=open('agent/agent_session_queue.py').read(); print(s.count('await event.wait()'))"` | output `0` (standalone wait now bounded by wait_for) |
 | Startup ordering unchanged | `grep -n "Step 3a\|Step 3b" worker/__main__.py` | 3a line precedes 3b line (unchanged from HEAD) |
 
 ## Open Questions
 
-1. **Executor pool sizing.** Is `REDIS_IO_POOL_MAX_WORKERS=4` the right provisional default,
-   or should it track `MAX_CONCURRENT_SESSIONS` (default 8) so every drain loop can offload
-   without queueing behind the bulkhead? Plan ships 4 (conservative); tune after observing
-   `max_latency_s` under load.
+1. **Executor pool sizing — RESOLVED (`max_workers=2`, decoupled).** A serialized drain-loop
+   awaiter issues exactly one offload at a time, so a single drain loop needs ≈1 concurrent
+   offload; 2 covers the realistic overlap of two drain loops idle-checking at once without
+   over-provisioning. Ships **2** (was 4). Explicitly **not** coupled to
+   `MAX_CONCURRENT_SESSIONS` — offloads are per-idle-check, not per-session, so scaling with
+   session concurrency would over-size the bulkhead. Env-tunable via `REDIS_IO_POOL_MAX_WORKERS`
+   if the windowed p95 shows queueing.
 2. **Slow-call threshold.** `REDIS_OFFLOAD_SLOW_THRESHOLD=1.0s` for the WARNING — right level,
    or align to `socket_timeout` (5s) so it only fires near the retry ceiling? Plan ships 1s to
    surface early degradation.
 3. **`register_worker_pid` offload — RESOLVED (dropped).** It is a single startup write, not a
    scan, and runs before the beacon is armed. Offloading it was scope creep with no liveness
    benefit; it stays on-loop and unchanged, consistent with the startup-scan descope.
-4. **Offload mechanism — RESOLVED (one mechanism).** There is exactly ONE offload seam:
-   `offload_redis` on the instrumented, dedicated `_redis_io_pool`. The earlier draft's split
-   (some sites via `offload_redis`, some via raw `asyncio.to_thread` on the shared default pool)
-   is removed — it left most sites unmeasured and routed heavy scans through the very default
-   pool the bulkhead protects. With the startup scans descoped, the sole offloaded site (the
-   hot-path drain query) routes through `offload_redis`, so 100% of offloaded Redis I/O is
-   measured. No open question remains; this is a coherent single mechanism.
+4. **Offload mechanism — RESOLVED (one NEW seam on the read hot path).** The plan adds exactly
+   ONE new offload seam — `offload_redis` on the instrumented, dedicated `_redis_io_pool` — for
+   the read hot path (the drain-loop idle-check). The earlier draft's split (some sites via
+   `offload_redis`, some via raw `asyncio.to_thread`) is removed. The six pre-existing
+   enqueue-path `to_thread` offloads (`:326,368,380,409,781,1085`) and `_reflection_pool` are
+   grandfathered and left as-is (out of scope), so the metric measures the read-hot-path seam's
+   bulkhead-isolated latency, not literally all Redis I/O in the process. No open question remains.
