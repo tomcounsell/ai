@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1878
 last_comment_id:
+revision_applied: true
 ---
 
 # Redefine no_progress recovery around TUI liveness + add a "continue"-nudge rung before kill
@@ -102,7 +103,7 @@ The fix is to connect the existing producer to the prime path — no new machine
 3. **Stamping (what should happen)**: with `on_read_iteration=self._pty_read_iteration_cb` wired, each inner poll tick (throttled to ≤1/s) calls `bridge_adapter._make_pty_read_callback` → stamps `last_pty_read_loop_at` (unconditional) + `last_pty_activity_at` (only when `_normalize_pty_buffer(buffer)` changed — #1768 gate).
 4. **Health check (consumer)**: `_agent_session_health_check` loop → D0 gate at `session_health.py:4090`: `_never_started_past_grace(entry)` true → re-read `fresh_ns` → `_prime_pty_alive(fresh_ns, now)`. With fields now fresh: Branch 3 (read-loop within `HEARTBEAT_FRESHNESS_WINDOW=90s`) and Branch 4 (activity within `NEVER_STARTED_PTY_LIVENESS_SECS=90s`) pass → returns `True` → `continue` (defer kill).
 5. **Frozen frame (genuine death)**: TUI stops repainting → `_normalize_pty_buffer` stable → `last_pty_activity_at` stops advancing → after 90s Branch 4 returns `False` → `_prime_pty_alive` returns `False` → recovery proceeds.
-6. **New nudge rung (part B)**: in `_apply_recovery_transition`'s `no_progress` branch, before the cancel/requeue, for a PTY session that hasn't been nudged within the reprieve window: `push_steering_message(session_id, "continue", "session-health")`, stamp `last_continue_nudge_at`, and defer the kill this tick (return `False`). On the next recovery decision, if the frame is still frozen and the reprieve elapsed → proceed to cancel/requeue.
+6. **New nudge rung (part B)**: in `_apply_recovery_transition`'s `no_progress` branch, before the cancel/requeue, **only for the post-prime #944 running-scan producer** (`reason != "no progress signal observed (never_started past grace)"`) and only for a PTY session with a frozen frame: on first observation (`last_continue_nudge_at is None`) `push_steering_message(session_id, "continue", "session-health")`, stamp `last_continue_nudge_at`, and defer the kill this tick (return `False`). On the next recovery decision, if still within `CONTINUE_NUDGE_REPRIEVE_SECS` → keep waiting (no re-nudge); once the reprieve has elapsed and the frame is still frozen → proceed to cancel/requeue. The **never-started (D0) producer is excluded** — it fires mid-prime where the nudge cannot drain, so it goes straight to the part-A deferral / kill path with no nudge.
 7. **Backstop**: if the read loop never stamps at all (totally dead prime), `_prime_pty_alive` Branch 2/3 stays kill-eligible AND the container's own `STARTUP_HARD_CEILING_S=600s` exits the run — no infinite hang.
 
 ## Architectural Impact
@@ -143,10 +144,16 @@ Slow granite cold start → prime `read_until_idle` ticks fire throttled callbac
 fields advance → health check D0 gate → `_prime_pty_alive` returns True → **defer kill**
 (session keeps priming) → prime completes → steady-state.
 
-Genuinely wedged session → frame stops changing → `last_pty_activity_at` goes stale (90s) →
-`_prime_pty_alive` returns False → recovery decision → **push `continue` nudge**, stamp
-`last_continue_nudge_at`, defer this tick → next decision: still frozen past reprieve →
+Genuinely wedged *post-prime* session (#944 running-scan producer) → frame stops changing →
+`last_pty_activity_at` goes stale (90s) → recovery decision → `last_continue_nudge_at is None`
+→ **push `continue` nudge**, stamp `last_continue_nudge_at`, defer this tick → next decision
+within reprieve → **wait** (no re-nudge) → next decision past reprieve, still frozen →
 **cancel + requeue** (recovery attempt consumed).
+
+Never-started prime wedge (D0 producer, zero SDK turns) → **no nudge** (gated out) → part-A
+`_prime_pty_alive` deferral protects it while the frame changes; once the frame freezes past
+the 90s activity window it goes straight to the kill path, backstopped by
+`STARTUP_HARD_CEILING_S (600s)`.
 
 ### Technical Approach
 
@@ -176,11 +183,32 @@ Insert in `_apply_recovery_transition`, inside the `reason_kind == "no_progress"
 **after** the `_should_kill_no_progress` Tier-2 gate returns "kill" (L2295) and **before**
 the task cancel (L2320) / `recovery_attempts` bump (L2376):
 
-- **Gate**: only for PTY sessions (`getattr(entry, "last_pty_read_loop_at", None) is not None`) whose normalized frame is frozen. Non-PTY sessions skip the rung entirely (resolves OQ4 for the nudge path).
-- **Budget**: **one nudge per wedge**, not per recovery attempt. The nudge sits *before* the `recovery_attempts` bump, so it does **not** count against `MAX_RECOVERY_ATTEMPTS`. Idempotency via a new nullable field `last_continue_nudge_at`: if it is unset or older than the reprieve window, push the nudge, stamp it, and defer (return `False`); if it is within the reprieve window, the reprieve is still in flight → also defer; if the frame is *still frozen* and the reprieve has *elapsed*, proceed to kill (the nudge did not un-stick it).
+- **Producer gate (resolves BLOCKER 2 — do NOT nudge the never-started producer).** There are two `no_progress` producers that reach this branch, and only one can actually drain a nudge:
+  - **D0 / never-started** (`session_health.py:4136`) passes the fixed literal `reason="no progress signal observed (never_started past grace)"`. This producer fires **precisely when the session is still mid-prime / frozen with zero SDK turns** — it structurally cannot consume a `continue` steering message (no turn-boundary drain during `_prime_session`, see Rabbit Hole + OQ1). Nudging it would burn the reprieve window uselessly and repeat the #1798 "assumed-but-unenforced gate" pattern.
+  - **#944 running-scan orphan** (`session_health.py:3229`) passes a `reason` beginning `"no progress signal, orphaned running row (no in-scope handle, #944), …"`. This is a genuine *post-prime, steady-state* running row (it has a turn count and has been running past the min-running guard) — it **can** drain a nudge at its next turn boundary. This is the only producer the nudge is scoped to.
+  - **Predicate:** gate the nudge on `reason != "no progress signal observed (never_started past grace)"`. Because the never-started reason is a fixed literal and the running-scan reason never equals it, this cleanly admits only the post-prime producer. (Implementation may equivalently thread a `never_started: bool` kwarg from both call sites; the string check is the least-code option and is regression-locked by a test.)
+- **PTY gate**: additionally, only for PTY sessions (`getattr(entry, "last_pty_read_loop_at", None) is not None`) whose normalized frame is frozen. Non-PTY (SDK/headless) sessions skip the rung entirely (resolves OQ4 for the nudge path) — this is a *separate* skip from the never-started skip and gets its own regression test.
+- **Budget + idempotency ladder (resolves BLOCKER 1 — strict if/elif/else, no never-escalating loop).** **One nudge per wedge**, not per recovery attempt. The nudge sits *before* the `recovery_attempts` bump, so it does **not** count against `MAX_RECOVERY_ATTEMPTS`. Idempotency is a new nullable field `last_continue_nudge_at`, evaluated as a **strict ordered ladder keyed on `is None` first** (never the same predicate for both push and kill):
+
+  ```
+  if last_continue_nudge_at is None:
+      # first observation of this wedge → nudge once
+      push_steering_message(entry.session_id, "continue", "session-health")
+      entry.last_continue_nudge_at = now; entry.save(...)
+      return False                      # defer kill this tick
+  elif (now - last_continue_nudge_at) < CONTINUE_NUDGE_REPRIEVE_SECS:
+      # already nudged, reprieve still in flight → keep waiting, no re-nudge
+      return False                      # defer kill this tick
+  else:
+      # already nudged AND reprieve elapsed AND frame still frozen →
+      # the nudge did not un-stick it → fall through to the existing kill path
+      pass                              # proceed to cancel + requeue
+  ```
+
+  The `is None` arm is reachable **exactly once** per wedge (it stamps the field on that same tick), so there is no re-nudge loop. Escalation is guaranteed: once the field is set, every subsequent tick is either "wait" (within reprieve) or "kill" (past reprieve) — never another nudge. A test asserts **exactly one** `push_steering_message` call across a nudge → wait → escalate sequence.
 - **Reprieve window**: a new named, env-overridable constant `CONTINUE_NUDGE_REPRIEVE_SECS` (default provisional ~45s — long enough for one turn boundary to drain the steering message and repaint, short enough to stay well under `STARTUP_HARD_CEILING_S`). Marked provisional/tunable per the magic-number convention.
 - **Steering call**: `push_steering_message(entry.session_id, "continue", "session-health")`. `continue` is not an abort keyword, so `is_abort` stays False. The message drains at the normal turn boundary via `agent/steering.py`, so there is no double-driving with the turn loop — the loop is the sole consumer.
-- **Escalation counter**: emit a project-scoped telemetry counter (`{project_key}:session-health:continue_nudge_total` and `:continue_nudge_escalated`) mirroring the existing reprieve counters, so we can measure how often a nudge un-sticks a wedge vs. escalates.
+- **Escalation counter (producer-attributed per the critique NIT)**: emit project-scoped telemetry counters suffixed by producer so escalations are attributable. Because the never-started producer is gated out, in practice the only suffix that fires is `:running_scan` — but suffixing future-proofs against a new `no_progress` producer. Counters: `{project_key}:session-health:continue_nudge_total:{producer}` on push and `:continue_nudge_escalated:{producer}` on the follow-up kill, where `{producer}` is `running_scan` (or `never_started` if the gate is ever relaxed). This mirrors the existing `tier2_reprieve_total:{reprieve}` namespace rather than inventing a flat taxonomy.
 
 **Part B/A — non-PTY preservation (resolves OQ4).**
 `_prime_pty_alive` Branch 2 already returns `False` (kill-eligible) when
@@ -209,7 +237,7 @@ the same `last_pty_read_loop_at is not None` guard so non-PTY sessions never rec
 - [ ] `tests/unit/granite_container/test_read_until_idle_per_iteration.py` — UPDATE (or add sibling): assert the prime path passes `on_read_iteration` (regression lock so a future refactor can't silently drop it).
 - [ ] `tests/unit/granite_container/test_pty_read_iteration_throttle.py` — VERIFY (likely no change): confirm the shared throttle prevents a prime+steady-state double-stamp storm; add an assertion if not already covered.
 - [ ] `tests/unit/test_session_stall_classifier.py` — VERIFY: no constant values change; confirm `NEVER_STARTED_PTY_LIVENESS_SECS`/`HEARTBEAT_FRESHNESS_WINDOW` reuse is asserted, add a test for the new `CONTINUE_NUDGE_REPRIEVE_SECS` default + env override.
-- [ ] New: `tests/unit/test_continue_nudge_rung.py` — CREATE: nudge-before-kill for PTY frozen-frame wedge; nudge does NOT count against `MAX_RECOVERY_ATTEMPTS`; escalation to kill after reprieve if still frozen; non-PTY session skips the nudge; fail-silent when `push_steering_message` raises.
+- [ ] New: `tests/unit/test_continue_nudge_rung.py` — CREATE: nudge-before-kill for the #944 running-scan PTY frozen-frame wedge; **exactly one** `push_steering_message` across a nudge → wait → escalate sequence (BLOCKER 1 lock — no never-escalating re-nudge loop); nudge does NOT count against `MAX_RECOVERY_ATTEMPTS`; escalation to kill after reprieve if still frozen; **D0 never-started producer (`reason="no progress signal observed (never_started past grace)"`) proceeds straight to kill with NO nudge** (BLOCKER 2 lock — distinct assertion from the non-PTY skip); non-PTY session skips the nudge; fail-silent when `push_steering_message` raises.
 
 ## Rabbit Holes
 
@@ -244,7 +272,7 @@ the same `last_pty_read_loop_at is not None` guard so non-PTY sessions never rec
 **Trigger:** The health-check tick pushes a `continue` nudge at the same moment the turn loop drains the steering queue at a turn boundary.
 **Data prerequisite:** `last_continue_nudge_at` must be persisted before the next recovery decision reads it, so a second tick doesn't double-push.
 **State prerequisite:** The steering queue must remain the single consumer; the nudge is a normal RPUSH, drained in order.
-**Mitigation:** `last_continue_nudge_at` is stamped and saved in the same recovery decision that pushes the nudge; the reprieve-window check (`now - last_continue_nudge_at < CONTINUE_NUDGE_REPRIEVE_SECS`) makes a re-push idempotent within the window. The steering queue's RPUSH/LPOP ordering guarantees the turn loop drains at most one `continue` per push. No lock needed — the idempotency is timestamp-based and the queue is already serialized.
+**Mitigation:** `last_continue_nudge_at` is stamped and saved in the same recovery decision that pushes the nudge, and the push happens **only in the `is None` arm** of the strict idempotency ladder (§Technical Approach Part B). Once stamped, every subsequent tick takes the `elif` (wait) or `else` (kill) arm — never a second push — so the field being set is itself the guard, independent of clock skew. The steering queue's RPUSH/LPOP ordering guarantees the turn loop drains at most one `continue` per push. No lock needed — the `is None` gate is single-shot and the queue is already serialized.
 
 ### Race 2: Prime callback stamp vs. health-check re-read
 **Location:** `container.py` `_prime_session` throttled callback vs. `session_health.py:4092` `fresh_ns = AgentSession.get_by_id(...)`.
@@ -295,7 +323,8 @@ turn loop — no new surface is exposed to the conversational agent.
 - [ ] A granite session whose TUI frame keeps changing during a long (>150s) Opus cold-start prime is **not** killed by `no_progress`/`never_started` (test: fresh liveness fields → `_prime_pty_alive` defers).
 - [ ] `_prime_session()` stamps `last_pty_read_loop_at` and `last_pty_activity_at` during priming, verified by a test asserting the fields advance mid-prime.
 - [ ] A genuinely frozen prime (no normalized-frame change past the 90s activity window) is still reaped — the kill path fires, and the container backstop stays within `STARTUP_HARD_CEILING_S (600s)`.
-- [ ] Recovery attempts a `continue` steering nudge before kill+respawn for a wedge; escalation to respawn only occurs if the frame stays frozen after the `CONTINUE_NUDGE_REPRIEVE_SECS` reprieve; the nudge does not consume a `MAX_RECOVERY_ATTEMPTS`.
+- [ ] Recovery attempts a `continue` steering nudge before kill+respawn for a **post-prime #944 running-scan** wedge; **exactly one** nudge is pushed per wedge (strict `is None`-first ladder — no never-escalating re-nudge loop); escalation to respawn only occurs if the frame stays frozen after the `CONTINUE_NUDGE_REPRIEVE_SECS` reprieve; the nudge does not consume a `MAX_RECOVERY_ATTEMPTS`.
+- [ ] The D0 **never-started** producer (`reason="no progress signal observed (never_started past grace)"`, fires mid-prime) is **never** nudged — it goes straight to the part-A deferral / kill path (regression test, distinct from the non-PTY skip).
 - [ ] Spinner-only animation (no normalized-content change) does **not** count as liveness — #1768 not regressed (test with a synthetic spinner-animating-but-content-static buffer).
 - [ ] Non-PTY (SDK/headless) sessions retain age-only never_started kill semantics and never receive a `continue` nudge (hard regression assertion).
 - [ ] Tests pass (`/do-test`)
@@ -374,10 +403,11 @@ work, paste the async/concurrency rules from `DOMAIN_FRAMING.md` into the builde
 - **Parallel**: true
 - Add `last_continue_nudge_at = DatetimeField(null=True)` to `AgentSession` (additive nullable; no migration).
 - Add `CONTINUE_NUDGE_REPRIEVE_SECS` env-overridable constant (provisional default ~45s, grain-of-salt comment) in `agent/session_stall_classifier.py`.
-- Insert the nudge rung in `_apply_recovery_transition`'s `no_progress` branch, after `_should_kill_no_progress` returns kill and before task cancel / `recovery_attempts` bump: gate on `last_pty_read_loop_at is not None` + frozen frame; push `push_steering_message(entry.session_id, "continue", "session-health")`; stamp `last_continue_nudge_at`; defer this tick; escalate to kill only if still frozen past the reprieve.
-- Emit `continue_nudge_total` / `continue_nudge_escalated` project-scoped counters.
+- Insert the nudge rung in `_apply_recovery_transition`'s `no_progress` branch, after `_should_kill_no_progress` returns kill and before task cancel / `recovery_attempts` bump. Gates (all must pass to nudge): (a) **producer gate** `reason != "no progress signal observed (never_started past grace)"` (excludes the D0 never-started producer that fires mid-prime); (b) **PTY gate** `last_pty_read_loop_at is not None`; (c) frozen frame. Then apply the **strict if/elif/else ladder keyed on `is None` first**: `if last_continue_nudge_at is None` → push + stamp + defer; `elif now - last_continue_nudge_at < CONTINUE_NUDGE_REPRIEVE_SECS` → defer (no re-nudge); `else` → fall through to kill.
+- Push via `push_steering_message(entry.session_id, "continue", "session-health")` in the `is None` arm only.
+- Emit producer-suffixed `continue_nudge_total:{producer}` / `continue_nudge_escalated:{producer}` project-scoped counters (`{producer}` = `running_scan`).
 - Fail-silent: wrap nudge in try/except → fall through to kill on error.
-- Create `tests/unit/test_continue_nudge_rung.py` covering: nudge-before-kill; nudge does NOT consume `MAX_RECOVERY_ATTEMPTS`; escalation after reprieve; non-PTY skips nudge; fail-silent on raising `push_steering_message`.
+- Create `tests/unit/test_continue_nudge_rung.py` covering: nudge-before-kill for the #944 running-scan PTY frozen wedge; **exactly one** `push_steering_message` across nudge → wait → escalate (BLOCKER 1 lock); nudge does NOT consume `MAX_RECOVERY_ATTEMPTS`; escalation after reprieve; **D0/never-started producer goes straight to kill with no nudge** (BLOCKER 2 lock, distinct from the non-PTY-skip case); non-PTY skips nudge; fail-silent on raising `push_steering_message`.
 
 ### 4. Validate part A
 - **Task ID**: validate-prime
@@ -429,14 +459,21 @@ work, paste the async/concurrency rules from `DOMAIN_FRAMING.md` into the builde
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room), 2026-07-03. Verdict: NEEDS REVISION (2 blockers). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency | Nudge idempotency spec (Part B, L180) is self-contradictory: "unset OR older than reprieve window → push nudge" and "reprieve elapsed → kill" are the same predicate with no ordering, so a literal implementation re-nudges forever and never escalates (silent never-recovers loop). | **RESOLVED** (revision 2026-07-03) | Part B "Budget + idempotency ladder" now specifies a strict ordered if/elif/else keyed on `last_continue_nudge_at is None` first (push+stamp+defer), `elif` within-reprieve (defer, no re-nudge), `else` (fall through to kill). The `is None` arm is single-shot (stamps on the same tick). Success Criteria + Step 3 + `test_continue_nudge_rung.py` now require asserting **exactly one** `push_steering_message` across nudge → wait → escalate. |
+| BLOCKER | Risk & Robustness + History & Consistency (both flagged) | Nudge rung is placed generically in `_apply_recovery_transition`'s shared `no_progress` branch, but the D0 never-started-past-grace producer reaches that branch precisely when the session is still mid-prime/frozen (reachable only when `sdk_ever_output`=False). So the nudge fires against a session that structurally cannot drain it — burning the ~45s reprieve uselessly and contradicting the plan's own Rabbit Hole ("Making the nudge drain mid-prime") + OQ1 (post-prime scope only). Repeats the #1798 "assumed-but-unenforced gate" pattern. | **RESOLVED** (revision 2026-07-03) | Part B now adds a **producer gate** `reason != "no progress signal observed (never_started past grace)"` (the literal D0 reason at `session_health.py:4136`), admitting only the #944 running-scan post-prime producer (`session_health.py:3229`). Data Flow item 6, the Flow section, Success Criteria, Step 3, and `test_continue_nudge_rung.py` now require a regression test asserting the D0/never-started producer proceeds straight to kill with no nudge — distinct from the non-PTY-skip assertion. |
+| CONCERN | Scope & Value | Part B (nudge rung) targets a post-prime steady-state wedge that the issue never evidenced — the root-caused failure (session c7bd42…, killed ~154s during priming) is fully fixed by Part A alone. Plan's own OQ1/OQ3 signal the uncertainty. | **ACKNOWLEDGED — kept in scope** | Non-blocking. Part B is retained per issue #1878's explicit ask ("add a 'continue'-nudge rung before kill"). With the BLOCKER-2 producer gate, Part B is now correctly and narrowly scoped to the post-prime #944 running-scan wedge — the exact steady-state case the issue names — while Part A independently fixes the priming failure. OQ1/OQ3 are now resolved (see Open Questions → answered), removing the uncertainty this concern flagged. Splitting Part B into a separate issue was considered and rejected: the nudge rung is small, its gates are now precise, and #1878 scopes both parts together. |
+| CONCERN | Scope & Value | Part B bolts a parallel reprieve mechanism (`last_continue_nudge_at`, `CONTINUE_NUDGE_REPRIEVE_SECS`, two ad-hoc counters) onto the outside of `_should_kill_no_progress`, whose docstring says the no_progress kill decision must live in exactly one place (#1820 OQ3). Duplicates the existing reprieve vocabulary (`_tier2_reprieve_signal`, `reprieve_count`, `tier2_reprieve_total:{reprieve}`). | **PARTIALLY ADOPTED** | Non-blocking. Counter taxonomy now mirrors the existing reprieve namespace (producer-suffixed `continue_nudge_total:{producer}` / `continue_nudge_escalated:{producer}`, matching `tier2_reprieve_total:{reprieve}`) rather than a flat pair. The rung deliberately stays in `_apply_recovery_transition` (not folded into `_should_kill_no_progress`): the nudge is an *action* taken **after** `_should_kill_no_progress` has already returned "kill", not a reprieve *signal* feeding that decision — folding a side-effecting steering push into the pure kill-decision predicate would violate the same single-responsibility contract this concern cites. The distinct `last_continue_nudge_at` timestamp is required (it survives across ticks; `reprieve_count` semantics differ). |
+| NIT | Risk & Robustness | Proposed `continue_nudge_total` / `continue_nudge_escalated` counters don't distinguish producer (D0/never-started vs #944 running-scan), so escalations can't be attributed. | **RESOLVED** | Counters are now suffixed by producer (`:running_scan`; `:never_started` reserved if the producer gate is ever relaxed). See Part B "Escalation counter" + Step 3. |
 
 ---
 
 ## Open Questions
 
-1. **Nudge-during-prime boundary (scope confirmation).** A `continue` steering nudge cannot be drained while `_prime_session()` is still blocking on `read_until_idle` (no turn-boundary drain during priming). This plan scopes the nudge rung to *post-prime* steady-state wedges and relies on part A's deferral (defer-while-alive, reap-when-dead) to protect the prime window. Is that the intended boundary, or do you want a mid-prime steering drain (a larger change, would become its own plan)?
-2. **Reprieve-window value.** `CONTINUE_NUDGE_REPRIEVE_SECS` default is provisionally ~45s (one turn boundary to drain + repaint, well under the 600s ceiling). Comfortable with 45s, or prefer a different value / tie it to an existing constant?
-3. **Nudge counter granularity.** One nudge per wedge, not per recovery attempt, sitting before the `MAX_RECOVERY_ATTEMPTS` bump (so a wedged session gets: nudge → reprieve → attempt 1 → attempt 2 → failed). Is one nudge enough, or do you want a nudge before *each* recovery attempt (up to 2 nudges total)?
+_All resolved in the 2026-07-03 revision pass — no open questions remain. Dispositions recorded below for traceability._
+
+1. **Nudge-during-prime boundary (scope confirmation) — RESOLVED: post-prime only.** A `continue` steering nudge cannot be drained while `_prime_session()` is still blocking on `read_until_idle` (no turn-boundary drain during priming). The nudge rung is scoped to *post-prime* steady-state wedges (the #944 running-scan producer) and this is now **enforced in code**, not just intended: the BLOCKER-2 producer gate (`reason != "no progress signal observed (never_started past grace)"`) excludes the mid-prime D0 producer, so a nudge can only fire for a session past priming that can actually drain it. Part A's deferral (defer-while-alive, reap-when-dead) protects the prime window. A mid-prime steering drain is explicitly **not** built (see No-Gos and Rabbit Holes); if ever wanted it becomes its own plan.
+2. **Reprieve-window value — RESOLVED: 45s provisional, env-overridable.** `CONTINUE_NUDGE_REPRIEVE_SECS` ships at a provisional default of ~45s (one turn boundary to drain + repaint, well under the 600s `STARTUP_HARD_CEILING_S`), marked provisional/tunable per the magic-number convention and overridable via `os.environ.get(...)`. It is a fresh named constant rather than tied to an existing one, because no existing constant carries "time for one steering message to drain and repaint" semantics — coupling it to `NEVER_STARTED_PTY_LIVENESS_SECS` (90s, a liveness-staleness window) would conflate two unrelated concerns. The env override is the escape hatch if 45s proves wrong in production.
+3. **Nudge granularity — RESOLVED: one nudge per wedge.** Exactly one nudge per wedge, sitting before the `MAX_RECOVERY_ATTEMPTS` bump (so a wedged session gets: nudge → reprieve → attempt 1 → attempt 2 → failed). One nudge is sufficient: the nudge is a cheap probe of "can a turn-boundary drain un-stick this?" — if one `continue` at the turn boundary does not move the frame within the reprieve, a second identical nudge is unlikely to, and the existing two-attempt kill+respawn ladder is the stronger remedy. Keeping it to one nudge also makes the idempotency ladder single-shot (BLOCKER-1 fix) and avoids re-nudge-loop hazards. Per-attempt nudging (up to 2) was considered and rejected as added complexity for negligible recovery gain.
