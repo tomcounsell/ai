@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1879
 last_comment_id: 4877607376
+revision_applied: true
 ---
 
 # Mid-run steering drain + continue-nudge recovery rung for wedged granite sessions
@@ -139,30 +140,112 @@ Live granite PTY session parked in `_await_turn_end`, frame frozen
 ### Technical Approach
 
 - **Build the consumer first (the missing piece).** Add to `_await_turn_end`'s
-  per-tick loop, immediately after step 2 (the `read_until_idle` liveness pump
-  at `container.py:1327-1331`), a fail-silent drain of `self._poll_wedge_nudge`
-  (new optional callback). For each drained nudge, `pty.write("continue\n")` to
-  the `pty` the wait is bound to. No `_cycle_idle` gate is needed or wanted: the
-  nudge class is a bare `continue` to a *parked* PTY, and the separate channel
-  guarantees no ordinary operator steering is ever consumed mid-turn (so the
-  "does not corrupt PM's in-flight turn" guarantee is preserved by *not*
-  touching the ordinary path, and by only ever writing the idempotent `continue`
-  token — the same token a crash-resume already writes at `container.py`).
+  per-tick loop a fail-silent drain of `self._poll_wedge_nudge` (new optional
+  callback). **Placement (critique r1 ordering fix):** the drain must go
+  **after** the crash-detection / crash-resume block — i.e., after the
+  `if not alive: … pty = resumed … continue` block ends at
+  `container.py:1379`, and before the bounded-timeout check at
+  `container.py:1382`. Placing it earlier (right after the step-2 liveness pump
+  at `container.py:1327-1331`) is a bug: on a tick where the PTY has died, the
+  drain would `write` the `continue` to the *dead* `pty` and the durable latch
+  would still be spent, burning the one-nudge window with zero keystrokes
+  reaching a live PTY. After line 1379 the `pty` local is guaranteed live
+  (the `if not alive` arm either returns or reassigns `pty = resumed` and
+  `continue`s), so the nudge always reaches a live PTY.
+- **Reuse the exact crash-resume token — no new write shape.** For each drained
+  nudge, inject `CRASH_RESUME_CONTINUE` (`container.py:387`, the literal
+  `"continue"`) via `pty.write(CRASH_RESUME_CONTINUE)` — the *same* constant and
+  call the crash-resume path already uses at `container.py:1528`. This makes the
+  idempotency claim concrete (verified: `_resume_crashed_pty` writes
+  `CRASH_RESUME_CONTINUE` at `:1528`) and sidesteps any submit/newline
+  divergence by mirroring the existing re-arm mechanism byte-for-byte.
+- **No `_cycle_idle` gate is needed or wanted.** The nudge class is a bare
+  `continue` to a *parked* PTY, and the separate channel guarantees no ordinary
+  operator steering is ever consumed mid-turn (so the "does not corrupt PM's
+  in-flight turn" guarantee is preserved by *not* touching the ordinary path,
+  and by only ever writing the idempotent `CRASH_RESUME_CONTINUE` token).
+- **`session_id`-only channel keying is correct despite the role-parameterized
+  wait (critique r1).** `_await_turn_end(…, role)` is called per-role (pm/dev),
+  but the wedge-nudge channel is keyed by `session_id` alone. This is the right
+  granularity, not an omission: (1) the *producer* observes only session-level
+  Redis fields (`last_pty_activity_at`, `last_pty_read_loop_at`) and cannot
+  distinguish a PM-parked wedge from a Dev-parked one — the wedge is a property
+  of the AgentSession, not of a role; (2) the Container run loop is
+  single-threaded, so **exactly one** `_await_turn_end` is executing at any
+  instant, and it drains the nudge into the one `pty` it is bound to — which is
+  precisely the currently-parked (wedged) PTY. A `continue` to "whichever PTY
+  this session is parked on right now" is exactly the intended un-stick, so a
+  role field would add a filter with no reachable failure it prevents. (Recorded
+  as a deliberate design choice; if a future producer needs to target a specific
+  role, add a `role` field to the nudge payload then — not now.)
 - **Separate channel, not the ordinary queue.** `pop_all_steering_messages` is
   an atomic LPOP-all; draining it mid-turn would strip pending operator steering
   the top-of-turn path owns. So the nudge rides its own key
   (`steering:nudge:{session_id}`) with its own `push_wedge_nudge` /
   `pop_wedge_nudges`. Ordinary steering (`steering:{session_id}`) is untouched.
+- **Two keys (signal channel + durable latch), not one GETDEL flag — this is
+  load-bearing, not over-abstraction (critique r1).** The obvious collapse is a
+  single one-slot flag: producer `SET steering:nudge:{id} continue EX <ttl> NX`,
+  consumer `GETDEL`. It is wrong, because `GETDEL` **clears** the key on drain,
+  which destroys the one-per-window latch: a producer tick that runs *after* the
+  consumer has drained finds the key absent, its `SET NX` succeeds, and a
+  **second** nudge fires inside the same turn-wait window — violating Success
+  Criterion 2 / Risk 3 ("exactly one nudge per window"). The invariant requires
+  a latch that **survives the drain**, which a self-clearing flag cannot be. So
+  the design is deliberately two keys: (a) the signal channel
+  `steering:nudge:{session_id}` that the consumer drains-and-clears, and (b) a
+  separate TTL latch (`steering:nudge:latch:{session_id}`, `SET NX EX`) that the
+  producer sets and that the consumer never touches — it expires only with the
+  turn-wait window. The two-key split is what makes "at most one nudge per
+  window" a structural property rather than a timing accident.
+- **Why a *channel* and not just a single-producer flag: named future
+  producers.** The push/pop channel (rather than an inline boolean the
+  session-health loop owns) exists so additional detectors can feed the same
+  one-shot recovery rung without re-plumbing the consumer: the cross-process
+  liveness-wedge detector (#1815/#1823/#1728, already referenced by
+  `_crash_resume_in_flight` at `container.py:1478-1480`) and the tool-timeout
+  loop (`_agent_session_tool_timeout_loop`) are the concrete near-term
+  candidates. Any of them can `push_wedge_nudge(session_id)`; the shared latch
+  still guarantees one nudge per window across *all* producers.
 - **Producer keys on the frozen normalized frame, gated to PTY + live handle.**
-  In the running-scan (`session_health.py:~3212`, alongside the existing
-  `in_scope_handle is None` #944 orphan branch) add a sibling branch for
-  `in_scope_handle is not None`. Gate on granite-PTY transport
+  In the running-scan (`session_health.py:~3221`, alongside the existing
+  `in_scope_handle is None` #944 orphan `elif` at `:3221`) add a sibling branch
+  for `in_scope_handle is not None`. Gate on granite-PTY transport
   (`last_pty_read_loop_at is not None`; non-PTY sessions have it `None`, exactly
   as `_prime_pty_alive` distinguishes them) AND `last_pty_activity_at` stale
   beyond `NUDGE_WEDGE_THRESHOLD_S` (well under the 600s `pm_hang` budget — start
   at ~240s) AND no active latch. On match: `push_wedge_nudge(session_id)`, set
-  the latch, do **not** call `_apply_recovery_transition`, do **not** touch
-  `recovery_attempts`.
+  the latch, do **not** set `should_recover`, do **not** call
+  `_apply_recovery_transition`, do **not** touch `recovery_attempts`.
+- **#1820 ownership-boundary reconciliation (critique r1 BLOCKER).** The
+  narrowed `elif` at `session_health.py:3221` was deliberately restricted by
+  #1820 to `in_scope_handle is None` (the #944 shared-`worker_key` orphan net)
+  precisely because `in_scope_handle is not None` sessions are owned by Fix #3's
+  in-scope progress-deadline watcher (`agent_session_queue.py:1790`,
+  `reason_kind="progress_deadline"`). Re-entering that population needs an
+  explicit justification, and here it is: **what #1820 split is *recovery /
+  kill* ownership — who is authorized to cancel-and-respawn an in-scope
+  session — not who may *observe* it.** Fix #3 owns the cancel scope: it calls
+  the recovery transition with `handle=None` because it kills the session its
+  own owned task is executing. The new nudge branch takes **no recovery action
+  whatsoever**: it never sets `should_recover`, never calls
+  `_apply_recovery_transition`, never mutates `recovery_attempts`, and never
+  kills. It only pushes a best-effort steering keystroke onto a separate Redis
+  channel. It therefore cannot compete with, pre-empt, double-fire, or race
+  Fix #3's kill decision — the two branches act on disjoint *verbs* (nudge vs.
+  cancel), even though they observe the same `in_scope_handle is not None`
+  population.
+- **The decision windows are also disjoint, so there is zero temporal
+  contention.** Fix #3 fires only at `SESSION_PROGRESS_DEADLINE_S = 1800s`
+  (`agent_session_queue.py:1462`). For the `_await_turn_end` wedge shape this
+  plan targets, the container self-terminates to `pm_hang` at the 600s
+  `_hook_turn_end_wait_s` budget (spike-3) — **before** Fix #3's 1800s deadline
+  is ever reached. The nudge fires in the 240s-600s band, entirely inside the
+  pre-`pm_hang` window and entirely before Fix #3 could act. So even setting the
+  verb argument aside, Fix #3 is preempted-unreachable for this shape and the
+  branches never co-fire on the same session. (The nudge branch's own comment —
+  see Documentation — must carry this reconciliation so a future reader does not
+  mistake it for a re-widening of the #1820 split.)
 - **The injected-echo hazard governs the reprieve/idempotency, not the kill.**
   `_normalize_pty_buffer` strips only animation noise, so the `continue` echo is
   *genuine new text* → it advances `last_pty_activity_at` once. Therefore
@@ -217,7 +300,7 @@ Live granite PTY session parked in `_await_turn_end`, frame frozen
 1. **Entry point (producer):** session-health loop tick (`_agent_session_health_check` running-scan, ~30s cadence). Reads a fresh `AgentSession`; observes `in_scope_handle` from `_active_sessions`, plus `last_pty_read_loop_at` / `last_pty_activity_at` on the row.
 2. **Producer decision:** live handle + PTY transport + frozen frame + no latch → `push_wedge_nudge(session_id)` writes to `steering:nudge:{session_id}`; latch key set with TTL.
 3. **Transport (Redis):** the nudge dict sits on its own list, isolated from `steering:{session_id}`.
-4. **Consumer:** the parked `_await_turn_end` tick calls `self._poll_wedge_nudge()` (bridge-adapter closure → `pop_wedge_nudges(session_id)`), drains the nudge, and `pty.write("continue\n")`.
+4. **Consumer:** the parked `_await_turn_end` tick — **after** the crash-resume block (past `container.py:1379`, where `pty` is guaranteed live) — calls `self._poll_wedge_nudge()` (bridge-adapter closure → `pop_wedge_nudges(session_id)`), drains the nudge, and injects `CRASH_RESUME_CONTINUE` via `pty.write(CRASH_RESUME_CONTINUE)` (the same token/call the crash-resume path uses at `:1528`).
 5. **Output — recovered:** PM finishes a turn → parent `Stop` edge → `_await_turn_end` returns `saw_turn=True`; `last_turn_at`/`last_tool_use_at` advance; the session continues normally.
 6. **Output — still wedged:** no `Stop` edge; the 600s `_hook_turn_end_wait_s` budget expires → `saw_turn=False`/`pm_hang` → existing teardown/recovery. Exactly one nudge was spent (latch prevented re-nudge), no `recovery_attempts` consumed by the nudge.
 
@@ -237,10 +320,11 @@ Live granite PTY session parked in `_await_turn_end`, frame frozen
 
 ## Test Impact
 
-- [ ] `tests/unit/granite/` (container turn-wait tests, e.g. `test_container_await_turn_end*.py`) — UPDATE: add a case proving the wedge-nudge channel is drained and `continue\n` injected during `_await_turn_end`, and a regression-lock asserting the ordinary steering queue is NOT consumed mid-turn.
-- [ ] `tests/unit/` steering tests (`test_steering*.py` if present) — UPDATE: add coverage for `push_wedge_nudge`/`pop_wedge_nudges`/latch on a key distinct from `steering:{id}`; assert ordinary steering push/pop is unaffected.
-- [ ] `tests/` session-health tests covering the running-scan / `no_progress` branch (the D0 and #944 tests added by PR #1880) — UPDATE: add a live-handle (`in_scope_handle is not None`) frozen-frame case asserting a nudge is pushed, `recovery_attempts` is NOT incremented, and no `_apply_recovery_transition` call occurs; assert the non-PTY (`last_pty_read_loop_at is None`) case pushes nothing.
-- [ ] `tests/unit/granite/` steering-injection ordering test (from #1779) — UPDATE only if the new drain shares a helper; otherwise the top-of-turn drain path is unchanged and its tests must still pass verbatim (regression lock).
+- [ ] `tests/unit/granite_container/test_container_hook_turn.py` (container turn-wait / `_await_turn_end` tests) — UPDATE: add a case proving the wedge-nudge channel is drained and `CRASH_RESUME_CONTINUE` injected during `_await_turn_end` (past the crash-resume block), and a regression-lock asserting the ordinary steering queue is NOT consumed mid-turn.
+- [ ] `tests/unit/granite_container/test_granite_mid_run_steering_unit.py` (mid-run steering unit tests) — UPDATE: add wedge-nudge drain coverage alongside the existing mid-run steering cases; assert channel isolation from ordinary steering.
+- [ ] `tests/unit/` steering tests (`test_steering*.py` if present) — UPDATE: add coverage for `push_wedge_nudge`/`pop_wedge_nudges`/latch on keys distinct from `steering:{id}` (signal `steering:nudge:{id}` and latch `steering:nudge:latch:{id}`); assert ordinary steering push/pop is unaffected.
+- [ ] `tests/` session-health tests covering the running-scan / `no_progress` branch (the D0 and #944 tests added by PR #1880) — UPDATE: add a live-handle (`in_scope_handle is not None`) frozen-frame case asserting a nudge is pushed, `should_recover` stays False, `recovery_attempts` is NOT incremented, and no `_apply_recovery_transition` call occurs; assert the non-PTY (`last_pty_read_loop_at is None`) case pushes nothing.
+- [ ] `tests/unit/granite_container/` steering-injection ordering test (from #1779) — UPDATE only if the new drain shares a helper; otherwise the top-of-turn drain path is unchanged and its tests must still pass verbatim (regression lock).
 
 No existing test is deleted or replaced — the change is additive (a new channel, a new optional callback, a new producer branch). Existing steering and turn-wait behavior is preserved, so their tests remain valid as regression locks.
 
@@ -252,6 +336,7 @@ No existing test is deleted or replaced — the change is additive (a new channe
 - **`_cycle_idle`-gating the mid-run write.** `_cycle_idle` waits for the turn to finish — which for a wedge never happens, so gating would deadlock the nudge. The separation of channels (not the idle gate) is what protects the ordinary in-flight turn.
 - **An in-container self-nudge with no steering channel.** Simpler, but it does not satisfy the acceptance criterion wording ("a `continue` steering nudge *drained* and injected") and forecloses future external producers. Considered and rejected (see No-Gos).
 - **Chasing the 1800s progress-deadline as the producer.** It is preempted at 600s for this wedge shape (spike-3). Do not wire the nudge there.
+- **Collapsing the signal channel and the latch into one GETDEL flag.** Tempting (one key, `SET NX EX` + `GETDEL`), but `GETDEL` clears the key on drain and re-opens the one-per-window window (a later producer tick's `SET NX` succeeds → a second nudge). The latch MUST survive the drain, so it lives in a distinct key from the drained signal. See Technical Approach.
 
 ## Risks
 
@@ -270,7 +355,7 @@ No existing test is deleted or replaced — the change is additive (a new channe
 ## Race Conditions
 
 ### Race 1: Producer pushes while the consumer is between ticks
-**Location:** `session_health.py` running-scan (push) ↔ `container.py:1327-1335` `_await_turn_end` liveness tick (drain).
+**Location:** `session_health.py` running-scan (push) ↔ `_await_turn_end` mid-run drain (placed after the crash-resume block, past `container.py:1379`, before the timeout check at `:1382`).
 **Trigger:** The nudge lands on `steering:nudge:{id}` after a liveness tick has already polled.
 **Data prerequisite:** The nudge dict must be durably on the Redis list before the *next* tick reads it.
 **State prerequisite:** None beyond list durability — the drain is level-triggered (polls every `HOOK_POLL_INTERVAL_S`), so a nudge is picked up on the following tick.
@@ -327,12 +412,12 @@ ordinary `steering:{id}` channel, which this plan leaves unchanged.
 
 ### Inline Documentation
 - [ ] Docstring on `push_wedge_nudge`/`pop_wedge_nudges` and the latch helper in `agent/steering.py` stating the channel-isolation contract.
-- [ ] Comment in `_await_turn_end` at the drain seam explaining why no `_cycle_idle` gate is used (channel isolation + idempotent `continue` token) and citing #1879.
-- [ ] Comment in the session_health producer branch explaining the PTY-transport + frozen-frame + latch gate and why `last_turn_at`/`last_tool_use_at` (not `last_pty_activity_at`) judge recovery.
+- [ ] Comment in `_await_turn_end` at the drain seam explaining why no `_cycle_idle` gate is used (channel isolation + idempotent `CRASH_RESUME_CONTINUE` token), why the drain is placed **after** the crash-resume block (so `pty` is guaranteed live and the latch is never spent on a dead PTY), and citing #1879.
+- [ ] Comment in the session_health producer branch explaining the PTY-transport + frozen-frame + latch gate, why `last_turn_at`/`last_tool_use_at` (not `last_pty_activity_at`) judge recovery, AND the #1820 reconciliation: this branch re-enters the `in_scope_handle is not None` population #1820 narrowed away, but takes no recovery action (no `should_recover`, no `_apply_recovery_transition`, no `recovery_attempts`), so it does not re-widen the #1820 recovery-ownership split — Fix #3 still solely owns the cancel scope.
 
 ## Success Criteria
 
-- [ ] A wedged-but-alive granite session (live `exec_task`, normalized frame frozen) has a `continue` nudge drained from the wedge-nudge channel and injected into the parked PTY *inside* `_await_turn_end*, with no completed turn boundary (unit/integration test).
+- [ ] A wedged-but-alive granite session (live `exec_task`, normalized frame frozen) has a `continue` nudge drained from the wedge-nudge channel and injected into the parked PTY *inside* `_await_turn_end` (after the crash-resume block), with no completed turn boundary (unit/integration test).
 - [ ] Exactly one `continue` nudge is pushed per turn-wait window (latch TTL); a second producer tick within the window pushes nothing (test).
 - [ ] The nudge does NOT increment `recovery_attempts` and does NOT call `_apply_recovery_transition` (test asserts both).
 - [ ] Escalation to respawn occurs only via the existing `pm_hang`/teardown backstop after the frame stays frozen through the reprieve — no new kill path (test drives a still-frozen post-nudge session to `pm_hang`).
@@ -404,14 +489,14 @@ The lead agent orchestrates; it never builds directly.
 ### 2. Mid-run drain consumer + bridge wiring
 - **Task ID**: build-container
 - **Depends On**: build-steering
-- **Validates**: `tests/unit/granite/test_container_await_turn_end*.py` (create/extend)
+- **Validates**: `tests/unit/granite_container/test_container_hook_turn.py` (extend) and `tests/unit/granite_container/test_granite_mid_run_steering_unit.py` (extend)
 - **Informed By**: spike-1 (drain seam), spike-2 (idempotent `continue`, no `_cycle_idle`)
 - **Assigned To**: container-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add optional `poll_wedge_nudge` callback to `Container.__init__`; drain + `pty.write("continue\n")` after the `_await_turn_end` liveness pump (`container.py:1327-1331`), fail-silent.
+- Add optional `poll_wedge_nudge` callback to `Container.__init__`; drain + `pty.write(CRASH_RESUME_CONTINUE)` placed **after** the crash-resume block (past `container.py:1379`, before the `:1382` timeout check — NOT after the liveness pump at `:1327-1331`, which can target a dead PTY), fail-silent.
 - Wire a `poll_wedge_nudge` closure in `bridge_adapter.py` bound to session_id (mirror `_poll_steering` at `:620`).
-- Tests: mid-run injection without turn boundary; raising callback does not abort the wait; empty channel writes nothing; ordinary steering never consumed mid-turn.
+- Tests: mid-run injection without turn boundary; raising callback does not abort the wait; empty channel writes nothing; ordinary steering never consumed mid-turn; a nudge on a tick where the PTY just died is NOT written to the dead PTY (placement regression lock).
 
 ### 3. Health-loop producer branch
 - **Task ID**: build-producer
@@ -460,8 +545,9 @@ The lead agent orchestrates; it never builds directly.
 | Wedge-nudge channel exists | `grep -c "def push_wedge_nudge" agent/steering.py` | output > 0 |
 | Mid-run drain wired in turn-wait | `grep -c "poll_wedge_nudge" agent/granite_container/container.py` | output > 0 |
 | Producer branch added | `grep -c "push_wedge_nudge" agent/session_health.py` | output > 0 |
+| Producer telemetry counter present | `grep -c "wedge_nudge_sent" agent/session_health.py` | output > 0 |
 | No Popoto migration added (anti-criterion) | `git diff --name-only main -- scripts/update/migrations.py` | output does not contain migrations.py |
-| No new `_apply_recovery_transition` call in producer for nudge (anti-criterion) | `git grep -c "continue_nudge" agent/session_health.py \| head -1` | output > 0 |
+| Nudge branch takes no recovery action (anti-criterion, test-backed) | `pytest tests/ -k "wedge_nudge and (recovery_attempts or no_recover)" -q` | exit code 0 (nudge branch never sets `should_recover` / calls `_apply_recovery_transition`) |
 | Nudge does not consume recovery_attempts (test) | `pytest tests/ -k "wedge_nudge and recovery_attempts" -q` | exit code 0 |
 | Channel isolation regression lock | `pytest tests/ -k "wedge_nudge and isolation" -q` | exit code 0 |
 | Non-PTY unaffected (test) | `pytest tests/ -k "wedge_nudge and non_pty" -q` | exit code 0 |
@@ -471,6 +557,13 @@ The lead agent orchestrates; it never builds directly.
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | r1 | Producer re-enters the `in_scope_handle is not None` population #1820 narrowed away for Fix #3's progress-deadline watcher (`session_health.py:3168-3220` warning comment). | Technical Approach (#1820 reconciliation bullets); producer inline-comment doc task | Reconciled, not relocated: #1820 split *recovery/kill* ownership, not *observation*. The nudge branch takes no recovery action (no `should_recover`, no `_apply_recovery_transition`, no `recovery_attempts`), so it acts on a disjoint verb from Fix #3's cancel scope. Windows are also disjoint — the wedge's 600s `pm_hang` preempts Fix #3's 1800s deadline (spike-3), so the branches never co-fire. |
+| Concern | r1 | Mid-run drain placed after the liveness pump (`:1327-1331`) burns the latch on a dead PTY when the crash-resume path reassigns `pty`. | Technical Approach (placement bullet); Task 2; Data Flow; Race 1 | Drain relocated to **after** the crash-resume block (past `container.py:1379`, before `:1382`), where `pty` is guaranteed live. Placement regression-lock test added. |
+| Concern | r1 | Crash-resume "already writes continue" idempotency claim unverified. | Technical Approach (token bullet) | Verified: `_resume_crashed_pty` writes `CRASH_RESUME_CONTINUE = "continue"` (`container.py:387`) at `:1528`. Plan now reuses that exact constant/call. |
+| Concern | r1 | Nudge channel keyed by `session_id` only while `_await_turn_end(…, role)` is role-parameterized. | Technical Approach (session_id-keying bullet) | Documented as safe: wedge is a session-level condition (producer reads session-level fields only); single-threaded run loop guarantees one `_await_turn_end` parked at a time, so the drain always reaches the parked PTY. Role field deferred to a future producer that needs it. |
+| Concern | r1 | Verification anti-criterion greps undefined symbol `continue_nudge`. | Verification table | Replaced with a `wedge_nudge_sent` telemetry grep + a test-backed "nudge branch takes no recovery action" row. |
+| Concern | r1 | Push/latch channel abstraction could collapse to one GETDEL flag, or needs future producers named. | Technical Approach (two-key bullets); Rabbit Holes | Justified keeping two keys: a single GETDEL flag clears on drain and re-opens the one-per-window window; the latch must survive the drain. Also named concrete future producers (#1815/#1823/#1728 wedge detector; tool-timeout loop). |
+| NIT | r1 | Test paths reference nonexistent `tests/unit/granite/`. | Test Impact; Task 2 | Corrected to `tests/unit/granite_container/`; targets `test_container_hook_turn.py` and `test_granite_mid_run_steering_unit.py`. |
 
 ---
 
