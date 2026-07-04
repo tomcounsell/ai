@@ -325,3 +325,53 @@ def test_surfacing_error_is_fail_quiet(make_session, monkeypatch):
     record_budget_trip(s, verdict)
     # The race-free flag still lands (independent best-effort step).
     assert _reason_of(s.session_id)
+
+
+def test_id_less_session_does_not_collapse_dedup(caplog):
+    """#1873 item 3: two id-less sessions (no session_id AND no agent_session_id)
+    must BOTH surface — never collapse into a shared ``...:tripped_applied:None``
+    dedup slot that silently drops the second trip.
+
+    Observable surface for an id-less deny is the WARNING log + the ``tripped``
+    counter increment ONLY (a keyless ``save()`` cannot persist the flag, so flag
+    persistence is deliberately not asserted).
+    """
+    import logging
+
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    from agent.tool_budget import BudgetVerdict, record_budget_trip
+
+    class _IdLessSession:
+        def __init__(self, project_key):
+            self.project_key = project_key
+            self.session_id = None
+            self.agent_session_id = None
+
+    pk = f"test-idless-{uuid.uuid4().hex[:8]}"
+    counter_key = f"{pk}:tool-budget:tripped"
+    none_dedup_key = f"{pk}:tool-budget:tripped_applied:None"
+    POPOTO_REDIS_DB.delete(counter_key)
+    POPOTO_REDIS_DB.delete(none_dedup_key)
+
+    verdict = BudgetVerdict(allow=False, reason="per-tool budget reached")
+    s1 = _IdLessSession(pk)
+    s2 = _IdLessSession(pk)
+
+    with caplog.at_level(logging.WARNING, logger="agent.tool_budget"):
+        record_budget_trip(s1, verdict)
+        record_budget_trip(s2, verdict)
+
+    # Both id-less trips surfaced: two WARNING "tripped budget" logs.
+    tripped_logs = [r for r in caplog.records if "tripped budget" in r.getMessage()]
+    assert len(tripped_logs) == 2, "both id-less trips must surface a WARNING (not deduped)"
+
+    # The counter incremented once per trip — the second was NOT deduped away.
+    assert int(POPOTO_REDIS_DB.get(counter_key)) == 2
+
+    # No shared ``:None`` dedup slot was ever written.
+    assert POPOTO_REDIS_DB.get(none_dedup_key) is None, (
+        "id-less path must bypass the NX gate, never write a shared :None key"
+    )
+
+    POPOTO_REDIS_DB.delete(counter_key)
