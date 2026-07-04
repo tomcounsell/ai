@@ -235,7 +235,7 @@ class TestImportDecoupling:
         """REACTION_* constants should be importable from agent.constants as EmojiResult objects."""
         from agent.constants import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
         from bridge.response import VALIDATED_REACTIONS
-        from tools.emoji_embedding import EmojiResult
+        from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS, EmojiResult
 
         assert isinstance(REACTION_SUCCESS, EmojiResult)
         assert isinstance(REACTION_COMPLETE, EmojiResult)
@@ -243,6 +243,9 @@ class TestImportDecoupling:
         assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS
         assert REACTION_COMPLETE.emoji in VALIDATED_REACTIONS
         assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
+        # REACTION_ERROR is pinned to 🤔 (deterministic, never hostile) — issue #1882.
+        assert REACTION_ERROR.emoji == "\U0001f914"
+        assert REACTION_ERROR.emoji not in BLOCKED_REACTION_EMOJIS
 
     def test_reaction_re_exports_from_bridge(self):
         """REACTION_* should be importable from bridge.response (backward compat) as EmojiResult."""
@@ -252,7 +255,7 @@ class TestImportDecoupling:
             REACTION_SUCCESS,
             VALIDATED_REACTIONS,
         )
-        from tools.emoji_embedding import EmojiResult
+        from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS, EmojiResult
 
         assert isinstance(REACTION_SUCCESS, EmojiResult)
         assert isinstance(REACTION_COMPLETE, EmojiResult)
@@ -260,6 +263,9 @@ class TestImportDecoupling:
         assert REACTION_SUCCESS.emoji in VALIDATED_REACTIONS
         assert REACTION_COMPLETE.emoji in VALIDATED_REACTIONS
         assert REACTION_ERROR.emoji in VALIDATED_REACTIONS
+        # REACTION_ERROR is pinned to 🤔 (deterministic, never hostile) — issue #1882.
+        assert REACTION_ERROR.emoji == "\U0001f914"
+        assert REACTION_ERROR.emoji not in BLOCKED_REACTION_EMOJIS
 
     def test_session_logs_importable_from_agent(self):
         """save_session_snapshot should be importable from agent.session_logs."""

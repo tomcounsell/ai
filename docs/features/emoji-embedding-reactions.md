@@ -73,7 +73,7 @@ The core module that maps feelings to emojis.
 
 **Standard emoji labels:** Each of the 72 validated Telegram reaction emojis has a descriptive label string used by `find_best_emoji()` (the agent-driven path). These labels are embedded and compared against input text.
 
-**Blocked reactions:** `BLOCKED_REACTION_EMOJIS` is a frozenset of emojis that must never be selected as a reaction. The middle finger 🖕 is blocked here. `find_best_emoji()` skips any emoji in this set at selection time. Offensive reactions are structurally impossible from `find_best_emoji_for_message` because the `ACTION_EMOJI_MAP` action vocabulary never contains them.
+**Blocked reactions:** `BLOCKED_REACTION_EMOJIS` is the single source of truth for reactions that must never target a user. It is a frozenset covering the middle finger 🖕 (also removed entirely from `VALIDATED_REACTIONS` and `EMOJI_LABELS`) plus five hostile faces that stay valid Telegram reactions but are excluded from selection: thumbs down 👎, face with symbols on mouth 🤬, pouting face 😡, face vomiting 🤮, and face screaming in fear 😱. `find_best_emoji()` skips any emoji in this set at selection time, so no semantically-resolved reaction can ever draw a hostile face, even if one scores as the nearest match. Self-directed sadness (😢 😭 😨) is not blocked. It expresses empathy rather than hostility, so it stays selectable. Offensive reactions are structurally impossible from `find_best_emoji_for_message` because the `ACTION_EMOJI_MAP` action vocabulary never contains them.
 
 **Custom emoji labels:** Custom emoji from Premium sticker packs are labeled using the associated emoji character plus the sticker set title (e.g., "party celebration confetti" for a party popper custom emoji). These are embedded with the same model and stored separately.
 
@@ -182,17 +182,19 @@ The two emoji paths have different performance profiles:
 
 ## Terminal Reactions
 
-Session lifecycle events are reported back to Telegram via three terminal reaction constants defined in `agent/constants.py`:
+Session lifecycle events are reported back to Telegram via three terminal reaction constants defined in `agent/constants.py`. Two resolve semantically; one is pinned to a fixed emoji:
 
-| Constant | Semantic | Feeling String | Fallback Emoji |
-|----------|----------|----------------|----------------|
-| `REACTION_SUCCESS` | Silent ack — no text reply sent | `"acknowledged received silently noted"` | 👌 |
-| `REACTION_COMPLETE` | Work done — text reply attached | `"task completed successfully work done"` | 👏 |
-| `REACTION_ERROR` | Something went wrong | `"error occurred something went wrong"` | 😢 |
+| Constant | Semantic | Resolution | Feeling String / Pinned Emoji | Fallback Emoji |
+|----------|----------|------------|-------------------------------|-----------------|
+| `REACTION_SUCCESS` | Silent ack — no text reply sent | Semantic (`find_best_emoji`) | `"acknowledged received silently noted"` | 👌 |
+| `REACTION_COMPLETE` | Work done — text reply attached | Semantic (`find_best_emoji`) | `"task completed successfully work done"` | 👏 |
+| `REACTION_ERROR` | Something went wrong | Pinned (fixed) | 🤔 | 🤔 (no fallback path; the pin IS the value) |
 
-These constants are `EmojiResult` objects, **not** plain strings. They are resolved lazily via `find_best_emoji()` using the feeling strings above on first access inside a live request handler. The resolved value is cached in a module-level dict (`_TERMINAL_EMOJI_CACHE`) — no HTTP call is made at import time and no retry occurs after the first resolution.
+These constants are `EmojiResult` objects, **not** plain strings, resolved lazily on first access inside a live request handler and cached in a module-level dict (`_TERMINAL_EMOJI_CACHE`) — no HTTP call is made at import time and no retry occurs after the first resolution. Each constant's resolution mode is declared in `_TERMINAL_EMOJI_CONFIG`, a dict of `_TerminalEmojiConfig` NamedTuples keyed by constant name, with a `pinned` flag selecting the path.
 
-When `find_best_emoji()` is unavailable (missing `OPENROUTER_API_KEY`, absent embeddings file, or the function returns the default thinking emoji), `_resolve_terminal_emoji()` substitutes the hardcoded fallback `EmojiResult` listed in the table above. All three fallback emojis are confirmed in `VALIDATED_REACTIONS` and are distinct from each other, ensuring correct behavior in degraded environments.
+`REACTION_SUCCESS` and `REACTION_COMPLETE` follow the semantic path: `find_best_emoji()` embeds the feeling string above and finds the nearest emoji by cosine similarity. When `find_best_emoji()` is unavailable (missing `OPENROUTER_API_KEY`, absent embeddings file, or the function returns the default thinking emoji), `_resolve_terminal_emoji()` substitutes the hardcoded fallback `EmojiResult` shown in the table. Both fallbacks are confirmed in `VALIDATED_REACTIONS` and stay distinct from each other in degraded environments.
+
+`REACTION_ERROR` follows the pinned path instead. It resolves directly to 🤔 and never calls `find_best_emoji()` at all: no feeling string, no embedding lookup, no dependence on the semantic resolver's degraded-path fallback. An error reaction lands on the user's own message, so a semantic draw over an "error / something went wrong" feeling could surface a face that reads as hostile toward that person. Pinning the constant removes the draw entirely: every error, in every environment (API available or not), produces the same deterministic, non-hostile 🤔. See [Reaction Semantics](reaction-semantics.md#reaction_error-is-pinned-not-semantic) for the full rationale.
 
 `bridge/response.py` re-exports these constants for backward compatibility. The `set_reaction()` call site already accepts `EmojiResult` objects transparently via the existing standard/custom emoji dispatch logic.
 
