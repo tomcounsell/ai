@@ -287,7 +287,11 @@ def export_session(session: AgentSession) -> None:
         _touch_meta(conn, kind="terminal", row_count=row_count)
         conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        # A BEGIN IMMEDIATE lock-timeout leaves no active transaction, so an
+        # unconditional ROLLBACK would raise "no transaction is active" and mask
+        # the original "database is locked" error.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     finally:
         conn.close()
@@ -329,7 +333,10 @@ def export_all() -> None:
         _touch_meta(conn, kind="periodic", row_count=row_count)
         conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        # See export_session: guard against a masked "no transaction is active"
+        # when BEGIN IMMEDIATE itself timed out on the write lock.
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
         raise
     finally:
         conn.close()
@@ -612,8 +619,16 @@ def _restore_if_empty_impl(dry_run: bool = False) -> dict[str, Any]:
                 _record_row_failure(conn, archived_id, exc)
                 conn.execute("COMMIT")
 
+        # Completion is "every archived row is now either restored or
+        # quarantined". Compare against the TOTAL archived row count, not
+        # `expected_row_count` (which already subtracts the pre-existing
+        # quarantined ids): `quarantined_total` re-includes those pre-existing
+        # ids, so comparing the two would double-count them and falsely stamp
+        # `restore_complete` while a transiently-failed (not-yet-quarantined)
+        # row is still genuinely absent from Redis -- a silently-partial restore
+        # in the exact durability path this feature protects.
         quarantined_total = _quarantined_count(conn)
-        if restored + quarantined_total >= expected_row_count:
+        if restored + quarantined_total >= len(archived_rows):
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE _meta SET restore_in_progress=0, restore_complete=1 WHERE id=1")
             conn.execute("COMMIT")

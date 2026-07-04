@@ -587,6 +587,74 @@ def test_poison_row_quarantine_and_completes(archive_db, monkeypatch):
     assert AgentSession.query.get(id=poison_id) is None
 
 
+def test_preexisting_quarantine_plus_transient_failure_does_not_falsely_complete(
+    archive_db, monkeypatch
+):
+    """Regression: the completion check must not double-count pre-existing
+    quarantined rows.
+
+    `expected_row_count` already subtracts the pre-existing quarantined ids, but
+    `_quarantined_count()` re-includes them. Comparing the two (the old bug)
+    stamps `restore_complete` while a transiently-failed, not-yet-quarantined row
+    is still genuinely absent from Redis -- a silently-partial restore. The fix
+    compares against the TOTAL archived row count instead.
+
+    Scenario: 3 archived rows. One (C) is already quarantined from a prior boot.
+    On a fresh cold boot (Redis wiped again), A restores, B fails transiently
+    (attempt 1 of 3, NOT quarantined). Old: restored(1)+quarantined(1) >=
+    expected(2) -> falsely complete, B lost. Fixed: 1+1 < len(archived)=3 ->
+    NOT complete, sentinel stays set, B resumes on the next boot.
+    """
+    sessions = [_make_session() for _ in range(3)]
+    for session in sessions:
+        archive.export_session(session)
+    transient_id = sessions[1].id  # B
+    prequarantined_id = sessions[2].id  # C
+    for session in sessions:
+        session.delete()
+    assert len(list(AgentSession.query.all())) == 0
+
+    # Pre-quarantine C directly in the archive DB (as a prior boot would have).
+    conn = sqlite3.connect(str(archive_db))
+    try:
+        conn.execute(
+            "INSERT INTO _restore_quarantine (id, attempt_count, quarantined_at) VALUES (?, ?, ?)",
+            (prequarantined_id, 3, "2026-07-04T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    original_rehydrate = archive._rehydrate_row
+
+    def _fails_once_for_transient(row):
+        if row["id"] == transient_id:
+            raise RuntimeError("transient restore failure (below cap)")
+        return original_rehydrate(row)
+
+    monkeypatch.setattr(archive, "_rehydrate_row", _fails_once_for_transient)
+
+    result = archive.restore_if_empty()
+
+    # A restored; B failed transiently (not quarantined); C skipped (pre-quarantined).
+    assert result["restored"] == 1
+    assert result["quarantined"] == 1  # only C
+    # The sentinel must NOT be cleared -- B is still genuinely missing.
+    meta = _read_meta_row(archive_db)
+    assert meta["restore_in_progress"] == 1, "premature completion: B was silently dropped"
+    assert meta["restore_complete"] == 0
+    assert AgentSession.query.get(id=transient_id) is None
+
+    # Next boot (B now succeeds): restore completes cleanly.
+    monkeypatch.setattr(archive, "_rehydrate_row", original_rehydrate)
+    second = archive.restore_if_empty()
+    assert second["resumed"] is True
+    assert AgentSession.query.get(id=transient_id) is not None
+    meta2 = _read_meta_row(archive_db)
+    assert meta2["restore_in_progress"] == 0
+    assert meta2["restore_complete"] == 1
+
+
 def test_poison_row_declares_wedged_before_quarantine_cap(archive_db, monkeypatch):
     # A tiny resume-attempt cap and a large row-attempt cap means the resume
     # budget runs out before the poison row would ever get quarantined --
