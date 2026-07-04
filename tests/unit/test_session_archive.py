@@ -462,6 +462,95 @@ def test_stuck_sentinel_never_clobbers_healthy_full_redis(archive_db):
     assert meta_row["restore_complete"] == 1
 
 
+def test_stuck_sentinel_does_not_mask_genuinely_missing_row(archive_db, monkeypatch):
+    """A raw live_count >= expected_row_count match must NOT be trusted alone.
+
+    Reproduces the exact bug scenario: a resume attempt rehydrates 2 of 3
+    archived rows while one (the poison row) keeps failing but hasn't yet hit
+    SESSION_ARCHIVE_ROW_ATTEMPT_CAP, so it isn't quarantined and the sentinel
+    is left set. Before the next call, an UNRELATED new session is created by
+    normal traffic, padding live_count up to match expected_row_count even
+    though the poison row was never actually restored. The guard must detect
+    that the archived, non-quarantined poison id is missing from Redis and
+    refuse to declare `restore_already_complete` -- it must keep retrying
+    until the poison row either succeeds or is properly quarantined, never
+    silently dropping it.
+    """
+    sessions = [_make_session() for _ in range(3)]
+    for session in sessions:
+        archive.export_session(session)
+    poison_id = sessions[0].id
+    for session in sessions:
+        session.delete()
+    assert len(list(AgentSession.query.all())) == 0
+
+    original_rehydrate = archive._rehydrate_row
+
+    def _always_fails_for_poison(row):
+        if row["id"] == poison_id:
+            raise RuntimeError("permanently unrestorable row")
+        return original_rehydrate(row)
+
+    monkeypatch.setattr(archive, "_rehydrate_row", _always_fails_for_poison)
+
+    # First call: restores the 2 good rows; the poison row fails once
+    # (attempt 1 of SESSION_ARCHIVE_ROW_ATTEMPT_CAP=3) and is NOT quarantined
+    # yet. The sentinel stays set because restored(2) + quarantined(0) < 3.
+    first = archive.restore_if_empty()
+    assert first["restored"] == 2
+    assert first["skipped_reason"] is None
+    assert first["quarantined"] == 0
+    meta_after_first = _read_meta_row(archive_db)
+    assert meta_after_first["restore_in_progress"] == 1
+    assert meta_after_first["expected_row_count"] == 3
+
+    # Simulate unrelated normal traffic creating a brand-new session that has
+    # nothing to do with the archive/restore -- this pads live_count up to
+    # match expected_row_count while the poison row remains missing.
+    _make_session(project_key="test-unrelated-traffic")
+    live_count = len(list(AgentSession.query.all()))
+    assert live_count == 3  # matches expected_row_count -- the bug trigger
+    assert AgentSession.query.get(id=poison_id) is None  # still genuinely missing
+
+    # Second call: with the bug, live_count(3) >= expected_row_count(3) would
+    # declare restore_already_complete and clear the sentinel here, silently
+    # and permanently losing the poison row. The fix must instead detect the
+    # missing archived id and keep resuming.
+    second = archive.restore_if_empty()
+    assert second["skipped_reason"] != "restore_already_complete"
+    assert second["skipped_reason"] is None
+    assert second["resumed"] is True
+    meta_after_second = _read_meta_row(archive_db)
+    assert meta_after_second["restore_in_progress"] == 1  # never cleared prematurely
+    assert AgentSession.query.get(id=poison_id) is None  # still not silently resurrected
+
+    # Third call: the poison row's attempt count reaches
+    # SESSION_ARCHIVE_ROW_ATTEMPT_CAP(3) and is properly quarantined --
+    # an operator-visible outcome, never a silent drop.
+    third = archive.restore_if_empty()
+    assert third["quarantined"] == 1
+    assert third["restored"] + third["quarantined"] == 3
+    meta_after_third = _read_meta_row(archive_db)
+    assert meta_after_third["restore_in_progress"] == 0
+    assert meta_after_third["restore_complete"] == 1
+
+    # Final state: the two good archived rows plus the one unrelated session
+    # are live; the poison row was never resurrected and is recorded as
+    # quarantined (operator-visible), not silently dropped.
+    assert len(list(AgentSession.query.all())) == 3
+    assert AgentSession.query.get(id=poison_id) is None
+    conn = sqlite3.connect(str(archive_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        quarantine_row = conn.execute(
+            "SELECT quarantined_at FROM _restore_quarantine WHERE id=?", (poison_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert quarantine_row is not None
+    assert quarantine_row["quarantined_at"] is not None
+
+
 def test_poison_row_quarantine_and_completes(archive_db, monkeypatch):
     sessions = [_make_session() for _ in range(4)]
     for session in sessions:

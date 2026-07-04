@@ -457,7 +457,8 @@ def restore_if_empty(*, dry_run: bool = False) -> dict[str, Any]:
 
 
 def _restore_if_empty_impl(dry_run: bool = False) -> dict[str, Any]:
-    live_count = len(list(AgentSession.query.all()))
+    live_ids = {session.id for session in AgentSession.query.all()}
+    live_count = len(live_ids)
 
     conn = _connect(on_loop=False)
     try:
@@ -466,30 +467,55 @@ def _restore_if_empty_impl(dry_run: bool = False) -> dict[str, Any]:
 
         if sentinel_was_set:
             if live_count >= meta["expected_row_count"]:
-                # Redis is already whole -- a stuck sentinel must NEVER force
-                # a re-upsert of an already-populated Redis. In dry-run mode
-                # we report this decision without clearing the sentinel.
-                if not dry_run:
-                    conn.execute("BEGIN IMMEDIATE")
-                    conn.execute(
-                        "UPDATE _meta SET restore_in_progress=0, restore_complete=1 WHERE id=1"
-                    )
-                    conn.execute("COMMIT")
-                    logger.info(
-                        "[session_archive] restore: stale sentinel cleared -- Redis already "
-                        "whole (live=%d >= expected=%d)",
-                        live_count,
-                        meta["expected_row_count"],
-                    )
-                result = {
-                    "restored": 0,
-                    "skipped_reason": "restore_already_complete",
-                    "resumed": False,
-                    "quarantined": _quarantined_count(conn),
+                # A raw count match is necessary but NOT sufficient: unrelated
+                # new sessions created since the interrupted restore can pad
+                # live_count up to (or past) expected_row_count while a
+                # genuinely un-rehydrated archived row is still missing from
+                # Redis. Verify actual presence of every archived,
+                # non-quarantined id before trusting the count -- otherwise a
+                # poison row that hasn't yet hit the quarantine cap gets
+                # silently and permanently dropped (never quarantined, never
+                # retried, sentinel says "done").
+                quarantined_ids_check = _quarantined_ids(conn)
+                archived_ids = {
+                    row["id"] for row in conn.execute("SELECT id FROM sessions").fetchall()
                 }
-                if dry_run:
-                    result["would_restore"] = 0
-                return result
+                missing_ids = (archived_ids - quarantined_ids_check) - live_ids
+                if not missing_ids:
+                    # Redis is genuinely already whole -- a stuck sentinel must
+                    # NEVER force a re-upsert of an already-populated Redis. In
+                    # dry-run mode we report this decision without clearing
+                    # the sentinel.
+                    if not dry_run:
+                        conn.execute("BEGIN IMMEDIATE")
+                        conn.execute(
+                            "UPDATE _meta SET restore_in_progress=0, restore_complete=1 WHERE id=1"
+                        )
+                        conn.execute("COMMIT")
+                        logger.info(
+                            "[session_archive] restore: stale sentinel cleared -- Redis already "
+                            "whole (live=%d >= expected=%d)",
+                            live_count,
+                            meta["expected_row_count"],
+                        )
+                    result = {
+                        "restored": 0,
+                        "skipped_reason": "restore_already_complete",
+                        "resumed": False,
+                        "quarantined": _quarantined_count(conn),
+                    }
+                    if dry_run:
+                        result["would_restore"] = 0
+                    return result
+                logger.warning(
+                    "[session_archive] restore: live_count (%d) >= expected_row_count (%d) "
+                    "but %d archived row(s) are missing from Redis (%s) -- refusing to "
+                    "declare restore complete, continuing resume",
+                    live_count,
+                    meta["expected_row_count"],
+                    len(missing_ids),
+                    sorted(missing_ids),
+                )
             if meta["resume_attempts"] >= SESSION_ARCHIVE_RESUME_ATTEMPT_CAP:
                 logger.error(
                     "[session_archive] restore WEDGED after %d resume attempts "
