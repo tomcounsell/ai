@@ -15,10 +15,10 @@ There are two sending interfaces. Use the correct one for your context:
 
 | Tool | Context | How It Works |
 |------|---------|--------------|
-| `python tools/send_telegram.py` | PM session | Queues via Redis, relay sends via Telethon, records msg_id for summarizer bypass |
-| `valor-telegram send` | Dev session / CLI | Sends directly via Telethon, no Redis queue, no summarizer bypass |
+| `python tools/send_telegram.py` | PM session | Queues via Redis (`telegram:outbox:{session_id}`), pipes text through the message drafter (persona voice), records msg_id for summarizer bypass |
+| `valor-telegram send` | Dev session / CLI | Queues via the same Redis relay (`bridge/telegram_relay.py`) — no drafter pass, no summarizer bypass; supports Read-the-Room pre-send gating |
 
-**PM sessions** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from a PM session would bypass the Redis queue and break `has_pm_messages()` tracking.
+**PM sessions** should always use `tools/send_telegram.py`. It supports text, single file attachments, and multi-file albums via `--file` (repeatable, max 10 files). Using `valor-telegram send` from a PM session would skip the drafter and summarizer-bypass recording and break `has_pm_messages()` tracking.
 
 ### PM Tool Examples
 
@@ -103,7 +103,7 @@ WARNING: Ambiguous chat name 'PsyOptimal' matched 2 candidates; picking most rec
 
 For scripted callers that need a hard failure on ambiguity, pass `--strict`
 to the `read` subcommand. Under `--strict`, the CLI exits non-zero and
-prints the candidate list on stderr instead of picking:
+prints the candidate list on stdout instead of picking:
 
 ```
 valor-telegram read --chat "PsyOptimal" --strict --limit 10

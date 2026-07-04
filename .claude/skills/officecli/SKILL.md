@@ -16,19 +16,18 @@ AI-friendly CLI for .docx, .xlsx, .pptx. Single binary, no dependencies, no Offi
 
 ---
 
-## Install / stale binary
+## Version check FIRST (stale binary)
 
-If `officecli` is not installed, or a command documented here comes back `Unrecognized command` (this reference tracks the current release; old binaries lack `help`, `swap`, `mark`, `dump`, and more), re-run the installer:
+**Run `officecli --version` before anything else.** This reference tracks a recent release; the fleet's `/update` pins the binary via `PINNED_VERSION` in `scripts/update/officecli.py` (currently `v1.0.29`), and v1.0.29 **lacks** `help`, `swap`, `mark`, `unmark`, `get-marks`, `dump`, `refresh`, `goto`, `load_skill`, and `save`. If your installed version predates a command documented here, expect `Unrecognized command` — fall back to the commands the binary's own `--help` lists (v1.0.29: `create`, `view`, `get`, `query`, `set`, `add`, `remove`, `move`, `raw`, `raw-set`, `add-part`, `validate`, `check`, `batch`, `import`, `merge`, `open`/`close`, `watch`/`unwatch`), and use `officecli pptx set shape`-style schema navigation instead of `officecli help`.
+
+**How to upgrade (this fleet):** bump `PINNED_VERSION` in `scripts/update/officecli.py` and run `/update`. Do NOT use the upstream curl installer as a fix on a fleet machine — `/update` enforces the pin and will revert an unpinned upgrade to `v1.0.29` on its next run. The curl installer is only appropriate on machines outside the `/update` fleet:
 
 ```bash
-# macOS / Linux
+# Non-fleet machines only (macOS / Linux)
 curl -fsSL https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/main/install.ps1 | iex
 ```
 
-Verify with `officecli --version`. If still not found after install, open a new terminal.
+Verify with `officecli --version`. If not found after install, check `~/.local/bin` is on PATH.
 
 ---
 

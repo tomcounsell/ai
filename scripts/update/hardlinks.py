@@ -450,7 +450,10 @@ def _cleanup_stale_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResu
 
         src_skill_dir = src_dir / dst_skill_dir.name
         if src_skill_dir.exists():
-            continue  # Still has a source — not stale
+            # Source dir survives — prune individual files whose source was
+            # deleted (intra-dir orphans), then keep the dir.
+            _prune_intra_dir_orphans(src_skill_dir, dst_skill_dir, result)
+            continue
 
         # Only remove if SKILL.md inode matches a current source,
         # meaning it's an old hardlink from a previous name in this project
@@ -474,6 +477,65 @@ def _cleanup_stale_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResu
         except OSError as e:
             result.actions.append(LinkAction("", rel_dst, "error", str(e)))
             result.errors += 1
+
+
+def _prune_intra_dir_orphans(
+    src_skill_dir: Path, dst_skill_dir: Path, result: HardlinkSyncResult
+) -> None:
+    """Remove files inside a synced skill dir whose source file was deleted.
+
+    The dir-level stale cleanup only handles a skill dir whose entire source is
+    gone. When a single tracked file is deleted from a *surviving* skill dir
+    (e.g. do-pr-review/sub-skills/README.md, folded into SKILL.md), the old
+    hardlink lingers at the user level and can be loaded alongside the current
+    SKILL.md, contradicting it.
+
+    Ownership guard mirrors the dir-level cleanup: the prune only runs when
+    the destination SKILL.md shares an inode with this project's source
+    SKILL.md — proving this project synced the dir. Foreign or hand-made
+    skill dirs are left untouched. Subdirectories emptied by the prune are
+    removed bottom-up (never the skill dir itself).
+    """
+    src_skill_file = src_skill_dir / "SKILL.md"
+    dst_skill_file = dst_skill_dir / "SKILL.md"
+    if not src_skill_file.is_file() or not dst_skill_file.is_file():
+        return
+
+    try:
+        if os.stat(src_skill_file).st_ino != os.stat(dst_skill_file).st_ino:
+            return  # Not synced from this project — leave it alone
+    except OSError:
+        return
+
+    emptied_parents: set[Path] = set()
+    for dst_file in sorted(dst_skill_dir.rglob("*")):
+        if not dst_file.is_file():
+            continue
+        rel = dst_file.relative_to(dst_skill_dir)
+        if (src_skill_dir / rel).exists():
+            continue  # Still has a source — not stale
+
+        rel_dst = str(dst_file).replace(str(Path.home()), "~")
+        try:
+            dst_file.unlink()
+            result.actions.append(LinkAction("", rel_dst, "removed"))
+            result.removed += 1
+            emptied_parents.add(dst_file.parent)
+        except OSError as e:
+            result.actions.append(LinkAction("", rel_dst, "error", str(e)))
+            result.errors += 1
+
+    # Remove subdirectories the prune emptied, walking up toward (but never
+    # including) the skill dir. rmdir only succeeds on empty dirs, so a dir
+    # that still holds live files stops the walk naturally.
+    for parent in sorted(emptied_parents, key=lambda p: len(p.parts), reverse=True):
+        current = parent
+        while current != dst_skill_dir:
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            current = current.parent
 
 
 def sync_user_hooks(project_dir: Path) -> HardlinkSyncResult:

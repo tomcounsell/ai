@@ -207,11 +207,13 @@ git push origin "HEAD:${BRANCH}"
 
 **Plan-checkbox sync (only if the context file declares it).** If the repo keeps
 plan docs with acceptance-criteria checkboxes and the context file declares a
-plan-checkbox sync mechanism, tick the builder's reported `criterion_addressed`
-(from Step 2) in the SAME `git add -A` so the plan edit and the code fix land in
-one commit. A helper failure (ambiguous / not-found match) is NON-FATAL — the
-commit still happens with the code change only. If no such mechanism is declared
-(the generic case), skip the tick and just commit the fix.
+plan-checkbox sync mechanism, run the declared mechanism's exact invocation to
+tick the builder's reported `criterion_addressed` (from Step 2) — never hand-edit
+the checkbox when a mechanism is declared — in the SAME `git add -A` so the plan
+edit and the code fix land in one commit. A helper failure (ambiguous /
+not-found match) is NON-FATAL — the commit still happens with the code change
+only. If no such mechanism is declared (the generic case), skip the tick and
+just commit the fix.
 
 **Why same-commit (and not amend, not separate):** Bundling everything into one
 commit keeps a repo's merge-gate review-comment freshness check passing on the

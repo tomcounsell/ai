@@ -1,14 +1,12 @@
 ---
 name: analyze
-description: "Strategic analysis of a decision, idea, or plan. Triggered by 'analyze this', 'run an analysis', 'strategic/business analysis', 'evaluate this', 'should we X or Y', 'pressure test this idea'."
+description: "Strategic analysis of a decision, idea, or plan. Triggered by 'analyze this', 'evaluate/assess this', 'deep dive', 'strategic read', 'your full take', 'should we X or Y'. NOT quick factual lookups."
 allowed-tools: Agent
 ---
 
 # Analyze
 
-Deliver a structured strategic assessment — convergence, tensions, overlooked factors, a direct recommendation, and one first move — on a decision, idea, or plan with meaningful stakes.
-
-Also fires on: 'do a full analysis', 'assess this', 'what's the strategic read', 'deep dive on this', 'give me your full take'. Do NOT trigger on simple factual questions, quick lookups, or casual requests without meaningful stakes.
+Deliver a structured strategic assessment — convergence, tensions, overlooked factors, a direct recommendation, and one first move — on a decision, idea, or plan with meaningful stakes. Do not run it for simple factual questions, quick lookups, or casual requests without meaningful stakes.
 
 ## Framing
 

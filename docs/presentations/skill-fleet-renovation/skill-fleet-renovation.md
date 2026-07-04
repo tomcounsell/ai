@@ -90,7 +90,7 @@ style: |
 
 <!-- _class: lead -->
 # The Skill Fleet Renovation
-### PR #1894: all 60 skills, two passes, eight parallel agents
+### PR #1894: all 60 skills, two passes, 17 subagents (8 clusters × 2 passes, plus a test-repair pass)
 <br>
 
 *Pass 1 fixed the structure. Pass 2 fixed the thinking.*

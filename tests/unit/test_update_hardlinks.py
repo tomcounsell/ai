@@ -111,6 +111,69 @@ def test_user_bin_scripts_table_contains_sdlc_tool():
     assert "scripts/sdlc-tool" in paths
 
 
+def test_sync_skills_prunes_intra_dir_orphan(fake_project, fake_home):
+    """A file deleted from a surviving source skill dir must be pruned from ~/.claude.
+
+    Regression for the skills-renovation rollout: pass 1 deleted
+    do-pr-review/sub-skills/README.md (content folded into SKILL.md), but the
+    dir-level stale cleanup only removes whole skill dirs whose source is gone.
+    The stale hardlink lingered on fleet machines and could be loaded alongside
+    the renovated SKILL.md, contradicting current instructions.
+    """
+    src_skill = fake_project / ".claude" / "skills-global" / "do-review"
+    (src_skill / "sub-skills").mkdir(parents=True)
+    (src_skill / "SKILL.md").write_text("# review skill\n")
+    (src_skill / "sub-skills" / "keep.md").write_text("keep\n")
+    old = src_skill / "sub-skills" / "old.md"
+    old.write_text("old guidance\n")
+
+    hardlinks.sync_claude_dirs(fake_project)
+    dst_skill = fake_home / ".claude" / "skills" / "do-review"
+    assert (dst_skill / "sub-skills" / "old.md").exists()
+
+    # Source file deleted (dir survives) — next sync must prune the dst copy.
+    old.unlink()
+    result = hardlinks.sync_claude_dirs(fake_project)
+
+    assert not (dst_skill / "sub-skills" / "old.md").exists(), (
+        "orphan file lingered after source deletion"
+    )
+    assert (dst_skill / "sub-skills" / "keep.md").exists()
+    assert (dst_skill / "SKILL.md").exists()
+    assert result.removed >= 1
+
+
+def test_sync_skills_prune_removes_emptied_subdir(fake_project, fake_home):
+    """When every file in a subdir is deleted at source, the empty dst subdir goes too."""
+    src_skill = fake_project / ".claude" / "skills-global" / "do-review"
+    (src_skill / "refs").mkdir(parents=True)
+    (src_skill / "SKILL.md").write_text("# review skill\n")
+    gone = src_skill / "refs" / "only.md"
+    gone.write_text("only\n")
+
+    hardlinks.sync_claude_dirs(fake_project)
+    gone.unlink()
+    (src_skill / "refs").rmdir()
+    hardlinks.sync_claude_dirs(fake_project)
+
+    dst_refs = fake_home / ".claude" / "skills" / "do-review" / "refs"
+    assert not dst_refs.exists(), "emptied subdir lingered in destination"
+    assert (fake_home / ".claude" / "skills" / "do-review" / "SKILL.md").exists()
+
+
+def test_sync_skills_prune_leaves_foreign_skill_dirs_alone(fake_project, fake_home):
+    """A user-level skill dir not backed by this project must never be touched."""
+    foreign = fake_home / ".claude" / "skills" / "foreign-skill"
+    foreign.mkdir(parents=True)
+    (foreign / "SKILL.md").write_text("foreign\n")
+    (foreign / "notes.md").write_text("private notes\n")
+
+    hardlinks.sync_claude_dirs(fake_project)
+
+    assert (foreign / "SKILL.md").exists()
+    assert (foreign / "notes.md").exists()
+
+
 def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
     """Namespaced commands (e.g. granite/prime-pm-role.md) must hardlink globally.
 

@@ -1,6 +1,6 @@
 ---
 name: ebook-ingest
-description: "Find, download, and prep an ebook as clean Markdown for AI ingestion. Use when acquiring a digital copy of an owned print book, building a book corpus, converting EPUB/PDF/MOBI, or chunking for RAG."
+description: "Find, download, and prep an ebook as clean Markdown for AI ingestion. Use when digitizing an owned print book, converting EPUB/PDF/MOBI, or chunking for RAG. NOT academic papers or DRM'd ebooks."
 ---
 
 # Ebook acquisition and AI ingestion prep
