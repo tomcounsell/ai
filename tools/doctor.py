@@ -411,6 +411,72 @@ def _check_redis_replication_health() -> CheckResult:
     )
 
 
+def _check_session_archive_freshness() -> CheckResult:
+    """Check the AgentSession SQLite secondary store (data/session_archive.db).
+
+    See docs/plans/session-archive-sqlite.md and docs/features/redis-durability.md
+    Fix #2: the worker periodically exports every ``AgentSession`` to a local
+    SQLite file (plus an immediate export on every terminal-status transition),
+    so a total Redis data-dir loss (FLUSHALL, disk failure, ``rm -rf``) is
+    recoverable. This check reads the read-only ``get_archive_status()``
+    summary -- it never writes and never raises -- and flags a missing or
+    stale archive as an actionable failure so an operator notices the second
+    copy is absent before a Redis loss makes that fact matter.
+    """
+    name = "session-archive-freshness"
+    category = "Services"
+    try:
+        from agent.constants import SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S
+        from agent.session_archive import get_archive_status
+
+        status = get_archive_status()
+    except Exception as e:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"Could not check session archive: {e}",
+        )
+
+    if not status["exists"]:
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message="Session archive (data/session_archive.db) does not exist yet",
+            fix="Start the worker (./scripts/valor-service.sh worker-start) -- the "
+            "periodic export thread and terminal-status hook create it automatically",
+        )
+
+    row_count = status["row_count"]
+    # Health keys off the periodic sweep age (C3) -- a dead sweep thread must
+    # surface even while terminal exports keep last_export_age_s fresh. Fall
+    # back to the terminal age only before the first sweep has run.
+    periodic_age_s = status["last_periodic_export_age_s"]
+    health_age_s = periodic_age_s if periodic_age_s is not None else status["last_export_age_s"]
+
+    if not status["healthy"]:
+        age_desc = "never" if health_age_s is None else f"{health_age_s:.0f}s ago"
+        return CheckResult(
+            name=name,
+            category=category,
+            passed=False,
+            message=f"Session archive stale: last periodic sweep {age_desc} "
+            f"(threshold {SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S}s), row_count={row_count}",
+            fix="Check the worker is running and its 'worker-session-archive' daemon "
+            "thread hasn't crashed: ./scripts/valor-service.sh worker-status; "
+            "tail -f logs/worker.log",
+        )
+
+    return CheckResult(
+        name=name,
+        category=category,
+        passed=True,
+        message=f"Session archive fresh: last periodic sweep {health_age_s:.0f}s ago, "
+        f"row_count={row_count}",
+    )
+
+
 def _check_bridge() -> CheckResult:
     """Check if Telegram bridge is running."""
     try:
@@ -831,6 +897,7 @@ def get_checks(
         _check_redis,
         _check_redis_durability,
         _check_redis_replication_health,
+        _check_session_archive_freshness,
         _check_bridge,
         _check_worker,
         # Auth

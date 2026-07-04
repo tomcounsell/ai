@@ -31,6 +31,7 @@ All resolved emojis are confirmed in VALIDATED_REACTIONS.
 from __future__ import annotations
 
 import logging
+import os
 from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,56 @@ HEARTBEAT_STALENESS_THRESHOLD_S: int = 360
 # declaring the worker down. The dashboard keeps the tighter 360s
 # HEARTBEAT_STALENESS_THRESHOLD_S above for its "ok" band.
 WORKER_DOWN_THRESHOLD_S: int = 600
+
+
+# ---------------------------------------------------------------------------
+# Session archive (durable secondary SQLite store) — see agent/session_archive.py
+# and docs/plans/session-archive-sqlite.md for the full design.
+#
+# All six values below are provisional/tunable: defaults match the plan's
+# reasoning (5-min sweep cadence mirroring the heartbeat/health cadence, a
+# tight on-loop busy-timeout an order of magnitude below the periodic sweep's,
+# and small bounded retry caps so one poison row or a stuck sentinel can never
+# wedge restore forever). Adjust via env override if production experience
+# says otherwise — no code changes required.
+# ---------------------------------------------------------------------------
+
+# Periodic full-sweep export cadence (seconds). Terminal sessions export
+# immediately via the finalize_session hook, so this cadence only bounds the
+# staleness window for non-terminal session state.
+SESSION_ARCHIVE_INTERVAL: int = int(os.environ.get("SESSION_ARCHIVE_INTERVAL", "300"))
+
+# Staleness threshold (seconds) gating the doctor/dashboard "healthy" flag —
+# 2x the sweep interval, one full missed cycle of grace.
+SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S: int = int(
+    os.environ.get("SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S", str(2 * SESSION_ARCHIVE_INTERVAL))
+)
+
+# Busy-timeout (ms) for the off-loop periodic sweep and read connections
+# (status/CLI). Matches analytics/collector.py's 5s timeout.
+SESSION_ARCHIVE_BUSY_TIMEOUT_MS: int = int(
+    os.environ.get("SESSION_ARCHIVE_BUSY_TIMEOUT_MS", "5000")
+)
+
+# Tight busy-timeout (ms) for the on-loop terminal export_session() write —
+# an order of magnitude below SESSION_ARCHIVE_BUSY_TIMEOUT_MS so a WAL-lock
+# stall on the event loop is bounded to ~250ms instead of the full 5s.
+SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS: int = int(
+    os.environ.get("SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS", "250")
+)
+
+# Max whole-restore resume attempts before a restore is declared *wedged* and
+# stops bypassing the empty-Redis guard (a stuck sentinel must never clobber
+# an already-populated Redis, so this bound protects the OTHER direction: a
+# permanently-failing restore must eventually stop retrying and surface loud).
+SESSION_ARCHIVE_RESUME_ATTEMPT_CAP: int = int(
+    os.environ.get("SESSION_ARCHIVE_RESUME_ATTEMPT_CAP", "5")
+)
+
+# Max per-row rehydrate attempts (cumulative, across resume calls) before an
+# archived id is quarantined into _restore_quarantine and skipped on every
+# future resume, so one permanently-unrestorable row can never wedge restore.
+SESSION_ARCHIVE_ROW_ATTEMPT_CAP: int = int(os.environ.get("SESSION_ARCHIVE_ROW_ATTEMPT_CAP", "3"))
 
 
 def _resolve_terminal_emoji(name: str, config: _TerminalEmojiConfig) -> object:

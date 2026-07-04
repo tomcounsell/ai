@@ -532,6 +532,16 @@ def finalize_session(
     except Exception:
         pass
 
+    # Durable secondary archive: upsert this session's terminal snapshot into
+    # SQLite. Exception-isolated -- an archive failure must never break the
+    # terminal transition itself. See docs/plans/session-archive-sqlite.md.
+    try:
+        from agent import session_archive  # lazy import to avoid import cycles
+
+        session_archive.export_session(session)
+    except Exception:
+        logger.warning("session_archive export_session failed for %s", session.id, exc_info=True)
+
 
 def transition_status(
     session,
