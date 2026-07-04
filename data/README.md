@@ -23,6 +23,7 @@ Runtime state and ephemeral data. This directory is gitignored except for this R
 | `sessions/` | Session log archives | Retain for debugging; prune quarterly |
 | `monitoring/` | Crash tracker and watchdog state | Retain for incident analysis |
 | `backups/` | Automatic backups of critical state | Retain last 7 days |
+| `session_archive.db` (+ `-shm`/`-wal`) | Durable SQLite secondary store for `AgentSession` records — periodic export + terminal-transition hook, guarded cold-start restore on a provably-empty Redis. See [Redis Durability: Durable Secondary Store](../docs/features/redis-durability.md#durable-secondary-store-fix-2). Inspect with `valor-session-archive status`. | Machine-local; auto-created and kept current by the worker. Do not delete while investigating a Redis loss — it is the recovery source. |
 
 ## Cleanup Policy
 

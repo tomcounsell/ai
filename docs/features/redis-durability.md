@@ -260,12 +260,20 @@ normal operation, or by a previous partial restore). Three mechanisms work toget
    set, the guard **bypasses the empty-Redis check only while the freshly recomputed
    `len(AgentSession.query.all()) < expected_row_count`** — i.e. Redis is still
    demonstrably short of the archived set — **and** `resume_attempts` is under
-   `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP` (default **5**). If Redis's live count has
-   already reached `expected_row_count`, the sentinel is recognized as stale, cleared,
-   and restore no-ops (`skipped_reason="restore_already_complete"`) — a stuck sentinel
-   can never overwrite an already-whole Redis. If the resume-attempt cap is exceeded,
-   restore is declared *wedged*, logged as an operator error, surfaced on the
-   dashboard/doctor freshness block, and stops bypassing the guard.
+   `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP` (default **5**). A raw count match is
+   necessary but not sufficient: unrelated new sessions created since an interrupted
+   restore could otherwise pad the live count up to `expected_row_count` while a
+   genuinely un-rehydrated archived row is still missing — so before declaring
+   completion the guard also cross-checks that every archived, non-quarantined `id`
+   is actually present among the live Redis ids. Only when both the count is met
+   *and* no archived row is missing is the sentinel recognized as stale, cleared, and
+   restore no-op'd (`skipped_reason="restore_already_complete"`) — a stuck sentinel
+   can never overwrite an already-whole Redis, and a still-missing poison row can
+   never be masked by coincidental live traffic. If any archived row is missing
+   despite the count match, the resume continues instead of declaring completion. If
+   the resume-attempt cap is exceeded, restore is declared *wedged*, logged as an
+   operator error, surfaced on the dashboard/doctor freshness block, and stops
+   bypassing the guard.
 3. Each archived row also carries a per-row failure counter. A row that fails to
    `.save()` more than `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` times (default **3**) is
    written to the `_restore_quarantine` table and skipped on every future resume. The
