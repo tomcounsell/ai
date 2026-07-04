@@ -82,11 +82,24 @@ CUSTOM_CACHE_PATH = Path(__file__).parent.parent / "data" / "custom_emoji_embedd
 # Default fallback emoji (thinking face)
 DEFAULT_EMOJI = "\U0001f914"  # 🤔
 
-# Emojis that must never be selected as a reaction, even if a stale on-disk
-# cache still contains their embedding. Telegram accepts 🖕 as a valid
-# reaction, but reacting to a user's message with it is offensive — so it is
-# blocked at selection time regardless of cache state.
-BLOCKED_REACTION_EMOJIS = frozenset({"\U0001f595"})  # 🖕 middle finger
+# Emojis that must never be selected as a reaction — the single source of truth
+# for "never aim hostility at a user." Every reaction this system sets lands on a
+# user's own message, so any outward-directed hostile face reads as blame at the
+# person who messaged us. These are filtered out of find_best_emoji candidates at
+# selection time regardless of what a stale on-disk cache contains. They stay in
+# VALIDATED_REACTIONS (they are valid Telegram reactions); they are simply
+# unselectable by the resolver. Self-directed sadness/worry (😢 😭 😨) is NOT
+# blocked — it expresses empathy, not hostility.
+BLOCKED_REACTION_EMOJIS = frozenset(
+    {
+        "\U0001f595",  # 🖕 middle finger
+        "\U0001f44e",  # 👎 thumbs down (dismissive)
+        "\U0001f92c",  # 🤬 face with symbols on mouth (swearing)
+        "\U0001f621",  # 😡 pouting face (anger)
+        "\U0001f92e",  # 🤮 face vomiting (disgust)
+        "\U0001f631",  # 😱 face screaming in fear (outward-directed shock/blame)
+    }
+)
 
 # Placeholder character used for custom emoji in message text
 CUSTOM_EMOJI_PLACEHOLDER = "\u2753"  # ❓ (replaced by entity rendering)

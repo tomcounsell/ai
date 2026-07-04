@@ -16,7 +16,7 @@ All constants are canonically defined in `agent/constants.py` (re-exported from 
 | `REACTION_PROCESSING` | thinking | Agent is actively working |
 | `REACTION_SUCCESS` | thumbs up | Acknowledged, no text reply coming |
 | `REACTION_COMPLETE` | trophy | Work done, text reply attached and delivered |
-| `REACTION_ERROR` | scream | Error occurred during processing |
+| `REACTION_ERROR` | thinking (🤔, pinned) | Error occurred during processing |
 
 ## Key Design Decisions
 
@@ -35,6 +35,12 @@ The distinction between `REACTION_SUCCESS` and `REACTION_COMPLETE` is critical:
 
 Without this distinction, a failure to deliver a reply could be masked by a thumbs-up reaction, making the user believe everything succeeded.
 
+### REACTION_ERROR Is Pinned, Not Semantic
+
+`REACTION_SUCCESS` and `REACTION_COMPLETE` resolve semantically: `find_best_emoji()` embeds a feeling string and finds the nearest emoji by cosine similarity, so the exact result can vary as the embedding index changes. `REACTION_ERROR` does not follow that path. It is pinned to a fixed emoji, 🤔 (U+1F914), via a `_TerminalEmojiConfig` NamedTuple in `agent/constants.py` with `pinned=True`. Resolution short-circuits straight to the fixed emoji: no `find_best_emoji()` call, no embedding lookup, no dependence on `OPENROUTER_API_KEY` or the on-disk embeddings cache.
+
+This is deliberate. An error reaction lands on the user's own message. A semantic draw over an "error / something went wrong" feeling string can surface faces that read as hostile toward the person who sent that message (for example, a scream face lands closer to blame than to distress). Pinning `REACTION_ERROR` to 🤔 removes that lottery entirely: every error, in every environment, produces the same deterministic, non-hostile reaction. See [Emoji Embedding Reactions](emoji-embedding-reactions.md#terminal-reactions) for the resolution table covering all three terminal constants.
+
 ### Invalid Reactions
 
 Telegram only accepts a specific subset of emoji as reactions. Common emoji that are explicitly banned in `INVALID_REACTIONS`:
@@ -48,7 +54,9 @@ The full list of validated working reactions is maintained in `VALIDATED_REACTIO
 
 ### Blocked Reactions (policy)
 
-Some emoji are *valid* Telegram reactions but are deliberately excluded from selection on policy grounds. The middle finger 🖕 is one such case — Telegram accepts it, but reacting to a user's message with it is offensive. It is removed from both `VALIDATED_REACTIONS` and the `EMOJI_LABELS` selection set, and additionally guarded by `BLOCKED_REACTION_EMOJIS` in `tools/emoji_embedding.py`, which `find_best_emoji()` filters at selection time. The blocklist is defensive against stale on-disk embedding caches (`data/emoji_embeddings.json`) that may still contain the emoji — see [Emoji Embedding Reactions](emoji-embedding-reactions.md#components).
+Some emoji are *valid* Telegram reactions but are deliberately excluded from selection on policy grounds. Every reaction this system sets lands on a user's own message, so an outward-directed hostile face reads as blame at the person who messaged us. `BLOCKED_REACTION_EMOJIS` in `tools/emoji_embedding.py` is the single source of truth for this policy: it names every emoji that must never target a user, and `find_best_emoji()` filters them out of candidate scoring at selection time, before scoring picks a winner.
+
+The middle finger 🖕 was the original case: it is removed entirely from both `VALIDATED_REACTIONS` and the `EMOJI_LABELS` selection set, and `BLOCKED_REACTION_EMOJIS` guards it defensively against stale on-disk embedding caches (`data/emoji_embeddings.json`) that may still contain its embedding. Five hostile faces joined the blocklist afterward: thumbs down 👎, face with symbols on mouth 🤬, pouting face 😡, face vomiting 🤮, and face screaming in fear 😱. Unlike the middle finger, these five stay in `VALIDATED_REACTIONS` (Telegram accepts them as reactions) and are excluded solely by `BLOCKED_REACTION_EMOJIS` at selection time. Self-directed sadness and worry (😢 😭 😨) stays selectable: it expresses empathy toward the user, not hostility. See [Emoji Embedding Reactions](emoji-embedding-reactions.md#components) for the module-level detail.
 
 ## Auto-Continue Integration
 
@@ -108,6 +116,7 @@ Three paths to silent text loss have been identified and guarded:
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
 | `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |
 | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
+| `tests/unit/test_reaction_never_hostile.py` | Locks `REACTION_ERROR`'s pin to 🤔 and the exact `BLOCKED_REACTION_EMOJIS` hostile deny-list |
 
 ## See Also
 
