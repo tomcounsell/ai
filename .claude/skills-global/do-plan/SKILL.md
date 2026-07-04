@@ -33,14 +33,6 @@ Creates structured feature plans (by default under `docs/plans/`) following Shap
 
 By default `gh` targets the repository of the current working directory. If the context file declares a cross-repo targeting mechanism (e.g. a `GH_REPO` env var), honor it so `gh` commands hit the intended repository.
 
-## When to Use
-
-- Planning a new feature
-- Updating an existing plan
-- User says "make a plan", "plan this out", "flesh out the idea"
-- Scoping unclear or large requests
-- Before starting significant implementation work
-
 ## Quick Start Workflow
 
 ### Phase 0: Validate Recon (ISSUE → PLAN gate)
@@ -108,25 +100,11 @@ Gather relevant external context before planning. This surfaces current document
    ToolSearch("select:WebSearch")
    ```
 
-2. **Generate 1-3 search queries** from the issue context. Extract key technical terms from the issue title, problem statement, and desired outcome. Target:
-   - (a) Library or API documentation relevant to the approach
-   - (b) Ecosystem best practices or recommended patterns
-   - (c) Known pitfalls, breaking changes, or migration guides
+2. **Run 1-3 searches** targeting: (a) library/API documentation relevant to the approach, (b) ecosystem best practices, (c) known pitfalls, breaking changes, or migration guides. Keep only findings directly relevant to the technical approach.
 
-3. **Execute each query** using the WebSearch tool. Review the results for relevance.
+3. **Save valuable findings for future reuse** — if the context file declares a memory/notes store, save each finding there (fire-and-forget — if it fails, continue without error). Otherwise the plan's `## Research` section is the only capture point.
 
-4. **Filter results** — Only retain findings that are directly relevant to the technical approach. Discard generic results, marketing content, or tangentially related material.
-
-5. **Save valuable findings for future reuse** — if the context file declares a memory/notes store, save each finding there (fire-and-forget — if it fails, continue without error). Otherwise capture the findings inline in the plan's `## Research` section (next step) and skip the external save.
-
-6. **Write the `## Research` section** in the plan document with the findings. Include:
-   - The search queries used
-   - Key findings with source URLs
-   - How each finding informs the plan's technical approach
-
-   If no useful results were found, write: "No relevant external findings — proceeding with codebase context and training data."
-
-7. **Proceed to Phase 1** with the research context available.
+4. **Write the `## Research` section** in the plan document: the queries used, key findings with source URLs, and how each finding informs the technical approach. If nothing useful was found, write: "No relevant external findings — proceeding with codebase context and training data."
 
 ### Phase 1: Flesh Out at High Level
 
@@ -354,8 +332,6 @@ After all task steps are written and before committing, verify that task bullets
    - A pattern (e.g., `asyncio.to_thread()` vs. direct `await`) that contradicts the current approach
 4. **Update divergent task steps** before committing — the task list must reflect the final spike conclusions, not intermediate assumptions
 
-**Concrete example:** If spike-2 found that `json.dumps()` is the correct encoding method and a task bullet still says "msgpack-encoded payload", update that task bullet to say "json-encoded payload" before committing the plan.
-
 **This step is non-negotiable for plans with spikes.** For plans with no spikes (Small appetite, greenfield), it is a 30-second sanity check — scan once and move on.
 
 ### Phase 2.7: Sync Issue Comments into Plan
@@ -393,12 +369,12 @@ fi
 Plan critique is handled separately by `/do-plan-critique` (war room). This phase focuses only on surfacing questions that need human input before the critique step.
 
 1. **Enumerate questions** - List all questions needing supervisor input
-4. **Add questions to plan** - Append to "Open Questions" section
-5. **Pre-send checklist**:
+2. **Add questions to plan** - Append to "Open Questions" section
+3. **Pre-send checklist**:
    - [ ] Plan committed AND pushed (to `main` or `plan/{slug}` branch if main is protected)
    - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/${PLAN_BRANCH}/docs/plans/{slug}.md`
    - [ ] Plan frontmatter has `tracking:` set to the issue URL
-6. **Send reply**:
+4. **Send reply**:
 
 ```
 Plan draft created: docs/plans/{slug}.md
@@ -443,15 +419,9 @@ I think I'm done, but I'm supposed to ask — does anything feel off? Missed edg
 
 ## Output Location
 
-All plans go to: `docs/plans/{slug}.md`
+All plans go to: `docs/plans/{slug}.md` — snake_case slugs (e.g. `async_meeting_reschedule.md`).
 
-Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, `api_response_caching.md`
-
-## Branch Workflow
-
-**MANDATORY: Plans are committed on `main`.** Before committing, switch to `main` regardless of current branch. Plans are documentation, not code — they do not belong on feature branches.
-
-When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
+Plans are committed on `main` (see Phase 2.5 Step 2) — they are documentation, not code, and do not belong on feature branches. When the plan is *executed* (via `/do-build`), the build skill creates the feature branch.
 
 ## Status Tracking
 

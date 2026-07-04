@@ -188,7 +188,7 @@ Parse the results:
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
-### Step 3.5: Commit the Fix (Atomic Single Commit)
+### Step 3.5: Sync Plan Checkbox and Commit the Fix (Atomic Single Commit)
 
 After the test-pass verification in Step 3 succeeds and BEFORE Report
 Completion, commit the fix as a single atomic commit and push it to the current
@@ -275,16 +275,6 @@ lint fixes:
 If the repo has no such automation (the generic case), run its lint/format
 checks once before committing and fix any reported issues manually.
 
-## Commit and Push Rules
-
-The commit and push are part of Step 3.5 ("Sync Plan Checkbox") — see that step
-for the atomic-commit procedure that bundles the code fix with the plan-file
-checkbox tick into a single commit. Do NOT commit elsewhere; the single-commit
-invariant is what keeps the merge-gate review-comment freshness check passing.
-
-This skill owns its full lifecycle — no parent skill handles commits on its
-behalf.
-
 ## Critical Rules
 
 - NEVER create a PR — that is `do-build`'s responsibility
@@ -293,16 +283,7 @@ behalf.
 - NEVER refactor unrelated code — targeted fixes only
 - Keep fixes minimal: change the least amount of code needed to pass tests
 - If a fix would require architectural changes, report stuck immediately — do not attempt it
-
-## Context-Awareness
-
-When invoked by `do-build`, this skill receives structured failure output. When invoked by a user, it may receive:
-- A short description ("3 tests failing")
-- Full pytest output
-- A review comment
-- Nothing (empty args)
-
-Adapt to what is provided. Extract the signal from whatever input arrives.
+- This skill owns its commit lifecycle (Step 3.5) — commit nowhere else; no parent skill commits on its behalf
 
 ## CWD-Relative Execution
 
@@ -311,28 +292,6 @@ All commands run relative to the current working directory. Do not attempt to de
 - Directly by user: CWD is wherever the user is — commands run there
 
 Run `pwd` once at the start to confirm and log it.
-
-## Example Invocations
-
-**User-facing (direct invocation):**
-```
-/do-patch "3 tests failing in test_bridge.py — connection timeout"
-/do-patch "review blocker: race condition in session lock"
-/do-patch  (no args — reads most recent failure from context)
-```
-
-**Model-invocable (called by do-build at test-fail step):**
-```
-/do-patch FAILED tests/unit/test_bridge_logic.py::test_session_lock_cleanup
-AssertionError: Expected lock to be cleared, got 1 active lock
-```
-
-**Model-invocable (called by do-build at review-blocker step):**
-```
-/do-patch The session cleanup in bridge/telegram_bridge.py line 247 has a race
-condition — if the cleanup runs while a new session is being initialized,
-it will incorrectly clear the new session's lock.
-```
 
 ## Success Report Format
 

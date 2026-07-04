@@ -186,22 +186,3 @@ When deploying an agent, include:
 3. Success criteria from the plan
 4. Validation commands they should run (for validators)
 5. Reminder: No temporary files in repo - use /tmp for scratch work, only commit deliverables
-
-## Example Execution
-
-Given a plan with tasks:
-```
-1. build-api (Parallel: true)
-2. build-frontend (Parallel: true)
-3. validate-api (Depends On: build-api)
-4. validate-frontend (Depends On: build-frontend)
-5. integration-test (Depends On: validate-api, validate-frontend)
-```
-
-Execution order:
-1. Create all 5 tasks
-2. Set dependencies
-3. Deploy build-api AND build-frontend simultaneously (both parallel, no deps)
-4. When build-api completes -> validate-api starts
-5. When build-frontend completes -> validate-frontend starts
-6. When BOTH validators complete -> integration-test starts

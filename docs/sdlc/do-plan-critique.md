@@ -84,11 +84,11 @@ If the plan touches any Popoto model, the critique must verify:
 
 ## Artifact-Based Roster Barrier (#1690, supersedes the #1654 wait-and-collect)
 
-The war-room critics (six or seven per CRITICS.md selection rules) write their findings to **per-critic result files** rather than relying on a prose await-all instruction. This barrier is observable on the filesystem and verifiable by a test — it does not depend on the LLM driver choosing to block.
+The war-room critics (1 for LITE, 3 for FULL — per the Step 2.6 triage) write their findings to **per-critic result files** rather than relying on a prose await-all instruction. This barrier is observable on the filesystem and verifiable by a test — it does not depend on the LLM driver choosing to block.
 
 ### How the barrier works
 
-**Step 3a — Frozen `_roster.json` manifest.** Before any critic is dispatched, the skill computes the expected roster from CRITICS.md's selection rules (seven critics by default; six when Archaeologist + User are skipped for a Small purely-internal plan) and writes `${CRITIQUE_RUN_DIR}/_roster.json` — a JSON object listing the expected critic names and count. This manifest is the **membership set** the Step 3.5 gate checks against. Because the manifest is frozen before dispatch, the gate cannot be satisfied by dispatching fewer critics than expected (the under-dispatch loophole from the prior prose-await design).
+**Step 3a — Frozen `_roster.json` manifest.** Before any critic is dispatched, the skill fixes the roster from the triage depth (LITE → `["Consolidated Critic"]`; FULL → `["Risk & Robustness", "Scope & Value", "History & Consistency"]`) and writes `${CRITIQUE_RUN_DIR}/_roster.json` — a JSON object listing the expected critic names and count. This manifest is the **membership set** the Step 3.5 gate checks against. Because the manifest is frozen before dispatch, the gate cannot be satisfied by dispatching fewer critics than expected (the under-dispatch loophole from the prior prose-await design).
 
 **Step 3 — Atomic per-critic result files.** Each critic writes its findings body first, then appends a **two-line terminal completion fence** as its final action: the unique delimiter `<<<CRITIQUE-RESULT-COMPLETE>>>` as the penultimate non-empty line, immediately followed by `STATUS: COMPLETED` as the last non-empty line. The write is **atomic**: the critic writes to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md.tmp`, then renames it to `${CRITIQUE_RUN_DIR}/{critic_name}.result.md`. Because both files live inside `${CRITIQUE_RUN_DIR}` (same filesystem), the rename is atomic — the canonical path is never observed in a truncated or partial state.
 
@@ -101,7 +101,7 @@ critique-roster-check --run-dir "$CRITIQUE_RUN_DIR"
 This helper reads `_roster.json` and, for each named roster member, checks that `{name}.result.md` exists and carries the terminal two-line fence. It prints a JSON gate decision and exits 0 when the full roster is complete:
 
 ```json
-{"complete": true, "missing": [], "present": ["Skeptic","Operator",...], "roster_count": 7, "completed_count": 7}
+{"complete": true, "missing": [], "present": ["Risk & Robustness","Scope & Value","History & Consistency"], "roster_count": 3, "completed_count": 3}
 ```
 
 Step 4 (aggregation) runs **only after this gate reports `complete: true`**. Step 4 then iterates the full `_roster.json` manifest — every named roster member — rather than "the result files that are present," so a missing file surfaces as a visible gap rather than being silently skipped.
@@ -139,7 +139,7 @@ through the normal Step 5.5 path, then sets the `plan_revising` lock (Step 5.6).
 
 ## Multi-Machine Deployment
 
-This repo runs on multiple machines (see `docs/deployment.md`). The Archaeologist critic should check:
+This repo runs on multiple machines (see `docs/deployment.md`). The History & Consistency critic (Archaeologist lens) should check:
 - Does the plan require a new env var? It must be added to `.env.example` and `config/settings.py`
 - Does the plan introduce new dependencies? They must be propagated via the update system
 - Are there race conditions between machines running `/update` simultaneously?

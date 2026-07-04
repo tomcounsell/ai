@@ -162,7 +162,7 @@ and the merge is already complete.
 ## Critical Rules
 
 - **Never bypass the gate.** The auth file is created ONLY after every
-  precondition passes. A copy-pasted `touch data/merge_authorized_{PR}` without
+  precondition passes. Creating the repo's authorization file without running
   the gate defeats the entire mechanism.
 - **Fail closed.** Any unconfirmed precondition (unknown CI state, missing
   review verdict, unresolved mergeability) is a FAIL, not a pass.

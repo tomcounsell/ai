@@ -177,10 +177,3 @@ As the very last line of your final response, emit an OUTCOME contract so the pi
 - **Fail** (build failed, no PR): `<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{}} -->`
 
 This structured output is parsed by the repo's pipeline harness (Tier 0) before any text pattern matching — the context file names the exact parser when the repo has an SDLC pipeline.
-
-## Notes
-
-- The plan document is the source of truth
-- Agents can be resumed using their agentId if they need to continue work
-- Background agents continue running even if you move to other tasks
-- Use `TaskStop` only if you need to abort a runaway agent

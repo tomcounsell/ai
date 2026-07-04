@@ -38,18 +38,14 @@ review issues for HIGH/MED-HIGH confidence matches. Otherwise skip — the
 
 ## Step 6.5: Pre-PR Commit Verification
 
-Before creating the PR, verify that the session branch has actual commits. This is the final safety net against silent build failures where all agents completed but produced no work.
+Final safety net against silent build failures — verify the session branch has actual commits:
 
 ```bash
 COMMIT_COUNT=$(git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
 echo "Commits on session/{slug}: $COMMIT_COUNT"
 ```
 
-**If `COMMIT_COUNT` is 0:**
-- **ABORT** -- do not push or create a PR
-- Report: "BUILD FAILED: No commits on session/{slug} branch. Builder agents completed but produced zero code changes."
-- Include a summary of which tasks ran and their reported status
-- This is a hard failure -- the orchestrator must stop and report, not silently succeed
+**If `COMMIT_COUNT` is 0: ABORT** — do not push or create a PR. Report: "BUILD FAILED: No commits on session/{slug} branch. Builder agents completed but produced zero code changes." Include which tasks ran and their reported status. This is a hard failure — stop and report, never silently succeed.
 
 **If `COMMIT_COUNT` > 0:** Proceed to Step 7.
 
@@ -151,7 +147,7 @@ The plan will be deleted by `do-merge` after the PR is successfully merged. The 
 
 ## Step 9: Report PR Link
 
-After plan migration completes, include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
+Include the PR URL prominently in your final response — the caller (human, bridge, or pipeline supervisor) reads it from there.
 
 ### Report Format
 
@@ -187,6 +183,5 @@ After plan migration completes, include the PR URL prominently in your final res
 
 ### Next Steps
 - Review and merge PR: [PR URL]
-- PR link has been sent to Telegram chat
 - [Any follow-up items or manual steps needed]
 ```
