@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1825
-last_comment_id:
+last_comment_id: 4880726096
 revision_applied: true
 ---
 
@@ -78,88 +78,127 @@ mirroring the existing email/heartbeat freshness pattern.
 
 ## Freshness Check
 
-**Baseline commit:** `b99e295821573d011c2981c401c8977ee87fe045` (main, plan time)
+**Baseline commit:** `dbe9682d9d5832087b6825b9c883b71775f82788` (main, HEAD at supervision
+time — was `b99e2958` at plan time). **Disposition: Minor drift** — every claim still
+holds; line numbers moved (worker startup shifted ~140 lines) and two sibling PRs from the
+same #1818 cluster merged after the plan was written. No structural change to the approach.
 **Issue filed at:** #1825, part of the #1818 resilience cluster; #1814 merged as PR #1824.
-**Disposition:** Anchors re-verified at HEAD during the post-critique revision. Two
-worker startup anchors were corrected (the `if dry_run: return` guard at 746-751 and the
-`register_callbacks`/index-rebuild layout at 753-764) so restore lands below the dry-run
-guard; the heartbeat-thread anchor was tightened to 1003-1005. The `id`/`AutoKeyField`
-key-preservation fact and the two-writer thread model were added below. Second revision
-(critique round 2): confirmed the dead-worker-sweep ordering anchors
-(`_sweep_dead_worker_sessions` at `agent/session_health.py:835`,
-`_recover_interrupted_agent_sessions_startup` at line 599) for the stale-`claude_pid`
-note; verified the lazy-import shape in `session_lifecycle.py` (`from agent.session_archive
-import export_session` + call = the `export_session(` call-site grep), and empirically
-validated the two `agent_session_id`-key greps against both correct and buggy simulated
-code (the negative check is deliberately pipe-free — a `\|` alternation is silently
-mis-parsed as a literal pipe by BSD `grep -E` once markdown-escaped, which would false-green).
 
-**File:line references verified at HEAD (`b99e2958`):**
-- `models/session_lifecycle.py:221` — `finalize_session(...)` signature. Confirmed.
-  The terminal write is `session.save()` at **line 474**; the function's last side
-  effects are the defensive `srem` (476-498), the `TaskTypeProfile` update (500-510),
-  and the analytics `record_metric` block (512-525). The archive hook belongs **after
-  line 525** (the current end of the function body), so it runs strictly after the
-  authoritative Redis save. Confirmed `TERMINAL_STATUSES` at line 61 and `ALL_STATUSES`
-  at line 97.
-- `worker/__main__.py:695-703` — "Redis connection verified" block (`AgentSession.query.filter(status="pending")`).
-  Re-verified at HEAD.
-- `worker/__main__.py:746-751` — the `if dry_run: ... return` guard. **Restore MUST run
-  below this guard**, not after line 703, or a `--dry-run` boot against an empty Redis
-  would rehydrate/mutate Redis (a dry run must never write). Re-verified at HEAD.
-- `worker/__main__.py:753-762` — callback/handler registration (`register_callbacks`).
-  Restore slots into the **751→753 gap**: after the dry-run `return` and **before**
-  handler registration and the Step 1 index rebuild. This keeps Race Condition #2's
-  invariant (restore completes before any handler can create a new session) while
-  respecting the dry-run guard. Re-verified at HEAD.
-- `worker/__main__.py:764` — Step 1 index rebuild (`run_cleanup()`); restore precedes it
-  so the rebuild reindexes the freshly-restored rows (they are otherwise not queryable —
-  see the cold-boot success criterion). Re-verified at HEAD.
-- `worker/__main__.py:1003-1005` — heartbeat daemon thread spawn
-  (`threading.Thread(target=_heartbeat_thread_main, name="worker-heartbeat", daemon=True)`).
-  The export daemon thread is spawned adjacent to it using the identical pattern.
-  Re-verified at HEAD.
-- `agent/session_health.py:3001-3011` — `_write_worker_heartbeat()` uses the
-  write-temp-then-`os.replace()` atomic file pattern. This is the in-repo precedent for
-  atomic writes (though the archive uses a SQLite transaction instead — see Technical
-  Approach for why). Confirmed.
-- `analytics/collector.py:9-31` — existing in-repo SQLite usage: `sqlite3`,
-  `_DB_DIR = Path(__file__).parent.parent / "data"`, `PRAGMA journal_mode=WAL`,
-  `_SQLITE_TIMEOUT = 5`, **and a single module-level `_sqlite_conn` opened with the
-  default `check_same_thread=True`** (line 30-31). The archive borrows the file/WAL/
-  timeout shape but **must NOT** copy the single-shared-connection detail: analytics is
-  written from one thread, whereas this archive is written from **two** (see the
-  two-writer note below). Re-verified at HEAD.
-- `models/agent_session.py:137` — `id = AutoKeyField()` is the **real persisted key**;
-  `agent_session_id` (lines 1124-1132) is only a `@property`/setter alias. Critically,
-  `_normalize_kwargs` at **lines 805-806** *pops and discards* any `agent_session_id`
-  kwarg (`# AutoKeyField, ignore`), while an explicit `id=` kwarg is honored. Verified
-  empirically at HEAD: `AgentSession(id=X, ...).save()` preserves the key and
+**Third revision (supervision-loop freshness re-verification, baseline `dbe9682d`):** two
+sibling PRs from the #1818 resilience cluster merged after the plan's `b99e2958` baseline
+and were reconciled here:
+- **#1826 (`51ecfd0c`, "Move hot-path Redis off the event loop")** added
+  `agent/redis_offload.py` — an `async def offload_redis(fn, ...)` bulkhead over a bounded
+  `ThreadPoolExecutor` that moves a synchronous Popoto/redis-py call off the event loop.
+  Its docstring and the single production call site
+  (`agent/agent_session_queue.py:1665`, the drain-loop idle-check) confirm it targets the
+  **ONE on-loop read hot-path**, not the finalize write path. **Impact on this plan: none
+  structurally — the plan deliberately does NOT wrap the archive hook in `offload_redis`,
+  and this is now stated explicitly** (see Architectural Impact and the Technical Approach
+  "Off-loop execution" note). Rationale: `finalize_session` is a **sync** function called
+  from `async def _execute_agent_session` (`agent/session_executor.py:754`), so it cannot
+  `await offload_redis(...)`; and the authoritative `session.save()` at
+  `session_lifecycle.py:482` — the line immediately before the hook — is itself a
+  synchronous, un-offloaded Redis write on the same loop. Offloading only the *secondary*
+  archive write while the *authoritative* save stays on-loop would be incoherent. The
+  periodic `export_all()` sweep is already off-loop on its own daemon thread (it mirrors
+  the heartbeat thread, a pattern that predates `offload_redis`), so it needs no offload
+  seam either. If finalize's on-loop blocking is ever addressed, `offload_redis` is the
+  sanctioned mechanism and the whole finalize path (save + archive) must move together — a
+  separate follow-up, out of this Medium appetite.
+- **#1828 (`dbe9682d`, "Reflection scheduler subprocess split")** moved reflections out of
+  the worker into their own launchd subprocess (`python -m reflections`,
+  `com.valor.reflection-worker` — confirmed by `worker/__main__.py:1183` and
+  `reflections/__main__.py`). **Impact on this plan: none — the periodic export is a
+  worker daemon thread, NOT a reflection.** The plan never wired the export as a
+  reflection, so the subprocess split does not touch it; the export must stay co-located
+  with the worker anyway (the terminal hook lives in the worker's `finalize_session` path,
+  and both writers share the two-writer connection model). The heartbeat daemon-thread
+  pattern the export mirrors is intact at `worker/__main__.py:1164-1170`.
+
+Prior revisions: first (post-critique) corrected the worker startup anchors so restore
+lands below the dry-run guard and added the `id`/`AutoKeyField` key-preservation fact and
+the two-writer thread model. Second (critique round 2) confirmed the dead-worker-sweep
+ordering anchors and empirically validated the two `agent_session_id`-key greps against
+correct and buggy simulated code (the negative check is deliberately pipe-free — a `\|`
+alternation is silently mis-parsed as a literal pipe by BSD `grep -E` once markdown-escaped,
+which would false-green).
+
+**File:line references re-verified at HEAD (`dbe9682d`) — all drifted line numbers below
+are the CURRENT values:**
+- `models/session_lifecycle.py:229` — `finalize_session(...)` signature (was 221). Confirmed.
+  The terminal write is `session.save()` at **line 482** (was 474); the function's last side
+  effects are the defensive `srem` (484-506), the `TaskTypeProfile` update (508-518), and
+  the analytics `record_metric` block (520-533). The archive hook belongs **after line 533**
+  (the current end of the function body, before `def transition_status` at 536), so it runs
+  strictly after the authoritative Redis save. `TERMINAL_STATUSES` at line 61 (unchanged);
+  `ALL_STATUSES` at line 105 (was 97).
+- `agent/session_executor.py:754` — `async def _execute_agent_session(session)` is the
+  async caller that invokes `finalize_session` synchronously (call sites at 843, 892,
+  2092), confirming the hook runs **on the event-loop thread**. Newly anchored this revision
+  (grounds the two-writer model and the #1826 offload reconciliation).
+- `worker/__main__.py:789-790` — "Redis connection verified" block
+  (`AgentSession.query.filter(status="pending")`) (was 695-703). Re-verified.
+- `worker/__main__.py:885-890` — the `if dry_run: ... return` guard (was 746-751). **Restore
+  MUST run below this guard**, not after the connection-verified block, or a `--dry-run` boot
+  against an empty Redis would rehydrate/mutate Redis (a dry run must never write).
+- `worker/__main__.py:892-901` — callback/handler registration (`register_callbacks`) (was
+  753-762). Restore slots into the **890→892 gap** (was 751→753): after the dry-run `return`
+  and **before** handler registration and the Step 1 index rebuild. This keeps Race
+  Condition #2's invariant (restore completes before any handler can create a new session)
+  while respecting the dry-run guard.
+- `worker/__main__.py:903` (comment) / `911` (`run_cleanup()` call) — Step 1 index rebuild
+  (was line 764); restore precedes it so the rebuild reindexes the freshly-restored rows
+  (they are otherwise not queryable — see the cold-boot success criterion).
+- `worker/__main__.py:1164-1170` — heartbeat daemon thread spawn
+  (`threading.Thread(target=_heartbeat_thread_main, name="worker-heartbeat", daemon=True)`)
+  (was 1003-1005). The export daemon thread is spawned adjacent to it using the identical
+  pattern.
+- `agent/session_health.py:4125` — `_write_worker_heartbeat()` uses the
+  write-temp-then-`os.replace()` atomic file pattern (`os.replace` at 4135; was 3001-3011).
+  In-repo precedent for atomic writes (the archive uses a SQLite transaction instead — see
+  Technical Approach for why). Confirmed.
+- `analytics/collector.py:17-74` — existing in-repo SQLite usage: `_DB_DIR = Path(__file__).parent.parent / "data"`
+  (line 17), `_SQLITE_TIMEOUT = 5` (line 25), `PRAGMA journal_mode=WAL` (line 63), **and a
+  single module-level `_sqlite_conn` opened at line 73 with the default
+  `check_same_thread=True`** (`_sqlite_conn` declared at line 31). The archive borrows the
+  file/WAL/timeout shape but **must NOT** copy the single-shared-connection detail: analytics
+  is written from one thread, this archive from **two** (see the two-writer note below).
+  Re-verified.
+- `models/agent_session.py:139` — `id = AutoKeyField()` is the **real persisted key** (was
+  137); `agent_session_id` (property at line 1164, setter 1169; was 1124-1132) is only an
+  alias. `_normalize_kwargs` at **line 850** (was 805-806) *pops and discards* any
+  `agent_session_id` kwarg (`# AutoKeyField, ignore`), while an explicit `id=` kwarg is
+  honored. Verified empirically: `AgentSession(id=X, ...).save()` preserves the key and
   `query.get(id=X)` finds it; `AgentSession(agent_session_id=X, ...)` regenerates a fresh
-  UUID (X is dropped). AutoKeyField mints a new value only when `id` is empty
-  (`auto_field_mixin.py:285-301`). **This is the crux of Blocker #1**: export/restore
-  must key on `id`, not `agent_session_id`, or the key regenerates on restore and every
-  `parent_agent_session_id` link dangles.
+  UUID. **Crux of Blocker #1**: export/restore must key on `id`, not `agent_session_id`, or
+  the key regenerates on restore and every `parent_agent_session_id` link dangles.
 - **Two-writer thread model (Blocker #2, verified by design):** `export_all()` runs on
   the periodic **daemon thread**; `export_session()` runs inside `finalize_session`,
-  which executes on the **asyncio event-loop thread**. SQLite connection objects are
-  thread-affine under the default `check_same_thread=True` — sharing one module-level
-  connection across these two threads raises `sqlite3.ProgrammingError`. WAL +
-  busy-timeout do NOT fix this (they serialize *separate* connections/processes, not
-  cross-thread reuse of one object). Mitigation stated in Technical Approach / Risks /
-  Race Conditions.
-- `ui/app.py:507-548` — `/dashboard.json` route; `_get_email_health()` (388-421) is the
-  freshness-block template to mirror; `_session_to_json` at 424. Confirmed.
-- `models/agent_session.py:84-336` — `AgentSession` field set (all `Field`/`KeyField`/
-  `IndexedField`/`DatetimeField`/`DictField`/`ListField` declarations), with the key
-  `id = AutoKeyField()` at line 137. `query.all()` used at line 988. Confirmed.
-- `.gitignore:171-181` — `*.db`, `*.db-shm`, `*.db-wal`, and `data/` are already
-  ignored, so `data/session_archive.db` and its WAL sidecars are never committed. Confirmed.
+  which executes on the **asyncio event-loop thread** (confirmed via
+  `_execute_agent_session` above). SQLite connection objects are thread-affine under the
+  default `check_same_thread=True` — sharing one module-level connection across these two
+  threads raises `sqlite3.ProgrammingError`. WAL + busy-timeout do NOT fix this (they
+  serialize *separate* connections/processes, not cross-thread reuse of one object).
+  Mitigation stated in Technical Approach / Risks / Race Conditions.
+- `agent/session_health.py` — dead-worker sweep `_sweep_dead_worker_sessions` at **line
+  1168** (was 835) and `_recover_interrupted_agent_sessions_startup` at **line 932** (was
+  599), for the stale-`claude_pid` note in Data Flow. Re-verified; sweep→recover ordering
+  intact.
+- `ui/app.py:729-730` — `/dashboard.json` route (was 507-548); `_get_email_health()` at 559
+  (was 388-421) is the freshness-block template to mirror; `_session_to_json` at 627 (was
+  424). Confirmed.
+- `models/agent_session.py` — `AgentSession` field set with `id = AutoKeyField()` at line
+  139; `query.all()` used at line 1045 (was 988). Confirmed.
+- `.gitignore` — `*.db`, `*.db-shm`, `*.db-wal`, and `data/` are already ignored, so
+  `data/session_archive.db` and its WAL sidecars are never committed. Confirmed.
 
-**Commits on main since #1814 merged (touching referenced files):** the only change to
-`models/session_lifecycle.py` / `worker/__main__.py` since is unrelated (calendar
-feature `b99e2958`); the `finalize_session` chokepoint and the startup sequence are
-intact. Premises hold.
+**Commits on main since the `b99e2958` plan baseline (touching referenced files):** #1826
+(`51ecfd0c`) and #1828 (`dbe9682d`) are the material ones and are reconciled above; both
+added lines to `worker/__main__.py` (hence the ~140-line startup drift) but changed neither
+the `finalize_session` chokepoint nor the dry-run→register→Step-1 startup ordering. Other
+commits since (#1877 lifecycle notification gaps, #1817/#1820 worker delivery-integrity)
+did not alter the archive's insertion points. Premises hold.
 
 **Active plans in `docs/plans/` overlapping this area:** none. The parent
 `docs/plans/completed/redis-durability-hardening.md` explicitly split this out.
@@ -173,6 +212,15 @@ intact. Premises hold.
   `tests/unit/test_analytics_query.py`.
 - **`agent/session_health.py::_write_worker_heartbeat`** — the write-temp-then-
   `os.replace()` atomic-file idiom already used for the heartbeat file.
+- **`agent/redis_offload.py::offload_redis` (#1826, merged after this plan's baseline)** —
+  the repo's now-sanctioned bulkhead for moving a synchronous Popoto/redis-py call **off
+  the event loop** (bounded `ThreadPoolExecutor`, kill-switch, latency gauges). Its sole
+  production caller is the drain-loop idle-check. This plan **does not** route the archive
+  hook through it — the terminal `export_session` runs inline in the sync `finalize_session`
+  (matching the un-offloaded `session.save()` that precedes it) and the periodic sweep is
+  already off-loop on its own daemon thread — but the module is cited so a reviewer sees the
+  offload seam was considered and deliberately left for a future finalize-path offload
+  (which would move `save()` + archive together). See the Freshness Check reconciliation.
 - **`tests/conftest.py::redis_test_db`** — the fixture that isolates `POPOTO_REDIS_DB`
   per test; the archive's restore/export tests reuse it so they never touch prod Redis
   or prod `data/session_archive.db` (tests point the archive at a `tmp_path` DB).
@@ -195,7 +243,7 @@ field map, and reconstruction is `AgentSession(**field_kwargs).save()`. **Key
 preservation is mandatory** — the field map includes the real `id` (`AutoKeyField`), and
 the restore kwargs MUST carry `id=<archived id>` so the AutoKey is *not* regenerated.
 Passing the `agent_session_id` alias instead is a trap: `_normalize_kwargs`
-(`models/agent_session.py:805-806`) pops it, and Popoto mints a fresh UUID, orphaning
+(`models/agent_session.py:850`) pops it, and Popoto mints a fresh UUID, orphaning
 every `parent_agent_session_id` reference. Empirically verified at HEAD: explicit `id=`
 survives `save()` and `query.get(id=...)`; `agent_session_id=` does not. Datetime/dict/
 list fields are the additional fidelity risk and are handled explicitly (see Risks and
@@ -222,8 +270,9 @@ path. Three flows:
 
 3. **Cold start → restore (startup, guarded).**
    `_run_worker()` calls `session_archive.restore_if_empty()` **after the `if dry_run:
-   return` guard** (`worker/__main__.py:746-751`) and **before** the Step 1 index rebuild
-   (line 764) — i.e. in the 751→753 gap. Placing it below the dry-run guard is
+   return` guard** (`worker/__main__.py:885-890`) and **before** the Step 1 index rebuild
+   (comment at line 903, `run_cleanup()` at 911) — i.e. in the 890→892 gap. Placing it
+   below the dry-run guard is
    load-bearing: a `--dry-run` boot must observe/report but never mutate Redis, so restore
    (which writes) cannot run above the guard. The function checks the empty-Redis guard
    (below); on a provably-empty Redis (or when a prior partial restore left the
@@ -386,11 +435,32 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
   full sweep). (The alternative — one `check_same_thread=False` connection + an explicit
   `threading.Lock` around every use — is functionally equivalent but easier to get wrong;
   per-operation is preferred.)
+- **Off-loop execution & the #1826 `offload_redis` seam (deliberately not used here).**
+  `#1826` (merged after this plan's baseline) added `agent/redis_offload.py`, the repo's
+  sanctioned `async` bulkhead for pushing a synchronous Redis call off the event loop. This
+  plan **does not** route either archive write through it, by design:
+  - **Terminal hook (`export_session`) — stays inline.** It runs inside `finalize_session`,
+    a **synchronous** function called from `async def _execute_agent_session`
+    (`agent/session_executor.py:754`). A sync function cannot `await offload_redis(...)`.
+    More importantly, the authoritative `session.save()` at `session_lifecycle.py:482` — the
+    line immediately preceding the hook — is itself a synchronous, un-offloaded Redis write
+    on the same loop; offloading only the *secondary* SQLite write while the *authoritative*
+    Redis save blocks in place would be incoherent. The single-row WAL upsert is a small
+    marginal cost on top of the save that is already there.
+  - **Periodic sweep (`export_all`) — already off-loop.** It runs on the
+    `worker-session-archive` **daemon thread**, which mirrors the heartbeat daemon thread and
+    predates `offload_redis`. A call that already executes on its own thread needs no
+    event-loop-offload seam.
+  - **If** the finalize path's on-loop Redis/SQLite blocking is ever addressed, the
+    sanctioned mechanism is `offload_redis`, and the whole finalize path (`save()` + archive)
+    must move together — a separate follow-up, out of this Medium appetite. This bullet exists
+    so critique does not flag "why wasn't the new offload seam used?" — it was considered and
+    deliberately deferred.
 - **Key preservation on restore.** The archive stores the real `id` (`AutoKeyField`) as
   the primary column and inside the JSON payload, and restore reconstructs via
   `AgentSession(id=<archived id>, **other_fields).save()`. This is mandatory: verified at
   HEAD, an explicit `id=` is honored and preserved through `save()`, whereas the
-  `agent_session_id` alias is popped by `_normalize_kwargs` (`models/agent_session.py:805-806`)
+  `agent_session_id` alias is popped by `_normalize_kwargs` (`models/agent_session.py:850`)
   and a fresh UUID is minted — which would silently dangle every `parent_agent_session_id`
   / child linkage at cold start. Never key on `agent_session_id`.
 - **Atomicity mechanism — SQLite transaction, deliberately NOT temp-file-rename.**
@@ -463,12 +533,13 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
   (sentinel cleared) or the next boot finishes it (sentinel still set). The sentinel lives
   in the durable archive, so even a crash between rows is recoverable.
 - **Startup ordering.** Restore runs **below the `if dry_run: return` guard**
-  (`worker/__main__.py:746-751`) so a `--dry-run` boot never mutates Redis, and **before**
-  the Step 1 index rebuild (line 764) so the rebuild indexes the freshly-restored rows
-  (rehydrated rows are not queryable by secondary index until then). Concretely it slots
-  into the 751→753 gap, ahead of handler registration (`register_callbacks`, 753-762) —
-  which also upholds Race Condition #2's invariant that no new session can be created
-  during restore. It is exception-isolated (a restore failure logs and must not block
+  (`worker/__main__.py:885-890`) so a `--dry-run` boot never mutates Redis, and **before**
+  the Step 1 index rebuild (comment at line 903, `run_cleanup()` at 911) so the rebuild
+  indexes the freshly-restored rows (rehydrated rows are not queryable by secondary index
+  until then). Concretely it slots into the 890→892 gap, ahead of handler registration
+  (`register_callbacks`, 892-901) — which also upholds Race Condition #2's invariant that
+  no new session can be created during restore. It is exception-isolated (a restore failure
+  logs and must not block
   worker startup — a worker that can't start is worse than a worker with an un-restored
   archive).
 - **Cadence.** `SESSION_ARCHIVE_INTERVAL` is a named, env-overridable constant in
@@ -602,7 +673,7 @@ cases above; everything else is new coverage.
 - **Do NOT** temp-write-then-`os.replace()` the SQLite file (corrupts WAL / races
   readers) — the transaction is the atomic primitive here.
 - **Do NOT** key the archive or restore on `agent_session_id`. It is a `@property` alias
-  that `_normalize_kwargs` (`models/agent_session.py:805-806`) *pops and discards*;
+  that `_normalize_kwargs` (`models/agent_session.py:850`) *pops and discards*;
   restoring by it regenerates the `AutoKeyField` `id` and dangles every
   `parent_agent_session_id`. Export and restore the real `id`, and pass it explicitly to
   `AgentSession(id=..., ...)` on restore.
@@ -611,7 +682,7 @@ cases above; everything else is new coverage.
   the default `check_same_thread=True` would raise `ProgrammingError`. Use a
   per-operation connection (or `check_same_thread=False` + an explicit `Lock`).
 - **Do NOT** run restore above the `if dry_run: return` guard in `_run_worker`. A
-  `--dry-run` boot must never mutate Redis; restore belongs below the guard (751→753 gap).
+  `--dry-run` boot must never mutate Redis; restore belongs below the guard (890→892 gap).
 - **Do NOT** expose `export` or live-`restore` write subcommands on the CLI. Writes run
   automatically (daemon + terminal hook / guarded startup); the CLI is read-only
   (`status`, `restore --dry-run`).
@@ -741,7 +812,8 @@ cases above; everything else is new coverage.
 - **Depends On**: build-archive-module
 - **Validates**: tests/unit/test_session_lifecycle.py (update)
 - Add the `export_session(session)` call as the LAST side effect in
-  `models/session_lifecycle.py::finalize_session` (after line 525), inside
+  `models/session_lifecycle.py::finalize_session` (after line 533, the end of the
+  `record_metric` block, before `def transition_status` at 536), inside
   `try/except Exception: logger.warning(...)`. Lazy import to avoid cycles.
 - Update/extend the lifecycle test to assert the hook runs after save and a raising
   hook does not break finalize.
@@ -751,11 +823,12 @@ cases above; everything else is new coverage.
 - **Depends On**: build-archive-module
 - **Validates**: tests/unit/test_session_archive.py (restore path), manual worker boot
 - Add the guarded restore call in `_run_worker` **below the `if dry_run: return` guard
-  (lines 746-751)** and before the Step 1 index rebuild (line 764) — i.e. in the 751→753
-  gap, ahead of `register_callbacks` — exception-isolated. (Placing it after line 703
-  would mutate Redis on a `--dry-run` boot — do NOT.)
+  (lines 885-890)** and before the Step 1 index rebuild (comment at line 903,
+  `run_cleanup()` at 911) — i.e. in the 890→892 gap, ahead of `register_callbacks`
+  (892-901) — exception-isolated. (Placing it above the dry-run guard would mutate Redis
+  on a `--dry-run` boot — do NOT.)
 - Spawn a `worker-session-archive` daemon thread near the heartbeat thread (line
-  1003-1005) that calls `export_all()` every `SESSION_ARCHIVE_INTERVAL`; pytest no-op
+  1164-1170) that calls `export_all()` every `SESSION_ARCHIVE_INTERVAL`; pytest no-op
   guard.
 
 ### 4. Operator surfaces (dashboard + doctor)
@@ -882,8 +955,8 @@ cases above; everything else is new coverage.
    Redis state).
 2. **Restore vs. incoming enqueue at startup.** A message could arrive and create a new
    AgentSession while `restore_if_empty()` is mid-flight. *Mitigation:* restore runs in
-   the 751→753 gap of `_run_worker` — after the dry-run guard but **before**
-   callbacks/handlers are registered (`register_callbacks`, lines 753-762), so no new
+   the 890→892 gap of `_run_worker` — after the dry-run guard but **before**
+   callbacks/handlers are registered (`register_callbacks`, lines 892-901), so no new
    session can be created during the guard evaluation or the rehydrate. The guard is also
    evaluated once, atomically-read, before any write.
 3. **Dashboard/CLI reading the DB during a write.** *Mitigation:* WAL mode gives readers
