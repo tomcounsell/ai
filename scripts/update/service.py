@@ -389,6 +389,41 @@ def install_nightly_tests(project_dir: Path) -> bool:
         return False
 
 
+def install_reflection_worker(project_dir: Path) -> bool:
+    """Install/reload the reflection-scheduler subprocess via its self-gating script.
+
+    Delegates to scripts/install_reflection_worker.sh which contains a has_worker_role()
+    gate — it installs wherever the worker installs (any owned project), skips install on
+    machines owning no project, and removes any stale plist. This mirrors
+    install_nightly_tests() but the caller in run.py invokes it UNCONDITIONALLY (not under
+    `if has_bridge:`) because the reflection subprocess must run everywhere the worker does.
+    Returns True if the script exits 0 (installed or cleanly skipped).
+    """
+    install_script = project_dir / "scripts" / "install_reflection_worker.sh"
+    if not install_script.exists():
+        logger.warning("install_reflection_worker: install script not found at %s", install_script)
+        return False
+
+    try:
+        result = run_cmd(
+            ["/bin/bash", str(install_script)],
+            cwd=project_dir,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            logger.info("install_reflection_worker: script completed (rc=0)")
+            return True
+        logger.warning(
+            "install_reflection_worker: script exited with rc=%d; stdout=%s",
+            result.returncode,
+            (result.stdout or "").strip()[:200],
+        )
+        return False
+    except Exception as exc:
+        logger.warning("install_reflection_worker: failed to run install script: %s", exc)
+        return False
+
+
 def restart_worker(project_dir: Path) -> bool:
     """Restart worker service. Returns True if successful."""
     service_script = project_dir / "scripts" / "valor-service.sh"

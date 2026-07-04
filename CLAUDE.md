@@ -162,7 +162,10 @@ valor-email threads
 | `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python -m ui.app` | Start web UI server on localhost:8500 |
 | `curl -s localhost:8500/dashboard.json` | Check the dashboard — full system state as JSON (sessions, health, reflections, machine) |
-| `tail -f logs/worker.log` | Stream worker logs (includes reflection scheduler) |
+| `tail -f logs/worker.log` | Stream worker logs |
+| `python -m reflections --dry-run` | Load the reflection registry, print status, exit 0 (validates the out-of-process scheduler entry) |
+| `./scripts/install_reflection_worker.sh` | Install/reload the reflection-scheduler subprocess (`com.valor.reflection-worker`; worker-role gated, self-skips + removes stale plist elsewhere) |
+| `tail -f logs/reflection_worker.log` | Stream reflection-scheduler subprocess logs (`python -m reflections`) |
 | `sdlc-tool stage-query --issue-number {N}` | Query SDLC pipeline state for an issue (cwd-independent — see `docs/features/sdlc-tool-resolver.md`) |
 | `sdlc-tool verdict get --stage CRITIQUE --issue-number {N}` | Read the recorded critique verdict for an issue (also: `--stage REVIEW`) |
 | `python scripts/sdlc_reflection.py` | Run SDLC reflection manually |
