@@ -24,11 +24,19 @@ import pytest
 from tools import plan_checkbox_writer as pcw
 
 DO_PATCH_SKILL = Path(".claude/skills-global/do-patch/SKILL.md")
+# Repo seam file (skill-context convention): the generic Step 3.5 defers the
+# concrete plan-checkbox helper invocation to docs/sdlc/do-patch.md.
+DO_PATCH_SEAM = Path("docs/sdlc/do-patch.md")
 
 
 @pytest.fixture(scope="module")
 def patch_skill_text() -> str:
     return DO_PATCH_SKILL.read_text()
+
+
+@pytest.fixture(scope="module")
+def patch_seam_text() -> str:
+    return DO_PATCH_SEAM.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -72,8 +80,11 @@ class TestPatchSkillPromptInvariants:
         ):
             assert cosmetic in patch_skill_text
 
-    def test_uses_plan_checkbox_writer(self, patch_skill_text: str) -> None:
-        assert "plan_checkbox_writer" in patch_skill_text
+    def test_uses_plan_checkbox_writer(self, patch_skill_text: str, patch_seam_text: str) -> None:
+        # The generic Step 3.5 carries the probe-guarded plan-checkbox sync hook;
+        # the concrete helper module is declared in the seam file.
+        assert "plan-checkbox sync mechanism" in patch_skill_text
+        assert "plan_checkbox_writer" in patch_seam_text
 
 
 # ---------------------------------------------------------------------------

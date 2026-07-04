@@ -60,6 +60,26 @@ def pr_review_skill() -> str:
 
 
 @pytest.fixture(scope="module")
+def pr_review_checkout() -> str:
+    """checkout.md carries do-pr-review's context-resolution block (#1731)."""
+    checkout = _find_skill_md("do-pr-review").parent / "sub-skills" / "checkout.md"
+    return checkout.read_text(encoding="utf-8")
+
+
+# Repo seam files (skill-context convention): the generic skill bodies defer
+# the concrete sdlc-tool recorder/stage-marker invocations to docs/sdlc/*.md,
+# which this repo's tests assert directly.
+@pytest.fixture(scope="module")
+def critique_seam() -> str:
+    return Path("docs/sdlc/do-plan-critique.md").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def pr_review_seam() -> str:
+    return Path("docs/sdlc/do-pr-review.md").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
 def do_sdlc_skill() -> str:
     return _find_skill_md("do-sdlc").read_text(encoding="utf-8")
 
@@ -137,10 +157,10 @@ class TestCritiqueSkillIssueNumberResolution:
             f'Found unquoted --issue-number $ISSUE_NUMBER (should be "$ISSUE_NUMBER"): {unquoted}'
         )
 
-    def test_verdict_record_uses_quoted_issue_number(self, critique_skill: str) -> None:
-        """verdict record call in Step 5.5 must use --issue-number \"$ISSUE_NUMBER\"."""
-        assert '--issue-number "$ISSUE_NUMBER"' in critique_skill, (
-            'Step 5.5 verdict record must use --issue-number "$ISSUE_NUMBER" (quoted)'
+    def test_verdict_record_uses_quoted_issue_number(self, critique_seam: str) -> None:
+        """Recorder calls (declared in the seam) must use --issue-number \"$ISSUE_NUMBER\"."""
+        assert '--issue-number "$ISSUE_NUMBER"' in critique_seam, (
+            'The seam\'s recorder calls must use --issue-number "$ISSUE_NUMBER" (quoted)'
         )
 
     def test_no_issue_num_orphan_in_resolution(self, critique_skill: str) -> None:
@@ -184,10 +204,10 @@ class TestCritiqueSkillIssueNumberResolution:
 class TestPrReviewSkillIssueNumberResolution:
     """Prose invariants for do-pr-review/SKILL.md (#1731)."""
 
-    def test_assigns_issue_number_variable(self, pr_review_skill: str) -> None:
-        """ISSUE_NUMBER= must appear in the context-resolution block."""
-        assert "ISSUE_NUMBER=" in pr_review_skill, (
-            "do-pr-review/SKILL.md must assign ISSUE_NUMBER in the context-resolution block"
+    def test_assigns_issue_number_variable(self, pr_review_checkout: str) -> None:
+        """ISSUE_NUMBER= must appear in the context-resolution block (checkout.md)."""
+        assert "ISSUE_NUMBER=" in pr_review_checkout, (
+            "do-pr-review's checkout.md must assign ISSUE_NUMBER in the context-resolution block"
         )
 
     def test_pr_body_is_primary_resolution_path(self, pr_review_skill: str) -> None:
@@ -215,16 +235,16 @@ class TestPrReviewSkillIssueNumberResolution:
             "PR number, not the issue number; use PR body extraction instead (#1731)"
         )
 
-    def test_pr_body_extraction_present(self, pr_review_skill: str) -> None:
+    def test_pr_body_extraction_present(self, pr_review_checkout: str) -> None:
         """Must extract tracking issue from PR body (Closes #N / Fixes #N)."""
-        assert "Closes" in pr_review_skill or "closes" in pr_review_skill.lower(), (
+        assert "closes" in pr_review_checkout.lower(), (
             "do-pr-review must extract tracking issue from PR body 'Closes #N'"
         )
-        assert "pr_body" in pr_review_skill.lower() or "PR_BODY" in pr_review_skill, (
+        assert "PR_BODY" in pr_review_checkout, (
             "do-pr-review must fetch PR body to extract tracking issue number"
         )
 
-    def test_sdlc_issue_number_env_not_authoritative(self, pr_review_skill: str) -> None:
+    def test_sdlc_issue_number_env_not_authoritative(self, pr_review_checkout: str) -> None:
         """$SDLC_ISSUE_NUMBER env must not be treated as primary/authoritative.
 
         It may appear as a last-resort fallback ONLY when guarded by a positive-integer
@@ -238,25 +258,25 @@ class TestPrReviewSkillIssueNumberResolution:
         #   ISSUE_NUMBER="$SDLC_ISSUE_NUMBER"
         # An unconditional top-level assignment (not inside an if-block that checks
         # the value is a positive integer) is the bug.
-        # Detect: ISSUE_NUMBER="${SDLC_ISSUE_NUMBER}" without a preceding guard on the
-        # same or immediately prior line (simpler: assert $ARGUMENTS is the primary).
-        assert "ARGUMENTS" in pr_review_skill, (
-            "ISSUE_NUMBER resolution must use $ARGUMENTS as the primary source, "
+        # PR-body extraction is the PRIMARY source in do-pr-review ($ARGUMENTS is
+        # the PR number, not the issue number), so PR_BODY resolution must appear
+        # BEFORE any $SDLC_ISSUE_NUMBER fallback.
+        pr_body_idx = pr_review_checkout.find("PR_BODY")
+        env_idx = pr_review_checkout.find('"$SDLC_ISSUE_NUMBER"')
+        assert pr_body_idx >= 0, (
+            "checkout.md must extract ISSUE_NUMBER from the PR body as the primary source, "
             "not $SDLC_ISSUE_NUMBER"
         )
-        # The $ARGUMENTS branch must appear BEFORE any $SDLC_ISSUE_NUMBER fallback.
-        args_idx = pr_review_skill.find('"$ARGUMENTS"')
-        env_idx = pr_review_skill.find('"$SDLC_ISSUE_NUMBER"')
         if env_idx >= 0:
-            assert args_idx < env_idx, (
-                "$ARGUMENTS resolution must appear before any $SDLC_ISSUE_NUMBER fallback — "
+            assert pr_body_idx < env_idx, (
+                "PR-body resolution must appear before any $SDLC_ISSUE_NUMBER fallback — "
                 "$SDLC_ISSUE_NUMBER must be a last-resort only, not the primary source (#1731)"
             )
         # Any use of $SDLC_ISSUE_NUMBER must be guarded (preceded by a regex check)
         # rather than being a bare unconditional assignment at the start of the block.
         guarded = re.search(
             r"\[\[.*SDLC_ISSUE_NUMBER.*\^.*\[0-9\]",
-            pr_review_skill,
+            pr_review_checkout,
         )
         if env_idx >= 0:
             assert guarded is not None, (
@@ -264,14 +284,14 @@ class TestPrReviewSkillIssueNumberResolution:
                 "by a positive-integer regex check, not used unconditionally (#1731)"
             )
 
-    def test_positive_integer_assertion_present(self, pr_review_skill: str) -> None:
+    def test_positive_integer_assertion_present(self, pr_review_checkout: str) -> None:
         """Must assert ISSUE_NUMBER is a positive integer before any recorder call."""
-        assert "^[0-9]" in pr_review_skill, (
-            "do-pr-review must contain a positive-integer assertion "
+        assert "^[0-9]" in pr_review_checkout, (
+            "do-pr-review's checkout.md must contain a positive-integer assertion "
             '[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] before any recorder call'
         )
 
-    def test_assertion_exits_nonzero_on_empty(self, pr_review_skill: str) -> None:
+    def test_assertion_exits_nonzero_on_empty(self, pr_review_checkout: str) -> None:
         """The assertion block must exit 1 for the failure path.
 
         Searches for the final positive-integer assertion (the one that guards
@@ -279,49 +299,58 @@ class TestPrReviewSkillIssueNumberResolution:
         """
         # The final assertion pattern: [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || { ... exit 1 }
         # Use rfind to locate the last occurrence of the assertion (not the per-branch guards).
-        assert_idx = pr_review_skill.rfind('"$ISSUE_NUMBER" =~ ^[0-9]')
+        assert_idx = pr_review_checkout.rfind('"$ISSUE_NUMBER" =~ ^[0-9]')
         assert assert_idx >= 0, (
-            'do-pr-review must contain [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] '
+            'do-pr-review\'s checkout.md must contain [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] '
             "as the final guard before any recorder call"
         )
         # The exit 1 must appear within a reasonable window after the assertion
-        segment = pr_review_skill[assert_idx : assert_idx + 600]
+        segment = pr_review_checkout[assert_idx : assert_idx + 600]
         assert "exit 1" in segment, (
             "Positive-integer assertion must exit 1 when ISSUE_NUMBER is unresolvable"
         )
 
-    def test_recorder_calls_quote_issue_number(self, pr_review_skill: str) -> None:
+    def test_recorder_calls_quote_issue_number(
+        self, pr_review_skill: str, pr_review_checkout: str, pr_review_seam: str
+    ) -> None:
         """Every --issue-number flag in recorder calls must use quoted \"$ISSUE_NUMBER\"."""
         import re
 
-        unquoted = re.findall(r'--issue-number\s+\$ISSUE_NUMBER(?!")', pr_review_skill)
-        assert not unquoted, (
-            f'Found unquoted --issue-number $ISSUE_NUMBER (must be "$ISSUE_NUMBER"): {unquoted}'
-        )
+        for text in (pr_review_skill, pr_review_checkout, pr_review_seam):
+            unquoted = re.findall(r'--issue-number\s+\$ISSUE_NUMBER(?!")', text)
+            assert not unquoted, (
+                f'Found unquoted --issue-number $ISSUE_NUMBER (must be "$ISSUE_NUMBER"): {unquoted}'
+            )
 
-    def test_verdict_record_uses_quoted_issue_number(self, pr_review_skill: str) -> None:
-        """verdict record calls must use --issue-number \"$ISSUE_NUMBER\"."""
-        assert '--issue-number "$ISSUE_NUMBER"' in pr_review_skill, (
+    def test_verdict_record_uses_quoted_issue_number(self, pr_review_seam: str) -> None:
+        """verdict record calls (declared in the seam) must use --issue-number \"$ISSUE_NUMBER\"."""
+        assert '--issue-number "$ISSUE_NUMBER"' in pr_review_seam, (
             'verdict record call must use --issue-number "$ISSUE_NUMBER" (quoted)'
         )
 
-    def test_stage_marker_uses_quoted_issue_number(self, pr_review_skill: str) -> None:
-        """stage-marker calls must use --issue-number \"$ISSUE_NUMBER\"."""
+    def test_stage_marker_uses_quoted_issue_number(
+        self, pr_review_skill: str, pr_review_seam: str
+    ) -> None:
+        """stage-marker calls (declared in the seam) must use --issue-number \"$ISSUE_NUMBER\"."""
+        # The generic body carries the stage-marker substrate hook...
         assert "stage-marker" in pr_review_skill
-        # At least one stage-marker call should use the quoted form
+        # ...and the seam declares the concrete quoted invocations.
         assert (
             'stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER"'
-            in pr_review_skill
+            in pr_review_seam
             or 'stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"'
-            in pr_review_skill
+            in pr_review_seam
         ), 'stage-marker calls must use --issue-number "$ISSUE_NUMBER" (quoted)'
 
-    def test_in_progress_marker_uses_issue_number_variable(self, pr_review_skill: str) -> None:
+    def test_in_progress_marker_uses_issue_number_variable(
+        self, pr_review_skill: str, pr_review_seam: str
+    ) -> None:
         """The in_progress stage marker at skill start must not use a {issue_number} placeholder."""
         import re
 
         placeholder_markers = re.findall(
-            r"stage-marker[^\n]*--issue-number\s+\{issue_number\}", pr_review_skill
+            r"stage-marker[^\n]*--issue-number\s+\{issue_number\}",
+            pr_review_skill + pr_review_seam,
         )
         assert not placeholder_markers, (
             "stage-marker calls must use $ISSUE_NUMBER (shell variable), not {issue_number} "

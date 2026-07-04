@@ -26,6 +26,10 @@ from tools import plan_checkbox_writer as pcw
 
 POST_REVIEW = Path(".claude/skills-global/do-pr-review/sub-skills/post-review.md")
 CODE_REVIEW = Path(".claude/skills-global/do-pr-review/sub-skills/code-review.md")
+# Repo seam file (skill-context convention): post-review §2.5 defers the
+# concrete plan-checkbox updater (module name + exit-code taxonomy) to
+# docs/sdlc/do-pr-review.md.
+SEAM = Path("docs/sdlc/do-pr-review.md")
 
 
 @pytest.fixture(scope="module")
@@ -36,6 +40,11 @@ def post_review_text() -> str:
 @pytest.fixture(scope="module")
 def code_review_text() -> str:
     return CODE_REVIEW.read_text()
+
+
+@pytest.fixture(scope="module")
+def seam_text() -> str:
+    return SEAM.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -54,13 +63,15 @@ class TestPostReviewPromptInvariants:
         for non_fire in ("CHANGES_REQUESTED", "BLOCKED_ON_CONFLICT", "PR_CLOSED"):
             assert non_fire in post_review_text
 
-    def test_four_value_rubric_mapping(self, post_review_text: str) -> None:
+    def test_four_value_rubric_mapping(self, post_review_text: str, seam_text: str) -> None:
         # The mapping table must encode all four rubric values and their
         # plan-file actions.
         for value in ("pass", "fail", "acknowledged", "n/a"):
             assert value in post_review_text
-        # And reference the helper.
-        assert "plan_checkbox_writer" in post_review_text
+        # The generic §2.5 carries the probe-guarded updater hook; the concrete
+        # helper module is declared in the seam file.
+        assert "plan-checkbox updater" in post_review_text
+        assert "plan_checkbox_writer" in seam_text
 
     def test_commit_before_post_review_ordering(self, post_review_text: str) -> None:
         # The non-negotiable invariant must appear verbatim, naming push.
@@ -69,15 +80,16 @@ class TestPostReviewPromptInvariants:
         # The push-failure path must abort and route to /do-patch.
         assert "/do-patch" in post_review_text
 
-    def test_helper_failure_handling_documented(self, post_review_text: str) -> None:
-        # All four failure tags must be enumerated so the caller can route.
+    def test_helper_failure_handling_documented(self, seam_text: str) -> None:
+        # All four failure tags must be enumerated (in the seam's exit-code
+        # taxonomy for the declared updater) so the caller can route.
         for tag in (
             "MATCH_AMBIGUOUS",
             "MATCH_NOT_FOUND",
             "MATCH_AMBIGUOUS_SECTION",
             "NO_CRITERIA_SECTION",
         ):
-            assert tag in post_review_text
+            assert tag in seam_text
 
 
 class TestCodeReviewPromptInvariants:

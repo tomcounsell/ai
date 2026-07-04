@@ -75,16 +75,24 @@ def test_builder_prompt_hard_limit():
 @pytest.mark.unit
 @pytest.mark.sdlc
 def test_progress_md_in_build_soft_check():
-    """do-build SKILL.md must contain the PROGRESS.md soft-check shell line.
+    """do-build's WORKFLOW.md must contain the PROGRESS.md soft-check shell line.
+
+    The check lives in WORKFLOW.md Step 5.6 (the do-build monolith was split
+    into SKILL.md + WORKFLOW.md); SKILL.md must still point at it.
 
     The line must match the pattern:
         [ -f <something with PROGRESS.md> ] || echo
     This pattern ensures the check never returns nonzero (warn-only).
     """
-    skill_md = REPO_ROOT / ".claude" / "skills-global" / "do-build" / "SKILL.md"
-    text = skill_md.read_text()
+    skill_dir = REPO_ROOT / ".claude" / "skills-global" / "do-build"
+    workflow_text = (skill_dir / "WORKFLOW.md").read_text()
     pattern = re.compile(r"\[ -f .*PROGRESS\.md.* \] \|\| echo")
-    assert pattern.search(text) is not None, (
-        "do-build SKILL.md is missing the PROGRESS.md soft-check line. "
+    assert pattern.search(workflow_text) is not None, (
+        "do-build WORKFLOW.md is missing the PROGRESS.md soft-check line. "
         "Expected a line matching: [ -f <path/PROGRESS.md> ] || echo '...'"
+    )
+    # SKILL.md must keep the pointer to the soft check so the orchestrator loads it.
+    skill_text = (skill_dir / "SKILL.md").read_text()
+    assert "PROGRESS.md" in skill_text, (
+        "do-build SKILL.md must reference the PROGRESS.md scratchpad convention"
     )

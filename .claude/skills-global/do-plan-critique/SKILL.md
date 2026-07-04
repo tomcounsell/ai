@@ -175,7 +175,7 @@ Set `CRITIQUE_DEPTH` to `LITE` or `FULL` based on the result.
 
 (Skip this step if RESUMED=1 — the surviving run already defines the roster.)
 
-Before dispatching ANY critic, fix the expected critic roster. This is the
+Before dispatching ANY critic, freeze the expected critic roster. This is the
 membership set the Step 3.5 completion check verifies — completion cannot be
 satisfied by dispatching fewer critics than the roster lists.
 
@@ -205,7 +205,7 @@ Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonne
 
 **Generic completion model:** dispatch the critics in the **foreground** and wait for each to return its findings before aggregating.
 
-**If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file (atomic `.tmp`→rename) ending in a two-line terminal completion fence, and completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's exact write convention and pass each critic its run-dir path and `{critic_name}`. The barrier is the robust form when the agent driver may return early from a background dispatch; foreground-and-wait suffices when the driver reliably blocks.
+**If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file — atomically: write to `{critic_name}.result.md.tmp`, then rename to `{critic_name}.result.md` — ending in the two-line terminal completion fence `<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` (the exact convention CRITICS.md embeds in every critic prompt). Completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's run-dir layout and pass each critic its run-dir path and `{critic_name}`. The barrier is the robust form when the agent driver may return early from a background dispatch; foreground-and-wait suffices when the driver reliably blocks.
 
 Each critic returns **0-3 findings** (or the literal `No findings.`) in this format:
 
@@ -260,7 +260,7 @@ a verdict** — never a silent or empty exit. Then set the plan-revising lock pe
 **Step 5.6** (a `CRITIQUE INCOMPLETE` verdict is revision-grade).
 
 **Run-dir cleanup gating (barrier only).** If the context file's barrier created
-a per-run directory, clean it up **ONLY on the complete path**. On the
+a per-run directory, clean it up **ONLY on the `complete: true` path**. On the
 incomplete / `CRITIQUE INCOMPLETE` path, **PRESERVE** it for forensics — the
 partial/missing result files are the diagnostic evidence of which critics never
 reported.
