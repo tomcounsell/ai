@@ -183,20 +183,6 @@ plus character count plus one sentence stating what the anchor is
 (the number / name / observation the post is built around).
 ```
 
-## Iterate: 3-4 rounds of draft + cold-read critique
-
-Single-shot drafts ship D-tier posts. The first draft buries the lesson, the second tightens the opener, the third lands the kicker. Build that loop into the workflow.
-
-**The loop:**
-
-1. **Draft v1.** Drafter subagent (above) produces v1 to `/tmp/x-post.txt`.
-2. **Cold-read v1.** Spawn a FRESH `general-purpose` subagent with the cold-read prompt below. It scores the draft and lists fixes. Fresh agent each round so it isn't anchored on the prior draft it already defended.
-3. **Draft v2.** Send the cold-read critique back to the drafter (or spawn a new drafter with v1 + critique). Drafter writes v2 incorporating fixes.
-4. **Cold-read v2.** New fresh cold-reader.
-5. **Repeat to v3, v4** until cold-read returns a strong pass (A-/A grade) OR you've hit 4 rounds. Ship the highest-grading version.
-
-**Don't ship a draft graded below B+.** If round 4 still grades C-D, the post premise is the problem, not the prose. Drop the post and find a different angle.
-
 ## The cold-reader cast
 
 A single cold-reader agent spirals into agreement with the drafter after one or two rounds. They both end up in the same echo chamber, grading drafts on whether they match the previous round's critique rather than whether they actually land on a stranger.
@@ -211,13 +197,7 @@ The five personas, with their defining bias:
 4. **The Time-Pressed Scroller** — only reads sentence one and the first few words of sentence two. Decides stop / scroll based on that alone. Brutal hook test.
 5. **The LLM-Tell Hunter** — purpose-built to catch AI register: em-dashes, tricolons, "in essence," "fundamentally," "it's not just X, it's Y," "this isn't about Y, it's about Z," over-symmetric sentences, every-paragraph-starts-with-a-conjunction. Their grade is binary: tells present (D) or absent (A).
 
-**Round assignment:**
-- Round 1 cold-read: Time-Pressed Scroller (catches buried lead first)
-- Round 2 cold-read: LLM-Tell Hunter (catches register tells before deeper iteration)
-- Round 3 cold-read: Specialist (catches technical wrongness)
-- Round 4 cold-read: Generalist OR Skeptic (catches the last-mile problem)
-
-If two distinct personas flag the same fix, that fix is mandatory. If only one flags it, it's optional.
+Round order (why: buried lead first, register tells second, technical wrongness third, last-mile problems fourth) is baked into the loop steps below. If two distinct personas flag the same fix, that fix is mandatory. If only one flags it, it's optional.
 
 **Cold-read prompt template** (parameterize `{PERSONA}` and `{PERSONA_BIAS}` per round):
 
@@ -262,7 +242,9 @@ Total under 250 words. Be blunt.
 
 ## Iterate: 3-4 rounds, rotating personas
 
-1. **Draft v1.** Drafter subagent (above) produces v1.
+Single-shot drafts ship D-tier posts. The first draft buries the lesson, the second tightens the opener, the third lands the kicker. Each cold-read is a FRESH subagent (no shared context with prior rounds).
+
+1. **Draft v1.** Drafter subagent (above) produces v1 to `/tmp/x-post.txt`.
 2. **Cold-read v1** with Time-Pressed Scroller (fresh subagent).
 3. **Draft v2.** Drafter rewrites from critique. Don't merge inline — let the drafter rewrite from scratch with the critique as input. Inline patches accumulate into Frankenstein drafts.
 4. **Cold-read v2** with LLM-Tell Hunter (fresh subagent).
@@ -270,7 +252,7 @@ Total under 250 words. Be blunt.
 6. **Cold-read v3** with Specialist (fresh subagent).
 7. **Draft v4** (only if any prior round graded below B+).
 8. **Final cold-read v4** with Generalist or Skeptic.
-9. **Ship the highest-graded version,** or drop the post if no version reaches B+. (Don't ship D-tier just because you've spent 4 rounds — premise might be the problem.)
+9. **Ship the highest-graded version,** or drop the post if no version reaches B+. (Don't ship D-tier just because you've spent 4 rounds — premise might be the problem, not the prose.)
 10. **Invoke `Skill('authenticity-pass')`** on `/tmp/x-post.txt` — PASS proceeds to publish; BLOCK returns the draft to the drafter with the blocking gaps as revision instructions (max 2 retries before dropping the post).
 
 ## Publish (verified live)

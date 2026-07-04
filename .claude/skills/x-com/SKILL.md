@@ -93,9 +93,5 @@ When multiple IEs map to the same logical control, prefer `tag: "button"`.
 ## Notes
 
 - **Reuse the same `tabId`** across the session. Discover once at the start.
-- **Re-read after every DOM-mutating click**. Old `byob:idx` values invalidate.
-- **Action button names carry counts** that change per post; match on the suffix (`Reply`, `Like`/`Liked`, `Repost`/`Reposted`).
-- **`<article>` `name` contains the full post text**. Triage from the IE list before opening individual posts.
-- **`/home` has an inline composer**. Much friendlier than LinkedIn's portal modal.
 - **Screenshots over 1MB fail**. Use `format="jpeg"` and `quality=50-60`.
 - **No fallback browser surface.** If BYOB transport errors mid-session: `cd ~/.byob && bun run doctor` to repair, then retry.

@@ -126,12 +126,4 @@ The 2-retry cap matters. A post that needs three authenticity loops to find one 
 
 ## Why this gate exists
 
-The Yudame Research report on AI content marketing (May 2026) identified the authenticity pass as "the single highest-leverage habit change" for founders using AI for content. The evidence:
-
-- 30-40% fewer LinkedIn impressions for pure-AI posts (360Brew practitioner data)
-- LinkedIn's 360Brew algorithm specifically penalizes content that lacks embedded professional experience
-- X's Phoenix algorithm suppresses high-frequency, low-variation automated posting patterns
-- 85% of consumers report "uncanny valley" reactions to AI-generated content
-- The only published cases of AI-assisted content driving measurable growth kept ideation and editorial review human
-
-The three markers in this gate are the minimum human-signal footprint that distinguishes "AI helped me write this" from "AI wrote this instead of me."
+Platform algorithms measurably punish AI-generic content: pure-AI posts earn 30-40% fewer LinkedIn impressions (360Brew practitioner data), and X's Phoenix algorithm suppresses low-variation automated posting. The three markers are the minimum human-signal footprint that distinguishes "AI helped me write this" from "AI wrote this instead of me" (Yudame Research, AI content marketing report, May 2026).

@@ -99,10 +99,6 @@ WARNING: Ambiguous chat name 'PsyOptimal' matched 2 candidates; picking most rec
 ... messages ...
 ```
 
-**Always read the freshness header** before trusting the messages. If the
-selected chat is not the one you wanted, re-run with `--chat-id <id>` or a
-more specific `--chat` string.
-
 #### Strict mode (`--strict`): exit 1 with candidate list
 
 For scripted callers that need a hard failure on ambiguity, pass `--strict`
@@ -179,7 +175,19 @@ valor-telegram send --chat "Dev: Valor" --image ./photo.jpg "Caption here"
 
 # Send audio
 valor-telegram send --chat "Dev: Valor" --audio ./recording.mp3
+
+# Reply to a message / post into a forum topic (message ID required for topics)
+valor-telegram send --chat "Forum Group" --reply-to 123 "Message to topic"
+
+# Native voice-message bubble (OGG/Opus via --audio; relay deletes the temp file after send)
+valor-telegram send --chat "Dev: Valor" --voice-note --cleanup-after-send --audio /tmp/out.ogg
+
+# E2E probe a registered bot -- blocks until its streamed reply settles
+valor-telegram send --chat 8837490628 --await-reply --timeout 900 "deploy status?"
 ```
+
+`--await-reply` is only valid against a bot registered under
+`projects.<key>.telegram.bots[]`; add `--json` for a structured transcript.
 
 ## Listing Known Chats
 
@@ -203,21 +211,7 @@ valor-telegram chats --project psyoptimal --search "dev"
 valor-telegram chats --search "psy" --json
 ```
 
-## When to Use
-
-- **Check what someone said**: `valor-telegram read --chat "Tom" --limit 10`
-- **Find a past discussion**: `valor-telegram read --chat "Dev: Valor" --search "authentication"`
-- **Get recent context**: `valor-telegram read --chat "Dev: Valor" --since "2 hours ago"`
-- **Project-wide situational awareness**: `valor-telegram read --project psyoptimal --limit 20`
-- **Send a status update (Dev session)**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
-- **Share a file (Dev session)**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
-- **Discover chats by fragment**: `valor-telegram chats --search "psy"`
-- **List chats in a project**: `valor-telegram chats --project psyoptimal`
-
 ## Notes
 
-- Chat names are resolved from the history database (groups) and DM whitelist (users)
-- Messages are read from Redis via Popoto ORM (TelegramMessage model)
-- Sending uses Telethon directly (requires bridge session and API credentials)
-- Use `valor-telegram chats --search PATTERN` if unsure of the exact chat name
-- **Always read the freshness header** before trusting the messages beneath it. A stale `last activity` value is the cheapest possible signal that you resolved to the wrong chat.
+- Chat names are resolved from the history database (groups) and DM whitelist (users); use `valor-telegram chats --search PATTERN` if unsure of the exact name
+- Reads hit Redis via Popoto ORM (TelegramMessage model); sends route through the bridge relay (requires the bridge to be running)

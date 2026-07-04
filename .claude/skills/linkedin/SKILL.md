@@ -7,8 +7,7 @@ user-invocable: true
 
 # LinkedIn Activity
 
-This skill drives the user's real, logged-in Chrome session via the **BYOB**
-stack — the Chrome extension + native messaging host + MCP server
+Drives the user's real, logged-in Chrome session via the **BYOB** stack
 (`mcp__byob__browser_*`). No CDP flag, no `state.json`, no
 headless-fingerprint detection.
 
@@ -54,23 +53,21 @@ cd ~/.byob && bun run doctor
 ```
 
 All status lines should be green: extension loaded, native bridge running,
-Unix socket live. If any line is red, the BYOB MCP tools below will return
-a transport error -- run `/setup` and answer "yes" to the computer-use
-opt-in to repair.
+Unix socket live. If any line is red, run `/setup` and answer "yes" to the
+computer-use opt-in to repair.
 
-After `bun run doctor` passes, sanity-check from inside the agent that
-the extension is actually talking to Chrome by listing open tabs:
+After `bun run doctor` passes, sanity-check that the extension is actually
+talking to Chrome:
 
 ```text
 mcp__byob__browser_list_tabs    # returns the user's currently open Chrome tabs
 ```
 
-If `browser_list_tabs` returns an empty list or a transport error, the
-extension loaded but isn't bound to an active Chrome window -- open Chrome
-(or focus it) and retry. **Do not proceed to LinkedIn work until
-`browser_list_tabs` returns at least one tab.** A silent transport failure
-here means every subsequent BYOB call returns wrong-shaped output and the
-skill drives nothing.
+**Do not proceed to LinkedIn work until `browser_list_tabs` returns at
+least one tab.** An empty list or transport error means the extension isn't
+bound to an active Chrome window — open or focus Chrome and retry. A silent
+transport failure here means every subsequent BYOB call returns wrong-shaped
+output and the skill drives nothing.
 
 The user must be logged into LinkedIn in that Chrome session.
 
@@ -128,11 +125,7 @@ The step-by-step `byob:idx` workflow and the gotcha list (scroll behavior, `reus
 ## Notes
 
 - **Always reuse the same `tabId`** across a session. Discover it once at the start and pass it to every call.
-- **Re-read after every DOM-mutating click** — sending a comment, opening a thread, expanding a menu, opening the post composer. The `interactiveSessionTag` changes; old `byob:idx` values no longer point where you think.
-- **`browser_get_html` for messaging, `browser_read` for feed.** They're not interchangeable on LinkedIn.
-- **`scrollY` is meaningless on LinkedIn** — it's an inner scroll container. Don't gate decisions on the value `browser_scroll` returns.
 - **Wait 2-3s after navigation** for SPA hydration — `waitUntil="networkidle"` mostly handles this; add `browser_wait_for(selector, state="visible")` for specific elements.
 - **Opening a message marks it as read** — be aware of "seen" indicators if you don't intend to actually engage.
 - **Screenshots over 1MB fail** — use `format="jpeg"` and `quality=50-60` for confirmation captures.
-- **No fallback browser surface.** BYOB is the only browser tool. If the bridge dies mid-session, the agent surfaces a clear error — run `cd ~/.byob && bun run doctor` to repair, then retry.
-- **If `mcp__byob__browser_*` calls return transport errors mid-session**, the Chrome extension may have lost its bridge — run `cd ~/.byob && bun run doctor` in a fresh shell to repair, then retry the failed call.
+- **No fallback browser surface.** BYOB is the only browser tool. If `mcp__byob__browser_*` calls return transport errors mid-session, run `cd ~/.byob && bun run doctor` in a fresh shell to repair, then retry the failed call.

@@ -9,9 +9,7 @@ user-invocable: true
 
 Reach for the lightest tool that does the job. Walk the tool ladder below
 top to bottom, trying each tier first and falling through to the next ONLY on
-tool absence OR auth failure. **Never use BYOB browser automation for a simple
-read or send** — it is slow, flaky, and burns browser context. BYOB is a last
-resort for tasks no CLI/MCP path can do at all.
+tool absence OR auth failure.
 
 ## Repo Context Probe
 
@@ -57,8 +55,7 @@ Fall through to Tier 4 if the MCP tools are not available in this session.
 ### Tier 4 — BYOB browser automation (LAST RESORT)
 
 Only when no tier above can reach the mailbox at all (e.g. a webmail provider
-with no CLI/MCP path). **Never** use BYOB for simple read or send when any tier
-above is available.
+with no CLI/MCP path). BYOB is slow, flaky, and burns browser context.
 
 ## Rules
 
