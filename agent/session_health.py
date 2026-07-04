@@ -136,6 +136,14 @@ RECLAIM_REQUESTS_MAX = int(os.environ.get("RECLAIM_REQUESTS_MAX", "256"))
 # the #1815 deadman staleness threshold default (90s).
 BRIDGE_WORKER_BEACON_STALE_S = int(os.environ.get("BRIDGE_WORKER_BEACON_STALE_S", "90"))
 
+# Sentinel distinct from ``None`` for the read-only bridge-contract-stale owner
+# map (#1873, item 2). A per-owner lookup that raises stores ``_ABSENT`` (a
+# transient DB error) so it is distinguishable from a positive not-found
+# (``None``). The stale-check treats BOTH as not-terminal → skip; only the
+# autonomous Phase-2 reaper (which re-reads fresh, never this map) treats
+# not-found ``None`` as terminal — the deliberate #1868 divergence.
+_ABSENT = object()
+
 # --- B2-probe: observability-only duplicate-worker detection (issue #1817) --
 #
 # A SEPARATE, additive key namespace from WORKER_REGISTERED_PID_KEY_PREFIX
@@ -2953,6 +2961,20 @@ def _reap_slot_leases() -> None:
       (concurrently-running sessions > max) and re-imposing exactly the
       wall-clock duration cap issue #1172 removed.
 
+    Between the phases (always-run region) the pass drains bridge-pushed
+    reclaim-requests and runs the read-only ``bridge_contract_stale`` check.
+    #1873 item 2: ``_drain_reclaim_requests`` now returns ``drained: int`` and no
+    longer calls the stale-check. This pass builds an owner→record map ONCE (only
+    when ``drained == 0``, the sole case the stale-check inspects owners; a
+    per-owner lookup error stores ``_ABSENT`` and logs) and calls
+    ``_maybe_emit_bridge_contract_stale(drained, owner_records)`` directly. That
+    map is for the read-only stale-check ONLY — Phase 2 above NEVER consults it
+    and re-reads each owner FRESH at reclaim time, which is what prevents a
+    ``valor-session resume`` during the bounded drain window from having its live
+    permit stripped. The #1868 divergence is preserved: the stale-check treats
+    ``None``/``_ABSENT`` as unknown → skip; Phase 2's fresh read treats a
+    not-found ``None`` as terminal → reclaim.
+
     Never raises into the health check — a single bad lease is logged and
     the pass continues; the whole function is exception-wrapped.
     """
@@ -3016,7 +3038,36 @@ def _reap_slot_leases() -> None:
         # under SLOT_LEASE_REAP_DISABLED=1, where it is the ONLY reclaim lever (the
         # autonomous Phase-2 reclaim is gated off). Placing it in/after the Phase-2
         # loop would silently defeat the feature's headline capability (concern #5).
-        _drain_reclaim_requests(registry, leases_snapshot)
+        drained = _drain_reclaim_requests(registry)
+
+        # === Fix #5 (#1821) / #1873 item 2: read-only bridge-contract-stale check ===
+        # Decoupled from the drain (which now returns ``drained: int`` and no longer
+        # calls the stale-check). Build the owner→record map HERE, in the always-run
+        # region (before the Phase-2 ``if reap_disabled: return`` gate, so it still
+        # fires under SLOT_LEASE_REAP_DISABLED=1). ``owner_records`` is initialized
+        # unconditionally so the ``drained > 0`` path (which just records the beacon)
+        # never references an undefined name; it is only populated when ``drained == 0``
+        # (the sole case the stale-check inspects owners), matching the shipped read
+        # cost. A per-owner lookup error stores ``_ABSENT`` (distinct from a not-found
+        # ``None``) and logs — the transient-DB-error signal must survive. This map is
+        # for the read-only stale-check ONLY and is NEVER consulted by Phase-2, which
+        # re-reads each owner FRESH at reclaim time (the resume-during-drain
+        # live-permit-strip guard — see Phase-2 loop below).
+        owner_records: dict[str, object] = {}
+        if drained == 0:
+            for lease in leases_snapshot:
+                owner_id = lease.owner_session_id
+                try:
+                    owner_records[owner_id] = AgentSession.get_by_id(owner_id)
+                except Exception:
+                    owner_records[owner_id] = _ABSENT
+                    logger.warning(
+                        "[session-health] bridge-contract-stale owner lookup failed for "
+                        "owner=%s (recording _ABSENT, non-fatal)",
+                        owner_id,
+                        exc_info=True,
+                    )
+        _maybe_emit_bridge_contract_stale(drained, owner_records)
 
         # === Phase 2: reclaim — gated on SLOT_LEASE_REAP_DISABLED ===
         if reap_disabled:
@@ -3089,8 +3140,101 @@ def _publish_slot_leases(registry, leases_snapshot) -> None:
         logger.debug("[session-health] slot-lease snapshot publish failed (non-fatal): %s", e)
 
 
-def _drain_reclaim_requests(registry, leases_snapshot) -> None:
+def _maybe_emit_bridge_contract_stale(drained: int, owner_records: dict[str, object]) -> None:
+    """Emit ``bridge_contract_stale`` when a terminal-owner leak is observed but no
+    reclaim-request has been drained for a sustained window (concern #5, #1821).
+
+    Detects the new-worker / old-bridge direction: the worker keeps ONE Redis
+    timestamp (``worker:slot:last_reclaim_request_drain:{host}``, set whenever the
+    drain pops ≥1 request). On a tick where a terminal-owner leak IS present but
+    ``now − last_drain_ts > BRIDGE_WORKER_BEACON_STALE_S`` (the REUSED beacon
+    threshold — no new staleness var), emit ``bridge_contract_stale`` once (dedup
+    ``SET NX EX``) so the contract gap is operator-visible rather than a silent drop.
+
+    #1873 item 2: this read-only check no longer runs its own owner-refetch loop.
+    It consumes ``owner_records`` — an owner_session_id → record map that
+    ``_reap_slot_leases`` built once this tick (only when ``drained == 0``). A map
+    value of ``None`` (positively not found) or ``_ABSENT`` (a lookup error) is NOT
+    terminal → skip, preserving the #1868 stale-side policy (``None``/``_ABSENT`` →
+    unknown). The autonomous Phase-2 reaper's opposite ``None``→terminal policy is
+    unaffected — it re-reads each owner FRESH and never consults this map.
+
+    Fail-quiet — an observability signal must never raise into the reap pass.
+    """
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
+
+        host = _ORPHAN_REAP_HOSTNAME
+        last_drain_key = f"{WORKER_SLOT_LAST_RECLAIM_DRAIN_KEY_PREFIX}{host}"
+        now = time.time()
+
+        if drained > 0:
+            # We drained a request → the contract is live; record the timestamp.
+            _R.set(last_drain_key, str(now), ex=WORKER_SLOT_KEY_TTL_SECONDS)
+            return
+
+        # No request drained this tick. Only interesting if a terminal-owner leak
+        # actually exists (else there is nothing for the bridge to have requested).
+        # Read the pre-built owner map — no owner refetch here (#1873 item 2). A
+        # ``None`` (not found) or ``_ABSENT`` (lookup error) value is NOT terminal →
+        # skip (the #1868 stale-side policy).
+        terminal_owner_present = False
+        for rec in owner_records.values():
+            if rec is None or rec is _ABSENT:
+                continue
+            if getattr(rec, "status", None) in _TERMINAL_STATUSES:
+                terminal_owner_present = True
+                break
+        if not terminal_owner_present:
+            return
+
+        raw = _R.get(last_drain_key)
+        last_drain_ts = None
+        if raw is not None:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", "replace")
+            try:
+                last_drain_ts = float(raw)
+            except (TypeError, ValueError):
+                last_drain_ts = None
+
+        stale = last_drain_ts is None or (now - last_drain_ts) > BRIDGE_WORKER_BEACON_STALE_S
+        if not stale:
+            return
+
+        # Dedup so a persistent gap logs once per stale window, not every tick.
+        dedup_key = f"worker:slot:bridge_contract_stale_applied:{host}"
+        if not _R.set(dedup_key, "1", nx=True, ex=BRIDGE_WORKER_BEACON_STALE_S):
+            return
+
+        logger.warning(
+            "[session-health] bridge_contract_stale: terminal-owner lease present but no "
+            "reclaim-request drained for >%ss — bridge reclaim-request channel may be "
+            "absent (new-worker/old-bridge). Autonomous reap still covers the leak.",
+            BRIDGE_WORKER_BEACON_STALE_S,
+        )
+        _append_watchdog_action(
+            _R,
+            host,
+            {"action": "bridge_contract_stale", "ts": now},
+        )
+        try:
+            _R.incr(f"{host}:worker-watchdog:bridge_contract_stale")
+        except Exception as e:
+            logger.debug("[session-health] bridge_contract_stale counter increment failed: %s", e)
+    except Exception as e:
+        logger.debug("[session-health] bridge_contract_stale check failed (non-fatal): %s", e)
+
+
+def _drain_reclaim_requests(registry) -> int:
     """Drain bridge-pushed reclaim-requests and reclaim genuinely-terminal owners.
+
+    Returns the number of reclaim-requests popped this tick (``drained``). The
+    read-only bridge-contract-stale check is NO LONGER called from here (#1873
+    item 2) — it is called directly by ``_reap_slot_leases`` off an owner map that
+    pass builds, decoupling the stale-check from the drain. The drain reads a
+    DISTINCT owner set (request ids popped from Redis), never the lease snapshot,
+    so it no longer takes ``leases_snapshot`` (no tramp parameter).
 
     The out-of-domain half of Fix #5 (#1821): the bridge's
     ``check_worker_liveness_and_slots`` pushes owner ids onto
@@ -3116,7 +3260,7 @@ def _drain_reclaim_requests(registry, leases_snapshot) -> None:
         from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
     except Exception as e:
         logger.debug("[session-health] reclaim-request drain: redis unavailable: %s", e)
-        return
+        return 0
 
     drained = 0
     try:
@@ -3182,84 +3326,7 @@ def _drain_reclaim_requests(registry, leases_snapshot) -> None:
             "[session-health] reclaim-request drain failed (non-fatal): %s", e, exc_info=True
         )
 
-    _maybe_emit_bridge_contract_stale(drained, leases_snapshot)
-
-
-def _maybe_emit_bridge_contract_stale(drained: int, leases_snapshot) -> None:
-    """Emit ``bridge_contract_stale`` when a terminal-owner leak is observed but no
-    reclaim-request has been drained for a sustained window (concern #5, #1821).
-
-    Detects the new-worker / old-bridge direction: the worker keeps ONE Redis
-    timestamp (``worker:slot:last_reclaim_request_drain:{host}``, set whenever the
-    drain pops ≥1 request). On a tick where a terminal-owner leak IS present but
-    ``now − last_drain_ts > BRIDGE_WORKER_BEACON_STALE_S`` (the REUSED beacon
-    threshold — no new staleness var), emit ``bridge_contract_stale`` once (dedup
-    ``SET NX EX``) so the contract gap is operator-visible rather than a silent drop.
-
-    Fail-quiet — an observability signal must never raise into the reap pass.
-    """
-    try:
-        from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
-
-        host = _ORPHAN_REAP_HOSTNAME
-        last_drain_key = f"{WORKER_SLOT_LAST_RECLAIM_DRAIN_KEY_PREFIX}{host}"
-        now = time.time()
-
-        if drained > 0:
-            # We drained a request → the contract is live; record the timestamp.
-            _R.set(last_drain_key, str(now), ex=WORKER_SLOT_KEY_TTL_SECONDS)
-            return
-
-        # No request drained this tick. Only interesting if a terminal-owner leak
-        # actually exists (else there is nothing for the bridge to have requested).
-        terminal_owner_present = False
-        for lease in leases_snapshot:
-            try:
-                fresh = AgentSession.get_by_id(lease.owner_session_id)
-            except Exception:
-                continue
-            if fresh is not None and getattr(fresh, "status", None) in _TERMINAL_STATUSES:
-                terminal_owner_present = True
-                break
-        if not terminal_owner_present:
-            return
-
-        raw = _R.get(last_drain_key)
-        last_drain_ts = None
-        if raw is not None:
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", "replace")
-            try:
-                last_drain_ts = float(raw)
-            except (TypeError, ValueError):
-                last_drain_ts = None
-
-        stale = last_drain_ts is None or (now - last_drain_ts) > BRIDGE_WORKER_BEACON_STALE_S
-        if not stale:
-            return
-
-        # Dedup so a persistent gap logs once per stale window, not every tick.
-        dedup_key = f"worker:slot:bridge_contract_stale_applied:{host}"
-        if not _R.set(dedup_key, "1", nx=True, ex=BRIDGE_WORKER_BEACON_STALE_S):
-            return
-
-        logger.warning(
-            "[session-health] bridge_contract_stale: terminal-owner lease present but no "
-            "reclaim-request drained for >%ss — bridge reclaim-request channel may be "
-            "absent (new-worker/old-bridge). Autonomous reap still covers the leak.",
-            BRIDGE_WORKER_BEACON_STALE_S,
-        )
-        _append_watchdog_action(
-            _R,
-            host,
-            {"action": "bridge_contract_stale", "ts": now},
-        )
-        try:
-            _R.incr(f"{host}:worker-watchdog:bridge_contract_stale")
-        except Exception as e:
-            logger.debug("[session-health] bridge_contract_stale counter increment failed: %s", e)
-    except Exception as e:
-        logger.debug("[session-health] bridge_contract_stale check failed (non-fatal): %s", e)
+    return drained
 
 
 def _append_watchdog_action(redis_client, host: str, entry: dict) -> None:

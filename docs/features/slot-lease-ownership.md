@@ -103,6 +103,20 @@ starvation case). The pass has two phases:
   `registry.reclaim(owner)` and increments the `slot_reclaims` counter. There is
   no wall-clock reclaim arm.
 
+Between the two phases the tick drains bridge-pushed reclaim-requests and runs a
+read-only `bridge_contract_stale` observability check. As of #1873 the drain
+(`_drain_reclaim_requests`) returns `drained: int` and no longer calls the
+stale-check; `_reap_slot_leases` builds an owner→record map once (only when
+`drained == 0`) and passes it to `_maybe_emit_bridge_contract_stale`, decoupling
+that read-only check from the drain. Phase-2 reclaim is unaffected — it still
+re-reads each owner FRESH at reclaim time and never consults the map, which is
+what prevents a `valor-session resume` during the bounded drain window from
+having its live permit stripped. The healthy-tick reclaim-dedup clear now
+enumerates its markers with a non-blocking `scan_iter` + batched delete instead
+of a blocking `KEYS` scan. See
+[`out-of-domain-recovery.md`](out-of-domain-recovery.md) for the full stale-check
+and drain contract.
+
 ### Prompt reclaim in the killer
 
 `_apply_recovery_transition` (the out-of-band killer) also calls

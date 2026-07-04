@@ -202,10 +202,18 @@ def record_budget_trip(session, verdict: BudgetVerdict) -> None:
         from popoto.redis_db import POPOTO_REDIS_DB
 
         # Dedup the SIDE EFFECTS (not the block) to once per session.
-        dedup_key = f"{project_key}:tool-budget:tripped_applied:{session_id}"
-        first = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=TRIP_DEDUP_TTL)
-        if not first:
-            return  # already surfaced this session; the block still fired in the caller
+        # #1873 item 3: an id-less session (no session_id AND no agent_session_id)
+        # must NOT collapse into a shared ``...:tripped_applied:None`` slot — that
+        # single key would silently dedup away every id-less trip after the first.
+        if not session_id:
+            # Bypass the NX dedup gate entirely: fall through to counter/log/flag
+            # and surface on every id-less deny (never write a shared :None key).
+            pass
+        else:
+            dedup_key = f"{project_key}:tool-budget:tripped_applied:{session_id}"
+            first = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=TRIP_DEDUP_TTL)
+            if not first:
+                return  # already surfaced this session; the block still fired in the caller
 
         try:
             POPOTO_REDIS_DB.incr(f"{project_key}:tool-budget:tripped")

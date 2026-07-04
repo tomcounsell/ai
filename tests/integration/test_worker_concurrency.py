@@ -208,7 +208,7 @@ class TestGlobalSemaphore:
             POPOTO_REDIS_DB.rpush(f"worker:slot:reclaim_requests:{host}", session.agent_session_id)
 
             # Worker on-loop drain performs the actual reclaim.
-            _sh._drain_reclaim_requests(reg, reg.leases())
+            _sh._drain_reclaim_requests(reg)
 
             assert reg.permits_free() == before + 1
             assert session.agent_session_id not in {
