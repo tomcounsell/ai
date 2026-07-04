@@ -401,6 +401,32 @@ TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
 # Set to 0 to disable the quiescence gate without disabling the writers.
 MID_RUN_QUIESCENCE_SECS: float = float(os.environ.get("MID_RUN_QUIESCENCE_SECS", "180"))
 
+# === Wedge-nudge producer constants (#1879) ===
+# Health-loop producer half of the mid-run steering drain / continue-nudge
+# recovery rung (see agent/steering.py's channel + latch helpers, added by
+# Task 1 of docs/plans/granite-mid-run-steering-drain-continue-nudge.md, and
+# the `_await_turn_end` mid-run drain consumer, Task 2). Threshold for how
+# long a granite PTY session's normalized frame may stay frozen
+# (`last_pty_activity_at` stale) before the 30s producer pass
+# (`_wedge_nudge_producer_tick`, riding the tool-timeout sub-loop) pushes one
+# best-effort `continue` nudge onto the wedge-nudge channel. Chosen well
+# under the 600s `_hook_turn_end_wait_s` `pm_hang` backstop (spike-3) so a
+# genuine un-stick has time to land and a real turn/tool to complete before
+# that backstop tears the session down. Env-tunable.
+NUDGE_WEDGE_THRESHOLD_S = int(os.environ.get("NUDGE_WEDGE_THRESHOLD_S", "240"))
+
+# Wedge-nudge latch TTL — should match the turn-wait budget
+# (`_hook_turn_end_wait_s`, default 600s: `config/settings.py`
+# `GraniteSettings.hook_turn_end_wait_s`, resolved via
+# `agent/granite_container/container.py::_resolve_hook_turn_end_wait_s`) so
+# at most one nudge fires per turn-wait window (Risk 3 / Race 2 in the
+# plan). Deliberately NOT dynamically synced to the container's resolved
+# value — importing a container-internal resolver into this module would
+# add coupling this producer does not need. The two constants are instead
+# conceptually paired by this comment; if the runtime default changes,
+# update both. Env-tunable.
+WEDGE_NUDGE_LATCH_TTL_S = int(os.environ.get("WEDGE_NUDGE_LATCH_TTL_S", "600"))
+
 # Internal-tier tool name set: lightweight built-in tools that should never
 # legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
 # env-overridable in v1 — drift risk is small and documented.
@@ -542,6 +568,22 @@ def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
     return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
 
 
+def _is_granite_pty_session(entry: "AgentSession") -> bool:
+    """Single source of truth for the granite-PTY-vs-non-PTY transport check.
+
+    A granite PTY session has a ``last_pty_read_loop_at`` write (stamped by
+    the PTY read-loop liveness callback); SDK/headless sessions leave it
+    ``None``. Both the D0 priming-liveness gate (``_prime_pty_alive``) and
+    the #1879 wedge-nudge producer gate (``_wedge_nudge_eligible``) MUST use
+    exactly this predicate to exclude non-PTY sessions — a nudge or a
+    PTY-liveness deferral only makes sense for a session that actually runs
+    on a granite PTY. Factoring it here keeps the two call sites provably in
+    lock-step (critique concern 5) rather than each re-deriving the field
+    check and risking future drift.
+    """
+    return getattr(entry, "last_pty_read_loop_at", None) is not None
+
+
 def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
     """Return True if the PTY is alive during priming (defer D0 kill); False if kill-eligible.
 
@@ -582,9 +624,11 @@ def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
             return False
 
         # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
-        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
-        if last_pty_read_loop_at is None:
+        # Shared transport check (critique concern 5) so this gate and the
+        # #1879 producer gate never drift apart.
+        if not _is_granite_pty_session(entry):
             return False
+        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
 
         # Branch 3: stale read loop — a dead read loop cannot prove liveness.
         if isinstance(last_pty_read_loop_at, datetime):
@@ -606,6 +650,209 @@ def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
         return (now - activity_aware).total_seconds() <= NEVER_STARTED_PTY_LIVENESS_SECS
     except Exception:
         return False
+
+
+def _wedge_nudge_eligible(entry: "AgentSession", now: datetime) -> bool:
+    """Return True if a live in-scope granite PTY session is wedge-nudge eligible.
+
+    Producer predicate for the #1879 mid-run steering drain / continue-nudge
+    recovery rung. Distinct from ``_prime_pty_alive`` (D0 priming-liveness
+    kill deferral) and ``_pty_quiescent_long_enough`` (default-tier
+    tool-timeout kill gate) — this predicate targets the *live-handle*
+    population (sessions the current worker loop is actively executing,
+    scanned every 30s by ``_wedge_nudge_producer_tick`` on the tool-timeout
+    sub-loop), and never recommends a kill. It only decides whether a
+    best-effort ``continue`` nudge should be pushed onto the separate
+    wedge-nudge steering channel (``agent/steering.py``) for a parked PTY to
+    drain mid-turn (see the ``_await_turn_end`` mid-run drain consumer,
+    Task 2 of the plan).
+
+    Gate (both required):
+
+    1. **Granite-PTY transport**: ``last_pty_read_loop_at is not None`` —
+       the exact field-presence check ``_prime_pty_alive`` already uses to
+       distinguish granite PTY sessions from non-PTY (SDK/headless)
+       sessions. Non-PTY sessions have no ``_await_turn_end`` consumer for
+       a nudge and must never be pushed to.
+    2. **Frozen frame**: ``last_pty_activity_at`` older than
+       ``NUDGE_WEDGE_THRESHOLD_S``.
+
+    IMPORTANT — why ``last_turn_at`` / ``last_tool_use_at``, not
+    ``last_pty_activity_at``, are the correct signals for judging *genuine*
+    recovery after a nudge fires (spike-2): the injected ``continue`` echo
+    is itself genuine new text (``_normalize_pty_buffer`` strips only
+    animation noise), so it advances ``last_pty_activity_at`` once on the
+    very next read. That means ``last_pty_activity_at`` freshness can NEVER
+    be trusted as "the nudge worked" — this predicate only judges "is the
+    frame frozen right now," and the one-nudge-per-window guarantee is
+    enforced entirely by the durable TTL latch (``set_wedge_nudge_latch``),
+    never by re-reading this field. Callers that want to know whether a
+    wedge genuinely un-stuck must check ``last_turn_at`` / ``last_tool_use_at``
+    advancing instead.
+
+    This predicate does not check the latch — callers must separately call
+    ``set_wedge_nudge_latch`` (the atomic acquire-and-gate) before pushing.
+    """
+    # Gate 1: granite-PTY transport — reuse the SAME predicate ``_prime_pty_alive``
+    # uses (critique concern 5), so the two never drift on how a non-PTY
+    # session is recognized.
+    if not _is_granite_pty_session(entry):
+        return False
+    last_activity = getattr(entry, "last_pty_activity_at", None)
+    if not isinstance(last_activity, datetime):
+        return False
+    activity_aware = last_activity if last_activity.tzinfo else last_activity.replace(tzinfo=UTC)
+    return (now - activity_aware).total_seconds() > NUDGE_WEDGE_THRESHOLD_S
+
+
+def _maybe_push_wedge_nudge(entry: "AgentSession", now: datetime) -> bool:
+    """Push a wedge-nudge for a live, in-scope, wedged granite PTY session (#1879).
+
+    Called every 30s from ``_wedge_nudge_producer_tick`` (the tool-timeout
+    sub-loop's producer pass) for sessions with a live in-scope handle —
+    the population the current worker loop is actively executing. That
+    population was deliberately narrowed away from the 300s running-scan's
+    ``elif`` chain by issue #1820 (BLOCKER r6) so that Fix #3's in-scope
+    progress-deadline cancel scope (``agent/agent_session_queue.py:1790``,
+    ``reason_kind="progress_deadline"``) would be the SOLE owner of
+    kill/recovery decisions for sessions the current worker loop is
+    actively executing.
+
+    Observing that population here is a deliberate, scoped exception —
+    NOT a re-widening of the #1820 split — because #1820 split *recovery /
+    kill* ownership, not *observation*: this function takes NO recovery
+    action whatsoever. It never sets ``should_recover``, never calls
+    ``_apply_recovery_transition``, and never touches ``recovery_attempts``.
+    It only pushes a best-effort steering keystroke onto a separate Redis
+    channel (``agent/steering.py``'s wedge-nudge channel, distinct from
+    ordinary operator steering) and bumps an observability counter. Because
+    the producer and Fix #3 act on disjoint *verbs* (nudge vs. cancel) over
+    the same population, this function cannot compete with, pre-empt,
+    double-fire, or race Fix #3's kill decision. The decision windows are
+    also disjoint: this nudge fires once ``last_pty_activity_at`` has been
+    stale past ``NUDGE_WEDGE_THRESHOLD_S`` (~240s) — at the 30s producer
+    cadence that lands within one tick of eligibility, well inside the 600s
+    ``_hook_turn_end_wait_s`` ``pm_hang`` backstop that self-terminates the
+    wedge shape this targets — entirely before Fix #3's 1800s
+    ``SESSION_PROGRESS_DEADLINE_S`` could ever be reached (spike-3). See
+    #1879 and #1820.
+
+    Fail-silent: any exception (including from ``push_wedge_nudge`` /
+    ``set_wedge_nudge_latch``, which are already fail-silent internally) is
+    caught here too, logged at ``warning``, and swallowed. This function
+    must never raise into the producer tick's per-session loop, and a
+    failure here must never fall through to a kill path.
+
+    Returns:
+        True if a nudge was pushed this call. False if not eligible
+        (``_wedge_nudge_eligible`` returned False), if the latch was
+        already held this turn-wait window (at most one nudge per window —
+        Risk 3 / Race 2), or on any failure.
+    """
+    try:
+        if not _wedge_nudge_eligible(entry, now):
+            return False
+
+        from agent.steering import push_wedge_nudge, set_wedge_nudge_latch
+
+        # CRITICAL — the channel must be keyed by ``session_id`` (the
+        # Telegram-derived routing key), NOT ``agent_session_id`` (the
+        # AutoKeyField UUID alias). The consumer that drains this channel —
+        # the ``_poll_wedge_nudge`` closure in
+        # ``agent/granite_container/bridge_adapter.py`` — keys it on
+        # ``self._agent_session.session_id``, exactly as the ordinary
+        # operator-steering channel does. Pushing to ``agent_session_id``
+        # here would write to a key no consumer ever reads, silently
+        # breaking the whole recovery rung end-to-end. The latch shares the
+        # same ``session_id`` so ``clear_wedge_nudge_latch`` (fired on turn
+        # completion in the bridge adapter) targets the same key.
+        session_id = entry.session_id
+        if not set_wedge_nudge_latch(session_id, ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S):
+            # Latch already held this turn-wait window — the latch
+            # acquisition itself is the gate. Do nothing further; this is
+            # the "exactly one nudge per window" guarantee (Risk 3 / Race 2).
+            return False
+
+        # Signal-channel TTL paired with the latch TTL (review blocker B2):
+        # an undrained nudge must expire with its turn-wait window rather
+        # than leak into a later healthy turn's first drain tick.
+        push_wedge_nudge(session_id, ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S)
+
+        try:
+            from popoto.redis_db import POPOTO_REDIS_DB as _R_WEDGE
+
+            _R_WEDGE.incr(f"{entry.project_key}:session-health:wedge_nudge_sent")
+        except Exception:
+            logger.debug(
+                "[session-health] Failed to incr wedge_nudge_sent counter for %s",
+                session_id,
+            )
+
+        return True
+    except Exception:
+        logger.warning(
+            "[session-health] wedge-nudge producer failed for session %s",
+            getattr(entry, "agent_session_id", "unknown"),
+            exc_info=True,
+        )
+        return False
+
+
+def _wedge_nudge_producer_tick(now: datetime | None = None) -> int:
+    """30s wedge-nudge producer pass over running sessions (#1879, blocker B1).
+
+    Runs once per ``_agent_session_tool_timeout_loop`` iteration — the 30s
+    sub-loop — NOT the 300s main health loop. The cadence is load-bearing:
+    ``NUDGE_WEDGE_THRESHOLD_S`` (~240s) plus a 300s scan interval would
+    routinely land the nudge after the 600s ``pm_hang`` turn-wait window has
+    already torn the wedged session down; at 30s the push fires within one
+    tick of eligibility, leaving the wedge ~330s of window to un-stick.
+
+    Cheap by construction, preserving the sub-loop's low-cost rationale: per
+    session it is attr reads only (``_wedge_nudge_eligible`` — transport
+    field presence + one timestamp compare). Redis is touched only for an
+    eligible session (latch ``SET NX`` + one ``RPUSH``), and the in-scope
+    gate is a dict lookup on ``_active_sessions``.
+
+    In-scope gate: only sessions the CURRENT worker loop is actively
+    executing (``_active_sessions`` holds a live handle) are considered —
+    the same ``in_scope_handle is not None`` population the 300s
+    running-scan's #944 orphan elif excludes. #1820 (BLOCKER r6) gave Fix
+    #3's progress-deadline cancel scope sole *kill* ownership of that
+    population; this pass only *observes* it and pushes a best-effort nudge
+    (see ``_maybe_push_wedge_nudge``'s docstring for the full
+    verb-disjointness and window-disjointness argument).
+
+    Deliberately independent of ``TOOL_TIMEOUT_TIERS_DISABLED`` — that
+    kill-switch gags the tool-timeout *recovery* tiers, and this pass takes
+    no recovery action. Fail-silent per session; never raises into the loop.
+
+    Returns:
+        Number of nudges pushed this tick (observability / tests).
+    """
+    if now is None:
+        now = datetime.now(tz=UTC)
+    pushed = 0
+    try:
+        running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
+    except Exception:
+        logger.warning("[session-health] wedge-nudge producer scan failed", exc_info=True)
+        return 0
+    for entry in running_sessions:
+        try:
+            if getattr(entry, "status", None) in _TERMINAL_STATUSES:
+                continue
+            if _active_sessions.get(entry.agent_session_id) is None:
+                continue
+            if _maybe_push_wedge_nudge(entry, now):
+                pushed += 1
+        except Exception:
+            logger.warning(
+                "[session-health] wedge-nudge producer tick failed for session %s",
+                getattr(entry, "agent_session_id", "unknown"),
+                exc_info=True,
+            )
+    return pushed
 
 
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
@@ -4309,8 +4556,17 @@ async def _agent_session_tool_timeout_loop() -> None:
     checks (psutil, OOM defer, orphan reap) stay on their original cadence —
     we deliberately avoid running them at 30s to keep load impact bounded.
 
-    Kill switch: ``TOOL_TIMEOUT_TIERS_DISABLED=1`` short-circuits each tick
-    (parity with ``DISABLE_PROGRESS_KILL`` for the main loop).
+    Also hosts the #1879 wedge-nudge producer pass
+    (``_wedge_nudge_producer_tick``) — attr-reads-only per session, Redis
+    only on an eligible wedge, so the low-cost rationale above holds. The
+    producer needs this 30s cadence: on the 300s main loop the ~240s
+    ``NUDGE_WEDGE_THRESHOLD_S`` nudge would routinely land after the 600s
+    ``pm_hang`` turn-wait window closed (review blocker B1). It runs outside
+    the tool-timeout kill-switch below because it takes no recovery action.
+
+    Kill switch: ``TOOL_TIMEOUT_TIERS_DISABLED=1`` short-circuits each
+    tool-timeout tick (parity with ``DISABLE_PROGRESS_KILL`` for the main
+    loop); the wedge-nudge producer pass is not covered by it.
     """
     logger.info(
         "[session-health] Per-tool timeout sub-loop started (interval=%ds, "
@@ -4326,6 +4582,19 @@ async def _agent_session_tool_timeout_loop() -> None:
         except Exception as e:
             logger.error(
                 "[session-health] Error in tool-timeout sub-loop: %s",
+                e,
+                exc_info=True,
+            )
+        # #1879 wedge-nudge producer (review blocker B1): the sole call site.
+        # Rides this 30s loop so a frame frozen past NUDGE_WEDGE_THRESHOLD_S
+        # (~240s) is nudged within one tick — the 300s main loop would push
+        # too late for the 600s pm_hang window. Own try/except so a raising
+        # producer can never disturb the tool-timeout tick above.
+        try:
+            _wedge_nudge_producer_tick()
+        except Exception as e:
+            logger.error(
+                "[session-health] Error in wedge-nudge producer tick: %s",
                 e,
                 exc_info=True,
             )

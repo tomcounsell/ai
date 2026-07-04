@@ -738,12 +738,13 @@ class Container:
         dev_model: str | None = None,
         on_user_payload: Callable[[str], None] | None = None,
         on_complete_payload: Callable[[str], None] | None = None,
-        on_turn: Callable[[], None] | None = None,
+        on_turn: Callable[..., None] | None = None,
         on_pty_read: Callable[[str], None] | None = None,
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
         session_type: str | None = None,
         poll_steering: Callable[[], list[dict]] | None = None,
+        poll_wedge_nudge: Callable[[], list[dict]] | None = None,
         pm_session_id: str | None = None,
         dev_session_id: str | None = None,
         pm_hook_edge_file: str | None = None,
@@ -809,8 +810,14 @@ class Container:
         # (every destination, including unknown). BridgeAdapter uses it
         # to bump `agent_session.last_turn_at` so the two-tier
         # no-progress detector's sub-check A stays live for granite
-        # sessions (PR #1612 review TD1). Exceptions are swallowed —
-        # progress signaling must never crash the loop.
+        # sessions (PR #1612 review TD1). Contract (#1879 review M1): the
+        # callable accepts an optional `genuine: bool = True` keyword.
+        # Genuine Stop-edge turn ends call it with no args (genuine=True);
+        # the crash-resume liveness bump calls `on_turn(genuine=False)` so
+        # the receiver can skip wedge-nudge bookkeeping (latch clear /
+        # recovered counter / pending-nudge purge) while still bumping
+        # `last_turn_at`. Exceptions are swallowed — progress signaling
+        # must never crash the loop.
         self._on_turn = on_turn
         # PTY read-loop hook: called from _cycle_idle once per turn-boundary
         # idle-return from read_until_idle, passing the ANSI-stripped (but not
@@ -863,6 +870,20 @@ class Container:
         # the call site is fail-silent: a raising callback yields [] and never
         # crashes the loop.
         self._poll_steering = poll_steering
+        # Optional, storage-agnostic wedge-nudge poll callback (mid-run drain,
+        # issue #1879). Distinct from `_poll_steering` above: this is drained
+        # from *inside* `_await_turn_end` (a session parked mid-turn, no
+        # completed-turn boundary), not at the top of a steady-state turn.
+        # Returns a list of pending nudge dicts (each with `text`, `sender`,
+        # `timestamp`, `is_abort`) from a channel the BridgeAdapter closure
+        # keeps isolated from ordinary operator steering (see
+        # `agent/steering.py` channel-isolation contract). The Container
+        # never imports Redis / agent.steering — the BridgeAdapter supplies
+        # the closure. Default None preserves every existing caller (CLI,
+        # tests, non-hook-driven runs) unchanged. Like `_poll_steering`, the
+        # call site is fail-silent: a raising callback yields [] and never
+        # crashes the loop.
+        self._poll_wedge_nudge = poll_wedge_nudge
         self._pm_pty: PTYDriver | None = None
         self._dev_pty: PTYDriver | None = None
         self._sandbox: tuple[str, str] | None = None
@@ -1387,6 +1408,47 @@ class Container:
                 deadline = time.monotonic() + self._hook_turn_end_wait_s  # re-arm
                 continue
 
+            # 3.5. Mid-run wedge-nudge drain (issue #1879). Placement is
+            # deliberate: this runs AFTER the crash-detection/crash-resume
+            # block above, never before it. That block either returns
+            # (crash-resume cap exhausted or spawn failed) or reassigns
+            # `pty = resumed` and `continue`s the loop — every `not alive`
+            # branch exits this point in the loop body without falling
+            # through to here. So by construction, reaching this line means
+            # `pty` is the LIVE handle for this tick (either it was alive
+            # all along, or it is the freshly resumed replacement from a
+            # prior tick). Draining earlier (e.g. right after the step-2
+            # liveness pump) would risk writing to a `pty` that just died on
+            # THIS tick — the nudge would be silently lost to a dead
+            # process while the session-health producer's one-nudge-per-
+            # window latch is still spent, wasting the single recovery
+            # attempt with zero keystrokes reaching anything alive.
+            #
+            # No `_cycle_idle` gate is used here, unlike the top-of-turn
+            # `_poll_steering` drain in the steady-state loop. Two
+            # independent guarantees make the gate unnecessary: (1) channel
+            # isolation — the wedge-nudge channel (`steering:nudge:{id}`) is
+            # a distinct Redis key from ordinary operator steering
+            # (`steering:{id}`), so this drain can never consume a message
+            # the top-of-turn path owns; and (2) token idempotency — the
+            # only thing ever written here is `CRASH_RESUME_CONTINUE`, the
+            # exact same constant/call the crash-resume path above already
+            # uses via `_resume_crashed_pty` (`pty.write(CRASH_RESUME_CONTINUE)`).
+            # A `continue` keystroke to a PTY that is parked (by definition —
+            # there is no in-flight turn to interrupt while waiting on the
+            # Stop edge) carries no corruption risk to gate against.
+            if self._poll_wedge_nudge is not None:
+                try:
+                    nudges = self._poll_wedge_nudge() or []
+                except Exception as e:
+                    logger.warning("[granite-container] poll_wedge_nudge callback raised: %s", e)
+                    nudges = []
+                if nudges:
+                    try:
+                        pty.write(CRASH_RESUME_CONTINUE)
+                    except Exception as e:
+                        logger.warning("[granite-container] wedge-nudge PTY write failed: %s", e)
+
             # 4. Bounded timeout: alive + quiet + no Stop past the budget.
             if time.monotonic() > deadline:
                 logger.warning(
@@ -1547,9 +1609,14 @@ class Container:
             # Redis, not this in-process flag) sees demonstrable progress across
             # the resume and does not fire its own recovery. Fail-silent —
             # liveness signaling must never crash the run (mirrors on_turn guard).
+            # genuine=False (#1879 review M1): this is a liveness bump, NOT a
+            # genuine Stop-edge turn end — the receiver must bump last_turn_at
+            # but skip the wedge-nudge bookkeeping (latch clear, recovered
+            # counter, pending-nudge purge), otherwise a crash-resume would
+            # pollute the wedge_nudge_recovered efficacy counter.
             if self._on_turn is not None:
                 try:
-                    self._on_turn()
+                    self._on_turn(genuine=False)
                 except Exception as e:
                     logger.warning("[granite-container] on_turn during crash-resume raised: %s", e)
             logger.info(

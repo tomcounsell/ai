@@ -229,6 +229,22 @@ On the terminal `failed` branch — both the `MAX_RECOVERY_ATTEMPTS` exhaustion 
 
 See [Session Recovery Mechanisms §Per-Tool Timeout Sub-Loop](session-recovery-mechanisms.md#10-per-tool-timeout-sub-loop-_agent_session_tool_timeout_loop) for the recovery trigger conditions and tier budgets.
 
+## Wedge-Nudge Channel (issue #1879) — a SEPARATE channel from operator steering
+
+The ordinary steering queue above (`steering:{session_id}`) is drained only at the **top of a completed turn**. That makes it unreachable for a granite PTY session that is *wedged mid-turn* — parked inside `_await_turn_end` with a frozen normalized frame, never completing a turn to reach the drain point. The wedge-nudge channel is the recovery rung built for exactly that shape. It is **deliberately a distinct Redis key** so the mid-turn drain can never consume a pending operator message, and ordinary steering behavior is byte-for-byte unchanged.
+
+Three keys, all keyed by the session's `session_id` (the Telegram routing key — the same key ordinary steering and the consumer closure use, **not** the `agent_session_id` UUID alias):
+
+| Key | Role | Drained by |
+|-----|------|-----------|
+| `steering:{session_id}` | Ordinary operator steering (unchanged) | Top-of-turn `poll_steering` |
+| `steering:nudge:{session_id}` | Wedge-nudge signal channel | Mid-run `poll_wedge_nudge` inside `_await_turn_end` |
+| `steering:nudge:latch:{session_id}` | Durable TTL latch (`SET NX EX`) | Never drained; TTL expiry or `clear_wedge_nudge_latch` on turn completion |
+
+Helpers live in `agent/steering.py`: `push_wedge_nudge` / `pop_wedge_nudges` (signal channel, fail-silent, mirror `pop_all_steering_messages`), and `set_wedge_nudge_latch` / `has_wedge_nudge_latch` / `clear_wedge_nudge_latch` (the latch). The latch is a distinct key from the signal channel so it **survives** the drain — the guarantee "at most one nudge per turn-wait window" is structural, not a timing accident. `clear_wedge_nudge_latch` is called on a genuine turn completion (`on_turn` in `bridge_adapter.py`) so a recovered-then-re-wedged session earns a fresh nudge instead of being suppressed for the whole fixed TTL.
+
+The producer (session-health running-scan) and the container-side consumer/drain are documented end-to-end in [granite-pty-production.md — Mid-run steering drain / wedge-nudge recovery rung](granite-pty-production.md#mid-run-steering-drain--wedge-nudge-recovery-rung-issue-1879), including the injected-echo hazard, the 600s `pm_hang` backstop, and the `wedge_nudge_sent` / `wedge_nudge_recovered` efficacy counters. Operator steering via `valor-session steer` continues to use the ordinary `steering:{session_id}` channel and is unaffected.
+
 ## Parent-Child Steering (parent Eng session to child Eng session)
 
 In addition to Telegram reply-thread steering (user to agent), the steering queue supports **parent-child steering**. Parent and child sessions are both Eng sessions (`session_type="eng"`); a parent created its child via `AgentSession.create_child()` for parallel work, and steers it while it runs.

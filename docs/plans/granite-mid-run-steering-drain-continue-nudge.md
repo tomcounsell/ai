@@ -406,14 +406,14 @@ ordinary `steering:{id}` channel, which this plan leaves unchanged.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/granite-pty-production.md` with a "Mid-run steering drain / wedge-nudge recovery rung" subsection: the separate nudge channel, the `_await_turn_end` drain seam, the health-loop producer gate, the injected-echo hazard, and the 600s `pm_hang` backstop.
-- [ ] Update `docs/features/session-steering.md` (or the steering doc under `docs/features/`) to document the wedge-nudge channel as distinct from ordinary operator steering.
-- [ ] Add/refresh the entry in `docs/features/README.md` index if the granite recovery surface is listed there.
+- [x] Update `docs/features/granite-pty-production.md` with a "Mid-run steering drain / wedge-nudge recovery rung" subsection: the separate nudge channel, the `_await_turn_end` drain seam, the health-loop producer gate, the injected-echo hazard, and the 600s `pm_hang` backstop.
+- [x] Update `docs/features/session-steering.md` (or the steering doc under `docs/features/`) to document the wedge-nudge channel as distinct from ordinary operator steering.
+- [x] Add/refresh the entry in `docs/features/README.md` index if the granite recovery surface is listed there.
 
 ### Inline Documentation
-- [ ] Docstring on `push_wedge_nudge`/`pop_wedge_nudges` and the latch helper in `agent/steering.py` stating the channel-isolation contract.
-- [ ] Comment in `_await_turn_end` at the drain seam explaining why no `_cycle_idle` gate is used (channel isolation + idempotent `CRASH_RESUME_CONTINUE` token), why the drain is placed **after** the crash-resume block (so `pty` is guaranteed live and the latch is never spent on a dead PTY), and citing #1879.
-- [ ] Comment in the session_health producer branch explaining the PTY-transport + frozen-frame + latch gate, why `last_turn_at`/`last_tool_use_at` (not `last_pty_activity_at`) judge recovery, AND the #1820 reconciliation: this branch re-enters the `in_scope_handle is not None` population #1820 narrowed away, but takes no recovery action (no `should_recover`, no `_apply_recovery_transition`, no `recovery_attempts`), so it does not re-widen the #1820 recovery-ownership split — Fix #3 still solely owns the cancel scope.
+- [x] Docstring on `push_wedge_nudge`/`pop_wedge_nudges` and the latch helper in `agent/steering.py` stating the channel-isolation contract.
+- [x] Comment in `_await_turn_end` at the drain seam explaining why no `_cycle_idle` gate is used (channel isolation + idempotent `CRASH_RESUME_CONTINUE` token), why the drain is placed **after** the crash-resume block (so `pty` is guaranteed live and the latch is never spent on a dead PTY), and citing #1879.
+- [x] Comment in the session_health producer branch explaining the PTY-transport + frozen-frame + latch gate, why `last_turn_at`/`last_tool_use_at` (not `last_pty_activity_at`) judge recovery, AND the #1820 reconciliation: this branch re-enters the `in_scope_handle is not None` population #1820 narrowed away, but takes no recovery action (no `should_recover`, no `_apply_recovery_transition`, no `recovery_attempts`), so it does not re-widen the #1820 recovery-ownership split — Fix #3 still solely owns the cancel scope.
 
 ## Success Criteria
 

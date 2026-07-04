@@ -14,15 +14,19 @@ already populates:
   - Part D: the ``BridgeAdapter`` ``poll_steering`` closure — it drains the
     real Redis list and is fail-silent (returns ``[]`` + logs a warning when
     the drain raises).
+  - Part E: the ``BridgeAdapter`` ``poll_wedge_nudge`` closure (mid-run drain,
+    issue #1879) — it drains the separate ``steering:nudge:{id}`` channel, is
+    fail-silent, and is isolated from the ordinary ``steering:{id}`` queue in
+    both directions.
 
 Routing-logic tests use a plain in-process stub callback for ``poll_steering``
 and ``MagicMock(spec=PTYDriver)`` PTY fakes (the same fakes the existing
 container unit tests use) so we can assert what was written to each PTY. No
 Redis and no real ``claude`` TUI spawn is required for the routing tier.
 
-Part D drives the REAL adapter closure (captured via a Container constructor
-spy) against the real ``agent.steering`` Redis queue — that is the seam that
-catches a wiring regression a hand-rolled closure cannot.
+Part D and Part E drive the REAL adapter closures (captured via a Container
+constructor spy) against the real ``agent.steering`` Redis queues — that is
+the seam that catches a wiring regression a hand-rolled closure cannot.
 """
 
 from __future__ import annotations
@@ -336,9 +340,10 @@ class _FakeSession:
     session_events: list = field(default_factory=list)
 
 
-def _capture_adapter_poll_closure(session_id: str):
+def _capture_adapter_kwargs(session_id: str) -> dict[str, Any]:
     """Run a BridgeAdapter with mocked spawn + a Container spy and return the
-    real ``poll_steering`` closure it built (bound to ``session_id``)."""
+    full kwargs dict it passed to ``Container(...)`` (includes both
+    ``poll_steering`` and ``poll_wedge_nudge``), bound to ``session_id``."""
     from agent.granite_container import bridge_adapter as ba
     from agent.granite_container.pty_pool import PTYPool
 
@@ -375,8 +380,24 @@ def _capture_adapter_poll_closure(session_id: str):
         )
         asyncio.run(adapter.run("hello", "/tmp"))
 
+    return seen
+
+
+def _capture_adapter_poll_closure(session_id: str):
+    """Run a BridgeAdapter with mocked spawn + a Container spy and return the
+    real ``poll_steering`` closure it built (bound to ``session_id``)."""
+    seen = _capture_adapter_kwargs(session_id)
     closure = seen.get("poll_steering")
     assert closure is not None, "BridgeAdapter did not pass poll_steering to Container"
+    return closure
+
+
+def _capture_adapter_poll_wedge_nudge_closure(session_id: str):
+    """Run a BridgeAdapter with mocked spawn + a Container spy and return the
+    real ``poll_wedge_nudge`` closure it built (bound to ``session_id``)."""
+    seen = _capture_adapter_kwargs(session_id)
+    closure = seen.get("poll_wedge_nudge")
+    assert closure is not None, "BridgeAdapter did not pass poll_wedge_nudge to Container"
     return closure
 
 
@@ -431,6 +452,101 @@ class TestBridgeAdapterPollClosure(unittest.TestCase):
         self.assertTrue(
             any("poll_steering drain failed" in line for line in cm.output),
             f"expected a 'poll_steering drain failed' warning, got: {cm.output}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Part E — BridgeAdapter poll_wedge_nudge closure (real Redis, isolation)
+# ---------------------------------------------------------------------------
+
+
+class TestBridgeAdapterPollWedgeNudgeClosure(unittest.TestCase):
+    """The wedge-nudge closure delegates to ``agent.steering.pop_wedge_nudges``
+    (mid-run drain, issue #1879), is fail-silent, and is isolated from the
+    ordinary ``steering:{session_id}`` operator-steering queue."""
+
+    def setUp(self) -> None:
+        import agent.steering as steering
+
+        self._steering = steering
+        self._sid = "unit-wedge-nudge-adapter-session"
+        steering.clear_steering_queue(self._sid)
+        steering.pop_wedge_nudges(self._sid)
+
+    def tearDown(self) -> None:
+        self._steering.clear_steering_queue(self._sid)
+        self._steering.pop_wedge_nudges(self._sid)
+
+    def test_closure_drains_real_queued_wedge_nudges(self) -> None:
+        """Happy path: a nudge pushed to ``steering:nudge:{session_id}`` is
+        returned by the closure. Regression guard for the wiring (a missing
+        import would silently make the closure always return ``[]``)."""
+        closure = _capture_adapter_poll_wedge_nudge_closure(self._sid)
+        self._steering.push_wedge_nudge(self._sid)
+
+        drained = closure()
+
+        self.assertEqual(len(drained), 1)
+        self.assertEqual(drained[0]["text"], "continue")
+        self.assertFalse(drained[0]["is_abort"])
+
+    def test_closure_returns_empty_and_logs_when_drain_raises(self) -> None:
+        """Fail-silent: when ``pop_wedge_nudges`` raises, the closure returns
+        ``[]`` and logs a warning (observable, not a silent pass)."""
+        closure = _capture_adapter_poll_wedge_nudge_closure(self._sid)
+        self._steering.push_wedge_nudge(self._sid)
+
+        def _boom(_sid):
+            raise RuntimeError("redis down")
+
+        with (
+            patch(
+                "agent.granite_container.bridge_adapter.pop_wedge_nudges",
+                side_effect=_boom,
+            ),
+            self.assertLogs("agent.granite_container.bridge_adapter", level=logging.WARNING) as cm,
+        ):
+            drained = closure()
+
+        self.assertEqual(drained, [])
+        self.assertTrue(
+            any("poll_wedge_nudge drain failed" in line for line in cm.output),
+            f"expected a 'poll_wedge_nudge drain failed' warning, got: {cm.output}",
+        )
+
+    def test_wedge_nudge_closure_does_not_touch_ordinary_steering_queue(self) -> None:
+        """Channel-isolation regression lock: draining the wedge-nudge
+        channel must NEVER consume the ordinary operator steering queue
+        (``steering:{session_id}``) — the two are separate Redis keys by
+        design (see the ``agent/steering.py`` channel-isolation contract)."""
+        closure = _capture_adapter_poll_wedge_nudge_closure(self._sid)
+        self._steering.push_steering_message(self._sid, "do not touch me", "Tom")
+
+        drained = closure()
+
+        self.assertEqual(drained, [], "wedge-nudge drain must not read the ordinary queue")
+        self.assertTrue(
+            self._steering.has_steering_messages(self._sid),
+            "ordinary steering message must survive an (unrelated) wedge-nudge drain",
+        )
+
+    def test_ordinary_steering_closure_does_not_touch_wedge_nudge_channel(self) -> None:
+        """Mirror of the above: the ordinary ``poll_steering`` closure must
+        never drain the wedge-nudge channel."""
+        seen = _capture_adapter_kwargs(self._sid)
+        poll_steering = seen.get("poll_steering")
+        assert poll_steering is not None, "BridgeAdapter did not pass poll_steering to Container"
+        self._steering.push_wedge_nudge(self._sid)
+
+        drained = poll_steering()
+
+        self.assertEqual(
+            drained, [], "ordinary steering drain must not read the wedge-nudge channel"
+        )
+        self.assertEqual(
+            len(self._steering.pop_wedge_nudges(self._sid)),
+            1,
+            "wedge-nudge must survive an (unrelated) ordinary steering drain",
         )
 
 
