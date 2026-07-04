@@ -77,6 +77,10 @@ WORKER_DEADMAN_ENABLED: bool = os.environ.get(
 # Stop event for the heartbeat daemon thread — set on worker shutdown.
 _heartbeat_stop_event = threading.Event()
 
+# Stop event for the session-archive periodic export daemon thread (issue #1825)
+# — set on worker shutdown.
+_session_archive_stop_event = threading.Event()
+
 # Granite re-probe / circuit breaker — provisional, tunable via env.
 # Grain of salt: defaults below are PROVISIONAL — tune after observing real
 # ollama outage / false-positive rates in logs/worker.log.
@@ -394,6 +398,34 @@ def _heartbeat_thread_main() -> None:
         armed, beacon_log_next = _heartbeat_cycle(armed, thread_start, beacon_log_next)
 
     logger.info("Heartbeat thread stopped")
+
+
+def _session_archive_thread_main() -> None:
+    """Dedicated daemon thread for the periodic session-archive export (issue #1825).
+
+    Mirrors :func:`_heartbeat_thread_main`'s pattern exactly: runs off the
+    asyncio event loop (both the Redis `query.all()` scan and the SQLite write
+    are blocking), wakes every SESSION_ARCHIVE_INTERVAL seconds, and wraps each
+    cycle's call to :func:`agent.session_archive.export_all` in its own
+    try/except so one failed export can never kill the thread or block the
+    next cycle.
+
+    See `docs/plans/session-archive-sqlite.md` Data Flow point 2.
+    """
+    from agent.constants import SESSION_ARCHIVE_INTERVAL
+    from agent.session_archive import export_all
+
+    logger.info("Session-archive export thread started (interval=%ds)", SESSION_ARCHIVE_INTERVAL)
+
+    # wait() returns True only when the stop event is set, so the loop exits on
+    # graceful shutdown and never aborts mid-export during teardown.
+    while not _session_archive_stop_event.wait(timeout=SESSION_ARCHIVE_INTERVAL):
+        try:
+            export_all()
+        except Exception:
+            logger.warning("session_archive export_all failed (non-fatal)", exc_info=True)
+
+    logger.info("Session-archive export thread stopped")
 
 
 class _UTCFormatter(logging.Formatter):
@@ -889,6 +921,20 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         )
         return
 
+    # Guarded cold-start restore (issue #1825): rehydrate data/session_archive.db
+    # back into Redis iff Redis is provably empty of AgentSession data. Must run
+    # BELOW the dry-run guard above (a dry run must never mutate Redis) and BEFORE
+    # handler/callback registration below (so no incoming message can create a new
+    # AgentSession while restore is running -- see the plan's Race Condition #2) and
+    # BEFORE the Step 1 index rebuild (so the rebuild reindexes any rehydrated rows).
+    try:
+        from agent import session_archive
+
+        restore_result = session_archive.restore_if_empty()
+        logger.info("session_archive restore_if_empty: %s", restore_result)
+    except Exception:
+        logger.warning("session_archive restore_if_empty failed at startup", exc_info=True)
+
     # Register TelegramRelayOutputHandler for each project
     for project_key in projects:
         register_callbacks(project_key, handler=handler)
@@ -1169,6 +1215,21 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     )
     heartbeat_thread.start()
 
+    # Start dedicated session-archive export daemon thread (issue #1825).
+    # Mirrors the heartbeat thread above exactly (own daemon thread, own stop
+    # event) so the periodic SQLite export never shares the event loop or the
+    # heartbeat's crash domain. Never started under pytest — a test run must
+    # not spin up a background thread that writes to data/session_archive.db.
+    session_archive_thread = None
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        _session_archive_stop_event.clear()
+        session_archive_thread = threading.Thread(
+            target=_session_archive_thread_main,
+            name="worker-session-archive",
+            daemon=True,
+        )
+        session_archive_thread.start()
+
     # Start health monitor as a supervised background task (#1816 Fix #4).
     # supervise() respawns on unexpected death with exponential backoff;
     # storm cap exceeds → _self_kill() SIGKILL so launchd can respawn clean.
@@ -1255,6 +1316,13 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # immediately; the thread exits its loop and the join() completes quickly.
     _heartbeat_stop_event.set()
     heartbeat_thread.join(timeout=5)
+
+    # Stop the dedicated session-archive export thread (issue #1825), mirroring
+    # the heartbeat thread shutdown above. Only join if it was actually started
+    # (never started under pytest -- see the startup guard).
+    if session_archive_thread is not None:
+        _session_archive_stop_event.set()
+        session_archive_thread.join(timeout=5)
 
     # Cancel health monitor
     health_task.cancel()

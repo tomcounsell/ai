@@ -415,6 +415,93 @@ class TestWorkerStartupSequence:
             f"_ensure_worker (line {line_ensure_worker})"
         )
 
+    def test_session_archive_restore_ordering(self):
+        """session_archive.restore_if_empty() must run in the exact startup gap:
+
+        below the `if dry_run: ... return` guard (a dry run must never mutate
+        Redis), and above both handler/callback registration (no incoming
+        message may create an AgentSession while restore runs -- Race
+        Condition #2) and the Step 1 index rebuild (restore must precede it so
+        rehydrated rows get reindexed). See docs/plans/session-archive-sqlite.md
+        Data Flow point 3.
+        """
+        import re
+
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+        lines = source.split("\n")
+
+        def first_line(pattern: str) -> int:
+            for i, line in enumerate(lines):
+                if re.search(pattern, line):
+                    return i
+            return -1
+
+        line_dry_run = first_line(r"if dry_run:")
+        line_restore = first_line(r"session_archive\.restore_if_empty\(\)")
+        line_register_callbacks = first_line(r"register_callbacks\(")
+        line_step1 = first_line(r"# Step 1: Rebuild indexes")
+
+        assert line_dry_run >= 0, "`if dry_run:` guard not found"
+        assert line_restore >= 0, "session_archive.restore_if_empty() call not found"
+        assert line_register_callbacks >= 0, "register_callbacks( call not found"
+        assert line_step1 >= 0, "Step 1 index-rebuild comment not found"
+
+        assert line_dry_run < line_restore, (
+            f"restore_if_empty (line {line_restore}) must come AFTER "
+            f"the dry-run guard (line {line_dry_run}) -- a dry run must never "
+            f"mutate Redis"
+        )
+        assert line_restore < line_register_callbacks, (
+            f"restore_if_empty (line {line_restore}) must come BEFORE "
+            f"register_callbacks (line {line_register_callbacks}) -- no incoming "
+            f"message may create a session while restore is running"
+        )
+        assert line_restore < line_step1, (
+            f"restore_if_empty (line {line_restore}) must come BEFORE "
+            f"the Step 1 index rebuild (line {line_step1}) so rehydrated rows "
+            f"are reindexed"
+        )
+
+    def test_session_archive_export_thread_present_and_pytest_guarded(self):
+        """A `worker-session-archive` daemon thread must exist and must be
+        skipped entirely under pytest (mirrors the PYTEST_CURRENT_TEST no-op
+        convention in config/redis_bootstrap.py and monitoring/sentry_config.py)
+        so a test run never spins up a thread that writes to
+        data/session_archive.db.
+        """
+        import re
+
+        source = (Path(__file__).parent.parent.parent / "worker" / "__main__.py").read_text()
+
+        assert "worker-session-archive" in source, (
+            "worker/__main__.py must spawn a daemon thread named "
+            "'worker-session-archive' for the periodic session_archive export"
+        )
+        assert "_session_archive_thread_main" in source, (
+            "worker/__main__.py must define _session_archive_thread_main"
+        )
+
+        lines = source.split("\n")
+
+        def first_line(pattern: str) -> int:
+            for i, line in enumerate(lines):
+                if re.search(pattern, line):
+                    return i
+            return -1
+
+        line_thread_name = first_line(r'"worker-session-archive"')
+        line_pytest_guard = first_line(r"PYTEST_CURRENT_TEST.*:\s*$")
+
+        assert line_thread_name >= 0
+        assert line_pytest_guard >= 0, (
+            "worker/__main__.py must check PYTEST_CURRENT_TEST before starting "
+            "the session-archive export thread"
+        )
+        assert line_pytest_guard < line_thread_name, (
+            f"the PYTEST_CURRENT_TEST guard (line {line_pytest_guard}) must "
+            f"wrap the thread start (line {line_thread_name})"
+        )
+
 
 class TestSigtermExitCode:
     """Test that SIGTERM sets _shutdown_via_signal and SIGINT does not.
