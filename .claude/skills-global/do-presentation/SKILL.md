@@ -8,21 +8,13 @@ context: fork
 
 # Make a Presentation
 
-Creates polished, educational presentations about any feature, concept, or system in the current repo. Outputs Marp markdown with PDF and HTML exports, styled to match the repo's design system.
+Produce a polished slide deck the audience actually understands: researched from the codebase, structured for the audience (educational or client-facing), themed to the repo's design system, and exported via Marp to PDF/HTML (PPTX on request). Success is judged at Step 10's verify checklist — exports exist, slide count matches plan, every review flag addressed.
 
 ## Repo Context Probe
 
 If `.claude/skill-context/do-presentation.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
 The static-deck flow (research → structure → theme → diagrams → Marp export) is fully generic — it needs only `npx`/Marp and `curl`, no repo-specific tooling. The context file declares one optional capability: the **narrated `--video` mode** and the repo-provided CLI that powers it. When the file is absent (the common case in a foreign repo), the static deck (PDF/HTML/PPTX) is the deliverable and `--video` is unavailable.
-
-## What this skill does
-
-1. Researches the topic deeply across the codebase
-2. Structures content using proven educational frameworks (high-school accessible)
-3. Detects the repo's design system and builds a matching Marp theme
-4. Generates diagrams (Mermaid/ASCII) for architecture and flows
-5. Exports to PDF, HTML, and optionally PPTX
 
 ## When to load sub-files
 
@@ -171,11 +163,9 @@ mv diagrams/logo-{slug}.svg.png diagrams/logo-{slug}.png
 ```
 
 **Rules:**
-- Only fetch logos for brands that are **central to the slide content**, not every passing mention
+- Only fetch logos for brands **central to the slide content**, and only for polished decks — skip for internal/informal ones
 - Keep logos small (24-32px inline, 64-80px standalone) — they accent, not dominate
-- SVGs render directly in Marp with `--allow-local-files` — prefer SVG over PNG for sharpness
-- If a brand isn't in Simple Icons, use Google Favicon as fallback
-- Don't spend time on logos if the presentation is internal/informal — this is for polished decks
+- Prefer SVG over PNG for sharpness (SVGs render in Marp with `--allow-local-files`)
 
 ### Step 6: Generate diagrams
 
@@ -331,10 +321,3 @@ This mode depends on a repo-provided deck-video CLI that owns the full compositi
 ## Narration / voiceover
 
 If the user wants a spoken voiceover or narration track as its own audio file (separate from the `--video` mode), **defer to `/do-voice-recording`** — it is the canonical text-to-speech step (portable TTS-CLI resolution, voice catalog, prosody rules). Feed it the per-slide speaker notes. Do not hand-roll synthesis for this path.
-
-## Version history
-- v1.4.0 (2026-06-22): Added `--video` mode — narrated MP4 export via a repo-provided deck-video CLI (deck + per-slide `<!-- narration: ... -->` blocks → Marp PNG-per-slide → per-slide TTS synthesis → ffmpeg mux into `deck.mp4`). The mode's repo-specific pipeline and narration schema now live in the skill-context file; the manual narration path still defers to `/do-voice-recording`.
-- v1.3.0 (2026-05-31): Anti-slop hardening + audience-first title slide. Removed `border-left` accent-bar styling from the `.stat`/`.warn`/`blockquote` templates (THEME_DETECTION + SKILL) — the single biggest "AI-generated" tell — and added the "Avoid AI-Slop Tells" section to THEME_DETECTION.md. Added "The title slide: audience first" convention to CONTENT_GUIDE.md (client attribution on top, real name+photo at the bottom, deck title in the middle, via a full-height space-between flex column). Driven by a real client deck session.
-- v1.2.0 (2026-05-07): Added client-facing Why→How→What structure guidance (Step 3), self-review critique pass via subagent (Step 8), utility CSS classes in theme defaults (Step 7), "Client-Facing Decks" section in CONTENT_GUIDE.md. Driven by real session: first-pass deck opened with V0.5 scope before establishing client context; dense slides caught only after user review — both preventable with the review pass.
-- v1.1.0 (2026-04-13): Added Step 5 (brand logo collection via Simple Icons + Google Favicons), renumbered subsequent steps
-- v1.0.0 (2026-04-10): Initial — research, structure, theme detection, Marp export

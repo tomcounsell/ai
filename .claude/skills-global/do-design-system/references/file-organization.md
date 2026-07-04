@@ -67,7 +67,3 @@ Propose migrations; do NOT auto-apply.
 | `inspiration/` flat (images mixed) | Move all images into `inspiration/YYYY-MM-DD-initial/` with scaffolded `README.md` |
 | No `product/` | Create with empty `README.md` |
 | `brand.css` ↔ `source.css` token names diverge | List mismatches; do NOT auto-fix (renames are breaking) |
-
-If `charter.md` is missing or empty, **HALT**. No moodboard edits until a charter
-exists and reflects the product. The charter is not boilerplate — it needs human
-judgment.

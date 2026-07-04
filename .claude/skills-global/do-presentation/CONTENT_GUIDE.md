@@ -134,7 +134,7 @@ For a client-facing deck, the title slide is not about the deck — it is about 
 2. **Middle — the title.** What the deck is ("the what"). Necessary, but secondary — give it the visual weight of a title, but not the top of the slide.
 3. **Bottom — the identity that anchors it.** The presenter, product, or subject as a name + photo **side by side** (a real face, not a logo, when there is a person/persona involved). This is who they're dealing with.
 
-**Rule:** never bury the client attribution in small muted print. Client name on top, a real name/face at the bottom, the deck title in between. Implement with a full-height flex column (`justify-content: space-between`) rather than absolute positioning — it stays balanced regardless of title length. (See the `.title-slide` / `.kicker` / `.meet` pattern in SKILL.md.)
+**Rule:** never bury the client attribution in small muted print. Client name on top, a real name/face at the bottom, the deck title in between. Implement with a full-height flex column (`justify-content: space-between`) rather than absolute positioning — it stays balanced regardless of title length.
 
 ## Anti-Patterns (What NOT to Do)
 

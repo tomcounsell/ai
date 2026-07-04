@@ -11,20 +11,12 @@ folder) into concrete, additive edits to a design system — `.pen`
 source, charter, downstream CSS tokens — and enforce the canonical
 organization of design files (`docs/designs/`: `design-system.pen`,
 `charter.md`, `gap-audit.md`, `inspiration/`, `product/`) in the repo.
+Success: 3–7 charter-grounded additive edits landed in one commit, with
+downstream CSS in sync and the pass logged in `gap-audit.md`.
 
-Use when:
-
-- Someone shares a moodboard URL and asks you to tighten, professionalize,
-  or re-theme an existing design system.
-- A new brand direction has mood imagery but no component spec.
-- You need to audit drift between the design system and the aesthetic the
-  team is actually pointing at.
-- The repo's `docs/designs/` structure needs organizing (scattered `.pen`
-  files, missing charter, flat inspiration folder).
-
-Do **not** use when the moodboard is abstract (vibes only, no reusable
-motifs) or when the existing system already matches — additive changes
-without a concrete signal waste effort.
+Do **not** run a pass when the moodboard is abstract (vibes only, no
+reusable motifs) or when the existing system already matches — additive
+changes without a concrete signal waste effort.
 
 ## Repo Context Probe
 
@@ -115,14 +107,10 @@ Follow [references/moodboard-capture.md](references/moodboard-capture.md):
 
 ## Step 3 — Critique the existing system
 
-Load sources of truth **in this order**:
-
-1. **`charter.md`** — principles, voice, a11y targets, token tiers,
-   component taxonomy, font licensing. Edits are tested against it.
-2. **`design-system.pen`** — current tokens + components (read JSON
-   directly; see Step 5 note about MCP).
-3. **`brand.css` and `source.css`** — downstream state.
-4. **`gap-audit.md`** — recent changes, still-open items.
+Load sources of truth **in this order**: `charter.md` (edits are tested
+against it) → `design-system.pen` (read the JSON directly; see Step 5)
+→ `brand.css`/`source.css` (downstream state) → `gap-audit.md` (recent
+changes, still-open items).
 
 For each absent/partial motif, write one paragraph:
 
@@ -269,27 +257,5 @@ gap-audit additions. Reference moodboard pass folder.>
 
 ## Reference implementation
 
-A worked reference implementation (a real moodboard pass: variable edits + new components, no
-renames or deletions) is recorded in `.claude/skill-context/do-design-system.md` when the repo
-declares one.
-
-## Version history
-
-- v1.4.0 (2026-07-04): Progressive-disclosure split. Canonical structure + Step 0 detail moved to
-  `references/file-organization.md`; Steps 1–2 mechanics to `references/moodboard-capture.md`;
-  Step 5 safety gate, MCP gotcha, JSON pattern, and gotchas table to `references/pen-editing.md`.
-  Trigger-first description trim. Behavior unchanged.
-- v1.3.0 (2026-06-26): Leaned to a repo-agnostic baseline. The deterministic downstream-artifact
-  generator, the PreToolUse safety hooks, and the reference implementation moved to
-  `.claude/skill-context/do-design-system.md`; added the repo-context probe. Steps 6–7 now sync
-  CSS by hand when no generator is declared.
-- v1.2.1 (2026-04-25): Clarified the safety-gate two-layer scope (inline `.pen` assertion vs the
-  tool-level PreToolUse guard on generated artifacts).
-- v1.2.0 (2026-04-24): Steps 6 and 7 rewritten to invoke the repo's deterministic design-system
-  generator (regeneration + gap-audit diff) plus a PreToolUse guard on generated artifacts.
-- v1.1.0 (2026-04-20): Added `charter.md` enforcement, file-organization
-  Step 0, `product/` subfolder for non-system `.pen` files, safety gate
-  on `.pen` writes, dated inspiration folders with per-pass READMEs,
-  principle-citation requirement for each edit.
-- v1.0.0 (2026-04-20): Initial — promoted from `cuttlefish` repo's
-  `docs/guides/moodboard-to-design-system.md`.
+A worked reference pass (variable edits + new components, no renames or deletions) is recorded
+in `.claude/skill-context/do-design-system.md` when the repo declares one.

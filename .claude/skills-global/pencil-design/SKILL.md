@@ -5,9 +5,7 @@ description: "Work with .pen files via the Pencil MCP or headless CLI. Triggered
 
 # Pencil Design (general-purpose)
 
-Hard-won notes for working with `.pen` files via the Pencil MCP server (`mcp__pencil__*`) or the headless `pencil` npm CLI. Project-specific skills (e.g. cuttlefish's `pencil-design`) override this one inside their own repo and add brand rules, component inventories, and design-system paths on top — this skill is the floor that applies everywhere.
-
-If a project-specific `pencil-design` skill exists, prefer it. This skill is intentionally generic. Ordinary frontend / CSS design work is NOT this skill's territory; that belongs in `frontend-design` or `do-design-system`.
+Hard-won notes for working with `.pen` files via the Pencil MCP server (`mcp__pencil__*`) or the headless `pencil` npm CLI. This is the floor that applies everywhere: if a project-specific `pencil-design` skill exists (brand rules, component inventories, design-system paths), prefer it. Ordinary frontend / CSS design work belongs in `frontend-design` or `do-design-system`, not here.
 
 ## Reading .pen files
 
