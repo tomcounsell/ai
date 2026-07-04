@@ -1,6 +1,6 @@
 ---
 name: checking-system-logs
-description: "Use when finding bridge events, agent responses, timeouts, or errors in system logs. Triggered by requests to debug system behavior, investigate errors, or check what the agent did. Always filter by project name."
+description: "Use when finding bridge events, agent responses, timeouts, or errors in system logs. Triggered by requests to debug system behavior, investigate errors, or check what the agent did."
 allowed-tools: Read, Grep, Glob, Bash
 user-invocable: false
 ---

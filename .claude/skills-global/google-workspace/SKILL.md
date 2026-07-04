@@ -2,7 +2,7 @@
 name: google-workspace
 description: "Use when accessing Google Workspace services including Gmail, Calendar, Docs, Sheets, Slides, Drive, and Chat. Triggered by requests for email, scheduling, document creation, or file management."
 allowed-tools: Read, Write, Edit, Bash, WebFetch
-user-invocable: true
+user-invocable: false
 ---
 
 # Google Workspace Extension - Behavioral Guide

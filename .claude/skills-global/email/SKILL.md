@@ -1,6 +1,6 @@
 ---
 name: email
-description: "Use when reading or sending email — checking the inbox, searching mail, reading a specific message, drafting or sending a reply. Triggered by 'read my email', 'check my inbox', 'send an email', 'reply to that email', 'search my mail', or any request to read/send mail."
+description: "Use when reading, searching, drafting, or sending email. Triggered by 'read my email', 'check my inbox', 'send an email', 'reply to that email', 'search my mail', or any request to read/send mail."
 allowed-tools: Bash
 user-invocable: true
 ---

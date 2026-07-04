@@ -1,8 +1,9 @@
 ---
 name: authenticity-pass
-description: "Pre-publish human-signal gate for social media content. Checks that a draft contains specific metrics, real constraints, and genuine opinions before allowing publish. Required by /linkedin and /x-com before any post goes live. Can also be invoked directly on any draft file."
+description: "Pre-publish human-signal gate for social media drafts. Use when /linkedin or /x-com is about to publish a post, or when asked to run an authenticity check on any draft file."
 allowed-tools: Read, Bash, Write
 user-invocable: true
+argument-hint: "[draft-file-path]"
 ---
 
 # Authenticity Pass
