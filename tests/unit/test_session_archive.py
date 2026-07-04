@@ -655,6 +655,42 @@ def test_preexisting_quarantine_plus_transient_failure_does_not_falsely_complete
     assert meta2["restore_complete"] == 1
 
 
+def test_resume_attempts_reset_on_completion_across_repeated_recoveries(archive_db, monkeypatch):
+    """resume_attempts bounds retries WITHIN one restore episode, not across the
+    DB file's lifetime.
+
+    Each successful cold-start recovery increments resume_attempts once. If the
+    counter were never reset, it would accumulate over repeated total-Redis-loss
+    recoveries, and a later interrupted restore would be falsely declared
+    `restore_wedged` after SESSION_ARCHIVE_RESUME_ATTEMPT_CAP lifetime recoveries
+    -- defeating the durability floor's whole purpose. A completed restore must
+    reset the counter to 0.
+    """
+    monkeypatch.setattr(archive, "SESSION_ARCHIVE_RESUME_ATTEMPT_CAP", 2)
+
+    session = _make_session()
+    session_id = session.id
+    archive.export_session(session)
+
+    # Run more recoveries than the cap. Each is a clean cold-start (Redis wiped),
+    # so without the reset the counter would climb past the cap.
+    for _ in range(archive.SESSION_ARCHIVE_RESUME_ATTEMPT_CAP + 3):
+        for s in AgentSession.query.all():
+            s.delete()
+        assert len(list(AgentSession.query.all())) == 0
+
+        result = archive.restore_if_empty()
+
+        # Never wedged: the counter resets to 0 on each completion so a fresh
+        # episode always starts with full budget.
+        assert result["skipped_reason"] != "restore_wedged"
+        assert result["restored"] == 1
+        assert AgentSession.query.get(id=session_id) is not None
+        meta = _read_meta_row(archive_db)
+        assert meta["restore_complete"] == 1
+        assert meta["resume_attempts"] == 0, "resume_attempts accumulated across recoveries"
+
+
 def test_poison_row_declares_wedged_before_quarantine_cap(archive_db, monkeypatch):
     # A tiny resume-attempt cap and a large row-attempt cap means the resume
     # budget runs out before the poison row would ever get quarantined --

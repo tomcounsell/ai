@@ -629,8 +629,17 @@ def _restore_if_empty_impl(dry_run: bool = False) -> dict[str, Any]:
         # in the exact durability path this feature protects.
         quarantined_total = _quarantined_count(conn)
         if restored + quarantined_total >= len(archived_rows):
+            # Reset resume_attempts on completion: the cap bounds retries WITHIN
+            # one restore episode, not across the DB file's lifetime. Without
+            # this reset the counter accumulates over successive total-Redis-loss
+            # recoveries, so a later interrupted restore would be falsely declared
+            # `restore_wedged` after SESSION_ARCHIVE_RESUME_ATTEMPT_CAP lifetime
+            # recoveries -- defeating the whole point of a durable secondary store.
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("UPDATE _meta SET restore_in_progress=0, restore_complete=1 WHERE id=1")
+            conn.execute(
+                "UPDATE _meta SET restore_in_progress=0, restore_complete=1, "
+                "resume_attempts=0 WHERE id=1"
+            )
             conn.execute("COMMIT")
 
         return {
