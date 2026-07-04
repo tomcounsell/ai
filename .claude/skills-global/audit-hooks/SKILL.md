@@ -1,6 +1,6 @@
 ---
 name: audit-hooks
-description: "Audit Claude Code hooks for safety, correctness, and best practices compliance. Checks settings.json configuration, hook scripts, error logging, and deployment readiness. Use when reviewing hook health, checking hook safety, validating hooks, or after adding/modifying hooks."
+description: "Audit Claude Code hooks for safety and correctness. Use when reviewing hook health, checking hook safety, validating hooks, or after adding/modifying hooks."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 ---

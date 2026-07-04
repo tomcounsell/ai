@@ -1,6 +1,6 @@
 ---
 name: audit-tools
-description: "Audit tools/ directory for structure compliance, test coverage, CLI quality, and documentation completeness. Use when checking tool health, validating tools, reviewing tool quality, or after adding or modifying a tool. Also use when someone says 'check the tools', 'are our tools documented', or 'which tools need work'."
+description: "Audit tools/ for structure, tests, CLI quality, and docs. Use when checking tool health, validating tools, or after adding a tool. Also 'check the tools', 'which tools need work'."
 allowed-tools: Read, Grep, Glob, Bash
 disable-model-invocation: true
 argument-hint: "[tool-name] [--fix]"
@@ -8,7 +8,7 @@ argument-hint: "[tool-name] [--fix]"
 
 # Tools Audit
 
-Validates every tool in `tools/` against STANDARD.md requirements and the interface documentation expectations defined here. Surfaces tools that are missing files, have incomplete docs, untested capabilities, or broken CLI help.
+Validates every tool in `tools/` against STANDARD.md requirements and the interface documentation expectations defined here. Surfaces tools that are missing files, have incomplete docs, untested capabilities, or broken CLI help. Also the right skill for reviewing tool quality after modifying a tool, and for questions like "are our tools documented".
 
 ## Repo Context Probe
 

@@ -1,13 +1,19 @@
 ---
 name: audit-models
-description: "Audit Popoto Redis models for relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Use when reviewing data model health, checking model integrity, validating Redis models, scanning for data model issues, or reviewing the data layer with the architect."
+description: "Audit Popoto Redis models for gaps and naming drift. Use when reviewing data model health or the data layer, checking model integrity, validating Redis models, or scanning for model issues."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # Model Audit
 
-Introspects `models/*.py` to surface structural weaknesses in the Popoto data layer. Designed for human-in-the-loop review sessions with the architect (Tom).
+Introspects `models/*.py` to surface structural weaknesses in the Popoto data layer: relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Designed for human-in-the-loop review sessions with the project architect.
+
+## Repo Context Probe
+
+If `.claude/skill-context/audit-models.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its universal fields (fields every model must carry) and its exempt models. When absent, the defaults listed under each check apply.
 
 ## What this skill does
 
@@ -20,12 +26,12 @@ Introspects `models/*.py` to surface structural weaknesses in the Popoto data la
 
 ### 1. Missing Universal Fields
 
-Fields declared as universal should appear on every model (or have an explicit exemption).
+Fields declared as universal should appear on every model (or have an explicit exemption). A repo's context file can override both lists.
 
-**Universal fields:**
+**Default universal fields:**
 - `project_key` (KeyField) — every model that stores project-scoped data
 
-**Exempt models:** ReflectionIgnore (global config, not project-scoped)
+**Default exempt models:** ReflectionIgnore (global config, not project-scoped)
 
 ### 2. Orphan Models
 

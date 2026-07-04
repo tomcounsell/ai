@@ -1,6 +1,6 @@
 ---
 name: new-audit-skill
-description: "Use when creating a new audit skill for validating code, configuration, or documentation quality. Also use when the user says 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', or 'I want to check X for problems'. Generates audit skills that follow established patterns from the 8 existing audit skills in this repo. Make sure to use this skill whenever someone wants systematic validation of any codebase artifact."
+description: "Create a new audit skill from established patterns. Use when creating an audit, or on 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', 'I want to check X for problems'."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<subject-to-audit>"
 ---
@@ -9,7 +9,7 @@ argument-hint: "<subject-to-audit>"
 
 ## What this skill does
 
-Creates a new audit skill by guiding you through a structured interview, then producing a complete skill directory with checks, output format, and disposition. The result is a reusable, testable audit that follows the patterns established by the 8 existing audit skills in this repo.
+Creates a new audit skill by guiding you through a structured interview, then producing a complete skill directory with checks, output format, and disposition. The result is a reusable, testable audit that follows the patterns established by the existing audit skills in the library. Use it whenever someone wants systematic validation of any codebase artifact — code, configuration, or documentation quality.
 
 ## When to load sub-files
 
@@ -70,7 +70,7 @@ Aim for 4-8 checks for a focused audit, 8-12 for comprehensive audits.
 
 | If checks are... | Use |
 |-------------------|-----|
-| Regex, structural, AST-based | Script-backed (`scripts/audit.py`) |
+| Regex, structural, AST-based | Script-backed (an `audit.py` under the new skill dir's `scripts/`) |
 | Semantic, cross-referencing, judgment | Prompt-only (instructions in SKILL.md) |
 | Mix of both | Hybrid (script for deterministic, prompt for semantic) |
 
@@ -80,7 +80,7 @@ Aim for 4-8 checks for a focused audit, 8-12 for comprehensive audits.
 2. Read [BEST_PRACTICES.md](BEST_PRACTICES.md) for design guidance
 3. Create the directory: `mkdir -p .claude/skills/audit-{subject}/`
 4. Fill in the template, replacing all UPPERCASE placeholders
-5. If script-backed, create `scripts/audit.py` with CLI flags (`--fix`, `--json`, `--target`)
+5. If script-backed, create `.claude/skills/audit-{subject}/scripts/audit.py` with CLI flags (`--fix`, `--json`, `--target`)
 6. Write 2-3 concrete examples showing real audit output — not pseudocode, but realistic items/findings/verdicts that someone would actually see when running the audit
 
 ### 5. Write the description

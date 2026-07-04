@@ -1,6 +1,6 @@
 ---
 name: do-integration-audit
-description: "Deep audit of a named feature's integration health: orphan code, dead wiring, missing tests, config gaps. User-invoked only."
+description: "Deep audit of a named feature's integration health: orphan code, dead wiring, missing tests, config gaps. Use when asked to audit a feature's integration or wiring. User-invoked only."
 allowed-tools: Read, Grep, Glob, Bash, Agent
 argument-hint: "<feature-topic>"
 disable-model-invocation: true

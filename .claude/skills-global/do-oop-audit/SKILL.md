@@ -1,13 +1,13 @@
 ---
 name: do-oop-audit
-description: "Audit Python classes and OOP code for structural anti-patterns, naming inconsistencies, and data modeling issues. Use when reviewing class design, checking model health, validating object boundaries, or after refactoring. Also triggered by 'check my classes', 'review the data model', 'are there OOP problems', 'scan for design issues', 'lint class structure', 'audit models', 'validate OOP', or 'review object hierarchy'."
+description: "Audit Python classes for OOP and data-modeling anti-patterns. Use when reviewing class design, boundaries, or hierarchy, or 'check my classes', 'lint class structure', 'scan for design issues'."
 allowed-tools: Read, Grep, Glob, Bash
 disable-model-invocation: true
 ---
 
 # OOP / Data Modeling Audit
 
-Scans Python class definitions for 14 structural anti-patterns covering field semantics, object boundaries, inheritance design, naming consistency, and coupling. Framework-agnostic: works with Django, SQLAlchemy, Pydantic, dataclasses, and vanilla Python. Produces a severity-grouped findings report and pauses for human review.
+Scans Python class definitions for 14 structural anti-patterns covering field semantics, object boundaries, inheritance design, naming consistency, and coupling. Framework-agnostic: works with Django, SQLAlchemy, Pydantic, dataclasses, and vanilla Python. Produces a severity-grouped findings report and pauses for human review. Also the right skill for requests like "review the data model", "are there OOP problems", "validate OOP", or a class-design review after refactoring.
 
 ## What this skill does
 
