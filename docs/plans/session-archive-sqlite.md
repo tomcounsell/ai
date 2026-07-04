@@ -124,6 +124,22 @@ correct and buggy simulated code (the negative check is deliberately pipe-free �
 alternation is silently mis-parsed as a literal pipe by BSD `grep -E` once markdown-escaped,
 which would false-green).
 
+**Fourth revision (critique NEEDS REVISION — 1 blocker + 4 concerns + 1 nit):** addressed
+without touching the four preserved core design points (Popoto `query.all()` reads, the
+empty-Redis dual-guard, the atomic `BEGIN IMMEDIATE … COMMIT` export transaction, and the
+deliberate non-use of #1826's `offload_redis` for the finalize hook). **Blocker** (stuck
+`restore_in_progress` sentinel bypassing the empty-Redis guard forever): the guard-bypass is
+now re-decided every boot against the freshly recomputed `live_count < expected_row_count`,
+never the persisted flag; resume attempts are bounded (`SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`)
+and poison rows are quarantined past `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` so one bad row can
+never wedge restore. **Concern 1** (export_all fault isolation): per-row `try/except`
+serialization isolation added before the single atomic COMMIT. **Concern 2** (on-loop
+busy-timeout stall): tight `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS` (250 ms) for the on-loop
+single-row write, distinct from the 5 s sweep timeout. **Concern 3** (speculative payload
+truncation): `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES` cut entirely — payloads stored verbatim.
+**Nit** (two `\|`-alternation greps false-greening on darwin): converted to `grep -E` with
+real `|`.
+
 **File:line references re-verified at HEAD (`dbe9682d`) — all drifted line numbers below
 are the CURRENT values:**
 - `models/session_lifecycle.py:229` — `finalize_session(...)` signature (was 221). Confirmed.
@@ -275,16 +291,21 @@ path. Three flows:
    below the dry-run guard is
    load-bearing: a `--dry-run` boot must observe/report but never mutate Redis, so restore
    (which writes) cannot run above the guard. The function checks the empty-Redis guard
-   (below); on a provably-empty Redis (or when a prior partial restore left the
-   `restore_in_progress` sentinel set) it sets/keeps the sentinel, rehydrates every
-   archived row back into Redis via
+   (below); on a provably-empty Redis — or, when a prior restore left the
+   `restore_in_progress` sentinel set, **only while the freshly recomputed live count
+   `len(AgentSession.query.all())` is still strictly below `expected_row_count` and the
+   resume-attempt cap is not exhausted** — it sets/keeps the sentinel, rehydrates every
+   archived row (skipping quarantined poison `id`s) back into Redis via
    `AgentSession(id=<archived id>, **other_fields).save()` — **the archived `id` is passed
    explicitly** so the AutoKey is preserved and parent/child links stay intact (never the
-   `agent_session_id` alias, which `_normalize_kwargs` drops) — and clears the sentinel
-   only after every row is restored (see the restore-atomicity mechanism in Technical
-   Approach). On any non-empty Redis with no pending sentinel it logs and returns without
-   touching Redis. Rehydrated rows are not queryable by secondary index until the Step 1
-   rebuild runs immediately after, which is why restore must precede it.
+   `agent_session_id` alias, which `_normalize_kwargs` drops) — and clears the sentinel once
+   `restored + quarantined == expected_row_count` (see the restore-atomicity mechanism in
+   Technical Approach). On any Redis whose live count already meets `expected_row_count` it
+   clears any stale sentinel and returns without touching Redis, and on a normal non-empty
+   Redis with no pending sentinel it logs and returns — **a persisted sentinel can never
+   force a rewrite of an already-populated Redis**. Rehydrated rows are not queryable by
+   secondary index until the Step 1 rebuild runs immediately after, which is why restore
+   must precede it.
 
    A restored session may carry a **stale `claude_pid`** (the pid of a worker process
    that no longer exists after the data-dir loss). Such rows in `running` status flow
@@ -368,28 +389,43 @@ well-tested empty-Redis guard — not volume of code.
     `updated_at`, plus a `payload` JSON blob holding the full `_meta.fields` snapshot,
     which itself includes `id`) and one `_meta` table (`last_export_ts`, `row_count`,
     `kind`, plus the restore-atomicity sentinel fields `restore_in_progress`,
-    `restore_complete`, `expected_row_count`).
+    `restore_complete`, `expected_row_count`, `resume_attempts`) and a small
+    `_restore_quarantine` table (poison `id`s past the per-row attempt cap, so one
+    permanently-unrestorable row can never wedge restore forever — see the Blocker fix in
+    Technical Approach).
   - `export_session(session)` — serialize one session's full field set (keyed on the
-    real `id`, with the `payload` blob subject to the `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES`
-    bound — see Serialization fidelity), upsert one row in a single transaction on its own
-    connection, refresh `_meta` (`kind="terminal"`). Fast, single-row.
-  - `export_all()` — `AgentSession.query.all()` → upsert every row in **one**
-    transaction on its own connection, refresh `_meta` (`kind="periodic"`). Rows present
-    in the DB but absent from Redis are **retained** (the archive is a superset floor,
-    never prunes live-set deletions — deletion is not a durability event we want to
+    real `id`, **full payload stored verbatim — no size cap**, see Serialization fidelity),
+    upsert one row in a single transaction on its own connection opened with a **tight
+    on-loop busy-timeout** (`SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS`, see the Concern-2
+    bound in Technical Approach), refresh `_meta` (`kind="terminal"`). Fast, single-row;
+    on a WAL-lock timeout it logs and returns — the terminal transition still completes and
+    the periodic sweep re-covers the row.
+  - `export_all()` — `AgentSession.query.all()` → serialize each row **inside a per-row
+    `try/except`** (a row that fails to serialize is logged with its `id` and skipped, so
+    one bad row can never abort the sweep) → upsert every successfully-serialized row in
+    **one** `BEGIN IMMEDIATE … COMMIT` transaction on its own connection, refresh `_meta`
+    (`kind="periodic"`). The single atomic transaction is deliberate (crash-safe consistent
+    snapshot); per-row serialization isolation is the fault-isolation layer that keeps a
+    single poison row from stranding the batch (see Concern-1 note in Technical Approach).
+    Rows present in the DB but absent from Redis are **retained** (the archive is a superset
+    floor, never prunes live-set deletions — deletion is not a durability event we want to
     propagate on a cold start).
-  - `restore_if_empty()` — apply the empty-Redis guard (OR detect a still-set
-    `restore_in_progress` sentinel from a prior interrupted restore); on pass, set the
-    sentinel, iterate archived rows and `AgentSession(id=<archived id>, **other_fields).save()`
-    each — **the archived `id` is passed explicitly so the AutoKey is preserved** (verified:
-    an explicit `id=` survives save; the `agent_session_id` alias is dropped by
-    `_normalize_kwargs`) — and clear the sentinel only after all rows are restored. A
-    mid-loop failure leaves the sentinel set so the next boot resumes (idempotent upserts on
-    the preserved `id`); the empty-Redis guard is bypassed for that one resume case so a
-    partial restore is never mistaken for a populated Redis (see restore-atomicity in
-    Technical Approach). Idempotent — re-running on a now-populated Redis with no pending
-    sentinel fails the guard and no-ops. Returns a structured result
-    `{restored: int, skipped_reason: str|None, resumed: bool}`.
+  - `restore_if_empty()` — the guard is gated on **live Redis emptiness recomputed every
+    boot**, never on a persisted sentinel alone: it restores on a provably-empty Redis, and
+    on a pending `restore_in_progress` sentinel it **bypasses the empty-Redis guard ONLY
+    while `len(AgentSession.query.all()) < expected_row_count` AND `resume_attempts` is
+    under the cap** — so a fully-populated healthy Redis is never clobbered even if the
+    sentinel is stuck (see the Blocker fix in Technical Approach). On pass it sets the
+    sentinel, iterates archived rows (skipping quarantined poison `id`s) and
+    `AgentSession(id=<archived id>, **other_fields).save()` each — **the archived `id` is
+    passed explicitly so the AutoKey is preserved** (verified: an explicit `id=` survives
+    save; the `agent_session_id` alias is dropped by `_normalize_kwargs`) — and clears the
+    sentinel once `restored + quarantined == expected_row_count`. A mid-loop failure leaves
+    the sentinel set so the next boot resumes (idempotent upserts on the preserved `id`); a
+    row that fails past the per-row attempt cap is quarantined so it can never wedge the
+    resume. Idempotent — re-running on a now-fully-populated Redis no-ops via the live-count
+    gate. Returns a structured result `{restored: int, skipped_reason: str|None, resumed:
+    bool, quarantined: int}`.
   - `get_archive_status()` — open a short-lived read connection, read `_meta` +
     `sqlite_master`; return
     `{db_path, exists, row_count, last_export_ts, last_export_age_s, kind, healthy}`
@@ -475,63 +511,105 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
   called out so review does not flag it as a missing atomicity guard.
 - **Serialization fidelity.** `export_*` enumerates `session._meta.fields` and reads
   each attribute into a dict, converting `datetime` → ISO-8601 string and leaving
-  dict/list fields as JSON-native. The whole dict is stored as a JSON `payload` column
-  (including the real `id`), with `id`/`session_id`/`project_key`/`status`/`updated_at`
-  promoted to real columns for queryability and the restore ordering. On restore, ISO
-  strings are parsed back to `datetime` for `DatetimeField`/`SortedField`/`created_at`,
-  and the row is reconstructed via `AgentSession(id=<archived id>, **other_fields).save()`
-  so the key is preserved (see Key preservation above). The datetime round-trip and the
-  key/parent-child-graph preservation are the two fidelity risks and each gets a
-  dedicated test.
-- **Payload size bound.** The serialized JSON `payload` is bounded by
-  `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES` (named, env-overridable constant in
-  `agent/constants.py`, provisional/tunable default, grain-of-salt comment). A payload
-  exceeding the bound — typically a session with an unusually large `DictField`/`ListField`
-  conversation history — is logged (`logger.warning` with the session `id` and byte size)
-  and stored with the oversized field(s) truncated/omitted; the `id` and promoted columns
-  are always preserved so the session (and its parent/child link) still round-trips. This
-  prevents a single pathological session from ballooning the archive DB and slowing the
-  sweep (bounds Risk #4 along the size dimension; see the No-Go on unbounded payloads).
-- **Empty-Redis guard (exact).** In `restore_if_empty()`:
-  1. `records = list(AgentSession.query.all())`; if `records` is non-empty **AND** no
-     partial-restore sentinel is set → skip (`skipped_reason="redis_has_records"`).
-     (The sentinel exception is the resume path below.)
-  2. Bounded `SCAN` (`count=1000`, capped iterations) for `AgentSession*` keys via the
-     Popoto client; if any key found (and no sentinel) → skip
-     (`skipped_reason="redis_has_keys"`).
-  3. Log `DBSIZE` as advisory (`DBSIZE==0` confirms a true cold start) — informational,
-     not a gate.
-  4. Only when 1 AND 2 are both empty (or a partial-restore sentinel is present):
-     rehydrate. Guard is evaluated **once**, before any write; the whole function is a
-     no-op on any non-empty Redis that has no pending sentinel.
-- **Restore atomicity — partial-restore is detected and resumed, never silently
-  half-completed.** A naive per-row loop with only whole-function exception isolation has
-  a silent-data-loss failure mode: if `.save()` raises on row 51 of 100, Redis ends up
-  with 50 records, and the **next** boot's empty-Redis guard sees those 50 rows, concludes
-  "Redis already populated," and permanently no-ops the remaining 50 — indistinguishable
-  from a clean restore. To close this, restore is bracketed by a **restore-in-progress
-  sentinel** stored in the archive DB `_meta` table (single-file source of truth, survives
-  a Redis wipe because it lives in SQLite, not Redis):
-  1. Before writing the first row, set `_meta.restore_in_progress = 1` (with the total
-     `expected_row_count`). This is a durable marker in the archive DB itself.
-  2. Rehydrate every row via `AgentSession(id=<archived id>, **other_fields).save()`.
-     Per-row failures are counted but do **not** silently abort the whole set — the loop
-     records each failure and continues, so one bad row cannot strand the rest.
-  3. Only after every row is attempted and the restored count matches
-     `expected_row_count` (no per-row failures): clear the sentinel
-     (`restore_in_progress = 0`) and stamp `restore_complete = 1`. If any row failed or the
-     process died mid-loop, the sentinel stays set.
-  4. **On the next boot**, `restore_if_empty()` first reads the sentinel. If
-     `restore_in_progress == 1` (a prior restore was interrupted or partial), it treats
-     Redis as "restore-not-finished" and **resumes** the rehydrate — re-running the loop is
-     safe because `.save()` on the preserved `id` is an idempotent upsert (rows already
-     present are simply re-written with identical state). The empty-Redis guard is
-     **bypassed** in this one case precisely because the partial rows are ours, mid-restore.
-     A partial restore is therefore always DETECTED and COMPLETED, never mistaken for a
-     populated Redis.
-  This makes restore effectively all-or-nothing at the boot boundary: either it completes
-  (sentinel cleared) or the next boot finishes it (sentinel still set). The sentinel lives
-  in the durable archive, so even a crash between rows is recoverable.
+  dict/list fields as JSON-native. The whole dict is stored **verbatim, with no size
+  cap**, as a JSON `payload` column (including the real `id`), with
+  `id`/`session_id`/`project_key`/`status`/`updated_at` promoted to real columns for
+  queryability and the restore ordering. On restore, ISO strings are parsed back to
+  `datetime` for `DatetimeField`/`SortedField`/`created_at`, and the row is reconstructed
+  via `AgentSession(id=<archived id>, **other_fields).save()` so the key is preserved (see
+  Key preservation above). The datetime round-trip and the key/parent-child-graph
+  preservation are the two fidelity risks and each gets a dedicated test.
+- **No payload truncation in v1 (Concern #3 — cut).** An earlier draft bounded the
+  `payload` blob with a `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES` cap that truncated/omitted an
+  oversized field. That is **removed**: truncation is speculative (no observed size
+  problem), it silently corrupts round-trip fidelity (a restored session missing a field
+  is not the session that was archived), and a half-serialized row is itself a poison-row
+  vector for the restore blocker. v1 stores full payloads verbatim. If a real size problem
+  ever appears (measured, not hypothesized), an incremental-by-`updated_at` sweep or a
+  compression pass is the clean follow-up — revisited then, not pre-emptively. See the
+  Rabbit Holes note.
+- **Per-row serialization isolation in `export_all()` (Concern #1).** The whole-batch
+  single-transaction commit is deliberately kept (it is the crash-safe primitive — see
+  Atomicity mechanism below — and gives a reader a consistent snapshot). Fault isolation is
+  layered **before** the write, not by splitting the transaction: `export_all()` serializes
+  each `query.all()` row inside its own `try/except`, and a row that fails to serialize is
+  logged (`logger.warning` with the session `id` and the exception) and skipped, so the
+  atomic `COMMIT` still writes every good row and one pathological session cannot abort the
+  entire periodic sweep. This makes the export loop as fault-tolerant as the restore loop
+  (the asymmetry the critique flagged), while preserving the single atomic transaction. The
+  single-row `export_session()` is already isolated by the `finalize_session` `try/except`
+  that wraps it.
+- **Tight on-loop busy-timeout for `export_session()` (Concern #2).** The terminal
+  `export_session()` runs inline on the asyncio event-loop thread (see Off-loop execution
+  below), so a WAL write-lock held by the concurrent periodic sweep could otherwise stall
+  the loop for up to the full SQLite busy-timeout. The on-loop connection is therefore
+  opened with a **tight** `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS` (named, env-overridable
+  constant in `agent/constants.py`, default **250 ms**, grain-of-salt/tunable) — an order
+  of magnitude below the periodic sweep's own busy-timeout (`SESSION_ARCHIVE_BUSY_TIMEOUT_MS`,
+  default 5000 ms, matching `analytics/collector.py`'s `_SQLITE_TIMEOUT`). If the tight
+  bound is exceeded the single-row write raises `sqlite3.OperationalError` (lock timeout),
+  which is swallowed by the `finalize_session` `try/except`; the terminal transition
+  completes and the next periodic sweep re-covers the row. The event loop is thus never
+  blocked more than ~250 ms by the archive hook. (Moving the single-row write fully
+  off-loop was considered and rejected: it would require the sync `finalize_session` to
+  schedule onto the loop or a thread, adding ordering complexity for a write that is
+  already a small marginal cost bounded to 250 ms — see the Off-loop execution note on why
+  the whole finalize path, save + archive, must move together if it moves at all.)
+- **Empty-Redis guard (exact) — bypass gated on LIVE emptiness, never on the sentinel
+  alone (Blocker fix).** In `restore_if_empty()`:
+  1. Read the sentinel from `_meta`: `restore_in_progress`, `expected_row_count`,
+     `resume_attempts`. Compute `live_count = len(list(AgentSession.query.all()))`
+     **fresh, every boot** — this recomputed live count is the authoritative gate, not any
+     persisted flag.
+  2. **Cold-start path (no pending sentinel):** if `live_count == 0` **AND** a bounded
+     `SCAN` (`count=1000`, capped iterations) for `AgentSession*` keys via the Popoto client
+     returns zero keys → restore. If `live_count > 0` → skip
+     (`skipped_reason="redis_has_records"`); if any `AgentSession*` key exists → skip
+     (`skipped_reason="redis_has_keys"`). `DBSIZE` is logged as advisory only, never a gate.
+  3. **Resume path (sentinel set):** bypass the empty-Redis guard **ONLY IF**
+     `live_count < expected_row_count` **AND** `resume_attempts < SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`.
+     If `live_count >= expected_row_count`, Redis is already whole → clear the sentinel and
+     no-op (`skipped_reason="restore_already_complete"`) — **this is the invariant fix: a
+     stuck sentinel can never clobber a healthy populated Redis, because the live count, not
+     the flag, decides.** If `resume_attempts >= cap`, stop resuming, log a **wedged-restore
+     operator error** and surface it on the dashboard/doctor, and no-op
+     (`skipped_reason="restore_wedged"`) — a poison row can no longer trigger an unbounded
+     clobber-on-every-boot loop.
+  4. Guard is evaluated **once**, before any write.
+- **Restore atomicity — partial restore is detected, resumed, and bounded, never wedged
+  and never a silent half-loss (Blocker + Concern-3 fix).** A naive per-row loop with only
+  whole-function exception isolation has a silent-data-loss failure mode: if `.save()`
+  raises on row 51 of 100, Redis ends up with 50 records and a next boot could mistake them
+  for a clean restore. But a sentinel that clears **only** on `restored == expected_row_count`
+  has the *opposite* failure mode the critique caught: a single permanently-unrestorable
+  row (an id collision, a rejected payload) means the sentinel NEVER clears, and every
+  later boot — including a healthy boot against a full Redis — would bypass the guard and
+  re-upsert every archived row by preserved id, resurrecting deleted sessions and
+  overwriting live ones. Both modes are closed by three mechanisms working together:
+  1. **Durable sentinel + fresh live-count gate.** Before writing the first row, set
+     `_meta.restore_in_progress = 1` with the total `expected_row_count` (a durable marker
+     in the archive DB, which survives a Redis wipe). But the **bypass decision is gated on
+     the freshly recomputed `live_count < expected_row_count` every boot** (guard step 3
+     above), not on the sentinel alone — so the sentinel only ever *enables* a resume; it
+     can never *force* a clobber of an already-whole Redis.
+  2. **Bounded resume attempts.** Each resume increments `_meta.resume_attempts`. Past
+     `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP` (named constant, default **5**) the restore is
+     declared *wedged*, logged as an operator error, surfaced on the dashboard/doctor
+     freshness block, and no longer bypasses the guard — so a permanently-failing row can
+     never drive an unbounded re-upsert loop.
+  3. **Per-row poison quarantine.** Each archived `id` carries a per-row attempt counter;
+     a row that fails to `.save()` more than `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` times
+     (named constant, default **3**) is written to the `_restore_quarantine` table, logged
+     with its `id`, and **skipped on all future resumes**. The completion condition is
+     therefore `restored + quarantined == expected_row_count` → clear the sentinel
+     (`restore_in_progress = 0`, stamp `restore_complete = 1`). One poison row is quarantined
+     after a few tries, the remaining good rows finish, and the sentinel clears cleanly —
+     restore completes despite the bad row instead of wedging on it forever.
+  Rehydrate itself is `AgentSession(id=<archived id>, **other_fields).save()` per row —
+  idempotent on the preserved `id`, so a resumed loop simply re-writes already-present rows
+  with identical state. The net invariant: restore either completes (sentinel cleared, poison
+  rows quarantined) or is cleanly declared wedged after a bounded number of attempts, and at
+  **no** point can a persisted flag override a live, populated Redis.
 - **Startup ordering.** Restore runs **below the `if dry_run: return` guard**
   (`worker/__main__.py:885-890`) so a `--dry-run` boot never mutates Redis, and **before**
   the Step 1 index rebuild (comment at line 903, `run_cleanup()` at 911) so the rebuild
@@ -542,15 +620,22 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
   logs and must not block
   worker startup — a worker that can't start is worse than a worker with an un-restored
   archive).
-- **Cadence.** `SESSION_ARCHIVE_INTERVAL` is a named, env-overridable constant in
-  `agent/constants.py`, default `300` seconds — a provisional/tunable value (grain of
-  salt: matched to the existing heartbeat/health cadence; loss window between periodic
-  sweeps for non-terminal sessions is bounded by this, terminal sessions are exported
-  immediately so the common case has no window). `SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S`
-  (default `2 * SESSION_ARCHIVE_INTERVAL`) gates the doctor/dashboard "healthy" flag.
-  `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES` (provisional/tunable default, grain of salt) bounds
-  the per-session JSON payload blob so an outsized conversation history can't balloon the
-  archive DB (see Serialization fidelity and Risk #7).
+- **Cadence & tuning constants.** All named, env-overridable constants in
+  `agent/constants.py` with grain-of-salt/provisional defaults:
+  - `SESSION_ARCHIVE_INTERVAL` (default `300` s) — periodic sweep cadence (matched to the
+    heartbeat/health cadence; the loss window between sweeps for non-terminal sessions is
+    bounded by this, terminal sessions export immediately so the common case has no window).
+  - `SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S` (default `2 * SESSION_ARCHIVE_INTERVAL`) — gates
+    the doctor/dashboard "healthy" flag.
+  - `SESSION_ARCHIVE_BUSY_TIMEOUT_MS` (default `5000`) — busy-timeout for the off-loop
+    periodic sweep and the CLI/read connections (matches `analytics/collector.py`'s 5 s).
+  - `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS` (default `250`) — the **tight** busy-timeout for
+    the on-loop terminal `export_session()` write, bounding event-loop stall on WAL-lock
+    contention to ~250 ms (Concern #2).
+  - `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP` (default `5`) — max whole-restore resume attempts
+    before a restore is declared *wedged* and stops bypassing the guard (Blocker fix).
+  - `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` (default `3`) — max per-row `.save()` attempts before
+    an archived `id` is quarantined as poison and skipped on future resumes (Blocker fix).
 - **Test isolation.** Under `PYTEST_CURRENT_TEST`, the periodic daemon thread is not
   started and the module honors a `SESSION_ARCHIVE_DB_PATH` override so tests write to
   `tmp_path`, never `data/session_archive.db`. Restore/export tests run against the
@@ -567,6 +652,15 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
       asserts `_run_worker` startup proceeds when restore raises (monkeypatch to raise).
 - [ ] `get_archive_status()` never raises on a missing/corrupt DB — returns
       `healthy=False`; tested against a nonexistent path and a truncated DB file.
+- [ ] **`export_all()` per-row serialization isolation (Concern #1):** with N sessions
+      where exactly one raises during serialization (monkeypatch its serialization to
+      raise), assert the sweep logs+skips the bad row and still commits the other N−1 rows
+      in one transaction — the good rows are all present in the archive and the sweep does
+      not abort. Proves the export loop is as fault-tolerant as the restore loop.
+- [ ] **On-loop tight busy-timeout (Concern #2):** assert the connection opened by
+      `export_session()` sets `PRAGMA busy_timeout` to `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS`
+      (the tight bound), distinct from the periodic sweep's `SESSION_ARCHIVE_BUSY_TIMEOUT_MS`
+      — so a WAL-lock stall on the event loop is bounded to the tight value.
 
 ### Empty/Invalid Input Handling
 - [ ] `export_all()` on zero sessions writes an empty snapshot + a `_meta` row with
@@ -608,16 +702,36 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
       `skipped_reason="redis_has_keys"`.
 - [ ] **Idempotency:** running `restore_if_empty()` twice — the second call sees a
       populated Redis (from the first) and no-ops (`restored: 0`).
-- [ ] **Partial-restore recovery (Concern #3 — silent loss guard):** archive has N rows;
+- [ ] **Partial-restore recovery (silent-loss guard):** archive has N rows;
       monkeypatch `.save()` (or the per-row rehydrate) to raise on row `k` (0 < k < N) so
       the first `restore_if_empty()` writes only `k` rows and leaves the
       `restore_in_progress` sentinel set. Assert: (a) the archive `_meta.restore_in_progress`
       is still `1` after the interrupted run (not cleared); (b) a **second**
       `restore_if_empty()` call — even though Redis now has `k` records — DETECTS the
-      sentinel, RESUMES, and restores all N rows (does NOT no-op via the empty-Redis guard);
-      (c) after the successful second run the sentinel is cleared
-      (`restore_in_progress == 0`, `restore_complete == 1`). This is the test that would
-      catch a regression to the naive "empty-guard treats partial rows as populated" bug.
+      sentinel, RESUMES (because live_count `k` < `expected_row_count` N), and restores all
+      N rows; (c) after the successful second run the sentinel is cleared
+      (`restore_in_progress == 0`, `restore_complete == 1`). Catches a regression to the
+      naive "empty-guard treats partial rows as populated" bug.
+- [ ] **Stuck sentinel never clobbers a healthy full Redis (Blocker fix — the central
+      invariant):** set `_meta.restore_in_progress = 1` with `expected_row_count = N`, then
+      populate Redis with all N live sessions (some deliberately mutated vs. their archived
+      copy, and one *deleted* in the archive but present live). Call `restore_if_empty()`
+      and assert: (a) it does NOT bypass the guard (live_count N ≥ expected N) →
+      `skipped_reason="restore_already_complete"`; (b) `restored == 0`; (c) every live
+      session is byte-for-byte unchanged (no re-upsert, no resurrection of the
+      archived-but-deleted row); (d) the stale sentinel is cleared. This is the test that
+      would catch a regression to the old "bypass the guard whenever the sentinel is set"
+      behavior.
+- [ ] **Poison-row quarantine + wedged cap (Blocker fix — one bad row cannot wedge
+      restore forever):** archive has N rows; monkeypatch the per-row rehydrate so one
+      specific `id` **always** raises (a permanently-unrestorable row). Drive
+      `restore_if_empty()` repeatedly and assert: (a) after `SESSION_ARCHIVE_ROW_ATTEMPT_CAP`
+      failures that `id` is written to `_restore_quarantine` and skipped; (b) the remaining
+      N−1 good rows restore and the sentinel clears once `restored + quarantined == N`
+      (restore COMPLETES despite the poison row); (c) in the variant where enough rows fail
+      to exceed `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`, restore is declared *wedged*
+      (`skipped_reason="restore_wedged"`), surfaces on the doctor/dashboard, and STOPS
+      bypassing the guard (no unbounded re-upsert-every-boot loop).
 
 ### Cold-boot recovery, end-to-end (validation altitude — Concern #4)
 - [ ] **Full boot ordering against a wiped Redis** (`tests/integration/test_session_archive_cold_boot.py`,
@@ -646,10 +760,12 @@ healthy Redis: guard fails (records present) → restore no-ops → no clobberin
 - [ ] `tests/unit/test_doctor.py` — UPDATE: add a case for the new
       `session-archive-freshness` doctor check (healthy + stale rendering).
 - [ ] New: `tests/unit/test_session_archive.py` — CREATE: export/restore round-trip,
-      the four restore-guard cases, **partial-restore recovery via the sentinel**, datetime
-      fidelity, **key + parent/child graph preservation**, **two-thread connection safety**,
-      oversized-payload bound, empty-input handling, `get_archive_status()` shapes,
-      exception isolation. (Greenfield — the archive module is new.)
+      the four restore-guard cases, **partial-restore recovery via the sentinel**,
+      **stuck-sentinel-never-clobbers-a-full-Redis**, **poison-row quarantine + wedged
+      cap**, datetime fidelity, **key + parent/child graph preservation**, **two-thread
+      connection safety**, **`export_all()` per-row serialization isolation**, **on-loop
+      tight busy-timeout**, empty-input handling, `get_archive_status()` shapes, exception
+      isolation. (Greenfield — the archive module is new.)
 - [ ] New: `tests/integration/test_session_archive_cold_boot.py` — CREATE: the full
       restore→rebuild→query cold-boot recovery test (see Cold-boot recovery above).
       (Greenfield.)
@@ -692,14 +808,22 @@ cases above; everything else is new coverage.
   AgentSession-only per the issue; other stores are separate durability work.
 - **Do NOT** run the periodic export or restore inside the asyncio event loop (both are
   blocking); use the daemon thread + startup step.
-- **Do NOT** store an unbounded per-session `payload` blob. Bound it with
-  `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES`; an oversized conversation history is logged and its
-  outsized field truncated/omitted (id + promoted columns always preserved), never written
-  whole so it balloons the archive DB.
+- **Do NOT** truncate or omit `payload` fields in v1 (Concern #3). Store each session's
+  payload verbatim; a size cap that drops a field silently corrupts the round-trip (a
+  restored session missing a field is not the archived session) and is itself a poison-row
+  vector for the restore guard. Revisit a size mitigation (incremental-by-`updated_at`
+  sweep / compression) only if a *measured* size problem appears — not pre-emptively.
 - **Do NOT** let a partial restore be mistaken for a populated Redis. A mid-loop restore
   failure must leave the durable `restore_in_progress` sentinel set so the next boot
   RESUMES and completes the remaining rows — never a silent half-restore that the
   empty-Redis guard permanently no-ops.
+- **Do NOT** gate the guard-bypass on the persisted sentinel alone (Blocker). The bypass
+  must be re-decided every boot against the **freshly recomputed** live count
+  (`len(AgentSession.query.all()) < expected_row_count`); a stuck sentinel can NEVER force a
+  re-upsert of an already-populated Redis, or it would overwrite live sessions and
+  resurrect deleted ones on every boot. Bound resume attempts
+  (`SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`) and quarantine poison rows
+  (`SESSION_ARCHIVE_ROW_ATTEMPT_CAP`) so one unrestorable row can never wedge restore forever.
 - **Do NOT** commit `data/session_archive.db` (already `.gitignore`d; do not add a
   tracked fixture DB).
 
@@ -741,9 +865,10 @@ cases above; everything else is new coverage.
       row in the "Deferred Durability Work" table with an **implemented** section
       documenting: the SQLite archive location, the export cadence + terminal hook, the
       empty-Redis restore guard (with the precise both-must-be-empty rule, the
-      `id`-key-preservation note, and the `restore_in_progress` sentinel that makes a
-      partial restore resumable rather than silently half-completed), the dashboard/doctor
-      freshness surfaces, and the
+      `id`-key-preservation note, and the `restore_in_progress` sentinel + **live-count
+      guard-bypass gate** + poison-row quarantine that make a partial restore resumable
+      without ever clobbering a repopulated Redis or wedging on one bad row), the
+      dashboard/doctor freshness surfaces, and the
       operational runbook (how to inspect the archive via `valor-session-archive status`
       and dry-run a restore via `valor-session-archive restore --dry-run` — noting that
       export and live restore are automatic, not manual CLI actions).
@@ -765,9 +890,17 @@ cases above; everything else is new coverage.
 5. Restore is idempotent (second run no-ops).
 5b. **Restore has no silent partial-loss mode:** a restore interrupted mid-loop leaves a
    durable `restore_in_progress` sentinel in the archive DB; the next `restore_if_empty()`
-   call DETECTS the sentinel, RESUMES (bypassing the empty-Redis guard for that one case),
-   and completes the remaining rows — verified by the partial-restore-recovery test. A
-   partial restore is never mistaken for a populated Redis.
+   call DETECTS the sentinel and RESUMES **while the freshly recomputed live count is still
+   below `expected_row_count`**, completing the remaining rows — verified by the
+   partial-restore-recovery test. A partial restore is never mistaken for a populated Redis.
+5c. **A stuck sentinel can never clobber a populated Redis, and one poison row can never
+   wedge restore (Blocker fix):** the guard-bypass is re-decided every boot against the live
+   `AgentSession.query.all()` count, not the persisted flag, so a healthy full Redis is left
+   byte-for-byte untouched even with the sentinel set; resume attempts are bounded
+   (`SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`) and a permanently-failing row is quarantined past
+   `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` so the sentinel clears on
+   `restored + quarantined == expected_row_count` — verified by the
+   stuck-sentinel-no-clobber and poison-row-quarantine tests.
 6. **Restore preserves the real `id` and the parent/child graph:** a restored session's
    `id` equals its archived `id` (not a regenerated UUID) and a child's
    `parent_agent_session_id` still resolves to its parent — verified by a dedicated test.
@@ -788,24 +921,35 @@ cases above; everything else is new coverage.
 - **Task ID**: build-archive-module
 - **Depends On**: none
 - **Validates**: tests/unit/test_session_archive.py (create)
-- Create `agent/session_archive.py`: `_connect()` (**per-operation connection**, WAL,
-  busy-timeout, `SESSION_ARCHIVE_DB_PATH` override, pytest-safe — NOT a shared
-  module-level connection, see Technical Approach on the two-writer thread model),
-  `sessions` table keyed on the real **`id`** (not `agent_session_id`) + `_meta` table,
-  `export_session`, `export_all` (single-transaction upsert), `restore_if_empty`
-  (both-empty guard OR resume-on-`restore_in_progress`-sentinel; reconstructs via
-  `AgentSession(id=..., ...)` to preserve the key; sets the sentinel before the first
-  write and clears it only after all rows restore — see restore-atomicity in Technical
+- Create `agent/session_archive.py`: `_connect(on_loop=False)` (**per-operation
+  connection**, WAL, busy-timeout selected by caller — the tight
+  `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS` for the on-loop `export_session`, the longer
+  `SESSION_ARCHIVE_BUSY_TIMEOUT_MS` for the sweep/reads — `SESSION_ARCHIVE_DB_PATH`
+  override, pytest-safe — NOT a shared module-level connection, see Technical Approach on
+  the two-writer thread model), `sessions` table keyed on the real **`id`** (not
+  `agent_session_id`) + `_meta` table + `_restore_quarantine` table,
+  `export_session` (tight on-loop busy-timeout), `export_all` (**per-row `try/except`
+  serialization isolation** then a single `BEGIN IMMEDIATE … COMMIT` upsert of the good
+  rows), `restore_if_empty` (guard-bypass gated on the **freshly recomputed
+  `live_count < expected_row_count`**, never the sentinel alone; resume attempts bounded by
+  `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`; per-row failures counted, and an `id` past
+  `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` written to `_restore_quarantine` and skipped;
+  reconstructs via `AgentSession(id=..., ...)` to preserve the key; clears the sentinel on
+  `restored + quarantined == expected_row_count` — see restore-atomicity in Technical
   Approach), `get_archive_status`. The `_meta` table carries the sentinel columns
-  (`restore_in_progress`, `restore_complete`, `expected_row_count`).
+  (`restore_in_progress`, `restore_complete`, `expected_row_count`, `resume_attempts`).
 - Add `SESSION_ARCHIVE_INTERVAL` (300), `SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S`
-  (2×interval), and `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES` (provisional default) to
-  `agent/constants.py` as env-overridable named constants with a grain-of-salt
-  "provisional/tunable" comment.
+  (2×interval), `SESSION_ARCHIVE_BUSY_TIMEOUT_MS` (5000),
+  `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS` (250), `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP` (5),
+  and `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` (3) to `agent/constants.py` as env-overridable named
+  constants with a grain-of-salt "provisional/tunable" comment. **No
+  `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES`** — payloads are stored verbatim (Concern #3).
 - Write `tests/unit/test_session_archive.py` (round-trip, 4 guard cases,
-  **partial-restore recovery via the sentinel**, datetime fidelity, **key + parent/child
-  graph preservation**, **two-thread connection safety**, oversized-payload bound, empty
-  input, status shapes, exception isolation).
+  **partial-restore recovery**, **stuck-sentinel-never-clobbers-a-full-Redis**,
+  **poison-row quarantine + wedged cap**, datetime fidelity, **key + parent/child graph
+  preservation**, **two-thread connection safety**, **`export_all()` per-row serialization
+  isolation**, **on-loop tight busy-timeout**, empty input, status shapes, exception
+  isolation).
 
 ### 2. finalize_session terminal hook
 - **Task ID**: build-finalize-hook
@@ -869,16 +1013,20 @@ cases above; everything else is new coverage.
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | Archive module exists | `test -f agent/session_archive.py && echo ok` | output contains `ok` |
-| Four public entry points present | `grep -c "^def export_session\|^def export_all\|^def restore_if_empty\|^def get_archive_status" agent/session_archive.py` | output is `4` |
+| Four public entry points present | `grep -cE "^def export_session|^def export_all|^def restore_if_empty|^def get_archive_status" agent/session_archive.py` | output is `4` (uses `grep -E` with real `|` alternation — a bare-`grep` `\|` is silently mis-parsed as a literal pipe on BSD/darwin) |
 | Terminal hook wired | `grep -c "export_session(" models/session_lifecycle.py` | output is `1` (call site; the lazy `from … import export_session` line has no paren and is not counted) |
-| Restore wired below dry-run guard, before index rebuild | `grep -n "restore_if_empty\|if dry_run\|Step 1: Rebuild" worker/__main__.py` | `restore_if_empty` line is ABOVE the "Step 1: Rebuild" line and BELOW the `if dry_run` guard line |
+| Restore wired below dry-run guard, before index rebuild | `grep -nE "restore_if_empty|if dry_run|Step 1: Rebuild" worker/__main__.py` | `restore_if_empty` line is ABOVE the "Step 1: Rebuild" line and BELOW the `if dry_run` guard line (`grep -E`, not bare-`grep` `\|`) |
 | Restore reconstructs on the real id | `grep -c "AgentSession(id=" agent/session_archive.py` | output is `1` or more (restore keys on `id`) |
 | Restore never reconstructs on the alias | `grep -cE "AgentSession\(agent_session_id=" agent/session_archive.py` | output is `0` (pipe-free single branch; matches the buggy `AgentSession(agent_session_id=…)` reconstruction but NOT the required `parent_agent_session_id`, since that is never preceded by `AgentSession(`) |
-| Per-operation connection, no shared module conn | `grep -c "_sqlite_conn\|module-level connection" agent/session_archive.py` | output is `0` |
+| Per-operation connection, no shared module conn | `grep -cE "_sqlite_conn|module-level connection" agent/session_archive.py` | output is `0` (`grep -E` with real `|` — a bare-`grep` `\|` would search for the literal string on BSD/darwin and false-green this negative check at `0`) |
 | Periodic thread wired | `grep -c "worker-session-archive" worker/__main__.py` | output is `1` |
 | Cadence constant named | `grep -c "SESSION_ARCHIVE_INTERVAL" agent/constants.py` | output greater than 0 |
-| Payload-size bound named | `grep -c "SESSION_ARCHIVE_MAX_PAYLOAD_BYTES" agent/constants.py` | output greater than 0 |
+| On-loop tight busy-timeout named | `grep -c "SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS" agent/constants.py` | output greater than 0 |
+| Resume + row attempt caps named | `grep -cE "SESSION_ARCHIVE_RESUME_ATTEMPT_CAP|SESSION_ARCHIVE_ROW_ATTEMPT_CAP" agent/constants.py` | output is `2` |
+| No payload-size cap (Concern #3 cut) | `grep -rn "SESSION_ARCHIVE_MAX_PAYLOAD_BYTES" agent/` | empty output (the truncation cap was removed) |
 | Restore-atomicity sentinel present | `grep -c "restore_in_progress" agent/session_archive.py` | output greater than 0 |
+| Poison-row quarantine table present | `grep -c "_restore_quarantine" agent/session_archive.py` | output greater than 0 |
+| Guard-bypass gated on live count | `grep -c "expected_row_count" agent/session_archive.py` | output greater than 0 |
 | Dashboard field present | `grep -c "\"archive\"" ui/app.py` | output greater than 0 |
 | Doctor check present | `grep -c "session-archive-freshness" tools/doctor.py` | output greater than 0 |
 | CLI entry point wired | `grep -c "valor-session-archive" pyproject.toml` | output is `1` |
@@ -916,27 +1064,36 @@ cases above; everything else is new coverage.
    go stale unnoticed. *Mitigation:* the `session-archive-freshness` doctor check +
    `dashboard.json.archive.healthy` surface staleness (age > threshold), mirroring the
    email/heartbeat pattern the issue explicitly asks us to follow.
-6. **Silent partial-restore data loss.** If `.save()` raises partway through the
-   rehydrate loop (row 51 of 100), Redis is left half-populated; a naive design's next-boot
-   empty-Redis guard would see the 50 written rows, assume "already restored," and
-   permanently drop the remaining 50 — silent, irrecoverable loss indistinguishable from a
-   clean restore. *Mitigation:* a durable `restore_in_progress` sentinel in the archive DB
-   `_meta` table brackets the loop; it is set before the first write and cleared only after
-   all rows are restored. On the next boot a still-set sentinel is DETECTED and the restore
-   is RESUMED (idempotent upserts on the preserved `id`), bypassing the empty-Redis guard
-   for that one case. Per-row failures are counted and do not silently abort the batch. A
-   dedicated partial-restore-recovery test drives a mid-loop failure and asserts the next
-   boot completes the remaining rows. See the restore-atomicity mechanism in Technical
-   Approach and Success Criterion #5b.
-7. **Oversized per-session payload blob.** A session with a very large `DictField`/
-   `ListField` conversation history serializes to a large JSON `payload` column; an
-   unbounded blob could bloat the archive DB and slow the sweep. *Mitigation:* a
-   `SESSION_ARCHIVE_MAX_PAYLOAD_BYTES` guard (named, env-overridable constant, provisional
-   default) — a payload exceeding the bound is logged (`logger.warning` with the session
-   `id` and size) and the row is stored with the oversized field truncated/omitted rather
-   than silently ballooning the DB; the session is still archived (id + promoted columns
-   preserved) so restore of the graph skeleton is unaffected. See the No-Go on unbounded
-   payloads. This bounds Risk #4 along the size dimension.
+6. **Restore-atomicity failure modes — silent half-loss AND stuck-sentinel clobber.**
+   Two opposite failures live here. **(a) Silent partial loss:** if `.save()` raises partway
+   through the rehydrate loop (row 51 of 100), Redis is left half-populated and a naive
+   next-boot guard would see the 50 rows and permanently drop the other 50. **(b) Stuck-
+   sentinel clobber (the Blocker the critique caught):** if the sentinel clears only on
+   `restored == expected_row_count`, one permanently-unrestorable row keeps the sentinel set
+   forever, so *every* later boot — including a healthy boot against a full Redis — bypasses
+   the guard and re-upserts every archived row by preserved id, overwriting live sessions and
+   resurrecting deleted ones. *Mitigation (both closed together):* a durable
+   `restore_in_progress` sentinel in the archive `_meta` table brackets the loop, but the
+   **guard-bypass is re-decided every boot against the freshly recomputed live count**
+   (`live_count < expected_row_count`), never on the flag alone — so a stuck sentinel can
+   never clobber an already-whole Redis (mode b). Resume attempts are bounded
+   (`SESSION_ARCHIVE_RESUME_ATTEMPT_CAP`) and a row failing past
+   `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` is quarantined and skipped, so the sentinel clears on
+   `restored + quarantined == expected_row_count` and one poison row can never wedge restore
+   (mode b). Per-row failures are counted and do not silently abort the batch, and a
+   still-set sentinel with `live_count < expected` DETECTS and RESUMES on the next boot (mode
+   a). Three dedicated tests drive each path (partial-restore recovery, stuck-sentinel-no-
+   clobber, poison-row quarantine + wedged cap). See the restore-atomicity mechanism in
+   Technical Approach and Success Criterion #5b.
+7. **Large per-session payload blobs (accepted, not truncated).** A session with a very
+   large `DictField`/`ListField` conversation history serializes to a large JSON `payload`
+   column. *Decision (Concern #3):* v1 stores it **verbatim** — truncation is speculative
+   and silently corrupts round-trip fidelity (a restored session missing a field is not the
+   archived session), and a half-serialized row is itself a poison-row vector for the restore
+   guard. No size problem has been observed; the sweep is off-loop on a 5-min cadence and the
+   interval is env-tunable (Risk #4). If a *measured* size problem ever appears, the clean
+   mitigation is an incremental-by-`updated_at` sweep or a compression pass — a follow-up,
+   revisited then. See the No-Go on payload truncation.
 
 ## Race Conditions
 
