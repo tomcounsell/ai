@@ -17,10 +17,11 @@ PTY + a scripted ``HookEdgeConsumer``, sub-second, no ollama, no real spawn:
 
 from __future__ import annotations
 
+import logging
 import unittest
 from unittest.mock import MagicMock
 
-from agent.granite_container.container import Container
+from agent.granite_container.container import CRASH_RESUME_CONTINUE, Container
 from agent.granite_container.hook_edge import (
     COMPACTION,
     NEEDS_HUMAN,
@@ -222,6 +223,106 @@ class TestContainerConsumerWiring(unittest.TestCase):
         )
         self.assertIsNotNone(c._pm_consumer)
         self.assertEqual(c._pm_consumer.session_id, PM_SID)
+
+
+class _OneShotList:
+    """A poll callback stub that yields a payload once, then drains empty."""
+
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+        self.calls = 0
+
+    def __call__(self) -> list[dict]:
+        self.calls += 1
+        if self.calls == 1:
+            return list(self._items)
+        return []
+
+
+class TestWedgeNudgeDrain(unittest.TestCase):
+    """Mid-run wedge-nudge drain in ``_await_turn_end`` (issue #1879)."""
+
+    def test_wedge_nudge_drained_and_injected_without_turn_boundary(self) -> None:
+        """A nudge on the wedge-nudge channel is drained and injected as
+        ``CRASH_RESUME_CONTINUE`` mid-wait, with no completed turn boundary
+        having occurred at the point of injection."""
+        consumer = _ScriptedConsumer([[], [_edge(TURN_END, transcript_path="/t.jsonl")]])
+        poll_wedge = _OneShotList(
+            [{"text": "continue", "sender": "wedge-nudge", "timestamp": 1.0, "is_abort": False}]
+        )
+        c = _container(poll_wedge_nudge=poll_wedge)
+        pty = _fake_pty()
+        res = c._await_turn_end(pty, consumer, PM_SID, role="pm")
+        self.assertTrue(res.saw_turn)
+        pty.write.assert_called_once_with(CRASH_RESUME_CONTINUE)
+        self.assertEqual(poll_wedge.calls, 1)
+
+    def test_empty_wedge_nudge_channel_writes_nothing(self) -> None:
+        consumer = _ScriptedConsumer([[], [_edge(TURN_END, transcript_path="/t.jsonl")]])
+        poll_wedge = _OneShotList([])  # always empty
+        c = _container(poll_wedge_nudge=poll_wedge)
+        pty = _fake_pty()
+        res = c._await_turn_end(pty, consumer, PM_SID, role="pm")
+        self.assertTrue(res.saw_turn)
+        pty.write.assert_not_called()
+
+    def test_raising_poll_wedge_nudge_does_not_abort_wait(self) -> None:
+        """A raising ``poll_wedge_nudge`` is fail-silent: the wait proceeds
+        to a normal completion and a warning is logged."""
+        consumer = _ScriptedConsumer([[], [_edge(TURN_END, transcript_path="/t.jsonl")]])
+
+        def _boom() -> list[dict]:
+            raise RuntimeError("redis exploded")
+
+        c = _container(poll_wedge_nudge=_boom)
+        pty = _fake_pty()
+        with self.assertLogs("agent.granite_container.container", level=logging.WARNING) as cm:
+            res = c._await_turn_end(pty, consumer, PM_SID, role="pm")
+        self.assertTrue(res.saw_turn)
+        pty.write.assert_not_called()
+        self.assertTrue(
+            any("poll_wedge_nudge callback raised" in line for line in cm.output),
+            f"expected a poll_wedge_nudge warning, got: {cm.output}",
+        )
+
+    def test_ordinary_steering_poll_not_consumed_mid_turn(self) -> None:
+        """Regression lock: the mid-run wedge-nudge drain must NEVER call the
+        ordinary ``poll_steering`` callback — that channel is only drained at
+        the top of a completed steady-state turn (issue #1779), not inside
+        ``_await_turn_end``."""
+        consumer = _ScriptedConsumer([[], [_edge(TURN_END, transcript_path="/t.jsonl")]])
+        poll_steering_mock = MagicMock(
+            return_value=[{"text": "hello", "sender": "Tom", "is_abort": False}]
+        )
+        poll_wedge = _OneShotList([])
+        c = _container(poll_steering=poll_steering_mock, poll_wedge_nudge=poll_wedge)
+        pty = _fake_pty()
+        res = c._await_turn_end(pty, consumer, PM_SID, role="pm")
+        self.assertTrue(res.saw_turn)
+        poll_steering_mock.assert_not_called()
+
+    def test_wedge_nudge_not_written_to_pty_that_just_died(self) -> None:
+        """Placement regression lock (critique r1 BLOCKER fix): a nudge
+        present on the tick where the PTY just died must reach only the
+        LIVE resumed PTY on a later tick — never the dead handle. This
+        proves the drain runs AFTER the crash-detection/crash-resume block,
+        not before it."""
+        # poll() call sequence: tick1-top (empty), tick1-late-drain (empty,
+        # Race-2 re-check), tick2-top (empty, drain fires here on the live
+        # resumed pty), tick3-top (the Stop that completes the wait).
+        consumer = _ScriptedConsumer([[], [], [], [_edge(TURN_END, transcript_path="/t.jsonl")]])
+        poll_wedge = _OneShotList(
+            [{"text": "continue", "sender": "wedge-nudge", "timestamp": 1.0, "is_abort": False}]
+        )
+        c = _container(hook_turn_end_wait_s=5.0, poll_wedge_nudge=poll_wedge)
+        resumed_pty = _fake_pty()
+        c._resume_crashed_pty = MagicMock(return_value=resumed_pty)  # type: ignore[method-assign]
+        dead = _fake_pty(alive_sequence=[False, True, True, True])
+        res = c._await_turn_end(dead, consumer, PM_SID, role="pm")
+        self.assertTrue(res.saw_turn)
+        dead.write.assert_not_called()
+        resumed_pty.write.assert_called_once_with(CRASH_RESUME_CONTINUE)
+        self.assertEqual(poll_wedge.calls, 1)
 
 
 if __name__ == "__main__":

@@ -75,7 +75,12 @@ from agent.granite_container.transcript_tailer import (
     TranscriptTelemetry,
     read_transcript_telemetry,
 )
-from agent.steering import pop_all_steering_messages
+from agent.steering import (
+    clear_wedge_nudge_latch,
+    pop_all_steering_messages,
+    pop_wedge_nudges,
+    purge_wedge_nudges,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +432,7 @@ class BridgeAdapter:
         project_key: str,
         transport: str,
         pool: PTYPool,
-        resolve_callbacks: Callable[[str, str], tuple[Callable | None, Any]] | None = None,
+        resolve_callbacks: (Callable[[str, str], tuple[Callable | None, Any]] | None) = None,
         delivery_timeout_s: float = DEFAULT_DELIVERY_TIMEOUT_S,
         session_env: dict[str, str] | None = None,
         pm_system_prompt: str | None = None,
@@ -594,7 +599,11 @@ class BridgeAdapter:
             pm_transport=pm_transport,
             dev_transport=dev_transport,
         )
-        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (pm, dev, pty_slot):
+        async with self._pool.acquire_pair(spawn_spec=spawn_spec) as (
+            pm,
+            dev,
+            pty_slot,
+        ):
             # Hand the pool's pre-warmed pair to Container so it
             # reuses them instead of spawning a fresh pair. The
             # pre-warm is the pool's whole point — discarding it
@@ -630,6 +639,28 @@ class BridgeAdapter:
                     )
                     return []
 
+            # Storage-agnostic wedge-nudge poll closure (mid-run drain,
+            # issue #1879). Container calls this from INSIDE
+            # `_await_turn_end` — a session parked mid-turn, no completed-
+            # turn boundary — so it must drain a channel entirely separate
+            # from `_poll_steering` above. `pop_wedge_nudges` reads only
+            # `steering:nudge:{session_id}`; it never touches
+            # `steering:{session_id}` (the ordinary operator queue) or the
+            # TTL latch key. Fail-silent: any error yields [] and never
+            # crashes the run, mirroring `_poll_steering`.
+            def _poll_wedge_nudge() -> list[dict]:
+                if not steering_session_id:
+                    return []
+                try:
+                    return pop_wedge_nudges(steering_session_id)
+                except Exception as e:
+                    logger.warning(
+                        "[granite-bridge-adapter] poll_wedge_nudge drain failed for session %s: %s",
+                        steering_session_id,
+                        e,
+                    )
+                    return []
+
             container = Container(
                 user_message=user_message,
                 cwd=working_dir,
@@ -641,6 +672,7 @@ class BridgeAdapter:
                 dev_pty=dev,
                 session_type=self._session_type,
                 poll_steering=_poll_steering,
+                poll_wedge_nudge=_poll_wedge_nudge,
                 pm_session_id=pm_session_id,
                 dev_session_id=dev_session_id,
                 pm_hook_edge_file=pm_hook_edge_file,
@@ -946,7 +978,7 @@ class BridgeAdapter:
 
     # -- Liveness (two-tier no-progress detector, TD1) ---------------------
 
-    def _bump_last_turn_at(self) -> None:
+    def _bump_last_turn_at(self, genuine: bool = True) -> None:
         """Bump ``agent_session.last_turn_at`` for the in-flight session.
 
         The harness path wrote this via the sdk_client ``result``
@@ -959,6 +991,18 @@ class BridgeAdapter:
         liveness signaling must never crash the run. Called from the
         ``asyncio.to_thread`` worker thread — the save is a plain
         blocking Redis write, which is fine off the event loop.
+
+        Args:
+            genuine: True (default) when the container observed a genuine
+                ``Stop``-edge turn end — the only signal that proves real
+                progress. The crash-resume path (``_resume_crashed_pty``)
+                also calls ``on_turn`` purely as a liveness bump and passes
+                ``genuine=False``: the timestamp bump below still happens
+                (the cross-process wedge detector must see the resume as
+                activity), but the wedge-nudge bookkeeping is skipped so a
+                crash-resume can neither clear the latch nor pollute the
+                ``wedge_nudge_recovered`` efficacy counter (issue #1879
+                review M1 — that counter is the rung's go/no-go signal).
         """
         if self._agent_session is None:
             return
@@ -969,6 +1013,45 @@ class BridgeAdapter:
                 save(update_fields=["last_turn_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("[bridge-adapter] last_turn_at bump failed: %s", e)
+        # Wedge-nudge recovery bookkeeping (issue #1879, critique concerns 1 & 2;
+        # review blockers B2/M1). Gated on ``genuine=True``: a genuine
+        # ``Stop``-edge turn end (never the injected ``continue`` echo —
+        # spike-2 — and never the crash-resume liveness bump, which passes
+        # ``genuine=False``) is the authoritative "the session is making
+        # progress" signal. Three actions, all keyed by ``session_id`` — the
+        # same key the producer pushed and the ``_poll_wedge_nudge`` consumer
+        # drains:
+        #   1. Purge any UNDRAINED nudge from the signal channel (B2): a
+        #      completed turn invalidates a pending nudge; leaving it queued
+        #      would let the next healthy turn's first drain tick inject a
+        #      spurious submitted "continue".
+        #   2. Clear the latch — frees a session that a nudge un-stuck to
+        #      earn a fresh nudge if it wedges again on a LATER turn, instead
+        #      of being gagged for the whole fixed latch TTL (the
+        #      recovered-then-re-wedged defect).
+        #   3. ``clear`` reports whether a latch was actually held; a True
+        #      here means THIS session had been nudged and just recovered, so
+        #      it also feeds the efficacy counter
+        #      ``{project_key}:session-health:wedge_nudge_recovered`` (paired
+        #      with the producer's ``wedge_nudge_sent``).
+        # Entirely fail-silent — recovery bookkeeping must never crash a turn.
+        if not genuine:
+            return
+        try:
+            session_id = str(getattr(self._agent_session, "session_id", "") or "")
+            if session_id:
+                purge_wedge_nudges(session_id)
+            if session_id and clear_wedge_nudge_latch(session_id):
+                try:
+                    from popoto.redis_db import POPOTO_REDIS_DB as _R_WEDGE_REC
+
+                    project_key = getattr(self._agent_session, "project_key", None)
+                    if project_key:
+                        _R_WEDGE_REC.incr(f"{project_key}:session-health:wedge_nudge_recovered")
+                except Exception:
+                    logger.debug("[bridge-adapter] wedge_nudge_recovered counter incr failed")
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("[bridge-adapter] wedge-nudge purge/latch clear failed: %s", e)
 
     def _make_pty_read_callback(self) -> Callable[[str], None]:
         """Build the sync callable for PTY read-loop liveness stamps (#1724).
@@ -1191,7 +1274,9 @@ class BridgeAdapter:
                         if exc is not None:
                             recovered = self._enqueue_to_outbox(_chat_id, _payload, _reply_to)
                             self._record_delivery_event(
-                                _payload, f"{type(exc).__name__}: {exc}", recovered=recovered
+                                _payload,
+                                f"{type(exc).__name__}: {exc}",
+                                recovered=recovered,
                             )
                     except Exception:  # pragma: no cover - defensive
                         logger.exception("[bridge-adapter] same-thread re-enqueue callback failed")

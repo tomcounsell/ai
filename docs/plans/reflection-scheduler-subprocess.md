@@ -1,11 +1,11 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-01
 tracking: https://github.com/tomcounsell/ai/issues/1828
-last_comment_id:
+last_comment_id: 4880590420
 revision_applied: true
 ---
 

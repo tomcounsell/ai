@@ -47,9 +47,25 @@ class TestEmojiLabels:
 
 
 class TestOffensiveEmojiBlocked:
-    """The middle finger 🖕 must never be selectable as a reaction."""
+    """Hostile faces must never be selectable as a reaction (issue #1882).
+
+    The middle finger 🖕 plus the outward-directed hostile faces
+    (👎 🤬 😡 🤮 😱) are filtered out of find_best_emoji candidates so a reaction
+    on a user's own message can never read as blame.
+    """
 
     MIDDLE_FINGER = "\U0001f595"
+    # Locked hostile deny-list — must match tools.emoji_embedding.BLOCKED_REACTION_EMOJIS.
+    HOSTILE = frozenset(
+        {
+            "\U0001f595",  # 🖕 middle finger
+            "\U0001f44e",  # 👎 thumbs down
+            "\U0001f92c",  # 🤬 face with symbols on mouth
+            "\U0001f621",  # 😡 pouting face
+            "\U0001f92e",  # 🤮 face vomiting
+            "\U0001f631",  # 😱 face screaming in fear
+        }
+    )
 
     def test_not_in_emoji_labels(self):
         """🖕 must not be in the selection label set."""
@@ -68,6 +84,19 @@ class TestOffensiveEmojiBlocked:
         from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS
 
         assert self.MIDDLE_FINGER in BLOCKED_REACTION_EMOJIS
+
+    def test_blocklist_is_exact_hostile_set(self):
+        """The blocklist is exactly the locked hostile deny-list."""
+        from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS
+
+        assert BLOCKED_REACTION_EMOJIS == self.HOSTILE
+
+    def test_hostile_faces_in_blocklist(self):
+        """Every hostile face (👎 🤬 😡 🤮 😱) is in the selection-time blocklist."""
+        from tools.emoji_embedding import BLOCKED_REACTION_EMOJIS
+
+        for emoji in self.HOSTILE:
+            assert emoji in BLOCKED_REACTION_EMOJIS, f"{emoji!r} must be blocked"
 
     def test_never_selected_even_if_cached(self):
         """Even a stale cache containing 🖕 must not produce it as a result.

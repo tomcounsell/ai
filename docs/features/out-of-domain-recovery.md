@@ -236,6 +236,43 @@ granite may eventually want a higher `MAX_TOOL_CALLS_PER_SESSION` — not a
 reason to gate the deny off by default, which would leave the backstop inert
 exactly where it matters most.
 
+**Id-less deny surfacing (#1873 item 3).** The deny-surfacing dedup gate keys
+on `session_id or agent_session_id`. When a session resolves neither id, the
+gate would otherwise form a single shared `{project_key}:tool-budget:tripped_applied:None`
+slot that collapses every id-less deny together — the first surfaces and every
+later one is silently deduped away. `record_budget_trip` therefore bypasses the
+`SET NX` gate entirely when no id resolves and surfaces on every id-less deny
+(observable via the WARNING log and the `{project_key}:tool-budget:tripped`
+counter; the `budget_tripped` flag cannot persist for a keyless, unsaved
+session). Id-less sessions do not arise on the shipped hook paths (both pass a
+persisted `AgentSession`), so this is defensive hardening — the log/counter
+volume stays bounded in practice.
+
+### Deny-but-don't-halt: the metering tradeoff
+
+With `TOOL_BUDGET_AUTO_PAUSE` off (the shipped default), a denied headless/SDK
+session is blocked on each over-budget tool call but is **not halted** — the
+session keeps issuing tool calls, each denied inline, metering one harness
+round-trip per denied call until it reaches max-turns on its own. The deny is a
+per-call backstop, not a session terminator.
+
+Whether those wasted round-trips justify a behavior change — flipping the
+auto-pause default on, or adding a consecutive-denial hard-stop — cannot be
+answered without live denial-distribution data. The current `tripped` counter
+increments once per session (gated by the dedup above), not once per denied
+call, so it does not measure the per-call metering cost. Making that decision
+needs a per-denial instrument.
+
+That observe-first tuning work is owned by **[#1886]** — both the per-denial
+`denied_calls` counter (the instrument that would collect the distribution) and
+the eventual data-gated default decision. It is deliberately deferred here
+pending production data; this feature ships the deny backstop and its
+documentation only, with no speculative default change. When #1886 adds the
+`denied_calls` counter, its `INCR` must carry its own isolated inner
+`try/except` (mirroring the `tripped` counter) so a Redis blip on that one
+increment cannot swallow the dedup-key write, the WARNING log, the
+`budget_tripped` flag, or the auto-pause.
+
 ## Mixed-version-deploy detectability
 
 Fix #5 spans both the bridge and worker processes, so a rolling deploy can
@@ -260,6 +297,31 @@ made operator-visible rather than silently dropped:
   reaper still reclaims the leak in this direction (unless
   `SLOT_LEASE_REAP_DISABLED=1`), so no slot is actually lost — the signal
   exists purely to make the contract gap visible rather than a quiet drop.
+
+**Stale-check decoupled from the drain (#1873 item 2).** The read-only
+`bridge_contract_stale` check no longer runs its own per-owner `get_by_id` loop
+over the lease snapshot. `_drain_reclaim_requests` now returns `drained: int`
+and no longer calls the stale-check; `_reap_slot_leases` builds an owner→record
+map once — only when `drained == 0`, the sole case the stale-check inspects
+owners — and calls `_maybe_emit_bridge_contract_stale(drained, owner_records)`
+directly, in the always-run region before the Phase-2 reap gate. A per-owner
+lookup error stores an `_ABSENT` sentinel (distinct from a positively not-found
+`None`) and logs a WARNING, so the transient-DB-error signal survives. The
+autonomous **Phase-2 reclaim loop is left unchanged**: it re-reads each owner
+FRESH via `get_by_id` at reclaim time and never consults the map. This fresh
+read is load-bearing — a `valor-session resume` during the bounded drain window
+can un-terminal an owner that was terminal moments earlier, and reclaiming off a
+pre-drain snapshot would strip the now-live session's permit (semaphore
+over-admission). Total Redis reads are unchanged; this is a structural
+decoupling of the stale-check, not a read reduction. The deliberate #1868
+divergence is preserved exactly: the read-only stale-check treats `None`/`_ABSENT`
+as unknown → skip, while the autonomous reaper's fresh read treats a not-found
+`None` as terminal → reclaim.
+
+The healthy-tick reclaim-dedup clear (`_clear_reclaim_dedup`) enumerates its
+per-owner markers with a non-blocking `scan_iter` and deletes them in bounded
+batches, replacing the blocking `KEYS` scan that held the Redis event loop at
+scale. It stays fail-quiet; orphaned markers also age out via their TTL.
 
 The contract is intentionally not hard version-gated. An explicit version
 field would add a migration surface for no safety gain, since both directions

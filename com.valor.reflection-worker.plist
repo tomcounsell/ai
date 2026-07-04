@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>__SERVICE_LABEL__</string>
+    <!-- Source .env in ProgramArguments (the com.valor.sdlc-reflection.plist /bin/bash -c
+         idiom) so Redis/GitHub creds are present without a runtime iCloud read. /bin/bash -c
+         (not zsh -l) avoids login-profile sourcing under launchd where there is no TTY.
+         TCC-safe: VALOR_LAUNCHD=1 (below) makes the scheduler skip the ~/Desktop vault path
+         and read the local config/reflections.yaml the installer copies. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>set -a; source __PROJECT_DIR__/.env; set +a; exec __PROJECT_DIR__/.venv/bin/python -m reflections</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_DIR__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__HOME_DIR__/.local/bin:__PROJECT_DIR__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+        <key>HOME</key>
+        <string>__HOME_DIR__</string>
+        <key>VALOR_LAUNCHD</key>
+        <string>1</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__PROJECT_DIR__/logs/reflection_worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_DIR__/logs/reflection_worker_error.log</string>
+    <!-- Restart-storm cap. Provisional — tune after observing real restart rates on the
+         live machine (same posture as the worker's 10s). -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

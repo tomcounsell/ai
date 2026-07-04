@@ -30,9 +30,14 @@ mkdir -p "$PROJECT_DIR/logs/worker"
 # Copy iCloud vault files to config/ so the launchd worker can read them without TCC hangs.
 # macOS TCC blocks open()/stat() on ~/Desktop files from launchd agents, causing indefinite
 # hangs that freeze the asyncio event loop. The worker reads these local copies when
-# VALOR_LAUNCHD=1 (bridge/routing.py and agent/reflection_scheduler.py skip the iCloud path).
+# VALOR_LAUNCHD=1 (bridge/routing.py skips the iCloud path).
 # We rm -f the destination first to avoid "identical (not copied)" errors when the destination
 # is a symlink pointing back to the source (set -euo pipefail would otherwise abort the script).
+#
+# NOTE (issue #1828): the reflection registry copy + its machine-ownership filter MOVED
+# to scripts/install_reflection_worker.sh — the reflection subprocess (not the worker) now
+# owns the reflection registry. The projects.json copy stays here (the worker needs it,
+# and the reflection installer's machine-filter reads the copy this step writes).
 _copy_config_file() {
     local src="$1" dst="$2" label="$3"
     if [ -f "$src" ]; then
@@ -45,21 +50,6 @@ _copy_config_file() {
 }
 
 _copy_config_file "$HOME/Desktop/Valor/projects.json"     "$PROJECT_DIR/config/projects.json"     "projects.json"
-_copy_config_file "$HOME/Desktop/Valor/reflections.yaml"  "$PROJECT_DIR/config/reflections.yaml"  "reflections.yaml"
-
-# Single-machine ownership for repo-specific reflections: disable any reflection
-# carrying a `project_key` this machine does not own (per config/projects.json) in
-# the just-copied local config/reflections.yaml. Computed here, at install time —
-# when projects.json is safely readable — so the launchd scheduler needs no runtime
-# ownership check and repo audits (e.g. docs-auditor) never run on N machines at
-# once, which is what produced duplicate GitHub issues. Best-effort: a non-zero
-# exit must not abort the install.
-if [ -f "$PROJECT_DIR/.venv/bin/python" ]; then
-    "$PROJECT_DIR/.venv/bin/python" -m tools.reflection_machine_filter \
-        --reflections "$PROJECT_DIR/config/reflections.yaml" \
-        --projects "$PROJECT_DIR/config/projects.json" || \
-        echo "WARNING: reflection ownership filter failed — config/reflections.yaml left unfiltered"
-fi
 
 # Check source plist exists
 if [ ! -f "$PLIST_SRC" ]; then

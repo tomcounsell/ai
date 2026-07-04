@@ -8,12 +8,12 @@ The reflections system is a unified framework for all recurring non-issue work. 
 
 ## Unified Reflection Scheduler
 
-All recurring tasks are declared in `config/reflections.yaml` and managed by a single scheduler that runs as an asyncio task inside the standalone worker process (`python -m worker`).
+All recurring tasks are declared in `config/reflections.yaml` and managed by a single scheduler that runs in its own supervised launchd subprocess (`python -m reflections`, `com.valor.reflection-worker`) — out-of-process from the worker for crash-domain isolation. See [Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md).
 
 ### Architecture
 
 ```
-Worker startup (worker/__main__.py)
+Subprocess startup (reflections/__main__.py, `python -m reflections`)
   -> ReflectionScheduler.start()
     -> Tick every 60 seconds
       -> For each reflection in registry:
@@ -705,11 +705,16 @@ For one-shot reconciliation against an existing backlog, the operator script `sc
 
 ### Scheduling
 
-The reflection scheduler starts automatically as part of the standalone worker process (`python -m worker`). No separate launchd plist is needed — the scheduler ticks every 60 seconds.
+The reflection scheduler runs in its own supervised launchd subprocess
+(`python -m reflections`, `com.valor.reflection-worker`, `KeepAlive`+`ThrottleInterval`),
+installed by `scripts/install_reflection_worker.sh`. It ticks every 60 seconds. See
+[Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md) for the lifecycle,
+worker-role install gate, cutover ordering, and the `/dashboard.json`
+`reflection_scheduler_*` health surface.
 
 | Component | Detail |
 |-----------|--------|
-| Scheduler | `agent/reflection_scheduler.py` (asyncio task in worker) |
+| Scheduler | `agent/reflection_scheduler.py` (run out-of-process by `python -m reflections`) |
 | Registry | `config/reflections.yaml` (symlink → `~/Desktop/Valor/reflections.yaml`) |
 | State | Redis via `models/reflection.py` |
 | Tick interval | 60 seconds |

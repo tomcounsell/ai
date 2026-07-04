@@ -2,7 +2,10 @@
 
 **Issue:** #1816  
 **Status:** Shipped (Stages A–B, Fixes #1–#4)  
-**Deferred:** Fix #5 (reflection subprocess split) → #1828
+**Deferred:** Fix #5 (reflection subprocess split) → #1828 — **now shipped**, see
+[Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md). The scheduler runs
+out-of-process (`python -m reflections`, `com.valor.reflection-worker`); the worker no
+longer constructs it.
 
 ## Problem
 

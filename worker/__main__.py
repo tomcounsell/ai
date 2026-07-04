@@ -1179,21 +1179,10 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # 30s internal-tier budget can fire within one tick of expiry.
     tool_timeout_task = supervise("session-tool-timeout-monitor", _agent_session_tool_timeout_loop)
 
-    # Start unified reflection scheduler (moved from bridge — processing belongs in worker).
-    # Supervised so a scheduler crash is respawned rather than silently lost.
-    reflection_task = None
-    try:
-        from agent.reflection_scheduler import ReflectionScheduler
-
-        _reflection_scheduler = ReflectionScheduler()
-
-        def _make_reflection_task():
-            return _reflection_scheduler.start()
-
-        reflection_task = supervise("reflection-scheduler", _make_reflection_task)
-        logger.info("Reflection scheduler started (supervised)")
-    except Exception as e:
-        logger.error(f"Failed to start reflection scheduler: {e}")
+    # The reflection scheduler runs OUT-OF-PROCESS (issue #1828): its own supervised
+    # launchd subprocess (`python -m reflections`, com.valor.reflection-worker) owns it,
+    # so a reflection defect can no longer share this worker's event loop or crash domain.
+    # The worker only executes the AgentSession records that subprocess enqueues.
 
     # Start pub/sub listener — supervised; delivers ~1s session pickup vs 5-min health check.
     notify_task = supervise("session-notify-listener", _session_notify_listener)
@@ -1295,13 +1284,8 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except asyncio.CancelledError:
         pass
 
-    # Cancel reflection scheduler
-    if reflection_task is not None:
-        reflection_task.cancel()
-        try:
-            await reflection_task
-        except asyncio.CancelledError:
-            pass
+    # (Reflection scheduler runs out-of-process — issue #1828 — so there is no
+    # reflection task to cancel here.)
 
     # Cancel granite re-probe / circuit breaker loop (Fix #1)
     reprobe_task.cancel()

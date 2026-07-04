@@ -155,14 +155,148 @@ The following improvements are explicitly deferred to separate issues:
 
 | Fix | Description | Issue |
 |-----|-------------|-------|
-| **Fix #2** | Durable secondary store (SQLite export of `AgentSession` + restore path). Covers total Redis data-dir loss that AOF cannot — the AOF floor only bounds write loss within a running Redis process. | TBD |
-| **Fix #4** | Move hot-path Redis calls off the asyncio event loop (async client or `run_in_executor`) to prevent loop blocking under load. | TBD |
-| **Fix #5** | Redis replication + Sentinel on a second host for primary-loss failover. | [#1827](https://github.com/tomcounsell/ai/issues/1827) — **implemented** (see [Replication + Sentinel Failover](#replication--sentinel-failover-fix-5)) |
+| **Fix #2** | Durable secondary store (SQLite export of `AgentSession` + restore path). Covers total Redis data-dir loss that AOF cannot; the AOF floor only bounds write loss within a running Redis process. | TBD |
+| **Fix #4** | Move hot-path Redis calls off the asyncio event loop to prevent loop blocking under load. | [#1826](https://github.com/tomcounsell/ai/issues/1826), **implemented** (see [Off-Loop Redis Access](#off-loop-redis-access-fix-4)) |
+| **Fix #5** | Redis replication + Sentinel on a second host for primary-loss failover. | [#1827](https://github.com/tomcounsell/ai/issues/1827), **implemented** (see [Replication + Sentinel Failover](#replication--sentinel-failover-fix-5)) |
 
 The current AOF floor (Fix #1) is the minimum durability guarantee: at most 1 second
 of loss on a hard crash. Fix #2 (SQLite export) is the next step to cover total
-data-dir loss. Fix #5 (replication) covers primary-host failure and is documented
+data-dir loss. Fix #4 (off-loop access) and Fix #5 (replication) are both documented
 below.
+
+## Off-Loop Redis Access (Fix #4)
+
+The resilient client (Fix #3) bounds *recovery* from a slow or restarting Redis: a
+transient outage reconnects instead of raising. It does not bound *loop occupancy*.
+Popoto is a synchronous, redis-py-based ORM, so any Popoto call issued directly from
+an `async def` blocks the whole asyncio event loop for the call's duration. Under a
+slow Redis, that block is compounded by the Fix #3 retry policy (up to
+`socket_timeout × retries` per call), and everything on the loop (every session,
+every monitor, the [worker liveness dead-man's-switch tick](worker-liveness-recovery.md))
+freezes in lockstep.
+
+Fix #4 moves the one Redis call that runs on every idle iteration of the worker's
+drain loop off the event loop, onto a dedicated thread pool, so a slow Redis degrades
+that call's *latency* without freezing the loop for everyone else.
+
+### The bulkhead: `_redis_io_pool`
+
+`agent/redis_offload.py` defines `_redis_io_pool`, a dedicated
+`ThreadPoolExecutor` isolated from the shared asyncio default executor (the pool
+granite probes and `session_executor` also offload work onto). Isolating it means a
+slow Redis call can never starve those unrelated offloads.
+
+Worker count defaults to **2**, tunable via `REDIS_IO_POOL_MAX_WORKERS`, clamped to a
+minimum of 1 so a misconfigured `0` can never produce a zero-worker pool that
+deadlocks every offloaded call. A serialized drain-loop awaiter issues one offload at
+a time, so a single drain loop needs about one concurrent offload; 2 workers cover the
+realistic overlap of two drain loops idle-checking concurrently without
+over-provisioning the pool.
+
+**Invariant:** the combined worker count of this pool, the `_reflection_pool`
+(`agent/reflection_scheduler.py`), and the shared default executor's peak usage must
+stay at or below the redis-py `ConnectionPool` capacity built by
+`configure_resilient_redis()`. That pool is unbounded today (no `max_connections`
+set), so any small worker count here is safe by construction. If `max_connections`
+is ever introduced on that pool, it must be sized to cover all three, or offloaded
+calls will block on `BlockingConnectionPool` checkout, reintroducing the very stall
+this fix removes.
+
+### The offload seam: `offload_redis()`
+
+`offload_redis(fn, *args, **kwargs)` is an `async def` in `agent/redis_offload.py`
+that runs a synchronous Popoto/redis-py callable on `_redis_io_pool` via
+`loop.run_in_executor(...)`, times the call, and records the latency sample. It is
+used at exactly **one** call site: the worker drain loop's hot-path idle-check in
+`agent/agent_session_queue.py`. No other Popoto call in the repo routes through it.
+
+Thread-safety rests on redis-py's `ConnectionPool`, which is thread-safe by default.
+Each offloaded call checks out its own connection, so there is no shared mutable
+client state for concurrent calls to corrupt. This mirrors the pattern this repo
+already relies on for the enqueue path's `asyncio.to_thread` offloads (below).
+
+Any exception `fn` raises propagates unchanged to the caller; latency is still
+recorded for a failing attempt so it doesn't silently disappear from the metric.
+
+### Cut-over site: the drain-loop idle-check
+
+The one instrumented cut-over is the per-worker drain loop's idle-check in
+`agent/agent_session_queue.py`, the query that decides whether a worker has pending
+work before it waits on its notify event. The ordering at that site is
+**clear-then-check**: `event.clear()` runs *before* the offloaded
+`AgentSession.query.filter(..., status="pending")` call, not after it.
+
+This ordering exists because adding an `await` at the check opens a real yield point
+that the old synchronous check-before-clear ordering did not have. Under the old
+ordering, a producer could enqueue work and call `event.set()` while the idle-check's
+offload was in flight, and the subsequent `event.clear()` would then swallow that
+wakeup, parking the worker on `event.wait()` with pending work it never sees.
+Clearing first removes the hole: because Redis is the source of truth, any enqueue
+that fires after the clear is either observed by the query (the worker `continue`s
+instead of waiting) or leaves the event set, so the following `event.wait()` returns
+immediately. No wakeup is lost in either case.
+
+### Operator metric: drain-loop idle-check latency
+
+`ui/app.py::dashboard_json` exposes a `redis_offload` block under `health`, labeled
+*drain-loop idle-check latency*:
+
+```json
+"redis_offload": {
+  "label": "drain-loop idle-check latency",
+  "p95_latency_s": 0.02,
+  "max_latency_s": 0.14,
+  "last_latency_s": 0.02
+}
+```
+
+`p95_latency_s` and `max_latency_s` are computed over a rolling
+`REDIS_LATENCY_WINDOW_S` window (default 300s), not a lifetime high-water mark. A
+single slow blip ages out of the window instead of latching the dashboard red
+forever. `offload_redis` also logs a WARNING whenever a single call exceeds
+`REDIS_OFFLOAD_SLOW_THRESHOLD` (default 1.0s), giving an early signal that Redis is
+degrading before it threatens the liveness tick.
+
+This block measures the read hot path's bulkhead-isolated seam only, not all Redis
+I/O in the process. See the grandfathered call sites below.
+
+### What's left un-instrumented, and why
+
+- **The six pre-existing enqueue-path `asyncio.to_thread` offloads**
+  (`agent/agent_session_queue.py`): `transition_status`, `_init_stage_states`,
+  `POPOTO_REDIS_DB.publish`, session reads, and the pubsub listen thread. These are
+  grandfathered rather than migrated onto `offload_redis`. They already run off the
+  loop via the shared default executor; folding them into the metric would measure
+  write-path latency alongside the one read hot path this fix targets, diluting the
+  signal without changing loop-freeze risk (they were already off-loop).
+- **`_reflection_pool`** (`agent/reflection_scheduler.py`) is the template this
+  bulkhead mirrors, but its own scans are out of scope for this metric. It measures
+  the drain-loop's one hot-path seam, not every bulkheaded executor in the process.
+- **The worker startup scans** (`worker/__main__.py`: the Redis-verify scan,
+  cleanup/recovery helpers, and the pending-sessions kick scan) are deliberately left
+  synchronous and on-loop. The [worker liveness dead-man's-switch beacon](worker-liveness-recovery.md)
+  is not armed until after every startup scan completes, so offloading them would
+  protect no liveness while risking a startup re-ordering hazard (some of these scans
+  have a load-bearing execution order). They stay exactly as they were before this fix.
+
+### Executor vs. async client
+
+A real async Redis client (`redis.asyncio`) was rejected in favor of
+`run_in_executor` on a bounded pool. Popoto's entire ORM (models, query builder,
+index/class sets, `save`/`delete`) is synchronous and third-party; adapting it to an
+async client would mean reimplementing that ORM against a different client, creating
+a parallel async ORM alongside the sync one used everywhere else in the codebase. The
+executor approach is the established in-repo pattern: it already mirrors
+`_reflection_pool`'s bulkhead and the enqueue path's `to_thread` offloads, both of
+which already rely on the same thread-safety guarantee.
+
+### Rollback: `REDIS_OFFLOAD_ENABLED`
+
+`REDIS_OFFLOAD_ENABLED` (default `true`) is a complete kill switch. When set to
+`false`, `offload_redis` runs the wrapped callable inline on the event loop instead
+of dispatching it to `_redis_io_pool`: a full, instant revert to the pre-cut-over
+synchronous behavior at the one site this module serves, with no code change
+required.
 
 ## Replication + Sentinel Failover (Fix #5)
 

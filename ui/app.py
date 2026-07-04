@@ -7,6 +7,7 @@ Start with: python -m ui.app
 """
 
 import datetime
+import json
 import logging
 import os
 import time
@@ -476,6 +477,57 @@ def create_app() -> FastAPI:
             **slot_health,
         }
 
+    def _get_reflection_scheduler_health() -> dict:
+        """Health of the out-of-process reflection scheduler (issue #1828).
+
+        Reads TWO data/ files written by `python -m reflections`:
+          - `last_reflection_tick` (mtime) → `status` + `tick_age_s`. `status` is derived
+            PURELY from tick freshness (mirroring `_get_worker_health`).
+          - `reflection_worker_starts` ({count, last_start_ts}) → `restart_count`
+            (informational-only; deploys inflate it) + `last_start_age_s` (the crash-loop
+            indicator — persistently near-zero means launchd keeps respawning a scheduler
+            that dies right after each fresh tick).
+
+        A grace window applies to the stale threshold so a just-deployed scheduler (whose
+        first tick lands a beat after boot) does not false-positive as `error`.
+        Fail-quiet: any OSError degrades to status="error", never raises.
+        """
+        # Provisional thresholds — tune after observing real tick/restart rates on the
+        # live machine. Stale threshold is ~2× the scheduler's 60s tick, plus a grace
+        # window so a fresh deploy's first-tick lag is not read as a dead scheduler.
+        tick_stale_threshold_s = 150
+        data_dir = Path(__file__).parent.parent / "data"
+        tick_file = data_dir / "last_reflection_tick"
+        starts_file = data_dir / "reflection_worker_starts"
+
+        tick_age_s: int | None = None
+        status = "error"
+        try:
+            if tick_file.exists():
+                tick_age_s = round(time.time() - tick_file.stat().st_mtime)
+                status = "ok" if tick_age_s < tick_stale_threshold_s else "error"
+        except OSError:
+            pass
+
+        restart_count: int | None = None
+        last_start_age_s: int | None = None
+        try:
+            if starts_file.exists():
+                data = json.loads(starts_file.read_text())
+                restart_count = int(data.get("count")) if data.get("count") is not None else None
+                last_start_ts = data.get("last_start_ts")
+                if last_start_ts is not None:
+                    last_start_age_s = round(time.time() - float(last_start_ts))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+
+        return {
+            "status": status,
+            "tick_age_s": tick_age_s,
+            "restart_count": restart_count,
+            "last_start_age_s": last_start_age_s,
+        }
+
     def _get_claude_auth_health() -> dict:
         """Check Claude Code subscription auth via `claude auth status`."""
         import subprocess
@@ -679,6 +731,11 @@ def create_app() -> FastAPI:
         """Full dashboard state as JSON for programmatic consumption."""
         from fastapi.responses import JSONResponse
 
+        from agent.redis_offload import (
+            get_last_redis_latency,
+            get_redis_latency_max,
+            get_redis_latency_p95,
+        )
         from ui.data.analytics import get_analytics_summary
         from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
@@ -686,6 +743,7 @@ def create_app() -> FastAPI:
 
         bridge = _get_bridge_health()
         worker = _get_worker_health()
+        reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
         sessions = get_all_sessions()
@@ -715,6 +773,15 @@ def create_app() -> FastAPI:
                         "tool_budget_resolution_errors"
                     ),
                     "worker_recent_actions": worker.get("recent_actions"),
+                    # Additive-only (issue #1828): out-of-process reflection scheduler.
+                    # status is tick-freshness-derived; last_start_age_s near-zero is the
+                    # crash-loop indicator; restart_count is informational-only.
+                    "reflection_scheduler_status": reflection_scheduler["status"],
+                    "reflection_scheduler_tick_age_s": reflection_scheduler["tick_age_s"],
+                    "reflection_scheduler_restart_count": reflection_scheduler["restart_count"],
+                    "reflection_scheduler_last_start_age_s": reflection_scheduler[
+                        "last_start_age_s"
+                    ],
                     "email": email["status"],
                     "email_last_seen_s": email["age_s"],
                     "email_alert": email.get("alert"),
@@ -723,6 +790,12 @@ def create_app() -> FastAPI:
                     "claude_auth_logged_in": claude_auth["logged_in"],
                     "claude_auth_method": claude_auth["auth_method"],
                     "claude_auth_subscription_type": claude_auth["subscription_type"],
+                    "redis_offload": {
+                        "label": "drain-loop idle-check latency",
+                        "p95_latency_s": get_redis_latency_p95(),
+                        "max_latency_s": get_redis_latency_max(),
+                        "last_latency_s": get_last_redis_latency(),
+                    },
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,
@@ -741,6 +814,7 @@ def create_app() -> FastAPI:
 
         bridge = _get_bridge_health()
         worker = _get_worker_health()
+        reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
         return JSONResponse(
@@ -759,6 +833,11 @@ def create_app() -> FastAPI:
                 "worker_bridge_contract_stale": worker.get("bridge_contract_stale"),
                 "worker_tool_budget_tripped": worker.get("tool_budget_tripped"),
                 "worker_tool_budget_resolution_errors": worker.get("tool_budget_resolution_errors"),
+                # Additive-only (issue #1828): out-of-process reflection scheduler.
+                "reflection_scheduler": reflection_scheduler["status"],
+                "reflection_scheduler_tick_age_s": reflection_scheduler["tick_age_s"],
+                "reflection_scheduler_restart_count": reflection_scheduler["restart_count"],
+                "reflection_scheduler_last_start_age_s": reflection_scheduler["last_start_age_s"],
                 "email": email["status"],
                 "email_last_seen_s": email["age_s"],
                 "email_alert": email.get("alert"),
@@ -797,6 +876,14 @@ def create_app() -> FastAPI:
         else:
             worker_label = "worker"
 
+        # Reflection scheduler (out-of-process, issue #1828). A fresh tick with a
+        # near-zero last_start_age_s reads as a crash loop — surface it in the label.
+        reflection = _get_reflection_scheduler_health()
+        if reflection["status"] in ("ok", "running"):
+            reflection_label = f"reflections{_format_uptime(reflection['tick_age_s'])}"
+        else:
+            reflection_label = "reflections"
+
         email = _get_email_health()
         if email["status"] in ("ok", "running"):
             email_label = f"email{_format_uptime(email['age_s'])}"
@@ -816,6 +903,7 @@ def create_app() -> FastAPI:
             f'<span class="badge badge-{email["status"]}">{email_label}</span>'
             f'<span class="health-label">Services</span>'
             f'<span class="badge badge-{worker["status"]}">{worker_label}</span>'
+            f'<span class="badge badge-{reflection["status"]}">{reflection_label}</span>'
             f'<span class="badge badge-ok">web</span>'
             f'<span class="health-label">Auth</span>'
             f'<span class="badge badge-{claude_auth["status"]}">{claude_label}</span>'

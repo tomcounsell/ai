@@ -917,13 +917,22 @@ def _clear_reclaim_dedup(redis_client, host: str) -> None:
     """Clear per-owner reclaim-request dedup markers on a healthy tick (Fix #5).
 
     So a future re-leak of a previously-requested owner re-triggers a fresh
-    reclaim-request. Fail-quiet; orphaned markers also age out via their TTL.
+    reclaim-request. Enumerates via a non-blocking ``scan_iter`` and deletes in
+    bounded batches (the old ``KEYS`` scan blocked the Redis event loop at
+    scale). Fail-quiet; orphaned markers also age out via their TTL. These are
+    plain watchdog marker keys (prefix ``WORKER_SLOT_RECLAIM_DEDUP_KEY_PREFIX``),
+    not Popoto-managed model keys, so raw ``scan_iter``/``delete`` is permitted.
     """
     try:
         pattern = f"{WORKER_SLOT_RECLAIM_DEDUP_KEY_PREFIX}{host}:*"
-        keys = list(redis_client.keys(pattern))
-        if keys:
-            redis_client.delete(*keys)
+        batch: list = []
+        for key in redis_client.scan_iter(match=pattern, count=100):
+            batch.append(key)
+            if len(batch) >= 500:
+                redis_client.delete(*batch)
+                batch = []
+        if batch:
+            redis_client.delete(*batch)
     except Exception as e:
         logger.debug("[watchdog] reclaim-dedup clear failed (non-fatal): %s", e)
 

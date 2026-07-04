@@ -28,7 +28,7 @@ Worker startup calls `run_cleanup()` from `scripts/popoto_index_cleanup` to rebu
 
 ### Cleanup Reflection
 
-`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` (worker-embedded in `python -m worker`) dispatches this daily while the worker process runs.
+`scripts/popoto_index_cleanup.py` provides a `run_cleanup()` function registered as the `redis-index-cleanup` reflection in `config/reflections.yaml`. The `ReflectionScheduler` dispatches this daily from its own out-of-process subprocess (`python -m reflections`) — see [Reflection Scheduler Subprocess](reflection-scheduler-subprocess.md).
 
 ### How `run_cleanup()` Works
 
@@ -44,7 +44,7 @@ Each model is processed independently -- one model failure does not abort the sw
 | Path | Trigger | Scope |
 |------|---------|-------|
 | Worker startup | `python -m worker` | All models via `run_cleanup()` |
-| ReflectionScheduler | Worker scheduler tick (daily) | All models via `run_cleanup()` |
+| ReflectionScheduler | Reflection subprocess tick (daily, `python -m reflections`) | All models via `run_cleanup()` |
 
 ## Concurrency Safety
 

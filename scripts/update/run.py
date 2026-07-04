@@ -1449,6 +1449,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             else:
                 result.warnings.append("Worker plist install failed")
 
+        # Install/reload the reflection-scheduler subprocess (issue #1828).
+        # UNCONDITIONAL (NOT under `if has_bridge:`) — the reflection subprocess must
+        # install wherever the worker installs, and the shell script self-gates on
+        # has_worker_role(). Placed AFTER the worker install/restart block is
+        # load-bearing for cutover ordering: the new worker (no in-process scheduler)
+        # comes up first, THEN this bootstraps the plist (RunAtLoad starts the
+        # subprocess). Worker-first → at most a brief zero-scheduler window, never
+        # two schedulers ticking at once.
+        if (project_dir / "com.valor.reflection-worker.plist").exists():
+            if service.install_reflection_worker(project_dir):
+                log("Reflection-worker service installed/verified", v)
+            else:
+                log(
+                    "WARN: Reflection-worker service install failed or not supported",
+                    v,
+                    always=True,
+                )
+                result.warnings.append("Reflection-worker service install failed")
+
         # Install nightly-tests launchd service on bridge machines.
         # The install script self-gates on has_bridge_role() — it skips
         # gracefully and removes stale plists on non-bridge machines.
