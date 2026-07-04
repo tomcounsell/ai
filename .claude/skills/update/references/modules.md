@@ -103,27 +103,12 @@ r2 = mcp_byob.verify_byob_mcp(write=True)
 - **Step 4.8**: `mcp_memory.verify_memory_mcp()` -- runs every invocation.
 - **Step 4.9**: `mcp_byob.verify_byob_mcp()` -- runs every invocation.
 
-For BYOB binary updates (rebuild ~/.byob/ when the pinned commit changes
-in `config/byob_pin.json`) and bcu binary updates (re-download + SHA verify
-against `config/bcu_pin.json` when the opt-in sentinel
-`~/.config/valor/computer-use-enabled` is present), see the upcoming
-implementation in `scripts/update/run.py` and its planned post-install
-end-to-end canary probe (`byob_canary.js`, not yet built). Pins are bumped only via:
-
-- `/update --bump-byob` -- next BYOB upstream commit
-- `/update --bump-bcu` -- next bcu release tag
-
-Rollback paths:
-- BYOB: snapshot the entire `~/.byob/` tree to `~/.byob.prev/` before
-  `git pull && bun install && bun run setup`. BYOB v0.3+ is a workspace
-  monorepo with build artifacts under `packages/*/output/` and
-  `packages/*/dist/` — there is no single top-level `dist/` to copy.
-  Restore by `rm -rf ~/.byob && mv ~/.byob.prev ~/.byob` on canary
-  failure (defined as `cd ~/.byob && bun run doctor` reporting any red
-  status, or the post-install end-to-end probe — once
-  `byob_canary.js` is built — failing within 30s).
-- bcu: `~/.local/bin/background-computer-use.prev` symlink, restored on
-  `/v1/list_apps` canary failure.
+Binary updates (rebuilding `~/.byob/` when the pin in `config/byob_pin.json`
+changes; re-downloading bcu against `config/bcu_pin.json` when the opt-in
+sentinel `~/.config/valor/computer-use-enabled` is present) are designed but
+not yet implemented in `scripts/update/` — see
+`docs/features/byob-browser-control.md` and `docs/features/computer-use.md`
+for the design (including `--bump-byob` / `--bump-bcu` and rollback paths).
 
 ## Service Management (`service.py`)
 
@@ -145,4 +130,11 @@ worker = service.get_worker_status(project_dir)
 # Install/restart worker
 service.install_worker(project_dir)   # Installs standalone worker service
 service.restart_worker(project_dir)
+
+# Install/reload the reflection-scheduler subprocess (issue #1828)
+service.install_reflection_worker(project_dir)
+# Delegates to scripts/install_reflection_worker.sh (has_worker_role()
+# self-gate, fail-open). Returns True on rc=0. Called by run.py right
+# after the worker install, guarded only on plist existence — NOT under
+# `if has_bridge:` (the subprocess must run everywhere the worker does).
 ```

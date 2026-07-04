@@ -30,7 +30,7 @@ A few things are **one-time, per-machine human steps** that the auto-update cron
 
 1. Verifies the PR was merged to main
 2. Confirms the local machine has the merge commit
-3. Checks that the bridge restarted cleanly on the local machine
+3. Checks that the bridge and worker are healthy on the local machine
 4. Reports deployment status and what other machines will pick up
 
 ## Variables
@@ -64,13 +64,14 @@ git checkout main && git pull
 git log --oneline -1 $MERGE_COMMIT
 ```
 
-## Step 3: Verify Local Bridge Health
+## Step 3: Verify Local Service Health
 
 ```bash
-# Check bridge is running
+# Check bridge and worker are running
 ./scripts/valor-service.sh status
+./scripts/valor-service.sh worker-status
 
-# Check for errors since the merge commit timestamp
+# Check recent bridge errors
 tail -20 logs/bridge.log | grep -c ERROR
 
 # Verify Telegram connection
@@ -121,6 +122,7 @@ else:
 
 ### Local Machine
 - Bridge status: {running/restarted/failed}
+- Worker status: {running/failed}
 - Telegram connected: {yes/no}
 - Errors since deploy: {count}
 

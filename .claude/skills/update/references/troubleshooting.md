@@ -55,3 +55,20 @@ tail -50 ~/src/ai/logs/worker_error.log
 # Reinstall plist
 ~/src/ai/scripts/install_worker.sh
 ```
+
+## Reflection scheduler dead or stale
+
+The scheduler is its own launchd subprocess (`python -m reflections`, label `com.valor.reflection-worker`) — separate from the worker since issue #1828.
+
+```bash
+# Check logs
+tail -50 ~/src/ai/logs/reflection_worker.log
+
+# Validate the registry loads (exits 0 on success)
+cd ~/src/ai && .venv/bin/python -m reflections --dry-run
+
+# Reinstall/reload plist (worker-role gated, fail-open)
+~/src/ai/scripts/install_reflection_worker.sh
+```
+
+Health signals on `/dashboard.json`: a stale `data/last_reflection_tick` mtime means the scheduler is dead; `reflection_scheduler_last_start_age_s` pinned near zero means it is crash-looping (launchd keeps respawning it). See `docs/features/reflection-scheduler-subprocess.md`.
