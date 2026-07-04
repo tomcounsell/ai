@@ -624,6 +624,36 @@ def create_app() -> FastAPI:
             return {"status": "error", "age_s": None, "alert": None, "alert_detail": None}
         return {"status": "running", "age_s": None, "alert": None, "alert_detail": None}
 
+    def _get_archive_health() -> dict:
+        """Session archive (data/session_archive.db) freshness -- mirrors _get_email_health.
+
+        Delegates entirely to `agent.session_archive.get_archive_status()`, which
+        never raises (any error -- missing file, corrupt DB -- returns a
+        `healthy=False` shape). This wrapper adds a coarse `status` label
+        (ok/stale/missing) for the same three-state shape the other health
+        blocks (bridge/worker/email) use, so dashboard/health consumers don't
+        need to re-derive it from `exists`/`healthy` themselves.
+
+        See docs/plans/session-archive-sqlite.md Task 4 (operator surfaces).
+        """
+        from agent.session_archive import get_archive_status
+
+        status = get_archive_status()
+        if not status["exists"]:
+            label = "missing"
+        elif status["healthy"]:
+            label = "ok"
+        else:
+            label = "stale"
+
+        return {
+            "status": label,
+            "healthy": status["healthy"],
+            "row_count": status["row_count"],
+            "last_export_age_s": status["last_export_age_s"],
+            "kind": status["kind"],
+        }
+
     def _session_to_json(s) -> dict:
         """Serialize a PipelineProgress to JSON dict for the dashboard API."""
         result = {
@@ -746,6 +776,7 @@ def create_app() -> FastAPI:
         reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
+        archive = _get_archive_health()
         sessions = get_all_sessions()
         reflections = get_all_reflections()
         analytics = get_analytics_summary()
@@ -796,6 +827,9 @@ def create_app() -> FastAPI:
                         "max_latency_s": get_redis_latency_max(),
                         "last_latency_s": get_last_redis_latency(),
                     },
+                    # Additive-only (issue #1825): AgentSession SQLite secondary
+                    # store freshness -- see docs/plans/session-archive-sqlite.md.
+                    "archive": archive,
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,
@@ -817,6 +851,7 @@ def create_app() -> FastAPI:
         reflection_scheduler = _get_reflection_scheduler_health()
         email = _get_email_health()
         claude_auth = _get_claude_auth_health()
+        archive = _get_archive_health()
         return JSONResponse(
             {
                 "webserver": "ok",
@@ -846,6 +881,12 @@ def create_app() -> FastAPI:
                 "claude_auth_logged_in": claude_auth["logged_in"],
                 "claude_auth_method": claude_auth["auth_method"],
                 "claude_auth_subscription_type": claude_auth["subscription_type"],
+                # Additive-only (issue #1825): AgentSession SQLite secondary
+                # store freshness -- see docs/plans/session-archive-sqlite.md.
+                "archive": archive["status"],
+                "archive_healthy": archive["healthy"],
+                "archive_row_count": archive["row_count"],
+                "archive_last_export_age_s": archive["last_export_age_s"],
             }
         )
 

@@ -212,6 +212,76 @@ class TestEmailHealthAlerts:
         assert health["email_alert"] == "auth_failed"
 
 
+class TestArchiveHealth:
+    """The dashboard's ``archive`` health block surfaces
+    ``agent.session_archive.get_archive_status()`` -- issue #1825,
+    docs/plans/session-archive-sqlite.md Task 4 (operator surfaces)."""
+
+    def test_dashboard_json_has_archive_block(self, client):
+        from unittest.mock import patch
+
+        fake_status = {
+            "db_path": "/tmp/session_archive.db",
+            "exists": True,
+            "row_count": 3,
+            "last_export_ts": 1700000000.0,
+            "last_export_age_s": 5.0,
+            "kind": "periodic",
+            "healthy": True,
+        }
+        with patch("agent.session_archive.get_archive_status", return_value=fake_status):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        health = response.json()["health"]
+        assert "archive" in health
+        archive = health["archive"]
+        assert archive["status"] == "ok"
+        assert archive["healthy"] is True
+        assert archive["row_count"] == 3
+        assert archive["last_export_age_s"] == 5.0
+        assert archive["kind"] == "periodic"
+
+    def test_dashboard_json_archive_degrades_gracefully_when_missing(
+        self, client, tmp_path, monkeypatch
+    ):
+        """A nonexistent archive DB (e.g. fresh machine, worker never ran) must
+        never 500 the dashboard -- it surfaces a clean 'missing' status."""
+        missing_path = tmp_path / "does-not-exist" / "session_archive.db"
+        monkeypatch.setenv("SESSION_ARCHIVE_DB_PATH", str(missing_path))
+
+        response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        archive = response.json()["health"]["archive"]
+        assert archive["status"] == "missing"
+        assert archive["healthy"] is False
+        assert archive["last_export_age_s"] is None
+        assert archive["row_count"] == 0
+
+    def test_health_endpoint_surfaces_archive_flat_keys(self, client):
+        from unittest.mock import patch
+
+        fake_status = {
+            "db_path": "/tmp/session_archive.db",
+            "exists": True,
+            "row_count": 7,
+            "last_export_ts": 1700000000.0,
+            "last_export_age_s": 12.0,
+            "kind": "terminal",
+            "healthy": True,
+        }
+        with patch("agent.session_archive.get_archive_status", return_value=fake_status):
+            response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["archive"] == "ok"
+        assert data["archive_healthy"] is True
+        assert data["archive_row_count"] == 7
+        assert data["archive_last_export_age_s"] == 12.0
+
+
 class TestRedisOffloadDashboardMetric:
     """The dashboard's ``health.redis_offload`` block surfaces the drain-loop
     idle-check latency gauges from agent/redis_offload.py — issue #1826."""
