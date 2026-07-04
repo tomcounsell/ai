@@ -150,8 +150,10 @@ Gather relevant external context before planning. This surfaces current document
    addressed the same problem, also fill the **Why Previous Fixes Failed** section.
    **Skip if:** Small appetite AND greenfield work (no existing code being modified).
 
-4.5. **xfail test search** - For bug fixes, search the test suite for xfail markers related to the bug.
-   These represent tests that document the bug but are marked as expected failures.
+4.5. **Expected-failure test search** - For bug fixes, search the test suite for expected-failure
+   markers related to the bug (pytest `xfail` in Python; the equivalent known-failure/skip
+   mechanism in the repo's test framework). These represent tests that document the bug but are
+   marked as expected failures. Python example:
    ```bash
    # Search for xfail markers in tests (both decorator and runtime forms)
    grep -rn 'pytest.mark.xfail\|pytest.xfail(' tests/ --include="*.py" | head -20
@@ -235,7 +237,7 @@ Before writing the plan, resolve verifiable assumptions through time-boxed inves
 
 **Classification is mandatory** - every plan MUST include a `type:` field (bug, feature, or chore).
 
-**Auto-Classification**: When a message arrives via Telegram, the bridge auto-classifies it. Check if `classification_type` is available from the session context. If available, use it as the default `type:` value. The user can always override.
+**Auto-Classification**: If the invoking environment supplies a pre-computed classification (e.g. the context file declares a `classification_type` carried in session context), use it as the default `type:` value. The user can always override.
 
 Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 

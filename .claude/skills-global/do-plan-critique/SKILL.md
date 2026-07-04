@@ -1,6 +1,6 @@
 ---
 name: do-plan-critique
-description: "Use when reviewing a plan before build. Runs 1 (LITE) or 3 (FULL) critics selected by a triage step plus automated structural checks. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
+description: "Use when reviewing a plan before build. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
 argument-hint: "<plan-path-or-issue-number>"
 context: fork
 ---

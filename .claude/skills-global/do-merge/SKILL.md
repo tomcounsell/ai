@@ -1,6 +1,6 @@
 ---
 name: do-merge
-description: Use when merging a pull request that has cleared the SDLC pipeline. Runs the deterministic verify-then-merge gate — confirms the PR is OPEN, mergeable, CI-green, REVIEW-approved, and links its tracking issue — then authorizes and squash-merges. Triggered by 'merge this PR', 'do-merge', or automatically by /sdlc at the MERGE stage.
+description: "Use when merging a pull request that has cleared the SDLC pipeline. Triggered by 'merge this PR', 'do-merge', or automatically by /sdlc at the MERGE stage."
 ---
 
 # Do-Merge (Deterministic Merge Gate)

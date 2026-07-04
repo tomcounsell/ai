@@ -4,7 +4,11 @@ Steps 6-9 of the build workflow: documentation gate, PR creation, worktree clean
 
 ## Step 6: Documentation Gate
 
-After all validation tasks pass, run the documentation lifecycle checks. Run doc
+After review passes, advance to the `document` stage (if the context file
+declares a state machine) and run the documentation lifecycle checks. This is
+the Document phase of the pipeline: `Plan → Branch → Implement → Test → Review →
+**Document** → PR` — documentation is written and validated here, after
+implementation is reviewed, not interleaved with implementation. Run doc
 checks inside the worktree so `git diff` sees the session branch changes — use a
 `(cd $TARGET_REPO/.worktrees/{slug} && ...)` subshell so the orchestrator's CWD
 stays in the main repo.
@@ -51,7 +55,7 @@ echo "Commits on session/{slug}: $COMMIT_COUNT"
 
 ## Step 7: Create Pull Request
 
-After documentation gate passes and pre-PR verification succeeds, push and create the PR:
+After documentation gate passes and pre-PR verification succeeds, advance to the `pr` stage (if the context file declares a state machine), then push and create the PR:
 
 ```bash
 git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
@@ -118,10 +122,14 @@ git -C "$TARGET_REPO" branch -D session/{slug} 2>/dev/null || true
 
 ## Step 7.6: Documentation Cascade
 
-After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
+After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number AND plan context so the cascade understands the feature intent:
 
 ```
 /do-docs {PR-number}
+
+Plan: {PLAN_PATH}
+Goal: [1-2 sentence summary from plan]
+Issue: #{issue-number}
 ```
 
 This invokes the cascade skill defined in `.claude/skills-global/do-docs/SKILL.md`, which:
@@ -157,9 +165,10 @@ After plan migration completes, include the PR URL prominently in your final res
 ### Definition of Done
 - [x] Built: All code implemented and working
 - [x] Tested: Unit tests passing, integration tests passing
-- [x] Documented: Docs created per plan requirements (validated by docs gate)
+- [x] Reviewed: Review passed (no blocking issues)
+- [x] Documented: Docs created after review (validated by docs gate)
 - [x] Quality: the repo's lint/format checks pass
-- [x] Plans migrated: Plan moved from docs/plans/ to completed state
+- [x] Plan retained: Plan stays at docs/plans/ until `/do-merge` migrates it post-merge
 
 ### Task Summary
 | Task | Agent | Status | Test Iterations | Notes |

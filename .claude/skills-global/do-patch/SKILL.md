@@ -1,6 +1,6 @@
 ---
 name: do-patch
-description: "Apply a targeted fix to failing tests or review blockers. Use when the user says 'patch this', 'fix the failures', 'fix the blockers', or 'do-patch'. Also called automatically by do-build at test-fail and review-blocker lifecycle steps."
+description: "Apply a targeted fix to failing tests or review blockers. Triggered by 'patch this', 'fix the failures', 'fix the blockers', 'do-patch', or by do-build at test-fail and review-blocker steps."
 argument-hint: "<description-of-what-to-patch>"
 ---
 
@@ -171,20 +171,20 @@ properly if the fix actually satisfies a criterion.
 
 ### Step 3: Re-run Tests to Verify
 
-After the builder agent reports completion, run tests and lint directly — do NOT invoke `/do-test` (parallel dispatch is overkill for patch verification):
+After the builder agent reports completion, run the repo's test suite and lint directly — do NOT invoke `/do-test` (parallel dispatch is overkill for patch verification). The context file declares the test command; generic default is the repo's standard runner, e.g.:
 
 ```bash
-# Run full test suite
+# Run full test suite (Python example — use cargo test / npm test / etc. per the repo)
 pytest tests/ -v --tb=short
 ```
 
-Then run the repo's lint/format checks (commands per the context file; generic default `ruff check .` / `ruff format --check .` when available, else skip).
+Then run the repo's lint/format checks (commands per the context file; generic default `ruff check .` / `ruff format --check .` for Python when available, else skip).
 
 Parse the results:
-- **pytest exit code 0** AND **lint passes**: All tests pass — proceed to Step 4
-- **pytest exit code 1**: Some tests failed — proceed to Step 5 (retry or report stuck)
-- **pytest exit code 2**: Test execution error — report the error and proceed to Step 5
-- **pytest exit code 5**: No tests collected — treat as pass (no tests to break)
+- **Test runner exit code 0** AND **lint passes**: All tests pass — proceed to Step 4
+- **Non-zero exit (test failures)**: Proceed to Step 5 (retry or report stuck)
+- **Non-zero exit (execution error, e.g. pytest exit code 2)**: Report the error and proceed to Step 5
+- **"No tests collected" (e.g. pytest exit code 5)**: Treat as pass (no tests to break)
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
