@@ -199,6 +199,71 @@ class TestFinalizeSessionProfileHook:
 
 
 # ===================================================================
+# finalize_session — session_archive export hook (docs/plans/session-archive-sqlite.md Task 2)
+# ===================================================================
+
+
+class TestFinalizeSessionArchiveHook:
+    """Tests for the terminal-transition session_archive.export_session() hook."""
+
+    def test_archive_export_called_after_save_on_terminal_status(self):
+        """export_session is called with the session after finalize_session runs
+        to a terminal status."""
+        session = _make_session()
+        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(
+                sys.modules,
+                {
+                    "tools.session_tags": mock_auto_tag_module,
+                    "models.task_type_profile": mock_profile_module,
+                },
+            ),
+            patch("agent.session_archive.export_session") as mock_export,
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+
+            finalize_session(session, "completed")
+
+        mock_export.assert_called_once_with(session)
+
+    def test_archive_export_failure_does_not_break_finalization(self):
+        """A raising export_session must not prevent finalize_session from
+        completing or propagate out of it."""
+        session = _make_session()
+        mock_auto_tag_module, mock_profile_module = _build_mock_modules()
+
+        with (
+            patch("models.session_lifecycle.get_authoritative_session") as mock_cas,
+            patch.dict(
+                sys.modules,
+                {
+                    "tools.session_tags": mock_auto_tag_module,
+                    "models.task_type_profile": mock_profile_module,
+                },
+            ),
+            patch(
+                "agent.session_archive.export_session",
+                side_effect=RuntimeError("disk full"),
+            ) as mock_export,
+        ):
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+            mock_cas.return_value = mock_fresh
+
+            # Must not raise -- finalization must complete despite the archive failure.
+            finalize_session(session, "completed")
+
+        mock_export.assert_called_once_with(session)
+        assert session.status == "completed"
+        session.save.assert_called()
+
+
+# ===================================================================
 # finalize_session — idempotency
 # ===================================================================
 
