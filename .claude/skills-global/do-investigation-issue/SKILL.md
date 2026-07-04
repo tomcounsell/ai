@@ -57,34 +57,11 @@ OWNER_TS=$(date +%s)
 ANCHOR="draft-owner: pid=${OWNER_PID} ts=${OWNER_TS}"
 
 # Write the anchor as the first line via printf (expands ${ANCHOR}),
-# then append the body with a QUOTED heredoc so the {component}/{date}/etc.
-# placeholders remain literal for the agent to substitute (no shell expansion).
+# then append the body with a QUOTED heredoc so any literal ${...} or
+# backticks in the body stay unexpanded.
 printf '<!-- %s -->\n' "${ANCHOR}" > "$DRAFT"
 cat >> "$DRAFT" << 'BODY'
-## Investigation Finding
-
-**Component:** {component}
-**Detected:** {date} ({source — e.g., "amux.io research", "daily-integration-audit", "observed in production"})
-**Status:** {Unverified / Observed-once / Persistent}
-
-## Symptoms
-{What was observed or what the research describes. Be specific — include error strings, log lines, or quotes verbatim.}
-
-## Diagnostic Output
-```
-{Raw evidence: log output, error messages, code excerpts, or external source quotes}
-```
-
-## Steps Attempted
-{What remediation was tried, if any. "None — proactive investigation." is a valid answer.}
-
-## Impact
-{What functionality breaks or degrades if this is a real defect. Who is affected.}
-
-## Next Steps
-- [ ] {Specific file or function to inspect}
-- [ ] {Specific experiment or test to run}
-- [ ] {Specific behavior to confirm or rule out}
+…replace this heredoc with the filled-in TEMPLATE.md body (every section completed, no placeholders left)…
 BODY
 
 # Verify the anchor BEFORE publishing. Mismatch = a foreign agent clobbered

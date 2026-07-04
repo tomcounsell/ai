@@ -7,7 +7,7 @@ Mechanical work: start the app and capture screenshots of UI changes.
 Screenshot capture runs against the user's real, logged-in Chrome via
 BYOB MCP (`mcp__byob__browser_*`). Public preview deploys and
 authenticated staging URLs are screenshotted the same way — there is
-no anonymous-headless fallback (retired in #1256).
+no anonymous-headless fallback.
 
 ## Context Variables
 
@@ -17,9 +17,8 @@ no anonymous-headless fallback (retired in #1256).
 
 PR branch must already be checked out (via checkout sub-skill).
 
-The calling session must have `requires_real_chrome=True` (set by
-bridge inference for SDLC runs, or the `--needs-real-chrome` CLI flag
-for manual runs). Verify the BYOB extension is connected before
+If the context file declares a real-Chrome session requirement (see the parent
+SKILL.md "Surface"), honor it. Verify the browser MCP is connected before
 screenshotting:
 
 ```text

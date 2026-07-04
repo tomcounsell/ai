@@ -8,7 +8,7 @@ allowed-tools: mcp__byob__*, Bash(gh:*), Bash(git:*), Bash(python:*), Bash(jq:*)
 
 # PR Review
 
-Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing screenshots of UI changes. Validates against plan requirements and captures visual proof before approval.
+Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing visual proof of UI changes before approval.
 
 ## Repo Context Probe
 
@@ -44,13 +44,6 @@ queries always use the operator's credential.
 ## Cross-Repo Resolution
 
 By default `gh` targets the repository of the current working directory. If the context file declares a cross-repo targeting mechanism (e.g. a `GH_REPO` env var), honor it so `gh` commands hit the intended repository.
-
-## When to Use
-
-- After `/do-build` creates a PR
-- When a PR needs thorough review before merge
-- To validate UI changes visually with screenshots
-- To generate structured review reports with issue severity classification
 
 ## Variables
 
@@ -110,27 +103,14 @@ Load `sub-skills/checkout.md` and run its steps in order:
 
 2. **Mergeability Preflight** — one cheap `gh pr view --json mergeable,mergeStateStatus,state`
    call (retry once after 2s on `UNKNOWN`) that catches objective blockers before
-   any subjective review:
-   - `state != OPEN` → emit `PR_CLOSED` verdict and stop.
-   - `mergeable == CONFLICTING` or `mergeStateStatus == DIRTY` → emit
-     `BLOCKED_ON_CONFLICT` verdict, cite the `mergeStateStatus`, ask for a rebase,
-     and stop.
-   - `mergeable == UNKNOWN` after retry → treat conservatively as
-     `BLOCKED_ON_CONFLICT`: post `gh pr comment` only and stop. Never post a code
-     review when GitHub hasn't finished evaluating mergeability.
-   - `mergeStateStatus == BEHIND` → note it and proceed (branch needs update but
-     has no conflicts).
-   - Otherwise (including `UNSTABLE`, `HAS_HOOKS`, `CLEAN`, `BLOCKED`) → proceed
-     with full code review.
+   any subjective review. `checkout.md` carries the full decision table; the
+   invariants: `state != OPEN` → `PR_CLOSED`; `CONFLICTING`/`DIRTY` (or still
+   `UNKNOWN` after retry) → `BLOCKED_ON_CONFLICT`; `BEHIND` is informational —
+   proceed.
 
    On a short-circuit, post the comment via `gh pr comment` (never
    `gh pr review`), emit the matching OUTCOME from `outcome-contract.md`, and
    exit — do NOT checkout, read the diff, or produce a code review body.
-
-   This preflight is complementary to the subjective rubric added by #1045:
-   #1045 catches reviews that APPROVED a PR without the reviewer actually
-   evaluating acceptance criteria; this preflight (#1112) catches reviews that
-   APPROVED a PR that mechanically cannot merge.
 
 3. **Checkout the PR branch (mandatory before any file reads)** — clean git
    state (abort in-progress merge/rebase, stash), then `gh pr checkout`. This
@@ -234,19 +214,6 @@ entirely.
 
 **Screenshots: {count}** captured -> `generated_images/pr-$PR_NUMBER/`
 
-## Integration Notes
-
-**Works with:**
-- `/do-build` - Reviews PRs created by the build workflow
-- Repo `## Running` README section — start server per the project's own docs
-- BYOB MCP (`mcp__byob__browser_*`) - Handles browser automation and screenshot capture
-- `gh` CLI - Fetches PR data and posts reviews
-
-**Screenshot storage:**
-- Saved to `generated_images/pr-$PR_NUMBER/` directory
-- Auto-detected and sent via Telegram bridge (when one exists)
-- Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
-
 ## Outcome Contract
 
 After posting the review, verifying it was posted, and recording the verdict if
@@ -271,13 +238,11 @@ generic case: one reviewer, one verdict.
 5. **Review identity follows the context file.** Generic default: post under the operator's `gh` credential. If the context file declares a bot/service-account identity and marker, apply it to the single review-posting subprocess only.
 6. **`BLOCKED_ON_CONFLICT` and `PR_CLOSED` MUST NEVER call `gh pr review`.** These preflight short-circuit paths use `gh pr comment` exclusively. A formal review API call on a conflicted or closed PR encodes a false code-review verdict.
 7. **Visual proof is a hard gate for PRs with UI changes.** If any HTML, CSS, JS/TS, JSX/TSX, Vue, or template files are in the diff, the review MUST capture at least one browser-MCP screenshot before posting an approval. If screenshots were not captured (browser unavailable, app failed to start, or step was skipped), the review MUST post as `CHANGES_REQUESTED` with a blocker citing the missing visual proof. Visual bugs in frontend changes are invisible to static analysis.
-8. **If the context file declares a verdict substrate, recording the verdict (Step 5) is mandatory and terminal.** Emitting the OUTCOME block does NOT complete the skill — the `sdlc-tool verdict record` call (and, on APPROVED, the co-written completion marker) must run first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. This is the #1 local-pipeline failure mode — do not exit until the verdict reads back.
+8. **If the context file declares a verdict substrate, recording the verdict (Step 5) is mandatory and terminal.** Emitting the OUTCOME block does NOT complete the skill — the declared verdict-record call (and, on APPROVED, the co-written completion marker) must run first. Locally-run pipelines have no hooks to record on your behalf; skipping this leaves the router blind and stalls it in a re-review loop. This is the #1 local-pipeline failure mode — do not exit until the verdict reads back.
 
 ## Best Practices
 
 1. **Always read the plan first**: The plan is the source of truth for what should have been built
 2. **Focus on correctness over style**: Don't nitpick formatting if the code works
-3. **Quote actual code in every finding**: Include the verbatim code snippet, not a paraphrase — this makes hallucinated findings self-evident
-4. **Verify before posting**: Every blocker must cite a file you read and code you saw
-5. **Classify severity honestly**: Don't mark blockers as tech debt to speed up merge
-6. **Capture key UI paths**: 1-3 screenshots typical, focus on changed functionality
+3. **Classify severity honestly**: Don't mark blockers as tech debt to speed up merge
+4. **Capture key UI paths**: 1-3 screenshots typical, focus on changed functionality

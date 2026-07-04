@@ -18,15 +18,14 @@ Loaded when the project uses Python (pytest, pyproject.toml, setup.py, etc.).
 
 ### Lint Tools
 
+Generic default (when the repo has no declared lint commands):
+
 ```bash
 python -m ruff check .
-black --check .
+python -m ruff format --check .
 ```
 
-Optional (if configured in project):
-```bash
-mypy . --ignore-missing-imports
-```
+If the project configures a different linter/formatter (`black`, `flake8`, `mypy`), run what the project configures instead.
 
 ### Changed-File Mapping
 

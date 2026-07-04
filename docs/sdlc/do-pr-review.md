@@ -49,6 +49,18 @@ sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSU
 python -c "from agent.verification_parser import parse_verification_table, run_checks, format_results; ..."
 ```
 
+**Plan-checkbox updater (post-review § 2.5).** Sync each rubric-judged criterion with:
+
+```bash
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer tick   "$PLAN_PATH" --criterion "$TEXT"   # rubric=pass
+"${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"   # rubric=fail or acknowledged
+```
+
+Exit 0 with a real mutation → `PLAN_MUTATED=true`. Exit 2 semantics (all preserve existing checkbox state):
+- `MATCH_AMBIGUOUS` / `MATCH_AMBIGUOUS_SECTION` → append `> Could not auto-tick "{criterion}" — please review manually.`
+- `MATCH_NOT_FOUND` when the rubric judged pass/fail → append `> Rubric judged criterion "{text}" {verdict} but no matching item in plan — investigate.`
+- `NO_CRITERIA_SECTION` → one-line warning and skip (some chore plans legitimately omit the section).
+
 **Verdict recording (global skill Step 6.6).** This runs **before** the OUTCOME
 block, not after it. In a local pipeline run (`/do-sdlc`) there are no hooks to
 write markers/verdicts for you — this `sdlc-tool` call is the ONLY thing that

@@ -56,20 +56,16 @@ Parse `TEST_ARGS` to determine what to run:
 | `performance` | Run `tests/performance/` + lint |
 | `tests/unit/test_bridge_logic.py` | Run that specific file + lint |
 | `--changed` | Detect changed files, map to test files, run those + lint |
-| `--no-lint` | Skip the repo's lint/format checks (combinable with any above) |
-| `unit --no-lint` | Run `tests/unit/` without lint |
-| `--changed --no-lint` | Changed-file tests without lint |
+| `--no-lint` | Skip the repo's lint/format checks |
 | `--direct` | Force direct execution, skip parallel agent dispatch |
-| `unit --direct` | Run `tests/unit/` directly (combinable with any target) |
 | `frontend <url> "<scenario>"` | Run a browser-based UI test via `frontend-tester` subagent (see `special-targets.md`) |
 | `happy-paths` | Run the repo's deterministic happy-path runner directly via bash (declared in the context file; see `special-targets.md`). Skip if no such runner is declared. |
 
 **Parsing rules:**
-1. Extract flags: `--changed`, `--no-lint`
+1. Extract flags: `--changed`, `--no-lint`, `--direct` — each is combinable with any target
 2. If target is `frontend` or `happy-paths`, load `special-targets.md` and route there. Neither runs the unit-test runner.
 3. Whatever remains is the **target**: a test type name (`unit`, `integration`, `e2e`, `tools`, `performance`) or a file/directory path
 4. If no target and no `--changed`, target is "all"
-5. Extract `--direct` flag alongside `--changed` and `--no-lint`
 
 ## Changed-File Detection (`--changed`)
 
@@ -172,7 +168,7 @@ All commands run relative to the current working directory. Do not attempt to de
 - From `/do-build`: CWD is already the worktree -- commands run there
 - Directly by user: CWD is the main repo -- commands run there
 
-Simply use the CWD as-is. Run `pwd` once at the start to confirm and log it.
+Simply use the CWD as-is.
 
 ## Error Handling
 
@@ -203,4 +199,3 @@ This structured output is parsed by the repo's pipeline harness (Tier 0) before 
 - No temporary files in the repo -- use `/tmp` for any scratch work
 - Do not modify any source or test files -- this skill is read-only (it runs tests, it does not fix them)
 - Keep the raw test-runner output visible -- developers need to see it for debugging
-- For pytest, the `-v --tb=short` flags provide verbose test names with concise tracebacks

@@ -238,9 +238,7 @@ file declares a verification-table runner, use it instead.
 
 ### Pre-Verdict Checklist
 
-Before writing the verdict, evaluate each of the following items. Every item must receive a `PASS`, `FAIL`, or `N/A` verdict. No blank entries are allowed. Items marked `FAIL` automatically become findings.
-
-Every item MUST have a verdict. Blank verdicts invalidate the review.
+Before writing the verdict, evaluate each of the following items. Every item must receive a `PASS`, `FAIL`, or `N/A` verdict — blank verdicts invalidate the review. Items marked `FAIL` automatically become findings.
 
 Emit the completed checklist as a bulleted list in the review comment. Format: `- **N. Item name** — PASS/FAIL/N/A — *notes*`. Keep one line per item.
 
@@ -261,7 +259,7 @@ Emit the completed checklist as a bulleted list in the review comment. Format: `
 - **12. Docs updated for user-facing changes** — PASS/FAIL/N/A — *notes*
 ```
 
-An "Approved" verdict requires all 12 items evaluated (no blank verdicts). Items that do not apply to this PR should be marked `N/A` with a note. An "Approved" verdict with one or more `FAIL` items is not valid — `FAIL` items must be promoted to findings.
+Items that do not apply to this PR are marked `N/A` with a note. An "Approved" verdict with one or more `FAIL` items is not valid — `FAIL` items must be promoted to findings.
 
 The Pre-Verdict Checklist remains the high-signal filter for common calibration bugs (unguarded `except Exception`, in-memory-only integration tests, missing docstrings, etc.). The Rubric below adds structured, mechanically-derived verdict logic on top — the two are complementary, not redundant.
 

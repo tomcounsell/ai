@@ -201,24 +201,20 @@ SLUG=$(echo "$BRANCH" | sed 's|^session/||')
 PLAN_PATH="docs/plans/${SLUG}.md"
 PLAN_MUTATED=false
 
-# For each criterion the rubric judged in Pre-Verdict item 1:
-#   - rubric=pass    => "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer tick   "$PLAN_PATH" --criterion "$TEXT"
-#   - rubric=fail    => "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
-#   - rubric=ack.    => "${AI_REPO_ROOT:-$HOME/src/ai}/.venv/bin/python" -m tools.plan_checkbox_writer untick "$PLAN_PATH" --criterion "$TEXT"
-#   - rubric=n/a     => skip
+# For each criterion the rubric judged in Pre-Verdict item 1, sync its plan
+# checkbox per the table above (pass => tick, fail/acknowledged => untick,
+# n/a => skip).
 #
-# On exit 0 with a real mutation, set PLAN_MUTATED=true.
-# On exit 2 (MATCH_AMBIGUOUS / MATCH_NOT_FOUND / MATCH_AMBIGUOUS_SECTION /
-# NO_CRITERIA_SECTION), preserve the existing checkbox state AND append a
-# manual-review comment to the review body:
-#   - MATCH_AMBIGUOUS / MATCH_AMBIGUOUS_SECTION:
-#       > Could not auto-tick "{criterion}" — please review manually.
-#   - MATCH_NOT_FOUND when rubric judged pass/fail:
-#       > Rubric judged criterion "{text}" {verdict} but no matching item in
-#       > plan — investigate.
-#   - NO_CRITERIA_SECTION:
-#       Log a one-line warning and skip; some chore plans legitimately omit the
-#       section.
+# If the context file declares a plan-checkbox updater, run its exact
+# invocation per criterion and honor its exit-code semantics. Generic default:
+# make the tick/untick as a surgical text edit to $PLAN_PATH.
+#
+# Set PLAN_MUTATED=true on any real checkbox change. Match failures are soft:
+#   - Criterion matches zero or 2+ plan items => preserve the existing checkbox
+#     state AND append a manual-review comment to the review body:
+#       > Could not auto-sync "{criterion}" — please review manually.
+#   - Plan has no criteria section => log a one-line warning and skip; some
+#     chore plans legitimately omit the section.
 
 if [ "$PLAN_MUTATED" = "true" ]; then
   git add "$PLAN_PATH"
@@ -236,16 +232,15 @@ fi
 ```
 
 **Why commit-then-post-review (non-negotiable invariant):** `/do-merge`'s
-review-comment freshness check (see `.claude/commands/do-merge.md` review-comment
-gate) filters out reviews whose `created_at` is older than the latest commit's
+review-comment freshness gate filters out reviews whose `created_at` is older than the latest commit's
 `committer.date`. If the tick commit is pushed AFTER the review is posted, the
 review immediately becomes stale and the next merge attempt forces a re-review
 — which is exactly the oscillation symptom this work removes. Pushing the tick
 commit FIRST guarantees the review's `created_at` is strictly newer than every
 commit on the branch.
 
-**Why the helper failure is non-fatal:** A `MATCH_AMBIGUOUS` or `MATCH_NOT_FOUND`
-on a single criterion is a soft signal. The review still gets posted with the
+**Why match failure is non-fatal:** An ambiguous or missing match on a single
+criterion is a soft signal. The review still gets posted with the
 manual-review comment surfaced to the human reviewer; the existing plan-file
 checkbox state is preserved. A push failure (after a successful tick commit)
 IS fatal because we already created a commit that lives only in the local

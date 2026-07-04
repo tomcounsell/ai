@@ -25,6 +25,17 @@ wrapper handles parallelism via `pyproject.toml`.
 
 Coverage (`--cov=. --cov-report=term-missing`) only when explicitly requested.
 
+## Changed-File Source-to-Test Mappings (`--changed`)
+
+Repo-specific mappings, applied before the generic `foo/bar.py -> tests/*/test_bar.py` rule:
+
+| Source pattern | Test pattern |
+|----------------|--------------|
+| `bridge/*.py` | `tests/unit/test_bridge*.py` |
+| `tools/*.py` | `tests/tools/test_*.py` |
+| `agent/*.py` | `tests/unit/test_agent*.py` |
+| `monitoring/*.py` | `tests/unit/test_monitoring*.py` |
+
 ## Redis Isolation
 
 Unit tests must never touch production Redis. Use `REDIS_TEST_DB` or a test-specific key prefix. Bulk Redis operations (`kill --all`, mass deletes) must always be project-scoped using the `PROJECT_NAME` prefix from `config/settings.py`.
