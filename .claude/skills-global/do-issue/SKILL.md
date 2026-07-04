@@ -1,6 +1,6 @@
 ---
 name: do-issue
-description: "Use when creating a new GitHub issue. Ensures issues are self-contained, define domain terms, and provide enough context for the /do-plan skill to produce a quality plan. Triggered by 'create an issue', 'file an issue', or automatically by /sdlc at Step 1."
+description: "Create a self-contained GitHub issue ready for planning. Triggered by 'create an issue', 'file an issue', 'track this', or by /sdlc at Step 1."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<title or description>"
 ---

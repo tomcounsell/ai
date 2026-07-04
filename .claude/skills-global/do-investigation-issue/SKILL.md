@@ -1,13 +1,13 @@
 ---
 name: do-investigation-issue
-description: Use when posting a GitHub investigation issue for an unverified finding, potential gap, or anomaly that needs root-cause analysis before any action is taken. Also use when an audit skill surfaces something suspicious, research reveals a possible gap in the current implementation, or an observed behavior is unexpected but unconfirmed. Issues are labeled 'investigation' only — never 'bug' unless the defect is already confirmed.
+description: "Post a GitHub investigation issue for an unverified finding, gap, or anomaly. Use when an audit or research surfaces something suspicious, or an observed behavior is unexpected but unconfirmed."
 allowed-tools: Bash, Read
 argument-hint: "<component> — <brief finding>"
 ---
 
 # Post Investigation Issue
 
-Creates a GitHub issue that captures an unverified finding and hands it off to a future investigator with enough context to start immediately. The issue does NOT require a confirmed defect — it exists to trigger investigation.
+Creates a GitHub issue that captures an unverified finding and hands it off to a future investigator with enough context to start immediately. The issue does NOT require a confirmed defect — it exists to trigger root-cause analysis before any action is taken. Findings that fit: an audit skill surfaced something suspicious, research revealed a possible gap in the current implementation, or an observed behavior is unexpected but unconfirmed.
 
 ## Label Policy
 

@@ -367,7 +367,20 @@ Before reporting, verify every blocker and tech_debt finding:
 2. Confirm the code exists at or near the cited line
 3. Confirm your description of the problem is accurate
 
-Drop any finding that fails verification. A false blocker is worse than a missed issue.
+Drop any finding that fails verification. A false blocker is worse than a missed
+issue — it wastes time and erodes trust. This step exists because of issue #181:
+a prior review hallucinated two "blocker" findings citing functions and files
+that did not exist.
+
+### 8. Legacy Cruft Audit
+
+Run the cruft auditor on the PR diff to identify legacy patterns (deprecated fields
+still read/written, fallback chains, dual implementations, dead imports, stale comments).
+
+Include any findings as a "Legacy Cruft" subsection in the review output.
+Cruft findings are advisory, not blockers. If the repo defines a cruft-auditor
+agent (e.g. `.claude/agents/cruft-auditor.md`), dispatch it; otherwise scan the
+diff for these patterns directly.
 
 ## Completion
 

@@ -1,11 +1,55 @@
 # Sub-Skill: PR Checkout
 
-Mechanical setup: **mergeability preflight**, then clean git state and checkout the PR branch.
+Mechanical setup: **context resolution**, **mergeability preflight**, then clean git state and checkout the PR branch.
 
 ## Context Variables
 
 - `$SDLC_PR_NUMBER` — PR number to checkout (fallback: extract from nudge feedback or `gh pr list`)
 - `$SDLC_PR_BRANCH` — expected branch name (informational)
+
+## Context Resolution (runs first)
+
+Resolve context variables — prefer env vars, fall back to manual resolution:
+
+```bash
+PR_NUMBER="${SDLC_PR_NUMBER:-$PR_NUMBER}"
+REPO="${SDLC_REPO:-${GH_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}}"
+PLAN_PATH="${SDLC_PLAN_PATH:-}"
+SLUG="${SDLC_SLUG:-}"
+
+# If PLAN_PATH not set, derive from slug or branch
+if [ -z "$PLAN_PATH" ] && [ -n "$SLUG" ]; then
+  PLAN_PATH="docs/plans/${SLUG}.md"
+fi
+
+# Resolve ISSUE_NUMBER — unconditional clobber (never ${ISSUE_NUMBER:-…}).
+# IMPORTANT: $ARGUMENTS is the PR number for this skill, NOT the issue number.
+# Do NOT use $ARGUMENTS as ISSUE_NUMBER. Do NOT use $SDLC_ISSUE_NUMBER as
+# authoritative — a stale inherited env value is exactly the "latched onto
+# wrong issue" mechanism this skill must guard against (#1731).
+#
+# Resolution order (first non-empty positive integer wins):
+# 1. PR body extraction: Closes #N / Fixes #N / Resolves #N  (PRIMARY — always run)
+# 2. PR body: tracking: https://.../issues/N  (secondary PR-body fallback)
+# 3. $SDLC_ISSUE_NUMBER env var (LAST RESORT ONLY — guarded by positive-integer check)
+PR_BODY=$(gh pr view "$PR_NUMBER" --json body -q '.body' 2>/dev/null)
+ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oiP '(?:closes|fixes|resolves)\s+#\K[0-9]+' | head -1)
+if [ -z "$ISSUE_NUMBER" ]; then
+  # Also try "tracking: https://.../issues/N" pattern
+  ISSUE_NUMBER=$(echo "$PR_BODY" | grep -oP '(?<=issues/)[0-9]+' | head -1)
+fi
+if [ -z "$ISSUE_NUMBER" ] && [[ "$SDLC_ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
+  ISSUE_NUMBER="$SDLC_ISSUE_NUMBER"
+fi
+
+# Assert ISSUE_NUMBER is a positive integer before any recorder call (#1731).
+# An unresolvable issue number must fail loudly so the supervisor sees an
+# actionable error rather than a silently diverted verdict on a wrong session.
+[[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] || {
+  echo "do-pr-review: could not resolve a positive-integer ISSUE_NUMBER from ARGUMENTS='${ARGUMENTS}', PR body, or SDLC_ISSUE_NUMBER. Pass the issue number as skill args or ensure the PR body contains 'Closes #N'." >&2
+  exit 1
+}
+```
 
 ## Mergeability Preflight (runs BEFORE any diff reading)
 
