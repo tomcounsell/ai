@@ -155,14 +155,177 @@ The following improvements are explicitly deferred to separate issues:
 
 | Fix | Description | Issue |
 |-----|-------------|-------|
-| **Fix #2** | Durable secondary store (SQLite export of `AgentSession` + restore path). Covers total Redis data-dir loss that AOF cannot; the AOF floor only bounds write loss within a running Redis process. | TBD |
 | **Fix #4** | Move hot-path Redis calls off the asyncio event loop to prevent loop blocking under load. | [#1826](https://github.com/tomcounsell/ai/issues/1826), **implemented** (see [Off-Loop Redis Access](#off-loop-redis-access-fix-4)) |
 | **Fix #5** | Redis replication + Sentinel on a second host for primary-loss failover. | [#1827](https://github.com/tomcounsell/ai/issues/1827), **implemented** (see [Replication + Sentinel Failover](#replication--sentinel-failover-fix-5)) |
 
 The current AOF floor (Fix #1) is the minimum durability guarantee: at most 1 second
-of loss on a hard crash. Fix #2 (SQLite export) is the next step to cover total
-data-dir loss. Fix #4 (off-loop access) and Fix #5 (replication) are both documented
-below.
+of loss on a hard crash. Fix #2 (SQLite export, below) covers total data-dir loss
+that AOF cannot. Fix #4 (off-loop access) and Fix #5 (replication) are both
+documented below.
+
+## Durable Secondary Store (Fix #2)
+
+AOF (Fix #1) bounds write loss to ~1 second *inside a running Redis process*. It does
+**nothing** for total loss of the Redis data directory: `FLUSHALL`, disk failure, an
+accidental `rm -rf` of the data dir, or a fresh machine that comes up with an empty
+Redis. In every one of those cases every `AgentSession` record is gone with no second
+copy to rehydrate from. Fix #2 ([#1825](https://github.com/tomcounsell/ai/issues/1825))
+closes that gap with a transactional SQLite secondary store (`agent/session_archive.py`)
+that every `AgentSession` is periodically exported to, plus a guarded cold-start
+restore path.
+
+**Data ownership is unchanged:** Redis remains the single source of truth. SQLite is a
+strictly-secondary, write-only-in-normal-operation copy, read only on a cold start.
+
+### Archive location
+
+The archive lives at `data/session_archive.db` (WAL mode, stdlib `sqlite3`). It is
+**machine-local** — each machine has its own Redis, so each machine has its own
+archive — and is **never synced or committed**: `*.db`, `*.db-shm`, `*.db-wal`, and
+`data/` are all already covered by `.gitignore`. There is nothing to propagate between
+machines and no migration step for existing installations; the file is created
+automatically on first export.
+
+### Export cadence
+
+Two independent write paths keep the archive current:
+
+1. **Periodic sweep (`export_all()`).** A `worker-session-archive` daemon thread in
+   `worker/__main__.py` wakes every `SESSION_ARCHIVE_INTERVAL` seconds (default **300**,
+   env-overridable) and upserts every current `AgentSession` in one
+   `BEGIN IMMEDIATE ... COMMIT` transaction — a crash-safe, consistent snapshot. Each
+   row is serialized inside its own `try/except` first, so one pathological session can
+   never abort the whole sweep; a row that fails to serialize is logged with its `id`
+   and skipped.
+2. **Terminal-transition hook (`export_session()`).** `models/session_lifecycle.py`'s
+   `finalize_session` calls `export_session(session)` as its **last** side effect,
+   unconditionally after the authoritative `session.save()` succeeds, inside
+   `try/except` — an archive failure logs and is swallowed; it never breaks the
+   terminal transition. This gives every session that reaches a terminal status an
+   immediate, single-row upsert instead of waiting for the next periodic sweep.
+
+Because these two writers run on **different threads** (the daemon thread and the
+asyncio event-loop thread that runs `finalize_session`), the archive never shares one
+SQLite connection across threads — every public entry point (`export_session`,
+`export_all`, `restore_if_empty`, `get_archive_status`) opens its own connection and
+closes it in a `finally`. WAL mode plus a busy-timeout then serialize the two
+independent connections at the SQLite level. The terminal hook additionally opens its
+connection with a **tight** `SESSION_ARCHIVE_ONLOOP_BUSY_TIMEOUT_MS` (default **250ms**,
+an order of magnitude below the periodic sweep's `SESSION_ARCHIVE_BUSY_TIMEOUT_MS`
+default of 5000ms) so a WAL-lock held by the concurrent sweep can never stall the event
+loop for more than ~250ms — a lock timeout there is swallowed, and the next periodic
+sweep re-covers the row.
+
+Each session is serialized by enumerating `session._meta.fields` (never a
+hand-maintained list), converting `datetime` values to ISO-8601 strings, and storing
+the whole field map **verbatim** as a JSON `payload` column (no size cap — truncation
+would silently corrupt round-trip fidelity). The real `id`, `session_id`,
+`project_key`, `status`, and `updated_at` are also promoted to real columns for
+queryability.
+
+### Empty-Redis restore guard
+
+At worker startup, `restore_if_empty()` runs — below the `if dry_run: return` guard and
+before the Step 1 index rebuild — and rehydrates the archive back into Redis **only
+when Redis is provably empty**. The guard is intentionally strict and layered:
+
+**Both-must-be-empty rule.** On a cold start with no pending resume in progress,
+restore proceeds **iff BOTH** are true: `AgentSession.query.all()` returns zero
+records **AND** a bounded `SCAN` for keys matching `AgentSession*` returns zero keys
+(this catches orphaned index-set members a `query.all()` might not surface). `DBSIZE`
+is checked and logged as advisory confirmation only — it is never a gate, because AOF
+or partial loss could wipe `AgentSession*` keys while leaving `Memory:*`/bloom keys
+behind, and restore should still proceed in that case. If even a single `AgentSession`
+record or index key exists, Redis is treated as partially-populated and restore is a
+strict no-op — it never merges, and it never clobbers.
+
+**`id`-key preservation.** Every archived row is keyed on the real `AgentSession.id`
+(the `AutoKeyField` primary key), never on the `agent_session_id` property alias.
+Restore reconstructs each row via `AgentSession(id=<archived id>, **other_fields).save()`
+— the archived `id` is passed **explicitly** so the `AutoKeyField` is preserved rather
+than regenerated. This matters because `AgentSession._normalize_kwargs` pops and
+discards any `agent_session_id` kwarg; keying on the alias would mint a fresh UUID on
+every restore and silently dangle every `parent_agent_session_id` parent/child link.
+
+**`restore_in_progress` sentinel, live-count-gated bypass, and poison-row quarantine.**
+A restore that fails partway through a large rehydrate loop must be resumable on the
+next boot without ever risking a clobber of a Redis that has since been repopulated (by
+normal operation, or by a previous partial restore). Three mechanisms work together:
+
+1. Before writing the first row, the archive's `_meta` table sets
+   `restore_in_progress = 1` and records `expected_row_count` (the number of
+   archived rows expected to land). This sentinel is durable — it survives a Redis
+   wipe because it lives in the SQLite file, not Redis.
+2. The sentinel alone can never force a restore. On every boot, if the sentinel is
+   set, the guard **bypasses the empty-Redis check only while the freshly recomputed
+   `len(AgentSession.query.all()) < expected_row_count`** — i.e. Redis is still
+   demonstrably short of the archived set — **and** `resume_attempts` is under
+   `SESSION_ARCHIVE_RESUME_ATTEMPT_CAP` (default **5**). If Redis's live count has
+   already reached `expected_row_count`, the sentinel is recognized as stale, cleared,
+   and restore no-ops (`skipped_reason="restore_already_complete"`) — a stuck sentinel
+   can never overwrite an already-whole Redis. If the resume-attempt cap is exceeded,
+   restore is declared *wedged*, logged as an operator error, surfaced on the
+   dashboard/doctor freshness block, and stops bypassing the guard.
+3. Each archived row also carries a per-row failure counter. A row that fails to
+   `.save()` more than `SESSION_ARCHIVE_ROW_ATTEMPT_CAP` times (default **3**) is
+   written to the `_restore_quarantine` table and skipped on every future resume. The
+   sentinel clears once `restored + quarantined == expected_row_count` — so a single
+   permanently-unrestorable row is quarantined rather than wedging the whole restore
+   forever, while every other row still lands.
+
+The net effect: restore either completes cleanly (sentinel cleared, any poison rows
+quarantined) or is cleanly declared wedged after a bounded number of attempts — and at
+no point can a persisted flag override a live, populated Redis.
+
+A restored session may carry a stale `claude_pid` (the pid of a worker process that no
+longer exists after the data-dir loss). Such rows in `running` status flow through the
+worker's existing dead-worker sweep and interrupted-session recovery exactly as any
+pre-existing `running` session would after a normal restart — restore does not need to
+scrub `claude_pid` itself.
+
+### Dashboard, health, and doctor freshness surfaces
+
+`get_archive_status()` is the single read-only status function (never raises — a
+missing or corrupt DB returns a `healthy=False` shape) that all three operator surfaces
+delegate to:
+
+- **`dashboard.json`** exposes an `archive` block (`db_path`, `exists`, `row_count`,
+  `last_export_ts`, `last_export_age_s`, `kind`, `healthy`), mirroring the existing
+  email/heartbeat freshness pattern.
+- **`/health`** surfaces the same freshness fields for external monitoring.
+- **`session-archive-freshness`** (`tools/doctor.py`) fails actionably when the archive
+  doesn't exist yet (fix: start the worker) or when `last_export_age_s` exceeds
+  `SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S` (default `2 × SESSION_ARCHIVE_INTERVAL`).
+
+### Operational runbook
+
+**Export and live restore are fully automatic** — the periodic daemon thread and the
+terminal-transition hook drive every export, and the guarded startup step drives every
+live restore. There is no manual "run an export" or "run a restore" action; the runbook
+below covers **inspection only**.
+
+Inspect the archive's current freshness and row count:
+
+```bash
+valor-session-archive status
+```
+
+Check what a restore *would* do — the exact guard decision (would it restore, skip, or
+resume?) and, if it would proceed, how many rows — without writing anything:
+
+```bash
+valor-session-archive restore --dry-run
+```
+
+`restore --dry-run` always calls the read-only guard evaluation; there is no CLI path
+to trigger a live (writing) restore or a manual export — those write paths are
+deliberately not exposed as CLI subcommands (see No-Gos in
+`docs/plans/session-archive-sqlite.md`), since exposing them would only duplicate the
+automatic paths and add a footgun.
+
+If the archive is missing or stale, check that the worker is running
+(`./scripts/valor-service.sh worker-status`) — the periodic export thread and terminal
+hook only run inside the worker process.
 
 ## Off-Loop Redis Access (Fix #4)
 

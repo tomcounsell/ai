@@ -205,6 +205,8 @@ valor-email threads
 | `python -m tools.valor_session telemetry --id <ID>` | Show session telemetry timeline (turn events, token usage, status transitions) |
 | `valor-session crash-signatures` | Show crash signatures in the library (project-scoped) |
 | `valor-session crash-policy list` | Show derived auto-resume policy entries |
+| `valor-session-archive status` | Show the SQLite secondary-store (`data/session_archive.db`) freshness: row count, last export age, health |
+| `valor-session-archive restore --dry-run` | Report the empty-Redis restore guard decision (would it restore/skip/resume, and how many rows) without writing anything — read-only; export and live restore run automatically via the worker |
 | `python -m tools.memory_search search "query"` | Search memories by query |
 | `python -m tools.memory_search search "query" --category correction` | Search filtered by category |
 | `python -m tools.memory_search search "query" --tag redis` | Search filtered by tag |
