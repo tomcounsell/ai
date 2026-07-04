@@ -1,6 +1,6 @@
 ---
 name: do-deploy
-description: "Use when deploying merged changes to production across all bridge machines. Triggered by 'deploy to prod', 'ship it', 'push to prod', or 'do-deploy'. Not part of the SDLC pipeline -- merge already handles the local dev environment."
+description: "Use when deploying merged changes to production across bridge machines. Triggered by 'deploy to prod', 'ship it', 'push to prod', or 'do-deploy'."
 argument-hint: "<pr-number>"
 context: fork
 ---
@@ -9,7 +9,7 @@ context: fork
 
 You are the **production deployment operator** for the Valor AI system.
 
-This skill is **not part of the SDLC pipeline**. The SDLC pipeline ends at merge.
+This skill is **not part of the SDLC pipeline**. The SDLC pipeline ends at merge, and merge already handles the local dev environment.
 
 ## How Production Deployment Works
 

@@ -1,6 +1,7 @@
 ---
 name: update
-description: "Use when deploying updates to this machine. Pulls latest changes, syncs dependencies, verifies environment, and restarts the bridge service. Triggered by 'update', 'deploy', 'pull and restart', or after git pull."
+description: "Use when deploying updates to this machine: pull, sync deps, verify, restart services. Triggered by 'update', 'deploy', 'pull and restart', or after git pull."
+disable-model-invocation: true
 ---
 
 # Update & Restart
@@ -33,7 +34,7 @@ The orchestrator will:
 - Check/pull Ollama summarizer model
 - Verify CLI tools and SDK authentication
 - **Validate `projects.json` (green-light gate)** — runs `bridge/config_validation.py::validate_projects_config` over the full config (Step 4.6). Enforces that every bridge-contact identifier (DM contact id, Telegram group, email contact, email domain wildcard) resolves to exactly one machine. On failure: log the error, skip the service restart, leave the running bridge serving on the previously-validated config. See [Single-Machine Ownership](../../../docs/features/single-machine-ownership.md).
-- Install/restart bridge, worker, caffeinate, and reflections services (skipped if the validation gate failed)
+- Install/restart bridge, worker, caffeinate, nightly-tests, and log-rotate services (skipped if the validation gate failed; daily reflections run inside the worker's reflection scheduler)
 - Set up global calendar hook and generate config
 - Check MCP server configuration
 - **Best-effort agent-judgment catchup (strictly last step)** — runs `valor-catchup` only after every service-management and health check above, and only when BOTH the bridge and worker report running. Failure or timeout is logged and swallowed; `/update` completion is wholly independent of its outcome. See [Agent-Judgment Catchup](#agent-judgment-catchup-strictly-last-step) below.
@@ -102,218 +103,22 @@ cd ~/src/ai
 
 ### Reinstall Launchd Services
 
-After update, reinstall launchd plists to pick up any template changes:
+After update, reinstall launchd plists to pick up any template changes. Daily reflections run inside the worker's reflection scheduler (`agent/reflection_scheduler.py`, driven by `config/reflections.yaml`), so reinstalling the worker covers them; the SDLC reflection has its own separate plist installer:
 
 ```bash
 cd ~/src/ai
-./scripts/install_reflections.sh
 ./scripts/install_worker.sh
+./scripts/install_sdlc_reflection.sh
 ```
 
 The install script substitutes `__PROJECT_DIR__` and `__HOME_DIR__` placeholders with the current machine's paths. This ensures plists work on any machine without hardcoded usernames.
 
-## Troubleshooting
+## When to Load Sub-Files
 
-### Virtual environment issues
-```bash
-cd ~/src/ai
-rm -rf .venv
-uv venv
-uv sync --all-extras
-```
-
-### Missing dependencies after update
-```bash
-cd ~/src/ai
-uv sync --all-extras --reinstall
-```
-
-### Calendar integration not working
-1. Check OAuth token: `ls ~/Desktop/Valor/google_token.json`
-2. Re-run OAuth: `valor-calendar test`
-3. Check deps: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
-
-### Wrong projects active (machine identity mismatch)
-
-The bridge derives active projects from `scutil --get ComputerName` matched against the `machine` field in `~/Desktop/Valor/projects.json`. If the wrong projects are active:
-
-1. Check the machine name: `scutil --get ComputerName`
-2. Check the config: `python -c "import json; [print(f'{k}: {v.get(\"machine\")}') for k,v in json.load(open('$HOME/Desktop/Valor/projects.json')).get('projects',{}).items()]"`
-3. Fix: ensure the `machine` value in projects.json matches the ComputerName exactly (case-insensitive)
-
-### Bridge won't start
-```bash
-# Check logs
-tail -50 ~/src/ai/logs/bridge.error.log
-
-# Manual restart
-~/src/ai/scripts/valor-service.sh restart
-
-# Check status
-~/src/ai/scripts/valor-service.sh status
-```
-
-### Worker won't start
-```bash
-# Check logs
-tail -50 ~/src/ai/logs/worker_error.log
-
-# Manual restart
-~/src/ai/scripts/valor-service.sh worker-restart
-
-# Check status
-~/src/ai/scripts/valor-service.sh worker-status
-
-# Reinstall plist
-~/src/ai/scripts/install_worker.sh
-```
-
-## Module Details
-
-### Git Operations (`git.py`)
-
-```python
-from scripts.update import git
-
-# Pull with automatic stash handling
-result = git.git_pull(project_dir)
-# result.success, result.commit_count, result.commits
-
-# Check pending upgrades
-pending = git.check_upgrade_pending(project_dir)
-# pending.pending, pending.timestamp, pending.reason
-```
-
-### Dependency Management (`deps.py`)
-
-```python
-from scripts.update import deps
-
-# Sync dependencies
-result = deps.sync_dependencies(project_dir, reinstall=False)
-# result.success, result.method ("uv" or "pip")
-
-# Verify versions
-versions = deps.verify_critical_versions(project_dir)
-# [VersionInfo(package, version, expected, matches), ...]
-```
-
-### Environment Verification (`verify.py`)
-
-```python
-from scripts.update import verify
-
-result = verify.verify_environment(project_dir)
-# result.system_tools, result.python_deps, result.dev_tools
-# result.valor_tools, result.ollama, result.sdk_auth, result.mcp_servers
-```
-
-### Google Workspace CLI auth (`gws_auth.py`)
-
-```python
-from scripts.update import gws_auth
-
-result = gws_auth.configure_gws_auth(project_dir)
-# result.action: "already_ok" | "needs_auth" | "skipped" | "failed"
-```
-
-Runs right after the `gh` auth step. `gws` (the `@googleworkspace/cli` binary)
-is installed automatically by the npm prereq step, but first use needs a
-one-time **human** OAuth step — `gws auth login` opens a browser for Google
-consent and `gws auth setup` requires `gcloud` + a GCP project. Those are
-human-gated and `/update` also runs non-interactively (launchd polling), so this
-step is **detection only** — it never opens a browser or blocks:
-
-- `gws` not on PATH → `skipped` (nothing to authenticate yet).
-- authenticated (`gws auth status` reports `auth_method != "none"`) → `already_ok`, silent and idempotent.
-- installed but unauthenticated → `needs_auth`: surfaces an actionable warning with the exact command (`gws auth setup --login`) and appends it to `result.warnings` so it shows at the end of the run. The human completes it once, at their next interactive moment.
-
-### Calendar Integration (`calendar.py`)
-
-```python
-from scripts.update import calendar
-
-# Ensure global hook is configured
-hook = calendar.ensure_global_hook(project_dir)
-# hook.configured, hook.created, hook.error
-
-# Generate calendar config
-config = calendar.generate_calendar_config(project_dir)
-# config.success, config.mappings, config.error
-```
-
-### MCP Server Registration (`mcp_memory.py`, `mcp_byob.py`)
-
-Both modules idempotently verify/repair their entry in `~/.claude.json`
-`mcpServers` under `fcntl.flock(LOCK_EX | LOCK_NB)` on
-`~/.claude.json.lock` with the same 3-attempt backoff (50/200/800ms).
-`run.py` calls both on every invocation so drift is healed automatically.
-
-```python
-from scripts.update import mcp_memory, mcp_byob
-
-# Memory MCP -- python3 -m mcp_servers.memory_server
-r1 = mcp_memory.verify_memory_mcp(write=True)
-# r1.ok, r1.action ("ok"|"installed"|"repaired"|...)
-
-# BYOB MCP -- tsx ~/.byob/packages/mcp-server/bin/byob-mcp.ts, BYOB_ALLOW_EVAL=1
-r2 = mcp_byob.verify_byob_mcp(write=True)
-# r2.ok, r2.action
-```
-
-`write=False` runs in verify-only mode (LOCK_SH, no rename) -- used by
-`/update --verify`.
-
-### BYOB + Computer-Use Update Steps
-
-`run.py` wires:
-
-- **Step 4.8**: `mcp_memory.verify_memory_mcp()` -- runs every invocation.
-- **Step 4.9**: `mcp_byob.verify_byob_mcp()` -- runs every invocation.
-
-For BYOB binary updates (rebuild ~/.byob/ when the pinned commit changes
-in `config/byob_pin.json`) and bcu binary updates (re-download + SHA verify
-against `config/bcu_pin.json` when the opt-in sentinel
-`~/.config/valor/computer-use-enabled` is present), see the upcoming
-implementation in `scripts/update/run.py` and the post-install canary at
-`scripts/update/byob_canary.js`. Pins are bumped only via:
-
-- `/update --bump-byob` -- next BYOB upstream commit
-- `/update --bump-bcu` -- next bcu release tag
-
-Rollback paths:
-- BYOB: snapshot the entire `~/.byob/` tree to `~/.byob.prev/` before
-  `git pull && bun install && bun run setup`. BYOB v0.3+ is a workspace
-  monorepo with build artifacts under `packages/*/output/` and
-  `packages/*/dist/` — there is no single top-level `dist/` to copy.
-  Restore by `rm -rf ~/.byob && mv ~/.byob.prev ~/.byob` on canary
-  failure (defined as `cd ~/.byob && bun run doctor` reporting any red
-  status, or the post-install end-to-end probe — once
-  `byob_canary.js` is built — failing within 30s).
-- bcu: `~/.local/bin/background-computer-use.prev` symlink, restored on
-  `/v1/list_apps` canary failure.
-
-### Service Management (`service.py`)
-
-```python
-from scripts.update import service
-
-# Get bridge status
-status = service.get_service_status(project_dir)
-# status.running, status.pid, status.uptime, status.memory_mb
-
-# Install/restart bridge
-service.install_service(project_dir)  # Installs bridge + update cron
-service.restart_service(project_dir)
-
-# Get worker status
-worker = service.get_worker_status(project_dir)
-# worker.running, worker.pid, worker.uptime, worker.memory_mb
-
-# Install/restart worker
-service.install_worker(project_dir)   # Installs standalone worker service
-service.restart_worker(project_dir)
-```
+| Sub-file | Load when... |
+|----------|-------------|
+| `references/troubleshooting.md` | An update run fails or the environment misbehaves afterward (venv, deps, calendar, machine identity, bridge/worker won't start) |
+| `references/modules.md` | Debugging orchestrator internals or calling a `scripts/update/` module directly (git.py, deps.py, verify.py, gws_auth.py, calendar.py, MCP registration, BYOB/bcu update steps, service.py) |
 
 ## Node toolchain (soft prerequisite)
 
