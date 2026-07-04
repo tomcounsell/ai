@@ -9,7 +9,7 @@ Fires on any request to prepare a book for RAG, fine-tuning, or long-context ref
 
 ## Overview
 
-End-to-end pipeline for turning a named book into clean, structured Markdown ready for an AI agent to consume. Covers search → download → convert → clean → chunk, across multiple sources (Gutenberg, Standard Ebooks, Anna's Archive, LibGen, Z-Library, archive.org), with format conversion via calibre/pandoc, OCR for scanned PDFs, cleanup, metadata, and chunking.
+End-to-end pipeline: a named book in → clean, structured Markdown out, ready for an AI agent to consume. Stages: search → download → convert → clean → chunk. The deliverable is `library/processed/<author-slug>/<title-slug>.md` with YAML frontmatter (plus optional RAG chunks); success means the text is free of page numbers, running headers, and broken hyphenation, and carries accurate metadata.
 
 Assumes the user owns a print copy and is creating a personal digital backup for private AI use. Skip this skill if that premise doesn't hold.
 

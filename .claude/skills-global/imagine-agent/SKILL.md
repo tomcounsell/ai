@@ -12,13 +12,11 @@ for their product or repo and their plain-language goals need to become a builda
 
 ## What this skill does
 
-The **client-facing front door** to building a managed agent. It interviews the client with ONLY
-end-user/outcome questions, researches the target repo to map goals to technical requirements, and
-emits a build-sheet that /build-agent launches. It talks to a *non-technical* client in
-their own language — outcomes, users, what "good" looks like — and never burdens them with model names,
-tools, rubrics, or cron syntax. Then it **researches the target repo** to learn what's actually possible
-and what house standards exist, and **translates** the client's goals into the technical fields a builder
-needs. The output is a `build-sheet.json` it hands to `/build-agent`.
+The **client-facing front door** to building a managed agent. It interviews a *non-technical* client
+in their own language — outcomes, users, what "good" looks like, never model names, tools, rubrics, or
+cron syntax — then **researches the target repo** to learn what's actually possible and what house
+standards exist, and **translates** the client's goals into the technical fields a builder needs. The
+output is a `build-sheet.json` it hands to `/build-agent`.
 
 Two skills, one seam: `imagine-agent` writes the build-sheet; `build-agent` reads it. See the contract in
 the sibling skill directory: `../build-agent/references/build-sheet.md`.

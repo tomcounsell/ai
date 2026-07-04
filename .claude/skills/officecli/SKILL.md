@@ -8,9 +8,17 @@ argument-hint: "[document path] [task]"
 
 AI-friendly CLI for .docx, .xlsx, .pptx. Single binary, no dependencies, no Office installation needed.
 
-## Install
+## Strategy
 
-If `officecli` is not installed:
+**L1 (read) → L2 (DOM edit) → L3 (raw XML)**. Always prefer higher layers. Add `--json` for structured output.
+
+**Before doc work, check Specialized Skills** (bottom of this file). Fundraising decks, academic papers, financial models, dashboards, and Morph animations need their own skill loaded first — `load_skill` once, then proceed.
+
+---
+
+## Install / stale binary
+
+If `officecli` is not installed, or a command documented here comes back `Unrecognized command` (this reference tracks the current release; old binaries lack `help`, `swap`, `mark`, `dump`, and more), re-run the installer:
 
 ```bash
 # macOS / Linux
@@ -24,17 +32,9 @@ Verify with `officecli --version`. If still not found after install, open a new 
 
 ---
 
-## Strategy
+## Help System
 
-**L1 (read) → L2 (DOM edit) → L3 (raw XML)**. Always prefer higher layers. Add `--json` for structured output.
-
-**Before doc work, check Specialized Skills** (bottom of this file). Fundraising decks, academic papers, financial models, dashboards, and Morph animations need their own skill loaded first — `load_skill` once, then proceed.
-
----
-
-## Help System (IMPORTANT)
-
-**When unsure about property names, value formats, or command syntax, ALWAYS run help instead of guessing.** One help query beats guess-fail-retry loops.
+**When unsure about property names, value formats, or command syntax, run help instead of guessing.** One help query beats guess-fail-retry loops.
 
 `officecli help` ≡ `officecli --help`, and `officecli <cmd> --help` ≡ `officecli help <cmd>` — same content.
 
@@ -52,12 +52,15 @@ Format aliases: `word`→`docx`, `excel`→`xlsx`, `ppt`/`powerpoint`→`pptx`. 
 
 ## Performance: Resident Mode
 
-**Every command auto-starts a resident on first access** (60s idle timeout) — file-lock conflicts are automatically avoided. Explicit `open`/`close` is still recommended for longer sessions (12min idle):
+**Every command auto-starts a resident on first access** — file-lock conflicts are automatically avoided. Explicit `open`/`close` is still recommended for longer sessions:
 ```bash
 officecli open report.docx       # explicitly keep in memory
 officecli set report.docx ...    # no file I/O overhead
-officecli close report.docx      # save and release
+officecli save report.docx       # flush to disk, keep resident warm
+officecli close report.docx      # flush and release
 ```
+
+**Flush semantics (footgun):** while a resident is live, edits apply in memory — officecli's own reads always see them, but a non-officecli program reading the file from disk sees the pre-edit version until `save`, `close`, or the ~10s idle auto-flush. Run `save` before handing the file to anything else.
 
 Opt out of auto-start: `OFFICECLI_NO_AUTO_RESIDENT=1`.
 
@@ -92,10 +95,12 @@ officecli set data.xlsx /Sheet1/A2 --prop value="Alice"
 
 ```bash
 officecli create <file>               # Create blank .docx/.xlsx/.pptx (type from extension)
-officecli view <file> <mode>          # outline | stats | issues | text | annotated | html
+officecli view <file> <mode>          # outline | stats | issues | text | annotated | html | svg | screenshot | forms
 officecli get <file> <path> --depth N # Get a node and its children [--json]
 officecli query <file> <selector>     # CSS-like query
 officecli validate <file>             # Validate against OpenXML schema
+officecli import <file> <sheet-path> <csv-or-tsv>   # Import tabular data into an Excel sheet
+officecli merge <template> <output>   # Fill {{key}} placeholders in a template from JSON data
 ```
 
 ### view modes
@@ -108,6 +113,8 @@ officecli validate <file>             # Validate against OpenXML schema
 | `text` | Plain text extraction | `--start N --end N`, `--max-lines N` |
 | `annotated` | Text with formatting annotations | |
 | `html` | Static HTML snapshot — same renderer as `watch`, no server needed | `--browser`, `--page N` (docx), `--start N --end N` (pptx) |
+| `svg` / `screenshot` | Vector / raster render of pages or slides | |
+| `forms` | Form fields and content controls | |
 
 Use `view html` for one-shot snapshots (CI artifacts, archival, diffing); use `watch` when you need live refresh or browser-side click-to-select.
 
@@ -255,9 +262,11 @@ officecli add <file> <parent> --from <path>                               # clon
 
 | Format | Types |
 |--------|-------|
-| **pptx** | slide (incl. hidden), shape (textbox — font.latin/ea/cs, direction=rtl), picture (SVG, brightness/contrast/glow/shadow), chart (direction=rtl), table (cell direction=rtl), row (tr), connector (connection/line), group, video (audio/media, trim), equation (formula/math), notes (direction=rtl, lang), comment (RTL via U+200F bidi mark; full CRUD via /slide[N]/comment[M]), paragraph (para), run, zoom (slidezoom), ole (oleobject/object/embed), placeholder (phType=title/body/subtitle/footer/...). slideLayout/slideMaster direction inheritance. |
-| **docx** | paragraph (para — direction/font.latin/ea/cs, bold.cs/italic.cs/size.cs for RTL/CJK; lang.latin/ea/cs BCP-47 tags on run; wordWrap toggle), run, table (direction=rtl → bidiVisual), row (tr), cell (td), image (picture/img — SVG supported), header (direction), footer (direction), section (pageNumFmt full ECMA-376 enum incl. Hindi/Arabic/Thai/CJK numerals; direction=rtl on Add/Set; rtlGutter; pgBorders=box shorthand), bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style (direction round-trip), toc, watermark, break (pagebreak/columnbreak), ole, **num / abstractNum / lvl** (numbering/list system), **tab** (paragraph or paragraph/table style tab stops). docDefaults.rtl document-wide override; `get /` exposes `locale`. Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
-| **xlsx** | sheet (visible/hidden/veryHidden, print margins, printTitleRows/Cols, rightToLeft sheetView, cascade-aware rename), row, cell (type=richtext+runs, merge=range/sweep, direction=rtl, phonetic guide on add), chart (direction=rtl on per-axis txPr / title; incl. pareto), image (picture — SVG), comment (direction=rtl), table (listobject), namedrange (definedname, volatile, `[@name=X]` selector), pivottable (pivot, calculatedField), sparkline, validation (datavalidation), autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). Query supports `merge`/`mergedrange` aliases for `mergeCell`. Workbook: password. `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
+| **pptx** | slide (incl. hidden), shape (textbox), picture (SVG supported), chart, table, row (tr), connector (line), group, video (audio/media), equation (math), notes, comment (full CRUD via `/slide[N]/comment[M]`), paragraph (para), run, zoom (slidezoom), ole (embed), placeholder (phType=title/body/subtitle/footer/...) |
+| **docx** | paragraph (para), run, table, row (tr), cell (td), image (img — SVG supported), header, footer, section, bookmark, comment, footnote, endnote, formfield (text/checkbox/dropdown), sdt (contentcontrol), chart, equation, field (28 types incl. mergefield/ref/seq/styleref/docproperty/if), hyperlink, style, toc, watermark, break (pagebreak/columnbreak), ole, num/abstractNum/lvl (numbering/list system), tab (tab stops). Document protection: `set / --prop protection=forms\|readOnly\|comments\|trackedChanges\|none` |
+| **xlsx** | sheet (visible/hidden/veryHidden, cascade-aware rename), row, cell (richtext runs, merge, phonetic guide), chart (incl. pareto), image (SVG), comment, table (listobject), namedrange (definedname, `[@name=X]` selector), pivottable (calculatedField), sparkline, validation, autofilter, shape, textbox, databar/colorscale/iconset/formulacf/cellIs/topN/aboveAverage (conditional formatting), ole, csv (tsv). `value="=SUM(...)"` auto-detects as formula. Chart/picture/shape/slicer accept `anchor=A1:E10`. |
+
+RTL/CJK support (direction=rtl, font.latin/ea/cs, BCP-47 lang tags, RTL page numbering) exists across all three formats — run `officecli help <format> <element>` for the exact property names.
 
 ### Pivot tables (xlsx)
 
@@ -409,4 +418,3 @@ Example: a fundraising deck task → `officecli load_skill pitch-deck` → use t
 - `--index` is **0-based** (array convention): `--index 0` = first position
 - **Excel exception**: for `add --type row` and `add --type col`, `--index N` is **1-based** (matches OOXML RowIndex / column letter index). `--index 5` inserts at row 5 / column 5.
 - After modifications, verify with `validate` and/or `view issues`
-- **When unsure**, run `officecli help <format> <element>` instead of guessing
