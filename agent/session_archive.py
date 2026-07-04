@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS _meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     last_export_ts REAL,
+    last_periodic_export_ts REAL,
     row_count INTEGER NOT NULL DEFAULT 0,
     kind TEXT,
     restore_in_progress INTEGER NOT NULL DEFAULT 0,
@@ -132,6 +133,14 @@ def _db_path() -> Path:
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
     conn.execute("INSERT OR IGNORE INTO _meta (id) VALUES (1)")
+    # Idempotent migration: an archive DB created before the terminal/periodic
+    # freshness split (C3) has a `_meta` table without `last_periodic_export_ts`.
+    # Add it on open so `get_archive_status()` can key liveness off the periodic
+    # sweep (which can die silently) rather than the shared `last_export_ts` that
+    # terminal exports keep fresh regardless of the sweep thread's health.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(_meta)")}
+    if "last_periodic_export_ts" not in cols:
+        conn.execute("ALTER TABLE _meta ADD COLUMN last_periodic_export_ts REAL")
 
 
 def _connect(on_loop: bool = False) -> sqlite3.Connection:
@@ -233,10 +242,21 @@ def _upsert_row(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
 
 
 def _touch_meta(conn: sqlite3.Connection, *, kind: str, row_count: int) -> None:
+    now = time.time()
     conn.execute(
         "UPDATE _meta SET last_export_ts=?, row_count=?, kind=? WHERE id=1",
-        (time.time(), row_count, kind),
+        (now, row_count, kind),
     )
+    # C3: the periodic sweep is the liveness signal that can fail silently (a
+    # dead `worker-session-archive` daemon thread). Terminal exports keep
+    # `last_export_ts` fresh on every session completion regardless of the sweep
+    # thread's health, so freshness must key off a SEPARATE periodic timestamp.
+    # Only the periodic sweep advances it.
+    if kind == "periodic":
+        conn.execute(
+            "UPDATE _meta SET last_periodic_export_ts=? WHERE id=1",
+            (now,),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -626,6 +646,8 @@ def get_archive_status() -> dict[str, Any]:
         "row_count": 0,
         "last_export_ts": None,
         "last_export_age_s": None,
+        "last_periodic_export_ts": None,
+        "last_periodic_export_age_s": None,
         "kind": None,
         "healthy": False,
     }
@@ -642,19 +664,42 @@ def get_archive_status() -> dict[str, Any]:
             }
             if "_meta" not in tables or "sessions" not in tables:
                 return result
+            meta_cols = {r[1] for r in conn.execute("PRAGMA table_info(_meta)")}
 
             result["exists"] = True
+            # Guard the periodic column for a pre-migration DB opened read-only
+            # (get_archive_status uses its own raw connection, bypassing the
+            # _init_schema ALTER on the writer connections).
+            periodic_select = (
+                "last_periodic_export_ts" if "last_periodic_export_ts" in meta_cols else "NULL"
+            )
             row = conn.execute(
-                "SELECT last_export_ts, row_count, kind FROM _meta WHERE id=1"
+                f"SELECT last_export_ts, {periodic_select}, row_count, kind FROM _meta WHERE id=1"
             ).fetchone()
             if row:
-                last_export_ts, row_count, kind = row
+                last_export_ts, last_periodic_export_ts, row_count, kind = row
+                now = time.time()
                 result["last_export_ts"] = last_export_ts
+                result["last_periodic_export_ts"] = last_periodic_export_ts
                 result["row_count"] = row_count or 0
                 result["kind"] = kind
                 if last_export_ts is not None:
-                    age = max(0.0, time.time() - last_export_ts)
-                    result["last_export_age_s"] = age
+                    result["last_export_age_s"] = max(0.0, now - last_export_ts)
+                if last_periodic_export_ts is not None:
+                    result["last_periodic_export_age_s"] = max(0.0, now - last_periodic_export_ts)
+                # C3: health keys off the PERIODIC sweep age -- a dead sweep
+                # thread must read stale even while terminal exports keep
+                # `last_export_ts` fresh. Before the first sweep has ever run
+                # (cold-start transient, `last_periodic_export_ts` is None) fall
+                # back to the terminal timestamp so a just-booted worker that has
+                # only done a terminal export is not falsely reported stale.
+                freshness_ts = (
+                    last_periodic_export_ts
+                    if last_periodic_export_ts is not None
+                    else last_export_ts
+                )
+                if freshness_ts is not None:
+                    age = max(0.0, now - freshness_ts)
                     result["healthy"] = age <= SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S
         finally:
             conn.close()

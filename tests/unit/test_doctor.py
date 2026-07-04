@@ -367,6 +367,8 @@ class TestCheckSessionArchiveFreshness:
             "row_count": 5,
             "last_export_ts": 1000.0,
             "last_export_age_s": 10.0,
+            "last_periodic_export_ts": 1000.0,
+            "last_periodic_export_age_s": 10.0,
             "kind": "periodic",
             "healthy": True,
         }
@@ -393,7 +395,9 @@ class TestCheckSessionArchiveFreshness:
 
         with patch(
             "agent.session_archive.get_archive_status",
-            return_value=self._status(healthy=False, last_export_age_s=99999.0),
+            return_value=self._status(
+                healthy=False, last_export_age_s=99999.0, last_periodic_export_age_s=99999.0
+            ),
         ):
             result = _check_session_archive_freshness()
 
@@ -428,7 +432,13 @@ class TestCheckSessionArchiveFreshness:
 
         with patch(
             "agent.session_archive.get_archive_status",
-            return_value=self._status(healthy=False, last_export_ts=None, last_export_age_s=None),
+            return_value=self._status(
+                healthy=False,
+                last_export_ts=None,
+                last_export_age_s=None,
+                last_periodic_export_ts=None,
+                last_periodic_export_age_s=None,
+            ),
         ):
             result = _check_session_archive_freshness()
 

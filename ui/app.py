@@ -651,6 +651,10 @@ def create_app() -> FastAPI:
             "healthy": status["healthy"],
             "row_count": status["row_count"],
             "last_export_age_s": status["last_export_age_s"],
+            # C3: periodic-sweep age is the liveness signal `healthy` keys off --
+            # surface it so a dead sweep thread is visible even while terminal
+            # exports keep last_export_age_s fresh.
+            "last_periodic_export_age_s": status["last_periodic_export_age_s"],
             "kind": status["kind"],
         }
 

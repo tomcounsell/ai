@@ -226,6 +226,8 @@ class TestArchiveHealth:
             "row_count": 3,
             "last_export_ts": 1700000000.0,
             "last_export_age_s": 5.0,
+            "last_periodic_export_ts": 1700000000.0,
+            "last_periodic_export_age_s": 5.0,
             "kind": "periodic",
             "healthy": True,
         }
@@ -240,6 +242,7 @@ class TestArchiveHealth:
         assert archive["healthy"] is True
         assert archive["row_count"] == 3
         assert archive["last_export_age_s"] == 5.0
+        assert archive["last_periodic_export_age_s"] == 5.0
         assert archive["kind"] == "periodic"
 
     def test_dashboard_json_archive_degrades_gracefully_when_missing(
@@ -268,6 +271,8 @@ class TestArchiveHealth:
             "row_count": 7,
             "last_export_ts": 1700000000.0,
             "last_export_age_s": 12.0,
+            "last_periodic_export_ts": 1700000000.0,
+            "last_periodic_export_age_s": 12.0,
             "kind": "terminal",
             "healthy": True,
         }

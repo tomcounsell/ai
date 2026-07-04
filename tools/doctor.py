@@ -449,15 +449,19 @@ def _check_session_archive_freshness() -> CheckResult:
         )
 
     row_count = status["row_count"]
-    age_s = status["last_export_age_s"]
+    # Health keys off the periodic sweep age (C3) -- a dead sweep thread must
+    # surface even while terminal exports keep last_export_age_s fresh. Fall
+    # back to the terminal age only before the first sweep has run.
+    periodic_age_s = status["last_periodic_export_age_s"]
+    health_age_s = periodic_age_s if periodic_age_s is not None else status["last_export_age_s"]
 
     if not status["healthy"]:
-        age_desc = "never" if age_s is None else f"{age_s:.0f}s ago"
+        age_desc = "never" if health_age_s is None else f"{health_age_s:.0f}s ago"
         return CheckResult(
             name=name,
             category=category,
             passed=False,
-            message=f"Session archive stale: last export {age_desc} "
+            message=f"Session archive stale: last periodic sweep {age_desc} "
             f"(threshold {SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S}s), row_count={row_count}",
             fix="Check the worker is running and its 'worker-session-archive' daemon "
             "thread hasn't crashed: ./scripts/valor-service.sh worker-status; "
@@ -468,7 +472,8 @@ def _check_session_archive_freshness() -> CheckResult:
         name=name,
         category=category,
         passed=True,
-        message=f"Session archive fresh: last export {age_s:.0f}s ago, row_count={row_count}",
+        message=f"Session archive fresh: last periodic sweep {health_age_s:.0f}s ago, "
+        f"row_count={row_count}",
     )
 
 

@@ -298,12 +298,21 @@ missing or corrupt DB returns a `healthy=False` shape) that all three operator s
 delegate to:
 
 - **`dashboard.json`** exposes an `archive` block (`db_path`, `exists`, `row_count`,
-  `last_export_ts`, `last_export_age_s`, `kind`, `healthy`), mirroring the existing
-  email/heartbeat freshness pattern.
+  `last_export_ts`, `last_export_age_s`, `last_periodic_export_age_s`, `kind`, `healthy`),
+  mirroring the existing email/heartbeat freshness pattern.
 - **`/health`** surfaces the same freshness fields for external monitoring.
 - **`session-archive-freshness`** (`tools/doctor.py`) fails actionably when the archive
-  doesn't exist yet (fix: start the worker) or when `last_export_age_s` exceeds
+  doesn't exist yet (fix: start the worker) or when the archive is stale relative to
   `SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S` (default `2 × SESSION_ARCHIVE_INTERVAL`).
+
+**Freshness keys off the periodic sweep, not the terminal hook.** The terminal-transition
+hook writes `last_export_ts` on *every* session completion, so it stays fresh regardless of
+whether the periodic sweep thread is alive. A dead `worker-session-archive` daemon thread
+would therefore read healthy forever if freshness keyed off the shared timestamp. To close
+that silent-green gap, `export_all()` advances a **separate `last_periodic_export_ts`**, and
+`healthy` keys off *that* age — a stalled sweep surfaces as stale even while terminal exports
+keep firing. Before the first sweep has run (cold-start transient), freshness falls back to
+the terminal timestamp so a just-booted worker is not falsely reported stale.
 
 ### Operational runbook
 

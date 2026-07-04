@@ -14,6 +14,7 @@ authoritative case list this file implements.
 from __future__ import annotations
 
 import sqlite3
+import time
 import uuid
 from datetime import UTC, datetime
 
@@ -640,6 +641,57 @@ def test_get_archive_status_healthy_shape(archive_db):
     assert status["kind"] == "terminal"
     assert status["last_export_age_s"] is not None
     assert status["db_path"] == str(archive_db)
+
+
+def test_periodic_sweep_populates_separate_periodic_timestamp(archive_db):
+    """A periodic sweep advances last_periodic_export_ts; a terminal export does not (C3)."""
+    session = _make_session()
+
+    # Terminal-only export: last_export_ts fresh, periodic timestamp still None.
+    archive.export_session(session)
+    status = archive.get_archive_status()
+    assert status["last_export_ts"] is not None
+    assert status["last_periodic_export_ts"] is None
+    # Cold-start grace: healthy falls back to the terminal timestamp before the
+    # first sweep has ever run.
+    assert status["healthy"] is True
+
+    # Periodic sweep: now the periodic timestamp is populated.
+    archive.export_all()
+    status = archive.get_archive_status()
+    assert status["last_periodic_export_ts"] is not None
+    assert status["last_periodic_export_age_s"] is not None
+    assert status["healthy"] is True
+
+
+def test_dead_sweep_thread_reads_stale_despite_fresh_terminal_exports(archive_db):
+    """C3: a dead periodic sweep must surface as stale even while terminal
+    exports keep last_export_ts fresh (the silent-green failure mode)."""
+    session = _make_session()
+
+    # One periodic sweep runs, then the sweep thread "dies": age its timestamp
+    # well past the freshness threshold.
+    archive.export_all()
+    stale_ts = time.time() - (archive.SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S + 3600)
+    conn = archive._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE _meta SET last_periodic_export_ts=? WHERE id=1", (stale_ts,))
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+
+    # Terminal exports keep firing on every session completion, keeping
+    # last_export_ts fresh -- this is exactly what would falsely mask the dead
+    # sweep if health keyed off the shared timestamp.
+    archive.export_session(session)
+
+    status = archive.get_archive_status()
+    # Terminal age is fresh...
+    assert status["last_export_age_s"] < archive.SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S
+    # ...but the periodic age is stale, so health must be RED.
+    assert status["last_periodic_export_age_s"] > archive.SESSION_ARCHIVE_FRESHNESS_THRESHOLD_S
+    assert status["healthy"] is False
 
 
 def test_get_archive_status_missing_db_never_raises(tmp_path, monkeypatch):
