@@ -679,6 +679,11 @@ def create_app() -> FastAPI:
         """Full dashboard state as JSON for programmatic consumption."""
         from fastapi.responses import JSONResponse
 
+        from agent.redis_offload import (
+            get_last_redis_latency,
+            get_redis_latency_max,
+            get_redis_latency_p95,
+        )
         from ui.data.analytics import get_analytics_summary
         from ui.data.machine import get_machine_name, get_machine_projects
         from ui.data.reflections import get_all_reflections
@@ -723,6 +728,12 @@ def create_app() -> FastAPI:
                     "claude_auth_logged_in": claude_auth["logged_in"],
                     "claude_auth_method": claude_auth["auth_method"],
                     "claude_auth_subscription_type": claude_auth["subscription_type"],
+                    "redis_offload": {
+                        "label": "drain-loop idle-check latency",
+                        "p95_latency_s": get_redis_latency_p95(),
+                        "max_latency_s": get_redis_latency_max(),
+                        "last_latency_s": get_last_redis_latency(),
+                    },
                 },
                 "sessions": [_session_to_json(s) for s in sessions],
                 "reflections": reflections,

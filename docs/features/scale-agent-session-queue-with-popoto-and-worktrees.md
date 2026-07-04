@@ -147,10 +147,13 @@ With Parts 1 and 2, these become unnecessary:
 
 ## Research Questions to Resolve Before Building
 
-1. **Popoto async wrapping** -- Popoto is synchronous. The bridge is async. Options:
-   - `asyncio.to_thread()` (Python 3.9+, simplest)
-   - `loop.run_in_executor()` (more control)
-   - Profile first: Redis calls are sub-millisecond, blocking may be acceptable in practice
+1. **Popoto async wrapping** -- Resolved. The enqueue/write path wraps Popoto calls in
+   `asyncio.to_thread()` directly (`agent/agent_session_queue.py`). The worker drain loop's
+   hot-path read (the idle-check query) runs through a dedicated instrumented seam,
+   `offload_redis()` on a bounded `run_in_executor()` bulkhead -- see
+   [Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4) for the
+   thread-safety contract, the bulkhead sizing, and why that one call site gets its own
+   measured pool instead of a bare `to_thread()`.
 
 2. **Worktree disk usage** -- Each worktree is a full copy of the working tree (not .git objects, just files). For this repo that's ~small. But for large projects monitored via multi-project config, need to check sizes. Worktrees share the .git object store so it's only file copies, not full clones.
 

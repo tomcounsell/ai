@@ -95,6 +95,25 @@ operators can observe the margin between the actual on-loop sync work duration a
 abort threshold. If real sync work routinely approaches the threshold, the threshold
 should be raised before it produces false aborts.
 
+### Composition With Off-Loop Redis Access (issue #1826)
+
+The beacon only stays fresh if the on-loop tick task actually gets to run. Before
+[Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4), the
+worker drain loop's hot-path idle-check ran its Redis query synchronously, directly
+on the event loop. A slow or restarting Redis could block the loop long enough to
+starve the tick task's `asyncio.sleep` resumption, letting the beacon go stale and
+triggering a false self-kill on a worker whose only problem was a slow Redis, not a
+real freeze.
+
+That hot-path query now runs off the loop via `offload_redis()` on a dedicated
+thread pool, so a slow Redis lengthens only that one call's latency instead of
+occupying the loop. The tick task keeps bumping the beacon throughout, so the
+dead-man's-switch no longer false-triggers on Redis slowness. It still fires
+correctly on a genuine synchronous freeze elsewhere in the loop, since that
+composition path was never touched. See
+[Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4)
+for the bulkhead, the cut-over ordering, and the latency metric.
+
 ### Environment Constants (Provisional)
 
 All constants are env-overridable and marked provisional/tunable. They live in
@@ -252,6 +271,9 @@ Both deferred follow-ups have since shipped:
 - [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md) —
   the bridge-domain reclaim trigger built on top of this beacon, plus the
   synchronous per-tool budget (#1821)
+- [Redis Durability: Off-Loop Redis Access](redis-durability.md#off-loop-redis-access-fix-4):
+  moves the drain loop's hot-path Redis query off the event loop so a slow Redis
+  cannot starve this beacon's tick task (#1826)
 - `agent/session_state.py` — beacon globals and accessors
 - `worker/__main__.py` — tick task, watchdog thread, and dead-man's-switch constants
 - `agent/granite_container/pty_pool.py` — bounded awaits and force-recycle

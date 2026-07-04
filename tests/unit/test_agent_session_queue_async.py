@@ -4,11 +4,14 @@ Covers get_active_session_for_chat and related async helpers.
 """
 
 import asyncio
+import os
+import time
 from unittest.mock import AsyncMock, MagicMock, patch  # noqa: F401
 
 import pytest
 
-from agent.agent_session_queue import get_active_session_for_chat
+import agent.agent_session_queue as asq
+from agent.agent_session_queue import _worker_loop, get_active_session_for_chat
 
 
 @pytest.fixture
@@ -624,3 +627,246 @@ class TestNotifyListenerPreservesNoneSocketTimeout:
             "and a dropped-notification window; do not reintroduce a finite "
             "timeout here."
         )
+
+
+class TestClearThenCheckDrainLoop:
+    """Issue #1826: the drain-loop idle-check offloads the AgentSession.query.filter
+    scan through agent.redis_offload.offload_redis, using CLEAR-then-CHECK
+    ordering (event.clear() runs BEFORE the offloaded query). See
+    docs/plans/hot-path-redis-off-loop.md Risk 1 for the full rationale — the
+    old check-before-clear ordering becomes unsafe once an `await` sits at the
+    check, because a concurrent enqueue+event.set() during the in-flight
+    offload could be swallowed by a later event.clear().
+    """
+
+    def test_event_cleared_before_query_runs(self):
+        """event.clear() must run before the offloaded idle-check query fires."""
+        chat_id = "clear-then-check-test"
+        observed = []
+
+        async def run():
+            event = asyncio.Event()
+            event.set()  # start SET, to prove clear() runs before the check
+
+            def fake_filter(**kwargs):
+                observed.append(event.is_set())
+                return []
+
+            async def wake_and_shutdown():
+                await asyncio.sleep(0.1)
+                asq._session_state._shutdown_requested = True
+                event.set()
+
+            with (
+                patch.dict(os.environ, {"VALOR_WORKER_MODE": "standalone"}),
+                patch(
+                    "agent.agent_session_queue._pop_agent_session",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
+                patch("agent.agent_session_queue.AgentSession") as mock_cls,
+                patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.2),
+            ):
+                mock_cls.query.filter.side_effect = fake_filter
+                wake_task = asyncio.create_task(wake_and_shutdown())
+                await _worker_loop(chat_id, event)
+                await wake_task
+
+        asq._session_state._shutdown_requested = False
+        try:
+            asyncio.run(run())
+        finally:
+            asq._session_state._shutdown_requested = False
+
+        assert observed, "AgentSession.query.filter was never called"
+        assert observed[0] is False, (
+            "event must already be cleared by the time the offloaded "
+            "idle-check query executes — clear-then-check ordering violated"
+        )
+
+    def test_pending_result_skips_wait_and_continues(self):
+        """A non-empty idle-check result must `continue` immediately, not wait."""
+        chat_id = "pending-continue-test"
+        call_count = {"n": 0}
+
+        async def run():
+            event = asyncio.Event()
+
+            def fake_filter(**kwargs):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    return [MagicMock()]  # pending work found — skip the wait
+                asq._session_state._shutdown_requested = True
+                return []
+
+            with (
+                patch.dict(os.environ, {"VALOR_WORKER_MODE": "standalone"}),
+                patch(
+                    "agent.agent_session_queue._pop_agent_session",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
+                patch("agent.agent_session_queue.AgentSession") as mock_cls,
+                patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.05),
+            ):
+                mock_cls.query.filter.side_effect = fake_filter
+                await _worker_loop(chat_id, event)
+
+        asq._session_state._shutdown_requested = False
+        start = time.monotonic()
+        try:
+            asyncio.run(run())
+        finally:
+            asq._session_state._shutdown_requested = False
+        elapsed = time.monotonic() - start
+
+        assert call_count["n"] >= 2, "loop should re-check after skipping the wait"
+        # The first iteration must have skipped straight to `continue` — total
+        # runtime should be dominated by the single bounded DRAIN_TIMEOUT wait
+        # on the second (empty) iteration, not two waits.
+        assert elapsed < 1.0
+
+    def test_standalone_wait_is_bounded_and_rechecks_on_timeout(self):
+        """The standalone wait must be bounded by DRAIN_TIMEOUT, not a bare
+        unbounded `await event.wait()` — on timeout it re-checks Redis at the
+        top of the loop instead of parking forever."""
+        chat_id = "bounded-wait-test"
+        call_count = {"n": 0}
+
+        async def run():
+            event = asyncio.Event()  # never set
+
+            def fake_filter(**kwargs):
+                call_count["n"] += 1
+                if call_count["n"] >= 3:
+                    asq._session_state._shutdown_requested = True
+                return []
+
+            with (
+                patch.dict(os.environ, {"VALOR_WORKER_MODE": "standalone"}),
+                patch(
+                    "agent.agent_session_queue._pop_agent_session",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                ),
+                patch("agent.agent_session_queue.AgentSession") as mock_cls,
+                patch("agent.agent_session_queue.DRAIN_TIMEOUT", 0.02),
+            ):
+                mock_cls.query.filter.side_effect = fake_filter
+                # If the wait were unbounded (a bare `await event.wait()`)
+                # this would hang forever since nothing ever sets the event;
+                # the outer wait_for is a hard backstop that proves it isn't.
+                await asyncio.wait_for(_worker_loop(chat_id, event), timeout=2.0)
+
+        asq._session_state._shutdown_requested = False
+        try:
+            asyncio.run(run())
+        finally:
+            asq._session_state._shutdown_requested = False
+
+        assert call_count["n"] >= 3, "loop must re-check Redis after each bounded wait"
+
+    def test_enqueue_during_inflight_offload_does_not_park(self):
+        """Lost-wakeup acceptance (Risk 1, unit-level approximation): an
+        event.set() that fires while the offloaded idle-check query is still
+        in flight must not be swallowed. Because event.clear() ran BEFORE the
+        query started, the concurrent set() survives, so the subsequent
+        event.wait() returns immediately instead of parking for the full
+        DRAIN_TIMEOUT once the (now-stale) idle-check result comes back empty.
+
+        This is a unit-level approximation: it simulates "an enqueue landed
+        during the offload" via a plain event.set() plus a scripted second
+        pop() result, rather than a real enqueue_agent_session() call against
+        Redis. A fuller integration-level version (real Redis, real
+        enqueue_agent_session()) is covered separately by
+        tests/integration/test_slow_redis_no_loop_freeze.py.
+        """
+        chat_id = "lost-wakeup-test"
+        query_calls = {"n": 0}
+        executed = []
+
+        async def run():
+            event = asyncio.Event()
+            session = MagicMock()
+            session.message_text = "enqueued during offload"
+            session.agent_session_id = "s-lost-wakeup"
+            session.session_id = "session_s-lost-wakeup"
+            session.chat_id = chat_id
+            session.project_key = "test"
+            session.status = "running"
+            session.working_dir = "/tmp/test"
+            session.log_lifecycle_transition = MagicMock()
+
+            pop_results = iter([None, session])
+
+            def pop_side_effect(cid, is_project_keyed=False):
+                return next(pop_results, None)
+
+            def slow_filter(**kwargs):
+                query_calls["n"] += 1
+                # Simulate a slow Redis call running in the offload thread.
+                # The producer below fires its event.set() while this sleep
+                # is still in flight.
+                time.sleep(0.1)
+                return []
+
+            async def enqueue_during_offload():
+                # Give the offload thread time to start before firing the
+                # wakeup, so the set() genuinely races the in-flight query.
+                await asyncio.sleep(0.03)
+                event.set()
+
+            async def fake_execute(sess):
+                executed.append(sess)
+                asq._session_state._shutdown_requested = True
+
+            mock_fresh = MagicMock()
+            mock_fresh.status = "running"
+
+            with (
+                patch.dict(os.environ, {"VALOR_WORKER_MODE": "standalone"}),
+                patch(
+                    "agent.agent_session_queue._pop_agent_session",
+                    side_effect=pop_side_effect,
+                ),
+                patch("agent.agent_session_queue.AgentSession") as mock_cls,
+                patch("agent.agent_session_queue.DRAIN_TIMEOUT", 1.5),
+                patch(
+                    "agent.agent_session_queue._execute_agent_session",
+                    side_effect=fake_execute,
+                ),
+                patch(
+                    "agent.agent_session_queue._complete_agent_session",
+                    new_callable=AsyncMock,
+                ),
+                patch(
+                    "agent.agent_session_queue._check_restart_flag",
+                    return_value=False,
+                ),
+                patch("agent.agent_session_queue.save_session_snapshot"),
+            ):
+                mock_cls.query.filter.side_effect = slow_filter
+                mock_cls.get.return_value = mock_fresh
+                enqueue_task = asyncio.create_task(enqueue_during_offload())
+                start = time.monotonic()
+                await asyncio.wait_for(_worker_loop(chat_id, event), timeout=2.0)
+                elapsed = time.monotonic() - start
+                await enqueue_task
+                return elapsed
+
+        asq._session_state._shutdown_requested = False
+        try:
+            elapsed = asyncio.run(run())
+        finally:
+            asq._session_state._shutdown_requested = False
+
+        assert query_calls["n"] == 1, (
+            "the loop should pick up the enqueued session on the very next "
+            "pop instead of re-running the idle-check"
+        )
+        assert len(executed) == 1
+        # If the wakeup had been lost (check-before-clear), the loop would
+        # block for the full DRAIN_TIMEOUT (1.5s) on event.wait() after the
+        # offload returned empty. It must instead proceed almost immediately
+        # because the event survived, set during the in-flight offload.
+        assert elapsed < 1.0, f"loop appears to have parked on event.wait() ({elapsed:.2f}s)"
