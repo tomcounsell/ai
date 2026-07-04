@@ -124,8 +124,10 @@ def get_last_redis_latency() -> float:
 
 def reset_max_redis_latency() -> None:
     """Operator reset of the windowed latency gauges (clears all samples)."""
+    global _last_latency
     with _samples_lock:
         _samples.clear()
+        _last_latency = 0.0
 
 
 async def offload_redis(fn, *args, **kwargs):
