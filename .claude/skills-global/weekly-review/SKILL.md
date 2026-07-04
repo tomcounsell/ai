@@ -1,6 +1,6 @@
 ---
 name: weekly-review
-description: Use when the user asks for a weekly review, engineering review, team review, or summary of recent commits. Also use for bi-weekly, monthly, or sprint reviews ("review the last N days"). Produces a concise, stakeholder-friendly engineering summary organized by category with contributor stats.
+description: Stakeholder-friendly summary of recent commits by category with contributor stats. Use when asked for a weekly, bi-weekly, monthly, sprint, engineering, or team review, or 'review the last N days'.
 allowed-tools: Bash, Read, Write
 argument-hint: "[days] [categories]"
 ---

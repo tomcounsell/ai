@@ -1,6 +1,6 @@
 ---
 name: claude-standards
-description: "Audit Claude Code assets — skills, commands, subagents, hooks, and MCP servers — against best practices and optionally apply conservative conformance changes. Use when reviewing overall Claude Code hygiene, bringing the system in line with documented standards, or after adding new skills/commands/subagents. Invoke explicitly; do not use for feature changes."
+description: "Audit Claude Code assets (skills, commands, subagents, hooks, MCP) against documented standards, optionally applying conformance fixes. Use when reviewing Claude Code hygiene; invoke explicitly."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write
 argument-hint: "[skills|commands|subagents|hooks|mcp|all] [--fix]"

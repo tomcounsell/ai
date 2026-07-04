@@ -1,6 +1,6 @@
 ---
 name: observability
-description: "Use when wiring up dashboards, alerts, and health checks for a module or service. Triggered by 'add observability to', 'set up monitoring for', 'create a health check for', 'wire up alerts', 'observability pass', or any request to build external monitoring surfaces."
+description: "Wire up dashboards, alerts, and health checks for a module or service. Triggered by 'add observability to', 'set up monitoring for', 'create a health check', 'wire up alerts', 'observability pass'."
 allowed-tools: Read, Edit, Write, Grep, Glob
 ---
 

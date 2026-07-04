@@ -1,6 +1,6 @@
 ---
 name: zoom-out
-description: "Use when course-correcting mid-session or reassessing priorities. Triggered by 'zoom out', 'am I solving the right problem', 'step back', 'reassess', 'am I on track', or any request to check whether current work aligns with real goals."
+description: "Course-correct mid-session and reassess priorities. Triggered by 'zoom out', 'step back', 'reassess', 'am I on track', 'am I solving the right problem', or checking work against real goals."
 allowed-tools: Read, Bash
 ---
 

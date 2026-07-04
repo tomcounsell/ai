@@ -1,7 +1,6 @@
 ---
 name: skillify
-description: "Capture this session's repeatable process into a reusable skill. Call at end of a process you want to automate."
-when_to_use: "Use when the user wants to capture, save, or turn a session workflow into a reusable skill. Examples: '/skillify', 'capture this as a skill', 'turn this into a skill', 'save this workflow', 'make this repeatable'"
+description: "Capture this session's repeatable process into a reusable skill. Triggered by '/skillify', 'capture this as a skill', 'turn this into a skill', 'save this workflow', 'make this repeatable'."
 allowed-tools:
   - Read
   - Write
@@ -13,8 +12,6 @@ allowed-tools:
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[description of the process you want to capture]"
-arguments:
-  - description
 ---
 
 # Skillify
@@ -25,7 +22,7 @@ You are capturing this session's repeatable process as a reusable skill.
 
 You have the full conversation history available to you. Analyze it directly to understand what process was performed, what tools were used, and how the user steered you.
 
-If a description was provided: The user described this process as: "$description"
+If a description was provided: The user described this process as: "$ARGUMENTS"
 
 ## Your Task
 
@@ -89,13 +86,10 @@ Use this format:
 ```markdown
 ---
 name: {{skill-name}}
-description: {{one-line description}}
+description: {{what the skill does, then when Claude should automatically invoke it, including trigger phrases and example user messages}}
 allowed-tools:
   {{list of tool permission patterns observed during session}}
-when_to_use: {{detailed description of when Claude should automatically invoke this skill, including trigger phrases and example user messages}}
 argument-hint: "{{hint showing argument placeholders}}"
-arguments:
-  {{list of argument names}}
 context: {{inline or fork -- omit for inline}}
 ---
 
@@ -103,7 +97,7 @@ context: {{inline or fork -- omit for inline}}
 Description of skill
 
 ## Inputs
-- `$arg_name`: Description of this input
+- `$ARGUMENTS`: Description of the expected input (omit this section if the skill takes no arguments)
 
 ## Goal
 Clearly stated goal for this workflow. Best if you have clearly defined artifacts or criteria for completion.
@@ -135,8 +129,8 @@ IMPORTANT: see the next section below for the per-step annotations you can optio
 **Frontmatter rules:**
 - `allowed-tools`: Minimum permissions needed (use patterns like `Bash(gh:*)` not `Bash`)
 - `context`: Only set `context: fork` for self-contained skills that don't need mid-process user input.
-- `when_to_use` is CRITICAL -- tells the model when to auto-invoke. Start with "Use when..." and include trigger phrases. Example: "Use when the user wants to cherry-pick a PR to a release branch. Examples: 'cherry-pick to release', 'CP this PR', 'hotfix'."
-- `arguments` and `argument-hint`: Only include if the skill takes parameters. Use `$name` in the body for substitution.
+- `description` is CRITICAL -- it tells the model when to auto-invoke. Say what the skill does, then when to use it, and include trigger phrases. Example: "Cherry-pick a PR to a release branch. Use when the user says 'cherry-pick to release', 'CP this PR', 'hotfix'."
+- `argument-hint`: Only include if the skill takes parameters. Use `$ARGUMENTS` in the body for substitution.
 
 ### Step 4: Confirm and Save
 

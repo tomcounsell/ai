@@ -1,6 +1,6 @@
 ---
 name: ontologies
-description: "Use when building or updating a project's domain vocabulary. Triggered by 'ontologies', 'build vocabulary', 'name things', 'define terms', 'ONTOLOGIES.md', or any request to establish precise domain language for a codebase."
+description: "Build or update a project's domain vocabulary in ONTOLOGIES.md. Triggered by 'ontologies', 'build vocabulary', 'name things', 'define terms', or establishing precise domain language."
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

@@ -70,11 +70,11 @@ Scaffold a test-driven development cycle: write a failing test first, implement 
    - Run tests after every change to confirm nothing broke
 
 7. **Check test hygiene.** Before marking done:
-   - Consolidate any overlapping tests with `@pytest.mark.parametrize`
+   - Consolidate any overlapping tests into parameterized tests (e.g. `@pytest.mark.parametrize` in pytest)
    - Delete any tests that test internal implementation rather than behavior
    - Confirm the test names describe behavior, not code paths
 
-8. **Run linting and formatting:**
+8. **Run the project's linter and formatter.** For example, in a Python repo:
    ```bash
    python -m ruff check . && python -m ruff format --check .
    ```

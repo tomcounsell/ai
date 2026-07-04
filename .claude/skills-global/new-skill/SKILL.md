@@ -1,6 +1,6 @@
 ---
 name: new-skill
-description: Use when creating a new Claude Code skill, subagent, or project tool. Also use when the user says 'create a skill', 'new skill', 'add a skill', 'create an agent', 'new agent', 'create a tool', 'new tool', or 'add a tool'. Handles shared (~/.claude/skills/), project-specific (.claude/skills/), and subagents (.claude/agents/).
+description: Use when creating a new Claude Code skill, subagent, or project tool. Triggered by 'create/add a skill', 'new skill', 'create an agent', 'new agent', 'create a tool', 'new tool', 'add a tool'.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<skill-name>"
 disable-model-invocation: true

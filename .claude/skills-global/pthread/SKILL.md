@@ -1,6 +1,6 @@
 ---
 name: pthread
-description: "Use when facing multiple independent tasks that can run concurrently. Scales compute by spawning multiple agents in parallel. Triggered by 'parallelize', 'run these in parallel', or when independent subtasks are detected."
+description: "Spawn parallel agents for independent tasks that can run concurrently. Triggered by 'parallelize', 'run these in parallel', or when independent subtasks are detected."
 context: fork
 ---
 
@@ -128,7 +128,7 @@ Output: Complete review document, not partial results
 
 *"Every time a new powerful model is released, you don't just get the benefits one time. You get it N times if and only if you're delegating to multiple agents."*
 
-The system should be making these parallelization decisions autonomously. Valor (the persona) doesn't need to think about threading - the underlying system handles it.
+The system should be making these parallelization decisions autonomously. The persona layer doesn't need to think about threading - the underlying system handles it.
 
 ---
 
