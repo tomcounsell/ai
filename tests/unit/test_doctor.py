@@ -347,3 +347,107 @@ class TestCheckClaudeOauthToken:
             or "prefix" in result.fix.lower()
             or "malformed" in result.fix.lower()
         )
+
+
+# ---------------------------------------------------------------------------
+# session-archive-freshness check (issue #1825)
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSessionArchiveFreshness:
+    """Tests for the session-archive-freshness doctor check (Task 4 of
+    docs/plans/session-archive-sqlite.md). It delegates entirely to
+    `agent.session_archive.get_archive_status()`, so tests patch that
+    function's return value rather than touching a real SQLite file."""
+
+    def _status(self, **overrides) -> dict:
+        base = {
+            "db_path": "/tmp/session_archive.db",
+            "exists": True,
+            "row_count": 5,
+            "last_export_ts": 1000.0,
+            "last_export_age_s": 10.0,
+            "last_periodic_export_ts": 1000.0,
+            "last_periodic_export_age_s": 10.0,
+            "kind": "periodic",
+            "healthy": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_healthy_archive_passes(self):
+        from tools.doctor import _check_session_archive_freshness
+
+        with patch(
+            "agent.session_archive.get_archive_status",
+            return_value=self._status(healthy=True, last_export_age_s=10.0),
+        ):
+            result = _check_session_archive_freshness()
+
+        assert result.passed is True
+        assert result.name == "session-archive-freshness"
+        assert result.category == "Services"
+        assert "fresh" in result.message.lower()
+        assert result.fix is None
+
+    def test_stale_archive_fails_with_fix(self):
+        from tools.doctor import _check_session_archive_freshness
+
+        with patch(
+            "agent.session_archive.get_archive_status",
+            return_value=self._status(
+                healthy=False, last_export_age_s=99999.0, last_periodic_export_age_s=99999.0
+            ),
+        ):
+            result = _check_session_archive_freshness()
+
+        assert result.passed is False
+        assert "stale" in result.message.lower()
+        assert result.fix is not None
+
+    def test_missing_archive_fails_with_fix(self):
+        from tools.doctor import _check_session_archive_freshness
+
+        with patch(
+            "agent.session_archive.get_archive_status",
+            return_value=self._status(
+                exists=False,
+                row_count=0,
+                last_export_ts=None,
+                last_export_age_s=None,
+                kind=None,
+                healthy=False,
+            ),
+        ):
+            result = _check_session_archive_freshness()
+
+        assert result.passed is False
+        assert "does not exist" in result.message
+        assert result.fix is not None
+        assert "worker-start" in result.fix
+
+    def test_never_exported_fails_gracefully(self):
+        """exists=True but last_export_ts=None (schema created, never written)."""
+        from tools.doctor import _check_session_archive_freshness
+
+        with patch(
+            "agent.session_archive.get_archive_status",
+            return_value=self._status(
+                healthy=False,
+                last_export_ts=None,
+                last_export_age_s=None,
+                last_periodic_export_ts=None,
+                last_periodic_export_age_s=None,
+            ),
+        ):
+            result = _check_session_archive_freshness()
+
+        assert result.passed is False
+        assert "never" in result.message.lower()
+
+    def test_get_checks_includes_session_archive_freshness(self):
+        """The check must be wired into the default registry (Services category)."""
+        from tools.doctor import get_checks
+
+        names = [getattr(fn, "__name__", "") for fn in get_checks()]
+        assert "_check_session_archive_freshness" in names
