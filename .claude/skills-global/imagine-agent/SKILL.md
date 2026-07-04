@@ -1,22 +1,27 @@
 ---
 name: imagine-agent
-description: Use when a non-technical client wants to imagine an AI agent for their product or repo and you need to turn their plain-language goals into a buildable spec. Triggered by 'help a client design an agent', 'what agent should we build for them', 'imagine an agent', 'scope an agent with the client', or 'imagine-agent'. Interviews the client with ONLY end-user/outcome questions, researches the target repo to map goals to technical requirements, and emits a build-sheet that /build-agent launches.
+description: Turn client goals into a build-sheet for /build-agent. Triggered by 'imagine an agent', 'help a client design an agent', 'what agent should we build for them', 'scope an agent with the client'.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion, Agent
 argument-hint: "[repo path or url] [client name]"
 ---
 
 # Imagine Agent
 
+Also fires on 'imagine-agent' or any request where a non-technical client wants to imagine an AI agent
+for their product or repo and their plain-language goals need to become a buildable spec.
+
 ## What this skill does
 
-The **client-facing front door** to building a managed agent. It talks to a *non-technical* client in
+The **client-facing front door** to building a managed agent. It interviews the client with ONLY
+end-user/outcome questions, researches the target repo to map goals to technical requirements, and
+emits a build-sheet that /build-agent launches. It talks to a *non-technical* client in
 their own language — outcomes, users, what "good" looks like — and never burdens them with model names,
 tools, rubrics, or cron syntax. Then it **researches the target repo** to learn what's actually possible
 and what house standards exist, and **translates** the client's goals into the technical fields a builder
 needs. The output is a `build-sheet.json` it hands to `/build-agent`.
 
 Two skills, one seam: `imagine-agent` writes the build-sheet; `build-agent` reads it. See the contract in
-the build-agent skill's `references/build-sheet.md`.
+the sibling skill directory: `../build-agent/references/build-sheet.md`.
 
 ## The core move
 
@@ -80,8 +85,8 @@ Map each client outcome to a build-sheet technical field, justified by a repo fi
 1. **Read the brief back to the client as scannable outcomes**, not a technical spec: what their users
    will get, how often, where, and what's coming in v1/v2. Approve via `AskUserQuestion`
    (looks right / tweak something). Keep the translation invisible — they approve the *experience*.
-2. **Write `./<agent-slug>/build-sheet.json`** following the schema in build-agent's
-   `references/build-sheet.md`. Set `meta.ownership = "client_account"` and confirm `meta.workspace`
+2. **Write `./<agent-slug>/build-sheet.json`** following the build-sheet schema in
+   `../build-agent/references/build-sheet.md`. Set `meta.ownership = "client_account"` and confirm `meta.workspace`
    (the client's Anthropic workspace) and `meta.repo_url`.
 3. **Validate** against that file's checklist.
 4. **Hand off:** invoke `/build-agent` with the build-sheet path. From here the technical loop

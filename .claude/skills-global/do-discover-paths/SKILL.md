@@ -1,6 +1,6 @@
 ---
 name: do-discover-paths
-description: "Discover happy paths on a target site using BYOB MCP, producing structured trace JSON for deterministic test generation."
+description: "Discover happy paths on a target site using BYOB MCP, producing trace JSON for deterministic test generation. Use when asked to discover paths, map site flows, or record browser traces for tests."
 argument-hint: "<url> [path-name]"
 allowed-tools: mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_eval, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, Bash, Read, Write, Edit, Grep, Glob
 ---

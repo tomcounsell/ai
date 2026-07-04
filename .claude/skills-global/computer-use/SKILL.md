@@ -1,6 +1,6 @@
 ---
 name: computer-use
-description: "Use when driving native macOS apps -- click buttons, type text, screenshot windows -- without moving the user's cursor or stealing focus. Triggered by requests to control desktop apps (Slack, Notes, Xcode, Telegram Desktop, VS Code), automate macOS workflows, or take screenshots of native windows. macOS-only."
+description: "Drive native macOS apps: click, type, screenshot windows without stealing focus. Use for desktop apps (Slack, Notes, Xcode), macOS workflow automation, or native window screenshots. macOS-only."
 allowed-tools: Bash
 user-invocable: false
 ---
