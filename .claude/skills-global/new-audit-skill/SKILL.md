@@ -7,9 +7,7 @@ argument-hint: "<subject-to-audit>"
 
 # New Audit Skill
 
-## What this skill does
-
-Creates a new audit skill by guiding you through a structured interview, then producing a complete skill directory with checks, output format, and disposition. The result is a reusable, testable audit that follows the patterns established by the existing audit skills in the library. Use it whenever someone wants systematic validation of any codebase artifact — code, configuration, or documentation quality.
+**Goal:** turn a request like "I want to check X for problems" into a complete, working audit skill — interviewed requirements, well-designed checks, a tested output format, and a clear disposition — following the patterns of the existing audit skills. Success is an audit that produces accurate, actionable findings on its first real invocation, not a template that merely looks right.
 
 ## When to load sub-files
 
@@ -21,14 +19,13 @@ Creates a new audit skill by guiding you through a structured interview, then pr
 
 | Skill | Subject | Approach | Disposition | Autonomy |
 |-------|---------|----------|-------------|----------|
-| `audit-models` | Popoto Redis models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
-| `audit-tools` | Python tools in `tools/` | Prompt-only, 4-phase process | Report + implement fixes | Medium |
+| `audit-models` | Data-layer models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
+| `audit-tools` | Python tools in `tools/` | Prompt-only, 10 checks | Report only (human decides) | Medium |
 | `do-design-audit` | Web UI quality | Prompt-only, 10-dimension rubric | Report only (findings + top 3 fixes) | Medium — opinionated |
-| `docs-auditor` (substrate) | Documentation files | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
+| `docs-auditor` (substrate) | Docs + cross-references | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
 | `do-integration-audit` | Feature wiring | Prompt-only, 12 semantic checks | Report only (human decides) | High — exploratory |
 | `do-oop-audit` | Python classes | Prompt-only, 14 anti-pattern checks | Report only (human decides) | Medium — semantic |
-| `do-skills-audit` | Skill SKILL.md files | Script-backed, 12 rules | Auto-fix trivial, report complex | High — deterministic |
-| `docs-auditor` (substrate) | Doc cross-references | Prompt + parallel agents | Report gaps, add links | Medium — surgical |
+| `do-skills-audit` | Skill SKILL.md files | Script-backed, 20 rules | Auto-fix trivial, report complex | High — deterministic |
 
 ## Quick start
 
@@ -117,7 +114,7 @@ After creating the skill, run it once on real data to verify:
 3. **False positive check**: Are any findings incorrect or misleading?
 4. **Output readability**: Is the report clear enough to act on without re-reading the skill?
 
-If findings are wrong or missing, revise the checks and re-run. The goal is a skill that produces accurate, actionable findings on the first real invocation — not just a template that looks right.
+If findings are wrong or missing, revise the checks and re-run.
 
 ### 8. Validate structure
 
@@ -129,8 +126,3 @@ Final structural checklist:
 - [ ] Disposition section clearly states what happens after findings
 - [ ] SKILL.md is under 500 lines (use sub-files for detailed reference material)
 - [ ] Description includes trigger synonyms beyond just "audit" (check, validate, review, scan)
-
-## Version history
-
-- v1.1.0 (2026-03-19): Added interview phase, autonomy calibration, description optimization, smoke testing, concrete examples requirement. Informed by Anthropic skill-creator, LobeHub, and FastMCP patterns.
-- v1.0.0 (2026-03-19): Initial — meta-skill for creating audit skills

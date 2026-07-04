@@ -17,7 +17,7 @@ Every audit skill answers five questions:
 
 | Approach | When to use | Examples |
 |----------|-------------|---------|
-| **Script-backed** | Checks are deterministic, regex-based, or structural. Benefits from caching, CLI flags, JSON output. | `do-skills-audit` (Python script with 12 rules) |
+| **Script-backed** | Checks are deterministic, regex-based, or structural. Benefits from caching, CLI flags, JSON output. | `do-skills-audit` (Python script with 20 rules) |
 | **Prompt-only** | Checks require semantic understanding, cross-referencing, or judgment calls. | `audit-models` (relationship analysis), `docs-auditor` (substrate) (reference verification) |
 | **Hybrid** | Some checks are deterministic, others need LLM reasoning. | `audit-tools` (structure checks + quality judgment) |
 
@@ -142,7 +142,7 @@ Match the instruction style to the audit's freedom level:
 | Autonomy | Instruction style | Example audit |
 |----------|-------------------|---------------|
 | **High** | Guiding principles, let model reason about edge cases | `audit-models` — "Flag when the same concept uses different names" |
-| **Medium** | Structured phases with judgment within each phase | `audit-tools` — 4-phase process, judgment on quality |
+| **Medium** | Structured phases with judgment within each phase | `audit-tools` — 10 checks per tool, judgment on quality |
 | **Low** | Step-by-step scripts, deterministic pass/fail | `do-skills-audit` — Python script with 12 boolean rules |
 
 Don't mix autonomy levels within a single check. If a check has a deterministic part and a judgment part, split it into two checks.

@@ -1,6 +1,6 @@
 # Hook Best Practices
 
-Authoritative reference for Claude Code hook safety patterns in this project. Used by the `/audit-hooks` skill and as a human-readable guide.
+Authoritative reference for Claude Code hook safety patterns. Used by the `/audit-hooks` skill and as a human-readable guide.
 
 **Source of truth:** [Claude Code hooks documentation](https://docs.anthropic.com/en/docs/claude-code/hooks)
 
@@ -38,14 +38,7 @@ Advisory hooks observe but do not enforce. They include: memory recall/extractio
 
 Validator hooks exist to block invalid operations. Adding `|| true` defeats the purpose.
 
-**Validators in this project:**
-- `validate_commit_message.py` — blocks commits with bad messages
-- `validate_merge_guard.py` — blocks unauthorized merges
-- `validate_no_raw_redis_delete.py` — blocks raw Redis reads/writes on Popoto-managed keys
-- `validate_documentation_section.py` — blocks plans without docs section
-- `validate_test_impact_section.py` — blocks plans without test impact
-- `validate_file_contains.py` — blocks plans missing required sections
-- `validate_features_readme_sort.py` — blocks unsorted README entries
+**How to identify:** scripts named `validate_*.py` registered on PreToolUse/PostToolUse with a matcher. A repo's `.claude/skill-context/audit-hooks.md` may declare an explicit validator inventory — treat that list as authoritative.
 
 ---
 
@@ -68,7 +61,7 @@ if __name__ == "__main__":
     main()  # errors swallowed by || true
 ```
 
-**Utility:** `log_hook_error()` is in `.claude/hooks/hook_utils/constants.py`. It writes `YYYY-MM-DD HH:MM:SS - hook_name - ERROR - message` to `logs/hooks.log`.
+**Utility:** the repo's error-logging helper (default: `log_hook_error()` in `.claude/hooks/hook_utils/constants.py`, writing `YYYY-MM-DD HH:MM:SS - hook_name - ERROR - message` to `logs/hooks.log`). The repo context file may declare a different helper or log path.
 
 ---
 
@@ -119,16 +112,16 @@ Hook scripts run as subprocesses with the system PATH. Project-specific tools in
 
 **Good:**
 ```bash
-if [ -x "$CLAUDE_PROJECT_DIR/.venv/bin/valor-calendar" ]; then
-    "$CLAUDE_PROJECT_DIR/.venv/bin/valor-calendar" "$@"
+if [ -x "$CLAUDE_PROJECT_DIR/.venv/bin/my-tool" ]; then
+    "$CLAUDE_PROJECT_DIR/.venv/bin/my-tool" "$@"
 else
-    python -m tools.calendar_tool "$@"
+    python -m tools.my_tool "$@"
 fi
 ```
 
 **Bad:**
 ```bash
-valor-calendar "$@"  # may not be on PATH
+my-tool "$@"  # may not be on PATH
 ```
 
 ---

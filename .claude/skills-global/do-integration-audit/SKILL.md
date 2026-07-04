@@ -8,17 +8,7 @@ disable-model-invocation: true
 
 # Feature Integration Audit
 
-Audits how thoroughly a named feature is wired into its host project. A feature can exist in a codebase without being truly integrated — code is present but unreachable, tests exist but don't exercise real paths, documentation mentions it but entry points are missing. This audit finds the gaps between "code exists" and "feature works end-to-end."
-
-Takes a feature topic as its argument and maps every integration surface: entry points, imports, tests, docs, config, and error handling. Produces a severity-grouped findings report and pauses for human review.
-
-## What this skill does
-
-1. Discovers all code, config, docs, and tests related to the given feature topic
-2. Maps the feature's integration surfaces: how it's entered, imported, configured, tested, and documented
-3. Runs 12 semantic checks against each integration surface
-4. Produces a structured findings report organized by severity (CRITICAL, WARNING, INFO)
-5. Pauses for discussion — no auto-fix, findings only
+**Goal:** find the gaps between "code exists" and "feature works end-to-end" for one named feature. A feature can be present but unreachable, tested but only with mocks, documented but missing its entry points. Map every integration surface — entry points, imports, tests, docs, config, error handling — run the 12 checks, and report findings grouped by severity. **Success is a report where every finding survives verification**; the skill never modifies source files and always pauses for human review.
 
 ## Invocation
 
@@ -196,87 +186,14 @@ Found N files across M surfaces:
 PASS: N  WARN: N  FAIL: N
 ```
 
-### Example: Authentication feature in a Django project
+### Example findings (style reference)
 
-```
-## Integration Audit Report: authentication
+Every finding names its check, cites file:line evidence, and states the runtime consequence:
 
-### Discovery
-Found 14 files across 5 surfaces:
-- Implementation: 4 files (models.py, backends.py, middleware.py, utils.py)
-- Entry points: 3 (routes: login, logout, password-reset)
-- Tests: 5 (unit: 4, integration: 1)
-- Documentation: 1 file (docs/auth.md)
-- Configuration: 3 keys (AUTH_BACKEND, SESSION_TTL, PASSWORD_MIN_LENGTH)
-
-### Integration Map
-| Surface | File | Status |
-|---------|------|--------|
-| entry point | urls.py:12 → views.login | connected |
-| entry point | urls.py:13 → views.logout | connected |
-| entry point | urls.py:14 → views.password_reset | dead — view exists but url not in root urlconf |
-| implementation | auth/middleware.py | connected via settings.MIDDLEWARE |
-| implementation | auth/backends.py | orphaned — AUTH_BACKEND default points to django.contrib.auth, not this |
-| config | AUTH_BACKEND | not in .env.example, no default in settings.py |
-
-### Findings
-
-#### CRITICAL
-- [orphan-code] auth/backends.py: Custom auth backend is never used — AUTH_BACKEND defaults to django.contrib.auth.backends.ModelBackend, not auth.backends.TokenBackend. The custom backend ships but never runs.
-- [dead-entrypoint] password-reset: View function exists at auth/views.py:89 but the URL pattern at urls.py:14 is not included in the root urlconf (myproject/urls.py only includes login and logout paths).
-
-#### WARNING
-- [config-gap] AUTH_BACKEND: Read in settings.py:34 via os.environ.get() with no default. Missing from .env.example and deployment docs. Feature silently falls back to Django default, masking the missing config.
-- [missing-integration-test] Only 1 of 5 tests exercises real auth flow (test_login_flow). No integration test for logout or password-reset paths. The 4 unit tests mock the backend, so they can't catch wiring issues like the orphaned backend above.
-- [undocumented-entry] password-reset: No mention in docs/auth.md. Users don't know this endpoint exists.
-
-#### WARNING (continued)
-- [inconsistent-interface] authenticate: API endpoint accepts `email` + `password`, but CLI login command accepts `username` + `pass`. Same operation, different argument names.
-- [internal-naming-drift] auth/backends.py calls it `token`, auth/middleware.py calls it `session_key`, auth/utils.py calls it `credential` — all refer to the same session identifier.
-- [external-naming-drift] User model FK is `auth_backend_id` in users table, but `login_provider_id` in the audit_log table — both reference auth/backends.
-
-#### INFO
-- [missing-error-boundary] views.login:23: AuthenticationError from backends.py propagates as unhandled 500. Should return 401 with error message.
-
-### Summary
-PASS: 28  WARN: 6  FAIL: 2
-```
-
-### Example: Search feature in a FastAPI project
-
-```
-## Integration Audit Report: search
-
-### Discovery
-Found 8 files across 4 surfaces:
-- Implementation: 3 files (search/engine.py, search/indexer.py, search/models.py)
-- Entry points: 2 (routes: /api/search, CLI: reindex command)
-- Tests: 2 (unit: 2, integration: 0)
-- Documentation: 0 files
-- Configuration: 4 keys (SEARCH_ENGINE_URL, SEARCH_INDEX_NAME, SEARCH_BATCH_SIZE, SEARCH_TIMEOUT)
-
-### Findings
-
-#### CRITICAL
-(none)
-
-#### WARNING
-- [missing-integration-test] Zero integration tests. Both test files mock the search engine client. No test verifies that the /api/search endpoint returns results from a real (or fixture) index. Wiring between the route handler and search.engine module is untested.
-- [undocumented-entry] /api/search: No API docs, no README mention, no docstring on the route handler. Endpoint is discoverable only by reading the code.
-- [undocumented-entry] CLI reindex: Command registered in cli.py:45 but not mentioned in README or --help description is empty string.
-- [config-gap] SEARCH_TIMEOUT: Used in engine.py:12 but missing from .env.example. Other 3 search config keys are documented.
-- [partial-wiring] search/indexer.py:67: `async def reindex_incremental` raises NotImplementedError. CLI reindex command only calls full reindex, but the incremental path is referenced in 2 comments as the intended production path.
-- [stale-reference] app/recommendations.py:34: imports `from search.engine import FullTextSearch` — class was renamed to `SearchEngine` in search/engine.py 3 months ago. Import succeeds because old name exists as a deprecated alias, but logs a deprecation warning on every call.
-
-- [non-reusable-interface] search/engine.py:SearchEngine.__init__ takes a FastAPI `Request` object to extract auth headers. Any non-HTTP caller (CLI reindex, background job) must fabricate a fake request. Should accept a credentials/config object instead.
-- [external-naming-drift] recommendations.py calls it `FullTextSearch`, analytics.py calls it `SearchClient`, both import from search/engine.py — only `SearchEngine` is the current class name.
-
-#### INFO
-- [missing-error-boundary] /api/search route handler: ConnectionError from search engine propagates as 500. Should return 503 with retry-after header.
-
-### Summary
-PASS: 22  WARN: 8  FAIL: 0
-```
+- [orphan-code] auth/backends.py: Custom auth backend is never used — AUTH_BACKEND defaults to django.contrib.auth.backends.ModelBackend, not auth.backends.TokenBackend. The code ships but never runs.
+- [config-gap] SEARCH_TIMEOUT: read in engine.py:12 via os.environ.get() with no default; missing from .env.example. Works on the developer's machine, silently misconfigured on fresh deploys.
+- [missing-integration-test] Only 1 of 5 tests exercises the real auth flow; the 4 unit tests mock the backend, so they can't catch wiring failures like the orphaned backend above.
+- [non-reusable-interface] SearchEngine.__init__ takes a FastAPI Request to extract auth headers — any non-HTTP caller (CLI reindex, background job) must fabricate a fake request.
 
 ---
 
