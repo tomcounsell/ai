@@ -7,46 +7,26 @@ disable-model-invocation: true
 
 # Reclassify Plan Type
 
-Changes the `type:` field in a plan's frontmatter. Only allowed during `status: Planning`.
+Changes the `type:` field in a plan document's YAML frontmatter. Only allowed while the plan is still in its planning phase — after approval, type is immutable.
 
-## Arguments
+## Repo Context Probe
 
-The skill takes a single argument: the new type. Must be one of: `bug`, `feature`, `chore`.
+If `.claude/skill-context/reclassify.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-Example: `/reclassify bug`
+The context file is where a repo declares its plan-document conventions: where plan files live, the allowed `type:` values, which `status:` values still permit reclassification, and any hooks that enforce these. Generic defaults: plans are markdown files under `docs/plans/` with `type:` and `status:` frontmatter, allowed types are `bug`, `feature`, `chore`, and only `status: Planning` permits the change. If the repo has no plan documents matching this shape, report that there is nothing to reclassify.
 
 ## Process
 
-### Step 1: Validate the argument
+Argument: the new type (e.g. `/reclassify bug`). If missing or not an allowed value, show usage and stop.
 
-The argument must be one of: `bug`, `feature`, `chore`. If missing or invalid, show usage and exit.
-
-### Step 2: Find the active plan
-
-Search for plan files in `docs/plans/*.md`. If there's exactly one plan with `status: Planning`, use it. If there are multiple, list them and ask the user to specify which one. If none, report that no plans are in Planning status.
-
-### Step 3: Check plan status
-
-Read the plan's frontmatter. If the status is NOT `Planning`, reject with:
-```
-Cannot reclassify: plan status is '{status}'. Type can only be changed during Planning phase.
-To change type after approval, first change status back to Planning.
-```
-
-### Step 4: Update the type field
-
-Use the Edit tool to change the `type:` field in the plan's YAML frontmatter to the new value.
-
-### Step 5: Confirm the change
-
-Report:
-```
-Reclassified {plan_file} from '{old_type}' to '{new_type}'.
-```
-
-### Step 6: Commit the change
-
-```bash
-git add {plan_file}
-git commit -m "Reclassify {plan_file} as {new_type}"
-```
+1. **Find the active plan.** Exactly one plan in a planning status → use it. Multiple → list them and ask which. None → report it.
+2. **Gate on status.** If the plan's status does not permit reclassification, reject with:
+   ```
+   Cannot reclassify: plan status is '{status}'. Type can only be changed during Planning phase.
+   To change type after approval, first change status back to Planning.
+   ```
+3. **Edit the `type:` field** in the frontmatter, then confirm:
+   ```
+   Reclassified {plan_file} from '{old_type}' to '{new_type}'.
+   ```
+4. **Commit** the change: `git add {plan_file} && git commit -m "Reclassify {plan_file} as {new_type}"`.

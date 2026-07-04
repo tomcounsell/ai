@@ -6,30 +6,38 @@ allowed-tools: Agent
 
 # Analyze
 
-Frame the question from what's already in context, then fire the strategic-analyst agent. Delivers a structured assessment with recommendation and first action.
+Deliver a structured strategic assessment — convergence, tensions, overlooked factors, a direct recommendation, and one first move — on a decision, idea, or plan with meaningful stakes.
 
 Also fires on: 'do a full analysis', 'assess this', 'what's the strategic read', 'deep dive on this', 'give me your full take'. Do NOT trigger on simple factual questions, quick lookups, or casual requests without meaningful stakes.
 
 ## Framing
 
-Before invoking the agent, compose a complete brief from what you already know:
+Compose a complete brief from what you already know: the user's raw question, relevant conversation context (constraints, goals, numbers, prior decisions), workspace files already in context that bear on the question, and what's at stake. Do not ask the user for anything.
 
-- The user's raw question
-- Relevant context from the current conversation (constraints, goals, numbers, prior decisions)
-- Any workspace files already in context that bear on the question
-- What's at stake
+## Run
 
-Do not ask the user for anything. Use what's available.
-
-## Invoke
+**If a `strategic-analyst` agent type is available** (listed among this session's agent types), delegate the whole protocol to it and relay the report path it returns:
 
 ```
-Agent(
-  subagent_type="strategic-analyst",
-  prompt="[the framed question]"
-)
+Agent(subagent_type="strategic-analyst", prompt="[the framed question]")
 ```
+
+**Otherwise, run the same protocol yourself** with general-purpose agents:
+
+1. **Five lenses in parallel** — spawn 5 agents in a single message, each applying one lens to the framed question (150-300 words, no hedging):
+   - *Downside* — failure points, fatal flaws; assumes a critical weakness exists and hunts for it
+   - *Foundational* — challenges the question's assumptions; may conclude the wrong question is being asked
+   - *Upside* — overlooked opportunities and undervalued assets, unbounded by risk
+   - *Outside* — zero domain context; catches what experts assume is obvious
+   - *Execution* — "what do you do Monday morning?"; flags ideas with no clear first step
+2. **Cross-examine** — with all 5 responses in hand, identify: the strongest analysis, the biggest blind spot, and what all five missed.
+3. **Synthesize** the assessment yourself, in this structure:
+   - **What the Analysis Converges On** — points multiple lenses reached independently
+   - **Points of Tension** — genuine disagreements, both sides
+   - **Overlooked Factors** — insights that only emerged in cross-examination
+   - **The Recommendation** — a real answer with reasoning, not "it depends"
+   - **The First Move** — one concrete next step, not a list
 
 ## Complete
 
-Relay the file path from the agent's return message to the user.
+Deliver the assessment (or the report path, in delegated mode) to the user. Be direct; don't hedge.

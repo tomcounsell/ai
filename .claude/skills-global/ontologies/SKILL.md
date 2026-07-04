@@ -36,8 +36,8 @@ Build and maintain an `ONTOLOGIES.md` at the repo root — a canonical domain vo
 
 4. **Check for bounded-context split signal.** If the same term means two different things in two different modules, that is a bounded-context boundary. Document it explicitly:
    ```
-   Note: "Session" in bridge/ means a Telegram conversation thread.
-         "Session" in agent/ means an AgentSession execution record.
+   Note: "Order" in checkout/ means a customer's cart at purchase time.
+         "Order" in fulfillment/ means a warehouse shipping instruction.
          These are distinct concepts that should not be merged.
    ```
 

@@ -34,9 +34,7 @@ Before asking any questions, analyze the conversation history to identify:
 - The distinct steps (in order)
 - The success artifacts/criteria (e.g. not just "writing code," but "an open PR with CI fully passing") for each step
 - Where the user corrected or steered you
-- What tools and permissions were needed
-- What agents were used
-- What the goals and success artifacts were
+- What tools, permissions, and agents were used
 
 ### Step 2: Interview the User
 
@@ -81,56 +79,7 @@ Stop interviewing once you have enough information. IMPORTANT: Don't over-ask fo
 
 Create the skill directory and file at the location the user chose in Round 2.
 
-Use this format:
-
-```markdown
----
-name: {{skill-name}}
-description: {{what the skill does, then when Claude should automatically invoke it, including trigger phrases and example user messages}}
-allowed-tools:
-  {{list of tool permission patterns observed during session}}
-argument-hint: "{{hint showing argument placeholders}}"
-context: {{inline or fork -- omit for inline}}
----
-
-# {{Skill Title}}
-Description of skill
-
-## Inputs
-- `$ARGUMENTS`: Description of the expected input (omit this section if the skill takes no arguments)
-
-## Goal
-Clearly stated goal for this workflow. Best if you have clearly defined artifacts or criteria for completion.
-
-## Steps
-
-### 1. Step Name
-What to do in this step. Be specific and actionable. Include commands when appropriate.
-
-**Success criteria**: ALWAYS include this! This shows that the step is done and we can move on. Can be a list.
-
-IMPORTANT: see the next section below for the per-step annotations you can optionally include for each step.
-
-...
-```
-
-**Per-step annotations**:
-- **Success criteria** is REQUIRED on every step. This helps the model understand what the user expects from their workflow, and when it should have the confidence to move on.
-- **Execution**: `Direct` (default), `Task agent` (straightforward subagents), `Teammate` (agent with true parallelism and inter-agent communication), or `[human]` (user does it). Only needs specifying if not Direct.
-- **Artifacts**: Data this step produces that later steps need (e.g., PR number, commit SHA). Only include if later steps depend on it.
-- **Human checkpoint**: When to pause and ask the user before proceeding. Include for irreversible actions (merging, sending messages), error judgment (merge conflicts), or output review.
-- **Rules**: Hard rules for the workflow. User corrections during the reference session can be especially useful here.
-
-**Step structure tips:**
-- Steps that can run concurrently use sub-numbers: 3a, 3b
-- Steps requiring the user to act get `[human]` in the title
-- Keep simple skills simple -- a 2-step skill doesn't need annotations on every step
-
-**Frontmatter rules:**
-- `allowed-tools`: Minimum permissions needed (use patterns like `Bash(gh:*)` not `Bash`)
-- `context`: Only set `context: fork` for self-contained skills that don't need mid-process user input.
-- `description` is CRITICAL -- it tells the model when to auto-invoke. Say what the skill does, then when to use it, and include trigger phrases. Example: "Cherry-pick a PR to a release branch. Use when the user says 'cherry-pick to release', 'CP this PR', 'hotfix'."
-- `argument-hint`: Only include if the skill takes parameters. Use `$ARGUMENTS` in the body for substitution.
+Read [../new-skill/WORKFLOW_TEMPLATE.md](../new-skill/WORKFLOW_TEMPLATE.md) — the `new-skill` skill is installed alongside this one and owns the canonical templates. Follow its skeleton, per-step annotations, and frontmatter rules exactly. In `allowed-tools`, list the tool permission patterns you observed being used during the session.
 
 ### Step 4: Confirm and Save
 

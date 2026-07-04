@@ -22,8 +22,6 @@ Pull back from the current task, reassess priorities, and reorient toward the ac
 - The user says "step back", "zoom out", or "are we doing the right thing?"
 - Before starting a fourth implementation attempt on something that keeps breaking
 
-Concrete trigger example: Run before a third consecutive patch loop on the same issue. If /do-patch has been invoked twice and the tests still fail, invoke /zoom-out before a third attempt.
-
 ## Steps
 
 1. **Synthesize recent context.** If the repo context file declares a memory/recall CLI, use it to surface observations related to the current work area and read the top results, noting any corrections or pattern observations that apply. Otherwise reconstruct recent context from `git log` (Step 3) and any session notes — there is no generic memory store to query.

@@ -21,6 +21,7 @@ Creates Claude Code skills and subagents from scratch, following canonical patte
 ## When to load sub-files
 
 - Creating a Claude Code skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) for the skeleton
+- Creating a workflow-capture skill (step-based process with success criteria; the shape `/skillify` produces) → read [WORKFLOW_TEMPLATE.md](WORKFLOW_TEMPLATE.md)
 - Creating a subagent (`.claude/agents/`) → read [AGENT.md](AGENT.md)
 - Creating a project tool / CLI → follow the repo's tool conventions declared in `.claude/skill-context/new-skill.md` if present; otherwise scaffold a small CLI with an entry point registered in the project's package manifest
 - Need current Anthropic field specs, substitution variable docs, or a canonical skill example → consult the `do-skills-audit` skill's bundled `references/` (installed alongside it on every machine), if available
@@ -110,9 +111,3 @@ If a skill is not being discovered or loaded:
 - **Hardcoded paths**: Use relative paths for sub-file references so skills work in both project and personal scope.
 - **Over-permissive allowed-tools**: Only list tools the skill actually needs. Fewer tools = smaller attack surface.
 - **Skipping progressive disclosure**: A 600-line SKILL.md that loads every time wastes context tokens. Split it.
-
-## Version history
-
-- v2.1.0 (2026-06-26): Leaned to a repo-agnostic baseline (skill + subagent creation). Repo-specific project-tool scaffolding conventions relocated to `.claude/skill-context/new-skill.md`; added the repo-context probe.
-- v2.0.0 (2026-05-11): Absorbed the legacy project-tool-creation skill and add-feature (AGENT.md); unified entry point for skills, agents, and tools
-- v1.0.0 (2026-02-22): Initial — extracted as a generic, repo-agnostic skill creator

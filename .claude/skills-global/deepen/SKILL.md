@@ -43,15 +43,12 @@ Add structured logging, metrics, and tracing to a specified module to make it de
    Fix: add logging.error("context: %s", value, exc_info=True) in the except block
    ```
 
-5. **DO NOT edit code.** This skill is read-only — it audits and recommends. To apply fixes, hand off to /do-plan with the ranked list as the problem statement.
-
-6. **Suggest next steps.** If the module needs substantial work, say: "Run /do-plan with this ranked list to create implementation tasks."
+5. **DO NOT edit code.** This skill is read-only — it audits and recommends. To apply fixes, hand off to /do-plan with the ranked list as the problem statement ("Run /do-plan with this ranked list to create implementation tasks").
 
 ## Output
 A ranked list of instrumentation gaps with fix suggestions. No code changes.
 
 ## Anti-Patterns
-- Do not edit any files — /deepen is a read-only audit skill.
 - Use /observability when the goal is dashboards and alerts — /deepen is for code-level logging and tracing.
 - Do not add logging to every line — over-logging is noise. Focus on decision points, I/O boundaries, and error paths.
 - Do not use print()/console.log — always recommend the language's structured logger (e.g. `logging.getLogger(__name__)` in Python) and structured log records.
