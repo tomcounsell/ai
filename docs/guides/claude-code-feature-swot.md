@@ -412,11 +412,11 @@ Operational (ready)          Configured (needs_setup)
 | Issue Poller | `com.valor.issue-poller` | Issue polling script | Every 5min |
 | AutoExperiment | `com.valor.autoexperiment` | `scripts/autoexperiment.py` | Nightly |
 
-Reflections no longer run via launchd; the scheduler is embedded in the worker (`python -m worker`). See [Reflections](../features/reflections.md) for details.
+Reflections run in their own supervised launchd subprocess (`python -m reflections`, `com.valor.reflection-worker`), separate from the worker (`python -m worker`). See [Reflection Scheduler Subprocess](../features/reflection-scheduler-subprocess.md) and [Reflections](../features/reflections.md) for details.
 
 **Code example — reflections maintenance:**
 
-Reflections are declared in `config/reflections.yaml` (a vault-symlinked registry). Each entry maps to a callable in the `reflections/` package (e.g., `reflections.maintenance.run_redis_ttl_cleanup`). The `ReflectionScheduler` in `agent/reflection_scheduler.py` — run as an asyncio task inside the standalone worker — enqueues due reflections at their declared intervals. There is no direct CLI invocation.
+Reflections are declared in `config/reflections.yaml` (a vault-symlinked registry). Each entry maps to a callable in the `reflections/` package (e.g., `reflections.maintenance.run_redis_ttl_cleanup`). The `ReflectionScheduler` in `agent/reflection_scheduler.py` — running in its own out-of-process subprocess — enqueues due reflections at their declared intervals. There is no direct CLI invocation.
 
 **Remote triggers (via /schedule skill):**
 ```bash

@@ -13,7 +13,7 @@ All recurring tasks are declared in `config/reflections.yaml` and managed by a s
 ### Architecture
 
 ```
-Worker startup (worker/__main__.py)
+Subprocess startup (reflections/__main__.py, `python -m reflections`)
   -> ReflectionScheduler.start()
     -> Tick every 60 seconds
       -> For each reflection in registry:
