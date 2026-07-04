@@ -665,6 +665,60 @@ class TestBridgeAdapterLastTurnAt(unittest.TestCase):
             adapter._bump_last_turn_at()
         assert counter.counts == {}
 
+    def test_bump_purges_pending_nudges_on_genuine_turn(self) -> None:
+        """A genuine turn completion eagerly purges any undrained wedge-nudge
+        from the signal channel (issue #1879 review blocker B2) so a stale
+        nudge cannot be injected by the first drain tick of the next healthy
+        turn. Also a direct regression guard for the missing-import class of
+        bug: purge_wedge_nudges must be resolvable and invoked here."""
+        session = _SavingFakeSession()
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=_make_pool(),
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        with (
+            patch(
+                "agent.granite_container.bridge_adapter.purge_wedge_nudges",
+                return_value=False,
+            ) as mock_purge,
+            patch(
+                "agent.granite_container.bridge_adapter.clear_wedge_nudge_latch",
+                return_value=False,
+            ),
+        ):
+            adapter._bump_last_turn_at()
+        mock_purge.assert_called_once_with(session.session_id)
+
+    def test_bump_genuine_false_skips_wedge_bookkeeping(self) -> None:
+        """The crash-resume liveness bump passes genuine=False: it still bumps
+        last_turn_at but must NOT purge, clear the latch, or touch the recovered
+        counter (issue #1879 review M1), so a crash-resume cannot pollute the
+        rung's efficacy signal."""
+        session = _SavingFakeSession()
+        adapter = BridgeAdapter(
+            agent_session=session,
+            project_key="test-project",
+            transport="telegram",
+            pool=_make_pool(),
+            resolve_callbacks=lambda p, t: (None, None),
+        )
+        with (
+            patch(
+                "agent.granite_container.bridge_adapter.purge_wedge_nudges",
+            ) as mock_purge,
+            patch(
+                "agent.granite_container.bridge_adapter.clear_wedge_nudge_latch",
+            ) as mock_clear,
+        ):
+            adapter._bump_last_turn_at(genuine=False)
+        mock_purge.assert_not_called()
+        mock_clear.assert_not_called()
+        # The liveness bump itself still happened.
+        self.assertIsNotNone(session.last_turn_at)
+
     def test_bump_survives_latch_clear_failure(self) -> None:
         """A raising clear_wedge_nudge_latch must not abort the turn bump."""
         session = _SavingFakeSession()

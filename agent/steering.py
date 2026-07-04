@@ -319,7 +319,11 @@ def _wedge_nudge_latch_key(session_id: str) -> str:
     return f"steering:nudge:latch:{session_id}"
 
 
-def push_wedge_nudge(session_id: str, sender: str = "wedge-nudge") -> None:
+def push_wedge_nudge(
+    session_id: str,
+    sender: str = "wedge-nudge",
+    ttl_seconds: int = _WEDGE_NUDGE_LATCH_TTL_DEFAULT,
+) -> None:
     """Push a single `continue` wedge-nudge onto the session's nudge channel.
 
     CHANNEL ISOLATION: this writes to `steering:nudge:{session_id}` — a key
@@ -328,6 +332,15 @@ def push_wedge_nudge(session_id: str, sender: str = "wedge-nudge") -> None:
     `pop_all_steering_messages` / `pop_steering_message`. Only
     `pop_wedge_nudges` (below) drains this channel.
 
+    SIGNAL-CHANNEL TTL (issue #1879 review blocker B2): the key expires after
+    `ttl_seconds` (default matched to the latch TTL / turn-wait budget). A
+    nudge only makes sense within the turn-wait window it was produced for;
+    if the container exits `_await_turn_end` before a drain tick, the
+    unconsumed message must NOT persist and be injected as a spurious
+    "continue" by the first drain tick of a later, healthy turn. The expiry
+    is the Redis-side backstop for that leak; `purge_wedge_nudges` (called on
+    genuine turn completion) is the eager invalidation.
+
     Fail-silent: any Redis error is caught, logged at `warning`, and
     swallowed. This function must never raise into the caller (the
     session-health producer loop).
@@ -335,6 +348,9 @@ def push_wedge_nudge(session_id: str, sender: str = "wedge-nudge") -> None:
     Args:
         session_id: The wedged session to nudge.
         sender: Label recorded on the pushed message for observability.
+        ttl_seconds: Expiry set on the signal-channel key. Should match the
+            latch TTL (`set_wedge_nudge_latch`) so channel and latch share a
+            lifetime.
     """
     try:
         r = _get_redis()
@@ -346,7 +362,8 @@ def push_wedge_nudge(session_id: str, sender: str = "wedge-nudge") -> None:
             "is_abort": False,
         }
         r.rpush(key, json.dumps(msg_dict))
-        logger.info(f"[steering] Pushed wedge-nudge to {key} (from {sender})")
+        r.expire(key, ttl_seconds)
+        logger.info(f"[steering] Pushed wedge-nudge to {key} (from {sender}, ttl={ttl_seconds}s)")
     except Exception:
         logger.warning(
             "[steering] Failed to push wedge-nudge for session %s",
@@ -394,6 +411,43 @@ def pop_wedge_nudges(session_id: str) -> list[dict]:
             exc_info=True,
         )
         return []
+
+
+def purge_wedge_nudges(session_id: str) -> bool:
+    """Discard any pending wedge-nudges without delivering them.
+
+    Called on a **genuine** turn completion (the bridge adapter's ``on_turn``
+    hook, issue #1879 review blocker B2): a completed turn proves the session
+    is not wedged, which invalidates any nudge still sitting on the signal
+    channel. Without this purge, a nudge produced late in one turn-wait
+    window — but never drained before the container exited
+    ``_await_turn_end`` — would be injected by the first drain tick of the
+    NEXT, healthy turn as a spurious submitted ``continue``.
+
+    CHANNEL ISOLATION: deletes ``steering:nudge:{session_id}`` only. Never
+    touches the ordinary operator steering queue (``steering:{session_id}``)
+    or the latch (``steering:nudge:latch:{session_id}``) — the latch is
+    cleared separately by ``clear_wedge_nudge_latch`` so its True/False
+    "was a nudge outstanding" return stays meaningful.
+
+    Fail-silent: a Redis error is caught, logged at ``warning``, and this
+    returns False.
+
+    Returns:
+        True iff a signal-channel key existed (pending nudges were
+        discarded). False if the channel was already empty, or on error.
+    """
+    try:
+        r = _get_redis()
+        key = _wedge_nudge_key(session_id)
+        return bool(r.delete(key))
+    except Exception:
+        logger.warning(
+            "[steering] Failed to purge wedge-nudges for session %s",
+            session_id,
+            exc_info=True,
+        )
+        return False
 
 
 def set_wedge_nudge_latch(

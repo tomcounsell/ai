@@ -788,22 +788,31 @@ operator steering) plus the idempotent `continue` token make it unnecessary, and
 a `continue` to a *parked* PTY (no in-flight turn to interrupt while waiting on
 the Stop edge) carries no corruption risk.
 
-**The producer — the 30s session-health running-scan.** A material premise
-correction from the plan's spikes: `_hook_turn_end_wait_s` defaults to **600s**,
-so a session parked in `_await_turn_end` with a frozen frame self-terminates to
-`pm_hang` at 600s — *before* the 1800s `SESSION_PROGRESS_DEADLINE_S` the issue
-originally named as the live-session killer. The reachable producer is therefore
-the 30s session-health loop, and the escalation backstop is the existing 600s
-`pm_hang` teardown (no new kill path). The producer adds a sibling branch in the
-running-scan for the `in_scope_handle is not None` population (a live worker
-handle). It gates on: granite-PTY transport (`_is_granite_pty_session`, the same
+**The producer — the 30s session-health tool-timeout sub-loop.** A material
+premise correction from the plan's spikes: `_hook_turn_end_wait_s` defaults to
+**600s**, so a session parked in `_await_turn_end` with a frozen frame
+self-terminates to `pm_hang` at 600s — *before* the 1800s
+`SESSION_PROGRESS_DEADLINE_S` the issue originally named as the live-session
+killer. The reachable producer therefore needs a 30s cadence, and the
+escalation backstop is the existing 600s `pm_hang` teardown (no new kill path).
+The producer (`_wedge_nudge_producer_tick` in `agent/session_health.py`) rides
+the existing 30-second tool-timeout sub-loop
+(`_agent_session_tool_timeout_loop`), NOT the 300s main health loop — at a 300s
+cadence, a ~240s-threshold nudge would routinely land after the 600s window had
+already closed. Each tick makes a cheap pass over `running` sessions with a
+live in-scope worker handle: attr reads only per session, Redis touched only
+for an eligible wedge, and the pass sits outside the
+`TOOL_TIMEOUT_TIERS_DISABLED` kill-switch because it takes no recovery action.
+It gates on: granite-PTY transport (`_is_granite_pty_session`, the same
 `last_pty_read_loop_at is not None` check `_prime_pty_alive` uses so non-PTY
 SDK/headless sessions are excluded by construction) AND a normalized frame frozen
 past `NUDGE_WEDGE_THRESHOLD_S` (~240s, env-overridable) AND the atomic latch
-acquire succeeds. On match it pushes one nudge and bumps
+acquire succeeds. On match it pushes one nudge — the signal-channel key carries
+a TTL matched to the latch TTL, so an undrained nudge expires with its
+turn-wait window instead of leaking into a later turn — and bumps
 `{project_key}:session-health:wedge_nudge_sent`. It takes **no** recovery action
 — never sets `should_recover`, never calls `_apply_recovery_transition`, never
-touches `recovery_attempts`. This re-enters the `in_scope_handle is not None`
+touches `recovery_attempts`. This observes the `in_scope_handle is not None`
 population #1820 narrowed away for Fix #3's progress-deadline cancel scope, but
 does not re-widen that split: #1820 split *recovery/kill* ownership, not
 *observation*; the nudge and the cancel act on disjoint verbs and disjoint time
@@ -819,11 +828,18 @@ Crucially, the injected `continue` echo is genuine new text, so it advances
 That field is therefore **not** a valid "the nudge worked" signal after a nudge;
 genuine recovery is judged on `last_turn_at`/`last_tool_use_at` advancing (a real
 turn/tool, which the echo cannot fake). On a genuine turn completion the bridge
-adapter's `on_turn` hook clears the latch (`clear_wedge_nudge_latch`) so a
-recovered-then-re-wedged session is not falsely suppressed for the rest of the
-fixed TTL, and — when a latch was actually held — bumps the paired efficacy
-counter `{project_key}:session-health:wedge_nudge_recovered`. Every step of the
-rung (push, drain, PTY write, latch ops, counters) is fail-silent.
+adapter's `on_turn` hook purges any undrained nudge from the signal channel
+(`purge_wedge_nudges` — a completed turn invalidates a pending nudge, so it can
+never be injected into a later healthy turn) and clears the latch
+(`clear_wedge_nudge_latch`) so a recovered-then-re-wedged session is not falsely
+suppressed for the rest of the fixed TTL, and — when a latch was actually held —
+bumps the paired efficacy counter
+`{project_key}:session-health:wedge_nudge_recovered`. Only genuine `Stop`-edge
+turn ends run this bookkeeping: the crash-resume path's liveness bump calls
+`on_turn(genuine=False)`, which still bumps `last_turn_at` but skips the purge,
+latch clear, and counter — so crash-resumes cannot pollute the efficacy signal.
+Every step of the rung (push, drain, PTY write, latch ops, counters) is
+fail-silent.
 
 > **Value-premise caveat (#1879):** the premise that a bare `continue` keystroke
 > actually un-sticks a wedged interactive TUI is validated by the crash-resume

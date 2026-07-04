@@ -146,7 +146,8 @@ def test_maybe_push_wedge_nudge_pushes_and_increments_telemetry_on_match():
 
     assert result is True
     # Keyed by session_id (the routing key the consumer drains), NOT agent_session_id.
-    mock_push.assert_called_once_with("tg-sess-eligible")
+    # Signal-channel TTL paired with the latch TTL (review blocker B2).
+    mock_push.assert_called_once_with("tg-sess-eligible", ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S)
     mock_latch.assert_called_once_with("tg-sess-eligible", ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S)
     assert fake_redis.counts == {"test-wedge-nudge:session-health:wedge_nudge_sent": 1}
 
@@ -321,34 +322,49 @@ def test_one_nudge_per_window_second_tick_within_ttl_pushes_nothing():
 
 
 # ---------------------------------------------------------------------------
-# Running-scan wiring: the elif branch never touches should_recover /
-# recovery_attempts / _apply_recovery_transition (#1820 reconciliation).
+# Producer wiring: the 30s producer pass never touches should_recover /
+# recovery_attempts / _apply_recovery_transition (#1820 reconciliation,
+# review blocker B1 moved this from the 300s running-scan elif into the
+# dedicated _wedge_nudge_producer_tick on the tool-timeout sub-loop).
 # ---------------------------------------------------------------------------
 
 
-def test_running_scan_branch_source_has_no_recovery_action():
-    """Static guard: the new sibling branch's call site must not appear inside
-    any code path that also sets should_recover=True or increments
-    recovery_attempts. This pins the #1820 BLOCKER-level invariant at the
-    source-inspection level, complementing the behavioral tests above."""
+def test_producer_source_has_no_recovery_action():
+    """Static guard: the 30s producer pass and its per-session helper must not
+    contain any recovery action — no should_recover=True, no recovery_attempts
+    mutation, no _apply_recovery_transition call. This pins the #1820
+    BLOCKER-level invariant at the source-inspection level, complementing the
+    behavioral tests above. After review blocker B1 the producer rides the 30s
+    _wedge_nudge_producer_tick (not the 300s running-scan elif), so the
+    invariant is pinned on those functions."""
+    import ast
     import inspect
+    import textwrap
 
     import agent.session_health as session_health
 
-    src = inspect.getsource(session_health._agent_session_health_check)
-    assert "elif in_scope_handle is not None:" in src
-    assert "_maybe_push_wedge_nudge(entry, now)" in src
+    def _code_only(fn):
+        """Return the function source with its docstring stripped, so the
+        negative-assertion prose in the docstring (which legitimately names
+        these terms) cannot false-positive the guard below."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        fn_node = tree.body[0]
+        if (
+            fn_node.body
+            and isinstance(fn_node.body[0], ast.Expr)
+            and isinstance(fn_node.body[0].value, ast.Constant)
+            and isinstance(fn_node.body[0].value.value, str)
+        ):
+            fn_node.body = fn_node.body[1:]
+        return ast.unparse(fn_node)
 
-    # Extract just the new branch's block (from the elif to the next
-    # unindented `if should_recover:` guard) and assert it never sets
-    # should_recover or touches recovery_attempts.
-    marker = "elif in_scope_handle is not None:"
-    start = src.index(marker)
-    end = src.index("if should_recover:", start)
-    branch_src = src[start:end]
-    assert "should_recover = True" not in branch_src
-    assert "recovery_attempts" not in branch_src
-    assert "_apply_recovery_transition" not in branch_src
+    tick_src = _code_only(session_health._wedge_nudge_producer_tick)
+    assert "_maybe_push_wedge_nudge(entry, now)" in tick_src
+
+    for src in (tick_src, _code_only(session_health._maybe_push_wedge_nudge)):
+        assert "should_recover = True" not in src
+        assert "recovery_attempts" not in src
+        assert "_apply_recovery_transition" not in src
 
 
 if __name__ == "__main__":

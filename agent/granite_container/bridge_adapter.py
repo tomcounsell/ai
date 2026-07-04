@@ -79,6 +79,7 @@ from agent.steering import (
     clear_wedge_nudge_latch,
     pop_all_steering_messages,
     pop_wedge_nudges,
+    purge_wedge_nudges,
 )
 
 logger = logging.getLogger(__name__)
@@ -977,7 +978,7 @@ class BridgeAdapter:
 
     # -- Liveness (two-tier no-progress detector, TD1) ---------------------
 
-    def _bump_last_turn_at(self) -> None:
+    def _bump_last_turn_at(self, genuine: bool = True) -> None:
         """Bump ``agent_session.last_turn_at`` for the in-flight session.
 
         The harness path wrote this via the sdk_client ``result``
@@ -990,6 +991,18 @@ class BridgeAdapter:
         liveness signaling must never crash the run. Called from the
         ``asyncio.to_thread`` worker thread — the save is a plain
         blocking Redis write, which is fine off the event loop.
+
+        Args:
+            genuine: True (default) when the container observed a genuine
+                ``Stop``-edge turn end — the only signal that proves real
+                progress. The crash-resume path (``_resume_crashed_pty``)
+                also calls ``on_turn`` purely as a liveness bump and passes
+                ``genuine=False``: the timestamp bump below still happens
+                (the cross-process wedge detector must see the resume as
+                activity), but the wedge-nudge bookkeeping is skipped so a
+                crash-resume can neither clear the latch nor pollute the
+                ``wedge_nudge_recovered`` efficacy counter (issue #1879
+                review M1 — that counter is the rung's go/no-go signal).
         """
         if self._agent_session is None:
             return
@@ -1000,22 +1013,34 @@ class BridgeAdapter:
                 save(update_fields=["last_turn_at"])
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("[bridge-adapter] last_turn_at bump failed: %s", e)
-        # Wedge-nudge recovery bookkeeping (issue #1879, critique concerns 1 & 2).
-        # A completed turn (this ``on_turn`` hook fires only on a genuine
-        # ``Stop``-edge turn end, never on the injected ``continue`` echo —
-        # spike-2) is the authoritative "the session is making progress" signal.
-        # Clearing the wedge-nudge latch here — keyed by ``session_id``, the same
-        # key the producer set and the ``_poll_wedge_nudge`` consumer drains —
-        # frees a session that a nudge un-stuck to earn a fresh nudge if it
-        # wedges again on a LATER turn, instead of being gagged for the whole
-        # fixed latch TTL (the recovered-then-re-wedged defect). ``clear`` reports
-        # whether a latch was actually held; a True here means THIS session had
-        # been nudged and just recovered, so it also feeds the efficacy counter
-        # ``{project_key}:session-health:wedge_nudge_recovered`` (paired with the
-        # producer's ``wedge_nudge_sent``). Entirely fail-silent — recovery
-        # bookkeeping must never crash a turn.
+        # Wedge-nudge recovery bookkeeping (issue #1879, critique concerns 1 & 2;
+        # review blockers B2/M1). Gated on ``genuine=True``: a genuine
+        # ``Stop``-edge turn end (never the injected ``continue`` echo —
+        # spike-2 — and never the crash-resume liveness bump, which passes
+        # ``genuine=False``) is the authoritative "the session is making
+        # progress" signal. Three actions, all keyed by ``session_id`` — the
+        # same key the producer pushed and the ``_poll_wedge_nudge`` consumer
+        # drains:
+        #   1. Purge any UNDRAINED nudge from the signal channel (B2): a
+        #      completed turn invalidates a pending nudge; leaving it queued
+        #      would let the next healthy turn's first drain tick inject a
+        #      spurious submitted "continue".
+        #   2. Clear the latch — frees a session that a nudge un-stuck to
+        #      earn a fresh nudge if it wedges again on a LATER turn, instead
+        #      of being gagged for the whole fixed latch TTL (the
+        #      recovered-then-re-wedged defect).
+        #   3. ``clear`` reports whether a latch was actually held; a True
+        #      here means THIS session had been nudged and just recovered, so
+        #      it also feeds the efficacy counter
+        #      ``{project_key}:session-health:wedge_nudge_recovered`` (paired
+        #      with the producer's ``wedge_nudge_sent``).
+        # Entirely fail-silent — recovery bookkeeping must never crash a turn.
+        if not genuine:
+            return
         try:
             session_id = str(getattr(self._agent_session, "session_id", "") or "")
+            if session_id:
+                purge_wedge_nudges(session_id)
             if session_id and clear_wedge_nudge_latch(session_id):
                 try:
                     from popoto.redis_db import POPOTO_REDIS_DB as _R_WEDGE_REC
@@ -1026,7 +1051,7 @@ class BridgeAdapter:
                 except Exception:
                     logger.debug("[bridge-adapter] wedge_nudge_recovered counter incr failed")
         except Exception as e:  # pragma: no cover - defensive
-            logger.debug("[bridge-adapter] wedge-nudge latch clear failed: %s", e)
+            logger.debug("[bridge-adapter] wedge-nudge purge/latch clear failed: %s", e)
 
     def _make_pty_read_callback(self) -> Callable[[str], None]:
         """Build the sync callable for PTY read-loop liveness stamps (#1724).

@@ -738,7 +738,7 @@ class Container:
         dev_model: str | None = None,
         on_user_payload: Callable[[str], None] | None = None,
         on_complete_payload: Callable[[str], None] | None = None,
-        on_turn: Callable[[], None] | None = None,
+        on_turn: Callable[..., None] | None = None,
         on_pty_read: Callable[[str], None] | None = None,
         pm_pty: PTYDriver | None = None,
         dev_pty: PTYDriver | None = None,
@@ -810,8 +810,14 @@ class Container:
         # (every destination, including unknown). BridgeAdapter uses it
         # to bump `agent_session.last_turn_at` so the two-tier
         # no-progress detector's sub-check A stays live for granite
-        # sessions (PR #1612 review TD1). Exceptions are swallowed —
-        # progress signaling must never crash the loop.
+        # sessions (PR #1612 review TD1). Contract (#1879 review M1): the
+        # callable accepts an optional `genuine: bool = True` keyword.
+        # Genuine Stop-edge turn ends call it with no args (genuine=True);
+        # the crash-resume liveness bump calls `on_turn(genuine=False)` so
+        # the receiver can skip wedge-nudge bookkeeping (latch clear /
+        # recovered counter / pending-nudge purge) while still bumping
+        # `last_turn_at`. Exceptions are swallowed — progress signaling
+        # must never crash the loop.
         self._on_turn = on_turn
         # PTY read-loop hook: called from _cycle_idle once per turn-boundary
         # idle-return from read_until_idle, passing the ANSI-stripped (but not
@@ -1603,9 +1609,14 @@ class Container:
             # Redis, not this in-process flag) sees demonstrable progress across
             # the resume and does not fire its own recovery. Fail-silent —
             # liveness signaling must never crash the run (mirrors on_turn guard).
+            # genuine=False (#1879 review M1): this is a liveness bump, NOT a
+            # genuine Stop-edge turn end — the receiver must bump last_turn_at
+            # but skip the wedge-nudge bookkeeping (latch clear, recovered
+            # counter, pending-nudge purge), otherwise a crash-resume would
+            # pollute the wedge_nudge_recovered efficacy counter.
             if self._on_turn is not None:
                 try:
-                    self._on_turn()
+                    self._on_turn(genuine=False)
                 except Exception as e:
                     logger.warning("[granite-container] on_turn during crash-resume raised: %s", e)
             logger.info(
