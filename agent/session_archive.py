@@ -416,11 +416,19 @@ def _rehydrate_row(row: sqlite3.Row) -> None:
     AgentSession(id=archived_id, **fields).save()
 
 
-def restore_if_empty() -> dict[str, Any]:
+def restore_if_empty(*, dry_run: bool = False) -> dict[str, Any]:
     """Guarded, idempotent cold-start rehydrate. Never raises.
 
     Returns a structured result:
         {"restored": int, "skipped_reason": str | None, "resumed": bool, "quarantined": int}
+
+    Pass `dry_run=True` to compute and return the exact same guard decision
+    (skip reason, or -- if the guard would proceed -- a `would_restore` count
+    of archived rows it would attempt) WITHOUT writing anything: the sentinel
+    columns in `_meta` are never touched and no row is rehydrated/`.save()`d.
+    This is the read-only path `valor-session-archive restore --dry-run`
+    uses; the default (`dry_run=False`) behavior and return shape are
+    unchanged for every existing caller.
 
     See docs/plans/session-archive-sqlite.md "Empty-Redis guard" and
     "Restore atomicity" sections for the exact decision table this
@@ -430,17 +438,25 @@ def restore_if_empty() -> dict[str, Any]:
     can never clobber an already-populated Redis.
     """
     try:
-        return _restore_if_empty_impl()
+        return _restore_if_empty_impl(dry_run=dry_run)
     except Exception as exc:
         logger.error(
             "[session_archive] restore_if_empty failed unexpectedly: %s",
             exc,
             exc_info=True,
         )
-        return {"restored": 0, "skipped_reason": "error", "resumed": False, "quarantined": 0}
+        result: dict[str, Any] = {
+            "restored": 0,
+            "skipped_reason": "error",
+            "resumed": False,
+            "quarantined": 0,
+        }
+        if dry_run:
+            result["would_restore"] = 0
+        return result
 
 
-def _restore_if_empty_impl() -> dict[str, Any]:
+def _restore_if_empty_impl(dry_run: bool = False) -> dict[str, Any]:
     live_count = len(list(AgentSession.query.all()))
 
     conn = _connect(on_loop=False)
@@ -451,24 +467,29 @@ def _restore_if_empty_impl() -> dict[str, Any]:
         if sentinel_was_set:
             if live_count >= meta["expected_row_count"]:
                 # Redis is already whole -- a stuck sentinel must NEVER force
-                # a re-upsert of an already-populated Redis.
-                conn.execute("BEGIN IMMEDIATE")
-                conn.execute(
-                    "UPDATE _meta SET restore_in_progress=0, restore_complete=1 WHERE id=1"
-                )
-                conn.execute("COMMIT")
-                logger.info(
-                    "[session_archive] restore: stale sentinel cleared -- Redis already whole "
-                    "(live=%d >= expected=%d)",
-                    live_count,
-                    meta["expected_row_count"],
-                )
-                return {
+                # a re-upsert of an already-populated Redis. In dry-run mode
+                # we report this decision without clearing the sentinel.
+                if not dry_run:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "UPDATE _meta SET restore_in_progress=0, restore_complete=1 WHERE id=1"
+                    )
+                    conn.execute("COMMIT")
+                    logger.info(
+                        "[session_archive] restore: stale sentinel cleared -- Redis already "
+                        "whole (live=%d >= expected=%d)",
+                        live_count,
+                        meta["expected_row_count"],
+                    )
+                result = {
                     "restored": 0,
                     "skipped_reason": "restore_already_complete",
                     "resumed": False,
                     "quarantined": _quarantined_count(conn),
                 }
+                if dry_run:
+                    result["would_restore"] = 0
+                return result
             if meta["resume_attempts"] >= SESSION_ARCHIVE_RESUME_ATTEMPT_CAP:
                 logger.error(
                     "[session_archive] restore WEDGED after %d resume attempts "
@@ -477,32 +498,52 @@ def _restore_if_empty_impl() -> dict[str, Any]:
                     live_count,
                     meta["expected_row_count"],
                 )
-                return {
+                result = {
                     "restored": 0,
                     "skipped_reason": "restore_wedged",
                     "resumed": True,
                     "quarantined": _quarantined_count(conn),
                 }
+                if dry_run:
+                    result["would_restore"] = 0
+                return result
         else:
             if live_count > 0:
-                return {
+                result = {
                     "restored": 0,
                     "skipped_reason": "redis_has_records",
                     "resumed": False,
                     "quarantined": 0,
                 }
+                if dry_run:
+                    result["would_restore"] = 0
+                return result
             if _redis_has_agentsession_keys():
-                return {
+                result = {
                     "restored": 0,
                     "skipped_reason": "redis_has_keys",
                     "resumed": False,
                     "quarantined": 0,
                 }
+                if dry_run:
+                    result["would_restore"] = 0
+                return result
 
         # Cold-start pass or valid resume: proceed.
         quarantined_ids = _quarantined_ids(conn)
         archived_rows = conn.execute("SELECT id, payload FROM sessions").fetchall()
         expected_row_count = len(archived_rows) - len(quarantined_ids)
+
+        if dry_run:
+            # Report the would-restore count without touching the sentinel or
+            # rehydrating/saving a single row.
+            return {
+                "restored": 0,
+                "skipped_reason": None,
+                "resumed": sentinel_was_set,
+                "quarantined": len(quarantined_ids),
+                "would_restore": expected_row_count,
+            }
 
         conn.execute("BEGIN IMMEDIATE")
         conn.execute(

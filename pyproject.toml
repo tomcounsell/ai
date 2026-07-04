@@ -95,6 +95,7 @@ valor-computer = "tools.computer.cli:main"
 valor-granite-loop = "tools.granite_interactive_tui_poc.cli:main"
 valor = "tools.valor_cli:main"
 valor-cross-vendor-judge = "tools.cross_vendor_judge:main"
+valor-session-archive = "tools.session_archive_cli:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
