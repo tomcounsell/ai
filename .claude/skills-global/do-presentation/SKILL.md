@@ -1,6 +1,6 @@
 ---
 name: do-presentation
-description: "Use when creating a presentation about a feature, concept, or system. Researches the topic, structures content for accessibility, generates diagrams, and exports polished Marp slides styled to the repo's design system. Triggered by 'make a presentation', 'create slides', 'do-presentation', or 'explain this as a deck'."
+description: "Create a polished Marp slide deck about a feature, concept, or system. Triggered by 'make a presentation', 'create slides', 'do-presentation', or 'explain this as a deck'."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Agent
 argument-hint: "<topic or feature name>"
 context: fork

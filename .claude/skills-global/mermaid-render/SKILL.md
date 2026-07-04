@@ -1,6 +1,6 @@
 ---
 name: mermaid-render
-description: "Render Mermaid .mmd diagrams as hand-drawn style PNG exports via Excalidraw. Use when converting .mmd files to presentation-quality images with a sketch/hand-drawn aesthetic. Triggered by 'render this diagram', 'export mermaid as PNG', 'convert mmd to image', or 'excalidraw export'. Also handles .excalidraw → PNG directly."
+description: "Render .mmd (and .excalidraw) files as hand-drawn PNGs via Excalidraw. Triggered by 'render this diagram', 'export mermaid as PNG', 'convert mmd to image', or 'excalidraw export'."
 argument-hint: "<file.mmd|file.excalidraw> [file2 ...] [--out <dir>]"
 allowed-tools: Bash, mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_type, mcp__byob__browser_press_key, mcp__byob__browser_eval, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab
 user-invocable: true

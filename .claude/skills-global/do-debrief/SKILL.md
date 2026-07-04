@@ -1,6 +1,6 @@
 ---
 name: do-debrief
-description: "Use when sending a spoken debrief to a chat. Collects context, drafts a 30-second executive brief, synthesizes it via TTS, and delivers it as a native voice message. Triggered by 'send a voice debrief', 'speak this update', 'do-debrief', or any request to deliver an audio summary."
+description: "Send a spoken executive brief to a chat as a voice message. Triggered by 'send a voice debrief', 'speak this update', 'do-debrief', or any request to deliver an audio summary."
 argument-hint: "<scope-or-notes> --chat <chat>"
 allowed-tools: Bash, Read, Grep
 user-invocable: true
