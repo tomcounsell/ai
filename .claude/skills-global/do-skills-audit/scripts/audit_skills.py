@@ -6,6 +6,12 @@ Runs 20 deterministic validation rules over every skills root the repo has
 user-level orphans, and optionally syncs against Anthropic's latest published
 best practices.
 
+With `--fix`, husk directories that are empty except for build artifacts
+(`__pycache__`, `.DS_Store`) are also auto-pruned before rule 19 runs, so a
+freshly-pruned husk doesn't reappear as a FAIL in the same invocation. Husks
+that still contain real files are left untouched for a human delete-or-restore
+decision.
+
 JSON contract (consumed by reflections/audits/skills_audit.py):
   {"summary": {"total_skills": N, "pass": N, "warn": N, "fail": N,
                "description_total_chars": N, "description_budget": N},
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -29,6 +36,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -652,6 +661,54 @@ def rule_19_husk_directories(skills_dir: Path, dir_label: str) -> list[Finding]:
     return findings
 
 
+def _is_empty_husk(d: Path) -> bool:
+    """Same "empty" predicate as rule_19_husk_directories: a directory with no
+    SKILL.md and no files besides build artifacts (__pycache__, .DS_Store)."""
+    contents = [
+        p
+        for p in d.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store"
+    ]
+    return not contents
+
+
+def prune_husk_directories(skills_dir: Path, dir_label: str) -> list[str]:
+    """Auto-fix companion to rule_19_husk_directories: actually remove husks.
+
+    Uses the identical "empty" predicate as rule 19 — a directory lacking
+    SKILL.md whose only contents (if any) are build artifacts (__pycache__,
+    .DS_Store). Only those genuinely-empty husks are pruned; a husk that still
+    holds real orphaned files is left on disk for a human delete-or-restore
+    decision (and will still surface as a rule 19 FAIL).
+
+    Returns a list of human-readable descriptions of husks actually removed,
+    suitable for reporting as "Fixed: ..." findings. Never raises — a failed
+    rmtree on one husk is logged and skipped so the sweep continues.
+    """
+    removed: list[str] = []
+    if not skills_dir.is_dir():
+        return removed
+    for d in sorted(skills_dir.iterdir()):
+        if not d.is_dir() or d.name.startswith(("_", ".")):
+            continue
+        if (d / "SKILL.md").exists():
+            continue
+        if not _is_empty_husk(d):
+            continue
+        # TOCTOU guard: re-check immediately before the irreversible delete —
+        # a file could have landed in the directory since the scan above.
+        if not _is_empty_husk(d):
+            continue
+        resolved = d.resolve()
+        logger.warning("Pruning empty husk directory: %s", resolved)
+        try:
+            shutil.rmtree(d)
+        except OSError:
+            continue
+        removed.append(f"Removed husk directory: {d.name} ({dir_label})")
+    return removed
+
+
 def rule_20_user_level_orphans(repo_skill_dirs: dict[str, Path]) -> list[Finding]:
     """Skills in ~/.claude/skills/ should be hardlink-synced from a repo source.
     A user-level skill with no repo source is an orphan (stale leftover or
@@ -981,6 +1038,10 @@ def main() -> int:
         report.add(rule_14_fleet_description_budget(all_descriptions))
         for f in rule_17_near_duplicate_descriptions(all_descriptions):
             report.add(f)
+        if args.fix:
+            for label, root in roots:
+                for desc in prune_husk_directories(root, label):
+                    report.add(Finding(root.name, 0, "PASS", f"Fixed: {desc}", dir=label))
         for label, root in roots:
             for f in rule_19_husk_directories(root, label):
                 report.add(f)
