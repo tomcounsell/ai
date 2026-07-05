@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-05
 tracking: https://github.com/tomcounsell/ai/issues/1898
 last_comment_id:
+revision_applied: true
 ---
 
 # Update verifies the running-process release matches pulled HEAD
@@ -44,7 +45,7 @@ Cron `/update` (the Telegram-triggered path and the 30-min polling cron) pulls c
 
 **Active plans in `docs/plans/` overlapping this area:** none. (`consolidate_delivery_paths.md` and `granite_lossless_checkpoint_resume.md` touch delivery/PTY, not the update/restart path.)
 
-**Notes:** No drift. All line references current at `63e43118`.
+**Notes:** No drift. Re-verified at the revision baseline `3d527474` (2026-07-05): all commits between `63e43118` and HEAD are plan-doc commits only — none touch `scripts/update/`, `agent/agent_session_queue.py`, `bridge/telegram_bridge.py`, or `worker/__main__.py`. All line references still current. Confirmed at revision: `_RESTART_FLAG = data/restart-requested` and `_RESTART_FLAG_TTL = 1h` (`agent_session_queue.py:1203/1206`); the polling cron runs every 30 min (`scripts/update/run.py:1538`, `scripts/remote-update.sh:155`).
 
 ## Prior Art
 
@@ -89,8 +90,8 @@ The fix inserts a new terminal step between (6) and (7): read each process's **b
 **Team:** Solo dev, plan critique, code review
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm the cron-mode escalation policy — hard-fail vs. forced restart)
-- Review rounds: 1
+- PM check-ins: 0-1 (the cron-mode escalation policy is resolved in the Decisions section — per-process branching; no open policy call remains)
+- Review rounds: 1 (one critique round completed; this is the post-critique revision)
 
 ## Prerequisites
 
@@ -102,24 +103,31 @@ No prerequisites — this work has no external dependencies. It runs against the
 
 - **Boot-SHA beacon**: at startup the bridge writes its launch SHA to `data/bridge_boot_sha`, and the worker writes its launch SHA to `data/worker_boot_sha` (via `git rev-parse HEAD` at process init, mirroring `monitoring/sentry_config.py:61`). Each write includes the SHA and a timestamp so a stale/orphaned beacon is detectable.
 - **Release-verification step** in the updater: a new `verify_running_release()` reads both beacons and compares them to the pulled HEAD. It runs as the last step of a service-restart run.
-- **Mode-aware verdict**:
+- **Mode-aware verdict** (per-process, positive-staleness gated):
   - **Full mode** (`do_service_restart=True`): the restart already happened synchronously in Step 5. Verify bridge AND worker boot SHA == HEAD. On mismatch → `result.success = False`, loud error, exit non-zero.
-  - **Cron mode** (`do_service_restart=False`): the restart is deferred. A single stale reading immediately after flag-set is expected (the process drains its session first), so verification distinguishes "a fresh restart is pending" (warn) from "the restart has been starved" (escalate). Escalation is bounded: if a restart flag has been pending across a configurable staleness window (or the beacon still lags HEAD after the flag's own TTL), escalate — either force the restart or hard-fail the run so the operator is alerted rather than left with a silent stale fleet.
-- **Bridge self-restart path**: give the bridge a cron-mode restart path so a code change delivered by the polling cron actually reaches it (today only a full `/update` restarts the bridge). Either the bridge consumes the restart flag between message batches (idle-gated, mirroring the worker), or the cron-mode verification force-restarts a bridge whose boot SHA lags HEAD. The plan prefers the flag-consumption path for symmetry with the worker; the force-restart is the fallback the verification step performs when the flag path is starved.
+  - **Cron mode** (`do_service_restart=False`): the restart is deferred. A single stale reading immediately after flag-set is expected (the process drains its session first), so verification distinguishes "a fresh restart is pending" (warn) from "the restart has been starved" (escalate). **Only positive staleness escalates** — a process is deemed genuinely stale only when `beacon_ts > process_start_ts` (`ps -o lstart`/`etime`, i.e. the beacon belongs to the *current* process image) **AND** `boot_sha != get_short_sha(HEAD)`. A missing beacon, or a beacon that predates the process start, classifies as **UNKNOWN → warn**, never escalate — so a swallowed best-effort beacon write can never invert into a false force-restart of a healthy process.
+  - **Per-process escalation branch** (resolves the internal contradiction the critique flagged): the escalation target is never uniform across bridge and worker.
+    - **Bridge, positively stale + starved** (flag/pending-window exceeded): force-restart the bridge via the same synchronous path full mode uses (`service.install_service` / service restart) and re-verify once; still stale → hard-fail. This is **safe** — the bridge holds no agent sessions, so force-restarting it interrupts nothing.
+    - **Worker, positively stale + starved**: **never force-killed.** Hard-fail loud + out-of-band alert; leave the worker to its own `_check_restart_flag` session-running defer. Force-killing a busy (not necessarily wedged) worker session is indistinguishable from a wedge on the beacon alone, which would cross the #1815/#1877 wedge No-Go this plan scopes out.
+- **Bridge cron-mode path to new code**: the bridge reaches new code in cron mode via the **verification-driven force-restart above** (safe, no sessions), NOT by consuming the worker's shared `data/restart-requested` flag. Reusing that single consumable flag is a first-reader-wins race — whichever of bridge/worker checks first unlinks it and the other never restarts, reproducing the exact #1898 bug. A dedicated idle-gated bridge self-restart flag (`data/bridge-restart-requested`) that would let the bridge converge on its *own* next idle boundary — before the next cron verify — is a distinct, orthogonal optimization deferred to its own slug (see No-Gos). The worker keeps exclusive ownership of `data/restart-requested`, unchanged.
 
 ### Flow
 
-Cron `/update` runs → git pull to new HEAD → migrations → set restart flag → (worker cycles when idle; bridge cycles when idle) → **verify step reads `data/bridge_boot_sha` + `data/worker_boot_sha`** → both == HEAD? → report OK. One lags AND the pending window is exceeded → escalate (force restart or exit non-zero with "bridge running {stale} but HEAD is {new}").
+Cron `/update` runs → git pull to new HEAD → migrations → set restart flag (worker only) → (worker cycles when idle) → **verify step reads `data/bridge_boot_sha` + `data/worker_boot_sha`** → both positively == HEAD? → report OK. A process is positively stale (fresh beacon belongs to current image AND `boot_sha != HEAD`) AND the pending window is exceeded → escalate **per-process**: bridge → force-restart (safe, no sessions) + re-verify, else hard-fail; worker → hard-fail + out-of-band alert, never force-kill. Beacon missing / predates process → UNKNOWN → warn, exit "bridge/worker release could not be confirmed" without force-restarting.
 
 ### Technical Approach
 
 - **Beacon write**: add a small helper (e.g. `monitoring/boot_beacon.py` or a function in `agent/agent_session_queue.py` alongside the flag helpers) that writes `{sha}\n{iso-timestamp}` to `data/{bridge,worker}_boot_sha`. Call it once at bridge startup (near `bridge/telegram_bridge.py:2985`, where the stale flag is already cleared) and once at worker startup (`worker/__main__.py`). Use `git rev-parse HEAD` with the same subprocess pattern as `monitoring/sentry_config.py:61` and `monitoring/crash_tracker.py:59`. Writes are best-effort (swallow FS errors, never crash startup).
-- **Verify helper**: `scripts/update/service.py::verify_running_release(project_dir, head_sha) -> ReleaseCheck` returning per-process `{running, boot_sha, matches, beacon_age}`. Reads the beacon files; treats a missing/older-than-process beacon conservatively (see Race Conditions). Reuse `git.get_short_sha()` for HEAD.
+- **Verify helper**: `scripts/update/service.py::verify_running_release(project_dir, head_sha) -> ReleaseCheck` returning per-process `{running, boot_sha, beacon_ts, process_start_ts, classification}` where `classification ∈ {matches, stale, unknown}`. `matches` = `boot_sha == get_short_sha(HEAD)`; `stale` (positive staleness) = `beacon_ts > process_start_ts AND boot_sha != HEAD`; `unknown` = beacon missing, empty, malformed, or `beacon_ts <= process_start_ts` (orphaned/predates the current image). Reads the beacon files; reuse `git.get_short_sha()` for HEAD and the `ps -o lstart`/`etime` already parsed in `get_service_status`.
 - **run.py wiring**:
-  - Full mode: call `verify_running_release()` after the Step 5 restart+poll block; on any process mismatch append an error and set `result.success = False`.
-  - Cron mode: call it after the restart-flag set; classify as `pending` (beacon predates flag, flag fresh) → warning, or `starved` (flag older than the pending window, or beacon still stale) → escalate per the chosen policy (Open Question 1).
-- **Escalation implementation** (cron starved): the safest bounded action is to perform the same synchronous restart the full path uses (`service.install_service` for the bridge, `restart_worker` for the worker) and re-verify once; if it still mismatches, hard-fail. This converts a silent stale fleet into either a fixed fleet or a loud failure.
-- **Summary surfacing**: extend the cron summary (`run.py:1867-1906`) so a release mismatch/pending appears in the Telegram status line, not only in the log file.
+  - Full mode: call `verify_running_release()` after the Step 5 restart+poll block; on any process classified `stale` append an error and set `result.success = False`. `unknown` → warn (the restart may have raced the beacon write — the freshness poll in Race 1 covers the legitimate case).
+  - Cron mode: call it after the restart-flag set; classify `pending` (positively stale but flag younger than the 30-min pending window — the deferred restart hasn't had its chance yet) → warning, or `starved` (positively stale AND flag older than the pending window, or flag already expired without cycling) → escalate **per-process** (see Escalation).
+- **Escalation implementation** (cron starved, per-process — the two branches never share a policy):
+  - **Bridge stale+starved**: `service.install_service` / bridge restart (the synchronous path full mode uses) + re-verify once; still stale → hard-fail. Safe because the bridge holds no sessions.
+  - **Worker stale+starved**: do NOT force-kill. Set `result.success = False`, emit the out-of-band alert, and let `_check_restart_flag`'s own `status="running"` defer stand — a busy worker is not force-interrupted.
+  - `unknown` (either process): warn only; never restart, never fail on staleness the verifier cannot positively confirm.
+- **Out-of-band alerting** (so a bridge that ends down after a forced restart can't silence its own alarm): on hard-fail or bridge-down-after-restart, in addition to the non-zero exit and the Telegram summary line, (a) capture to Sentry via `monitoring/sentry_config.py`, and (b) write a filesystem sentinel `data/update-release-failed` (SHA lag + timestamp) that `monitoring/bridge_watchdog.py` reads on its 60s health cycle. The Telegram line alone is insufficient — `run.py:1331-1345` can legitimately end with "Bridge not running after restart", which disables the very channel meant to report it.
+- **Summary surfacing**: extend the cron summary (`run.py:1867-1906`) so a release mismatch/pending explicitly names the stale process AND its lagging short-SHA (e.g. "bridge running 659756a4 but HEAD is 6b5b998a") in the Telegram status line, not only in the log file. This string is an operator-facing acceptance artifact (see Success Criteria), asserted off-bridge in tests.
 
 ## Failure Path Test Strategy
 
@@ -128,18 +136,24 @@ Cron `/update` runs → git pull to new HEAD → migrations → set restart flag
 - [ ] `verify_running_release()` must not raise on a missing beacon file — test the missing-file path returns a well-formed "unknown/stale" result, not an exception.
 
 ### Empty/Invalid Input Handling
-- [ ] Test `verify_running_release()` with: missing beacon, empty beacon, malformed beacon (no timestamp), beacon SHA == HEAD, beacon SHA != HEAD, beacon older than process start.
-- [ ] Test the cron classifier with a fresh flag + stale beacon (→ pending/warn) and a stale flag + stale beacon (→ starved/escalate).
+- [ ] Test `verify_running_release()` classification with: missing beacon (→ unknown), empty beacon (→ unknown), malformed beacon / no timestamp (→ unknown), beacon SHA == HEAD (→ matches), beacon SHA != HEAD with `beacon_ts > process_start_ts` (→ stale), beacon SHA != HEAD with `beacon_ts <= process_start_ts` / orphaned (→ unknown).
+- [ ] Test the cron classifier: positively-stale beacon + fresh flag (< 30 min) → pending/warn; positively-stale beacon + flag older than the 30-min pending window → starved/escalate; positively-stale beacon + already-expired flag → starved/escalate.
+- [ ] **Swallowed-write inversion guard**: a beacon-write failure (unwritable `data/`) leaving a missing/orphaned beacon must classify UNKNOWN → warn, and MUST NOT trigger a force-restart of the (healthy) process. Assert no restart is invoked in this path.
+
+### Per-Process Escalation
+- [ ] Bridge positively-stale+starved → bridge force-restart invoked (mock `install_service`) + one re-verify; worker restart path NOT invoked.
+- [ ] Worker positively-stale+starved → `result.success=False` + out-of-band alert, and the worker is NEVER force-killed (assert no SIGTERM / restart_worker call).
+- [ ] Out-of-band alert fires on hard-fail: Sentry capture invoked AND `data/update-release-failed` sentinel written, independent of whether the Telegram line was delivered.
 
 ### Error State Rendering
-- [ ] Full-mode mismatch surfaces a non-zero exit and a clear error string naming both SHAs. Test the exit code and message.
-- [ ] Cron-mode escalation surfaces the mismatch in the Telegram summary line (not only the attached log). Test the summary builder includes the release warning.
+- [ ] Full-mode `stale` surfaces a non-zero exit and a clear error string naming both short-SHAs. Test the exit code and message.
+- [ ] Cron-mode escalation surfaces the mismatch in the Telegram summary line naming the stale process and its lagging SHA (not only the attached log). Test the summary builder includes the release warning string. (Operator-facing acceptance check — runs off-bridge.)
 
 ## Test Impact
 
-- [ ] `tests/unit/` (update-system tests, e.g. `test_update_service.py` / `test_update_run.py` if present) — UPDATE: add coverage for `verify_running_release()` and the mode-aware verdict; assert full-mode mismatch sets `result.success=False`.
+- [ ] `tests/unit/` (update-system tests, e.g. `test_update_service.py` / `test_update_run.py` if present) — UPDATE: add coverage for `verify_running_release()` positive-staleness/unknown classification, the per-process escalation branches, and the mode-aware verdict; assert full-mode `stale` sets `result.success=False`.
 - [ ] Worker/bridge startup tests that assert startup side effects — UPDATE: add assertion that the boot-SHA beacon is written at startup.
-- [ ] `agent/agent_session_queue.py` restart-flag tests (if the bridge gains flag consumption) — UPDATE: assert the bridge idle path consumes the flag and triggers restart.
+- [ ] `agent/agent_session_queue.py` restart-flag tests — UPDATE ONLY the `_trigger_restart` docstring assertion if any test pins the string; the SIGTERM target and flag mechanics are unchanged. This plan does NOT add bridge consumption of `data/restart-requested` (that would introduce the first-reader-wins race #1898 closes), so no new shared-flag test is added here.
 
 If no dedicated update-system unit test file exists, this is greenfield for that module — create `tests/unit/test_update_release_verify.py`. No existing test asserts release verification today, so nothing needs DELETE/REPLACE; changes are additive to startup and the updater's terminal step.
 
@@ -157,12 +171,16 @@ If no dedicated update-system unit test file exists, this is greenfield for that
 **Mitigation:** The cron path classifies `pending` (fresh flag, process draining) as a warning, not a failure; only a `starved` state (flag older than the pending window, or beacon still stale) escalates. The staleness window is the Open Question to confirm.
 
 ### Risk 2: Forced restart interrupts an in-flight session
-**Impact:** If the escalation force-restarts, it may kill a running session mid-turn.
-**Mitigation:** Escalation is bounded and rare (only after the pending window is exceeded — i.e. the deferred path already failed to converge). Prefer draining once more before forcing; log loudly. This is a deliberate tradeoff: a stale fleet running known-broken code is worse than one interrupted session.
+**Impact:** A force-restart could kill a running agent session mid-turn.
+**Mitigation:** The escalation force-restart **only ever targets the bridge**, which holds no agent sessions — so it interrupts nothing. The worker (the only process that runs sessions) is **never force-killed**: a positively-stale+starved worker hard-fails loud and defers to `_check_restart_flag`'s own `status="running"` gate, which already waits for the session to drain. This removes the internal contradiction the critique flagged (the prior "interrupts in-flight session" mitigation named a scenario that cannot occur for the bridge and must not occur for the worker). A stale worker running known-broken code is surfaced loudly for the operator rather than silently force-restarted.
 
 ### Risk 3: Beacon staleness / orphaned beacon file
-**Impact:** A beacon left by a previous process image could read as "current" and mask a stale process.
-**Mitigation:** The beacon stores a timestamp; the verifier cross-checks the beacon's timestamp against the process start time (`ps -o lstart`/`etime`, already read in `get_service_status`). A beacon older than the process start is treated as unknown/stale, not a match.
+**Impact:** A beacon left by a previous process image could read as "current" and mask a stale process, or (worse) invert into a false escalation.
+**Mitigation:** The beacon stores a timestamp; the verifier cross-checks `beacon_ts` against the process start time (`ps -o lstart`/`etime`, already read in `get_service_status`). A beacon whose timestamp is `<= process_start_ts` is classified **unknown → warn**, never `stale` and never a `match`. Only `beacon_ts > process_start_ts AND boot_sha != HEAD` (positive staleness) can escalate.
+
+### Risk 4: Best-effort beacon write failure inverts into a false force-restart
+**Impact:** Beacon writes swallow FS errors (never crash startup). If the verdict treated a missing/orphaned beacon as authoritative "stale", a swallowed write on a healthy up-to-date process would trigger a false force-restart.
+**Mitigation:** Missing / empty / malformed / predates-process beacons all classify **unknown → warn**, which never escalates and never fails the run on staleness grounds. Escalation requires *positive* confirmation the live process is on old code (a fresh beacon belonging to the current image whose SHA lags HEAD). A swallowed write can only ever downgrade to a warning, never invert to a force-restart.
 
 ## Race Conditions
 
@@ -183,17 +201,20 @@ If no dedicated update-system unit test file exists, this is greenfield for that
 ## No-Gos (Out of Scope)
 
 - `[EXTERNAL]` Running `/update` on the Captain (or any bridge machine) to capture the executable proof for acceptance criterion 3 — the agent's dev machine has no Telegram bridge role, so the release-verification output must be captured on a real bridge machine by the operator. The build produces the verification step and a local/full-mode test; the on-bridge proof run is the human-gated step.
+- `[SEPARATE-SLUG]` A dedicated idle-gated bridge self-restart flag (`data/bridge-restart-requested` with a bridge-side consumer mirroring `_check_restart_flag` semantics) that would let the bridge converge on new code at its *own* next idle boundary, before the next cron verify. This is an orthogonal optimization: the DESIRED outcome ("verify both == HEAD and exit non-zero / escalate") is fully delivered by verification plus the verifier-driven bridge force-restart in *this* plan. A new self-restart code path in the bridge is a distinct capability that should ship on its own issue after verification lands. Explicitly NOT reusing the worker's `data/restart-requested` flag (first-reader-wins race).
 - `[SEPARATE-SLUG]` Fixing the underlying session-wedge that starves the restart (resilience workstream) — not filed under a new issue here because this plan only bounds the *consequence*; if a dedicated wedge issue is desired it should be filed separately. (No `[SEPARATE-SLUG #NNN]` tag claimed since no issue is being asserted — this item is explicitly out of scope with the wedge tracked by the existing resilience issues #1815/#1877.)
 
-Everything else relevant — the beacon, the verify step, the mode-aware verdict, the bridge restart path, and the tests — is in scope for this plan.
+Everything else relevant — the beacon, the verify step, the per-process mode-aware verdict, the verifier-driven bridge force-restart, the `_trigger_restart` docstring correction, and the tests — is in scope for this plan.
 
 ## Update System
 
 This bug **is** in the update system, so the change is intrinsically to `/update`:
-- `scripts/update/run.py` — new verification step wired into the service-restart path; cron summary surfaces mismatches.
-- `scripts/update/service.py` — new `verify_running_release()` + `boot_sha` on status.
+- `scripts/update/run.py` — new per-process verification step wired into the service-restart path; cron summary names the stale process + lagging SHA; out-of-band failure sentinel + Sentry capture on hard-fail.
+- `scripts/update/service.py` — new `verify_running_release()` (positive-staleness/unknown classification) + `boot_sha`/`beacon_ts` on status.
 - `bridge/telegram_bridge.py` + `worker/__main__.py` — write boot-SHA beacons at startup.
-- No new deps to propagate. No `migrations.py` change (beacon files are inert, self-healing, and written on next startup on every machine — no data migration needed). The change propagates to all machines via the normal `/update` git pull; the first post-merge full `/update` restarts the fleet and begins writing beacons.
+- `agent/agent_session_queue.py` — docstring-only correction to `_trigger_restart` (state it SIGTERMs the WORKER PID; launchd respawns the worker, not the bridge). MUST NOT change the SIGTERM target.
+- `monitoring/bridge_watchdog.py` — read the `data/update-release-failed` sentinel on its 60s cycle so a bridge-down-after-restart failure is surfaced even when the Telegram channel is dead.
+- No new deps to propagate. No `migrations.py` change (beacon files and the failure sentinel are inert, self-healing, written on next startup / next failed update — no data migration needed). The change propagates to all machines via the normal `/update` git pull; the first post-merge full `/update` restarts the fleet and begins writing beacons.
 
 ## Agent Integration
 
@@ -202,19 +223,22 @@ No agent integration required — this is entirely internal to the update system
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/bridge-self-healing.md` (or the update-system doc) to describe the boot-SHA beacon and the post-restart release-verification gate, including the cron-mode pending-vs-starved policy.
+- [ ] Update `docs/features/bridge-self-healing.md` (or the update-system doc) to describe the boot-SHA beacon and the post-restart release-verification gate, including the cron-mode pending-vs-starved policy, the per-process escalation branch (bridge force-restart safe; worker never force-killed), and the out-of-band failure sentinel.
 - [ ] Add/refresh an entry in `docs/features/README.md` index for the release-verification behavior.
 
 ### Inline Documentation
-- [ ] Docstrings on `verify_running_release()` and the beacon-writer explaining the pending-vs-starved classification and the beacon-freshness cross-check.
-- [ ] Comment at the `run.py` verify step explaining why cron mode does not hard-fail on a fresh pending restart.
+- [ ] Docstrings on `verify_running_release()` and the beacon-writer explaining the positive-staleness vs. unknown classification and the beacon-freshness (`beacon_ts > process_start_ts`) cross-check.
+- [ ] Comment at the `run.py` verify step explaining why cron mode does not hard-fail on a fresh pending restart, and why only the bridge is force-restarted.
+- [ ] **`_trigger_restart` docstring correction** (`agent/agent_session_queue.py:1250`): rewrite the current "graceful bridge restart" / "Launchd KeepAlive restarts the process" wording to state it SIGTERMs the **worker** PID from inside the worker loop, and launchd's KeepAlive respawns the **worker** (not the bridge). This misleading on-disk artifact plausibly seeded the operator's false trust that `/update` cycled everything. Documentation-only — do NOT change the SIGTERM target.
 
 ## Success Criteria
 
-- [ ] Root cause documented (this plan's Recon/Data Flow): cron `/update` never restarts the bridge and its worker restart can be starved+expired, with no release verification. (Acceptance criterion 1.)
-- [ ] Bridge and worker write a boot-SHA beacon at startup.
-- [ ] `/update` verifies bridge AND worker running release == pulled HEAD after the restart step and exits non-zero on mismatch in full mode; escalates (force-restart or fail) rather than silently passing in cron mode. (Acceptance criterion 2.)
-- [ ] The bridge has a cron-mode path to reach new code (flag consumption and/or verification-driven force-restart).
+- [ ] Root cause documented (this plan's Recon/Data Flow): cron `/update` never restarts the bridge and its worker restart can be starved+expired, with no release verification. Includes the `_trigger_restart` docstring correction (the misleading "restarts the bridge" artifact). (Acceptance criterion 1.)
+- [ ] Bridge and worker write a boot-SHA beacon (SHA + ISO timestamp) at startup.
+- [ ] `/update` verifies bridge AND worker running release == pulled HEAD after the restart step and exits non-zero on positively-stale mismatch in full mode; in cron mode escalates **per-process** — bridge force-restart (safe, no sessions), worker hard-fail without force-kill — rather than silently passing. Only positive staleness (`beacon_ts > process_start_ts AND boot_sha != HEAD`) escalates; unknown → warn. (Acceptance criterion 2.)
+- [ ] The bridge has a cron-mode path to reach new code via the verifier-driven force-restart (the dedicated idle-gated self-restart flag is deferred to its own slug per No-Gos).
+- [ ] **Operator-facing (off-bridge):** the cron summary string (`run.py:1867-1906`) explicitly names the stale process and its lagging short-SHA (e.g. "bridge running 659756a4 but HEAD is 6b5b998a") — asserted in a unit test, independent of the bridge-machine proof. This is the human-visible artifact that the original "misleading update OK" bug lacked.
+- [ ] Out-of-band failure signal (Sentry capture + `data/update-release-failed` sentinel) fires on hard-fail so a bridge-down-after-restart cannot silence its own alarm.
 - [ ] Executable proof captured on a bridge machine: `/update` run output showing the release-verification step (SHA match, or a deliberate mismatch producing non-zero exit). (Acceptance criterion 3 — operator-gated per No-Gos.)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -226,16 +250,16 @@ The lead agent orchestrates; it does not build directly.
 
 ### Team Members
 
-- **Builder (beacon + verify)**
+- **Builder (beacon + verify + escalation)**
   - Name: `update-verify-builder`
-  - Role: Add boot-SHA beacon writes (bridge + worker) and `verify_running_release()`; wire the mode-aware verify step into `run.py`.
+  - Role: Add boot-SHA beacon writes (bridge + worker) and `verify_running_release()` (positive-staleness/unknown classification); wire the per-process mode-aware verify step into `run.py`, including the verifier-driven bridge force-restart, the worker hard-fail-without-force-kill branch, and the out-of-band alert (Sentry + `data/update-release-failed` sentinel + `bridge_watchdog` read).
   - Agent Type: builder
   - Domain: async/process-lifecycle
   - Resume: true
 
-- **Builder (bridge restart path)**
-  - Name: `bridge-restart-builder`
-  - Role: Give the bridge a cron-mode restart path (flag consumption idle-gated, or verification-driven force-restart).
+- **Builder (root-cause docstring correction)**
+  - Name: `docstring-correction-builder`
+  - Role: Rewrite the misleading `_trigger_restart` docstring (`agent/agent_session_queue.py:1250`) to state it SIGTERMs the WORKER PID (launchd respawns the worker, not the bridge). Documentation-only; MUST NOT change the SIGTERM target. Small task, can fold into `update-verify-builder` if preferred.
   - Agent Type: builder
   - Resume: true
 
@@ -269,40 +293,42 @@ The lead agent orchestrates; it does not build directly.
 - Add a best-effort beacon writer (SHA + ISO timestamp) writing `data/bridge_boot_sha` and `data/worker_boot_sha`.
 - Call it at bridge startup (near `bridge/telegram_bridge.py:2985`) and worker startup (`worker/__main__.py`), swallowing FS errors.
 
-### 2. verify_running_release() + run.py wiring
+### 2. verify_running_release() + run.py per-process wiring
 - **Task ID**: build-verify
 - **Depends On**: build-beacon
 - **Validates**: tests/unit/test_update_release_verify.py
 - **Assigned To**: update-verify-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `verify_running_release()` to `scripts/update/service.py` with per-process `{running, boot_sha, matches, beacon_age}` and a beacon-vs-process-start freshness cross-check.
-- Wire the verify step into `run.py`: full mode → hard-fail on mismatch; cron mode → pending (warn) vs. starved (escalate). Surface mismatches in the cron summary.
+- Add `verify_running_release()` to `scripts/update/service.py` returning per-process `{running, boot_sha, beacon_ts, process_start_ts, classification}` with `classification ∈ {matches, stale, unknown}`; `stale` requires positive staleness (`beacon_ts > process_start_ts AND boot_sha != get_short_sha(HEAD)`), everything ambiguous → `unknown`.
+- Wire the verify step into `run.py`: full mode → hard-fail on `stale`; cron mode → pending (warn, flag < 30-min window) vs. starved (escalate). Escalation branches **per-process**: bridge stale+starved → force-restart via `install_service` + one re-verify, else hard-fail; worker stale+starved → `result.success=False` WITHOUT force-kill; `unknown` → warn.
+- Emit the out-of-band alert on hard-fail: Sentry capture + write `data/update-release-failed`; make `monitoring/bridge_watchdog.py` read that sentinel on its 60s cycle.
+- Cron summary (`run.py:1867-1906`) names the stale process + lagging short-SHA.
 
-### 3. Bridge cron-mode restart path
-- **Task ID**: build-bridge-restart
-- **Depends On**: build-beacon
-- **Validates**: agent/agent_session_queue restart-flag tests
-- **Assigned To**: bridge-restart-builder
+### 3. Root-cause docstring correction + watchdog sentinel
+- **Task ID**: build-docstring-fix
+- **Depends On**: none
+- **Validates**: agent/agent_session_queue restart-flag tests (docstring assertion only)
+- **Assigned To**: docstring-correction-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Give the bridge an idle-gated restart-flag consumption path OR have the cron verify step force-restart a bridge whose boot SHA lags HEAD. Keep the worker path unchanged.
+- Rewrite the `_trigger_restart` docstring (`agent/agent_session_queue.py:1250`) to state it SIGTERMs the WORKER PID; launchd respawns the worker, not the bridge. Do NOT touch the SIGTERM target or flag mechanics. (This is the on-disk artifact that seeded the operator's false trust.) Can be folded into build-verify if the builder prefers a single PR.
 
 ### 4. Tests
 - **Task ID**: build-tests
-- **Depends On**: build-verify, build-bridge-restart
+- **Depends On**: build-verify, build-docstring-fix
 - **Assigned To**: release-verify-tester
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Cover verify classification, beacon freshness, full-mode non-zero exit, cron pending-vs-starved, startup beacon writes, and best-effort failure handling.
+- Cover verify classification (matches/stale/unknown), beacon freshness, the swallowed-write inversion guard (unknown never force-restarts), per-process escalation (bridge force-restart invoked; worker never force-killed), out-of-band alert firing, full-mode non-zero exit, cron pending-vs-starved, startup beacon writes, and the operator-facing summary string.
 
 ### 5. Documentation
 - **Task ID**: document-feature
-- **Depends On**: build-verify, build-bridge-restart, build-tests
+- **Depends On**: build-verify, build-docstring-fix, build-tests
 - **Assigned To**: release-verify-docs
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Update the self-healing / update-system feature doc + index; add docstrings and the cron-mode comment.
+- Update the self-healing / update-system feature doc + index; add docstrings and the cron-mode + per-process-escalation comments.
 
 ### 6. Final Validation
 - **Task ID**: validate-all
@@ -324,6 +350,9 @@ The lead agent orchestrates; it does not build directly.
 | bridge writes beacon | `grep -rn "bridge_boot_sha" bridge/telegram_bridge.py` | exit code 0 |
 | worker writes beacon | `grep -rn "worker_boot_sha" worker/__main__.py` | exit code 0 |
 | full-mode failure wired | `grep -n "result.success = False" scripts/update/run.py` | exit code 0 |
+| out-of-band sentinel | `grep -rn "update-release-failed" scripts/update/run.py monitoring/bridge_watchdog.py` | exit code 0 |
+| docstring corrected | `grep -n "worker PID\|worker loop" agent/agent_session_queue.py` | exit code 0 |
+| bridge NOT consuming shared flag | `grep -c "_check_restart_flag\|_trigger_restart" bridge/telegram_bridge.py` | output 0 (bridge only `clear_restart_flag`s at startup; never a restart-triggering consumer of `data/restart-requested`) |
 | No stale xfails | `grep -rn 'xfail' tests/ \| grep -v '# open bug'` | exit code 1 |
 
 ## Critique Results
@@ -334,8 +363,12 @@ The lead agent orchestrates; it does not build directly.
 
 ---
 
-## Open Questions
+## Decisions (resolved in critique revision, 2026-07-05)
 
-1. **Cron-mode escalation policy:** when the deferred restart is starved (flag stale AND beacon still lags HEAD), should `/update` (a) force a synchronous restart and re-verify, or (b) hard-fail non-zero and leave the process alone for the operator? Force-restart converges the fleet automatically but may interrupt a wedged session; hard-fail is safer but leaves stale code running until a human acts. Recommendation: force-restart with one drain attempt, then hard-fail if still stale.
-2. **Pending window duration:** how long may a cron restart legitimately stay pending before it counts as starved? The restart flag's own TTL is 1h (`_RESTART_FLAG_TTL`). Reuse 1h, or a shorter window (e.g. 30 min = the polling-cron interval, so a second cron run would catch it)?
-3. **Bridge restart path preference:** idle-gated flag consumption in the bridge (symmetry with the worker) vs. verification-driven force-restart only. Flag consumption is cleaner but adds a new self-restart code path to the bridge; force-restart keeps the bridge dumb. Which does the operator prefer?
+All three prior Open Questions are resolved by the critique revision; none remains open.
+
+1. **Cron-mode escalation policy (was OQ1 — resolved via Blocker 2 fix):** escalation is **per-process, not a single blanket policy.** A process escalates only on *positive* staleness (`beacon_ts > process_start_ts AND boot_sha != get_short_sha(HEAD)`). Bridge stale+starved → force-restart (safe, no sessions) + one re-verify, then hard-fail if still stale. Worker stale+starved → hard-fail loud + out-of-band alert, **never force-killed** (defers to `_check_restart_flag`'s own session-running gate). `unknown` (missing/orphaned beacon) → warn, never escalate.
+
+2. **Pending window duration (was OQ2 — resolved):** **30 minutes**, matching the polling-cron interval (`scripts/update/run.py:1538`, `scripts/remote-update.sh:155`), so a subsequent cron run catches a starved restart — and shorter than the restart flag's own 1h TTL (`_RESTART_FLAG_TTL`), so `/update` escalates *before* the flag silently expires without cycling. A positively-stale process whose flag is younger than 30 min classifies `pending` (warn); older than 30 min (or flag already expired) classifies `starved` (escalate).
+
+3. **Bridge restart path preference (was OQ3 — resolved via Simplifier concern):** this plan uses the **verification-driven force-restart** as the bridge's cron-mode path (keeps the bridge dumb, no new self-restart code path, no shared-flag race). The dedicated idle-gated bridge self-restart flag (`data/bridge-restart-requested`) that would let the bridge converge on its own next idle boundary is a distinct orthogonal capability **deferred to its own slug** (see No-Gos) — the DESIRED outcome is fully delivered by verification + the force-restart without it.
