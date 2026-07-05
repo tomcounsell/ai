@@ -204,6 +204,16 @@ Defense in depth lives in two layers:
 
 **Explicit non-goal**: this work does not fix the upstream Popoto stale-index root cause. That is tracked under #617 / #860 — orphan-index hygiene is its own ongoing reflection. sdlc-1330 makes intake resilient to that condition; the root cause is unaffected.
 
+### Classification Key-Resolution Resilience (issue #1899)
+
+Inbound messages trigger up to three classification calls that share one key resolver, `utils/api_keys.py::get_anthropic_api_key`: the terminus decision (`bridge/routing.py::classify_conversation_terminus`), the background work-type classifier (`tools/classifier.py::classify_request_async`, fired non-blocking from `classify_work_type()`), and the intent classifier (`agent/intent_classifier.py`). A message never depends on classification succeeding — each path carries a message-preserving default:
+
+- **Terminus → `RESPOND`**: the Haiku fallback is guarded by `if api_key:` and defaults conservatively.
+- **Work-type → sentinel `type=None`**: a missing key logs a single `WARNING` and returns `{"type": None, "confidence": 0.0, "reason": "..."}`. The bridge maps `type=None` to its most conservative routing (`"question"`, no spurious SDLC spawn). Genuine API/parse failures keep their `ERROR`-level (Sentry-visible) logging.
+- **Intent → `new_work`**: defaults internally on any error.
+
+**Resolver self-heal**: `get_anthropic_api_key()` returns `str | None` and caches **only a truthy** resolution. An absent resolution returns `None` without caching it, so the next call re-reads env/`.env` rather than short-circuiting on a poisoned empty cache. This removes a persistence amplifier: a transient startup window (LaunchAgent env or `.env` symlink not yet readable when the first classification ran) previously cached `""` and forced every subsequent classification in that process to fail until restart. Now the miss clears itself on the next inbound message once the environment settles. A *permanently* keyless process is not hidden by the work-type `WARNING` downgrade — the same resolver feeds the terminus fallback, the intent classifier, the health check, and every live session's model client, so a genuinely keyless bridge surfaces loudly through those paths.
+
 ### Execution Harness Routing
 
 All session types (dev, pm, teammate) execute via the CLI harness (`claude -p`). There is no SDK execution branch — the `DEV_SESSION_HARNESS` feature flag was eliminated in issue #912.
