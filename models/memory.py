@@ -1,7 +1,7 @@
 """Memory model for the subconscious memory system.
 
 Level 3 popoto model with DecayingSortedField, ConfidenceField, BM25Field,
-EmbeddingField, WriteFilterMixin, AccessTrackerMixin, and ExistenceFilter.
+GracefulEmbeddingField, WriteFilterMixin, AccessTrackerMixin, and ExistenceFilter.
 
 Memories are partitioned by project_key for per-project isolation.
 Human messages are saved with high importance (InteractionWeight.HUMAN = 6.0),
@@ -9,8 +9,11 @@ agent observations with low importance (InteractionWeight.AGENT = 1.0).
 
 The ExistenceFilter fingerprints on content, enabling O(1) bloom checks
 for topic relevance before running the BM25 + RRF fusion retrieval.
-EmbeddingField generates vector embeddings via OllamaProvider on save,
-enabling semantic similarity as a fourth RRF signal in retrieval.
+GracefulEmbeddingField generates vector embeddings via OllamaProvider on save,
+enabling semantic similarity as a fourth RRF signal in retrieval. When the
+provider is slow or unreachable it persists the record without a vector
+(issue #1904) instead of dropping it; the memory-embedding-backfill reflection
+re-embeds it once the provider is healthy.
 """
 
 import logging
@@ -27,7 +30,6 @@ from popoto import (  # noqa: E402
     ConfidenceField,
     DecayingSortedField,
     DictField,
-    EmbeddingField,
     FloatField,
     KeyField,
     Model,
@@ -35,6 +37,8 @@ from popoto import (  # noqa: E402
     WriteFilterMixin,
 )
 from popoto.fields.existence_filter import ExistenceFilter  # noqa: E402
+
+from models.graceful_embedding_field import GracefulEmbeddingField  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +155,7 @@ class Memory(WriteFilterMixin, AccessTrackerMixin, Model):
     )
     confidence = ConfidenceField(initial_confidence=0.5)
     bm25 = BM25Field(source="content")
-    embedding = EmbeddingField(source="content")
+    embedding = GracefulEmbeddingField(source="content")
 
     # Opt-in marker for EmbeddingField.garbage_collect (Popoto >= 1.6.0).
     # Without this attribute, garbage_collect is a no-op for safety —
