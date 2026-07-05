@@ -168,7 +168,15 @@ async def classify_request_async(message: str, context: str = "") -> dict:
     try:
         api_key = get_anthropic_api_key()
         if not api_key:
-            raise ValueError("No Anthropic API key found for classification")
+            logger.warning(
+                "Anthropic API key missing — skipping async classification, "
+                "message preserved with sentinel default"
+            )
+            return {
+                "type": None,
+                "confidence": 0.0,
+                "reason": "no anthropic api key — classification skipped",
+            }
 
         # Build prompt
         prompt = CLASSIFICATION_PROMPT.format(
