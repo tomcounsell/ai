@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: completed
 type: bug
 appetite: Small
 owner: Valor Engels
