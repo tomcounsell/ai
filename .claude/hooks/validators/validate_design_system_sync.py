@@ -53,6 +53,9 @@ _COMMAND_REGEX = re.compile(
 # Anchored to the repo root (not cwd) so the hook never creates a stray
 # cwd-relative logs/ directory (e.g. inside a skills root), which would
 # trip rule_19_husk_directories in the skills-audit reflection.
+# Assumption: this only ignores cwd because __file__ is absolute at
+# invocation time. Claude Code hooks are registered via `$CLAUDE_PROJECT_DIR`
+# in .claude/settings.json (an absolute path), so that assumption holds.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _LOG_PATH = _REPO_ROOT / "logs" / "validate_design_system_sync.jsonl"
 
