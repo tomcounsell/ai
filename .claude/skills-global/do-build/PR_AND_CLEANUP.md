@@ -143,7 +143,7 @@ After PR is created and documentation cascade completes, the plan document is **
 - `do-merge` can read it to verify all checklist items are done
 - `do-docs` can use it as context during the DOCS stage
 
-The plan will be deleted by `do-merge` after the PR is successfully merged. The tracking issue closes automatically when the PR merges (via `Closes #N` in the PR body).
+The plan is **moved to `docs/plans/completed/`**, not deleted — either by `do-merge`'s deterministic `python scripts/migrate_completed_plan.py --issue <N> --apply` call once the tracking issue closes, or by the `merged-branch-cleanup` reflection on a merge path that bypasses `do-merge`. The tracking issue closes automatically when the PR merges (via `Closes #N` in the PR body). See [`docs/features/plan-migration-invariant.md`](../../../docs/features/plan-migration-invariant.md).
 
 ## Step 9: Report PR Link
 

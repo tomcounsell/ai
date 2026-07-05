@@ -40,6 +40,7 @@ from scripts.update import (  # noqa: E402
     readme_check,
     redis_persistence,
     redis_replication,
+    reflection_arm,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -136,6 +137,7 @@ class UpdateResult:
     hook_audit: hooks.HookAuditResult | None = None
     migration_result: migrations.MigrationResult | None = None
     reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
+    reflection_arm_result: reflection_arm.ArmResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -806,6 +808,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     else:
         log(f"  WARN: reflections.yaml migration failed: {ry.error}", v, always=True)
         result.warnings.append(f"reflections.yaml migration: {ry.error}")
+
+    # Step 3.66: Arm the merged-branch-cleanup plan-migration backstop
+    # (issue #1900, Tier 0). Runs after the reflections.yaml copy (Step 1.66)
+    # and grammar migration (Step 3.65) so it flips the CURRENT vault + repo
+    # copies. Guarded on the vault file existing and this machine owning the
+    # 'valor' project -- a no-op everywhere else.
+    log("Arming plan-migration backstop reflection...", v)
+    result.reflection_arm_result = reflection_arm.arm_merged_branch_cleanup(project_dir)
+    ar = result.reflection_arm_result
+    if ar.action == "armed":
+        log(f"  merged-branch-cleanup: {ar.detail}", v, always=True)
+    elif ar.action == "noop":
+        log(f"  merged-branch-cleanup: {ar.detail}", v)
+    elif ar.action == "skipped":
+        log(f"  merged-branch-cleanup: skipped ({ar.detail})", v)
+    if not ar.success:
+        log(f"  WARN: merged-branch-cleanup arm failed: {ar.detail}", v, always=True)
+        result.warnings.append(f"merged-branch-cleanup arm: {ar.detail}")
 
     # Step 3.7: OfficeCLI binary install/update
     log("Checking OfficeCLI...", v)

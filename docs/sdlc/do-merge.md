@@ -74,6 +74,14 @@ merge`, a forked `/do-sdlc` run, or a cross-machine merge all skip this
 deterministic step, so the daily reflection sweep is what eventually migrates
 those plans instead. See `docs/features/plan-migration-invariant.md`.
 
+**A non-zero exit from this command is not a no-op to ignore.** The CLI exits
+`0` only for `migrated`/`already-migrated`; it exits `1` and prints
+`Verdict: dirty-tree-skip` (or `rebase-conflict-skip`) when the primitive took
+its report-only fallback instead of moving the plan. Do not silently retry or
+swallow this — surface it in the merge report so a human knows the primary
+path did not migrate this plan and the daily reflection backstop is the only
+thing that will (within its next cycle, not immediately).
+
 ## Post-Merge Memory Extraction
 
 After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker's post-merge learning extraction handles it automatically.
