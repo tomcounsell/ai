@@ -150,3 +150,31 @@ def test_jsonl_log_captures_bypass():
     assert len(after) >= len(before) + 1
     latest = json.loads(after[-1])
     assert latest["result"] == "bypassed"
+
+
+def test_log_path_anchored_to_repo_root_not_cwd(tmp_path: Path):
+    """Regression for #1901: running from a non-repo-root cwd must not
+    create a stray cwd-relative logs/ directory (flagged as a husk by the
+    skills-audit reflection's rule_19_husk_directories).
+    """
+    log_path = REPO_ROOT / "logs/validate_design_system_sync.jsonl"
+    before = log_path.read_text(encoding="utf-8").splitlines() if log_path.is_file() else []
+
+    env = os.environ.copy()
+    env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    proc = subprocess.run(
+        [sys.executable, str(HOOK)],
+        input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "git add README.md"}}),
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+    )
+    assert proc.returncode == 0
+
+    after = log_path.read_text(encoding="utf-8").splitlines() if log_path.is_file() else []
+    assert len(after) >= len(before) + 1
+    latest = json.loads(after[-1])
+    assert latest["tool_name"] == "Bash"
+
+    assert not (tmp_path / "logs").exists()

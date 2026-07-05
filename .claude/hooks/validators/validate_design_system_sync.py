@@ -50,7 +50,11 @@ _COMMAND_REGEX = re.compile(
     r"(?![A-Za-z0-9.])"
 )
 
-_LOG_PATH = Path("logs/validate_design_system_sync.jsonl")
+# Anchored to the repo root (not cwd) so the hook never creates a stray
+# cwd-relative logs/ directory (e.g. inside a skills root), which would
+# trip rule_19_husk_directories in the skills-audit reflection.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_LOG_PATH = _REPO_ROOT / "logs" / "validate_design_system_sync.jsonl"
 
 
 def _log(entry: dict) -> None:
