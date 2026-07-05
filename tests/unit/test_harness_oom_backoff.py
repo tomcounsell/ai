@@ -108,7 +108,10 @@ def test_oom_defer_condition_grep_present():
     assert "pre_bump_attempts == 0" in src
     assert "_is_memory_tight()" in src
     assert "timedelta(seconds=120)" in src
-    assert 'update_fields=["scheduled_at", "recovery_attempts"]' in src
+    # 15f01deb (#1769) rewrote the save to build the field list dynamically
+    # (appending the tool_timeout wedge fields), but the OOM-defer persistence
+    # base is still ["scheduled_at", "recovery_attempts"] — pin that literal.
+    assert '_oom_fields = ["scheduled_at", "recovery_attempts"]' in src
 
 
 def test_pending_scan_skips_deferred(clean_sessions):

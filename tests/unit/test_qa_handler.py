@@ -10,11 +10,15 @@ class TestBuildTeammateInstructions:
         assert len(result) > 50
 
     def test_dev_session_redirect_present(self):
-        """Teammate prompt must surface the Dev-session redirect command
+        """Teammate prompt must surface the Eng-session redirect command
         and the WHEN BLOCKED guidance verbatim, since the hook block
-        message also includes the redirect."""
+        message also includes the redirect.
+
+        The redirect role is ``eng`` since commit dd926192 (#1633) merged
+        the PM/Dev roles into the single Eng role.
+        """
         result = build_teammate_instructions()
-        assert "valor-session create --role dev" in result
+        assert "valor-session create --role eng" in result
         assert "WHEN BLOCKED" in result
 
     def test_read_only_tools_mentioned(self):

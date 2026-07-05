@@ -83,6 +83,11 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
     - ``current_plan_hash``: sha256 of the plan file (used by G5 to short-circuit
       re-critique on an unchanged plan; #1639). Without this, G5's loop bound on
       router row 2b is inert in the CLI path.
+    - ``legacy_plan_hash``: the OLD full-bytes hash (``compute_plan_hash``),
+      supplied so G5's transparent migration (#1761 Layer 3) can detect a
+      stored legacy hash without the router importing from tools/ (the
+      import-boundary contract — tools/ imports agent/sdlc_router, never the
+      reverse).
     """
     context: dict = {}
     if proposed_skill:
@@ -95,7 +100,7 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
     if issue_number:
         try:
             from tools._sdlc_utils import find_plan_path
-            from tools.sdlc_verdict import compute_plan_body_hash
+            from tools.sdlc_verdict import compute_plan_body_hash, compute_plan_hash
 
             plan_path = find_plan_path(issue_number)
             if plan_path is not None:
@@ -103,6 +108,13 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
                 if plan_hash is not None:
                     context["current_plan_hash"] = plan_hash
                     context["issue_number"] = issue_number
+                    # G5 transparent migration (#1761 Layer 3): the router
+                    # compares the stored artifact_hash against the legacy
+                    # full-bytes hash. Caller-supplied because the router must
+                    # not import from tools/ (import-boundary contract).
+                    legacy_hash = compute_plan_hash(plan_path)
+                    if legacy_hash is not None:
+                        context["legacy_plan_hash"] = legacy_hash
         except Exception:
             pass
 

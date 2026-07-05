@@ -183,8 +183,18 @@ class TestDoGenerate:
 class TestGenerationModelConfig:
     """The generation model id comes from settings, default gemma4:31b-cloud."""
 
-    def test_resolve_uses_generation_setting_default(self):
+    def test_resolve_uses_generation_setting_default(self, monkeypatch):
+        from config.settings import ModelSettings, settings
         from tools.memory_search.title_generator import _resolve_ollama_config
+
+        # The `settings` singleton reflects the machine-local env override
+        # MODELS__OLLAMA_GENERATION_MODEL (written to ~/.zshenv by /setup).
+        # Pin the singleton to the code default so this test asserts BOTH
+        # that the default is gemma4:31b-cloud AND that _resolve wires it
+        # through settings.models — independent of the host machine.
+        default_model = ModelSettings().ollama_generation_model
+        assert default_model == "gemma4:31b-cloud"
+        monkeypatch.setattr(settings.models, "ollama_generation_model", default_model)
 
         _base, model, _timeout = _resolve_ollama_config()
         assert model == "gemma4:31b-cloud"

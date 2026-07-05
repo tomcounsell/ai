@@ -99,15 +99,39 @@ class TestWritePromiseAuditShape:
         assert entry["class_"] is None
 
     def test_audit_helper_is_independent_of_drafter(self):
-        """The drafter's _write_classification_audit must be unchanged.
+        """The promise-gate audit helper stands alone — no drafter dependency.
 
-        We can't import it directly to assert "shape unchanged" without a
-        regression baseline, but we can assert it still exists and is
-        independently callable — the forked helper does not replace it.
+        History: this helper was originally forked from the drafter's
+        ``_write_classification_audit``. Commit ef452704 (#1685) repositioned
+        the drafter as a verbatim pass-through and deleted its entire
+        classification cluster, including that audit helper. The fork now IS
+        the sole audit writer: assert it lives in ``bridge.promise_gate``
+        without importing anything from ``bridge.message_drafter``, and that
+        the drafter no longer exposes a classification-audit helper.
         """
-        from bridge.message_drafter import _write_classification_audit
+        import ast
+        import inspect
 
-        assert callable(_write_classification_audit)
+        import bridge.message_drafter as message_drafter
+
+        assert callable(_write_promise_audit)
+        assert _write_promise_audit.__module__ == "bridge.promise_gate"
+        # Removed by #1685 — the promise gate's fork is the only audit writer.
+        assert not hasattr(message_drafter, "_write_classification_audit")
+
+        # The promise gate module must not import the drafter (independence).
+        tree = ast.parse(inspect.getsource(promise_gate))
+        imported = [
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        ] + [
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        ]
+        assert "bridge.message_drafter" not in imported
 
 
 class TestWritePromiseAuditFailureSwallowing:

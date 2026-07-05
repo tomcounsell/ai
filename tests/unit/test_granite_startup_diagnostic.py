@@ -220,7 +220,9 @@ class TestPlateau(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            # _run_pkill_fallback was deleted in #1816/#1832 (bab446d8):
+            # teardown is now process-group-scoped via _close_pair_and_reap.
+            patch.object(c, "_close_pair_and_reap"),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock
@@ -292,7 +294,9 @@ class TestPlateau(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            # _run_pkill_fallback was deleted in #1816/#1832 (bab446d8):
+            # teardown is now process-group-scoped via _close_pair_and_reap.
+            patch.object(c, "_close_pair_and_reap"),
             patch("agent.granite_container.container.last_assistant_text", side_effect=_lat_stub),
             patch("agent.granite_container.container.text_bearing_count", return_value=0),
         ):
@@ -314,7 +318,9 @@ class TestPlateau(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            # _run_pkill_fallback was deleted in #1816/#1832 (bab446d8):
+            # teardown is now process-group-scoped via _close_pair_and_reap.
+            patch.object(c, "_close_pair_and_reap"),
             # Override the startup deadline to be in the past so we hit the ceiling path
             # but NOT the plateau (to test pure ceiling exit we need more cycles than plateau).
             # We'll patch monotonic to simulate the ceiling being reached.
@@ -362,7 +368,9 @@ class TestPlateau(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            # _run_pkill_fallback was deleted in #1816/#1832 (bab446d8):
+            # teardown is now process-group-scoped via _close_pair_and_reap.
+            patch.object(c, "_close_pair_and_reap"),
             # Hit ceiling fast
             patch("agent.granite_container.container.time") as mock_time,
         ):
@@ -432,7 +440,9 @@ class TestFrameCaptureFallback(unittest.TestCase):
             patch.object(c, "_spawn_pair"),
             patch.object(c, "_close_pair"),
             patch.object(c, "_prime_session"),
-            patch.object(c, "_run_pkill_fallback"),
+            # _run_pkill_fallback was deleted in #1816/#1832 (bab446d8):
+            # teardown is now process-group-scoped via _close_pair_and_reap.
+            patch.object(c, "_close_pair_and_reap"),
         ):
             c._pm_pty = pm_mock
             c._dev_pty = dev_mock

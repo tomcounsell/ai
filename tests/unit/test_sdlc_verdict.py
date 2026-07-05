@@ -622,19 +622,19 @@ class TestG5TransparentMigration:
         legacy_hash = compute_plan_hash(plan)  # full-bytes (old)
         body_hash = compute_plan_body_hash(plan)  # stripped (new)
 
-        # Simulate: stored hash is the OLD legacy hash; current hash is the new body hash.
+        # Simulate: stored hash is the OLD legacy hash; current hash is the new
+        # body hash. The legacy hash is caller-supplied via context (import
+        # boundary: the router must not import tools/ to compute it itself).
         assert legacy_hash != body_hash  # precondition: they differ
         states = self._make_states(legacy_hash, verdict="READY TO BUILD (NO CONCERNS)")
         meta = {}
         context = {
             "current_plan_hash": body_hash,
+            "legacy_plan_hash": legacy_hash,
             "issue_number": 1761,
         }
 
-        from unittest.mock import patch
-
-        with patch("tools._sdlc_utils.find_plan_path", return_value=plan):
-            result = guard_g5_artifact_hash_cache(states, meta, context)
+        result = guard_g5_artifact_hash_cache(states, meta, context)
 
         from agent.sdlc_router import SKILL_DO_BUILD, Dispatch
 
@@ -654,7 +654,7 @@ class TestG5TransparentMigration:
         modified_plan = tmp_path / "modified.md"
         modified_plan.write_text("---\nstatus: active\n---\n# DIFFERENT body\n", encoding="utf-8")
 
-        from tools.sdlc_verdict import compute_plan_body_hash
+        from tools.sdlc_verdict import compute_plan_body_hash, compute_plan_hash
 
         old_hash = compute_plan_body_hash(original_plan)
         new_hash = compute_plan_body_hash(modified_plan)
@@ -664,17 +664,25 @@ class TestG5TransparentMigration:
         meta = {}
         context = {
             "current_plan_hash": new_hash,
+            # Caller-supplied legacy hash of the CURRENT plan file — with a
+            # genuine body change it does not match the stored hash, so the
+            # migration must not fire.
+            "legacy_plan_hash": compute_plan_hash(modified_plan),
             "issue_number": 1761,
         }
 
-        with patch("tools._sdlc_utils.find_plan_path", return_value=modified_plan):
-            result = guard_g5_artifact_hash_cache(states, meta, context)
+        result = guard_g5_artifact_hash_cache(states, meta, context)
 
         # No migration: genuine body change → cache miss → None.
         assert result is None
 
-    def test_no_migration_when_issue_number_missing(self, tmp_path):
-        """When issue_number is absent from context, migration is skipped."""
+    def test_no_migration_when_legacy_hash_missing(self, tmp_path):
+        """When legacy_plan_hash is absent from context, migration is skipped.
+
+        The router never computes the legacy hash itself (it must not import
+        tools/); a caller that omits ``legacy_plan_hash`` — e.g. because no
+        plan path resolved — gets plain cache-miss behavior.
+        """
         from agent.sdlc_router import guard_g5_artifact_hash_cache
 
         plan = tmp_path / "plan.md"
@@ -687,10 +695,10 @@ class TestG5TransparentMigration:
 
         states = self._make_states(legacy_hash)
         meta = {}
-        # No issue_number in context → migration cannot run.
+        # No legacy_plan_hash in context → migration cannot run.
         context = {"current_plan_hash": body_hash}
 
         result = guard_g5_artifact_hash_cache(states, meta, context)
 
-        # Without issue_number, no plan path can be resolved, so it's a cache miss.
+        # Without the caller-supplied legacy hash, it's a plain cache miss.
         assert result is None

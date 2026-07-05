@@ -65,16 +65,20 @@ class TestWorktreeEnforcementGuard:
     def _should_block(session, working_dir: Path) -> bool:
         """Replicate the guard predicate from session_executor.py.
 
-        Mirrors the live check at ``agent/session_executor.py:766``. The
-        directory-existence test was added as a follow-up to #887: a path
-        string under ``.worktrees/`` is not enough — the directory must
-        actually exist on disk, otherwise the dev session can fall back to
-        the parent CWD (the main checkout) at shell-launch time.
+        Mirrors the live main-checkout protection guard in
+        ``agent/session_executor.py`` (#887). The directory-existence test was
+        added as a follow-up to #887: a path string under ``.worktrees/`` is
+        not enough — the directory must actually exist on disk, otherwise the
+        session can fall back to the parent CWD (the main checkout) at
+        shell-launch time.
+
+        The guarded session type is ``"eng"`` since commit dd926192 (#1633)
+        merged the PM/Dev roles into the single Eng role.
         """
         _stype = session.session_type
         slug = session.slug
         return bool(
-            _stype == "dev"
+            _stype == "eng"
             and slug
             and (WORKTREES_DIR not in str(working_dir) or not working_dir.exists())
         )
@@ -112,9 +116,14 @@ class TestWorktreeEnforcementGuard:
         assert not missing_wt.exists()
         assert self._should_block(session, missing_wt) is True
 
-    def test_pm_session_with_slug_is_not_blocked(self):
-        """PM sessions should never be blocked by the worktree guard."""
-        session = self._make_session(session_type="eng", slug="my-feature")
+    def test_teammate_session_with_slug_is_not_blocked(self):
+        """Teammate sessions are never blocked by the worktree guard.
+
+        (Formerly the PM-session case: since commit dd926192 (#1633) collapsed
+        PM/Dev into the single Eng role, an eng session with a slug outside a
+        worktree IS blocked — teammate is the remaining exempt type.)
+        """
+        session = self._make_session(session_type="teammate", slug="my-feature")
         working_dir = Path(session.working_dir)
         assert self._should_block(session, working_dir) is False
 
@@ -130,28 +139,31 @@ class TestWorktreeEnforcementGuard:
         working_dir = Path(session.working_dir)
         assert self._should_block(session, working_dir) is False
 
-    def test_worktree_creation_failure_raises_for_dev_session(self):
-        """When worktree creation fails for a dev session, it should raise, not fall back."""
-        # Simulate the escalated error handling path
+    def test_worktree_creation_failure_raises_for_eng_session(self):
+        """When worktree creation fails for an eng session, it should raise, not fall back.
+
+        Mirrors the escalated error path in ``agent/session_executor.py``
+        (guarded on ``session_type == "eng"`` since commit dd926192 / #1633).
+        """
         session = self._make_session(session_type="eng", slug="my-feature")
 
         # The new code raises RuntimeError instead of falling back
         with pytest.raises(RuntimeError, match="Worktree provisioning failed"):
             _stype = session.session_type
-            if _stype == "dev":
+            if _stype == "eng":
                 raise RuntimeError(
-                    f"Worktree provisioning failed for dev session "
+                    f"Worktree provisioning failed for eng session "
                     f"slug={session.slug}: simulated error. "
                     f"Refusing to run in main checkout."
                 )
 
-    def test_worktree_creation_failure_warns_for_non_dev_session(self):
-        """When worktree creation fails for a non-dev session, it should warn and continue."""
-        session = self._make_session(session_type="eng", slug="my-feature")
+    def test_worktree_creation_failure_warns_for_non_eng_session(self):
+        """When worktree creation fails for a non-eng session, it should warn and continue."""
+        session = self._make_session(session_type="teammate", slug="my-feature")
 
-        # For non-dev sessions, the original warning behavior is preserved
+        # For non-eng sessions, the original warning behavior is preserved
         _stype = session.session_type
-        assert _stype != "dev"  # Should fall through to warning path
+        assert _stype != "eng"  # Should fall through to warning path
 
 
 class TestSlugFlagOnCreate:
@@ -335,12 +347,14 @@ class TestSyntheticSlugForSlugslessDev:
         _slug_pre = getattr(session, "slug", None)
         _aid_pre = getattr(session, "agent_session_id", None)
 
-        should_block = _stype_pre == "dev" and _slug_pre is None and _aid_pre is None
+        # Precondition mirrors agent/session_executor.py — guarded on "eng"
+        # since commit dd926192 (#1633) merged PM/Dev into the Eng role.
+        should_block = _stype_pre == "eng" and _slug_pre is None and _aid_pre is None
         assert should_block is True
 
-    def test_pm_session_no_slug_no_aid_not_blocked_by_synthesis_guard(self):
-        """PM/teammate sessions don't enter synthesis; the precondition lets them through."""
-        for stype in ("pm", "teammate"):
+    def test_teammate_session_no_slug_no_aid_not_blocked_by_synthesis_guard(self):
+        """Teammate/granite sessions don't enter synthesis; the precondition lets them through."""
+        for stype in ("teammate", "granite"):
             session = MagicMock()
             session.session_type = stype
             session.slug = None
@@ -350,9 +364,9 @@ class TestSyntheticSlugForSlugslessDev:
             _slug_pre = getattr(session, "slug", None)
             _aid_pre = getattr(session, "agent_session_id", None)
 
-            should_block = _stype_pre == "dev" and _slug_pre is None and _aid_pre is None
+            should_block = _stype_pre == "eng" and _slug_pre is None and _aid_pre is None
             assert should_block is False, (
-                f"synthesis precondition must only fire for slugless dev with no aid, not {stype!r}"
+                f"synthesis precondition must only fire for slugless eng with no aid, not {stype!r}"
             )
 
     def test_dev_session_with_aid_passes_precondition(self):
@@ -366,7 +380,7 @@ class TestSyntheticSlugForSlugslessDev:
         _slug_pre = getattr(session, "slug", None)
         _aid_pre = getattr(session, "agent_session_id", None)
 
-        should_block = _stype_pre == "dev" and _slug_pre is None and _aid_pre is None
+        should_block = _stype_pre == "eng" and _slug_pre is None and _aid_pre is None
         assert should_block is False
 
     def test_synthetic_slug_worktree_pruneable(self):

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -43,18 +44,20 @@ def _clear_active_clients():
 def _make_session(session_id: str, status: str, updated_at: datetime):
     """Build and persist an AgentSession with a specific `updated_at`.
 
-    `updated_at` has `auto_now=True` on the model, so a plain save() would
-    overwrite our explicit value with the current timestamp. We pass
-    `skip_auto_now=True` to Popoto so the dormancy-age test fixtures hold.
+    Since fix #1645 (commit 0335c10e), `AgentSession.save()` unconditionally
+    stamps `updated_at = bridge.utc.utc_now()` (Popoto's `auto_now` was
+    removed in favor of an explicit UTC stamp). To persist a backdated
+    `updated_at` for the dormancy-age fixtures, we patch `utc_now` for the
+    duration of the save so the stamp lands on our chosen timestamp.
     """
     s = AgentSession(
         session_id=session_id,
         project_key="tst-sweep",
         agent_session_id=f"as-{session_id}",
         status=status,
-        updated_at=updated_at,
     )
-    s.save(skip_auto_now=True)
+    with patch("bridge.utc.utc_now", return_value=updated_at):
+        s.save()
     return s
 
 
