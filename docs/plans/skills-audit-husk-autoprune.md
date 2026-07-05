@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-05
 tracking: https://github.com/tomcounsell/ai/issues/1902
 last_comment_id:
+revision_applied: true
 ---
 
 # skills-audit: auto-prune rule-19 "empty" husk directories under --fix
@@ -38,13 +39,19 @@ issue #1902.
   remediation. An operator must `rm -rf` it by hand.
 
 **Desired outcome:**
-`audit_skills.py --fix` prunes rule-19 "empty" husk directories automatically —
-directories with no `SKILL.md` whose only remaining contents are `__pycache__` /
-`.DS_Store`. Husks that still contain real orphaned files are left untouched and
-still surface as FAIL findings, preserving the human delete-or-restore decision
-for anything that might hold real work. A one-command operator remediation
-(`audit_skills.py --fix --no-sync`) is documented so a future husk is cleared in
-one step instead of a manual `rm -rf`.
+An **operator** who sees a recurring rule-19 husk FAIL can clear it with one
+command — `audit_skills.py --fix --no-sync` — instead of a manual `rm -rf`. Under
+`--fix`, the audit prunes rule-19 "empty" husk directories: directories with no
+`SKILL.md` whose only remaining contents are `__pycache__` / `.DS_Store`. Husks
+that still contain real orphaned files are left untouched and still surface as FAIL
+findings, preserving the human delete-or-restore decision for anything that might
+hold real work.
+
+This is deliberately **operator-invoked remediation, not reflection-automated
+deletion.** The nightly `skills-audit` reflection stays strictly read-only — it
+files issues and never mutates a target repo (see Rabbit Holes). The deletion path
+runs only when a human explicitly passes `--fix`, so the irreversible `rmtree` is
+always a conscious one-command action, never a background job.
 
 ## Freshness Check
 
@@ -144,8 +151,12 @@ No prerequisites — this work has no external dependencies. Standard library on
 - **`prune_husk_directories(skills_dir, dir_label)` helper**: mirrors rule 19's
   "empty" test (contents after excluding `__pycache__`/`.DS_Store`). For each
   directory with no `SKILL.md`, not `_`/`.`-prefixed, and no real contents, it
-  removes the directory (`shutil.rmtree`) and returns a description string. Husks
-  WITH real contents are left in place and returned as skipped (not pruned).
+  removes the directory (`shutil.rmtree`) and returns a description string. The
+  return value contains ONLY the husks actually removed — there is no "skipped"
+  concept. Husks WITH real contents are left untouched and simply are not returned;
+  rule 19 already surfaces them as a FAIL (`delete or restore`), so `main()`'s
+  `Fixed:` reporting stays truthful (a real-content husk stays a rule-19 FAIL and
+  is never reported as fixed).
 - **Fleet-level `--fix` wiring**: in `main()`, when `args.fix` is set and this is a
   full-fleet run (`not args.skill`), call the prune helper for each root BEFORE
   rule-19 detection, and record each prune as a `Fixed:` PASS finding (consistent
@@ -167,10 +178,19 @@ report FAIL → exit 0 when no FAILs remain.
   (`p.is_file() and "__pycache__" not in p.parts and p.name != ".DS_Store"`) so
   "empty" means the same thing in both places — a husk is pruned only if rule 19
   would have labelled it `(empty)`.
-- Safety guardrails on the delete path:
+- Safety guardrails on the delete path (`shutil.rmtree` on an untracked husk is
+  irreversible — git cannot restore an untracked directory, so these guards are
+  the only safety net):
   - Only operate on direct children of a known skills root (`skills_dir.iterdir()`).
   - Skip `SKILL.md`-bearing dirs, `_`-prefixed and `.`-prefixed dirs (matches rule 19 exemptions).
   - Skip any dir with real (non-junk) contents — those stay as FAIL for human decision.
+  - **TOCTOU guard**: re-evaluate the exact "empty except build artifacts" predicate
+    *immediately* before calling `shutil.rmtree` (not only at the top of the loop).
+    A file could land in the directory between the initial scan and the delete; the
+    re-check ensures a husk that gained real contents in that window is NOT deleted.
+  - **WARN log before deletion**: emit a `logging.warning(...)` (or the module's
+    equivalent) recording the resolved absolute path being removed, so the operator
+    has an audit trail of exactly what `--fix` deleted.
   - Wrap `shutil.rmtree` in `try/except OSError` and continue (never crash the audit).
 - In `main()` (`:984`), before the `rule_19_husk_directories` loop, add:
   `if args.fix: for label, root in roots: for desc in prune_husk_directories(root, label): report.add(Finding(<dir>, 0, "PASS", f"Fixed: {desc}", dir=label))`.
@@ -191,7 +211,11 @@ report FAIL → exit 0 when no FAILs remain.
 - [ ] This is not agent-output processing — no silent-loop risk.
 
 ### Error State Rendering
-- [ ] A husk that CANNOT be pruned (real orphaned file present) must still render as a rule-19 FAIL in both human and JSON output — assert the FAIL survives a `--fix` run. This is the key "don't silently swallow real orphans" guarantee.
+- [ ] A husk that is left in place (real orphaned file present) must still render as a rule-19 FAIL in both human and JSON output — assert the FAIL survives a `--fix` run. This is the key "don't silently swallow real orphans" guarantee, and it is exactly the gating test named in the Verification table.
+
+### TOCTOU / Irreversible-Delete Safety
+- [ ] `shutil.rmtree` on an untracked husk cannot be undone by git. Assert a WARN log records the absolute path before each deletion (audit trail).
+- [ ] Assert the predicate is re-checked immediately before `rmtree`: a directory empty at initial scan but holding a real file at delete time is left in place (not removed).
 
 ## Test Impact
 
@@ -279,9 +303,11 @@ home for the operator remediation note.
 
 ## Success Criteria
 
-- [ ] `prune_husk_directories` exists and removes a husk whose only contents are `__pycache__`/`.DS_Store`.
-- [ ] A husk with a real orphaned file is NOT pruned and still reports rule-19 FAIL after a `--fix` run.
-- [ ] `audit_skills.py --fix` on a fleet containing an empty husk removes it and reports a `Fixed:` PASS.
+- [ ] `prune_husk_directories` exists, removes a husk whose only contents are `__pycache__`/`.DS_Store`, and returns ONLY the descriptions of husks actually removed (no "skipped" entries).
+- [ ] **Gating test**: a husk with one real orphaned file is NOT pruned and still reports a rule-19 FAIL after a `--fix` run; a junk-only husk IS pruned and emits no rule-19 FAIL. (This is the authoritative safety criterion.)
+- [ ] `audit_skills.py --fix` on a fleet containing an empty husk removes it and reports a `Fixed:` PASS — and reports NO `Fixed:` for a real-content husk.
+- [ ] A WARN log line records the resolved absolute path of every directory removed by `--fix`.
+- [ ] The TOCTOU guard re-checks the "empty except build artifacts" predicate immediately before `rmtree`; a test proves a directory that gains a real file between scan and delete is not removed.
 - [ ] Rule 19 has unit-test coverage (empty husk, real-content husk, `SKILL.md` dir, `_`-prefixed dir).
 - [ ] The JSON contract is unchanged (reflection still parses findings; `rule == 19` FAILs only for real-content husks).
 - [ ] Tests pass (`/do-test`)
@@ -340,7 +366,8 @@ Tier 1 core agents as listed in the template. No specialist tier needed.
 - **Parallel**: false
 - Import `prune_husk_directories` in the test module.
 - `TestRule19HuskDirectories`: husk with only `__pycache__` → FAIL `(empty)`; husk with a real file → FAIL `(contains: ...)`; dir with `SKILL.md` → no finding; `_`-prefixed dir → exempt; non-existent dir → `[]`.
-- `TestPruneHuskDirectories`: empty husk (only junk) is removed and reported; real-content husk is preserved; `SKILL.md` dir untouched; `_`-prefixed dir untouched; OSError on one husk does not abort the sweep.
+- `TestPruneHuskDirectories`: empty husk (only junk) is removed and reported (return list contains only removed husks); real-content husk is preserved and is NOT in the return list; `SKILL.md` dir untouched; `_`-prefixed dir untouched; OSError on one husk does not abort the sweep; a WARN log records each removed absolute path (assert via `caplog`); TOCTOU — a directory that is empty at scan time but gains a real file before `rmtree` is NOT removed (simulate by patching the predicate/`iterdir` or dropping a file via a side-effect).
+- **Gating test** (`test_prune_real_content_husk_preserved_and_fails`, `test_prune_junk_only_husk_removed_no_fail`): run the full `--fix` path over a temp fleet; assert the real-content husk still exists on disk AND a `rule == 19` FAIL is present in the findings, while the junk-only husk is gone AND no `rule == 19` FAIL is present. Keyed so `pytest -k "prune and (real_content or junk_only)"` selects them (matches the Verification table row).
 
 ### 3. Update skill documentation
 - **Task ID**: document-remediation
@@ -370,17 +397,37 @@ Tier 1 core agents as listed in the template. No specialist tier needed.
 | Prune helper exists | `grep -c "def prune_husk_directories" .claude/skills-global/do-skills-audit/scripts/audit_skills.py` | output contains 1 |
 | Wired under --fix | `grep -n "prune_husk_directories" .claude/skills-global/do-skills-audit/scripts/audit_skills.py` | output contains main |
 | No live rule-19 FAILs | `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --json --no-sync \| python3 -c "import json,sys; d=json.load(sys.stdin); print(sum(1 for f in d['findings'] if f.get('rule')==19 and f.get('severity')=='FAIL'))"` | output contains 0 |
-| Anti-criterion: real-content husks not force-deleted | `grep -n "rmtree" .claude/skills-global/do-skills-audit/scripts/audit_skills.py \| grep -c "prune_husk"` | match count == 0 |
+| **Gating test: real-content husk preserved AND still FAILs; junk-only husk pruned AND no FAIL** | `pytest tests/unit/test_skills_audit.py -q -k "prune and (real_content or junk_only)"` | exit code 0 |
 
-<!-- Anti-criterion note: the last row is a proxy guard — it asserts `rmtree` in the
-     prune path is not applied unconditionally on the same line as the function name
-     (i.e. deletion is guarded by the empty-contents check, not a blanket sweep). The
-     authoritative guarantee is the unit test asserting a real-content husk survives
-     `--fix`; this grep is the cheap mechanical companion. -->
+<!-- Anti-criterion note: the "don't silently delete real orphans" guarantee is
+     asserted by a real behavioral unit test, not a proxy grep. The gating test
+     exercises both halves of the contract end-to-end through a `--fix` run:
+       (a) a husk containing one real orphan file → after `--fix`, the directory
+           still exists AND a rule-19 FAIL is still emitted for it;
+       (b) a husk whose only contents are `__pycache__` / `.DS_Store` → after
+           `--fix`, the directory is removed AND no rule-19 FAIL is emitted.
+     A tautological grep such as `grep rmtree | grep -c prune_husk == 0` can never
+     fail (rmtree and the helper name will simply not co-occur on one line), so it
+     is deliberately excluded — behavior, not source-text shape, is the criterion. -->
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict (2026-07-05):** READY TO BUILD (WITH CONCERNS). Three concerns raised;
+all folded into this plan in the revision pass:
+
+- **C1 — truthful `Fixed:` reporting.** `prune_husk_directories()` now returns ONLY
+  the descriptions of husks actually removed (rmtree'd); the "skipped" concept is
+  dropped entirely. Real-content husks are left untouched and surface as a rule-19
+  FAIL rather than being reported as fixed. (Solution → Key Elements; Success Criteria.)
+- **C2 — remove tautological verification.** The `grep rmtree | grep -c prune_husk == 0`
+  row (which can never fail) is deleted. It is replaced by a real gating unit test as
+  the acceptance criterion: real-content husk survives `--fix` and still FAILs;
+  junk-only husk is removed with no FAIL. (Verification table; Success Criteria; Step 2.)
+- **C3 — irreversible `rmtree` safety.** Added (a) a WARN log of each pruned absolute
+  path, (b) a TOCTOU guard re-checking the empty-except-build-artifacts predicate
+  immediately before `rmtree`, and (c) reframed Problem/Desired-Outcome as
+  operator-invoked `--fix` remediation (the reflection stays strictly read-only).
+  (Technical Approach; Desired outcome; Failure Path Test Strategy.)
 
 ---
 
