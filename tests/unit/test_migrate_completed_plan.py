@@ -1,10 +1,13 @@
 """Tests for scripts/migrate_completed_plan.py.
 
 Covers Bug 1 fix: README-based display name extraction replacing .title() mangling.
+Also covers the path-independent migrate_plan_to_completed() primitive (issue
+#1900, Tier 0): guarded git-mv of a root plan into docs/plans/completed/.
 """
 
 import contextlib
 import os
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -16,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from scripts.migrate_completed_plan import (  # noqa: E402
     extract_feature_doc_path,
     extract_feature_name_from_index,
+    migrate_plan_to_completed,
     validate_feature_doc,
     validate_feature_index,
 )
@@ -236,7 +240,131 @@ class TestEndToEndMigrationChain:
             assert valid_old is False, "Old .title() approach should fail due to missing /"
 
 
+class TestMigratePlanToCompleted:
+    """Tests for the path-independent migrate_plan_to_completed() primitive.
+
+    Uses a real temp git repo (matches the `docs/plans/{name}.md` layout the
+    function derives its repo root from) rather than mocking git -- these
+    guards (existence, clean-tree/HEAD==main, git mv) only mean something
+    against a real repository.
+    """
+
+    def _init_repo(self, tmp_path: Path) -> Path:
+        """Create a bare-bones git repo with docs/plans/ + docs/plans/completed/."""
+        repo = tmp_path / "repo"
+        (repo / "docs" / "plans" / "completed").mkdir(parents=True)
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        return repo
+
+    def _write_plan(self, repo: Path, name: str, tracking_issue: int = 1900) -> Path:
+        plan = repo / "docs" / "plans" / name
+        plan.write_text(
+            f"---\ntracking: https://github.com/tomcounsell/ai/issues/{tracking_issue}\n"
+            f"---\n# {name}\n"
+        )
+        return plan
+
+    def _commit_all(self, repo: Path, message: str = "init") -> None:
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", message)
+
+    def test_closed_issue_plan_migrates(self, tmp_path):
+        """A plan on a clean main branch is git-mv'd into completed/, not unlinked."""
+        repo = self._init_repo(tmp_path)
+        plan = self._write_plan(repo, "example-plan.md")
+        self._commit_all(repo)
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "migrated"
+        assert not plan.exists()
+        completed = repo / "docs" / "plans" / "completed" / "example-plan.md"
+        assert completed.exists()
+        assert "example-plan.md" in completed.read_text()
+        # Verify it was a tracked git mv, not a bare unlink: git status is clean
+        # (the move + commit is fully recorded), and the file shows up under
+        # completed/ in the git history for HEAD.
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == ""
+        log = _git(repo, "log", "--oneline", "-1")
+        assert "Migrate completed plan" in log.stdout
+
+    def test_already_migrated_is_idempotent(self, tmp_path):
+        """Source absent + dest present -> 'already-migrated', not an error.
+
+        git mv is NOT idempotent -- a second attempt on an already-moved plan
+        must not look like a failure.
+        """
+        repo = self._init_repo(tmp_path)
+        completed = repo / "docs" / "plans" / "completed" / "example-plan.md"
+        completed.write_text("# already here\n")
+        missing_plan = repo / "docs" / "plans" / "example-plan.md"
+
+        verdict = migrate_plan_to_completed(missing_plan, apply=True)
+
+        assert verdict == "already-migrated"
+        assert completed.exists()
+        assert completed.read_text() == "# already here\n"
+
+    def test_dirty_tree_preserves_plan(self, tmp_path):
+        """A dirty working tree blocks the git mv; the plan is never lost."""
+        repo = self._init_repo(tmp_path)
+        plan = self._write_plan(repo, "dirty-plan.md")
+        self._commit_all(repo)
+        # Make the tree dirty.
+        plan.write_text(plan.read_text() + "\nuncommitted change\n")
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "dirty-tree-skip"
+        assert plan.exists(), "plan must be preserved in place, never lost"
+        completed = repo / "docs" / "plans" / "completed" / "dirty-plan.md"
+        assert not completed.exists()
+
+    def test_non_main_branch_preserves_plan(self, tmp_path):
+        """Migration only runs on main; a feature branch is also a report-only skip."""
+        repo = self._init_repo(tmp_path)
+        plan = self._write_plan(repo, "branch-plan.md")
+        self._commit_all(repo)
+        _git(repo, "checkout", "-q", "-b", "session/some-feature")
+
+        verdict = migrate_plan_to_completed(plan, apply=True)
+
+        assert verdict == "dirty-tree-skip"
+        assert plan.exists()
+
+    def test_apply_false_reports_without_mutating(self, tmp_path):
+        """apply=False (report-only) evaluates eligibility but moves nothing on disk."""
+        repo = self._init_repo(tmp_path)
+        plan = self._write_plan(repo, "dry-run-plan.md")
+        self._commit_all(repo)
+
+        verdict = migrate_plan_to_completed(plan, apply=False)
+
+        assert verdict == "migrated"  # verdict describes what WOULD happen
+        assert plan.exists(), "apply=False must not perform the git mv"
+        completed = repo / "docs" / "plans" / "completed" / "dry-run-plan.md"
+        assert not completed.exists()
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == "", "apply=False must leave the tree untouched"
+
+
 # --- Helpers ---
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run a git subcommand rooted at `repo`, raising on unexpected failure."""
+    result = subprocess.run(
+        ["git", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, f"git {' '.join(args)} failed: {result.stderr}"
+    return result
 
 
 @contextlib.contextmanager
