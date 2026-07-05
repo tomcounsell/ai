@@ -125,7 +125,7 @@ tests/
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
 | unit | `test_observer.py` | 81 | Stage detection, routing, progression |
-| unit | `test_skills_audit.py` | 53 | Skills directory structure validation |
+| unit | `test_skills_audit.py` | 77 | Skills directory structure validation, rule-19 husk detection, `--fix` auto-prune |
 | unit | `test_pipeline_integrity.py` | 31 | Pipeline state preservation |
 | unit | `test_post_tool_use_sdlc.py` | 31 | Post-tool SDLC hook execution |
 | unit | `test_pipeline_graph.py` | 29 | Pipeline graph visualization |
