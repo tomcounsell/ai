@@ -274,17 +274,17 @@ no stray husk is created" is sufficient and covered under Inline Documentation.
 
 ## Success Criteria
 
-- [ ] `_LOG_PATH` in `validate_design_system_sync.py` is anchored to the repo root
+- [x] `_LOG_PATH` in `validate_design_system_sync.py` is anchored to the repo root
   via `Path(__file__).resolve().parents[3]` (no cwd-relative `Path("logs/...")`).
-- [ ] Running the hook from a non-repo-root cwd creates NO `logs/` directory under
+- [x] Running the hook from a non-repo-root cwd creates NO `logs/` directory under
   that cwd; the log line lands at `<repo_root>/logs/validate_design_system_sync.jsonl`.
-- [ ] New regression test in `test_validate_design_system_sync.py` covers the
+- [x] New regression test in `test_validate_design_system_sync.py` covers the
   non-repo-root-cwd case and passes.
-- [ ] Existing `test_jsonl_log_records_each_invocation` and
+- [x] Existing `test_jsonl_log_records_each_invocation` and
   `test_jsonl_log_captures_bypass` still pass unchanged.
-- [ ] `skills-audit` rule 19 reports no `logs` husk finding
+- [x] `skills-audit` rule 19 reports no `logs` husk finding
   (`python .claude/skills-global/do-skills-audit/scripts/audit_skills.py` clean for rule 19).
-- [ ] Tests pass (`/do-test`)
+- [x] Tests pass (`/do-test`)
 - [ ] Documentation reviewed (`/do-docs`) — inline comment added; no feature-doc change.
 
 ## Team Orchestration
