@@ -342,7 +342,7 @@ def _extract_gh_commands(session_id: str) -> list[str]:
         return []
 
 
-def _get_api_key() -> str:
+def _get_api_key() -> str | None:
     """Resolve Anthropic API key from env or shared .env files."""
 
     return get_anthropic_api_key()
