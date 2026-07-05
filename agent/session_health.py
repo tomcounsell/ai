@@ -1359,9 +1359,13 @@ def _never_started_past_grace(
     (container spin-up + TUI boot + priming). Both constants live in
     ``agent.session_stall_classifier`` and are env-overridable.
 
-    Call sites that do NOT have ``now`` in scope (e.g. ``_has_progress`` and
-    ``_tier2_reprieve_signal``) should omit the argument — this function
-    derives it internally via ``datetime.now(tz=timezone.utc)``.
+    Call sites holding a trusted ``now`` in scope MUST pass it, so this
+    function and the caller agree on elapsed time: ``_has_progress`` (issue
+    #1905) passes its trusted ``now_utc = _trusted_utc_now()``, and the
+    recovery-path peers (~lines 4432, 4445) pass their own trusted ``now``.
+    ``_tier2_reprieve_signal`` has no trusted clock in scope and continues to
+    omit the argument — this function derives it internally via
+    ``datetime.now(tz=timezone.utc)`` for that call site only.
 
     Returns False (safe default) when:
       - ``sdk_ever_output`` is True (session has produced output).
@@ -1551,13 +1555,16 @@ def _has_progress(entry: AgentSession) -> bool:
             if (now_utc - hb_aware).total_seconds() < HEARTBEAT_FRESHNESS_WINDOW:
                 # Sub-check B D0 gate (issue #1724): deny the fresh-heartbeat
                 # fast-path when the session is never-started past grace.
-                # _never_started_past_grace uses now_utc internally (called
-                # without a `now` arg here; it derives now itself). When True,
-                # the session has been running longer than
+                # Threads the shared trusted clock (now=now_utc, issue #1905)
+                # so the gate and this sub-check's own running_seconds below
+                # agree on elapsed time — without this, a local-vs-Redis clock
+                # skew could let the gate miss while running_seconds already
+                # exceeds the threshold on the trusted clock. When True, the
+                # session has been running longer than
                 # NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
                 # without any SDK output — a fresh heartbeat must NOT falsely
                 # signal "alive" for a session that has never started.
-                if _never_started_past_grace(entry):
+                if _never_started_past_grace(entry, now=now_utc):
                     return False
 
                 # Compute running_seconds and apply the no-output budget gate

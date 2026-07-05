@@ -566,6 +566,63 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=None, created_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
 
+    def test_divergent_clock_d0_gate_fires_before_removed_leg(self, monkeypatch):
+        """Divergent-clock regression (#1905): the D0 gate and sub-check B's
+        ``running_seconds`` must share the single trusted ``now_utc`` clock.
+
+        Before the #1905 clock-consistency fix, the D0 gate (line ~1560)
+        called ``_never_started_past_grace(entry)`` with no ``now`` argument,
+        so it derived its own elapsed time from the process's real wall
+        clock, while sub-check B's ``running_seconds`` (line ~1584) used the
+        trusted ``now_utc = _trusted_utc_now()`` (Redis TIME). Under >150s of
+        skew between the two clocks, the D0 gate could miss (computing a
+        local ``running_seconds <= 150``) while the trusted clock already put
+        ``running_seconds`` in ``(150, 300)`` — reaching the STARTUP_GRACE
+        leg and wrongly returning True for a session that has, by the
+        trusted clock, already failed to start.
+
+        Construction: monkeypatch ``_trusted_utc_now`` to return a
+        far-future ``T_future`` (real-now + 10000s). Set ``started_at`` so
+        the TRUSTED ``running_seconds`` (computed from ``T_future``) lands in
+        the open interval (150, 300) — here ~200s — and set
+        ``last_heartbeat_at`` fresh RELATIVE TO ``T_future`` (T_future - 30s),
+        not relative to real wall-clock now, so the fresh-heartbeat block
+        (gated by HEARTBEAT_FRESHNESS_WINDOW=90s against now_utc) is actually
+        entered.
+
+        Pre-fix (clock-less 1560 call): the D0 gate derives
+        ``datetime.now(tz=UTC)`` internally (real wall clock, ~T_future -
+        10000s), so its locally-computed running_seconds is negative/tiny —
+        well under the 150s threshold — and the gate does NOT fire. Sub-check
+        B then falls to the ``running_seconds < STARTUP_GRACE_SECONDS``
+        (300s) leg using the trusted ~200s figure, which returns True. This
+        test would FAIL (assert False, got True) against that code.
+
+        Fixed (1560 threaded ``now=now_utc``): the D0 gate evaluates the same
+        trusted ~200s figure, sees it exceeds the 150s never-started
+        threshold, and fires — returning False before the STARTUP_GRACE leg
+        is ever reached. This test PASSES against the fixed code.
+
+        Deliberately does NOT use trusted running_seconds > 1800s — that
+        construction returns False under both pre-fix and fixed code (the
+        pre-fix path falls through to the now-removed budget/INCR branch and
+        the absent own-progress fields), which is a tautology that cannot
+        discriminate the two versions.
+        """
+        from datetime import timedelta
+
+        import agent.session_health as session_health_mod
+        from agent.agent_session_queue import _has_progress
+
+        t_future = _now_utc() + timedelta(seconds=10000)
+        monkeypatch.setattr(session_health_mod, "_trusted_utc_now", lambda: t_future)
+
+        entry = self._make_entry(
+            started_at=t_future - timedelta(seconds=200),  # trusted running_seconds ~200s
+            last_heartbeat_at=t_future - timedelta(seconds=30),  # fresh relative to T_future
+        )
+        assert _has_progress(entry) is False
+
     def test_d0_gate_preempts_budget_exceeded_counter(self, monkeypatch):
         """The D0 never-started gate (#1724) fires BEFORE the #1356 budget leg.
 
