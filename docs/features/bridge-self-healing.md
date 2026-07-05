@@ -644,7 +644,7 @@ counts as progress. `last_sdk_heartbeat_at` (the BackgroundTask watchdog
 tick) is intentionally NOT a progress signal — it proves only that the
 subprocess exists.
 
-**Sub-check B — startup-window executor-alive fallback (issue #1036, narrowed by #1356).**
+**Sub-check B — startup-window executor-alive fallback (issue #1036, narrowed by #1226 / #1724 / #1905).**
 
 | Field | Writer | When |
 |-------|--------|------|
@@ -652,21 +652,31 @@ subprocess exists.
 
 When `sdk_ever_output` is False (neither per-turn field has ever been set),
 `last_heartbeat_at` fresh within `HEARTBEAT_FRESHNESS_WINDOW` (90s) counts
-as progress, **subject to the no-output running-time budget gate**. The
-function uses `started_ref = entry.started_at or entry.created_at` so that
-recovered sessions (whose `started_at` is nulled by the recovery path)
-cannot silently re-enter the original fast-path:
+as progress, **subject to the D0 never-started gate (issue #1724)**. The
+gate (`_never_started_past_grace`, called with the same trusted `now_utc`
+clock sub-check B uses — issue #1905) is the authoritative never-started
+bound: it returns True once `running_seconds > NEVER_STARTED_GRACE_SECS
+(120) + NEVER_STARTED_CONFIRM_MARGIN_SECS (30)` (150s), and sub-check B
+returns False immediately when it fires. For gate survivors, the function
+uses `started_ref = entry.started_at or entry.created_at` so that recovered
+sessions (whose `started_at` is nulled by the recovery path) cannot
+silently re-enter the original fast-path:
 
 | `started_ref` state | Verdict |
 |---|---|
 | both `started_at` and `created_at` are None (phantom record from older format) | fresh heartbeat passes |
-| `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes |
-| `STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS` (= `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW` = 1800s, 30 min) | fresh heartbeat passes (in-band) |
-| `running_seconds > 1800s` AND `sdk_ever_output is False` | **fall through** — INCRs `tier1_falloff:no_output_budget_exceeded`, sub-check B does NOT pass; the heartbeat is now stale, so own-progress fields (`turn_count`, `log_path`, `claude_session_uuid`) are also gated out (#1614); combined with absent per-turn signals, `_has_progress` returns False; Tier 2 reprieve cap then escalates to recovery within `MAX_NO_OUTPUT_REPRIEVES` ticks |
+| `running_seconds < STARTUP_GRACE_SECONDS` (300s, aliased to `AGENT_SESSION_HEALTH_MIN_RUNNING`, env-tunable) | fresh heartbeat passes — unconditional for D0-gate survivors, since a survivor's `running_seconds` (<= 150s) is always below this 300s window |
 
-This bounds the previously-unbounded fresh-heartbeat fast-path that allowed
-cwd-disappearance and similar wedges (parent investigation #1246) to hold
-Tier 1 open indefinitely. Sessions that have produced any SDK output
+The #1356 grace-to-budget band (`STARTUP_GRACE_SECONDS <=
+running_seconds <= NO_OUTPUT_BUDGET_SECONDS`) and its `tier1_falloff`
+budget-exceeded telemetry counter that used to fire beyond it were removed
+in issue #1905: once the D0 gate and this leg share one clock, every gate
+survivor unconditionally satisfies the 300s leg above, so the old band was
+provably unreachable.
+
+The D0 gate bounds the previously-unbounded fresh-heartbeat fast-path that
+allowed cwd-disappearance and similar wedges (parent investigation #1246) to
+hold Tier 1 open indefinitely. Sessions that have produced any SDK output
 (`sdk_ever_output=True`) are not subject to sub-check B at all — sub-check A
 is authoritative for them.
 
@@ -699,8 +709,8 @@ and evaluated regardless of heartbeat freshness.
 |----------|---------|---------|---------|
 | `SDK_PROGRESS_FRESHNESS_WINDOW` | 1800s (30 min) | `SDK_PROGRESS_FRESHNESS_WINDOW_SECS` | Sub-check A freshness window for `last_tool_use_at` / `last_turn_at` (issue #1226) |
 | `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds `NO_OUTPUT_BUDGET_SECONDS` (issues #1226 / #1356) |
-| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. Sub-check B falls through when `running_seconds` exceeds this (issue #1356) |
-| `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional (issue #1356) |
+| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. No longer consulted by sub-check B (its grace-to-budget band was removed in issue #1905, subsumed by the D0 gate); still used by the #1614 own-progress heartbeat gate and the Tier-2 reprieve cap |
+| `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional for D0-gate survivors (issue #1356, gate added by #1724) |
 | `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
 **Operator alert:** After 3 Tier 2 reprieves, the reprieve log message is

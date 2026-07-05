@@ -66,22 +66,25 @@ Issue #1172 retires every inference path. Evidence-only signals stay:
 |---|---|---|---|---|
 | **A: per-turn SDK activity** | `last_tool_use_at` | `agent/hooks/pre_tool_use.py`, `post_tool_use.py` | `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s, env-tunable) | Always |
 | **A: per-turn SDK activity** | `last_turn_at` | `agent/sdk_client.py` `result` event | `SDK_PROGRESS_FRESHNESS_WINDOW` (1800s, env-tunable) | Always |
-| **B: startup-window executor-alive** | `last_heartbeat_at` | `_heartbeat_loop` in `session_executor.py` | `HEARTBEAT_FRESHNESS_WINDOW` (90s) | Only when `sdk_ever_output=False` AND (`started_ref` is None OR `running_seconds <= NO_OUTPUT_BUDGET_SECONDS`); see no-output budget gate below (#1356) |
+| **B: startup-window executor-alive** | `last_heartbeat_at` | `_heartbeat_loop` in `session_executor.py` | `HEARTBEAT_FRESHNESS_WINDOW` (90s) | Only when `sdk_ever_output=False` AND (`started_ref` is None OR `running_seconds < STARTUP_GRACE_SECONDS`); gated by the D0 never-started gate — see below (#1724) |
 | **Watchdog-alive (not Tier 1)** | `last_sdk_heartbeat_at` | `BackgroundTask._watchdog` every 60s | N/A — not a progress signal | Dashboard `last_evidence_at` only |
 
 Sub-check B preserves backward compatibility for sessions in their startup
 window and for those started before PR #1177 (whose hooks did not write the
-per-turn fields). Issue #1356 bounds the previously-unbounded fresh-heartbeat
-fast-path with a no-output running-time budget: the function reads
+per-turn fields). Issue #1724 bounds the previously-unbounded fresh-heartbeat
+fast-path with the D0 never-started gate: the function reads
 `started_ref = entry.started_at or entry.created_at` (the fallback is
-load-bearing — the recovery path nulls `started_at` when re-queuing) and
-falls through (does NOT pass) when `sdk_ever_output=False` AND
-`running_seconds > NO_OUTPUT_BUDGET_SECONDS` (= `MAX_NO_OUTPUT_REPRIEVES *
-HEARTBEAT_FRESHNESS_WINDOW` = 1800s = 30 min). On fall-through the
-`{project_key}:session-health:tier1_falloff:no_output_budget_exceeded`
-counter is INCR'd once per tick. Combined with the Tier-2 reprieve cap
-below, this guarantees a session that never emits a first turn is recovered
-within ~60 minutes worst-case (parent investigation #1246).
+load-bearing — the recovery path nulls `started_at` when re-queuing) and,
+when `sdk_ever_output=False` AND `running_seconds > NEVER_STARTED_GRACE_SECS
++ NEVER_STARTED_CONFIRM_MARGIN_SECS` (150s), the D0 gate fires and sub-check
+B returns False immediately — it does NOT fall through to a grace-to-budget
+band. As of issue #1905 the gate is called with the same trusted `now_utc`
+clock sub-check B's own `running_seconds` computation uses, making the
+prior #1356 grace-to-budget band (and its `tier1_falloff` budget-exceeded
+telemetry counter) provably unreachable; both were removed. Combined with
+the Tier-2 reprieve cap below, this
+guarantees a session that never emits a first turn is recovered within
+~60 minutes worst-case (parent investigation #1246).
 
 ### Tier 2 reprieve gates (current)
 
