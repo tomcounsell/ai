@@ -54,11 +54,29 @@ These run in the worktree, not main.
 
 ## Plan Migration
 
-After merge, move the plan from `docs/plans/{slug}.md` to `docs/plans/completed/{slug}.md` on `main`. The plan stays on `main` (not the branch) throughout the lifecycle — migrate it on `main` post-merge.
+After merge, on `main`, run the deterministic migration primitive:
+
+```bash
+python scripts/migrate_completed_plan.py --issue <closed-issue-number> --apply
+```
+
+This resolves the plan by reading its `tracking:` frontmatter (not by guessing a
+filename from the branch slug — a slug≠filename mismatch never bites) and does a
+guarded `git mv` into `docs/plans/completed/`. The plan stays on `main` (not the
+branch) throughout the lifecycle — migrate it on `main` post-merge, the same as
+before, just via this command instead of a hand `git mv`.
+
+`migrate_plan_to_completed()` (the primitive this command wraps, in
+`scripts/migrate_completed_plan.py`) is also the single mechanism the
+`merged-branch-cleanup` reflection calls. That reflection is the path-independent
+backstop for merges that bypass `/do-merge` entirely — a raw-terminal `gh pr
+merge`, a forked `/do-sdlc` run, or a cross-machine merge all skip this
+deterministic step, so the daily reflection sweep is what eventually migrates
+those plans instead. See `docs/features/plan-migration-invariant.md`.
 
 ## Post-Merge Memory Extraction
 
-After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker handles it automatically via `_handle_merge_completion()`.
+After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker's post-merge learning extraction handles it automatically.
 
 ## Worktree Cleanup
 
