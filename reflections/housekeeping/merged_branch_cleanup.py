@@ -2,14 +2,23 @@
 
 What it does: Deletes local git branches merged into main and audits docs/plans/
     for complete/orphaned/closed-issue plans (deletes branches; reads plan files
-    and queries GitHub issue state via gh).
+    and queries GitHub issue state via gh). Also acts as the path-independent
+    backstop for the plan-migration invariant (issue #1900, Tier 0): a plan whose
+    OWN ``tracking:`` frontmatter issue is closed is migrated into
+    ``docs/plans/completed/`` via ``migrate_plan_to_completed()`` -- the same
+    primitive the deterministic ``/do-merge --issue`` call uses. This catches
+    merges that bypass ``/do-merge`` entirely (manual `gh pr merge`, forked
+    `/do-sdlc`, cross-machine merges).
 Cadence: 86400s (daily) (keeps the branch list and plans dir from accreting cruft)
 Failure modes:
     - git/gh subprocess failure or timeout -> caught per step, logged, skipped
     - missing docs/plans dir -> returns early with branch-cleanup findings only
+    - tracking-issue state lookup returns "unknown" -> plan is never migrated
+      (the gate is non-vacuous: only a literal "closed" state qualifies)
 Related reflections:
     - tech_debt_scan: complementary stale-artifact audit over project source
-See also: config/reflections.yaml (declaration), docs/features/reflections.md
+See also: config/reflections.yaml (declaration), docs/features/reflections.md,
+    docs/features/plan-migration-invariant.md
 """
 
 from __future__ import annotations
@@ -21,18 +30,33 @@ import re
 from pathlib import Path
 
 from reflections.utilities import PROJECT_ROOT, load_local_projects
+from scripts.migrate_completed_plan import extract_tracking_issue, migrate_plan_to_completed
 
 logger = logging.getLogger("reflections.maintenance")
+
+# Single toggle point for arming the mechanism (issue #1900, Tier 0). While False,
+# run() only reports what it would migrate -- it never calls git mv. The
+# arm-reflection follow-up task flips this to True once the evidence-gate
+# regression test (tests/unit/test_plan_migration_invariant.py) proves green.
+MIGRATION_APPLY_ENABLED = False
+
+# Per-run cap on plans migrated (or reported as migratable) in a single
+# invocation -- bounds the blast radius of the daily unattended sweep. The
+# one-time backfill sweep (`migrate_completed_plan.py --sweep`) is uncapped;
+# this cap only applies to this recurring reflection.
+MIGRATION_PER_RUN_CAP = 10
 
 
 async def run() -> dict:
     """Clean up stale git branches and audit plan files.
 
     - Deletes local branches merged into main
+    - Migrates plans whose OWN tracking issue is closed into completed/
     - Audits docs/plans/ for complete/orphaned/stale-issue plans
     """
     findings: list[str] = []
     projects = load_local_projects()
+    migrated_count = 0
 
     # --- Stale branch cleanup ---
     try:
@@ -93,8 +117,13 @@ async def run() -> dict:
             names = ", ".join(d.name for d in dupes)
             findings.append(f"Duplicate plans: {names}")
 
-    # Extract issue refs
+    # Extract issue refs (broad prose scan -- feeds the existing closed_issue finding)
+    # and each plan's OWN tracking-issue number (narrow frontmatter scan -- feeds
+    # the migration gate below). These are deliberately separate sets: the
+    # migration gate must not key on the broader `refs` scan, or a plan that only
+    # mentions a closed sibling issue in prose could get migrated by mistake.
     plan_issue_refs: dict[Path, list[int]] = {}
+    plan_tracking_issue: dict[Path, int | None] = {}
     for plan_file in plan_files:
         plan_text = plan_file.read_text(errors="replace")
         refs: set[int] = set()
@@ -103,6 +132,14 @@ async def run() -> dict:
         for m in re.finditer(r"github\.com/[^/]+/[^/]+/issues/(\d+)", plan_text):
             refs.add(int(m.group(1)))
         plan_issue_refs[plan_file] = sorted(refs)
+
+        tracking_url = extract_tracking_issue(plan_text)
+        tracking_num: int | None = None
+        if tracking_url:
+            tm = re.search(r"/issues/(\d+)", tracking_url)
+            if tm:
+                tracking_num = int(tm.group(1))
+        plan_tracking_issue[plan_file] = tracking_num
 
     # Check issue states
     async def check_issue_state(issue_num: int) -> tuple[int, str]:
@@ -131,6 +168,9 @@ async def run() -> dict:
     all_issue_nums: set[int] = set()
     for refs in plan_issue_refs.values():
         all_issue_nums.update(refs)
+    for tracking_num in plan_tracking_issue.values():
+        if tracking_num is not None:
+            all_issue_nums.add(tracking_num)
 
     issue_states: dict[int, str] = {}
     if all_issue_nums:
@@ -144,7 +184,7 @@ async def run() -> dict:
                 if isinstance(r, tuple):
                     issue_states[r[0]] = r[1]
 
-    stats = {"complete": 0, "orphaned": 0, "closed_issue": 0, "active": 0}
+    stats = {"complete": 0, "orphaned": 0, "closed_issue": 0, "active": 0, "migrated": 0}
 
     for plan_file in plan_files:
         plan_name = plan_file.stem
@@ -161,6 +201,38 @@ async def run() -> dict:
                 f"Plan complete: {plan_name} -- "
                 f"run /do-docs then delete docs/plans/{plan_file.name}"
             )
+            # Intentionally no `continue` here: the migration gate below must be
+            # evaluated regardless of checkbox completeness. Previously an
+            # all-checkboxes-complete plan short-circuited past the
+            # tracking-issue-closed check entirely (issue #1900 Blocker 1), so
+            # ~34 of 212 root plans could never migrate even with a closed issue.
+
+        # --- Migration gate: keyed on the plan's OWN tracking-issue frontmatter
+        # (plan_tracking_issue), NOT the broader prose `refs` set used by the
+        # closed_issue finding below. Non-vacuous: requires a literal "closed"
+        # state for that one issue; "unknown"/missing tracking issue defers and
+        # never migrates (issue #1900 Blocker 2 -- the old `all(... if s !=
+        # "unknown")` check was vacuously True when every ref state was
+        # "unknown", which could migrate an ACTIVE plan on a gh outage).
+        tracking_num = plan_tracking_issue.get(plan_file)
+        if tracking_num is not None and issue_states.get(tracking_num) == "closed":
+            if migrated_count < MIGRATION_PER_RUN_CAP:
+                verdict = migrate_plan_to_completed(plan_file, apply=MIGRATION_APPLY_ENABLED)
+                migrated_count += 1
+                stats["migrated"] += 1
+                action_word = "Migrated" if MIGRATION_APPLY_ENABLED else "Would migrate"
+                findings.append(
+                    f"{action_word} ({verdict}): {plan_file.name} -> completed/ "
+                    f"(tracking issue #{tracking_num} closed)"
+                )
+            else:
+                findings.append(
+                    f"Deferred migration (per-run cap {MIGRATION_PER_RUN_CAP} reached): "
+                    f"{plan_file.name} (tracking issue #{tracking_num} closed)"
+                )
+            continue
+
+        if is_complete:
             continue
 
         if refs:
@@ -202,10 +274,11 @@ async def run() -> dict:
         stats["orphaned"] += 1
         findings.append(f"Orphaned plan (no open issue): {plan_file.name}")
 
+    migration_mode = "migrated" if MIGRATION_APPLY_ENABLED else "would-migrate"
     summary = (
         f"Branch/plan cleanup: {len(findings)} finding(s), "
         f"{stats['active']} active plans, {stats['complete']} complete, "
-        f"{stats['orphaned']} orphaned"
+        f"{stats['orphaned']} orphaned, {stats['migrated']} {migration_mode}"
     )
     logger.info(summary)
     return {"status": "ok", "findings": findings, "summary": summary}
