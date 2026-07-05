@@ -48,3 +48,16 @@ There are two narration paths, and they use different surfaces:
 - **Automated `--video` pipeline (approved exception):** the `valor-deck-video` CLI is an **approved direct consumer of `valor-tts`**. It calls `valor-tts` per slide because it needs the structured per-clip `duration` that `valor-tts` returns and the conversational `/do-voice-recording` skill does not. This is a deliberate carve-out from the "defer to `/do-voice-recording`" rule, which continues to govern the manual narration path above.
 
 Both paths **reuse the existing `valor-tts` surface** — there is no second TTS tool.
+
+## Deck output location (this repo)
+
+`docs/presentations/` was deliberately deleted (issue #1900 Tier 3) — do not recreate
+it. In this repo, decks are deliverables, not repo docs:
+
+- **Author/export** the deck in a scratch location (the session scratchpad or `/tmp`),
+  not under `docs/`.
+- **Business-valuable output** (client/strategy decks): move the final PDF (and a
+  `*-report.md` companion if one exists) to `~/work-vault/AI Valor Engels System/`,
+  run `valor-ingest` on the PDF, and add a row to that directory's `README.md` index.
+- **One-off internal decks**: deliver the artifact (Telegram/email attachment) and let
+  the scratch copy expire. Nothing lands in the repo.
