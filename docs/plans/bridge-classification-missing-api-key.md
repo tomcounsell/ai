@@ -53,9 +53,14 @@ classification call resolves an empty key and logs at ERROR level, feeding Sentr
   preserves the message when the key is missing: terminus → `RESPOND`, work-type →
   non-fatal sentinel default (`type=None`), intent → `new_work`. Regression tests lock this in
   against the real production condition (the resolver now returns `None` on absence).
-- A permanently keyless process still surfaces a Sentry signal: after K=5 consecutive misses the
-  work-type classifier escalates from WARNING to a single ERROR, so a genuine misconfig is not
-  hidden by the transient-miss WARNING degrade.
+- A permanently keyless process still surfaces a Sentry signal, but only after a *sustained*
+  window: the work-type classifier escalates from WARNING to a single ERROR when the miss streak
+  has both crossed K=5 consecutive misses AND persisted longer than `MIN_STREAK_SECONDS` (~60s).
+  The time gate keeps a restart burst — Telethon `catch_up=True` can flood many queued messages
+  through the sub-second env/`.env` settle window — from tripping a false ERROR during a
+  self-healing transient; a fire-once latch ensures at most one ERROR per sticky-misconfig
+  episode. A genuine, persistent misconfig still pages an operator once the streak outlives the
+  time gate.
 
 ## Freshness Check
 
@@ -146,11 +151,14 @@ Run via `python scripts/check_prerequisites.py docs/plans/bridge-classification-
 ### Key Elements
 
 - **`get_anthropic_api_key()` self-heals AND returns `None` on absence:** only cache a truthy
-  resolution; on absence return `None` (not `""`), annotated `-> str | None`. The next call
-  re-reads env/`.env` after the LaunchAgent env and `.env` sourcing settle. Returning `None`
-  (rather than `""`) also lets the Anthropic SDK's own `os.environ["ANTHROPIC_API_KEY"]`
-  fallback resolve a freshly-populated env key at any `AsyncAnthropic(api_key=None)` call site
-  — an empty string is a *value* that suppresses that fallback, whereas `None` triggers it.
+  resolution; on absence return `None` (not `""`), annotated `-> str | None`. The self-heal
+  comes entirely from the resolver no longer caching the absent result: the next call re-reads
+  env/`.env` (no cache short-circuit) after the LaunchAgent env and `.env` sourcing settle, so
+  it resolves the real key. Returning `None` rather than `""` is on cache-poisoning grounds — it
+  keeps the "absent" sentinel distinct from a cached value so the truthy-only cache guard is
+  unambiguous. (Note: `AsyncAnthropic(api_key=None)` with an empty env does not raise at
+  construction, identical to `api_key=""`; the None change is a correctness/clarity choice, not
+  an SDK-fallback trigger.)
 - **Missing-key degrades quietly in the async work-type classifier only
   (`classify_request_async`):** distinguish "no API key" from real API/parse errors. Missing
   key → log at WARNING and return a message-preserving sentinel default, instead of raising a
@@ -159,13 +167,22 @@ Run via `python scripts/check_prerequisites.py docs/plans/bridge-classification-
   has no live keyless production caller (only in-module docstring examples and tests; the sole
   production caller is `classify_request_async` at `bridge/telegram_bridge.py:1646`). Editing it
   would be gold-plating on a code path the Sentry event never traverses.
-- **Consecutive-miss escalation (transient vs. permanent):** a module-level
-  `_consecutive_missing_key_count` in `tools/classifier.py` distinguishes a transient startup
-  race from a permanently keyless process. Each missing-key classification logs WARNING and
-  increments the counter; once it reaches `_MISSING_KEY_ERROR_THRESHOLD` (K=5) it logs one
-  ERROR (restoring the Sentry signal for a genuine, sticky misconfig). The counter resets to
-  `0` on the first successful classification, so a self-heal clears it. This keeps startup-race
-  noise quiet while ensuring an operator still gets paged if the key never arrives.
+- **Time-aware consecutive-miss escalation (transient vs. permanent):** three module-level
+  variables in `tools/classifier.py` distinguish a transient startup race (including a
+  restart-driven message burst) from a permanently keyless process:
+  `_consecutive_missing_key_count`, `_first_missing_key_ts` (monotonic timestamp recorded on the
+  0→1 transition), and `_missing_key_error_emitted` (a fire-once latch). Each missing-key
+  classification logs WARNING and increments the counter. The single ERROR fires only when
+  **`_consecutive_missing_key_count >= _MISSING_KEY_ERROR_THRESHOLD` (K=5) AND
+  `(monotonic() - _first_missing_key_ts) > _MIN_STREAK_SECONDS` (~60s) AND not
+  `_missing_key_error_emitted`** — then it sets the latch so no further ERROR fires for the same
+  episode (avoids one ERROR per message past the 5th). The time gate is what defeats the restart
+  burst: Telethon `catch_up=True` can flood ≥K queued messages through the sub-second env/`.env`
+  settle window, tripping the raw count instantly, but that burst is younger than
+  `_MIN_STREAK_SECONDS`, so it stays at WARNING and self-heals. All three variables reset
+  (count→0, ts→None, latch→False) on the first successful classification. This keeps startup-race
+  and restart-burst noise quiet while still paging an operator once a genuinely keyless streak
+  outlives the time gate.
 - **Explicit RESPOND / non-drop regression coverage:** lock in that all three inbound
   classification entry points preserve the message when the key is absent (`None`, the real
   production value after this change).
@@ -176,16 +193,19 @@ Inbound message → classification call resolves key → **populated:** normal c
 miss-counter reset to 0 → **absent (transient):** WARNING + message-preserving sentinel default
 (work-type→`type=None`, terminus→RESPOND, intent→new_work), resolver returns `None` and does
 not cache it → next message re-resolves the real key → normal classification resumes → **absent
-(persistent, ≥K consecutive):** one ERROR (Sentry) flags the permanent misconfig while still
-returning the safe default.
+(persistent, ≥K consecutive AND streak older than `_MIN_STREAK_SECONDS`):** one ERROR (Sentry,
+fire-once) flags the permanent misconfig while still returning the safe default. A restart burst
+that floods ≥K queued misses within the settle window stays at WARNING because the streak is
+younger than the time gate.
 
 ### Technical Approach
 
 - `utils/api_keys.py`: change the signature to `-> str | None`; short-circuit the cache only on
   a truthy cached value; on absence `return None` WITHOUT assigning `_cached_anthropic_key`.
   Behavior for a populated key is unchanged (still cached once). This is the highest-leverage
-  change: it removes the persistence amplifier and enables the SDK env fallback. **Call-site
-  audit for the `"" → None` change** (all resolve safely — verified during planning):
+  change: it removes the persistence amplifier so a transient absence self-heals on the next
+  no-cache `.env` re-read. **Call-site audit for the `"" → None` change** (all resolve safely —
+  verified during planning):
   - Truthiness guards — `if api_key:` / `if not api_key:` behave identically for `None` and
     `""`: `bridge/routing.py:946,989`, `bridge/promise_gate.py:504`, `bridge/session_router.py:118`,
     `bridge/agent_catchup.py:201`, `agent/intent_classifier.py:202`,
@@ -193,19 +213,28 @@ returning the safe default.
     `tools/classifier.py:74,169,312,401`.
   - `AsyncAnthropic(api_key=...)` / `Anthropic(api_key=...)` constructors —
     `agent/anthropic_client.py:76`, `bridge/read_the_room.py:430`, `agent/session_completion.py:496`,
-    `agent/memory_extraction.py:289`: passing `None` is *better* (SDK falls back to `os.environ`);
-    passing `""` suppressed that fallback. No string operations run on the return value at any
-    site, so no `AttributeError` risk.
+    `agent/memory_extraction.py:289`: passing `None` is *equivalent* to `""` at construction —
+    `AsyncAnthropic(api_key=None)` with an empty env does not raise, same as `api_key=""`. No
+    string operations run on the return value at any site, so no `AttributeError` risk either
+    way; `None` is preferred purely for sentinel clarity.
   - `agent/health_check.py:348` returns the resolver value directly; a `None` health probe is a
     truthful "no key" signal (was falsy `""` before). Confirm the health-check assertion treats
     both as absent during build.
 - `tools/classifier.py`, `classify_request_async` **only**: replace
   `if not api_key: raise ValueError(...)` with a missing-key branch that (a) increments
-  `_consecutive_missing_key_count`, (b) logs WARNING for a transient miss or ERROR once the
-  counter crosses `_MISSING_KEY_ERROR_THRESHOLD`, and (c) returns the sentinel default
+  `_consecutive_missing_key_count`, recording `_first_missing_key_ts = time.monotonic()` on the
+  `0→1` transition (i.e. when the count was 0 before this miss); (b) logs WARNING for the miss;
+  (c) escalates to a single ERROR **only when all three hold**:
+  `_consecutive_missing_key_count >= _MISSING_KEY_ERROR_THRESHOLD` (K=5),
+  `(time.monotonic() - _first_missing_key_ts) > _MIN_STREAK_SECONDS` (~60s), and
+  `not _missing_key_error_emitted` — then set `_missing_key_error_emitted = True` so the ERROR
+  fires at most once per episode; and (d) returns the sentinel default
   `{"type": None, "confidence": 0.0, "reason": "no anthropic api key — classification skipped"}`.
-  Reset `_consecutive_missing_key_count = 0` on the successful-return path (after response
-  validation). The outer `except Exception` ERROR log stays for real failures. The bridge caller
+  On the successful-return path (after response validation) reset all three:
+  `_consecutive_missing_key_count = 0`, `_first_missing_key_ts = None`,
+  `_missing_key_error_emitted = False`. Use `time.monotonic()` (not wall-clock) so the streak
+  age is immune to clock adjustments. The outer `except Exception` ERROR log stays for real
+  failures. The bridge caller
   (`bridge/telegram_bridge.py:1646`) reads `result.get("type")`; `type=None` is already the
   handled sentinel there — the comment at `telegram_bridge.py:1665` documents
   `classification_type=None → default "question"`, the most conservative routing (it does not
@@ -221,9 +250,9 @@ returning the safe default.
 - No change to `classify_conversation_terminus` logic (already correct); only add a regression
   test for the missing-key case.
 - `agent/anthropic_client.py::anthropic_slot()` constructs `AsyncAnthropic(api_key=...)` with
-  whatever the resolver returns — the cache fix means it stops receiving a stale empty string
-  (now `None`, enabling the SDK env fallback), so its call sites benefit automatically. No code
-  change there.
+  whatever the resolver returns — the cache fix means it stops receiving a stale cached value
+  (empty before, now a fresh re-read once the env settles), so its call sites benefit
+  automatically from the self-heal. No code change there.
 
 ## Failure Path Test Strategy
 
@@ -232,9 +261,14 @@ returning the safe default.
   fix, add a test asserting a **single transient** missing-key call does NOT reach the ERROR log
   (asserts WARNING instead), and a separate test asserting a **real** API error still logs at
   ERROR.
-- [ ] Consecutive-miss escalation — assert that `_MISSING_KEY_ERROR_THRESHOLD` (K=5) consecutive
-  missing-key calls escalate the K-th call to ERROR (Sentry signal for a permanent misconfig),
-  and that a successful call in between resets the counter so the WARNING regime resumes.
+- [ ] Time-aware consecutive-miss escalation — with `time.monotonic` monkeypatched to control
+  the streak age: (a) assert that K=5 consecutive misses whose streak age is **below**
+  `_MIN_STREAK_SECONDS` (the restart-burst case) stay at WARNING and emit **no** ERROR;
+  (b) assert that once the streak age exceeds `_MIN_STREAK_SECONDS` the next miss emits exactly
+  **one** ERROR and the `_missing_key_error_emitted` latch suppresses any further ERROR on
+  subsequent misses in the same episode; (c) assert a successful call resets all three
+  (`_consecutive_missing_key_count`, `_first_missing_key_ts`, `_missing_key_error_emitted`) so
+  the WARNING regime resumes and a fresh episode can escalate again.
 - [ ] `bridge/telegram_bridge.py:1653-1654` (non-fatal catch) — covered indirectly; assert
   `classify_work_type` leaves the message enqueue path intact when classification returns the
   sentinel default (`type=None`).
@@ -248,8 +282,9 @@ returning the safe default.
 
 ### Error State Rendering
 - [ ] A single transient missing-key case produces a WARNING log line (observable), not a silent
-  swallow and not an ERROR/Sentry event. Assert via `caplog`. The K-th consecutive miss produces
-  exactly one ERROR line.
+  swallow and not an ERROR/Sentry event. Assert via `caplog`. A miss streak that has crossed both
+  K=5 **and** `_MIN_STREAK_SECONDS` (monotonic monkeypatched) produces exactly one ERROR line,
+  and no further ERROR on later misses in the same episode.
 
 ## Test Impact
 
@@ -259,8 +294,11 @@ returning the safe default.
   now returning `None`, `None` *is* the production condition, so no `""` case is needed.
 - [ ] `tests/unit/test_work_request_classifier.py` — UPDATE: add cases asserting
   `classify_request_async` returns the sentinel default (`type=None`, `confidence=0.0`) on a
-  missing key (no raise) and logs at WARNING for a transient miss; add a case asserting K
-  consecutive misses escalate to ERROR and that a success resets the counter. Existing
+  missing key (no raise) and logs at WARNING for a transient miss; add a case (monotonic
+  monkeypatched) asserting K consecutive misses **under** `_MIN_STREAK_SECONDS` stay WARNING-only
+  (restart-burst guard), a case asserting a streak past both K and the time gate escalates to
+  exactly one ERROR with the fire-once latch suppressing repeats, and a case asserting a success
+  resets all three module-level variables. Existing
   populated-key tests are unaffected. **No changes to the sync `classify_request` tests** — that
   function is out of scope this revision.
 - [ ] `tests/unit/test_api_keys.py` — CREATE: new file covering `get_anthropic_api_key`
@@ -300,9 +338,11 @@ sentinel only affects genuinely ambiguous messages during a short self-healing w
 extra I/O) instead of once, and the WARNING-only degrade would otherwise hide a permanent
 misconfig.
 **Mitigation:** The extra cost is three `Path.exists()` checks per call; populated deployments
-still cache once. The consecutive-miss counter escalates to ERROR/Sentry after K=5 misses, so a
-genuinely keyless process is flagged for an operator to fix rather than degrading silently
-forever — bounding the re-read window to the time it takes to notice and repair the misconfig.
+still cache once. The time-aware escalation fires ERROR/Sentry only after the miss streak crosses
+both K=5 AND `_MIN_STREAK_SECONDS` (~60s), so a genuinely keyless process is flagged for an
+operator to fix rather than degrading silently forever — bounding the re-read window to the time
+it takes to notice and repair the misconfig, while the time gate keeps a restart burst from
+paging on a transient that self-heals within seconds.
 
 ## Race Conditions
 
@@ -355,8 +395,8 @@ safer failure mode.
 
 ### Inline Documentation
 - [ ] Comment in `utils/api_keys.py` explaining why absent resolutions return `None` and are not
-  cached (self-healing after startup env/.env race; `None` enables the SDK `os.environ`
-  fallback, ref #1899).
+  cached (self-healing after startup env/.env race comes from the no-cache re-read; `None` is a
+  distinct absent-sentinel kept out of the cache, ref #1899).
 - [ ] Comment in `tools/classifier.py` distinguishing the missing-key WARNING path (and the
   consecutive-miss ERROR escalation) from the ERROR path for real failures (ref #1899).
 
@@ -366,15 +406,17 @@ safer failure mode.
   (`classify_request_async`), amplified by empty-key caching in
   `utils/api_keys.py::get_anthropic_api_key`; issue's terminus attribution corrected.
 - [ ] `get_anthropic_api_key()` returns `None` on absence (annotated `-> str | None`) and no
-  longer caches absent resolutions (self-heals; enables SDK env fallback).
+  longer caches absent resolutions (self-heals via the no-cache `.env` re-read).
 - [ ] A transient missing-key classification logs at WARNING, not ERROR (no new Sentry events),
   and returns the message-preserving sentinel default (`type=None`, `confidence=0.0`) without
-  raising. K=5 consecutive misses escalate to one ERROR (permanent-misconfig signal); a success
-  resets the counter.
+  raising. A restart burst of ≥K misses inside the settle window stays WARNING-only; only a
+  streak past both K=5 AND `_MIN_STREAK_SECONDS` (~60s) escalates to a single, fire-once ERROR
+  (permanent-misconfig signal); a success resets all three streak variables.
 - [ ] `classify_conversation_terminus` returns `RESPOND` under a `None` key — regression test
   present.
-- [ ] Regression tests for the key-missing path across resolver, work-type (including counter
-  escalation), and terminus.
+- [ ] Regression tests for the key-missing path across resolver, work-type (including the
+  time-aware escalation: restart-burst stays WARNING, sustained streak fires one ERROR), and
+  terminus.
 - [ ] The `confidence==0.0` sentinel is never written to a durable cache (no sidecar cache on
   the in-scope path; invariant documented).
 - [ ] Tests pass (`/do-test`)
@@ -387,7 +429,8 @@ safer failure mode.
 - **Builder (classification-hardening)**
   - Name: classify-builder
   - Role: Implement the resolver no-cache-on-absence (`None`) fix, the classifier missing-key
-    WARNING path with consecutive-miss ERROR escalation, and the three regression tests.
+    WARNING path with time-aware (count + streak-age + fire-once-latch) ERROR escalation, and the
+    three regression tests.
   - Agent Type: builder
   - Domain: async (see DOMAIN_FRAMING.md — async/await + shared client semantics)
   - Resume: true
@@ -426,9 +469,13 @@ safer failure mode.
   sentinel default dict (`{"type": None, "confidence": 0.0, "reason": "..."}`); keep the
   ERROR-level `except Exception` for real failures. Do NOT touch the sync `classify_request` or
   the intent classifiers.
-- Add the module-level `_consecutive_missing_key_count` and `_MISSING_KEY_ERROR_THRESHOLD`
-  (K=5): increment on each missing-key call; escalate to ERROR when the counter crosses K; reset
-  to 0 on the successful-return path.
+- Add the module-level state: `_consecutive_missing_key_count`, `_first_missing_key_ts`
+  (monotonic, set on the `0→1` transition), `_missing_key_error_emitted` (fire-once latch), and
+  the constants `_MISSING_KEY_ERROR_THRESHOLD` (K=5) and `_MIN_STREAK_SECONDS` (~60s). Increment
+  the count on each missing-key call; escalate to a single ERROR only when
+  `count >= K AND (time.monotonic() - _first_missing_key_ts) > _MIN_STREAK_SECONDS AND not
+  _missing_key_error_emitted`, then set the latch. Reset all three (count→0, ts→None,
+  latch→False) on the successful-return path. Use `time.monotonic()`, never wall-clock.
 - Confirm `bridge/telegram_bridge.py:1646` handles the sentinel dict (reads `.get("type")`;
   `type=None` → downstream "question" default).
 
@@ -441,9 +488,11 @@ safer failure mode.
 - **Parallel**: false
 - Create `tests/unit/test_api_keys.py`: absent resolution returns `None` and is not cached
   (self-heals), truthy cached once. Reset `_cached_anthropic_key` to `None` between cases.
-- Update `test_work_request_classifier.py`: missing key → sentinel dict (`type=None`) + WARNING
-  (assert via caplog), no raise; K consecutive misses → one ERROR + counter reset on success;
-  real API error still ERROR.
+- Update `test_work_request_classifier.py` (monkeypatch `time.monotonic` to drive streak age):
+  missing key → sentinel dict (`type=None`) + WARNING (assert via caplog), no raise; K misses
+  **under** `_MIN_STREAK_SECONDS` → WARNING-only, no ERROR (restart-burst guard); streak past
+  both K and the time gate → exactly one ERROR with the latch suppressing repeats; success resets
+  all three module-level variables; real API error still ERROR.
 - Update `test_routing.py`: confirm the terminus fallback test's `None` key case asserts
   `RESPOND` (no `""` case needed — `None` is now the production value).
 
@@ -473,10 +522,13 @@ safer failure mode.
 | Format clean | `python -m ruff format --check utils/api_keys.py tools/classifier.py` | exit code 0 |
 | Empty result not cached | `grep -c '_cached_anthropic_key = ""' utils/api_keys.py` | output `0` |
 | Resolver returns None on absence | `grep -c 'return None' utils/api_keys.py` | output `>= 1` |
-| Missing-key no longer raises in `classify_request_async` (range-scoped to the one changed function) | `awk '/^async def classify_request_async/{cap=1; next} /^(async def\|def) /{cap=0} cap' tools/classifier.py \| grep -c 'No Anthropic API key found for classification'` | output `0` |
+| Missing-key no longer raises in `classify_request_async` (range-scoped to the one changed function; single awk, no shell pipe, no `\|`, runs byte-for-byte from raw .md) | `awk '/^async def classify_request_async/{cap=1;next} /^async def /{cap=0} /^def /{cap=0} cap && /No Anthropic API key found for classification/{n++} END{print n+0}' tools/classifier.py` | output `0` |
 | Sync + intent classifiers untouched (raise still present) | `grep -c 'No Anthropic API key found for classification' tools/classifier.py` | output `3` |
 | Consecutive-miss counter present | `grep -c '_MISSING_KEY_ERROR_THRESHOLD' tools/classifier.py` | output `>= 2` |
-| Terminus missing-key test present | `grep -rn 'RESPOND' tests/unit/test_routing.py \| grep -c terminus` | output > 0 |
+| Time gate present (escalation is time-aware) | `grep -c '_MIN_STREAK_SECONDS' tools/classifier.py` | output `>= 2` |
+| Fire-once latch present | `grep -c '_missing_key_error_emitted' tools/classifier.py` | output `>= 3` |
+| Streak timestamp uses monotonic clock | `grep -c '_first_missing_key_ts' tools/classifier.py` | output `>= 3` |
+| Terminus missing-key test present | `grep -c terminus tests/unit/test_routing.py` | output > 0 |
 
 ## Critique Results
 
@@ -486,10 +538,18 @@ Verdict: **NEEDS REVISION** (round 1). All six findings addressed in this revisi
 |----------|---------|--------------|---------------------|
 | BLOCKER | Verification grep gate unsatisfiable — string appears 4× (lines 76/171/314/403), gate expected 0 for whole file | Verification table row range-scoped to the `classify_request_async` function body via `awk`; added a companion row asserting the sync + intent classifiers keep their raise (count `3`) | The one changed function loses the raise (0); the three out-of-scope functions keep it (3). Validated the `awk` extractor against current `tools/classifier.py`. |
 | CONCERN | WARNING path collapses transient miss with permanent misconfig — no Sentry signal, unbounded `.env` re-read | Added module-level `_consecutive_missing_key_count` + `_MISSING_KEY_ERROR_THRESHOLD` (K=5): WARNING for transient, ERROR/Sentry after K consecutive, reset on success | Solution Key Elements, Technical Approach, Risk 2, tasks 2/3, tests. Bounds the re-read window to time-to-notice for a genuinely keyless process. |
-| CONCERN | Resolver should return `None` (not `""`), annotated `-> str \| None`, so SDK `os.environ` fallback can resolve a fresh key; update all call sites | Signature `-> str \| None`; `return None` on absence; audited all 15 non-test call sites (truthiness guards + SDK constructors) — all safe, `None` strictly better at constructors | Technical Approach call-site audit; task 1; test_api_keys assertions. |
+| CONCERN | Resolver should return `None` (not `""`), annotated `-> str \| None`, and stop caching absent resolutions so a transient absence self-heals on the next `.env` re-read; update all call sites | Signature `-> str \| None`; `return None` on absence without caching; audited all 15 non-test call sites (truthiness guards + SDK constructors) — all safe, `None` equivalent-or-clearer at constructors | Technical Approach call-site audit; task 1; test_api_keys assertions. |
 | CONCERN | Sync `classify_request` edit may be unreachable gold-plating (Sentry event is async-only) | Grepped for a live keyless sync caller — none (only docstring examples + tests). Dropped the sync edit from scope | No-Gos, Solution, tasks 2/3, Test Impact all now async-only. |
 | NIT | Safe-default `type="chore"` both asserted and punted to Open Question 1 (self-contradiction) | Pinned invariant to `confidence==0.0` / no-raise; sentinel `type=None` (downstream already maps `None → "question"`) preferred over `"chore"`; deleted Open Question 1 | Technical Approach, Risk 1, Success Criteria. |
 | NIT | #1182 JSON sidecar could durably cache the `confidence=0.0` default | Documented that `classify_request_async` uses no sidecar cache (the `JsonCache` is in the out-of-scope `agent/intent_classifier.py`, which returns its default before its cache write); pinned invariant "never cache `confidence==0.0`" + guard note if caching is ever added | Technical Approach "No durable caching of the default". |
+
+Verdict: **NEEDS REVISION** (round 2). All three findings addressed in this revision pass.
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| BLOCKER | K=5 consecutive-miss escalation misfires on restart bursts (Telethon `catch_up=True` floods ≥K queued messages through the sub-second settle window → false permanent-misconfig ERROR during a self-healing transient); operator unpinned so >=K fires one ERROR per message past the 5th | Made escalation **time-aware**: record `_first_missing_key_ts` (monotonic) on the `0→1` transition; gate the ERROR on `count >= K AND (monotonic - first_ts) > _MIN_STREAK_SECONDS` (~60s); add `_missing_key_error_emitted` fire-once latch; reset all three on the success-reset path | Problem desired-outcome, Solution Key Elements, Flow, Technical Approach, Failure Path Test Strategy, Test Impact, Risk 2, tasks 2/3, Verification (3 new grep rows), Success Criteria. |
+| CONCERN | awk-scoped Verification gate not runnable byte-for-byte — `\|` inside the awk alternation `/^(async def\|def) /` is treated as a literal, so the reset never matches (verified: broken form outputs `3`, not `0`) | Rewrote the gate as a single awk with two separate anchor rules (`/^async def /{cap=0}` and `/^def /{cap=0}`) and an inline `END{print n+0}` count — no `\|`, no shell pipe, runs byte-for-byte from raw .md (verified: outputs `1` on the unfixed file, will be `0` after the fix). Also removed the `\|` from the terminus-test presence row | Verification table. |
+| NIT | "None enables the SDK `os.environ` fallback" overstated — `AsyncAnthropic(api_key=None)` with empty env does not raise, identical to `api_key=""` | Attributed the self-heal entirely to the resolver's no-cache `.env` re-read; dropped all SDK-fallback wording. The `None` change stays on cache-poisoning / sentinel-clarity grounds | Solution Key Elements, Technical Approach call-site audit, `anthropic_client` note, Inline Documentation, Success Criteria, round-1 critique-row wording. |
 
 ---
 
