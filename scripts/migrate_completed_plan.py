@@ -8,12 +8,22 @@ Usage:
     python scripts/migrate_completed_plan.py docs/plans/my-feature.md
     python scripts/migrate_completed_plan.py docs/plans/my-feature.md --dry-run
 
+Also provides the path-independent migration primitive (issue #1900, Tier 0):
+``migrate_plan_to_completed()`` performs a guarded ``git mv`` of a root plan into
+``docs/plans/completed/`` -- the single authoritative mechanism two call sites
+share: the deterministic ``/do-merge --issue`` invocation and the
+``merged-branch-cleanup`` reflection backstop.
+
+    python scripts/migrate_completed_plan.py --issue 1900 [--apply|--dry-run]
+    python scripts/migrate_completed_plan.py --sweep [--apply] [--cap N]
+
 Exit codes:
     0 - Plan successfully migrated (or would be in dry-run)
     1 - Validation failed, plan not migrated
     2 - File or command error
 """
 
+import json
 import re
 import subprocess
 import sys
@@ -189,10 +199,260 @@ def delete_plan(plan_path: Path, dry_run: bool) -> tuple[bool, str]:
         return False, f"Error deleting plan: {e}"
 
 
+# --- Path-independent migration primitive (issue #1900, Tier 0) ------------------
+#
+# ``migrate_plan_to_completed()`` is the ONE authoritative mechanism for moving a
+# completed plan out of ``docs/plans/`` root into ``docs/plans/completed/``. Two
+# call sites share it: the deterministic ``/do-merge --issue`` invocation (Site D)
+# and the ``merged-branch-cleanup`` reflection backstop (Site C). Both call this
+# same function -- neither re-implements the git mv / guard logic.
+
+
+def _run_git(args: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    """Run a git subcommand rooted at ``cwd``. Never raises on non-zero exit."""
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _rebase_in_progress(repo_root: Path) -> bool:
+    """Detect a half-finished rebase (rebase-merge/rebase-apply state dir present)."""
+    git_dir_result = _run_git(["rev-parse", "--git-dir"], cwd=repo_root)
+    if git_dir_result.returncode != 0:
+        return False
+    git_dir = Path(git_dir_result.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = repo_root / git_dir
+    return (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists()
+
+
+def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
+    """Guarded git-mv of a root plan into docs/plans/completed/.
+
+    Returns one of: "migrated", "already-migrated", "dirty-tree-skip",
+    "rebase-conflict-skip". Never raises -- all failure modes return a verdict
+    string and log the reason.
+    """
+    plan_path = Path(plan_path)
+
+    # Resolve repo layout from the plan's own path: docs/plans/{name}.md implies
+    # repo_root == plan_path.parent.parent.parent. This keeps the function usable
+    # from callers with different process cwds (CLI vs. reflection worker) without
+    # needing a cwd parameter in the public signature.
+    anchor = plan_path if plan_path.is_absolute() else plan_path.resolve()
+    plans_dir = anchor.parent
+    repo_root = plans_dir.parent.parent
+    completed_path = plans_dir / "completed" / plan_path.name
+
+    # Existence-guard (idempotency): git mv is NOT idempotent -- a second attempt
+    # on an already-moved plan must not look like a failure.
+    if not plan_path.exists():
+        if completed_path.exists():
+            print(f"[SKIP] Already migrated: {plan_path.name}")
+            return "already-migrated"
+        print(f"[SKIP] Plan not found in root or completed/: {plan_path}")
+        return "already-migrated"
+
+    # Clean-tree/HEAD==main precondition. If either fails, this is the
+    # report-only fallback: log what would be migrated, mutate nothing.
+    try:
+        branch_result = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root)
+        current_branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+        status_result = _run_git(["status", "--porcelain"], cwd=repo_root)
+        tree_dirty = bool(status_result.stdout.strip()) if status_result.returncode == 0 else True
+    except Exception as e:
+        print(f"[SKIP] Could not inspect git state for {plan_path.name}: {e}")
+        return "dirty-tree-skip"
+
+    if current_branch != "main" or tree_dirty:
+        reasons = []
+        if current_branch != "main":
+            reasons.append(f"HEAD is '{current_branch}', not 'main'")
+        if tree_dirty:
+            reasons.append("working tree is dirty")
+        print(
+            f"[REPORT-ONLY] Would migrate {plan_path.name} -> docs/plans/completed/ "
+            f"(blocked: {'; '.join(reasons)})"
+        )
+        return "dirty-tree-skip"
+
+    if not apply:
+        print(f"[DRY-RUN] Would migrate {plan_path.name} -> docs/plans/completed/")
+        return "migrated"
+
+    completed_path.parent.mkdir(parents=True, exist_ok=True)
+    mv_result = _run_git(["mv", str(plan_path), str(completed_path)], cwd=repo_root)
+    if mv_result.returncode != 0:
+        print(f"[ERROR] git mv failed for {plan_path.name}: {mv_result.stderr.strip()}")
+        return "dirty-tree-skip"
+
+    commit_result = _run_git(
+        ["commit", "-m", f"Migrate completed plan: {plan_path.stem}"], cwd=repo_root
+    )
+    if commit_result.returncode != 0:
+        print(f"[ERROR] git commit failed for {plan_path.name}: {commit_result.stderr.strip()}")
+        _run_git(["reset", "--hard", "HEAD"], cwd=repo_root)
+        return "dirty-tree-skip"
+
+    # If there's no 'origin' remote (e.g. a local-only test repo), the migration
+    # is already durable as a local commit -- nothing more to do.
+    remote_check = _run_git(["remote", "get-url", "origin"], cwd=repo_root)
+    if remote_check.returncode != 0:
+        print(f"[MIGRATED] {plan_path.name} -> docs/plans/completed/ (no 'origin' remote)")
+        return "migrated"
+
+    # Rebase-retry loop: a losing push replays atop the winner. Distinguish a
+    # genuine textual conflict (abort + leave tree clean, never resolve
+    # unattended) from a plain non-fast-forward rejection (retry).
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        push_result = _run_git(["push", "origin", "main"], cwd=repo_root, timeout=60)
+        if push_result.returncode == 0:
+            print(f"[MIGRATED] {plan_path.name} -> docs/plans/completed/")
+            return "migrated"
+
+        print(
+            f"[WARN] git push rejected for {plan_path.name} "
+            f"(attempt {attempt}/{max_attempts}): {push_result.stderr.strip()}"
+        )
+        pull_result = _run_git(["pull", "--rebase", "origin", "main"], cwd=repo_root, timeout=60)
+        conflict_text = (pull_result.stdout + pull_result.stderr).lower()
+        if pull_result.returncode != 0 and (
+            _rebase_in_progress(repo_root) or "conflict" in conflict_text
+        ):
+            _run_git(["rebase", "--abort"], cwd=repo_root)
+            print(
+                f"[ERROR] Rebase conflict migrating {plan_path.name}; "
+                "aborted rebase, tree left clean"
+            )
+            return "rebase-conflict-skip"
+
+    print(f"[ERROR] Failed to push migration for {plan_path.name} after {max_attempts} attempts")
+    return "rebase-conflict-skip"
+
+
+def find_plan_by_issue(issue_number: str, plans_dir: Path = Path("docs/plans")) -> Path | None:
+    """Scan root plans for the one whose tracking: frontmatter matches issue_number."""
+    for plan_file in sorted(plans_dir.glob("*.md")):
+        text = plan_file.read_text(errors="replace")
+        tracking_url = extract_tracking_issue(text)
+        if not tracking_url:
+            continue
+        match = re.search(r"/issues/(\d+)", tracking_url)
+        if match and match.group(1) == str(issue_number):
+            return plan_file
+    return None
+
+
+def _gh_issue_state(issue_number: str) -> str:
+    """Look up a GitHub issue's state via gh. Returns 'unknown' on any failure."""
+    try:
+        result = subprocess.run(
+            ["gh", "issue", "view", str(issue_number), "--json", "state"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return str(data.get("state", "unknown")).lower()
+    except Exception as e:
+        print(f"[WARN] Could not check issue #{issue_number}: {e}")
+    return "unknown"
+
+
+def run_issue(issue_number: str, *, apply: bool) -> int:
+    """CLI handler for --issue <N>: resolve the plan by tracking issue, migrate it."""
+    plan_file = find_plan_by_issue(issue_number)
+    if not plan_file:
+        print(f"Error: no plan found with tracking issue #{issue_number}")
+        return 2
+
+    verdict = migrate_plan_to_completed(plan_file, apply=apply)
+    print(f"Verdict: {verdict}")
+    return 0 if verdict in ("migrated", "already-migrated") else 1
+
+
+def run_sweep(*, apply: bool, cap: int | None) -> int:
+    """CLI handler for --sweep: migrate every root plan with a closed tracking issue."""
+    plans_dir = Path("docs/plans")
+    migrated_count = 0
+    rows: list[tuple[str, str, str]] = []
+
+    for plan_file in sorted(plans_dir.glob("*.md")):
+        text = plan_file.read_text(errors="replace")
+        tracking_url = extract_tracking_issue(text)
+        if not tracking_url:
+            rows.append((plan_file.name, "no tracking issue in frontmatter", "skip"))
+            continue
+
+        match = re.search(r"/issues/(\d+)", tracking_url)
+        if not match:
+            rows.append((plan_file.name, f"unparseable tracking url: {tracking_url}", "skip"))
+            continue
+
+        issue_number = match.group(1)
+        state = _gh_issue_state(issue_number)
+        if state != "closed":
+            rows.append((plan_file.name, f"issue #{issue_number} state={state}", "skip"))
+            continue
+
+        if cap is not None and migrated_count >= cap:
+            rows.append((plan_file.name, f"issue #{issue_number} closed", "deferred (cap reached)"))
+            continue
+
+        verdict = migrate_plan_to_completed(plan_file, apply=apply)
+        rows.append((plan_file.name, f"issue #{issue_number} closed", verdict))
+        if verdict == "migrated":
+            migrated_count += 1
+
+    print(f"{'plan':<50} {'evidence':<40} action")
+    for name, evidence, action in rows:
+        print(f"{name:<50} {evidence:<40} {action}")
+    return 0
+
+
 def main() -> int:
+    args = sys.argv[1:]
+
+    # --issue <N>: path-independent migration keyed on the plan's own tracking
+    # frontmatter (issue #1900, Tier 0). This is what /do-merge invokes after a
+    # real merge, so it defaults to apply=True unless --dry-run is passed.
+    if "--issue" in args:
+        idx = args.index("--issue")
+        if idx + 1 >= len(args):
+            print("Error: --issue requires an issue number")
+            return 2
+        issue_number = args[idx + 1]
+        apply = "--dry-run" not in args
+        return run_issue(issue_number, apply=apply)
+
+    # --sweep [--apply] [--cap N]: iterate every root plan, migrate the ones
+    # whose tracking issue is closed. Report-only (apply=False) by default.
+    if "--sweep" in args:
+        apply = "--apply" in args
+        cap: int | None = None
+        if "--cap" in args:
+            cap_idx = args.index("--cap")
+            if cap_idx + 1 >= len(args):
+                print("Error: --cap requires an integer value")
+                return 2
+            try:
+                cap = int(args[cap_idx + 1])
+            except ValueError:
+                print("Error: --cap requires an integer value")
+                return 2
+        return run_sweep(apply=apply, cap=cap)
+
     # Parse arguments
     if len(sys.argv) < 2:
         print("Usage: python scripts/migrate_completed_plan.py <plan-path> [--dry-run]")
+        print("       python scripts/migrate_completed_plan.py --issue <N> [--dry-run]")
+        print("       python scripts/migrate_completed_plan.py --sweep [--apply] [--cap N]")
         print()
         print("Validates feature documentation and migrates completed plan.")
         print()
@@ -207,6 +467,10 @@ def main() -> int:
         print()
         print("Options:")
         print("  --dry-run  Validate only, do not delete plan or close issue")
+        print()
+        print("  --issue <N>          Migrate the plan tracking issue N (git mv, not delete)")
+        print("  --sweep [--apply]    Migrate every root plan with a closed tracking issue")
+        print("  --cap N              With --sweep, migrate at most N plans this run")
         return 2
 
     plan_path = Path(sys.argv[1])
