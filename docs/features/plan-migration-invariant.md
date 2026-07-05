@@ -13,7 +13,8 @@ the agent to hand-`git mv` the plan on `main` after merge — and prose is not
 an invariant. 212 plans had accumulated in root (13MB), including plans whose
 tracking issue had been closed for months: every merge path that didn't
 faithfully execute that hand instruction (a raw-terminal `gh pr merge`, a
-forked `/do-sdlc` run, a cross-machine merge) leaked a plan into root forever.
+forked `/do-sdlc` run, a cross-machine merge, a merge initiated from a PR
+review) leaked a plan into root forever.
 
 ## What this ships
 
@@ -73,11 +74,24 @@ transaction as the merge.
 `docs/plans/` root daily, extracted issue references, and classified a
 `closed_issue` finding — it just reported instead of acting. It is now
 extended to call `migrate_plan_to_completed()` on that branch, so it catches
-every plan orphaned by a merge that bypassed `/do-merge` entirely (a
-raw-terminal `gh pr merge`, a forked `/do-sdlc` run, a cross-machine merge)
-within one daily cycle. No net-new reflection was added — extending the
-existing sweep (which already reads, extracts, and classifies) keeps one
-mechanism, not two.
+every plan orphaned by a merge that bypassed `/do-merge` entirely, within one
+daily cycle. No net-new reflection was added — extending the existing sweep
+(which already reads, extracts, and classifies) keeps one mechanism, not two.
+
+### Merge-path coverage
+
+The four confirmed merge paths, and which site catches each:
+
+| Merge path | Caught by |
+|------------|-----------|
+| `/do-merge` (SDLC pipeline merge) | Site D, synchronously in the merge itself |
+| Raw-terminal `gh pr merge` by a human or agent | Site C, within one daily cycle |
+| Forked `/do-sdlc` run merging on its own | Site C, within one daily cycle |
+| PR-review-initiated merge | Site C, within one daily cycle |
+
+Site C also backstops Site D itself: if a `/do-merge` run's migration step
+fails or is skipped (dirty tree, push race), the plan is picked up on the
+next daily sweep.
 
 The reflection's migration gate is **evidence-gated and non-vacuous**:
 
