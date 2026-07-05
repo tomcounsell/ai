@@ -353,24 +353,28 @@ MAX_NO_OUTPUT_REPRIEVES = SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_W
 # from the very first tick where the gate could possibly fire.
 #
 # Env-tunable via ``STARTUP_GRACE_SECONDS`` for parity with other tunables
-# in this file. Operators raising the grace must keep
-# ``STARTUP_GRACE_SECONDS < NO_OUTPUT_BUDGET_SECONDS`` so the in-band region
-# is non-empty.
+# in this file. The D0 never-started gate (issue #1724, clock-consistent with
+# this leg as of issue #1905) is the authoritative bound for never-started
+# sessions — every D0-gate survivor's running_seconds is <= 150s, which is
+# unconditionally below this 300s window, so this grace window is the
+# preserve-fast-path bound for D0-gate survivors rather than one edge of an
+# in-band region.
 STARTUP_GRACE_SECONDS = int(
     os.environ.get("STARTUP_GRACE_SECONDS", AGENT_SESSION_HEALTH_MIN_RUNNING)
 )
-# No-output running-time budget (seconds) for sub-check B (issue #1356).
+# No-output running-time budget (seconds).
 #
 # Defined as ``MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW``
 # (= 20 * 90 = 1800s = 30 min). Mirrors how ``MAX_NO_OUTPUT_REPRIEVES`` is
 # derived from ``SDK_PROGRESS_FRESHNESS_WINDOW // HEARTBEAT_FRESHNESS_WINDOW``,
 # keeping the relationship symmetric.
 #
-# When ``sdk_ever_output`` is False AND ``running_seconds > NO_OUTPUT_BUDGET_SECONDS``,
-# sub-check B's fresh-heartbeat fast-path is denied and the function falls
-# through to the own-progress fields. Combined with Tier-2's existing reprieve
-# cap (also gated on ``MAX_NO_OUTPUT_REPRIEVES``), this guarantees a session
-# that never emits a first turn is recovered within ~30 minutes.
+# No longer consulted by ``_has_progress`` sub-check B (its grace-to-budget
+# band and ``no_output_budget_exceeded`` counter were removed in issue #1905
+# — subsumed by the D0 never-started gate, issue #1724). The constant remains
+# live via two other consumers: the #1614 own-progress heartbeat gate
+# (``_hb_age < NO_OUTPUT_BUDGET_SECONDS``, below in this module) and the
+# Tier-2 reprieve cap (``MAX_NO_OUTPUT_REPRIEVES``).
 #
 # Not env-tunable directly because the underlying constants are.
 NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW  # 1800
@@ -1458,35 +1462,32 @@ def _has_progress(entry: AgentSession) -> bool:
     subprocess existence — it is a watchdog-alive signal, NOT a progress signal.
     It is intentionally excluded from sub-check A (issue #1226).
 
-    **Sub-check B: Startup-window executor-alive fallback (#1036, narrowed by #1226 / #1356).**
+    **Sub-check B: Startup-window executor-alive fallback (#1036, narrowed by
+    #1226 / #1724 / #1905).**
     When ``sdk_ever_output`` is False (neither per-turn field has ever been set),
     ``last_heartbeat_at`` (queue-layer, written by ``_heartbeat_loop``) fresher
-    than ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress, **subject to the
-    no-output running-time budget gate added by issue #1356**.
+    than ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) ⇒ progress, **subject to the D0
+    never-started gate added by issue #1724**.
 
-    The gate reads ``started_ref = entry.started_at or entry.created_at`` and
-    computes ``running_seconds``:
+    The D0 gate (``_never_started_past_grace``, called with the shared
+    ``now=now_utc`` trusted clock — issue #1905) is the authoritative bound
+    for never-started sessions: it returns True once
+    ``running_seconds > NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS``
+    (150s), at which point sub-check B returns False immediately, denying the
+    fresh-heartbeat fast-path. For D0-gate survivors (``running_seconds <=
+    150``), ``started_ref = entry.started_at or entry.created_at`` is used to
+    compute ``running_seconds`` again for the following legs:
 
     - Both ``started_at`` and ``created_at`` are None (truly legacy / phantom
       record predating the field) — the fresh-heartbeat fast-path is preserved.
     - ``running_seconds < STARTUP_GRACE_SECONDS`` (300s, aliased to
-      ``AGENT_SESSION_HEALTH_MIN_RUNNING``) — the fast-path is preserved.
-      The caller's race-condition guard already filters sessions whose
-      running time is below this threshold; the explicit re-check defends
-      against clock skew and future reuse paths.
-    - ``STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS``
-      (where ``NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES *
-      HEARTBEAT_FRESHNESS_WINDOW`` = 20 * 90 = 1800s = 30 min) — fresh
-      heartbeat still passes (preserves backward compatibility for sessions
-      in their normal startup-to-first-turn window).
-    - ``running_seconds > NO_OUTPUT_BUDGET_SECONDS`` AND
-      ``sdk_ever_output is False`` — sub-check B does NOT return True; it
-      falls through to the own-progress fields. The Redis counter
-      ``{project_key}:session-health:tier1_falloff:no_output_budget_exceeded``
-      is INCR'd once per fall-through tick. With the per-turn signals also
-      absent, ``_has_progress`` returns False and the Tier-2 reprieve cap
-      escalates the session to recovery within
-      ``MAX_NO_OUTPUT_REPRIEVES`` (20) ticks.
+      ``AGENT_SESSION_HEALTH_MIN_RUNNING``) — the fast-path is preserved. Because
+      the D0 gate and this computation now share ``now_utc``, every D0-gate
+      survivor unconditionally satisfies ``running_seconds <= 150 < 300``, so
+      this leg always returns True for a survivor — it is defense in depth,
+      not a separate reachable band. (The #1356 grace-to-budget band and its
+      ``no_output_budget_exceeded`` counter that used to follow this leg are
+      subsumed by the D0 gate and have been removed — issue #1905.)
 
     The ``started_at or created_at`` fallback is load-bearing: the recovery
     path nulls ``started_at`` when re-queuing a session, so without the
@@ -1495,9 +1496,10 @@ def _has_progress(entry: AgentSession) -> bool:
 
     This preserves the pre-#1226 behavior for sessions in their normal
     startup window and for sessions predating PR #1177 (whose hooks did not
-    write the per-turn fields), while bounding the previously-unbounded
-    fresh-heartbeat fast-path that allowed cwd-disappearance and similar
-    wedges to hold Tier 1 open indefinitely (issue #1246, parent of #1356).
+    write the per-turn fields), while the D0 gate (issue #1724) bounds the
+    previously-unbounded fresh-heartbeat fast-path that allowed
+    cwd-disappearance and similar wedges to hold Tier 1 open indefinitely
+    (issue #1246).
 
     **Own-progress fields (#944 / #963, narrowed by #1226).**
     - ``turn_count > 0`` — at least one turn boundary observed.
@@ -1596,32 +1598,18 @@ def _has_progress(entry: AgentSession) -> bool:
                     # caller-side guard already rules out genuinely fresh
                     # sessions, but we keep the explicit check for defense in
                     # depth and to handle clock skew.
+                    #
+                    # This is now the authoritative bound for D0-gate
+                    # survivors (issue #1905): with the gate and this
+                    # computation sharing the trusted now_utc clock, any
+                    # entry that reaches here has running_seconds <= 150 (the
+                    # D0 gate's NEVER_STARTED_GRACE_SECS +
+                    # NEVER_STARTED_CONFIRM_MARGIN_SECS threshold), which is
+                    # unconditionally < STARTUP_GRACE_SECONDS (300). The old
+                    # #1356 grace-to-budget band and no-output budget INCR
+                    # that used to follow this leg are therefore unreachable
+                    # and have been removed.
                     return True
-                if running_seconds <= NO_OUTPUT_BUDGET_SECONDS:
-                    # In the band between startup grace (300s) and the
-                    # no-output budget (1800s) → fresh heartbeat still passes.
-                    # Preserves the normal startup-to-first-turn window for
-                    # slow auth / large initial prompt digestion.
-                    return True
-                # Budget exceeded AND sdk_ever_output is False — DO NOT return
-                # True from sub-check B. INCR the telemetry counter exactly
-                # once on this fall-through path, then continue to the
-                # own-progress fields below. If those are also absent,
-                # _has_progress returns False and the existing Tier-2 reprieve
-                # cap (also gated on sdk_ever_output / MAX_NO_OUTPUT_REPRIEVES)
-                # escalates to recovery.
-                try:
-                    from popoto.redis_db import POPOTO_REDIS_DB as _MR
-
-                    _MR.incr(
-                        f"{entry.project_key}:session-health:"
-                        f"tier1_falloff:no_output_budget_exceeded"
-                    )
-                except Exception as _m_err:
-                    logger.warning(
-                        "[session-health] tier1_falloff counter increment failed (non-fatal): %s",
-                        _m_err,
-                    )
 
     # Own-progress fields (#944 / #963, narrowed by #1226, gated by #1614).
     # Only evaluated when sdk_ever_output is False — once the SDK has produced
