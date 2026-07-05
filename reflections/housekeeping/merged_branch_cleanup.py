@@ -197,18 +197,6 @@ async def run() -> dict:
         checked = sum(1 for c in checkboxes if c.lower() == "x")
         is_complete = checkboxes and checked == len(checkboxes)
 
-        if is_complete:
-            stats["complete"] += 1
-            findings.append(
-                f"Plan complete: {plan_name} -- "
-                f"run /do-docs then delete docs/plans/{plan_file.name}"
-            )
-            # Intentionally no `continue` here: the migration gate below must be
-            # evaluated regardless of checkbox completeness. Previously an
-            # all-checkboxes-complete plan short-circuited past the
-            # tracking-issue-closed check entirely (issue #1900 Blocker 1), so
-            # ~34 of 212 root plans could never migrate even with a closed issue.
-
         # --- Migration gate: keyed on the plan's OWN tracking-issue frontmatter
         # (plan_tracking_issue), NOT the broader prose `refs` set used by the
         # closed_issue finding below. Non-vacuous: requires a literal "closed"
@@ -217,16 +205,45 @@ async def run() -> dict:
         # "unknown")` check was vacuously True when every ref state was
         # "unknown", which could migrate an ACTIVE plan on a gh outage).
         tracking_num = plan_tracking_issue.get(plan_file)
-        if tracking_num is not None and issue_states.get(tracking_num) == "closed":
+        migration_gate_fires = (
+            tracking_num is not None and issue_states.get(tracking_num) == "closed"
+        )
+
+        if is_complete:
+            stats["complete"] += 1
+            # Suppressed when the migration gate below also fires for this plan:
+            # telling the operator to delete a plan the same run just migrated
+            # (or attempted to migrate) is redundant/contradictory (issue #1900
+            # Tier 0 PR review nit). `stats["complete"]` still counts every
+            # checkbox-complete plan regardless.
+            if not migration_gate_fires:
+                findings.append(
+                    f"Plan complete: {plan_name} -- "
+                    f"run /do-docs then delete docs/plans/{plan_file.name}"
+                )
+            # Intentionally no `continue` here: the migration gate below must be
+            # evaluated regardless of checkbox completeness. Previously an
+            # all-checkboxes-complete plan short-circuited past the
+            # tracking-issue-closed check entirely (issue #1900 Blocker 1), so
+            # ~34 of 212 root plans could never migrate even with a closed issue.
+
+        if migration_gate_fires:
             if migrated_count < MIGRATION_PER_RUN_CAP:
                 verdict = migrate_plan_to_completed(plan_file, apply=MIGRATION_APPLY_ENABLED)
-                migrated_count += 1
-                stats["migrated"] += 1
                 action_word = "Migrated" if MIGRATION_APPLY_ENABLED else "Would migrate"
                 findings.append(
                     f"{action_word} ({verdict}): {plan_file.name} -> completed/ "
                     f"(tracking issue #{tracking_num} closed)"
                 )
+                # Only a real "migrated" verdict represents an actual git mv (or,
+                # in report-only mode, the informational equivalent). The other
+                # verdicts (dirty-tree-skip, rebase-conflict-skip,
+                # already-migrated, unknown) are report-only fallbacks/no-ops --
+                # counting those would consume the per-run cap and inflate the
+                # summary on runs that moved nothing (PR #1903 review Tech Debt).
+                if verdict == "migrated":
+                    migrated_count += 1
+                    stats["migrated"] += 1
             else:
                 findings.append(
                     f"Deferred migration (per-run cap {MIGRATION_PER_RUN_CAP} reached): "

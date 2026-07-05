@@ -182,8 +182,11 @@ class TestMigrationGate:
 
         assert len(calls) == 1
         assert calls[0].name == "complete-plan.md"
-        # The informational "Plan complete" finding is still recorded.
-        assert any("Plan complete: complete-plan" in f for f in result["findings"])
+        # The redundant "Plan complete ... delete" finding is suppressed in favor
+        # of the migration finding -- telling the operator to delete a plan the
+        # same run just migrated is contradictory (PR #1903 review Nit).
+        assert not any("Plan complete: complete-plan" in f for f in result["findings"])
+        assert any("complete-plan.md -> completed/" in f for f in result["findings"])
 
     def test_unknown_issue_state_never_migrates(self, monkeypatch, tmp_path, plans_dir):
         """Regression test for Blocker 2: a gh outage/timeout (state "unknown")
@@ -222,6 +225,48 @@ class TestMigrationGate:
         assert len(calls) == cap
         deferred = [f for f in result["findings"] if "Deferred migration" in f]
         assert len(deferred) == n_plans - cap
+
+    def test_report_only_fallback_verdict_does_not_count_as_migrated(
+        self, monkeypatch, tmp_path, plans_dir
+    ):
+        """Tech Debt fix (PR #1903 review): when migrate_plan_to_completed()
+        returns a report-only fallback verdict (dirty-tree-skip, here) rather
+        than an actual "migrated" verdict, the reflection must not count it
+        towards stats["migrated"] or consume the per-run migration cap -- the
+        common case is the reflection worker's checkout not being a clean
+        `main`, and a run that moved nothing must not report "N migrated"."""
+        _write_plan(plans_dir, "dirty-tree-plan", issue=700)
+
+        def fake_migrate(plan_path, *, apply):
+            return "dirty-tree-skip"
+
+        result = _run(monkeypatch, tmp_path, {700: "closed"}, fake_migrate)
+
+        assert "0 migrated" in result["summary"]
+        # The operator-facing finding still reports the actual verdict (never
+        # silent), it just doesn't count as a real migration.
+        assert any(
+            "Migrated (dirty-tree-skip): dirty-tree-plan.md" in f for f in result["findings"]
+        )
+
+    def test_complete_and_migrated_plan_emits_only_migration_finding(
+        self, monkeypatch, tmp_path, plans_dir
+    ):
+        """Nit fix (PR #1903 review): a plan that is both all-checkboxes-complete
+        AND has a closed tracking issue must emit only the migration finding in
+        a given run, not also the stale "Plan complete ... delete" finding --
+        the two are contradictory (delete vs. move) for the same plan/run."""
+        _write_plan(plans_dir, "complete-and-closed", issue=701, all_checked=True)
+
+        def fake_migrate(plan_path, *, apply):
+            return "migrated"
+
+        result = _run(monkeypatch, tmp_path, {701: "closed"}, fake_migrate)
+
+        complete_findings = [f for f in result["findings"] if "Plan complete" in f]
+        migration_findings = [f for f in result["findings"] if "complete-and-closed.md ->" in f]
+        assert complete_findings == []
+        assert len(migration_findings) == 1
 
 
 class TestApplyOnMigrates:
