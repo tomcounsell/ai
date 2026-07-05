@@ -83,10 +83,12 @@ The existence of 138 files in `completed/` proves *some* path moves rather than 
 3. **Migration step:** on path (a), `docs/sdlc/do-merge.md`'s "Plan Migration" prose asks the agent to `git mv` the plan on `main`. On paths (b)–(d), nothing runs the migration at all. `scripts/migrate_completed_plan.py` (which deletes) is no longer wired into any skill or hook.
 4. **Output:** plan is inconsistently deleted, moved to `completed/`, or left in root. The root accumulates stale plans.
 
-**Enforcement-site candidates (the Tier 0 design decision):**
-- **(A) merge-guard hook** — covers every path (all merges go through `gh pr merge`), but runs pre-merge; it can *verify/authorize* but a after-merge action needs a follow-through step.
-- **(B) `post_merge_cleanup.py` / `cleanup_after_merge()`** — already runs after-merge with the slug in hand; a natural place to also migrate the plan, but only invoked on paths that call it. **Caveat (#1357):** `cleanup_after_merge()` carries a busy-session guard that early-surfaces `blocked_by_session` and makes `post_merge_cleanup.py` exit 2; migration folded in after that guard would inherit the early-return and skip. If B is chosen, run migration before the guard.
-- **(C) a reconciler reflection** — sweeps root plans whose issue is CLOSED. Institutionalizes the leak rather than preventing it; acceptable only as a backstop, not the primary fix.
+**Enforcement-site candidates and the RESOLVED decision (Tier 0 design):**
+- **(A) merge-guard hook** — covers every *Claude-Code-mediated* `gh pr merge`, but runs pre-merge; it can *verify/authorize* but an after-merge action needs a follow-through step. Also fires no hook at all for a human typing `gh pr merge` in a raw terminal. **Rejected as sole mechanism.**
+- **(B) `post_merge_cleanup.py` / `cleanup_after_merge()`** — already runs after-merge with the slug in hand; only invoked on paths that call it. **Caveat (#1357):** `cleanup_after_merge()` carries a busy-session guard that early-surfaces `blocked_by_session` and makes `post_merge_cleanup.py` exit 2; migration folded in after that guard would inherit the early-return and skip. **CHOSEN as Layer 1 (primary)** — migration runs at the top of `main()`, before the #1357 guard.
+- **(C) a reconciler reflection** — sweeps root plans whose issue is CLOSED. It is the ONLY path-independent site: it covers the raw-terminal `gh pr merge` (path b) that fires no hook and calls no cleanup script. **CHOSEN as Layer 2 (backstop).** It does not merely institutionalize the leak — paired with Layer 1, Layer 1 handles the common path immediately and Layer 2 guarantees eventual convergence for every path within one cycle.
+
+**Decision:** ship both B (primary) and C (backstop), both delegating to the single authoritative `scripts/migrate_completed_plan.py`. See Technical Approach for the concrete wiring.
 
 ## Appetite
 
@@ -112,7 +114,7 @@ Large because it spans a merge-pipeline invariant (with a regression test), a sc
 
 ### Key Elements
 
-- **Tier 0 — merge-site migration invariant.** A single deterministic mechanism that migrates a merged PR's plan out of `docs/plans/` root on **every** merge path, plus a regression test that fails if a merged PR's plan remains in root. Resolve the three-way delete/move contradiction to ONE documented behavior and cascade it.
+- **Tier 0 — path-independent migration invariant (two enforcement layers, one authoritative module).** Layer 1 migrates a merged PR's plan out of `docs/plans/` root at the merge site (`post_merge_cleanup.py`) for the common Claude-Code-mediated paths; Layer 2 is a standing reconciler reflection that catches the raw-terminal `gh pr merge` and anything Layer 1 misses. Both delegate to `scripts/migrate_completed_plan.py`. Ships with a regression test that fails if a merged PR's plan remains in root, plus a static-invocation assertion. Resolve the three-way delete/move contradiction to ONE documented behavior and cascade it.
 - **Tier 1 — evidence-gated leaked-plan migration.** A dry-run-first script that, for each root plan, extracts issue/PR references, queries `gh` for state, and migrates only when the issue is CLOSED / PR MERGED. Unresolvable plans go to a human-review list in the PR, never moved blind. Emits a machine-readable report as the proof artifact.
 - **Tier 2 — de-duplication.** Merge each diverged research/guides pair into one canonical file, delete the other, fix the (minimal) inbound links, and record the guides-vs-research placement rule in `docs/README.md`.
 - **Tier 3 — remove one-off decks and point-in-time reports.** Delete outright what has no lasting value; route business-valuable decks to Tier 4. Surface GEMINI.md and CHANGELOG.md as explicit keep-or-delete decisions.
@@ -125,7 +127,10 @@ PR merges → merge-site invariant runs (Tier 0) → plan leaves root determinis
 ### Technical Approach
 
 - **Decide the canonical behavior first** (delete vs move-to-`completed/`). Recommendation to confirm with PM: **move to `completed/`** (git history alone is a poor archive for grep/context, and 138 files already live there), and change `scripts/migrate_completed_plan.py`'s `delete_plan()` to a `git mv` into `completed/`. Then make ONE mechanism authoritative and delete the contradictory prose/behaviors (no-legacy-code tolerance).
-- **Anchor the invariant path-independently.** Confirm the root cause in build (which paths skip migration), then place enforcement so it covers manual `gh pr merge` too. Leading candidate: have the merge-guard hook (the universal choke point) verify/record the plan slug and drive the migration through a after-merge follow-through (or fold migration into `post_merge_cleanup.py` and make the merge-guard require it). Do **not** rely on `_handle_merge_completion()` — it does not exist. If migration is folded into `cleanup_after_merge()`, it MUST run before the #1357 busy-session guard's early-surface (a `blocked_by_session` return exits 2 and would skip a post-guard migration step).
+- **Anchor the invariant path-independently — two-layer enforcement (DECIDED, resolves Open Question #2).** No single hook can cover every path: a human typing a bare `gh pr merge` in a raw terminal fires **no** Claude Code hook and calls **no** cleanup script, and the merge-guard hook fires *before* the merge, so it can authorize but not carry out an after-merge action. The mechanism is therefore two layers, both invoking the ONE authoritative module (`scripts/migrate_completed_plan.py`):
+  - **Layer 1 — primary merge-site migration (immediate, common path).** Fold the migration call into `scripts/post_merge_cleanup.py::main()`, which the `/do-merge` skill already runs after-merge with the slug in hand. Cover paths (a) `/do-merge`, (c) forked `/do-sdlc`, (d) PR-review merges. The migration call runs at the **top** of `main()`, BEFORE `cleanup_after_merge()` and its #1357 `blocked_by_session` early-return (line 73, `return 2`) — so a busy worktree never skips migration. This file is the static-invocation enforcement target: `grep -q "migrate_completed_plan" scripts/post_merge_cleanup.py`.
+  - **Layer 2 — backstop reconciler reflection (path-independent, catches the raw-terminal case).** Add a `plan-migration-reconciler` entry to the reflections registry (`config/reflections.yaml`, `execution_type: function`, daily) whose callable is a **new** `reconcile_leaked_plans()` function in `scripts/migrate_completed_plan.py`. It sweeps `docs/plans/` root for plans whose tracking issue is CLOSED / PR MERGED and `git mv`s them into `completed/` with the rebase-retry push (see Race Conditions). This is the ONLY site that covers path (b) — the bare-terminal `gh pr merge` that fires no hook — and it self-heals anything Layer 1 misses within one cycle. `reconcile_leaked_plans()` is the shared evidence-gated sweep: **Tier 1's one-time historical sweep is a manual (dry-run-first) invocation of this same function**, so both the standing backstop and the one-time cleanup run identical authoritative code.
+  - Do **not** rely on `_handle_merge_completion()` — it does not exist. Do **not** fold migration in *after* the #1357 busy-session guard.
 - **Ship a regression test** that constructs a merged-PR scenario and asserts the plan is not left in `docs/plans/` root (Tier 0 acceptance).
 - **Tier 1 script** imports ONLY `extract_tracking_issue()` from `migrate_completed_plan.py` for reference extraction (`from scripts.migrate_completed_plan import extract_tracking_issue`). It must NOT call `main()`, `validate_feature_doc()`, or `validate_feature_index()`: that path refuses any plan lacking an indexed `docs/features/*.md` doc, and most of the ~130 historical plans never had one, so reusing it would silently refuse the entire backlog. Tier 1 gates purely on issue/PR state, not on feature-doc presence. It uses `git mv` for history preservation; report mode prints `(plan, evidence, action)` rows.
 - **Tier 4 is outside the repo diff.** Acceptance is executed-command proof (directory listing + README content), per the issue's executable-criteria mandate.
@@ -147,7 +152,8 @@ PR merges → merge-site invariant runs (Tier 0) → plan leaves root determinis
 ## Test Impact
 
 - [ ] `tests/unit/test_migrate_completed_plan.py` — UPDATE: if the canonical behavior changes from delete→move, its assertions around `delete_plan()`/`unlink()` must flip to assert a `git mv` into `completed/`, and add the failure-preserves-plan case. If PM chooses to keep delete-semantics, add tests asserting the single authoritative behavior instead.
-- [ ] New test file (CREATE): `tests/unit/test_plan_migration_invariant.py` (or integration equivalent) — the Tier 0 regression test asserting a merged PR's plan does not remain in `docs/plans/` root, covering the manual-`gh pr merge` path, AND a static-invocation assertion that the chosen enforcement file still contains a call to `migrate_completed_plan` (guards against prose-only regression, per Risk 1).
+- [ ] New test file (CREATE): `tests/unit/test_plan_migration_invariant.py` (or integration equivalent) — the Tier 0 regression test asserting a merged PR's plan does not remain in `docs/plans/` root, AND a static-invocation assertion `assert "migrate_completed_plan" in Path("scripts/post_merge_cleanup.py").read_text()` (guards against prose-only regression, per Risk 1). Also assert Layer 1 runs migration BEFORE the #1357 `blocked_by_session` early-return (a busy-worktree fixture still migrates).
+- [ ] New test coverage (CREATE) for `reconcile_leaked_plans()` (the shared Layer 2 / Tier 1 function): closed-issue plan → migrated, open-issue plan → skipped, no-reference → human-review list, already-migrated (source absent) → idempotent success, and the `plan-migration-reconciler` entry is present and well-formed in `config/reflections.yaml`.
 - [ ] New test (CREATE) for the Tier 1 sweep script covering: closed-issue → migrate, open-issue → skip, no-reference → human-review list, `git mv` failure → plan preserved, and **a fixture plan with no `## Documentation` / indexed feature doc still migrates on closed-issue evidence** (guards against accidentally routing Tier 1 through `main()`/`validate_feature_doc()`).
 
 No other existing tests reference the plans-root layout or the moved docs (grep of `tests/` for the duplicated filenames and presentation paths returned no production-test hits).
@@ -195,7 +201,12 @@ All other operations are synchronous, single-process file-system and `git`/`gh` 
 
 ## Update System
 
-The Tier 0 enforcement mechanism ships inside the repo (hook, script, and/or skill-addendum edits) and propagates via the normal repo sync — `/update` needs no special step **if** enforcement lives in a hook or an existing script. **Conditional:** if the chosen mechanism is a new standing reflection (option C backstop) requiring a launchd job, add its install to the reflection-worker wiring and note it here; the plan's recommendation is a merge-site invariant precisely to avoid a new scheduled job. Vault writes (Tier 4) are one-time and outside the update system. Confirm at build time which enforcement site was chosen and update this section to the concrete answer.
+The Tier 0 mechanism has two enforcement sites, both propagating via the normal repo sync with **no new launchd job**:
+
+- **Layer 1** edits `scripts/post_merge_cleanup.py` and `scripts/migrate_completed_plan.py` — plain repo files, synced by `/update` with no special step.
+- **Layer 2** adds one `plan-migration-reconciler` entry to the reflections registry. The registry resolves in order `REFLECTIONS_YAML env → ~/Desktop/Valor/reflections.yaml → config/reflections.yaml` (`agent/reflection_scheduler.py`), and `install_worker.sh` copies the active registry to `config/reflections.yaml` at install time. Add the entry to **`config/reflections.yaml`** (the in-repo source of truth) AND propagate it to the vault copy `~/Desktop/Valor/reflections.yaml` on worker machines that use it, or the entry is invisible there. The already-installed `com.valor.reflection-worker` subprocess (`python -m reflections`) runs it on its next cycle — **no new launchd plist**; reload the worker (`./scripts/install_reflection_worker.sh`) to pick it up immediately. Add a task to `scripts/update/` docs only if a machine needs the vault-copy propagation automated; the in-repo fallback already covers dev machines.
+
+Vault writes (Tier 4) are one-time and outside the update system.
 
 ## Agent Integration
 
@@ -203,24 +214,24 @@ No agent integration required. No new MCP server, `.mcp.json` entry, or bridge i
 
 ## Documentation
 
-### Feature Documentation
-- [ ] Create `docs/features/plan-migration-invariant.md` describing the single authoritative after-merge plan-migration behavior, which merge paths it covers, and the regression test that guards it.
-- [ ] Add entry to `docs/features/README.md` index table (also required so this very plan can migrate cleanly at its own merge — the Tier 0 mechanism is dogfooded on `stale-docs-tiered-cleanup.md`).
+### Feature Documentation (PR 1)
+- [ ] Create `docs/features/plan-migration-invariant.md` describing the two-layer after-merge plan-migration behavior (Layer 1 merge-site in `post_merge_cleanup.py`, Layer 2 `plan-migration-reconciler` reflection), which merge paths each layer covers, the evidence-gate on issue state, and the regression + static-invocation tests that guard it.
+- [ ] Add entry to `docs/features/README.md` index table.
 
-### Repo Docs Cascade (Tier 0 contradiction resolution)
-- [ ] Resolve `docs/sdlc/do-merge.md` "Plan Migration" section and `.claude/skills-global/do-build/PR_AND_CLEANUP.md` Steps 8 to ONE documented behavior; remove the `_handle_merge_completion()` reference (function does not exist) or replace it with the real after-merge mechanism.
-- [ ] Record the `docs/guides/` (evergreen how-to) vs `docs/research/` (dated investigation) placement rule in `docs/README.md` (Tier 2).
-- [ ] Run `/do-docs` cascade so no inbound link points at a moved/deleted doc.
+### Repo Docs Cascade
+- [ ] (PR 1) Resolve `docs/sdlc/do-merge.md` "Plan Migration" section and `.claude/skills-global/do-build/PR_AND_CLEANUP.md` Steps 8 to ONE documented behavior; remove the `_handle_merge_completion()` reference (function does not exist) or replace it with the real two-layer mechanism.
+- [ ] (PR 2) Record the `docs/guides/` (evergreen how-to) vs `docs/research/` (dated investigation) placement rule in `docs/README.md` (Tier 2).
+- [ ] (PR 1 and PR 2) Run `/do-docs` cascade so no inbound link points at a moved/deleted doc.
 
-### Knowledge Base
-- [ ] Create `~/work-vault/AI Valor Engels System/README.md` with a complete file index (Tier 4); link it from `~/work-vault/_index.md`.
+### Knowledge Base (PR 2)
+- [ ] Create `~/work-vault/AI Valor Engels System/README.md` indexing the files **directly inside that one directory** — one line per file/subfolder with a short description, following the KB-section convention (`docs/conventions/knowledge-base-section.md`). "Complete" means every current entry in `AI Valor Engels System/` is listed; it is **not** a recursive index of the whole vault, and it is **not** the vault-root `_index.md` (which only links to it). Link it from `~/work-vault/_index.md`.
 
 ## Success Criteria
 
-- [ ] Tier 0: the skipping merge paths are named in the PR; one authoritative enforcement mechanism ships covering manual `gh pr merge` as well as `/do-merge`; a test fails if a merged PR's plan remains in `docs/plans/` root.
+- [ ] Tier 0: the skipping merge paths are named in the PR; two enforcement layers ship over one authoritative module — Layer 1 (`post_merge_cleanup.py`) for `/do-merge` and Claude-Code-mediated merges, Layer 2 (`plan-migration-reconciler` reflection) covering the raw-terminal `gh pr merge` that fires no hook; a test fails if a merged PR's plan remains in `docs/plans/` root, and a static-invocation assertion confirms `post_merge_cleanup.py` still calls `migrate_completed_plan`.
 - [ ] Tier 0: the delete-vs-migrate contradiction across `migrate_completed_plan.py`, `PR_AND_CLEANUP.md`, and `docs/sdlc/do-merge.md` is resolved to one documented behavior and cascaded by `/do-docs`.
 - [ ] Tier 1: after merge, zero files in `docs/plans/` root reference a CLOSED issue or MERGED PR (re-run the tier-1 script in report mode to verify); the evidence report is attached to the PR.
-- [ ] Tier 2: exactly one copy of each of the three duplicated docs exists (`git grep <filename>` returns a single path under `docs/`); the guides-vs-research rule is recorded in `docs/README.md`.
+- [ ] Tier 2: exactly one copy of each of the three duplicated docs exists — a **filename** search excluding plan docs returns a single path (`git ls-files -- 'docs/**/<name>.md' ':(exclude)docs/plans/**' | wc -l` == 1; a content grep is unreliable here because the canonical docs do not contain their own slug string, so only plan-doc references would match); the guides-vs-research rule is recorded in `docs/README.md`.
 - [ ] Tier 3: `docs/presentations/`, the listed one-off reports, and resolved stragglers are gone; `du -sh docs` drops by at least 5MB; GEMINI.md and CHANGELOG.md each have an explicit recorded decision in the PR.
 - [ ] Size reclaim recorded explicitly: capture `du -sh docs` **before** and **after** the Tier 3/4 sweep and paste both totals in the PR (correctness Tiers 0/1 reclaim zero bytes by design — only Tier 3/4 shrink the tree).
 - [ ] Tier 4: moved files exist in the vault, each binary has a `valor-ingest` `.md` sidecar, `~/work-vault/AI Valor Engels System/README.md` exists with a complete index, and vault root `_index.md` links it; PR includes the proof artifact (listing + README content).
@@ -234,12 +245,17 @@ The lead agent orchestrates; it never builds directly. Tier 0 (mechanism + test)
 
 ### Delivery: two PRs
 
-Tier 0 (the pipeline-invariant bugfix + regression test) and Tiers 1–4 (the one-time docs janitorial sweep) share **no code, test, or review surface**. The task graph already gates every Tier 1–4 task on `build-tier0-mechanism`, which proves they need Tier 0 *landed*, not *co-reviewed*. Ship as two PRs:
+Tier 0 (the pipeline-invariant bugfix + regression test) and Tiers 1–4 (the one-time docs janitorial sweep) share **no code, test, or review surface**. The split is enforced in the task DAG (see Step by Step Tasks: tasks carry an explicit **PR:** tag, and every PR-2 task depends on the sentinel `pr1-merged` gate, not merely on `build-tier0-mechanism`). Ship as two PRs on **separate branches**:
 
-1. **PR 1 — Tier 0 alone.** Small, ships fast, stops the leak. Contains `migrate_completed_plan.py` changes, the enforcement-site wiring, the regression + static-invocation tests, and the doc-contradiction resolution. Merging this PR is itself the first exercise of the new invariant (dogfood).
-2. **PR 2 — Tiers 1–4 one-time sweep.** Depends on PR 1 being merged; its Prerequisites reference PR 1's merged issue so the sweep runs against a fixed pipeline. Contains the Tier 1 sweep script + report, the Tier 2 de-dup, Tier 3 deletions, and Tier 4 vault relocation + indexes.
+1. **PR 1 — Tier 0 alone** (`type: bug`). Small, ships fast, stops the leak. Contains `migrate_completed_plan.py` changes (including the shared `reconcile_leaked_plans()` function), the Layer 1 wiring in `post_merge_cleanup.py`, the Layer 2 `plan-migration-reconciler` reflection entry, the regression + static-invocation tests, the feature doc, and the doc-contradiction resolution.
+2. **PR 2 — Tiers 1–4 one-time sweep** (`type: chore`). Branched from `main` **after PR 1 merges** (so it inherits the fixed pipeline and the `reconcile_leaked_plans()` function it calls). Contains the Tier 1 dry-run-first invocation + report, the Tier 2 de-dup, Tier 3 deletions, and Tier 4 vault relocation + indexes.
 
-No shared code, test, or review surface is lost by splitting; the split shortens PR 1's review and lets the leak-stop land independently of the janitorial churn.
+**Plan-doc migration timing (avoids the git resurrection / rename conflict).** Both PRs carry `docs/plans/stale-docs-tiered-cleanup.md` in root. The Tier 0 invariant is **evidence-gated on the tracking issue being CLOSED**, and issue #1900 stays OPEN until PR 2 merges with `Closes #1900`. Therefore:
+- Merging **PR 1** does NOT migrate this plan doc (issue #1900 still open → the evidence gate correctly skips it). The file stays in root on `main`, identical to what PR 2's branch carries — no divergence, no resurrection, no rename conflict.
+- The backstop reconciler running between the two merges also skips this plan (issue still open).
+- Only **PR 2's** merge (which closes #1900) makes this plan eligible; PR 2's own Layer 1 merge-site step migrates `stale-docs-tiered-cleanup.md` → `completed/`. Because PR 2 is the last to merge, nothing resurrects it.
+
+The invariant is therefore dogfooded by its own evidence-gate logic (correctly declining to migrate an open-issue plan), and demonstrated by the regression test (red→green) — **not** by moving this plan's doc mid-flight at PR 1's merge.
 
 ### Team Members
 
@@ -280,8 +296,13 @@ Standard Tier 1 agents (builder, validator, documentarian). No specialist pool.
 
 ## Step by Step Tasks
 
-### 1. Confirm Tier 0 root cause and decide canonical behavior
+The DAG is partitioned into two PRs. Every **PR 2** task depends on the `pr1-merged` sentinel gate (PR 1 merged to `main`), not merely on `build-tier0-mechanism` — Tiers 1–4 need Tier 0 *landed and merged*, so they call the shipped `reconcile_leaked_plans()` and branch from a `main` that already carries the fixed pipeline.
+
+#### PR 1 — Tier 0 (branch `session/stale-docs-tier0`)
+
+##### 1. Ship the Tier 0 path-independent invariant
 - **Task ID**: build-tier0-mechanism
+- **PR**: 1
 - **Depends On**: none
 - **Validates**: tests/unit/test_plan_migration_invariant.py (create), tests/unit/test_migrate_completed_plan.py (update)
 - **Assigned To**: tier0-builder
@@ -289,28 +310,51 @@ Standard Tier 1 agents (builder, validator, documentarian). No specialist pool.
 - **Parallel**: false
 - Confirm which merge paths skip migration (manual `gh pr merge`, forked `/do-sdlc`, cross-machine, PR-review merges).
 - Decide delete-vs-move with PM; make `migrate_completed_plan.py` the single authoritative mechanism (recommend `git mv` into `completed/`).
-- Anchor the invariant path-independently (merge-guard choke point and/or `post_merge_cleanup.py`); do NOT use the nonexistent `_handle_merge_completion()`.
-- Write the regression test that fails when a merged PR's plan stays in root, and add the static-invocation assertion that the chosen enforcement file still calls `migrate_completed_plan` (guards against a future prose-only "fix" silently dropping the call, per #1394).
+- Wire **Layer 1**: call migration at the top of `scripts/post_merge_cleanup.py::main()`, BEFORE `cleanup_after_merge()` and the #1357 `blocked_by_session` early-return. Do NOT use the nonexistent `_handle_merge_completion()`.
+- Add **Layer 2**: a `reconcile_leaked_plans()` function in `scripts/migrate_completed_plan.py` (evidence-gated sweep + rebase-retry push) and a `plan-migration-reconciler` entry in `config/reflections.yaml`.
+- Write the regression test that fails when a merged PR's plan stays in root, and add the static-invocation assertion that `scripts/post_merge_cleanup.py` still calls `migrate_completed_plan` (guards against a future prose-only "fix" silently dropping the call, per #1394).
 
-### 2. Validate Tier 0
+##### 2. Validate Tier 0
 - **Task ID**: validate-tier0
+- **PR**: 1
 - **Depends On**: build-tier0-mechanism
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Confirm the test fails on a deliberately-leaked plan (red-state) and passes after the fix.
 
-### 3. Tier 1 evidence-gated sweep
-- **Task ID**: build-tier1-sweep
+##### 3. Tier 0 feature doc + contradiction resolution
+- **Task ID**: document-tier0
+- **PR**: 1
 - **Depends On**: build-tier0-mechanism
+- **Assigned To**: docs-cascade
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Create `docs/features/plan-migration-invariant.md` + `docs/features/README.md` entry describing both enforcement layers.
+- Resolve the `do-merge.md` / `PR_AND_CLEANUP.md` delete-vs-move contradiction wording; remove the `_handle_merge_completion()` reference. Run `/do-docs` for the Tier 0 surface.
+
+##### GATE: PR 1 merged
+- **Task ID**: pr1-merged
+- **PR**: 1→2 boundary
+- **Depends On**: validate-tier0, document-tier0
+- **Assigned To**: (lead — human/PM confirms PR 1 merged and #1900 still OPEN)
+- Sentinel: PR 1 is merged to `main`; issue #1900 remains open (PR 1 does not close it). PR 2 branches from `main` at this point.
+
+#### PR 2 — Tiers 1–4 one-time sweep (branch `session/stale-docs-tiers1234`, cut after `pr1-merged`)
+
+##### 4. Tier 1 evidence-gated sweep
+- **Task ID**: build-tier1-sweep
+- **PR**: 2
+- **Depends On**: pr1-merged
 - **Assigned To**: tier1-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Dry-run-first script: extract references, query `gh`, `git mv` closed/merged plans, route unresolvable to a human-review list, emit `(plan, evidence, action)` report.
+- Invoke the shipped `reconcile_leaked_plans()` in dry-run/report mode first; review the `(plan, evidence, action)` report; then run the destructive pass. Route unresolvable plans to a human-review list in the PR body.
 
-### 4. Tier 2/3/4 docs reorganization
+##### 5. Tier 2/3/4 docs reorganization
 - **Task ID**: build-docs-reorg
-- **Depends On**: build-tier0-mechanism
+- **PR**: 2
+- **Depends On**: pr1-merged
 - **Assigned To**: docs-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -318,21 +362,23 @@ Standard Tier 1 agents (builder, validator, documentarian). No specialist pool.
 - Tier 3: delete one-off decks/reports; surface GEMINI.md/CHANGELOG.md decisions.
 - Tier 4: `git mv`/move business+vendor docs to vault; `valor-ingest` each binary; capture executed-command proof.
 
-### 5. Documentation cascade + indexes
-- **Task ID**: document-feature
-- **Depends On**: build-tier0-mechanism, build-docs-reorg
+##### 6. Tier 2/3/4 documentation cascade + indexes
+- **Task ID**: document-tiers234
+- **PR**: 2
+- **Depends On**: build-docs-reorg
 - **Assigned To**: docs-cascade
 - **Agent Type**: documentarian
 - **Parallel**: false
-- Resolve the do-merge/PR_AND_CLEANUP contradiction wording; record guides-vs-research rule in `docs/README.md`; create `docs/features/plan-migration-invariant.md` + README entry; create vault README and link from `_index.md`; run `/do-docs`.
+- Record the guides-vs-research placement rule in `docs/README.md`; create the vault README and link from `_index.md`; run `/do-docs` so no inbound link points at a moved/deleted doc.
 
-### 6. Final validation
+##### 7. Final validation
 - **Task ID**: validate-all
-- **Depends On**: validate-tier0, build-tier1-sweep, build-docs-reorg, document-feature
+- **PR**: 2
+- **Depends On**: build-tier1-sweep, build-docs-reorg, document-tiers234
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify every Success Criterion, including `du -sh docs` delta, single-copy `git grep`, executed Tier 4 proof, and a clean docs cascade.
+- Verify every Success Criterion, including `du -sh docs` before/after delta, the filename-based single-copy `git ls-files` checks, executed Tier 4 proof, and a clean docs cascade.
 
 ## Verification
 
@@ -341,24 +387,33 @@ Standard Tier 1 agents (builder, validator, documentarian). No specialist pool.
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Tier 2: swot single copy | `git grep -l claude-code-feature-swot -- docs/ \| grep -v completed \| wc -l` | output contains 1 |
-| Tier 2: sdk-req single copy | `git grep -l agent-sdk-replacement-requirements -- docs/ \| grep -v completed \| wc -l` | output contains 1 |
-| Tier 2: ruflo single copy | `git grep -l ruflo-deep-dive -- docs/ \| grep -v completed \| wc -l` | output contains 1 |
+| Tier 2: swot single copy | `git ls-files -- 'docs/**/claude-code-feature-swot.md' ':(exclude)docs/plans/**' \| wc -l` | output is 1 |
+| Tier 2: sdk-req single copy | `git ls-files -- 'docs/**/agent-sdk-replacement-requirements.md' ':(exclude)docs/plans/**' \| wc -l` | output is 1 |
+| Tier 2: ruflo single copy | `git ls-files -- 'docs/**/ruflo-deep-dive.md' ':(exclude)docs/plans/**' \| wc -l` | output is 1 |
 | Tier 3: presentations gone | `test -d docs/presentations; echo $?` | output contains 1 |
 | Tier 3: GEMINI decided (gone) | `test -e GEMINI.md; echo $?` | output contains 1 |
 | Tier 4: vendor PDF out of repo | `test -e docs/media/anthropic-skills-guide.pdf; echo $?` | output contains 1 |
 | Tier 4: vault README exists | `test -f "$HOME/work-vault/AI Valor Engels System/README.md"; echo $?` | output contains 0 |
 | Tier 0: migration invariant test present | `ls tests/unit/test_plan_migration_invariant.py tests/integration/test_plan_migration_invariant.py 2>/dev/null \| wc -l` | output > 0 |
 | Tier 0: no phantom handler reference | `grep -rn "_handle_merge_completion" docs/sdlc/do-merge.md .claude/skills-global/do-build/PR_AND_CLEANUP.md` | match count == 0 |
-| Tier 0: enforcement site statically invokes migration | `grep -q "migrate_completed_plan" <chosen_enforcement_file>; echo $?` | output contains 0 |
+| Tier 0: primary merge-site statically invokes migration | `grep -q "migrate_completed_plan" scripts/post_merge_cleanup.py; echo $?` | output contains 0 |
+| Tier 0: backstop reconciler is registered | `grep -q "plan-migration-reconciler" config/reflections.yaml; echo $?` | output contains 0 |
+| Tier 0: backstop callable exists in authoritative module | `grep -q "def reconcile_leaked_plans" scripts/migrate_completed_plan.py; echo $?` | output contains 0 |
 | No history-rewrite tooling | `git grep -rn "filter-branch\|filter-repo" -- scripts/ .claude/` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room), 2026-07-05. Verdict: NEEDS REVISION (1 blocker, 6 concerns). -->
-<!-- Revision applied 2026-07-05: all 1 blocker + 6 concerns addressed — see Resolution column. -->
+<!-- Round 1 (/do-plan-critique war room, 2026-07-05): NEEDS REVISION (1 blocker, 6 concerns) — addressed below. -->
+<!-- Round 2 (re-critique, 2026-07-05): NEEDS REVISION (2 blockers, 1 concern, 1 nit) — addressed in "Round 2 resolution" below. -->
 
-**Revision resolution (all findings addressed):**
+**Round 2 resolution (this revision — 2 blockers + 1 concern + 1 nit addressed):**
+
+- **BLOCKER 1 (self-defeating Tier 2 single-copy grep):** The `git grep -l <name> -- docs/ | grep -v completed` rows counted the wrong thing — the canonical `docs/guides|research/*.md` files do NOT contain their own slug string, so a content grep matches only plan-doc *references*, never the doc files. Replaced all three Verification rows and the Tier 2 Success Criterion with a **filename** search: `git ls-files -- 'docs/**/<name>.md' ':(exclude)docs/plans/**' | wc -l` (== 1 after dedup; empirically returns 2 today, 1 after removing one duplicate). Immune to the plan doc's own references.
+- **BLOCKER 2 (undefined enforcement site):** MADE the decision (was Open Question #2). No single hook covers a human's raw-terminal `gh pr merge` (fires no Claude Code hook, calls no cleanup script), and the merge-guard hook is pre-merge. Chose **two layers over one authoritative module** (`scripts/migrate_completed_plan.py`): Layer 1 = merge-site migration in `scripts/post_merge_cleanup.py::main()`, before the #1357 `blocked_by_session` early-return; Layer 2 = a `plan-migration-reconciler` reflection (`config/reflections.yaml`, callable `reconcile_leaked_plans()`) as the path-independent backstop. The `<chosen_enforcement_file>` placeholder in the Verification table is replaced by the real path `scripts/post_merge_cleanup.py`, plus two new rows asserting the reconciler is registered and its callable exists. Documented in Technical Approach, the Data Flow decision block, Update System, and Open Questions.
+- **CONCERN (two-PR split prose-only, shared plan-doc conflict):** The split is now enforced in the task DAG — every PR-2 task depends on a `pr1-merged` sentinel gate, tasks carry a **PR:** tag, and PR 2 branches from `main` after PR 1 merges. The git resurrection/rename risk is resolved by the evidence gate: issue #1900 stays OPEN until PR 2 closes it, so PR 1's merge does not migrate this plan doc (gate correctly skips an open-issue plan); only PR 2's merge (last to land) migrates it. Removed the false "dogfood at PR 1 merge" framing.
+- **NIT (Tier 4 vault README scope):** Clarified in the Documentation → Knowledge Base bullet — the README indexes only the files directly inside `~/work-vault/AI Valor Engels System/` (one line each, per the KB-section convention), not a recursive whole-vault index and not the vault-root `_index.md`.
+
+**Round 1 resolution (all findings addressed):**
 
 - **BLOCKER (self-defeating grep):** Verification row rescoped to `grep -rn "_handle_merge_completion" docs/sdlc/do-merge.md .claude/skills-global/do-build/PR_AND_CLEANUP.md` (no longer matches this plan's own copy under `docs/plans/`); added a companion static-invocation Verification row.
 - **C1 (feature-doc gate):** Technical Approach now mandates `from scripts.migrate_completed_plan import extract_tracking_issue` ONLY — never `main()`/`validate_feature_doc()`/`validate_feature_index()`; Test Impact adds a no-`## Documentation` fixture that still migrates on closed-issue evidence.
@@ -383,6 +438,7 @@ Standard Tier 1 agents (builder, validator, documentarian). No specialist pool.
 ## Open Questions
 
 1. **Canonical migration behavior:** delete the plan (git history as archive) or move to `docs/plans/completed/`? Recommendation: move — but this contradicts `migrate_completed_plan.py`'s current `unlink()`. Confirm before build changes the script.
-2. **Enforcement site:** merge-guard hook (covers every path, but pre-merge), `post_merge_cleanup.py` (after-merge, but only on paths that call it), or a reconciler backstop? Prefer a merge-site invariant; is a reconciler acceptable as belt-and-suspenders?
-3. **Prune `docs/plans/completed/`?** It holds 138 files (5.4MB). Keep as archive (default) or prune, given git history already preserves content?
-4. **GEMINI.md and CHANGELOG.md:** delete both, or is either still in use? (GEMINI.md is [EXTERNAL] — needs a human answer.)
+2. **Prune `docs/plans/completed/`?** It holds 138 files (5.4MB). Keep as archive (default) or prune, given git history already preserves content?
+3. **GEMINI.md and CHANGELOG.md:** delete both, or is either still in use? (GEMINI.md is [EXTERNAL] — needs a human answer.)
+
+**RESOLVED this revision (was Open Question #2 — enforcement site):** Two-layer enforcement over one authoritative module — Layer 1 merge-site migration in `scripts/post_merge_cleanup.py` (runs before the #1357 guard) for Claude-Code-mediated merges, plus Layer 2 `plan-migration-reconciler` reflection as the path-independent backstop for the raw-terminal `gh pr merge` that fires no hook. The merge-guard hook is rejected as a sole mechanism (pre-merge, and absent entirely for raw-terminal merges). See Technical Approach and the Data Flow decision block.
