@@ -22,6 +22,15 @@ Documentation for the Valor AI System - a unified conversational development env
 tail -f logs/bridge.log
 ```
 
+## Doc Placement: guides/ vs research/
+
+Each doc topic has exactly one canonical file. Place it by kind:
+
+- `docs/guides/` — evergreen how-to material that stays current with the system (setup, references, standards).
+- `docs/research/` — dated investigations: point-in-time analyses, evaluations, and deep dives, each stamped with its date.
+
+A doc lives in exactly one of the two — never both.
+
 ## Documentation Index
 
 ### Core Architecture
