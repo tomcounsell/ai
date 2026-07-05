@@ -181,15 +181,18 @@ open on internal error** (exits 0 with stderr warning) so a broken
 validator cannot block all commits.
 
 Every invocation appends one JSON line to
-`logs/validate_design_system_sync.jsonl`:
+`logs/validate_design_system_sync.jsonl`, anchored to the repo root
+(derived from the hook file's own location, not the invoking process's
+cwd) so a session working from any directory always lands the log in
+the same place instead of scattering stray `logs/` husks:
 
 ```json
 {"ts": "...", "tool_name": "Bash", "matched": true, "result": "ok", "duration_ms": 42, "reason": null, "error": null}
 ```
 
 Operators can `tail -f logs/validate_design_system_sync.jsonl | jq 'select(.result=="error")'`
-to detect silently-broken hooks post-hoc. This is the observability
-surface that closes the fail-open gap.
+(from the repo root) to detect silently-broken hooks post-hoc. This is
+the observability surface that closes the fail-open gap.
 
 ### `validate_design_system_readonly.py` (Write|Edit matcher)
 
