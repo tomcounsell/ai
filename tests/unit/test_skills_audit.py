@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from audit_skills import (  # noqa: E402
     audit_skill,
     discover_skills,
     parse_frontmatter,
+    prune_husk_directories,
     rule_01_line_count,
     rule_02_frontmatter_exists,
     rule_03_name_field,
@@ -38,6 +41,7 @@ from audit_skills import (  # noqa: E402
     rule_11_known_fields,
     rule_12_argument_hint,
     rule_13_coupling_signals,
+    rule_19_husk_directories,
 )
 from sync_best_practices import (  # noqa: E402
     compare_fields,
@@ -603,3 +607,233 @@ class TestRule13CouplingSignals:
         )
         exit_code = audit_mod.main()
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Rule 19: husk directories (issue #1902)
+# ---------------------------------------------------------------------------
+
+
+class TestRule19HuskDirectories:
+    def test_empty_husk_fails_with_empty_message(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "empty-husk"
+        husk.mkdir(parents=True)
+        pycache = husk / "__pycache__"
+        pycache.mkdir()
+        (pycache / "mod.cpython-311.pyc").write_text("compiled")
+        (husk / ".DS_Store").write_text("mac metadata")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.severity == "FAIL"
+        assert f.rule == 19
+        assert "(empty)" in f.message
+
+    def test_real_content_husk_fails_with_contains_message(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "orphan-husk"
+        husk.mkdir(parents=True)
+        (husk / "notes.md").write_text("orphaned content")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert len(findings) == 1
+        f = findings[0]
+        assert f.severity == "FAIL"
+        assert "(contains:" in f.message
+        assert "notes.md" in f.message
+
+    def test_dir_with_skill_md_is_not_a_husk(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        valid = skills_dir / "real-skill"
+        valid.mkdir(parents=True)
+        (valid / "SKILL.md").write_text("---\nname: real-skill\n---\n")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert findings == []
+
+    def test_underscore_prefixed_dir_is_exempt(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        shared = skills_dir / "_shared"
+        shared.mkdir(parents=True)
+        (shared / "helper.py").write_text("# shared helper, no SKILL.md here")
+
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert findings == []
+
+    def test_nonexistent_skills_dir_returns_empty_list(self, tmp_path):
+        missing = tmp_path / "does-not-exist"
+
+        findings = rule_19_husk_directories(missing, "global")
+
+        assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# prune_husk_directories: rule 19 auto-fix companion (issue #1902)
+# ---------------------------------------------------------------------------
+
+
+class TestPruneHuskDirectories:
+    def test_empty_husk_is_removed_and_reported(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "empty-husk"
+        husk.mkdir(parents=True)
+        (husk / "__pycache__").mkdir()
+        (husk / "__pycache__" / "mod.cpython-311.pyc").write_text("compiled")
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert not husk.exists()
+        assert len(removed) == 1
+        assert "empty-husk" in removed[0]
+
+    def test_husk_containing_orphaned_file_is_preserved_and_not_reported(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "orphan-husk"
+        husk.mkdir(parents=True)
+        (husk / "notes.md").write_text("orphaned content")
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert husk.exists()
+        assert (husk / "notes.md").exists()
+        assert removed == []
+
+    def test_dir_with_skill_md_is_left_untouched(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        valid = skills_dir / "real-skill"
+        valid.mkdir(parents=True)
+        (valid / "SKILL.md").write_text("---\nname: real-skill\n---\n")
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert valid.exists()
+        assert (valid / "SKILL.md").exists()
+        assert removed == []
+
+    def test_underscore_prefixed_dir_is_left_untouched(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        shared = skills_dir / "_shared"
+        shared.mkdir(parents=True)
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert shared.exists()
+        assert removed == []
+
+    def test_oserror_on_one_husk_does_not_abort_sweep(self, tmp_path, monkeypatch):
+        skills_dir = tmp_path / "skills"
+        bad_husk = skills_dir / "bad-husk"
+        good_husk = skills_dir / "good-husk"
+        bad_husk.mkdir(parents=True)
+        good_husk.mkdir(parents=True)
+        (bad_husk / "__pycache__").mkdir()
+        (good_husk / "__pycache__").mkdir()
+
+        real_rmtree = shutil.rmtree
+
+        def flaky_rmtree(path, *args, **kwargs):
+            if Path(path).name == "bad-husk":
+                raise OSError("simulated permission failure")
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(shutil, "rmtree", flaky_rmtree)
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert bad_husk.exists()  # failed delete leaves the dir behind
+        assert not good_husk.exists()  # sweep continues past the failure
+        assert len(removed) == 1
+        assert "good-husk" in removed[0]
+
+    def test_warns_with_resolved_absolute_path_before_delete(self, tmp_path, caplog):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "log-husk"
+        husk.mkdir(parents=True)
+        (husk / "__pycache__").mkdir()
+        resolved_path = str(husk.resolve())
+
+        with caplog.at_level(logging.WARNING, logger="audit_skills"):
+            removed = prune_husk_directories(skills_dir, "global")
+
+        assert len(removed) == 1
+        assert not husk.exists()
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(resolved_path in message for message in messages)
+
+    def test_toctou_guard_skips_dir_that_gained_a_file(self, tmp_path, monkeypatch):
+        """A husk that looked empty at the initial scan but gained a real file
+        before the immediate pre-delete re-check must NOT be removed."""
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "toctou-husk"
+        husk.mkdir(parents=True)
+
+        real_is_empty_husk = audit_mod._is_empty_husk
+        call_count = {"n": 0}
+
+        def fake_is_empty_husk(d):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Simulate a file landing in the directory between the
+                # initial scan and the TOCTOU re-check immediately before
+                # the delete.
+                (d / "late_arrival.txt").write_text("real content, not a husk")
+                return True
+            return real_is_empty_husk(d)
+
+        monkeypatch.setattr(audit_mod, "_is_empty_husk", fake_is_empty_husk)
+
+        removed = prune_husk_directories(skills_dir, "global")
+
+        assert call_count["n"] == 2
+        assert removed == []
+        assert husk.exists()
+        assert (husk / "late_arrival.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# Prune-then-detect gating: the safety guarantee named in the plan
+# (issue #1902) — a --fix run must never silently delete real orphans.
+# ---------------------------------------------------------------------------
+
+
+class TestPruneDetectGating:
+    def test_prune_junk_only_husk_removed_no_fail(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "junk-only-husk"
+        husk.mkdir(parents=True)
+        (husk / "__pycache__").mkdir()
+        (husk / "__pycache__" / "mod.cpython-311.pyc").write_text("compiled")
+        (husk / ".DS_Store").write_text("mac metadata")
+
+        # Simulate the --fix prune-then-detect order: prune first, then
+        # re-run rule 19 detection on whatever remains.
+        removed = prune_husk_directories(skills_dir, "global")
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert len(removed) == 1
+        assert not husk.exists()
+        assert findings == []  # nothing left to FAIL on
+
+    def test_prune_real_content_husk_preserved_and_fails(self, tmp_path):
+        skills_dir = tmp_path / "skills"
+        husk = skills_dir / "real-content-husk"
+        husk.mkdir(parents=True)
+        (husk / "orphaned_notes.md").write_text("real orphaned content")
+
+        # Same prune-then-detect sequence as a --fix run.
+        removed = prune_husk_directories(skills_dir, "global")
+        findings = rule_19_husk_directories(skills_dir, "global")
+
+        assert removed == []
+        assert husk.exists()
+        assert (husk / "orphaned_notes.md").exists()
+        assert len(findings) == 1
+        assert findings[0].severity == "FAIL"
+        assert "real-content-husk" in findings[0].skill
