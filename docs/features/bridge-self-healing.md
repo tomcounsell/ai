@@ -709,7 +709,7 @@ and evaluated regardless of heartbeat freshness.
 |----------|---------|---------|---------|
 | `SDK_PROGRESS_FRESHNESS_WINDOW` | 1800s (30 min) | `SDK_PROGRESS_FRESHNESS_WINDOW_SECS` | Sub-check A freshness window for `last_tool_use_at` / `last_turn_at` (issue #1226) |
 | `MAX_NO_OUTPUT_REPRIEVES` | 20 | — (derived) | Tier-2 reprieve cap for `sdk_ever_output=False` sessions; also feeds `NO_OUTPUT_BUDGET_SECONDS` (issues #1226 / #1356) |
-| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. No longer consulted by sub-check B (its grace-to-budget band was removed in issue #1905, subsumed by the D0 gate); still used by the #1614 own-progress heartbeat gate and the Tier-2 reprieve cap |
+| `NO_OUTPUT_BUDGET_SECONDS` | 1800s (30 min) | — (derived) | `MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW`. Outside sub-check B's scope (its grace-to-budget band was pruned in issue #1905, subsumed by the D0 gate); still used by the #1614 own-progress heartbeat gate and the Tier-2 reprieve cap |
 | `STARTUP_GRACE_SECONDS` | 300s (= `AGENT_SESSION_HEALTH_MIN_RUNNING`) | `STARTUP_GRACE_SECONDS` | Below this `running_seconds`, sub-check B's fresh-heartbeat fast-path is unconditional for D0-gate survivors (issue #1356, gate added by #1724) |
 | `COMPACT_REPRIEVE_WINDOW_SEC` | 600s | `COMPACT_REPRIEVE_WINDOW_SECS` | Tier 2 `compacting` reprieve window — `last_compaction_ts` within this window reprieves the kill (issue #1099 Mode 3) |
 
