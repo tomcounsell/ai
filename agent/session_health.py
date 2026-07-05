@@ -370,11 +370,11 @@ STARTUP_GRACE_SECONDS = int(
 # keeping the relationship symmetric.
 #
 # No longer consulted by ``_has_progress`` sub-check B (its grace-to-budget
-# band and ``no_output_budget_exceeded`` counter were removed in issue #1905
-# — subsumed by the D0 never-started gate, issue #1724). The constant remains
-# live via two other consumers: the #1614 own-progress heartbeat gate
-# (``_hb_age < NO_OUTPUT_BUDGET_SECONDS``, below in this module) and the
-# Tier-2 reprieve cap (``MAX_NO_OUTPUT_REPRIEVES``).
+# band and no-output budget-exceeded telemetry counter were removed in issue
+# #1905 — subsumed by the D0 never-started gate, issue #1724). The constant
+# remains live via two other consumers: the #1614 own-progress heartbeat
+# freshness gate (further down in this module) and the Tier-2 reprieve cap
+# (``MAX_NO_OUTPUT_REPRIEVES``).
 #
 # Not env-tunable directly because the underlying constants are.
 NO_OUTPUT_BUDGET_SECONDS = MAX_NO_OUTPUT_REPRIEVES * HEARTBEAT_FRESHNESS_WINDOW  # 1800
