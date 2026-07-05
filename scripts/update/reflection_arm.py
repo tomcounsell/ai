@@ -104,7 +104,7 @@ def _this_machine_owns_valor(project_dir: Path) -> bool:
     return owner.strip().lower() == machine.strip().lower()
 
 
-def _flip_enabled(path: Path) -> bool:
+def _flip_enabled(path: Path) -> str:
     """Set enabled: true on REFLECTION_NAME's entry in the YAML at ``path``.
 
     Line-scoped text edit, never a YAML re-serialize: the vault registry is
@@ -115,16 +115,22 @@ def _flip_enabled(path: Path) -> bool:
     (temp file + ``os.replace``) so a crash or iCloud sync race never leaves
     a truncated registry.
 
-    Returns True iff the file was rewritten (entry existed and was not
-    already enabled). Never raises -- any read failure is treated as
-    "nothing to flip" so a malformed file can't crash the update run.
+    Returns a verdict, never raises. The caller must only stamp the one-shot
+    marker on "flipped"/"already-enabled" -- "not-found" and "io-error" must
+    stay retryable on the next /update (PR #1903 validation defect: stamping
+    on a failed flip permanently bricked arming while reporting noop).
+
+      "flipped"          -- file rewritten, entry now enabled: true
+      "already-enabled"  -- entry present and already true
+      "not-found"        -- file or entry absent
+      "io-error"         -- read or atomic-write failure
     """
     if not path.exists():
-        return False
+        return "not-found"
     try:
         text = path.read_text()
     except Exception:
-        return False
+        return "io-error"
 
     lines = text.splitlines(keepends=True)
     name_re = re.compile(r"^(\s*)(-\s+)?name:\s*" + re.escape(REFLECTION_NAME) + r"\s*(#.*)?$")
@@ -136,7 +142,7 @@ def _flip_enabled(path: Path) -> bool:
             name_idx = i
             break
     if name_idx is None:
-        return False
+        return "not-found"
 
     # The entry's `name:` key is not necessarily on the dash line (YAML key
     # order is free). Anchor on the name line's indent, then walk back to the
@@ -171,7 +177,7 @@ def _flip_enabled(path: Path) -> bool:
         m = enabled_re.match(lines[j].rstrip("\n"))
         if m:
             if m.group(3).lower() in ("true", "yes", "on"):
-                return False
+                return "already-enabled"
             lines[j] = f"{m.group(1)}{m.group(2) or ''}enabled: true{m.group(4) or ''}\n"
             break
     else:
@@ -183,8 +189,8 @@ def _flip_enabled(path: Path) -> bool:
         os.replace(tmp, path)
     except Exception:
         tmp.unlink(missing_ok=True)
-        return False
-    return True
+        return "io-error"
+    return "flipped"
 
 
 def _write_arm_marker(marker: Path) -> None:
@@ -219,13 +225,27 @@ def arm_merged_branch_cleanup(project_dir: Path) -> ArmResult:
         )
 
     try:
-        vault_changed = _flip_enabled(vault_path)
-        repo_changed = _flip_enabled(project_dir / "config" / "reflections.yaml")
+        vault_verdict = _flip_enabled(vault_path)
+        # The repo copy is best-effort: it is clobbered from the vault on the
+        # next /update anyway, and may legitimately be absent on a fresh
+        # checkout. The vault verdict alone decides success and the marker.
+        repo_verdict = _flip_enabled(project_dir / "config" / "reflections.yaml")
     except Exception as e:  # pragma: no cover - defensive
         return ArmResult(False, "error", f"failed to flip enabled: {e}")
 
+    if vault_verdict not in ("flipped", "already-enabled"):
+        # No marker: a missing entry or an I/O failure must stay retryable on
+        # the next /update, and must never be reported as "already enabled"
+        # (PR #1903 validation: the old bool return conflated these with noop
+        # and the unconditional marker bricked all future arm attempts).
+        return ArmResult(
+            False,
+            "error",
+            f"vault flip failed ({vault_verdict}) at {vault_path}; will retry next /update",
+        )
+
     _write_arm_marker(marker)
-    if not (vault_changed or repo_changed):
+    if vault_verdict == "already-enabled" and repo_verdict != "flipped":
         return ArmResult(True, "noop", f"{REFLECTION_NAME} already enabled")
 
     reload_script = project_dir / "scripts" / "install_reflection_worker.sh"

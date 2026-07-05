@@ -210,3 +210,54 @@ def test_noop_also_stamps_marker(mock_machine, tmp_path, monkeypatch):
 
     assert result.action == "noop"
     assert (project_dir / "data" / "reflection-armed-merged-branch-cleanup").exists()
+
+
+@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+def test_missing_vault_entry_is_retryable_error(mock_machine, tmp_path, monkeypatch):
+    """A vault file without the merged-branch-cleanup entry must NOT be
+    reported as noop and must NOT stamp the marker -- once a human adds the
+    entry, the next /update must still be able to arm it (PR #1903
+    validation defect: the bool return conflated not-found with noop and the
+    unconditional marker bricked arming forever)."""
+    vault_path, project_dir = _setup(
+        tmp_path,
+        reflections={"reflections": [{"name": "other-reflection", "enabled": True}]},
+        repo_reflections=REFLECTIONS_DISABLED,
+    )
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = arm_merged_branch_cleanup(project_dir)
+
+    assert result.success is False
+    assert result.action == "error"
+    assert "not-found" in result.detail
+    assert not (project_dir / "data" / "reflection-armed-merged-branch-cleanup").exists()
+
+    # Human adds the entry -> the retry arms normally.
+    vault_path.write_text(yaml.safe_dump(REFLECTIONS_DISABLED))
+    with patch("scripts.update.reflection_arm.subprocess.run"):
+        retry = arm_merged_branch_cleanup(project_dir)
+    assert retry.action == "armed"
+    assert _states(vault_path)["merged-branch-cleanup"] is True
+
+
+@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+def test_write_failure_is_retryable_error(mock_machine, tmp_path, monkeypatch):
+    """An atomic-write failure (read-only dir, disk full, sync lock) must
+    surface as an error without the marker, never as a silent noop."""
+    import os as _os
+
+    vault_path, project_dir = _setup(tmp_path, repo_reflections=REFLECTIONS_DISABLED)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+    vault_path.parent.chmod(0o555)  # temp file creation fails
+    try:
+        result = arm_merged_branch_cleanup(project_dir)
+    finally:
+        vault_path.parent.chmod(0o755)
+
+    assert result.success is False
+    assert result.action == "error"
+    assert "io-error" in result.detail
+    assert not (project_dir / "data" / "reflection-armed-merged-branch-cleanup").exists()
+    assert _states(vault_path)["merged-branch-cleanup"] is False
+    assert _os.path.exists(vault_path)  # original file untouched
