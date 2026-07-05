@@ -59,6 +59,16 @@ The `embedding-orphan-sweep` reflection (registered in `config/reflections.yaml`
 
 For one-shot reconciliation against an existing backlog, run `python scripts/embedding_orphan_reconcile.py --dry-run` to preview, then `--apply` to act. The script enforces a positive-assertion safety check (refuses to apply if the to-delete set intersects expected-keep) and a pre-flight regression guard (refuses to apply if `$Class:Memory` is empty — defense-in-depth against the data-destruction bug that motivated this feature). `python -m tools.memory_search status --deep --json` reports both `orphan_index_count` (Redis-side, pre-existing) and `disk_orphan_count` (disk-side, new) so the two surfaces can be checked independently.
 
+### Embedding Degradation (persist without vector)
+
+The provider-not-configured degradation above covers the case where Ollama is absent at startup. A subtler case is when the provider **is** configured but the embed call fails mid-save — a read timeout under concurrent load, or a transient unreachable. In that window `EmbeddingField.on_save` (which runs inside popoto's `Model.save` field loop, before the record's main `hset` commits) raised, so the exception aborted the whole save and the record — content, BM25 index, relevance — was lost, not merely left without a vector (issue #1904).
+
+`Memory.embedding` uses `GracefulEmbeddingField` (`models/graceful_embedding_field.py`), an `EmbeddingField` subclass whose `on_save` catches provider/write failures (`RuntimeError`, `ValueError`, `OSError`) and returns the pipeline unchanged. The already-queued main `hset` then commits normally, so the record persists with `embedding = None` — the queryable "no vector" marker. Recall still serves it via the other three RRF signals (BM25, relevance, confidence). The swap is storage-identical to `EmbeddingField`, so no migration is needed.
+
+Degradation is observable without flooding the logs: a module-level throttle emits at most one `Embedding degraded …` warning per 60s window, while a counter increments on every degraded save. The count is surfaced in the `memory-embedding-backfill` reflection summary.
+
+The `memory-embedding-backfill` reflection (`reflections/memory/memory_embedding_backfill.py`, registered in `config/reflections.yaml` / vault `reflections.yaml`) heals degraded records. It runs daily, finds active records with a falsy `embedding`, and — when the provider is healthy again (`OllamaEmbeddingProvider().is_available()`) — re-embeds them so they regain the fourth (semantic-similarity) signal. It defaults to dry-run; set `MEMORY_EMBEDDING_BACKFILL_APPLY=true` to enable re-embedding. Each run caps at 500 re-embeds so a long-outage backlog does not re-saturate Ollama the moment it recovers. Re-embed is a **partial** save — `memory.save(update_fields=["embedding"])` — so only the embedding index is rewritten; a bare `memory.save()` would re-run the `relevance` `DecayingSortedField` (`auto_now=True`) and re-stamp it to "now", silently un-decaying stale memories. It emits the `memory.embedding_backfill_reembedded` metric.
+
 ## Data Flows
 
 ### Flow 1: Human Message Ingestion
