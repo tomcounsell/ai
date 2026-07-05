@@ -1,7 +1,6 @@
 ---
 name: skillify
-description: "Capture this session's repeatable process into a reusable skill. Call at end of a process you want to automate."
-when_to_use: "Use when the user wants to capture, save, or turn a session workflow into a reusable skill. Examples: '/skillify', 'capture this as a skill', 'turn this into a skill', 'save this workflow', 'make this repeatable'"
+description: "Capture this session's repeatable process into a reusable skill. Triggered by '/skillify', 'capture this as a skill', 'turn this into a skill', 'save this workflow', 'make this repeatable'."
 allowed-tools:
   - Read
   - Write
@@ -13,8 +12,6 @@ allowed-tools:
 user-invocable: true
 disable-model-invocation: true
 argument-hint: "[description of the process you want to capture]"
-arguments:
-  - description
 ---
 
 # Skillify
@@ -25,7 +22,7 @@ You are capturing this session's repeatable process as a reusable skill.
 
 You have the full conversation history available to you. Analyze it directly to understand what process was performed, what tools were used, and how the user steered you.
 
-If a description was provided: The user described this process as: "$description"
+If a description was provided: The user described this process as: "$ARGUMENTS"
 
 ## Your Task
 
@@ -37,9 +34,7 @@ Before asking any questions, analyze the conversation history to identify:
 - The distinct steps (in order)
 - The success artifacts/criteria (e.g. not just "writing code," but "an open PR with CI fully passing") for each step
 - Where the user corrected or steered you
-- What tools and permissions were needed
-- What agents were used
-- What the goals and success artifacts were
+- What tools, permissions, and agents were used
 
 ### Step 2: Interview the User
 
@@ -84,59 +79,7 @@ Stop interviewing once you have enough information. IMPORTANT: Don't over-ask fo
 
 Create the skill directory and file at the location the user chose in Round 2.
 
-Use this format:
-
-```markdown
----
-name: {{skill-name}}
-description: {{one-line description}}
-allowed-tools:
-  {{list of tool permission patterns observed during session}}
-when_to_use: {{detailed description of when Claude should automatically invoke this skill, including trigger phrases and example user messages}}
-argument-hint: "{{hint showing argument placeholders}}"
-arguments:
-  {{list of argument names}}
-context: {{inline or fork -- omit for inline}}
----
-
-# {{Skill Title}}
-Description of skill
-
-## Inputs
-- `$arg_name`: Description of this input
-
-## Goal
-Clearly stated goal for this workflow. Best if you have clearly defined artifacts or criteria for completion.
-
-## Steps
-
-### 1. Step Name
-What to do in this step. Be specific and actionable. Include commands when appropriate.
-
-**Success criteria**: ALWAYS include this! This shows that the step is done and we can move on. Can be a list.
-
-IMPORTANT: see the next section below for the per-step annotations you can optionally include for each step.
-
-...
-```
-
-**Per-step annotations**:
-- **Success criteria** is REQUIRED on every step. This helps the model understand what the user expects from their workflow, and when it should have the confidence to move on.
-- **Execution**: `Direct` (default), `Task agent` (straightforward subagents), `Teammate` (agent with true parallelism and inter-agent communication), or `[human]` (user does it). Only needs specifying if not Direct.
-- **Artifacts**: Data this step produces that later steps need (e.g., PR number, commit SHA). Only include if later steps depend on it.
-- **Human checkpoint**: When to pause and ask the user before proceeding. Include for irreversible actions (merging, sending messages), error judgment (merge conflicts), or output review.
-- **Rules**: Hard rules for the workflow. User corrections during the reference session can be especially useful here.
-
-**Step structure tips:**
-- Steps that can run concurrently use sub-numbers: 3a, 3b
-- Steps requiring the user to act get `[human]` in the title
-- Keep simple skills simple -- a 2-step skill doesn't need annotations on every step
-
-**Frontmatter rules:**
-- `allowed-tools`: Minimum permissions needed (use patterns like `Bash(gh:*)` not `Bash`)
-- `context`: Only set `context: fork` for self-contained skills that don't need mid-process user input.
-- `when_to_use` is CRITICAL -- tells the model when to auto-invoke. Start with "Use when..." and include trigger phrases. Example: "Use when the user wants to cherry-pick a PR to a release branch. Examples: 'cherry-pick to release', 'CP this PR', 'hotfix'."
-- `arguments` and `argument-hint`: Only include if the skill takes parameters. Use `$name` in the body for substitution.
+Read [../new-skill/WORKFLOW_TEMPLATE.md](../new-skill/WORKFLOW_TEMPLATE.md) — the `new-skill` skill is installed alongside this one and owns the canonical templates. Follow its skeleton, per-step annotations, and frontmatter rules exactly. In `allowed-tools`, list the tool permission patterns you observed being used during the session.
 
 ### Step 4: Confirm and Save
 

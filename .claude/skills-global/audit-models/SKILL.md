@@ -1,31 +1,27 @@
 ---
 name: audit-models
-description: "Audit Popoto Redis models for relationship gaps, missing fields, naming inconsistencies, and architectural weaknesses. Use when reviewing data model health, checking model integrity, validating Redis models, scanning for data model issues, or reviewing the data layer with the architect."
+description: "Audit Popoto Redis models for gaps and naming drift. Use when reviewing data model health or the data layer, checking model integrity, validating Redis models, or scanning for model issues."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # Model Audit
 
-Introspects `models/*.py` to surface structural weaknesses in the Popoto data layer. Designed for human-in-the-loop review sessions with the architect (Tom).
+**Goal:** surface structural weaknesses in the data-model layer — relationship gaps, missing fields, naming drift, implicit coupling — by extracting every model's fields, types, and keys from `models/*.py` and running the six checks below. Findings only, grouped by severity; never auto-fix. Designed for human-in-the-loop review with the project architect.
 
-## What this skill does
+## Repo Context Probe
 
-1. Scan all model files in `models/` and extract class definitions, fields, types, and keys
-2. Run heuristic checks against the config below
-3. Output a structured findings report organized by severity
-4. Pause for discussion — do NOT auto-fix anything
+If `.claude/skill-context/audit-models.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
+
+The context file is where a repo declares its ORM, its universal fields (fields every model must carry), its exempt models, and its legacy field terms. When absent, the generic defaults listed under each check apply.
 
 ## Audit Checks
 
 ### 1. Missing Universal Fields
 
-Fields declared as universal should appear on every model (or have an explicit exemption).
+Fields declared as universal should appear on every model (or have an explicit exemption). The repo's context file declares the universal-field list and the exempt models.
 
-**Universal fields:**
-- `project_key` (KeyField) — every model that stores project-scoped data
-
-**Exempt models:** ReflectionIgnore (global config, not project-scoped)
+**Generic default (no context file):** treat any field present on most models (~75%+) as a candidate universal field, and flag the models missing it for discussion rather than as hard failures.
 
 ### 2. Orphan Models
 
@@ -37,7 +33,7 @@ Models with no foreign key reference to or from any other model. A model is "con
 
 Flag when:
 - The same concept uses different field names across models (e.g. `session_id` vs `agent_session_id` for the same thing)
-- Field names contain legacy/deprecated terms (configurable: `job`, `redis`, `log`)
+- Field names contain legacy/deprecated terms (the context file declares the repo's list; none by default)
 - A field name is ambiguous without its model context (e.g. `id` fields that don't clarify what they identify)
 
 ### 4. Implicit Proxy Relationships
@@ -58,7 +54,7 @@ When two models share a field name, their types and key kinds should match (e.g.
 
 Read every file in `models/` (excluding `__init__.py`). For each model class:
 
-1. Extract: class name, all fields with their types and popoto field kinds (KeyField, Field, SortedField, etc.)
+1. Extract: class name, all fields with their types and key kinds (for Popoto: KeyField, Field, SortedField, etc. — adapt to the repo's ORM)
 2. Build a cross-model field matrix
 3. Run each check above
 4. Present findings grouped by severity:
@@ -92,5 +88,5 @@ Read every file in `models/` (excluding `__init__.py`). For each model class:
 
 This skill produces findings only. Next steps are decided by the human:
 - Create a GitHub issue for actionable findings
-- Update the config in this skill if exemptions are justified
+- Update the repo's context file (`.claude/skill-context/audit-models.md`) if exemptions are justified
 - Use `/sdlc` to plan and execute fixes

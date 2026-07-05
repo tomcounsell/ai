@@ -1,6 +1,6 @@
 ---
 name: do-plan-critique
-description: "Use when reviewing a plan before build. Runs 1 (LITE) or 3 (FULL) critics selected by a triage step plus automated structural checks. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
+description: "Use when reviewing a plan before build. Triggered by 'critique this plan', 'review the plan', 'war room', or 'do-plan-critique'."
 argument-hint: "<plan-path-or-issue-number>"
 context: fork
 ---
@@ -20,14 +20,6 @@ Critiques a plan document from a frozen roster of expert perspectives (1 (LITE) 
 ## When to load sub-files
 
 - Spawning war room critics → read [CRITICS.md](CRITICS.md) for critic definitions and prompt templates
-
-## Quick start
-
-1. Resolve the plan path from `$ARGUMENTS` (issue number or file path)
-2. Read the plan and fetch linked issue/prior art context
-3. Run automated structural checks (Step 2)
-4. Freeze the critic roster manifest (Step 3a), then dispatch the frozen roster of critics — each writes a result file (Step 3)
-5. Gate on the roster membership check before aggregating, then aggregate and output the report (Steps 3.5-5)
 
 ## Plan Resolution
 
@@ -114,8 +106,7 @@ Run these checks directly — no LLM needed:
 Verify the plan's required sections exist and are non-empty. The context file
 declares which sections this repo mandates; absent a declaration, verify the
 plan's own structure is internally complete (problem, solution, tasks,
-verification). For reference, this repo mandates `## Documentation`,
-`## Update System`, `## Agent Integration`, and `## Test Impact`.
+verification).
 
 **2b. Task Integrity**
 - Check for gaps in task numbering (e.g., 1, 2, 4 — missing 3)
@@ -184,7 +175,7 @@ Set `CRITIQUE_DEPTH` to `LITE` or `FULL` based on the result.
 
 (Skip this step if RESUMED=1 — the surviving run already defines the roster.)
 
-Before dispatching ANY critic, fix the expected critic roster. This is the
+Before dispatching ANY critic, freeze the expected critic roster. This is the
 membership set the Step 3.5 completion check verifies — completion cannot be
 satisfied by dispatching fewer critics than the roster lists.
 
@@ -212,11 +203,11 @@ Dispatch the roster's critics (on a fresh run, all roster members; on a resume, 
 
 Each critic is a general-purpose Agent with a focused prompt. Use `model: "sonnet"` for each critic — fast enough for 0-3 findings, saves cost.
 
-**Generic completion model:** dispatch the critics in the **foreground** and wait for each to return its findings before aggregating. Each critic returns **0-3 findings** (or the literal `No findings.`).
+**Generic completion model:** dispatch the critics in the **foreground** and wait for each to return its findings before aggregating.
 
-**If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file (atomic `.tmp`→rename) ending in a two-line terminal completion fence, and completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's exact write convention and pass each critic its run-dir path and `{critic_name}`. That barrier is the robust form for an environment where the agent driver may return early from a background dispatch; the generic foreground-and-wait model above is sufficient when the driver reliably blocks.
+**If the context file declares a result-file roster barrier**, each critic instead writes its findings to a per-critic result file — atomically: write to `{critic_name}.result.md.tmp`, then rename to `{critic_name}.result.md` — ending in the two-line terminal completion fence `<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED` (the exact convention CRITICS.md embeds in every critic prompt). Completion is observed on the filesystem — independent of whether the driver awaited the agents. Follow the context file's run-dir layout and pass each critic its run-dir path and `{critic_name}`. The barrier is the robust form when the agent driver may return early from a background dispatch; foreground-and-wait suffices when the driver reliably blocks.
 
-Each critic returns **0-3 findings** in this format:
+Each critic returns **0-3 findings** (or the literal `No findings.`) in this format:
 
 ```
 SEVERITY: BLOCKER | CONCERN | NIT
@@ -248,58 +239,40 @@ gate decision (`{"complete": bool, "missing": [...], ...}`) and exiting non-zero
 until complete. This filesystem membership check holds whether or not the driver
 awaited the agents.
 
-**Bounded re-dispatch.** Define:
+**Bounded re-dispatch.** `MAX_CRITIC_REDISPATCH = 2`. The total attempt budget
+is pinned: **1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts
+maximum per critic** — never an unbounded retry loop. Every re-dispatch is
+**foreground** (never `run_in_background: true` — a background re-dispatch
+re-introduces exactly the fire-and-forget assumption this check replaces).
 
-```
-MAX_CRITIC_REDISPATCH = 2
-```
-
-If the roster is incomplete, re-dispatch ONLY the missing critics and re-check.
-Repeat up to `MAX_CRITIC_REDISPATCH` rounds. The total attempt budget is pinned:
-**1 initial dispatch (Step 3) + up to 2 re-dispatches = 3 attempts maximum per
-critic.** There is **NO unbounded retry loop** — the cap is named and fixed.
-
-> **CRITICAL — re-dispatch is FOREGROUND.** The re-dispatch block must NEVER contain `run_in_background: true`. A background re-dispatch re-introduces exactly the fire-and-forget assumption this check replaces.
-
-**STOP-grade verdict on a still-incomplete roster.** If the roster is **STILL
-incomplete after `MAX_CRITIC_REDISPATCH` rounds**, do NOT aggregate and do NOT
+**STOP-grade verdict on a still-incomplete roster.** If the roster is still
+incomplete after `MAX_CRITIC_REDISPATCH` rounds, do NOT aggregate and do NOT
 loop further. Jump to **Step 5.5** and record the verdict string:
 
 ```
 MAJOR REWORK (CRITIQUE INCOMPLETE: roster N/M — missing: {names})
 ```
 
-Substitute `N` = completed count, `M` = roster count, `{names}` = the critic
-names that never reported. The `MAJOR REWORK` substring routes back to `/do-plan`
-(in a repo with an SDLC router its guard **G1** consumes it) — the human sees
-exactly which critics never reported. The stage **ALWAYS produces a verdict**; it
-never returns empty. Then set the plan-revising lock per **Step 5.6** (a
-`CRITIQUE INCOMPLETE` verdict is revision-grade).
-
-**Invariants (must hold on every path):**
-
-- **Never aggregate a partial set.** Step 4 runs only after the roster is complete.
-- **Never record an empty verdict.** Every exit path records a concrete verdict string in Step 5.5.
-- **The incomplete-roster STOP is a recorded `MAJOR REWORK` verdict, not a silent exit.**
+(`N` = completed count, `M` = roster count, `{names}` = the critics that never
+reported.) The `MAJOR REWORK` substring routes back to `/do-plan` (in a repo
+with an SDLC router its guard **G1** consumes it). The stage **ALWAYS produces
+a verdict** — never a silent or empty exit. Then set the plan-revising lock per
+**Step 5.6** (a `CRITIQUE INCOMPLETE` verdict is revision-grade).
 
 **Run-dir cleanup gating (barrier only).** If the context file's barrier created
-a per-run directory, clean it up **ONLY on the complete path**. On the
+a per-run directory, clean it up **ONLY on the `complete: true` path**. On the
 incomplete / `CRITIQUE INCOMPLETE` path, **PRESERVE** it for forensics — the
 partial/missing result files are the diagnostic evidence of which critics never
 reported.
 
 ### Step 4: Aggregate and Deduplicate
 
-The Step 3.5 check has confirmed every roster member completed. Now aggregate
-their findings.
-
-**Aggregation invariant (mandatory): iterate every roster member fixed in Step 3a
-and read each one's findings.** Name and account for EVERY roster member — do NOT
-aggregate only "whatever happened to come back" and do NOT silently skip a member.
-A missing member at this point is a **visible gap** (Step 3.5 should already have
-caught it), never a member silently dropped from aggregation. (When the barrier is
-active, iterate the frozen `_roster.json` manifest and read each `{name}.result.md`
-rather than globbing whatever files exist.)
+**Aggregation invariant: iterate every roster member fixed in Step 3a and read
+each one's findings** — never just "whatever happened to come back". A missing
+member at this point is a visible gap (Step 3.5 should have caught it), never a
+member silently dropped. (When the barrier is active, iterate the frozen
+`_roster.json` manifest and read each `{name}.result.md` rather than globbing
+whatever files exist.)
 
 1. Collect all findings (structural + critic), accounting for every roster member fixed in Step 3a
 2. **Deduplicate**: If two critics flagged the same issue, keep the higher-severity version and note which critics agreed
@@ -370,7 +343,7 @@ Output the final report in this format:
 
 ### Step 5.5: Finalize — record the verdict (mandatory, self-contained)
 
-This step is **mandatory and reached on EVERY exit path** — every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK) must pass through it. There is no path out of this skill that skips Step 5.5. Do not return control to a supervisor before completing it.
+This step is **mandatory and reached on EVERY exit path** — every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK) passes through it. Do not return control to a supervisor before completing it.
 
 **Generic case:** the verdict printed in Step 5 IS the recorded output — the caller reads it from your response. Nothing further to do.
 
@@ -425,12 +398,3 @@ Use **"READY TO BUILD (no concerns)"** when there are zero CONCERN or BLOCKER fi
 - **Does not expand scope** — critics flag gaps, they don't suggest features
 - **Does not re-architect** — validates internal consistency, not whether a different approach is better
 - **Does not block on NITs** — only BLOCKERs prevent a READY TO BUILD verdict
-
-## Version history
-
-- v1.5.0 (2026-06-16): Triage-first LITE/FULL routing (1 consolidated vs 3 merged critics), crash-resume via critique-resume-probe, first-pass Implementation Note requirement (no re-run loop) (#1714)
-- v1.4.0 (2026-06-16): Replace fire-and-forget `run_in_background` critic spawn + prose await with an artifact-based roster barrier: each critic atomically writes a result file ending in a two-line terminal fence (`<<<CRITIQUE-RESULT-COMPLETE>>>` then `STATUS: COMPLETED`); synthesis gates on a filesystem membership check against a frozen roster manifest, run before aggregation; incomplete roster after a bounded re-dispatch cap records `MAJOR REWORK (CRITIQUE INCOMPLETE)` (#1690)
-- v1.3.0 (2026-06-13): Add explicit Step 3.5 "Wait and Collect" barrier (block on all six background critics before aggregating); make Step 5.5 a mandatory, self-contained verdict-record + completion-marker block reached on every exit path; reinforce the Stage Marker note so the verdict and marker cannot desync (#1654)
-- v1.2.0 (2026-04-07): Fix Step 5 Verdict template to show both READY TO BUILD variants so critics output the correct form for SDLC routing
-- v1.1.0 (2026-03-23): Add SOURCE_FILES inline context to prevent critic hallucination (Step 1.5)
-- v1.0.0 (2026-03-21): Initial — war room critique with six parallel critics + structural checks

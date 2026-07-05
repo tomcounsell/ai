@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Prime - Codebase Onboarding
 
-Get up to speed on the Valor AI system to add new features effectively.
+Get oriented in the Valor AI system well enough to add features effectively.
 
 ## What This Is
 
@@ -17,73 +17,62 @@ This is **Valor** - an AI coworker that runs on its own Mac. Not an assistant, n
 ## Current Architecture
 
 ```
-Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
+Telegram → Bridge (Telethon) → Redis AgentSession queue (bridge is I/O only)
+Standalone Worker (python -m worker) → sole session execution engine → Claude Agent SDK / granite PTY
+Reflection scheduler (python -m reflections) → own launchd subprocess; enqueues recurring work the worker executes
 ```
 
 **Key components:**
-- **Python Bridge** (`bridge/telegram_bridge.py`): Handles Telegram user account via Telethon
-- **Claude Agent SDK** (`agent/sdk_client.py`): AI orchestration, calls Claude API
-- **MCP Servers** (`.mcp.json`): Modular capabilities (Sentry, Notion, etc.); GitHub via `gh` CLI
-- **Identity Config** (`config/identity.json`): Structured identity data + persona segments
+- **Bridge** (`bridge/telegram_bridge.py`): Telegram user account via Telethon; enqueues sessions and routes output (nudge loop) — no SDLC awareness
+- **Worker** (`worker/__main__.py`): executes AgentSessions via the Claude Agent SDK (`agent/sdk_client.py`)
+- **MCP Servers** (`.mcp.json`): modular capabilities (memory, BYOB, Sentry, Notion); GitHub via `gh` CLI
+- **Identity** (`config/identity.json` + `config/personas/segments/`): structured identity data and composable persona segments
 
 ## Directory Layout
 
 ```
 ai/                          # This repo
-├── .claude/skills/          # Project-specific skills
-├── .claude/skills-global/   # Cross-repo shared skills (/prime, /pthread, /sdlc)
-├── agent/                   # Claude Agent SDK integration
+├── .claude/skills/          # Project-only skills (/prime, /setup, /sdlc, /update, /do-deploy)
+├── .claude/skills-global/   # Global skills — hardlinked to ~/.claude/skills/ on every machine by /update
+├── agent/                   # Session queue, SDK client, output routing
 ├── bridge/                  # Telegram bridge
-├── config/identity.json      # Structured identity data
-├── config/personas/segments/ # Composable prompt segments
+├── worker/                  # Standalone worker service (python -m worker)
+├── reflections/             # Out-of-process reflection scheduler (python -m reflections)
+├── tools/                   # Local Python tools (valor-* CLIs)
+├── config/                  # identity.json, personas/segments/, reflections.yaml
 ├── scripts/valor-service.sh # Service management
-├── docs/                    # Documentation
+├── docs/features/           # Feature index — how things actually work
 └── CLAUDE.md                # Development guide (READ THIS)
 ```
 
 ## Read These Files
 
 **In order:**
-1. `CLAUDE.md` - Development principles, commands, architecture
+1. `CLAUDE.md` - development principles, commands, architecture
 2. `config/personas/segments/` - Valor's identity, work patterns, and tools
+3. `docs/features/README.md` - feature index, when you need how-something-works detail
 
 ## How to Add Features
 
-### New Claude Code Skill
+Create `.claude/skills-global/<name>/SKILL.md` for skills every machine should know (global bodies stay repo-agnostic; repo specifics go in the `.claude/skill-context/` seam), or `.claude/skills/<name>/SKILL.md` for project-only skills. See "Global vs. Project-Only Skills" in `CLAUDE.md`.
 
-Create `.claude/skills-global/<name>/SKILL.md` for cross-repo skills, or `.claude/skills/<name>/SKILL.md` for project-specific ones.
-
-### Permission Model
-
-| Pattern | Behavior | Use For |
-|---------|----------|---------|
-| `accept` | Auto-approve | Read ops (list, get) |
-| `prompt` | Ask user | Write ops (create, update) |
-| `reject` | Block | Dangerous ops (delete) |
+New Python tools are invisible to the agent until wired into a CLI entry point (`pyproject.toml [project.scripts]`) or imported by the bridge directly.
 
 ## Service Management
 
 ```bash
 ./scripts/valor-service.sh status   # Check if running
-./scripts/valor-service.sh restart  # Restart after changes
+./scripts/valor-service.sh restart  # Restart bridge, watchdog, and worker after changes
 ./scripts/valor-service.sh logs     # View logs
 ```
 
 ## Key Principles
 
-1. **Always commit and push** - Never leave work uncommitted
-2. **No legacy code** - Delete obsolete code completely
-3. **Critical thinking** - Question assumptions, validate decisions
+1. **Always commit and push** - never leave work uncommitted
+2. **No legacy code** - delete obsolete code completely
+3. **Critical thinking** - question assumptions, validate decisions
 4. **Self-improving** - Valor can modify his own code and restart
-
-## Thread Types (for complex work)
-
-| Type | Use Case |
-|------|----------|
-| Base | Single task |
-| P-Thread | Parallel independent work |
-| C-Thread | Chained phases with checkpoints |
-| L-Thread | Extended autonomous work |
+5. **Parallelize independent work** - spawn parallel subagents for independent tasks; never for sequential/dependent work
 
 ## Quick Actions
 
@@ -91,6 +80,7 @@ Create `.claude/skills-global/<name>/SKILL.md` for cross-repo skills, or `.claud
 ```bash
 ./scripts/valor-service.sh status
 tail -20 logs/bridge.error.log
+curl -s localhost:8500/dashboard.json   # full system state as JSON
 ```
 
 **After making changes:**

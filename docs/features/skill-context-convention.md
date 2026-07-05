@@ -67,8 +67,9 @@ Some skills are too tightly coupled to this repo's infrastructure to generalize 
 | `setup` | Configures this repo's specific bridge, launchd plists, and vault paths |
 | `prime` | Onboards developers into this repo's exact architecture |
 | `sdlc` | SDLC router tightly coupled to this repo's stage model and pipeline state |
-| `do-sdlc` | Full pipeline supervisor referencing this repo's session and queue infrastructure |
 | `do-deploy` | Deploys to this repo's specific bridge machines |
+
+`do-sdlc` stays in `.claude/skills-global/` deliberately: it drives the pipeline entirely through `sdlc-tool` (synced to `~/.local/bin` on every machine), `gh`, `git`, and the global `do-*` stage skills — it never invokes the project-only `/sdlc` router skill. Its probe seam is `docs/sdlc/do-sdlc.md`.
 
 Skills in `.claude/skills/` are never synced. Moving a skill from `skills-global/` to `skills/` requires a `RENAMED_REMOVALS` entry in `scripts/update/hardlinks.py` so the stale hardlink is cleaned up on every machine.
 

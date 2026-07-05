@@ -1,6 +1,6 @@
 ---
 name: do-voice-recording
-description: "Turn text into a spoken-audio file (OGG/Opus) from any project or directory. The canonical text-to-speech step — other skills (/do-presentation, /do-debrief) defer to this for synthesis. Use when asked to 'record a voiceover', 'narrate this', 'speak this', 'read this aloud', 'say this', 'make an audio/voice clip', or 'text to speech', e.g. recording narration after building a presentation."
+description: "Turn text into spoken audio (OGG/Opus). Use when asked to 'record a voiceover', 'narrate this', 'speak this', 'read this aloud', 'say this', 'make an audio/voice clip', or 'text to speech'."
 argument-hint: "<text> [--output <path.ogg>] [--voice <name>] [--force-cloud]"
 allowed-tools: Bash, Read
 user-invocable: true

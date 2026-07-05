@@ -1,12 +1,12 @@
 ---
 name: do-sdlc
-description: "Use when supervising a full SDLC pipeline run in a local Claude Code session. Loops the /sdlc router — dispatching each stage to a subagent on the stage-appropriate model (opus/sonnet) — until merge, a blocking guard, or the iteration cap. Triggered by 'do-sdlc', 'run the full pipeline', 'ship this issue end to end', 'supervise the sdlc'."
+description: "Supervise a full SDLC pipeline run to merge in a local Claude Code session. Triggered by 'do-sdlc', 'run the full pipeline', 'ship this issue end to end', 'supervise the sdlc'."
 context: fork
 ---
 
 # do-sdlc — Local Pipeline Supervisor
 
-This skill is the **local stand-in for the bridge PM session**. `/sdlc` is a single-stage router by contract: it dispatches ONE sub-skill and returns, expecting a PM session to re-invoke it. In a local Claude Code session there is no PM loop — this skill IS that loop.
+This skill is the **local stand-in for the bridge PM session**. `/sdlc` is a single-stage router by contract: it dispatches ONE sub-skill and returns, expecting a PM session to re-invoke it. In a local Claude Code session there is no PM loop — this skill IS that loop: it re-invokes the router, dispatching each stage to a subagent on the stage-appropriate model (opus/sonnet), until merge, a blocking guard, or the iteration cap.
 
 You are the supervisor, not the worker. You assess, dispatch, and track. The stage subagents do all the work.
 

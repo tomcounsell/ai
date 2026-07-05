@@ -1,20 +1,13 @@
 ---
 name: do-oop-audit
-description: "Audit Python classes and OOP code for structural anti-patterns, naming inconsistencies, and data modeling issues. Use when reviewing class design, checking model health, validating object boundaries, or after refactoring. Also triggered by 'check my classes', 'review the data model', 'are there OOP problems', 'scan for design issues', 'lint class structure', 'audit models', 'validate OOP', or 'review object hierarchy'."
+description: "Audit Python classes for OOP and data-modeling anti-patterns. Use when reviewing class design, boundaries, or hierarchy, or 'check my classes', 'lint class structure', 'scan for design issues'."
 allowed-tools: Read, Grep, Glob, Bash
 disable-model-invocation: true
 ---
 
 # OOP / Data Modeling Audit
 
-Scans Python class definitions for 14 structural anti-patterns covering field semantics, object boundaries, inheritance design, naming consistency, and coupling. Framework-agnostic: works with Django, SQLAlchemy, Pydantic, dataclasses, and vanilla Python. Produces a severity-grouped findings report and pauses for human review.
-
-## What this skill does
-
-1. Scans the target path for all `.py` files containing class definitions
-2. Runs 14 semantic checks against each class and its relationships
-3. Produces a structured findings report organized by severity (CRITICAL, WARNING, INFO)
-4. Pauses for discussion — no auto-fix, findings only
+**Goal:** surface structural weaknesses in Python class design — field semantics, object boundaries, inheritance, naming consistency, coupling — by running the 14 checks below against every class in the target path and reporting findings grouped by severity. Framework-agnostic: Django, SQLAlchemy, Pydantic, dataclasses, and vanilla Python. Findings only — the skill never modifies source files and pauses for human review. Also the right skill for requests like "review the data model", "are there OOP problems", or a class-design review after refactoring.
 
 ## Invocation
 
@@ -143,64 +136,15 @@ Present findings using this structure. Adapt the content to actual findings.
 PASS: N  WARN: N  FAIL: N
 ```
 
-### Example: E-commerce models
+### Example findings (style reference)
 
-```
-## OOP Audit Report
+Every finding names its check, the class, concrete evidence, and a recommendation:
 
-### Items Scanned
-- User (12 fields, 3 methods) — models/user.py [Django]
-- Order (23 fields, 8 methods) — models/order.py [Django]
-- OrderItem (6 fields, 2 methods) — models/order.py [Django]
-- ShippingAddress (9 fields) — models/shipping.py [Django]
-- BillingAddress (8 fields) — models/shipping.py [Django]
-
-### Findings
-
-#### CRITICAL
 - [god-object] Order: 23 fields spanning order details, shipping, billing, and payment status — split into Order + OrderShipping + OrderBilling
 - [circular-reference] models/user.py <-> models/order.py: User imports Order for `recent_orders()`, Order imports User for `placed_by` — break with lazy import or move `recent_orders` to a service
-
-#### WARNING
 - [bool-should-be-timestamp] User.is_verified: boolean loses when verification happened — use `verified_at: datetime | None`
-- [bool-should-be-timestamp] Order.is_shipped: same pattern — use `shipped_at: datetime | None`
-- [inconsistent-naming] created_at vs date_created: User uses `created_at`, Order uses `date_created` — standardize to `created_at`
 - [merge-candidates] ShippingAddress + BillingAddress: 7 of 9 fields identical, always used together — merge into Address with `address_type` enum
-- [missing-base-class] User, Order, ShippingAddress: all define `created_at`, `updated_at`, `is_active` — extract TimestampedMixin
-- [stringly-typed-field] Order.payment_meta: stores JSON as TextField — use JSONField or a structured PaymentInfo model
-
-#### INFO
 - [derived-field-not-property] Order.total_price: always computed as sum of OrderItem prices — should be @property or @cached_property
-- [missing-semantic-type] User.email: raw CharField — use EmailField for built-in validation
-
-### Summary
-PASS: 60  WARN: 6  FAIL: 2
-```
-
-### Example: Pydantic API schemas
-
-```
-## OOP Audit Report
-
-### Items Scanned
-- UserCreate (5 fields) — schemas/user.py [Pydantic]
-- UserResponse (8 fields) — schemas/user.py [Pydantic]
-- APIConfig (18 fields, 2 validators) — config/settings.py [Pydantic]
-
-### Findings
-
-#### CRITICAL
-- [god-object] APIConfig: 18 fields covering database, auth, email, storage, and feature flags — split into DatabaseConfig, AuthConfig, EmailConfig, etc.
-
-#### WARNING
-- [missing-base-class] UserCreate, UserResponse: share 5 identical fields — extract UserBase
-
-#### INFO
-- [empty-subclass] UserResponse: only adds `id` and `created_at` to UserCreate fields — consider a single User model with optional fields
-
-### Summary
-PASS: 38  WARN: 1  FAIL: 1
-```
 
 ---
 
@@ -212,7 +156,3 @@ Findings only. The skill never modifies source files. Next steps are decided by 
 - Batch warning-level fixes into a refactoring PR
 - Track info-level findings as tech debt for future sprints
 - Re-run the audit after fixes to verify resolution
-
-## Version history
-
-- v1.0.0 (2026-03-24): Initial — 14 checks, framework detection, severity filtering

@@ -1,19 +1,19 @@
 ---
 name: do-issue
-description: "Use when creating a new GitHub issue. Ensures issues are self-contained, define domain terms, and provide enough context for the /do-plan skill to produce a quality plan. Triggered by 'create an issue', 'file an issue', or automatically by /sdlc at Step 1."
+description: "Create a self-contained GitHub issue ready for planning. Triggered by 'create an issue', 'file an issue', 'track this', or by /sdlc at Step 1."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<title or description>"
 ---
 
 # Create Issue (Quality Issue Creator)
 
+Create a GitHub issue that is a self-contained document a stranger could understand. Every issue must teach the reader what they need to know — define terms, link sources, and state the problem from the reader's perspective. The `/do-plan` skill reads the issue as its primary input: quality here directly determines plan quality downstream.
+
 ## Repo Context Probe
 
 If `.claude/skill-context/do-issue.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
 The context file is where a repo layers its SDLC automation onto this generic baseline: a stage/status marker to write at the start and end, cross-repo `gh` targeting, the canonical doc locations to search for related context, and the plan-doc path convention the issue should reference downstream. When the file is absent (the common case in a foreign repo), this skill runs entirely on `git` and `gh` — no repo-specific tooling required.
-
-Creates GitHub issues that are self-contained documents a stranger could understand. Every issue must teach the reader what they need to know — define terms, link sources, and state the problem from the reader's perspective.
 
 ## Core Philosophy: Think Like a Teacher
 
@@ -22,7 +22,7 @@ The reader of your issue has general software engineering experience but **zero 
 1. A one-sentence definition
 2. A link to its source (repo, docs page, file path, or RFC)
 
-This isn't optional politeness — it's functional. The `/do-plan` skill reads the issue description as its primary input. Undefined terms produce vague plans. Defined terms produce precise plans.
+This isn't optional politeness — it's functional. Undefined terms produce vague plans. Defined terms produce precise plans.
 
 ## When to load sub-files
 
@@ -35,12 +35,6 @@ This isn't optional politeness — it's functional. The `/do-plan` skill reads t
 ## Cross-Repo Resolution
 
 By default `gh` targets the repository of the current working directory. If the context file declares a cross-repo targeting mechanism (e.g. a `GH_REPO` env var), honor it so `gh` commands hit the intended repository.
-
-## When to Use
-
-- Creating any new GitHub issue (feature, bug, or chore)
-- `/sdlc` Step 1 dispatches here when no issue exists
-- User says "create an issue", "file a bug", "track this"
 
 ## Quick Start Workflow
 
@@ -84,6 +78,8 @@ Before writing, run the reconnaissance routine to surface unknowns and conflicts
    - Revised scope (narrower or broader than the original request)
 
 This step catches stale assumptions, dead code, existing coverage, and architectural conflicts BEFORE they get baked into the issue. Skip only for trivially simple issues (typo fixes, config changes).
+
+### Step 4: Write the Issue Body
 
 Load `ISSUE_TEMPLATE.md` and fill it in. Key rules:
 
@@ -135,7 +131,6 @@ fi
 
 TYPE="feature"  # or "bug" or "chore"
 
-# Write the issue body to the temp file, then create the issue
 gh issue create \
   --title "Brief, specific title" \
   --label "$TYPE" \
@@ -162,8 +157,6 @@ This skill is invoked by `/sdlc` at **Step 1: Ensure a GitHub Issue Exists**. Th
 - The **Solution sketch** to understand the intended direction
 - The **Definitions** to understand domain vocabulary
 - The **Acceptance criteria** to know when the plan is complete
-
-Quality here directly determines plan quality downstream.
 
 ## Anti-Patterns
 

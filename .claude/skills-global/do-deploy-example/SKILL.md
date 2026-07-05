@@ -1,6 +1,6 @@
 ---
 name: do-deploy-example
-description: "Template for creating a repo-specific /do-deploy skill. Copy this directory to do-deploy/ and customize DEPLOYMENT_PROCESS.md and HEALTH_CHECKS.md for your repo's production deployment process."
+description: "Template for a repo-specific /do-deploy skill. Use when creating a production deployment skill: copy to do-deploy/ and customize."
 argument-hint: "<pr-number-or-branch>"
 context: fork
 disable-model-invocation: true
@@ -95,7 +95,7 @@ If `DEPLOYMENT_PROCESS.md` does not exist, use this fallback template:
 ```
 No DEPLOYMENT_PROCESS.md found. This skill needs to be customized for this repo.
 
-Create .claude/skills/do-deploy/DEPLOYMENT_PROCESS.md with:
+Create DEPLOYMENT_PROCESS.md inside the .claude/skills/do-deploy/ directory with:
 1. Production environment details (URLs, infrastructure, access)
 2. Production deployment commands
 3. Rollback procedure
@@ -182,7 +182,7 @@ Write the answers into `DEPLOYMENT_PROCESS.md` and `HEALTH_CHECKS.md`. The SKILL
 
 ### Step 1: Copy and configure
 
-1. Copy this directory: `cp -r .claude/skills/do-deploy-example .claude/skills/do-deploy`
+1. Copy this directory: `cp -r .claude/skills-global/do-deploy-example .claude/skills/do-deploy` (in a repo without a `skills-global/` split, copy from wherever this template lives to a sibling `do-deploy/` directory)
 2. Update `SKILL.md` frontmatter:
    - Change `name:` to `do-deploy`
    - Write a `description:` specific to your repo's production deployment

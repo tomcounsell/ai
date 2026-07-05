@@ -1,6 +1,6 @@
 ---
 name: do-patch
-description: "Apply a targeted fix to failing tests or review blockers. Use when the user says 'patch this', 'fix the failures', 'fix the blockers', or 'do-patch'. Also called automatically by do-build at test-fail and review-blocker lifecycle steps."
+description: "Apply a targeted fix to failing tests or review blockers. Triggered by 'patch this', 'fix the failures', 'fix the blockers', 'do-patch', or by do-build at test-fail and review-blocker steps."
 argument-hint: "<description-of-what-to-patch>"
 ---
 
@@ -171,24 +171,24 @@ properly if the fix actually satisfies a criterion.
 
 ### Step 3: Re-run Tests to Verify
 
-After the builder agent reports completion, run tests and lint directly — do NOT invoke `/do-test` (parallel dispatch is overkill for patch verification):
+After the builder agent reports completion, run the repo's test suite and lint directly — do NOT invoke `/do-test` (parallel dispatch is overkill for patch verification). The context file declares the test command; generic default is the repo's standard runner, e.g.:
 
 ```bash
-# Run full test suite
+# Run full test suite (Python example — use cargo test / npm test / etc. per the repo)
 pytest tests/ -v --tb=short
 ```
 
-Then run the repo's lint/format checks (commands per the context file; generic default `ruff check .` / `ruff format --check .` when available, else skip).
+Then run the repo's lint/format checks (commands per the context file; generic default `ruff check .` / `ruff format --check .` for Python when available, else skip).
 
 Parse the results:
-- **pytest exit code 0** AND **lint passes**: All tests pass — proceed to Step 4
-- **pytest exit code 1**: Some tests failed — proceed to Step 5 (retry or report stuck)
-- **pytest exit code 2**: Test execution error — report the error and proceed to Step 5
-- **pytest exit code 5**: No tests collected — treat as pass (no tests to break)
+- **Test runner exit code 0** AND **lint passes**: All tests pass — proceed to Step 4
+- **Non-zero exit (test failures)**: Proceed to Step 5 (retry or report stuck)
+- **Non-zero exit (execution error, e.g. pytest exit code 2)**: Report the error and proceed to Step 5
+- **"No tests collected" (e.g. pytest exit code 5)**: Treat as pass (no tests to break)
 
 Report the test summary (passed/failed/skipped counts) before proceeding.
 
-### Step 3.5: Commit the Fix (Atomic Single Commit)
+### Step 3.5: Sync Plan Checkbox and Commit the Fix (Atomic Single Commit)
 
 After the test-pass verification in Step 3 succeeds and BEFORE Report
 Completion, commit the fix as a single atomic commit and push it to the current
@@ -207,11 +207,13 @@ git push origin "HEAD:${BRANCH}"
 
 **Plan-checkbox sync (only if the context file declares it).** If the repo keeps
 plan docs with acceptance-criteria checkboxes and the context file declares a
-plan-checkbox sync mechanism, tick the builder's reported `criterion_addressed`
-(from Step 2) in the SAME `git add -A` so the plan edit and the code fix land in
-one commit. A helper failure (ambiguous / not-found match) is NON-FATAL — the
-commit still happens with the code change only. If no such mechanism is declared
-(the generic case), skip the tick and just commit the fix.
+plan-checkbox sync mechanism, run the declared mechanism's exact invocation to
+tick the builder's reported `criterion_addressed` (from Step 2) — never hand-edit
+the checkbox when a mechanism is declared — in the SAME `git add -A` so the plan
+edit and the code fix land in one commit. A helper failure (ambiguous /
+not-found match) is NON-FATAL — the commit still happens with the code change
+only. If no such mechanism is declared (the generic case), skip the tick and
+just commit the fix.
 
 **Why same-commit (and not amend, not separate):** Bundling everything into one
 commit keeps a repo's merge-gate review-comment freshness check passing on the
@@ -275,16 +277,6 @@ lint fixes:
 If the repo has no such automation (the generic case), run its lint/format
 checks once before committing and fix any reported issues manually.
 
-## Commit and Push Rules
-
-The commit and push are part of Step 3.5 ("Sync Plan Checkbox") — see that step
-for the atomic-commit procedure that bundles the code fix with the plan-file
-checkbox tick into a single commit. Do NOT commit elsewhere; the single-commit
-invariant is what keeps the merge-gate review-comment freshness check passing.
-
-This skill owns its full lifecycle — no parent skill handles commits on its
-behalf.
-
 ## Critical Rules
 
 - NEVER create a PR — that is `do-build`'s responsibility
@@ -293,16 +285,7 @@ behalf.
 - NEVER refactor unrelated code — targeted fixes only
 - Keep fixes minimal: change the least amount of code needed to pass tests
 - If a fix would require architectural changes, report stuck immediately — do not attempt it
-
-## Context-Awareness
-
-When invoked by `do-build`, this skill receives structured failure output. When invoked by a user, it may receive:
-- A short description ("3 tests failing")
-- Full pytest output
-- A review comment
-- Nothing (empty args)
-
-Adapt to what is provided. Extract the signal from whatever input arrives.
+- This skill owns its commit lifecycle (Step 3.5) — commit nowhere else; no parent skill commits on its behalf
 
 ## CWD-Relative Execution
 
@@ -311,28 +294,6 @@ All commands run relative to the current working directory. Do not attempt to de
 - Directly by user: CWD is wherever the user is — commands run there
 
 Run `pwd` once at the start to confirm and log it.
-
-## Example Invocations
-
-**User-facing (direct invocation):**
-```
-/do-patch "3 tests failing in test_bridge.py — connection timeout"
-/do-patch "review blocker: race condition in session lock"
-/do-patch  (no args — reads most recent failure from context)
-```
-
-**Model-invocable (called by do-build at test-fail step):**
-```
-/do-patch FAILED tests/unit/test_bridge_logic.py::test_session_lock_cleanup
-AssertionError: Expected lock to be cleared, got 1 active lock
-```
-
-**Model-invocable (called by do-build at review-blocker step):**
-```
-/do-patch The session cleanup in bridge/telegram_bridge.py line 247 has a race
-condition — if the cleanup runs while a new session is being initialized,
-it will incorrectly clear the new session's lock.
-```
 
 ## Success Report Format
 

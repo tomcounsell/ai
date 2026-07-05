@@ -17,6 +17,11 @@ import pytest
 
 SKILL_MD = Path(".claude/skills-global/do-pr-review/SKILL.md")
 POST_REVIEW_MD = Path(".claude/skills-global/do-pr-review/sub-skills/post-review.md")
+# Repo seam file (skill-context convention): the generic skill body carries a
+# probe-guarded bot-identity hook; the concrete env vars and marker grammar
+# (SDLC_AGENT_GH_TOKEN, CLAUDE_AGENT_REVIEW, SDLC-AGENT-REVIEW v1 sha=...) are
+# declared in docs/sdlc/do-pr-review.md, which this repo's tests assert directly.
+SEAM_MD = Path("docs/sdlc/do-pr-review.md")
 
 
 @pytest.fixture(scope="module")
@@ -29,6 +34,11 @@ def post_review_text() -> str:
     return POST_REVIEW_MD.read_text()
 
 
+@pytest.fixture(scope="module")
+def seam_text() -> str:
+    return SEAM_MD.read_text()
+
+
 # ---------------------------------------------------------------------------
 # SKILL.md structural invariants
 # ---------------------------------------------------------------------------
@@ -39,32 +49,36 @@ class TestSkillMdReviewIdentitySection:
         """SKILL.md must have a ## Review Identity section (plan requirement)."""
         assert "## Review Identity" in skill_text
 
-    def test_marker_grammar_documented(self, skill_text: str) -> None:
-        """Marker grammar must include 'SDLC-AGENT-REVIEW v1' and sha= attribute."""
-        assert "SDLC-AGENT-REVIEW v1" in skill_text
-        assert "sha=" in skill_text
+    def test_marker_grammar_documented(self, skill_text: str, seam_text: str) -> None:
+        """Marker grammar ('SDLC-AGENT-REVIEW v1' + sha=) lives in the seam;
+        the generic body must carry the probe-guarded marker hook."""
+        assert "review marker" in skill_text
+        assert "SDLC-AGENT-REVIEW v1" in seam_text
+        assert "sha=" in seam_text
 
-    def test_sdlc_agent_gh_token_documented(self, skill_text: str) -> None:
-        """SKILL.md must document SDLC_AGENT_GH_TOKEN env var."""
-        assert "SDLC_AGENT_GH_TOKEN" in skill_text
+    def test_sdlc_agent_gh_token_documented(self, seam_text: str) -> None:
+        """The seam file must document the SDLC_AGENT_GH_TOKEN env var."""
+        assert "SDLC_AGENT_GH_TOKEN" in seam_text
 
-    def test_claude_agent_review_documented(self, skill_text: str) -> None:
-        """SKILL.md must document CLAUDE_AGENT_REVIEW env var."""
-        assert "CLAUDE_AGENT_REVIEW" in skill_text
+    def test_claude_agent_review_documented(self, seam_text: str) -> None:
+        """The seam file must document the CLAUDE_AGENT_REVIEW env var."""
+        assert "CLAUDE_AGENT_REVIEW" in seam_text
 
-    def test_hard_rule_bot_identity(self, skill_text: str) -> None:
-        """Hard Rules must document the opt-in bot-identity posture."""
-        assert "bot identity" in skill_text.lower()
-        assert "opt-in per machine" in skill_text.lower()
+    def test_hard_rule_bot_identity(self, skill_text: str, seam_text: str) -> None:
+        """Hard Rules must carry the bot-identity hook; the opt-in-per-machine
+        posture is declared in the seam."""
+        assert "bot/service-account" in skill_text.lower()
+        assert "opt-in per machine" in seam_text.lower()
 
-    def test_hard_rule_marker_presence(self, skill_text: str) -> None:
-        """Hard Rules must require the marker when CLAUDE_AGENT_REVIEW=1."""
-        assert "SDLC-AGENT-REVIEW v1" in skill_text
-        # Marker rule is expressed somewhere in Hard Rules
+    def test_hard_rule_marker_presence(self, skill_text: str, seam_text: str) -> None:
+        """Hard Rules must require the marker when the context file declares one."""
+        assert "SDLC-AGENT-REVIEW v1" in seam_text
+        # Marker rule is expressed somewhere in Hard Rules (the generic body's
+        # identity rule defers the exact grammar to the context file)
         hard_rules_start = skill_text.find("## Hard Rules")
         assert hard_rules_start != -1
         hard_rules_section = skill_text[hard_rules_start : hard_rules_start + 2000]
-        assert "SDLC-AGENT-REVIEW" in hard_rules_section
+        assert "marker" in hard_rules_section
 
     def test_tier_decision_tree_deleted_from_skill_md(self, skill_text: str) -> None:
         """Tier 1/2/3 review-post block must be removed from SKILL.md (plan §6 deletion)."""
@@ -99,18 +113,19 @@ class TestPostReviewIdentitySetup:
         """§0 must define GH_TOKEN_FOR_REVIEW variable."""
         assert "GH_TOKEN_FOR_REVIEW" in post_review_text
 
-    def test_token_optional_in_agent_context(self, post_review_text: str) -> None:
-        """§0 must reference CLAUDE_AGENT_REVIEW and treat the token as opt-in.
+    def test_token_optional_in_agent_context(self, post_review_text: str, seam_text: str) -> None:
+        """§0 must treat the token as opt-in (env vars declared in the seam).
 
         When the token is unset, §0 falls through to the operator credential
         rather than hard-failing — bot identity is opt-in per machine.
         """
-        assert "CLAUDE_AGENT_REVIEW" in post_review_text
-        assert "SDLC_AGENT_GH_TOKEN" in post_review_text
+        assert "CLAUDE_AGENT_REVIEW" in seam_text
+        assert "SDLC_AGENT_GH_TOKEN" in seam_text
         # Must not hard-fail when token is missing
         assert "refusing to post under operator identity" not in post_review_text.lower()
         # Must document the fall-through to operator credential
-        assert "operator credential" in post_review_text.lower()
+        assert "operator" in post_review_text.lower()
+        assert "operator credential" in seam_text.lower()
 
     def test_empty_token_not_passed_to_gh(self, post_review_text: str) -> None:
         """C-5: empty GH_TOKEN must not be passed to gh (would corrupt credential store)."""
@@ -121,18 +136,24 @@ class TestPostReviewIdentitySetup:
             or "[ -n" in post_review_text
         )
 
-    def test_marker_preface_documented(self, post_review_text: str) -> None:
-        """§0 must document the marker preface for agent-context reviews."""
-        assert "SDLC-AGENT-REVIEW v1" in post_review_text
+    def test_marker_preface_documented(self, post_review_text: str, seam_text: str) -> None:
+        """§0 must document the marker preface for agent-context reviews.
 
-    def test_marker_includes_sha(self, post_review_text: str) -> None:
+        The generic §0 carries the first-line marker hook; the exact grammar
+        is declared in the seam file.
+        """
+        assert "review marker" in post_review_text
+        assert "first line" in post_review_text
+        assert "SDLC-AGENT-REVIEW v1" in seam_text
+
+    def test_marker_includes_sha(self, seam_text: str) -> None:
         """Marker must include sha= attribute (N-1: use PR head SHA)."""
-        # The marker grammar with sha= must appear in the file
-        marker_section_idx = post_review_text.find("SDLC-AGENT-REVIEW v1")
+        # The marker grammar with sha= must appear in the seam file
+        marker_section_idx = seam_text.find("SDLC-AGENT-REVIEW v1")
         assert marker_section_idx != -1
         # sha= should appear near the marker
-        surrounding = post_review_text[marker_section_idx : marker_section_idx + 200]
-        assert "sha=" in surrounding or "headRefOid" in post_review_text
+        surrounding = seam_text[marker_section_idx : marker_section_idx + 200]
+        assert "sha=" in surrounding or "headRefOid" in seam_text
 
     def test_gh_token_injection_in_section_3(self, post_review_text: str) -> None:
         """§3 must use GH_TOKEN_FOR_REVIEW for the gh subprocess."""
@@ -153,9 +174,16 @@ class TestLocalDeveloperUnchanged:
         # The §0 block initializes GH_TOKEN_FOR_REVIEW="" unconditionally
         assert 'GH_TOKEN_FOR_REVIEW=""' in post_review_text
 
-    def test_empty_string_treated_same_as_unset(self, post_review_text: str) -> None:
-        """C-5: empty SDLC_AGENT_GH_TOKEN must be treated identically to unset."""
-        # The guard uses [ -z ... ] or similar to detect empty/unset
-        assert "SDLC_AGENT_GH_TOKEN" in post_review_text
-        # Empty-string detection: either -z or :- expansion
-        assert ("-z" in post_review_text) or (":-}" in post_review_text)
+    def test_empty_string_treated_same_as_unset(
+        self, post_review_text: str, seam_text: str
+    ) -> None:
+        """C-5: empty SDLC_AGENT_GH_TOKEN must be treated identically to unset.
+
+        The seam declares the non-empty requirement on the token; the generic
+        §0/§3 guard only injects the token when GH_TOKEN_FOR_REVIEW is non-empty.
+        """
+        assert "SDLC_AGENT_GH_TOKEN" in seam_text
+        # Seam requires a non-empty token before injection
+        assert "non-empty" in seam_text
+        # Generic guard: token used only when non-empty
+        assert '-n "$GH_TOKEN_FOR_REVIEW"' in post_review_text

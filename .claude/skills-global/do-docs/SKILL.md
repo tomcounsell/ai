@@ -1,6 +1,6 @@
 ---
 name: do-docs
-description: "Use when cascading documentation updates after code changes. Finds every document referencing the changed area and makes targeted surgical updates. Triggered by 'update docs', 'sync the docs', or any request about documentation updates."
+description: "Cascade documentation updates after a code change. Triggered by 'update docs', 'sync the docs', or any request about documentation updates."
 ---
 
 # Update Docs — Cascade Skill
@@ -168,9 +168,7 @@ If ALL four answers are NO, skip that doc.
 
 ### Merge Semantic Results
 
-If Agent C ran and returned results, add any documents it identified that aren't already in the affected list. Agent C catches conceptual coupling that keyword matching misses. For each result with relevance >= 0.5:
-- If already in the affected list: note the semantic reason as additional context
-- If NOT in the affected list: add it with Agent C's reason as the justification
+If Agent C ran, merge its results with relevance >= 0.5 into the affected list: if a doc is already listed, note the semantic reason as additional context; if not, add it with Agent C's reason as the justification. Agent C catches conceptual coupling that keyword matching misses.
 
 Produce an ordered task list of affected docs, ordered by dependency — foundational docs first (primary guidance, feature docs), then derivative docs (commands, plans, skills).
 

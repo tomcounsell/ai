@@ -20,6 +20,3 @@ Enough to complete the task without reading sub-files.
 
 ## Scripts
 - `scripts/example.sh` — brief description of what it does and when to use it
-
-## Version history
-- v1.0.0 (YYYY-MM-DD): Initial

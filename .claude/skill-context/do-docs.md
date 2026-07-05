@@ -85,8 +85,7 @@ for r in results:
 
 Replace `<CHANGE_SUMMARY>` with a 2-3 sentence natural-language summary of the change. May
 return zero results if no embedding API key is configured — that is expected; the cascade
-degrades gracefully to lexical-only matching. Merge results with relevance >= 0.5 into the
-affected-docs list (Step 2): if already present, note the semantic reason; if not, add it.
+degrades gracefully to lexical-only matching. Merge per the global body's Step 2 rules.
 
 ## Stale-reference sweep paths (Step 2b)
 

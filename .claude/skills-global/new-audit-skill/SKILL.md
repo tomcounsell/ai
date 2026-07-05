@@ -1,15 +1,13 @@
 ---
 name: new-audit-skill
-description: "Use when creating a new audit skill for validating code, configuration, or documentation quality. Also use when the user says 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', or 'I want to check X for problems'. Generates audit skills that follow established patterns from the 8 existing audit skills in this repo. Make sure to use this skill whenever someone wants systematic validation of any codebase artifact."
+description: "Create a new audit skill from established patterns. Use when creating an audit, or on 'create an audit', 'new audit skill', 'add an audit', 'make an audit for', 'I want to check X for problems'."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<subject-to-audit>"
 ---
 
 # New Audit Skill
 
-## What this skill does
-
-Creates a new audit skill by guiding you through a structured interview, then producing a complete skill directory with checks, output format, and disposition. The result is a reusable, testable audit that follows the patterns established by the 8 existing audit skills in this repo.
+**Goal:** turn a request like "I want to check X for problems" into a complete, working audit skill — interviewed requirements, well-designed checks, a tested output format, and a clear disposition — following the patterns of the existing audit skills. Success is an audit that produces accurate, actionable findings on its first real invocation, not a template that merely looks right.
 
 ## When to load sub-files
 
@@ -21,14 +19,13 @@ Creates a new audit skill by guiding you through a structured interview, then pr
 
 | Skill | Subject | Approach | Disposition | Autonomy |
 |-------|---------|----------|-------------|----------|
-| `audit-models` | Popoto Redis models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
-| `audit-tools` | Python tools in `tools/` | Prompt-only, 4-phase process | Report + implement fixes | Medium |
+| `audit-models` | Data-layer models | Prompt-only, 6 heuristic checks | Report only (human decides) | Low — exploratory |
+| `audit-tools` | Python tools in `tools/` | Prompt-only, 10 checks | Report only (human decides) | Medium |
 | `do-design-audit` | Web UI quality | Prompt-only, 10-dimension rubric | Report only (findings + top 3 fixes) | Medium — opinionated |
-| `docs-auditor` (substrate) | Documentation files | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
+| `docs-auditor` (substrate) | Docs + cross-references | Prompt + parallel agents | Auto-fix, commit, threshold router | High — mechanical |
 | `do-integration-audit` | Feature wiring | Prompt-only, 12 semantic checks | Report only (human decides) | High — exploratory |
 | `do-oop-audit` | Python classes | Prompt-only, 14 anti-pattern checks | Report only (human decides) | Medium — semantic |
-| `do-skills-audit` | Skill SKILL.md files | Script-backed, 12 rules | Auto-fix trivial, report complex | High — deterministic |
-| `docs-auditor` (substrate) | Doc cross-references | Prompt + parallel agents | Report gaps, add links | Medium — surgical |
+| `do-skills-audit` | Skill SKILL.md files | Script-backed, 20 rules | Auto-fix trivial, report complex | High — deterministic |
 
 ## Quick start
 
@@ -70,7 +67,7 @@ Aim for 4-8 checks for a focused audit, 8-12 for comprehensive audits.
 
 | If checks are... | Use |
 |-------------------|-----|
-| Regex, structural, AST-based | Script-backed (`scripts/audit.py`) |
+| Regex, structural, AST-based | Script-backed (an `audit.py` under the new skill dir's `scripts/`) |
 | Semantic, cross-referencing, judgment | Prompt-only (instructions in SKILL.md) |
 | Mix of both | Hybrid (script for deterministic, prompt for semantic) |
 
@@ -80,7 +77,7 @@ Aim for 4-8 checks for a focused audit, 8-12 for comprehensive audits.
 2. Read [BEST_PRACTICES.md](BEST_PRACTICES.md) for design guidance
 3. Create the directory: `mkdir -p .claude/skills/audit-{subject}/`
 4. Fill in the template, replacing all UPPERCASE placeholders
-5. If script-backed, create `scripts/audit.py` with CLI flags (`--fix`, `--json`, `--target`)
+5. If script-backed, create `.claude/skills/audit-{subject}/scripts/audit.py` with CLI flags (`--fix`, `--json`, `--target`)
 6. Write 2-3 concrete examples showing real audit output — not pseudocode, but realistic items/findings/verdicts that someone would actually see when running the audit
 
 ### 5. Write the description
@@ -117,7 +114,7 @@ After creating the skill, run it once on real data to verify:
 3. **False positive check**: Are any findings incorrect or misleading?
 4. **Output readability**: Is the report clear enough to act on without re-reading the skill?
 
-If findings are wrong or missing, revise the checks and re-run. The goal is a skill that produces accurate, actionable findings on the first real invocation — not just a template that looks right.
+If findings are wrong or missing, revise the checks and re-run.
 
 ### 8. Validate structure
 
@@ -129,8 +126,3 @@ Final structural checklist:
 - [ ] Disposition section clearly states what happens after findings
 - [ ] SKILL.md is under 500 lines (use sub-files for detailed reference material)
 - [ ] Description includes trigger synonyms beyond just "audit" (check, validate, review, scan)
-
-## Version history
-
-- v1.1.0 (2026-03-19): Added interview phase, autonomy calibration, description optimization, smoke testing, concrete examples requirement. Informed by Anthropic skill-creator, LobeHub, and FastMCP patterns.
-- v1.0.0 (2026-03-19): Initial — meta-skill for creating audit skills

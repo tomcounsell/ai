@@ -1,11 +1,14 @@
 ---
 name: build-agent
-description: Use when staging, launching, grading, and scheduling a Claude Managed Agent (CMA) in a client's Anthropic account, scoped to a specific repo. Triggered by 'build the agent', 'launch this agent', 'deploy a managed agent', 'build-agent', or automatically as the handoff target of /imagine-agent. Consumes a build-sheet.json and runs the create→launch→grade→schedule loop.
+description: Stage, launch, grade, and schedule a Claude Managed Agent (CMA) from a build-sheet. Triggered by 'build the agent', 'launch this agent', 'deploy a managed agent', or as /imagine-agent's handoff.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 argument-hint: "[path/to/build-sheet.json or agent-slug]"
 ---
 
 # Build Agent
+
+Also fires on 'build-agent' or any request to stand up a Claude Managed Agent in a client's
+Anthropic account, scoped to a specific repo.
 
 ## What this skill does
 

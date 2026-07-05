@@ -39,26 +39,24 @@ gh pr view {number} --json number,title,state,headRefName,reviewDecision,statusC
 
 If NO issue or PR number was provided (just a feature description), invoke `/do-issue` to create a quality issue. Do not proceed without an issue number.
 
-## Step 1.5: Ensure Local Session Exists
+## Step 1.5: Session Tracking
 
-After resolving the issue number, ensure a local SDLC session exists in Redis so that stage markers can track progress. This is a no-op for bridge-initiated sessions (which already have `VALOR_SESSION_ID`), but critical for local Claude Code sessions.
+No explicit session-ensure call is needed: since #1558, every `sdlc-tool` state *write* (`dispatch record`, `verdict record`, `meta-set`, `stage-marker`) auto-ensures the tracking session via `find_session(..., ensure=True)`. Two rules that DO matter:
 
-```bash
-SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || git remote get-url origin | sed 's/.*github.com[:/]//;s/.git$//')
-sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true  <!-- REDUNDANT-AFTER-#1558: kept as belt-and-suspenders; remove once resolver auto-ensure is proven -->
-```
-
-As of #1558, this explicit call is **belt-and-suspenders rather than the sole guarantee**: the `find_session(..., ensure=True)` resolver auto-ensures a PM session on the first state *write* (`verdict record`, `meta-set`, `stage-marker`), so non-`/sdlc` callers (direct `sdlc-tool` invocations, individual `/do-*` skills) no longer silently no-op. Keeping the up-front ensure here makes a session exist before the first read too, which is harmless (idempotent). This is idempotent -- running it multiple times for the same issue reuses the same session. Inside a bridge-initiated session (where `VALOR_SESSION_ID` is set), the call is a true no-op — it returns the already-active session without creating a new record. Do NOT export `AGENT_SESSION_ID` -- env vars do not persist across Claude Code bash blocks. Instead, pass `--issue-number` to all subsequent `sdlc_stage_marker` and `sdlc_stage_query` invocations.
+- **Pass `--issue-number` to every `sdlc-tool` invocation.** It is the authoritative session selector.
+- **Do NOT export `AGENT_SESSION_ID`** — env vars do not persist across Claude Code bash blocks.
 
 ## Step 2: Assess Current State
 
 Check what already exists for this issue. Use `$SDLC_TARGET_REPO` for local operations (defaults to `.` for same-repo work). Run ALL of these checks — do not skip any.
 
+**Command discipline (applies to every check in Steps 2-3):** run each check as a separate single-line command and read the output from the tool result — no pipes, no command substitution, no `||` fallbacks, no environment-variable capture. You interpret the output and decide the next step.
+
 ### Step 2.0: Query stage_states from PipelineStateMachine (primary signal)
 
 Query the PM session's `stage_states` for authoritative stage completion data. This is the **exclusive signal** for routing decisions. Stage completion is determined ONLY by stored state — never by artifact inference.
 
-Run the stage query tool directly and read its output from the tool result -- no shell substitution, no pipes, no environment-variable capture. The tool resolves the active session from `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` internally.
+The tool resolves the active session from `VALOR_SESSION_ID`, `AGENT_SESSION_ID`, or `--issue-number` internally.
 
 ```bash
 sdlc-tool stage-query --issue-number {issue_number}
@@ -76,7 +74,7 @@ These checks run ONLY when stage_states is unavailable (empty JSON from step 2.0
 
 When stage_states is unavailable, use conversation context to identify which skills were already dispatched in this session. Artifacts are used only to check preconditions (e.g., "does a PR exist?") — not to declare stages complete.
 
-Run each check as a separate single-line command and read the output from the tool result. `$SDLC_TARGET_REPO` is exported by the harness so `git -C` picks it up without further shell composition; `gh` uses `$GH_REPO` automatically for the cross-repo case.
+`$SDLC_TARGET_REPO` is exported by the harness so `git -C` picks it up without further shell composition; `gh` uses `$GH_REPO` automatically for the cross-repo case.
 
 ```bash
 # 2a. Check if a plan doc references this issue
@@ -92,8 +90,6 @@ git -C "$SDLC_TARGET_REPO" branch -a
 # 2c. Check if a PR already exists
 gh pr list --search "#{issue_number}" --state open
 ```
-
-Filter the outputs by reading the tool results -- do not pipe through `grep` / `head` / `||`. The LLM interprets the output and decides the next step.
 
 If a PR exists, fetch its full state for assessment:
 ```bash
@@ -112,8 +108,6 @@ gh pr view {pr_number} --json number,headRefName,reviewDecision,statusCheckRollu
 ## Step 3: Check Documentation Status
 
 This step is REQUIRED when a PR exists and review is clean (APPROVED). Skip it only if the pipeline hasn't reached the REVIEW stage yet.
-
-Run each check as a separate single-line command -- no pipes, no command substitution, no `||` fallbacks. The LLM interprets the tool results and decides the next step.
 
 ```bash
 # 3a. List files changed in the PR (count docs/ entries from the tool result)
@@ -138,11 +132,9 @@ For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output 
 - If docs tasks are all checked AND `docs/` changes exist in PR → docs done
 - When in doubt, dispatch `/do-docs` — it is idempotent and will no-op if nothing needs updating
 
-## Step 3.5: Legal Dispatch Guards
+## Step 3.5: Legal Dispatch Guards (reference)
 
-Before consulting the dispatch table in Step 4, evaluate the following guards against the enriched `sdlc_stage_query` output (`stages` + `_meta`). If any guard fires, it forces a specific dispatch or escalates to `blocked`, and Step 4 is SKIPPED.
-
-The canonical Python implementation is `agent.sdlc_router.decide_next_dispatch()`. The parity test in `tests/unit/test_sdlc_skill_md_parity.py` asserts this markdown stays in sync with the Python rules.
+`sdlc-tool next-skill` (Step 4) evaluates these guards itself — do NOT re-evaluate them by hand. The table exists so you can interpret a `blocked` decision or a forced dispatch when the tool returns one. Canonical implementation: `agent.sdlc_router.decide_next_dispatch()`; the parity test `tests/unit/test_sdlc_skill_md_parity.py` keeps this table in sync with the Python rules.
 
 | Guard | Condition | Forced Dispatch |
 |-------|-----------|-----------------|
@@ -158,9 +150,9 @@ The canonical Python implementation is `agent.sdlc_router.decide_next_dispatch()
 
 **G5 applies to CRITIQUE only**, not REVIEW. Review verdicts legitimately change on unchanged diffs (CI flips, new comments, linked issues). G4 handles REVIEW non-determinism instead.
 
-**G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass. It is cleared by `/do-plan` (Phase 4, Step 2b) after committing and pushing the revision. G7 self-heals when `revision_applied: true` is in the plan frontmatter even if the explicit lock-clear step was skipped. G7 is gated on `pr_number is None` so an already-shipped PR is never blocked.
+**G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass, cleared by `/do-plan` (Phase 4, Step 2b) after pushing the revision, and self-heals when `revision_applied: true` is in the plan frontmatter. Gated on `pr_number is None` so an already-shipped PR is never blocked.
 
-After evaluating guards, record the dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill. This preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
+Record every dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill — this preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
 
 ```bash
 # Record a dispatch event (call BEFORE invoking the sub-skill)
@@ -218,11 +210,6 @@ Blocked:
 sdlc-tool next-skill --issue-number {issue_number} --proposed-skill /do-build
 ```
 
-**Context notes for specific rows** (for human reference — the tool encodes these internally):
-- *Row 4b/4c concern path*: When critique verdict is "READY TO BUILD (with concerns)", the tool routes to `/do-plan` if `revision_applied` is not yet set in plan frontmatter, else `/do-build`.
-- *Row 8/8b patch-review cycle*: Every review finding (blockers, nits, tech debt) must be patched; re-review is mandatory after each patch.
-- *Row 10 merge gate*: ALL display stages must show `completed` before merge. The tool enforces this internally.
-
 Do NOT restart from scratch if prior stages are already complete.
 
 ## Hard Rules
@@ -259,5 +246,3 @@ Cycles:     CRITIQUE(fail) -> PLAN -> CRITIQUE (max 2 cycles)
 | MERGE | /do-merge {pr_number} | sonnet | Programmatic gate: verifies all stages, then merges |
 
 The **Dev Model** column shows the model the PM should pass via `--model` when spawning a dev session for that stage (see Stage→Model Dispatch Table in PM persona).
-
-This list is for reference only. This skill does NOT advance through stages -- it picks the right one and returns.

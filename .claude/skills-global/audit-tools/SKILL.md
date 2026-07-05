@@ -1,6 +1,6 @@
 ---
 name: audit-tools
-description: "Audit tools/ directory for structure compliance, test coverage, CLI quality, and documentation completeness. Use when checking tool health, validating tools, reviewing tool quality, or after adding or modifying a tool. Also use when someone says 'check the tools', 'are our tools documented', or 'which tools need work'."
+description: "Audit tools/ for structure, tests, CLI quality, and docs. Use when checking tool health, validating tools, or after adding a tool. Also 'check the tools', 'which tools need work'."
 allowed-tools: Read, Grep, Glob, Bash
 disable-model-invocation: true
 argument-hint: "[tool-name] [--fix]"
@@ -8,24 +8,13 @@ argument-hint: "[tool-name] [--fix]"
 
 # Tools Audit
 
-Validates every tool in `tools/` against STANDARD.md requirements and the interface documentation expectations defined here. Surfaces tools that are missing files, have incomplete docs, untested capabilities, or broken CLI help.
+**Goal:** surface every tool in `tools/` that is missing files, under-documented, untested, or has a broken CLI surface, by running the 10 checks in [CHECKS.md](CHECKS.md) against each tool and reporting a severity-grouped result per tool plus a fleet summary. Report only — findings go to a human. Also the right skill for reviewing tool quality after modifying a tool, and for questions like "are our tools documented".
 
 ## Repo Context Probe
 
 If `.claude/skill-context/audit-tools.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
 The context file is where a repo declares its CLI-naming convention (e.g. a `valor-*` entry-point prefix) and its skill-scaffolding command, so the `[cli-registered]` check and the "missing structure" next-step name the repo's real conventions. When the file is absent, the generic baseline applies: a tool is "cli-registered" when it has a console-script entry in `pyproject.toml [project.scripts]` under any name, and missing structure is scaffolded by hand.
-
-## What this skill does
-
-1. Discovers all tool directories in `tools/` (skipping `_template`, `__pycache__`)
-2. Runs 10 checks against each tool, grouped into Structure, Interface, Tests, and CLI
-3. Produces a severity-grouped findings report per tool
-4. Reports overall health summary with pass/warn/fail counts
-
-## When to load sub-files
-
-- For the full checklist with verification commands → read [CHECKS.md](CHECKS.md)
 
 ## Quick start
 
@@ -90,7 +79,3 @@ This skill produces findings only. Next steps are decided by the human:
 - Create GitHub issues for tools that need significant work
 - Scaffold missing structure for incomplete tools using the repo's skill/tool scaffolding command if its context file declares one (otherwise scaffold by hand)
 - Delete tools that are abandoned (e.g., empty placeholders)
-
-## Version history
-
-- v1.0.0 (2026-03-19): Initial — replaces audit-next-tool with structured checks

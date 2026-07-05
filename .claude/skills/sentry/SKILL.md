@@ -3,6 +3,7 @@ name: sentry
 description: "Check Sentry for unresolved issues and run triage on demand. Triggered by requests to check Sentry errors, run Sentry triage, or handle Sentry issues."
 allowed-tools: Bash
 user-invocable: true
+argument-hint: "[--apply]"
 ---
 
 # Sentry Triage
@@ -31,19 +32,17 @@ Pass `--apply` to enable live writes:
 
 ## How to Run
 
-**Dry-run (default):**
+The `SENTRY_TRIAGE_APPLY` env var controls live writes (default `0` = dry-run;
+`1` = files GitHub issues + updates Sentry state):
 
 ```bash
-cd /Users/valorengels/src/ai && python -c "
+cd ~/src/ai && python -c "
 from reflections.sentry_triage import run_sentry_triage
 result = run_sentry_triage()
-if result['status'] == 'disabled':
-    print(result['summary'])
-else:
-    print(result['summary'])
-    findings = result.get('findings', [])
+print(result['summary'])
+if result['status'] != 'disabled':
     show = False
-    for line in findings:
+    for line in result.get('findings', []):
         if line.startswith('Class C') or line.startswith('Class D'):
             show = True
         elif line.startswith('Class '):
@@ -53,27 +52,7 @@ else:
 "
 ```
 
-**Live mode (files GitHub issues + updates Sentry state):**
-
-```bash
-cd /Users/valorengels/src/ai && SENTRY_TRIAGE_APPLY=1 python -c "
-from reflections.sentry_triage import run_sentry_triage
-result = run_sentry_triage()
-if result['status'] == 'disabled':
-    print(result['summary'])
-else:
-    print(result['summary'])
-    findings = result.get('findings', [])
-    show = False
-    for line in findings:
-        if line.startswith('Class C') or line.startswith('Class D'):
-            show = True
-        elif line.startswith('Class '):
-            show = False
-        if show:
-            print(line)
-"
-```
+For live mode, run the same command prefixed with `SENTRY_TRIAGE_APPLY=1`.
 
 ## Argument Handling
 

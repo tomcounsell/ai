@@ -1,13 +1,15 @@
 ---
 name: ebook-ingest
-description: "Use this skill when the user wants to find, download, and prepare an ebook for AI agent ingestion (RAG, fine-tuning, or long-context reference). Triggers include: requests to acquire a digital copy of a book the user owns in print, building a personal book corpus for an AI agent, converting EPUB/PDF/MOBI to clean Markdown for LLM consumption, or chunking books for vector stores. Handles search across multiple sources (Gutenberg, Standard Ebooks, Anna's Archive, LibGen, Z-Library, archive.org), format conversion via calibre/pandoc, OCR for scanned PDFs, cleanup, metadata, and chunking. Do NOT use for academic papers (use Sci-Hub/unpaywall), bulk public-domain scraping (hit Gutenberg's API directly), or DRM'd commercial ebooks the user has not purchased."
+description: "Find, download, and prep an ebook as clean Markdown for AI ingestion. Use when digitizing an owned print book, converting EPUB/PDF/MOBI, or chunking for RAG. NOT academic papers or DRM'd ebooks."
 ---
 
 # Ebook acquisition and AI ingestion prep
 
+Fires on any request to prepare a book for RAG, fine-tuning, or long-context reference. Do NOT use for academic papers (use Sci-Hub/unpaywall), bulk public-domain scraping (hit Gutenberg's API directly), or DRM'd commercial ebooks the user has not purchased.
+
 ## Overview
 
-End-to-end pipeline for turning a named book into clean, structured Markdown ready for an AI agent to consume. Covers search → download → convert → clean → chunk.
+End-to-end pipeline: a named book in → clean, structured Markdown out, ready for an AI agent to consume. Stages: search → download → convert → clean → chunk. The deliverable is `library/processed/<author-slug>/<title-slug>.md` with YAML frontmatter (plus optional RAG chunks); success means the text is free of page numbers, running headers, and broken hyphenation, and carries accurate metadata.
 
 Assumes the user owns a print copy and is creating a personal digital backup for private AI use. Skip this skill if that premise doesn't hold.
 
@@ -18,7 +20,7 @@ Assumes the user owns a print copy and is creating a personal digital backup for
 | Search | Anna's Archive (meta), Gutenberg, Standard Ebooks | candidate file URLs |
 | Download | `curl` / `wget` | `library/raw/<slug>.<ext>` |
 | Convert | `pandoc` (EPUB), `pdftotext -layout` (PDF), `ocrmypdf` (scanned) | raw `.md` or `.txt` |
-| Clean | `clean_book.py` | normalized Markdown |
+| Clean | bundled `scripts/clean_book.py` | normalized Markdown |
 | Metadata | YAML frontmatter | `<slug>.md` |
 | Chunk (optional) | `langchain` text splitters | `chunks/*.json` |
 
@@ -68,137 +70,15 @@ Try sources in priority order. Stop at the first clean match in a good format.
 
 ### Anna's Archive: programmatic search + download
 
-When `ANNAS_ARCHIVE_ACCOUNT_ID` and `ANNAS_ARCHIVE_SECRET_KEY` are set, use the API workflow. Save as `scripts/annas_get.py`:
-
-```python
-"""Search Anna's Archive and download via the fast_download API.
-
-Usage:
-  python annas_get.py search "How to Write Short Roy Peter Clark" --ext epub
-  python annas_get.py download <md5> --output ./library/raw/
-"""
-import os
-import re
-import sys
-import json
-import time
-import argparse
-from pathlib import Path
-import httpx
-from bs4 import BeautifulSoup
-
-MIRRORS = [
-    "https://annas-archive.org",
-    "https://annas-archive.li",
-    "https://annas-archive.se",
-    "https://annas-archive.in",
-    "https://annas-archive.pm",
-]
-
-UA = "Mozilla/5.0 (compatible; personal-ebook-ingest/1.0)"
-
-
-def pick_mirror() -> str:
-    """Return the first mirror that responds 200 to /."""
-    for m in MIRRORS:
-        try:
-            r = httpx.get(m, timeout=5.0, headers={"User-Agent": UA})
-            if r.status_code == 200:
-                return m
-        except httpx.HTTPError:
-            continue
-    raise RuntimeError("No Anna's Archive mirror reachable")
-
-
-def search(query: str, ext: str | None = None, limit: int = 10) -> list[dict]:
-    """Scrape search results. Returns list of {md5, title, author, ext, size, lang}."""
-    base = pick_mirror()
-    params = {"q": query}
-    if ext:
-        params["ext"] = ext
-    r = httpx.get(f"{base}/search", params=params, headers={"User-Agent": UA}, timeout=20)
-    r.raise_for_status()
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    results = []
-    # Result cards link to /md5/<hash>; metadata is in adjacent text
-    for a in soup.select("a[href^='/md5/']")[:limit]:
-        md5 = a["href"].split("/md5/")[1].split("?")[0]
-        title = a.get_text(strip=True)[:200]
-        # Sibling text often has "epub, EN, 1.2MB" etc.
-        meta = a.find_next("div")
-        meta_text = meta.get_text(" ", strip=True) if meta else ""
-        results.append({
-            "md5": md5,
-            "title": title,
-            "meta": meta_text,
-        })
-    return results
-
-
-def fast_download(md5: str, output_dir: Path) -> Path:
-    """Use the fast_download JSON API to retrieve a direct URL, then fetch the file."""
-    account_id = os.environ.get("ANNAS_ARCHIVE_ACCOUNT_ID")
-    secret_key = os.environ.get("ANNAS_ARCHIVE_SECRET_KEY")
-    if not account_id or not secret_key:
-        raise RuntimeError("ANNAS_ARCHIVE_ACCOUNT_ID and ANNAS_ARCHIVE_SECRET_KEY must both be set")
-
-    base = pick_mirror()
-    api_url = f"{base}/dyn/api/fast_download.json"
-    r = httpx.get(api_url,
-                  params={"md5": md5, "account_id": account_id, "secret_key": secret_key},
-                  timeout=30, headers={"User-Agent": UA})
-    r.raise_for_status()
-    payload = r.json()
-
-    if "download_url" not in payload:
-        raise RuntimeError(f"API returned no download_url: {payload}")
-
-    direct_url = payload["download_url"]
-    # File extension is in the URL path or in the API response
-    ext = payload.get("ext") or direct_url.rsplit(".", 1)[-1].split("?")[0]
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{md5}.{ext}"
-
-    with httpx.stream("GET", direct_url, timeout=300,
-                      headers={"User-Agent": UA}, follow_redirects=True) as resp:
-        resp.raise_for_status()
-        with open(out_path, "wb") as f:
-            for chunk in resp.iter_bytes(chunk_size=64 * 1024):
-                f.write(chunk)
-
-    print(f"Downloaded: {out_path} ({out_path.stat().st_size:,} bytes)")
-    return out_path
-
-
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    s = sub.add_parser("search")
-    s.add_argument("query")
-    s.add_argument("--ext", choices=["epub", "pdf", "mobi", "azw3", "djvu"])
-    s.add_argument("--limit", type=int, default=10)
-
-    d = sub.add_parser("download")
-    d.add_argument("md5")
-    d.add_argument("--output", type=Path, default=Path("./library/raw"))
-
-    args = p.parse_args()
-    if args.cmd == "search":
-        for hit in search(args.query, ext=args.ext, limit=args.limit):
-            print(f"{hit['md5']}  {hit['title']}\n    {hit['meta']}")
-    elif args.cmd == "download":
-        fast_download(args.md5, args.output)
-```
+When `ANNAS_ARCHIVE_ACCOUNT_ID` and `ANNAS_ARCHIVE_SECRET_KEY` are set, use the API workflow via the bundled helper `scripts/annas_get.py` (in this skill's directory: `.claude/skills/ebook-ingest/scripts/annas_get.py`). It picks a live mirror, scrapes search results into `{md5, title, meta}` rows, and downloads through the `fast_download.json` endpoint.
 
 Workflow:
 ```bash
 # Find the book
-python scripts/annas_get.py search "How to Write Short Roy Peter Clark" --ext epub
+python .claude/skills/ebook-ingest/scripts/annas_get.py search "How to Write Short Roy Peter Clark" --ext epub
 
 # Inspect results, copy the md5 of the cleanest match, download
-python scripts/annas_get.py download <md5> --output ./library/raw/clark-roy-peter/
+python .claude/skills/ebook-ingest/scripts/annas_get.py download <md5> --output ./library/raw/clark-roy-peter/
 ```
 
 **Daily limit**: paid membership has a per-day fast-download cap (typically a few dozen books). The API returns an error message in the JSON when exceeded; check the response before assuming success.
@@ -230,7 +110,7 @@ When multiple formats are available for the same book, prefer in this order:
 mkdir -p library/{raw,processed,chunks}
 
 # Download via the API helper (preferred when key is set)
-python scripts/annas_get.py download <md5> --output library/raw/<author-slug>/
+python .claude/skills/ebook-ingest/scripts/annas_get.py download <md5> --output library/raw/<author-slug>/
 
 # Or manual download via browser into library/raw/<author-slug>/<title-slug>.<ext>
 
@@ -293,45 +173,11 @@ ocrmypdf --image-dpi 300 --language eng --deskew --clean input.pdf out.pdf
 
 ## Step 5: Clean for AI ingestion
 
-Save as `scripts/clean_book.py`:
+Run the bundled cleaner `scripts/clean_book.py` (in this skill's directory: `.claude/skills/ebook-ingest/scripts/clean_book.py`) over the converted text. It rejoins words hyphenated across line breaks, strips page-number lines and repeated running headers/footers, collapses blank-line runs, and normalizes smart quotes and dashes for tokenizer consistency.
 
-```python
-import re
-from pathlib import Path
-
-def clean_book_text(raw: str) -> str:
-    text = raw
-
-    # Rejoin words hyphenated across line breaks: "exam-\nple" -> "example"
-    text = re.sub(r'(\w)-\n(\w)', r'\1\2', text)
-
-    # Strip lines that are only page numbers
-    text = re.sub(r'^\s*\d+\s*$\n', '', text, flags=re.MULTILINE)
-
-    # Strip running headers/footers: detect lines that repeat >5 times
-    lines = text.split('\n')
-    from collections import Counter
-    counts = Counter(l.strip() for l in lines if l.strip())
-    boilerplate = {l for l, c in counts.items() if c > 5 and len(l) < 80}
-    lines = [l for l in lines if l.strip() not in boilerplate]
-    text = '\n'.join(lines)
-
-    # Collapse runs of blank lines
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    # Normalize smart quotes (helps tokenizer consistency)
-    text = (text
-        .replace('“', '"').replace('”', '"')
-        .replace('‘', "'").replace('’', "'")
-        .replace('–', '-').replace('—', '--'))
-
-    return text.strip()
-
-if __name__ == '__main__':
-    import sys
-    path = Path(sys.argv[1])
-    cleaned = clean_book_text(path.read_text())
-    path.with_suffix('.clean.md').write_text(cleaned)
+```bash
+python .claude/skills/ebook-ingest/scripts/clean_book.py library/processed/<author-slug>/<title-slug>.md
+# writes <title-slug>.clean.md alongside the input
 ```
 
 ## Step 6: Add metadata frontmatter

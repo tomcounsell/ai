@@ -1,6 +1,6 @@
 ---
 name: do-debrief
-description: "Use when sending a spoken debrief to a chat. Collects context, drafts a 30-second executive brief, synthesizes it via TTS, and delivers it as a native voice message. Triggered by 'send a voice debrief', 'speak this update', 'do-debrief', or any request to deliver an audio summary."
+description: "Send a spoken executive brief to a chat as a voice message. Triggered by 'send a voice debrief', 'speak this update', 'do-debrief', or any request to deliver an audio summary."
 argument-hint: "<scope-or-notes> --chat <chat>"
 allowed-tools: Bash, Read, Grep
 user-invocable: true
@@ -112,12 +112,8 @@ Then deliver to the chat:
 
 ## Anti-patterns
 
-- **Reading the calendar back.** They have it. Surface only the anomaly — "Your 2pm moved to 3" — not the full agenda.
-- **Open-ended questions.** "What about the vendor?" wastes 30 seconds of attention. State your default; let them veto.
-- **Laddered FYIs.** "Also… and another thing… oh and…" — pre-batch into "Three quick FYIs:" with one clause each.
 - **Status-of-status.** "I'm working on the migration" isn't brief-worthy. Either it shipped (FYI) or it's blocked on a decision (Decision).
 - **Synthesizing raw notes verbatim.** That's a dictated memo, not a brief. The construction phases above are the value the skill adds.
-- **Reciting numbers in audio.** Issue numbers, PR numbers, port numbers, and dollar figures with many digits all read badly through TTS and don't help a listener anyway. Substance over identifier; numbers go in the written follow-up.
 - **Skipping the review gate.** TTS + chat delivery is one-way; the wrong "I'm pushing the vendor call to Thursday unless you want it sooner" is permanent once it lands.
 
 ## Error handling
@@ -127,4 +123,4 @@ Then deliver to the chat:
 
 ## Relationship to `/do-voice-recording`
 
-`/do-voice-recording` is the canonical raw-synthesis surface — "speak this text → audio file" — and owns the portable resolution of the repo's TTS CLI so TTS works from any cwd. `/do-debrief` is the composite: it *constructs* a 30-second executive brief (the categorize → gap-check → draft → review-gate phases above), defers to `/do-voice-recording` for the actual synthesis, and delivers the result as a chat voice note. Those construction phases are the value `/do-debrief` adds. When you just need audio from text, use `/do-voice-recording` directly; when you need a decision-shaped spoken brief delivered to a chat, use this skill.
+`/do-voice-recording` is the canonical raw-synthesis surface ("speak this text → audio file") and owns the portable resolution of the repo's TTS CLI. This skill is the composite: it constructs the decision-shaped brief, defers to `/do-voice-recording` for synthesis, and delivers to a chat. When you just need audio from text, use `/do-voice-recording` directly.

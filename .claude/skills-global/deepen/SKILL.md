@@ -1,6 +1,6 @@
 ---
 name: deepen
-description: "Use when adding structured logging, metrics, and tracing to a specified module. Triggered by 'deepen this module', 'add logging to', 'instrument this', 'make this debuggable', or any request to improve a module's observability at the code level."
+description: "Audit a module's code-level observability: structured logging, metrics, tracing. Triggered by 'deepen this module', 'add logging to', 'instrument this', 'make this debuggable'."
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
@@ -20,7 +20,7 @@ Add structured logging, metrics, and tracing to a specified module to make it de
 
 1. **Resolve the target module.** If invoked with no argument, scan for modules with zero `logging.getLogger` calls and list the top 5 by line count. Ask the user to confirm which to instrument.
 
-2. **Audit the module against the 9-symptom checklist.** Read the file(s) and check each symptom:
+2. **Audit the module against the 9-symptom checklist.** The checklist below is written with Python's `logging` module as the example — map each symptom to the project language's structured-logging equivalent (e.g. `tracing`/`log` in Rust, `pino`/`winston` in Node). Read the file(s) and check each symptom:
    - [ ] No `logging.getLogger(__name__)` at module level
    - [ ] Exception handlers with bare `pass` or only `raise` (no log)
    - [ ] Functions longer than 40 lines with no log statements
@@ -43,16 +43,13 @@ Add structured logging, metrics, and tracing to a specified module to make it de
    Fix: add logging.error("context: %s", value, exc_info=True) in the except block
    ```
 
-5. **DO NOT edit code.** This skill is read-only — it audits and recommends. To apply fixes, hand off to /do-plan with the ranked list as the problem statement.
-
-6. **Suggest next steps.** If the module needs substantial work, say: "Run /do-plan with this ranked list to create implementation tasks."
+5. **DO NOT edit code.** This skill is read-only — it audits and recommends. To apply fixes, hand off to /do-plan with the ranked list as the problem statement ("Run /do-plan with this ranked list to create implementation tasks").
 
 ## Output
 A ranked list of instrumentation gaps with fix suggestions. No code changes.
 
 ## Anti-Patterns
-- Do not edit any files — /deepen is a read-only audit skill.
 - Use /observability when the goal is dashboards and alerts — /deepen is for code-level logging and tracing.
 - Do not add logging to every line — over-logging is noise. Focus on decision points, I/O boundaries, and error paths.
-- Do not use print() — always recommend `logging.getLogger(__name__)` and structured log records.
+- Do not use print()/console.log — always recommend the language's structured logger (e.g. `logging.getLogger(__name__)` in Python) and structured log records.
 - Do not conflate metrics (counters, gauges) with logging — mention both but distinguish them.

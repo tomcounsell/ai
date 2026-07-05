@@ -1,66 +1,79 @@
 ---
 name: checking-system-logs
-description: "Use when finding bridge events, agent responses, timeouts, or errors in system logs. Triggered by requests to debug system behavior, investigate errors, or check what the agent did. Always filter by project name."
+description: "Use when finding bridge events, agent responses, timeouts, or errors in system logs. Triggered by requests to debug system behavior, investigate errors, or check what the agent did."
 allowed-tools: Read, Grep, Glob, Bash
 user-invocable: false
 ---
 
 # System Logs
 
-**Location**: `~/src/ai/logs/bridge.events.jsonl`
+Two surfaces. Structured bridge events live in Redis (`BridgeEvent` Popoto
+model — the old `logs/bridge.events.jsonl` file is gone); plain-text service
+logs live under `~/src/ai/logs/`. Always narrow by project or keyword — raw
+tails of a busy bridge log bury the signal.
 
-**IMPORTANT**: Always filter by project to get relevant results.
+## Structured events (Redis)
 
-## Fields
-
-- `project` - **required filter** ("DM", "Valor", "Django Project Template", etc.)
-- `type` - event type (see below)
-- `chat` - group name (null for DMs)
-- `session_id` - e.g., "tg_dm_179144806"
-- `sender` - who triggered the event
-
-## Event Types
-
-- `message_received` - incoming message
-- `agent_request` - request sent to agent
-- `agent_response` - Valor's response
-- `agent_timeout` - response timed out
-- `reply_sent` - message sent back to user
-- `error` - system error
-
-## Query Examples
+Query via the analyzer script (respects the no-raw-Redis rule):
 
 ```bash
-# ALWAYS filter by project first, then by type or other criteria
-
-# All recent events for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | tail -20 | jq .
-
-# Agent responses for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_response"' | tail -10 | jq .
-
-# Errors for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep '"type": "error"' | tail -10 | jq .
-
-# Timeouts for a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_timeout"' | tail -10 | jq .
-
-# Search keyword within a project
-grep '"project": "Valor"' ~/src/ai/logs/bridge.events.jsonl | grep -i "keyword" | tail -10 | jq .
+cd ~/src/ai && python scripts/analyze_logs.py recent 20   # recent events, correlated by request
+cd ~/src/ai && python scripts/analyze_logs.py timeouts    # timeout events
+cd ~/src/ai && python scripts/analyze_logs.py stats       # counts by type/project
 ```
 
-## List Available Projects
+For project-filtered queries, use the ORM directly (never raw Redis on
+Popoto-managed keys):
 
 ```bash
-grep -o '"project": "[^"]*"' ~/src/ai/logs/bridge.events.jsonl | sort -u
+cd ~/src/ai && python -c "
+from models.bridge_event import BridgeEvent
+events = [e for e in BridgeEvent.query.all() if e.project_key == 'Valor']
+events.sort(key=lambda e: e.timestamp or 0, reverse=True)
+for e in events[:20]:
+    print(e.event_type, e.chat_id, e.data)
+"
 ```
 
-## If No Results
+Fields: `event_type`, `chat_id`, `project_key`, `timestamp`, `data` (dict with
+`sender`, `chat`, `message_id`, ...). The bridge currently emits
+`message_received`; older types (`agent_request`, `agent_response`,
+`agent_timeout`, `reply_sent`) may appear in historical data. Events expire
+after ~7 days (`BridgeEvent.cleanup_old`).
 
-If a project filter returns no results, list available projects and report them:
+## Text logs (`~/src/ai/logs/`)
+
+| File | What's in it |
+|------|--------------|
+| `bridge.log` / `bridge.error.log` | Telegram bridge — message handling, routing, delivery |
+| `worker.log` | Session execution engine |
+| `reflection_worker.log` | Reflection scheduler subprocess (`python -m reflections`) |
+| `email_bridge.log` | IMAP polling + SMTP relay |
+| `nightly_tests.log` / `nightly_tests_error.log` | Nightly regression runs |
 
 ```bash
-# No results? Check available projects:
-grep -o '"project": "[^"]*"' ~/src/ai/logs/bridge.events.jsonl | sort -u
-# Then retry with a valid project name from the list
+# Recent bridge activity for a project/chat
+grep -i "psyoptimal" ~/src/ai/logs/bridge.log | tail -20
+
+# Errors across the bridge
+grep -iE "error|exception|traceback" ~/src/ai/logs/bridge.log | tail -20
+tail -50 ~/src/ai/logs/bridge.error.log
 ```
+
+## Session-level debugging
+
+For what a specific agent session did, prefer session telemetry over log
+archaeology:
+
+```bash
+python -m tools.valor_session telemetry --id <ID>   # turn events, tokens, status transitions
+python -m tools.valor_session inspect --id <ID>     # raw Popoto fields
+```
+
+## If a filter returns nothing
+
+List what actually exists before concluding the event never happened:
+`python scripts/analyze_logs.py stats` shows event-type counts; for the set of
+project keys, swap the ORM one-liner's filter for
+`sorted({e.project_key for e in BridgeEvent.query.all()})`. Then retry with a
+name from the list.

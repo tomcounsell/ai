@@ -1,24 +1,19 @@
 ---
 name: audit-hooks
-description: "Audit Claude Code hooks for safety, correctness, and best practices compliance. Checks settings.json configuration, hook scripts, error logging, and deployment readiness. Use when reviewing hook health, checking hook safety, validating hooks, or after adding/modifying hooks."
+description: "Audit Claude Code hooks for safety and correctness. Use when reviewing hook health, checking hook safety, validating hooks, or after adding/modifying hooks."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # Hook Audit
 
-Audits all Claude Code hooks registered in `.claude/settings.json` against the best practices defined in `BEST_PRACTICES.md`. Produces a structured report with PASS/WARN/FAIL dispositions per hook.
+**Goal:** verify that every Claude Code hook registered in `.claude/settings.json` is safe — advisory hooks can never hang or block a session, validators actually block what they exist to block, and no hook fails silently. Check each hook against the rules in [BEST_PRACTICES.md](BEST_PRACTICES.md) and report PASS/WARN/FAIL per hook. Read-only: findings only, fixes are applied by a human.
 
-## What this skill does
+## Repo Context Probe
 
-1. Parse `.claude/settings.json` and extract all hook entries
-2. Classify each hook as advisory (has `|| true`) or validator (no `|| true`)
-3. Run safety checks against BEST_PRACTICES.md rules
-4. Inspect each hook script for code-level issues
-5. Check deployment readiness
-6. Output a structured findings report
+If `.claude/skill-context/audit-hooks.md` exists, read it and honor its declarations; otherwise use the generic defaults described below.
 
-**This skill is read-only. It does NOT auto-fix anything.** Review findings and fix manually.
+The context file is where a repo declares its validator inventory (hooks that must NOT have `|| true`), its error-logging convention, and its hook log path. Generic defaults: validators are identified by a `validate_*` script name on PreToolUse/PostToolUse with a matcher; the error log is `logs/hooks.log`; the logging helper is `log_hook_error()` if the repo has one.
 
 ## Audit Procedure
 
@@ -49,28 +44,26 @@ For EACH hook command, check:
 - [ ] Matcher specificity (empty matcher on PreToolUse fires on every tool call — WARN if timeout > 5s)
 
 **Python script checks** (for hooks targeting `.py` files):
-- [ ] Has `try/except` + `log_hook_error()` at `__main__` level (Rule 4)
+- [ ] Has `try/except` + error logging at `__main__` level (Rule 4)
 - [ ] No bare `sys.exit(1)` in advisory hooks
 - [ ] No top-level imports of known-heavy modules: `anthropic`, `openai`, `pandas`, `numpy`, `httpx`, `pydantic` (Rule 8)
-- [ ] File exists and is syntactically valid Python
 
 **Bash script checks** (for hooks targeting `.sh` files):
 - [ ] Uses `set +e`, not `set -e` (Rule 5)
 - [ ] No bare `exec` without error handling (Rule 6)
 - [ ] Prefers venv binaries over system PATH (Rule 7)
-- [ ] Has error logging to `logs/hooks.log`
-- [ ] File exists and is executable
+- [ ] Has error logging to the hook log
 
 ### Step 4: Deployment readiness
 
 - [ ] Every script path referenced in settings.json exists
 - [ ] Python scripts are importable (no syntax errors)
 - [ ] Shell scripts are executable (`chmod +x`)
-- [ ] `log_hook_error()` is importable from `hook_utils.constants`
+- [ ] The error-logging helper is importable from where the repo declares it lives
 
-### Step 5: Check logs/hooks.log
+### Step 5: Check the hook log
 
-If `logs/hooks.log` exists, scan for recent errors (last 24h). Report:
+If the hook log (default `logs/hooks.log`) exists, scan for recent errors (last 24h). Report:
 - Total error count
 - Unique hook names that errored
 - Most frequent error message

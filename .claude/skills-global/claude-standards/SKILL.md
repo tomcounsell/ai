@@ -1,6 +1,6 @@
 ---
 name: claude-standards
-description: "Audit Claude Code assets — skills, commands, subagents, hooks, and MCP servers — against best practices and optionally apply conservative conformance changes. Use when reviewing overall Claude Code hygiene, bringing the system in line with documented standards, or after adding new skills/commands/subagents. Invoke explicitly; do not use for feature changes."
+description: "Audit Claude Code assets (skills, commands, subagents, hooks, MCP) against documented standards, optionally applying conformance fixes. Use when reviewing Claude Code hygiene; invoke explicitly."
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write
 argument-hint: "[skills|commands|subagents|hooks|mcp|all] [--fix]"
@@ -14,10 +14,10 @@ Audits the five classes of Claude Code assets in this repo against the best-prac
 
 | Asset class | Location | Standards reference |
 |-------------|----------|---------------------|
-| Skills | `.claude/skills/*/SKILL.md` | [STANDARDS_SKILLS.md](STANDARDS_SKILLS.md) |
+| Skills | `.claude/skills/*/SKILL.md` (plus `.claude/skills-global/*/SKILL.md` if the repo has one) | [STANDARDS_SKILLS.md](STANDARDS_SKILLS.md) |
 | Slash commands | `.claude/commands/*.md` | [STANDARDS_COMMANDS.md](STANDARDS_COMMANDS.md) |
 | Subagents | `.claude/agents/*.md` | [STANDARDS_SUBAGENTS.md](STANDARDS_SUBAGENTS.md) |
-| Hooks | `.claude/settings.json` + `.claude/hooks/**` | [STANDARDS_HOOKS.md](STANDARDS_HOOKS.md) (canonical source: `.claude/skills-global/audit-hooks/BEST_PRACTICES.md`) |
+| Hooks | `.claude/settings.json` + `.claude/hooks/**` | [STANDARDS_HOOKS.md](STANDARDS_HOOKS.md) (canonical source: the `audit-hooks` skill's `BEST_PRACTICES.md`, installed alongside this skill) |
 | MCP servers | `config/mcp_library.json` + `mcp_servers/` (if present) | [STANDARDS_MCP.md](STANDARDS_MCP.md) |
 
 Each `STANDARDS_*.md` file holds the rules. Keep those files as the single source of truth; do not inline rules here.

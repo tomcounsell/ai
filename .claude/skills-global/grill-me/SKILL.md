@@ -1,6 +1,6 @@
 ---
 name: grill-me
-description: "Use when probing assumptions and surfacing gaps via Socratic interrogation. Triggered by 'grill me', 'challenge my thinking', 'probe this', 'stress test this idea', or any request to pressure-test a plan, belief, or understanding."
+description: "Socratic interrogation to probe assumptions and surface gaps. Triggered by 'grill me', 'challenge my thinking', 'probe this', 'stress test this idea', or pressure-testing a plan or belief."
 allowed-tools: Read, Bash
 ---
 
@@ -10,7 +10,7 @@ allowed-tools: Read, Bash
 Probe the human's assumptions, surface blind spots, and identify the most critical gap in their thinking — one pointed question at a time.
 
 ## When to Use
-- Human presents a plan, idea, or design and wants it pressure-tested
+- Human presents a plan, idea, design, belief, or understanding and wants it pressure-tested
 - Prior to /do-plan to ensure the problem statement is sound
 - When a third patch loop on the same issue suggests a wrong-root-cause diagnosis
 - Any time the user says "grill me", "challenge this", or "what am I missing?"

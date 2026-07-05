@@ -238,9 +238,7 @@ file declares a verification-table runner, use it instead.
 
 ### Pre-Verdict Checklist
 
-Before writing the verdict, evaluate each of the following items. Every item must receive a `PASS`, `FAIL`, or `N/A` verdict. No blank entries are allowed. Items marked `FAIL` automatically become findings.
-
-Every item MUST have a verdict. Blank verdicts invalidate the review.
+Before writing the verdict, evaluate each of the following items. Every item must receive a `PASS`, `FAIL`, or `N/A` verdict — blank verdicts invalidate the review. Items marked `FAIL` automatically become findings.
 
 Emit the completed checklist as a bulleted list in the review comment. Format: `- **N. Item name** — PASS/FAIL/N/A — *notes*`. Keep one line per item.
 
@@ -261,7 +259,7 @@ Emit the completed checklist as a bulleted list in the review comment. Format: `
 - **12. Docs updated for user-facing changes** — PASS/FAIL/N/A — *notes*
 ```
 
-An "Approved" verdict requires all 12 items evaluated (no blank verdicts). Items that do not apply to this PR should be marked `N/A` with a note. An "Approved" verdict with one or more `FAIL` items is not valid — `FAIL` items must be promoted to findings.
+Items that do not apply to this PR are marked `N/A` with a note. An "Approved" verdict with one or more `FAIL` items is not valid — `FAIL` items must be promoted to findings.
 
 The Pre-Verdict Checklist remains the high-signal filter for common calibration bugs (unguarded `except Exception`, in-memory-only integration tests, missing docstrings, etc.). The Rubric below adds structured, mechanically-derived verdict logic on top — the two are complementary, not redundant.
 
@@ -367,7 +365,20 @@ Before reporting, verify every blocker and tech_debt finding:
 2. Confirm the code exists at or near the cited line
 3. Confirm your description of the problem is accurate
 
-Drop any finding that fails verification. A false blocker is worse than a missed issue.
+Drop any finding that fails verification. A false blocker is worse than a missed
+issue — it wastes time and erodes trust. This step exists because of issue #181:
+a prior review hallucinated two "blocker" findings citing functions and files
+that did not exist.
+
+### 8. Legacy Cruft Audit
+
+Run the cruft auditor on the PR diff to identify legacy patterns (deprecated fields
+still read/written, fallback chains, dual implementations, dead imports, stale comments).
+
+Include any findings as a "Legacy Cruft" subsection in the review output.
+Cruft findings are advisory, not blockers. If the repo defines a cruft-auditor
+agent (e.g. `.claude/agents/cruft-auditor.md`), dispatch it; otherwise scan the
+diff for these patterns directly.
 
 ## Completion
 

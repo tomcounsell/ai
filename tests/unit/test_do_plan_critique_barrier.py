@@ -61,6 +61,19 @@ def critics_text(skill_dir: Path) -> str:
     return (skill_dir / "CRITICS.md").read_text(encoding="utf-8")
 
 
+# Repo seam file (skill-context convention): the generic skill body refers to
+# the barrier CLIs abstractly ("membership-gate CLI", "resume probe"); the
+# concrete repo executables (critique-roster-check / critique-resume-probe)
+# are declared in docs/sdlc/do-plan-critique.md, which this repo's tests can
+# assert directly.
+_SEAM_PATH = Path("docs/sdlc/do-plan-critique.md")
+
+
+@pytest.fixture(scope="module")
+def seam_text() -> str:
+    return _SEAM_PATH.read_text(encoding="utf-8")
+
+
 # Fence tokens, asserted in many places.
 FENCE_DELIMITER = "<<<CRITIQUE-RESULT-COMPLETE>>>"
 FENCE_STATUS = "STATUS: COMPLETED"
@@ -135,9 +148,15 @@ class TestProseInvariants:
 
     # (d) Step 3.5 cap framing + CRITIQUE INCOMPLETE ----------------------
 
-    def test_step_3_5_calls_roster_check_and_names_cap(self, skill_text: str) -> None:
+    def test_step_3_5_calls_roster_check_and_names_cap(
+        self, skill_text: str, seam_text: str
+    ) -> None:
         step35 = _section(skill_text, "### Step 3.5", "### Step 4")
-        assert "critique-roster-check" in step35
+        # The generic body invokes the barrier through the probe-guarded
+        # membership-gate hook; the concrete gate CLI is a repo executable
+        # declared in the seam file (skill-context convention).
+        assert "membership-gate CLI" in step35
+        assert "critique-roster-check" in seam_text
         assert "MAX_CRITIC_REDISPATCH" in step35
         # The "1 initial + up to 2 re-dispatches = 3 attempts" framing.
         assert "3 attempts" in step35 or "1 initial" in step35
@@ -165,11 +184,12 @@ class TestProseInvariants:
 
     # (f) Step 2b resume probe present ------------------------------------
 
-    def test_step_2b_resume_probe_present(self, skill_text: str) -> None:
-        """Step 2b must exist and reference critique-resume-probe."""
+    def test_step_2b_resume_probe_present(self, skill_text: str, seam_text: str) -> None:
+        """Step 2b must exist and invoke the resume probe (concrete CLI in seam)."""
         assert "Step 2b" in skill_text
         step2b = _section(skill_text, "### Step 2b", "### Step 2.6")
-        assert "critique-resume-probe" in step2b
+        assert "resume probe" in step2b
+        assert "critique-resume-probe" in seam_text
 
     # (g) Step 2.6 triage and force-FULL present --------------------------
 
@@ -210,9 +230,12 @@ class TestProseInvariants:
 class TestOrderingAndAggregationInvariants:
     # (f) Step 3.5 / roster-check precedes Step 4 -------------------------
 
-    def test_roster_check_precedes_step_4(self, skill_text: str) -> None:
-        assert skill_text.index("critique-roster-check") < skill_text.index("### Step 4")
+    def test_roster_check_precedes_step_4(self, skill_text: str, seam_text: str) -> None:
+        # The gate hook (membership-gate CLI) must be invoked before Step 4;
+        # the concrete critique-roster-check CLI is declared in the seam.
+        assert skill_text.index("membership-gate CLI") < skill_text.index("### Step 4")
         assert skill_text.index("### Step 3.5") < skill_text.index("### Step 4")
+        assert "critique-roster-check" in seam_text
 
     # (g) Verdict-record gated on complete: true OR CRITIQUE INCOMPLETE ----
 

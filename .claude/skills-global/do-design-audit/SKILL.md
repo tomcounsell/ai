@@ -1,11 +1,11 @@
 ---
 name: do-design-audit
-description: "Audit an existing web UI against premium design criteria. Screenshots pages and evaluates visual hierarchy, typography, color, spacing, consistency, and more. Use when the user wants to evaluate design quality, audit a UI, or says 'review this design', 'check the UI', 'audit this page', 'scan the interface', or provides a URL for design feedback."
+description: "Audit a web UI against premium design criteria. Use when evaluating design quality, or on 'review this design', 'check the UI', 'audit this page', 'scan the interface', or a URL for design feedback."
 allowed-tools: mcp__byob__browser_navigate, mcp__byob__browser_read, mcp__byob__browser_click, mcp__byob__browser_screenshot, mcp__byob__browser_close_tab, mcp__byob__browser_list_tabs, mcp__byob__browser_wait_for
 context: fork
 ---
 
-This skill evaluates existing web interfaces against premium design criteria. It is the review-time companion to `/frontend-design` — that skill builds to the standard; this one audits against it.
+Audit an existing web interface against premium design criteria and produce the structured report defined below — every rubric row scored with a specific finding, plus the three most impactful fixes. This is the review-time companion to `/frontend-design`: that skill builds to the standard; this one audits against it.
 
 Be opinionated. Call out what fails clearly. "Acceptable" is not a compliment.
 
@@ -27,14 +27,6 @@ The calling session **must** be in real-Chrome mode (the harness may
 auto-infer this from the request, or expose an explicit flag — see the
 repo context file for the project-specific mechanism). Two concurrent
 real-Chrome sessions race on the active tab and corrupt each other's DOM.
-
-## When to Use
-
-Trigger this skill when the user:
-- Provides a URL and asks for design feedback
-- Says "review this design", "check the UI", "what do you think of this interface"
-- Asks whether something looks professional, polished, or premium
-- Wants to know what to improve before launching
 
 ## Variables
 
@@ -76,17 +68,13 @@ Desktop viewport only. Do not resize for mobile in v1.
 
 ### Step 3: Evaluate
 
-Evaluate ALL collected screenshots against the 10 rubric dimensions below. Do not rush — look carefully at each screenshot before scoring.
-
-### Step 4: Produce the Report
-
-Output the structured report format defined in the Output Format section. Every row in the evaluation table must have a specific finding, not a generic one.
+Evaluate ALL collected screenshots against the 10 rubric dimensions below, then produce the report in the Output Format section.
 
 ---
 
 ## Evaluation Rubric
 
-Score each dimension: ✅ **Premium**, ⚠️ **Acceptable**, or ❌ **Needs work**.
+Score each dimension: ✅ **Premium** (deliberate, polished, no action needed), ⚠️ **Acceptable** (won't embarrass you, won't impress anyone — clear room to improve), or ❌ **Needs work** (specific issue, actionable fix).
 
 Be specific. "Typography could be improved" is a non-answer. "The heading and body text use the same font weight, eliminating any sense of hierarchy between the two" is a finding.
 
@@ -185,18 +173,6 @@ Fail conditions (direct from `/frontend-design` DON'Ts):
 
 ---
 
-## Rating Scale
-
-| Rating | Meaning |
-|--------|---------|
-| ✅ **Premium** | Exceptional — deliberate, polished, no action needed |
-| ⚠️ **Acceptable** | Passes the bar — functional, inoffensive, but with clear room to improve |
-| ❌ **Needs work** | Specific issue identified — actionable fix recommended |
-
-"Acceptable" is not a compliment. It means "won't embarrass you, but won't impress anyone either."
-
----
-
 ## Output Format
 
 Produce the following report after evaluating all screenshots:
@@ -250,9 +226,4 @@ Top 3 improvements must be actionable. A developer or designer should be able to
 
 ## After the Audit
 
-This skill produces findings only. The report identifies design weaknesses but does not modify any code. Next steps:
-
-- Share findings with the designer or developer responsible for the UI
-- Use `/frontend-design` to implement the recommended improvements
-- Re-run `/do-design-audit` after changes to verify improvements landed
-- For systematic issues (typography, color palette), address them at the design system level rather than page-by-page
+This skill produces findings only — it modifies no code. Implement fixes with `/frontend-design` (or at the design-system level for systematic issues like typography or palette), then re-run the audit to verify.

@@ -1,17 +1,13 @@
 ---
 name: weekly-review
-description: Use when the user asks for a weekly review, engineering review, team review, or summary of recent commits. Also use for bi-weekly, monthly, or sprint reviews ("review the last N days"). Produces a concise, stakeholder-friendly engineering summary organized by category with contributor stats.
+description: Stakeholder-friendly summary of recent commits by category with contributor stats. Use when asked for a weekly, bi-weekly, monthly, sprint, engineering, or team review, or 'review the last N days'.
 allowed-tools: Bash, Read, Write
 argument-hint: "[days] [categories]"
 ---
 
 # Weekly Review
 
-## What this skill does
-
-Produces a structured engineering review of recent commits, organized by category with 2-5 bullets each plus contributor statistics. Output is plain text with Unicode emojis suitable for copy-paste into email, Slack, Google Docs, or any communication channel. Works for ANY codebase and tech stack — the framework is purely git-based.
-
-The framework is analysis-focused (not prescriptive): it gathers commit data, helps you organize it into meaningful categories, and writes a concise summary in plain language accessible to non-technical stakeholders while still meaningful to engineers.
+Produces a structured engineering review of recent commits — N categories with 2-5 bullets each, plus contributor statistics — written in plain language a non-technical stakeholder can read while staying meaningful to engineers. Output is plain text with Unicode emojis, ready to paste into email, Slack, or a doc. Purely git-based, so it works in any codebase.
 
 ## Defaults
 
@@ -48,22 +44,7 @@ Think through the commits and organize them. Do NOT produce a long verbose break
 4. **Note key stats** — total commits, files changed, contributors, percentages
 5. **Identify highlights** — the most impactful changes
 
-**Category examples** (pick what fits this period's actual work — do not force-fit):
-
-- 🔐 Credential & Authentication Infrastructure
-- 🔌 Third-party Integrations
-- 💬 Frontend Performance & UX
-- 📧 User Lifecycle Automation
-- 🧪 Testing & Code Quality
-- 🐛 Bug Fixes & Stability
-- ⚙️ DevOps & Infrastructure
-- 🏗️ API Development
-- 💰 Billing & Payments
-- 📊 Reporting & Analytics
-- 💾 Database & Data Models
-- 🚀 Feature Development
-
-Use **descriptive, specific names** based on actual work — not generic labels. Prefer "Credential & Authentication Infrastructure" over just "Auth".
+Let categories emerge from the actual work — do not force-fit a stock taxonomy. Use **descriptive, specific names** with a fitting emoji: prefer "🔐 Credential & Authentication Infrastructure" over "Auth"; other examples: 🧪 Testing & Code Quality, 🐛 Bug Fixes & Stability, ⚙️ DevOps & Infrastructure, 💰 Billing & Payments, 🚀 Feature Development.
 
 ## Phase 3: Write the final summary
 
@@ -103,26 +84,15 @@ Output format (plain text, Unicode emojis, NO numbered sections):
 - Test: "Would a product manager, designer, or executive understand this?"
 
 **Category selection**:
-- Choose the N most relevant categories to this period's work
-- Order by importance/impact
+- Choose the N most relevant categories to this period's work, ordered by importance/impact
 - NO NUMBERS — just emoji + bold title (e.g., `🔐 **Authentication**` not `1. 🔐 Authentication`)
 
 **Team Statistics section**:
-- Calculate commit percentages for each contributor
-- List in order of commit count (highest first)
+- Calculate commit percentages for each contributor; list highest first
 - Include 1-2 bullets describing each person's focus areas in plain language
 - Add relevant aggregate metrics (files changed, tests added, etc.)
 
-## Output expectations
-
-- ✅ Plain text with full Unicode emoji support
-- ✅ N categories with emoji + bold title (NO NUMBERS)
-- ✅ 2-5 bullets per category in plain language (no code paths, no method names, no file references)
-- ✅ Team Statistics section with contributor breakdown
-- ✅ Focus on business impact and user benefits, not technical implementation
-- ❌ NOT multiple pages of verbose analysis
-- ❌ NOT numbered sections
-- ❌ NOT technical jargon or code references (`apps/path/file.py`, function names, etc.)
+Keep the whole review concise — a page, not a report. No numbered sections, no code references, no jargon.
 
 ## Final step: save the document
 
@@ -132,7 +102,3 @@ Save to plain text in `/tmp/`:
 - Monthly: `/tmp/eng_review_<mon><day>-<mon><day>.txt` (e.g., `/tmp/eng_review_sep7-oct7.txt`)
 
 After saving, offer: `open -a TextEdit <path>`
-
-## Version history
-
-- v1.0.0 (2026-04-29): Imported from cuttlefish `apps/ai/mcp/cto_tools/server.py::weekly_review` as a self-contained skill (no MCP dependency)

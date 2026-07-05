@@ -2,6 +2,16 @@
 
 Step-by-step execution workflow for the build orchestrator. Read this file when executing a plan.
 
+## Step 0: Stage Marker (only if the context file declares a substrate)
+
+If the context file declares an orchestration substrate (a pipeline state
+machine + stage markers), write the BUILD `in_progress` marker now and follow
+its degraded-mode handling — a forked sub-skill announces degraded mode rather
+than silently lagging state. The build itself (worktree, agents, tests, PR) never
+depends on the substrate, so a missing or degraded substrate never blocks it.
+
+In the generic case (no substrate declared), skip this step.
+
 ## Step 1: Initialize Task List
 
 Read the plan and create tasks:
@@ -50,7 +60,9 @@ Your assignment:
 [If the task carries a `Domain: <tag>` line, read `../do-plan/DOMAIN_FRAMING.md` and
 append that domain's rules here so the builder/reviewer applies them.]
 
-When complete, commit your changes and update your task status.
+Commit at logical checkpoints as you work — not as one batch at the end. Any commit-message hygiene hook the repo has runs at each commit.
+
+When complete, update your task status.
 
 SELF-CHECK (mandatory before marking task complete):
 1. Run \`git status\` in the worktree and include the output in your response
@@ -120,16 +132,33 @@ COMMIT_COUNT=$(git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD | 
 
 ## Step 5: Final Validation and Definition of Done
 
-When the final `validate-all` task completes, verify Definition of Done criteria:
+When the final `validate-all` task completes, verify Definition of Done criteria.
 
-**Definition of Done Checklist:**
+**Pipeline stage at this point:** `test` → advance to `review` before proceeding (if the context file declares a state machine; otherwise just proceed).
+
+**Definition of Done Checklist (pre-documentation):**
 - [x] **Built**: All code implemented and working
 - [x] **Tested**: All unit tests passing, integration tests passing
-- [x] **Documented**: Documentation created per plan's Documentation section
 - [x] **Quality**: the repo's lint/format checks pass, no lint errors
-- [x] **Plans migrated**: Ready to migrate from docs/plans/ to the completed/docs location
+- [x] **Reviewed**: Review passes (no blocking issues)
+- [x] **Demonstrated**: Feature produces intended user-visible output (e.g., rendered message, API response, UI state)
 
-If any criterion is not met, report the issue and do NOT proceed to PR creation.
+If any criterion is not met, report the issue and do NOT proceed to the Document stage.
+
+**Note**: Documentation validation happens AFTER review passes — see PR_AND_CLEANUP.md Step 6. The canonical pipeline order is: Plan → Branch → Implement → Test → Review → Document → PR. Fix-and-retry loops re-enter at Test (for test failures) or Review (for review failures).
+
+## Step 5.1: Run Verification Checks from Plan
+
+If the plan has a `## Verification` section with a machine-readable table, run
+each check and confirm its expected result. This replaces manual validation
+judgment with deterministic pass/fail. Run the checks inside the worktree
+(`cd .worktrees/{slug}` in a subshell).
+
+Generic baseline: read the `## Verification` table from the plan, run each
+`Command`, and compare against its `Expected` column. If any check fails, fix the
+specific failure and re-run. If the context file declares a verification-table
+parser/runner, use it instead. If the plan has no `## Verification` section, this
+step is a no-op.
 
 ## Step 5.5: CWD Safety Reset
 
@@ -141,6 +170,14 @@ cd $(git rev-parse --show-toplevel) && pwd
 
 The output should be the main repo path, NOT a `.worktrees/` path. If the CWD is somehow inside the worktree, this resets it. All subsequent orchestrator commands depend on CWD being the repo root.
 
+## Step 5.6: PROGRESS.md Soft Check
+
+After validating Definition of Done, run a soft check for the working-state scratchpad. Missing PROGRESS.md is a warning, not a blocker — PR creation is not gated on this:
+
+```bash
+[ -f $TARGET_REPO/.worktrees/{slug}/PROGRESS.md ] || echo "[warn] No PROGRESS.md at worktree root — not blocking, but recovery from compaction may be degraded next run."
+```
+
 ## Agent Deployment Context
 
 When deploying an agent, include:
@@ -149,22 +186,3 @@ When deploying an agent, include:
 3. Success criteria from the plan
 4. Validation commands they should run (for validators)
 5. Reminder: No temporary files in repo - use /tmp for scratch work, only commit deliverables
-
-## Example Execution
-
-Given a plan with tasks:
-```
-1. build-api (Parallel: true)
-2. build-frontend (Parallel: true)
-3. validate-api (Depends On: build-api)
-4. validate-frontend (Depends On: build-frontend)
-5. integration-test (Depends On: validate-api, validate-frontend)
-```
-
-Execution order:
-1. Create all 5 tasks
-2. Set dependencies
-3. Deploy build-api AND build-frontend simultaneously (both parallel, no deps)
-4. When build-api completes -> validate-api starts
-5. When build-frontend completes -> validate-frontend starts
-6. When BOTH validators complete -> integration-test starts

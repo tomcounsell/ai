@@ -1,6 +1,6 @@
 ---
 name: ontologies
-description: "Use when building or updating a project's domain vocabulary. Triggered by 'ontologies', 'build vocabulary', 'name things', 'define terms', 'ONTOLOGIES.md', or any request to establish precise domain language for a codebase."
+description: "Build or update a project's domain vocabulary in ONTOLOGIES.md. Triggered by 'ontologies', 'build vocabulary', 'name things', 'define terms', or establishing precise domain language."
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
@@ -36,8 +36,8 @@ Build and maintain an `ONTOLOGIES.md` at the repo root — a canonical domain vo
 
 4. **Check for bounded-context split signal.** If the same term means two different things in two different modules, that is a bounded-context boundary. Document it explicitly:
    ```
-   Note: "Session" in bridge/ means a Telegram conversation thread.
-         "Session" in agent/ means an AgentSession execution record.
+   Note: "Order" in checkout/ means a customer's cart at purchase time.
+         "Order" in fulfillment/ means a warehouse shipping instruction.
          These are distinct concepts that should not be merged.
    ```
 

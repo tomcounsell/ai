@@ -1,6 +1,6 @@
 ---
 name: zoom-out
-description: "Use when course-correcting mid-session or reassessing priorities. Triggered by 'zoom out', 'am I solving the right problem', 'step back', 'reassess', 'am I on track', or any request to check whether current work aligns with real goals."
+description: "Course-correct mid-session and reassess priorities. Triggered by 'zoom out', 'step back', 'reassess', 'am I on track', 'am I solving the right problem', or checking work against real goals."
 allowed-tools: Read, Bash
 ---
 
@@ -21,8 +21,6 @@ Pull back from the current task, reassess priorities, and reorient toward the ac
 - A session has gone quiet or circular — same fixes, same failures
 - The user says "step back", "zoom out", or "are we doing the right thing?"
 - Before starting a fourth implementation attempt on something that keeps breaking
-
-Concrete trigger example: Run before a third consecutive patch loop on the same issue. If /do-patch has been invoked twice and the tests still fail, invoke /zoom-out before a third attempt.
 
 ## Steps
 

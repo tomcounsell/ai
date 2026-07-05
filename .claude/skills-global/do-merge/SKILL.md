@@ -1,6 +1,6 @@
 ---
 name: do-merge
-description: Use when merging a pull request that has cleared the SDLC pipeline. Runs the deterministic verify-then-merge gate — confirms the PR is OPEN, mergeable, CI-green, REVIEW-approved, and links its tracking issue — then authorizes and squash-merges. Triggered by 'merge this PR', 'do-merge', or automatically by /sdlc at the MERGE stage.
+description: "Use when merging a pull request that has cleared the SDLC pipeline. Triggered by 'merge this PR', 'do-merge', or automatically by /sdlc at the MERGE stage."
 ---
 
 # Do-Merge (Deterministic Merge Gate)
@@ -162,7 +162,7 @@ and the merge is already complete.
 ## Critical Rules
 
 - **Never bypass the gate.** The auth file is created ONLY after every
-  precondition passes. A copy-pasted `touch data/merge_authorized_{PR}` without
+  precondition passes. Creating the repo's authorization file without running
   the gate defeats the entire mechanism.
 - **Fail closed.** Any unconfirmed precondition (unknown CI state, missing
   review verdict, unresolved mergeability) is a FAIL, not a pass.

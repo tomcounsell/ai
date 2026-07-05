@@ -18,6 +18,7 @@ import pytest
 SKILL_MD = Path(".claude/skills-global/do-pr-review/SKILL.md")
 POST_REVIEW_MD = Path(".claude/skills-global/do-pr-review/sub-skills/post-review.md")
 CHECKOUT_MD = Path(".claude/skills-global/do-pr-review/sub-skills/checkout.md")
+OUTCOME_CONTRACT_MD = Path(".claude/skills-global/do-pr-review/sub-skills/outcome-contract.md")
 
 
 @pytest.fixture(scope="module")
@@ -33,6 +34,11 @@ def post_review_text() -> str:
 @pytest.fixture(scope="module")
 def checkout_text() -> str:
     return CHECKOUT_MD.read_text()
+
+
+@pytest.fixture(scope="module")
+def outcome_contract_text() -> str:
+    return OUTCOME_CONTRACT_MD.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -186,15 +192,22 @@ class TestUnknownMergeabilityConservative:
             "checkout.md must not tell the agent to proceed on UNKNOWN-after-retry"
         )
 
-    def test_outcome_contract_has_blocked_on_conflict_verdict(self, skill_text: str) -> None:
-        """Outcome Contract must include BLOCKED_ON_CONFLICT with next_skill:null."""
+    def test_outcome_contract_has_blocked_on_conflict_verdict(
+        self, skill_text: str, outcome_contract_text: str
+    ) -> None:
+        """Outcome Contract must include BLOCKED_ON_CONFLICT with next_skill:null.
+
+        SKILL.md defers the exact JSON blocks to sub-skills/outcome-contract.md,
+        which carries every verdict variant.
+        """
         assert "BLOCKED_ON_CONFLICT" in skill_text
-        assert "next_skill" in skill_text
-        # Find BLOCKED_ON_CONFLICT outcome
-        idx = skill_text.find("BLOCKED_ON_CONFLICT")
+        assert "BLOCKED_ON_CONFLICT" in outcome_contract_text
+        assert "next_skill" in outcome_contract_text
+        # The BLOCKED_ON_CONFLICT outcome block must carry next_skill:null
+        idx = outcome_contract_text.find('"verdict":"BLOCKED_ON_CONFLICT"')
         assert idx != -1
-        surrounding = skill_text[idx : idx + 500]
-        assert "next_skill" in surrounding or "null" in skill_text
+        surrounding = outcome_contract_text[idx : idx + 500]
+        assert '"next_skill":null' in surrounding
 
 
 # ---------------------------------------------------------------------------

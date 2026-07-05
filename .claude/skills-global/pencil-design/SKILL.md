@@ -1,13 +1,11 @@
 ---
 name: pencil-design
-description: "Use when designing or iterating on .pen files via the Pencil MCP server (or the headless `pencil` npm CLI). Captures cross-project gotchas — save semantics for new files, schema pitfalls that aren't in the schema text, and the MCP-vs-CLI file-existence distinction. Triggered by '.pen file', 'pencil mcp', 'mcp__pencil__*', 'pencil cli', 'design system pen'. NOT triggered by ordinary frontend / CSS design work — that belongs in `frontend-design` or `do-design-system`."
+description: "Work with .pen files via the Pencil MCP or headless CLI. Triggered by '.pen file', 'pencil mcp', 'mcp__pencil__*', 'pencil cli', 'design system pen'. NOT ordinary frontend/CSS work."
 ---
 
 # Pencil Design (general-purpose)
 
-Hard-won notes for working with `.pen` files via the Pencil MCP server (`mcp__pencil__*`) or the headless `pencil` npm CLI. Project-specific skills (e.g. cuttlefish's `pencil-design`) override this one inside their own repo and add brand rules, component inventories, and design-system paths on top — this skill is the floor that applies everywhere.
-
-If a project-specific `pencil-design` skill exists, prefer it. This skill is intentionally generic.
+Hard-won notes for working with `.pen` files via the Pencil MCP server (`mcp__pencil__*`) or the headless `pencil` npm CLI. This is the floor that applies everywhere: if a project-specific `pencil-design` skill exists (brand rules, component inventories, design-system paths), prefer it. Ordinary frontend / CSS design work belongs in `frontend-design` or `do-design-system`, not here.
 
 ## Reading .pen files
 
@@ -194,7 +192,3 @@ Run `mcp__pencil__get_guidelines` early in a session — it returns the live sch
 
 - Pre-commit's `end-of-file-fixer` modifies `.pen` files on first commit (they lack a trailing newline). The hook fails, fixes the file, and you re-stage + re-commit. Expected; not an error.
 - Commit `.pen` and `.png` exports together — the `.pen` is the editable source; the `.png` lets reviewers see the diagram in the PR diff without launching Pencil.
-
-## Distribution
-
-This skill lives at `~/src/ai/.claude/skills-global/pencil-design/SKILL.md` and is hardlinked to `~/.claude/skills/pencil-design/` by `scripts/update/hardlinks.py` on every `/update` run. Edits in either location update both (shared inode). Project-specific overrides (e.g. cuttlefish's brand rules) live in that project's own `.claude/skills/pencil-design/` and take precedence inside that repo.
