@@ -34,11 +34,13 @@ from scripts.migrate_completed_plan import extract_tracking_issue, migrate_plan_
 
 logger = logging.getLogger("reflections.maintenance")
 
-# Single toggle point for arming the mechanism (issue #1900, Tier 0). While False,
-# run() only reports what it would migrate -- it never calls git mv. The
-# arm-reflection follow-up task flips this to True once the evidence-gate
-# regression test (tests/unit/test_plan_migration_invariant.py) proves green.
-MIGRATION_APPLY_ENABLED = False
+# Single toggle point for arming the mechanism (issue #1900, Tier 0). Armed
+# (True) as of the arm-reflection task: the evidence-gate regression test
+# (tests/unit/test_plan_migration_invariant.py) proves the gate is
+# independent of is_complete and non-vacuous (requires a literal "closed"
+# issue state), so run() now calls git mv for real, bounded by
+# MIGRATION_PER_RUN_CAP below.
+MIGRATION_APPLY_ENABLED = True
 
 # Per-run cap on plans migrated (or reported as migratable) in a single
 # invocation -- bounds the blast radius of the daily unattended sweep. The

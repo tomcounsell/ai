@@ -11,13 +11,15 @@ Covers the plan-migration backstop this reflection was extended with:
   (Blocker 1): an all-checkboxes-complete plan with a closed tracking issue must
   still migrate.
 - The per-run cap is honored.
-- ``MIGRATION_APPLY_ENABLED = False`` (this task) means run() only reports; it
-  never mutates disk.
+- ``MIGRATION_APPLY_ENABLED = True`` (armed as of the arm-reflection task):
+  run() performs the git mv for real. A forced-off variant is still covered
+  to prove report-only mode remains correct if the flag is ever flipped back.
 
 All git/gh subprocess calls are mocked -- no real network, no real git repo --
-except the dedicated end-to-end test that verifies apply-off mode against a
-real temp git repo (the strongest guarantee that "report-only" truly means
-"moves nothing on disk").
+except the dedicated end-to-end tests that verify apply-on (the shipped,
+armed state) and apply-off (forced via monkeypatch) against a real temp git
+repo (the strongest guarantee that each mode does exactly what it claims to
+disk).
 """
 
 from __future__ import annotations
@@ -222,14 +224,15 @@ class TestMigrationGate:
         assert len(deferred) == n_plans - cap
 
 
-class TestApplyOffReportOnly:
-    def test_apply_off_moves_nothing_on_disk(self, monkeypatch, tmp_path):
-        """End-to-end: with MIGRATION_APPLY_ENABLED off (this task's shipped
-        state), run() against a REAL git repo reports eligibility but performs
-        no git mv -- the plan file stays exactly where it was.
+class TestApplyOnMigrates:
+    def test_apply_on_moves_plan_on_disk(self, monkeypatch, tmp_path):
+        """End-to-end: with MIGRATION_APPLY_ENABLED armed (the shipped state as
+        of the arm-reflection task), run() against a REAL git repo performs
+        the git mv -- the plan file actually lands in docs/plans/completed/.
         """
-        assert mbc.MIGRATION_APPLY_ENABLED is False, (
-            "this task ships the mechanism report-only; arm-reflection flips this"
+        assert mbc.MIGRATION_APPLY_ENABLED is True, (
+            "arm-reflection armed this permanently; the reflection registry "
+            "entry (config/reflections.yaml) is enabled: true to match"
         )
 
         repo = tmp_path / "repo"
@@ -249,7 +252,7 @@ class TestApplyOffReportOnly:
             lambda: [{"github": "tomcounsell/ai", "working_directory": str(repo)}],
         )
         # migrate_plan_to_completed is NOT mocked here -- exercise the real
-        # primitive end-to-end against MIGRATION_APPLY_ENABLED=False.
+        # primitive end-to-end against MIGRATION_APPLY_ENABLED=True.
 
         with patch.object(
             mbc.asyncio,
@@ -259,11 +262,53 @@ class TestApplyOffReportOnly:
         ):
             result = asyncio.run(mbc.run())
 
+        assert not plan.exists(), "armed mode must perform the git mv"
+        assert (plans_dir / "completed" / "e2e-plan.md").exists()
+        status = _git(repo, "status", "--porcelain")
+        assert status.stdout.strip() == "", "the primitive commits its own git mv"
+        assert any("e2e-plan.md" in f for f in result["findings"])
+        assert "migrated" in result["summary"]
+
+    def test_apply_off_moves_nothing_on_disk(self, monkeypatch, tmp_path):
+        """Report-only mode remains available and correct: forcing
+        MIGRATION_APPLY_ENABLED off (regardless of the armed default) still
+        reports eligibility without performing any git mv -- the plan file
+        stays exactly where it was.
+        """
+        monkeypatch.setattr(mbc, "MIGRATION_APPLY_ENABLED", False)
+
+        repo = tmp_path / "repo"
+        plans_dir = repo / "docs" / "plans"
+        (plans_dir / "completed").mkdir(parents=True)
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        plan = _write_plan(plans_dir, "e2e-plan-off", issue=601)
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+
+        monkeypatch.setattr(mbc, "PROJECT_ROOT", repo)
+        monkeypatch.setattr(
+            mbc,
+            "load_local_projects",
+            lambda: [{"github": "tomcounsell/ai", "working_directory": str(repo)}],
+        )
+        # migrate_plan_to_completed is NOT mocked here -- exercise the real
+        # primitive end-to-end against a forced MIGRATION_APPLY_ENABLED=False.
+
+        with patch.object(
+            mbc.asyncio,
+            "create_subprocess_exec",
+            new_callable=AsyncMock,
+            side_effect=_gh_dispatcher({601: "closed"}),
+        ):
+            result = asyncio.run(mbc.run())
+
         assert plan.exists(), "report-only mode must never perform the git mv"
-        assert not (plans_dir / "completed" / "e2e-plan.md").exists()
+        assert not (plans_dir / "completed" / "e2e-plan-off.md").exists()
         status = _git(repo, "status", "--porcelain")
         assert status.stdout.strip() == "", "report-only mode must leave the tree clean"
-        assert any("e2e-plan.md" in f for f in result["findings"])
+        assert any("e2e-plan-off.md" in f for f in result["findings"])
         assert "would-migrate" in result["summary"]
 
 
