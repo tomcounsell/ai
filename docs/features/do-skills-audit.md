@@ -42,7 +42,7 @@ Main validation script with 20 deterministic rules:
 | 16 | No git-tracked junk files in skill dirs (README/CHANGELOG/pyc/__pycache__) | WARN |
 | 17 | No near-duplicate trigger surfaces (word-overlap Jaccard >= 0.5) | WARN |
 | 18 | Every bundled sub-file referenced by SKILL.md or a sibling file | WARN |
-| 19 | No husk directories (a dir in a skills root without SKILL.md is a move leftover) | FAIL |
+| 19 | No husk directories (a dir in a skills root without SKILL.md is a move leftover) — `--fix` auto-prunes ones that are empty except for build artifacts; husks with real orphaned files are left for a human to delete or restore | FAIL |
 | 20 | User-level `~/.claude/skills/` copies trace to a repo source and haven't diverged | WARN |
 
 Rules 10, 14, 17, 19, 20 are fleet-level and run only on full-fleet invocations (not
@@ -101,7 +101,8 @@ python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --no-sync
 # Audit single skill
 python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --skill telegram
 
-# Auto-fix trivial issues (missing name, whitespace, untracked build artifacts)
+# Auto-fix trivial issues (missing name, whitespace, untracked build artifacts,
+# and empty rule-19 husk directories)
 python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --fix
 
 # JSON output for CI / reflections
