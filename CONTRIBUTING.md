@@ -104,7 +104,7 @@ pytest -m sdlc                 # Tests for a specific feature marker
 
 **New tests** should use existing feature markers (see `tests/README.md`) and live under the appropriate subdirectory (`unit/`, `integration/`, `e2e/`).
 
-**CHANGELOG:** PRs introducing notable features should include a new entry in [`CHANGELOG.md`](CHANGELOG.md) under `[Unreleased]`.
+**Feature docs:** Notable features are documented in [`docs/features/`](docs/features/) (already mandatory via the plan's `## Documentation` section); git history is the changelog.
 
 ---
 
