@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1563,3 +1564,281 @@ class TestEmbeddingOrphanSweep:
         # with the error noted in findings.
         assert result["status"] == "ok"
         assert any("garbage_collect error" in f for f in result["findings"])
+
+
+# ============================================================
+# run_memory_embedding_backfill (issue #1904)
+# ============================================================
+
+
+def _mock_vectorless(memory_id: str):
+    """A MagicMock Memory with no embedding whose save() sets one (mimics re-embed)."""
+    m = MagicMock()
+    m.memory_id = memory_id
+    m.embedding = None
+    m.superseded_by = ""
+
+    def _save(update_fields=None):
+        # Real re-embed would set the dimension count via on_save.
+        m.embedding = 768
+
+    m.save.side_effect = _save
+    return m
+
+
+class TestMemoryEmbeddingBackfill:
+    """Tests for run_memory_embedding_backfill() — the re-embed backfill (#1904)."""
+
+    def test_dry_run_default_saves_nothing(self):
+        from reflections.memory.memory_embedding_backfill import run
+
+        candidate = _mock_vectorless("mem_bf_1")
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "false"}, clear=False),
+        ):
+            mock_model.query.all.return_value = [candidate]
+            result = run_async(run())
+
+        assert_valid_result(result)
+        assert "DRY RUN" in result["summary"]
+        candidate.save.assert_not_called()
+
+    def test_apply_mode_reembeds_via_partial_save_only(self):
+        """C1: re-embed MUST be a partial save on ['embedding'] so relevance is not re-stamped."""
+        from reflections.memory.memory_embedding_backfill import run
+
+        candidate = _mock_vectorless("mem_bf_2")
+        provider = MagicMock()
+        provider.is_available.return_value = True
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
+        ):
+            mock_model.query.all.return_value = [candidate]
+            result = run_async(run())
+
+        assert_valid_result(result)
+        assert "APPLIED" in result["summary"]
+        # The load-bearing critique-C1 assertion: exactly update_fields=["embedding"],
+        # never a bare save() (which would re-stamp the relevance DecayingSortedField).
+        candidate.save.assert_called_once_with(update_fields=["embedding"])
+
+    def test_apply_mode_provider_unavailable_skips(self):
+        """Apply mode with a down provider must NOT re-save (no re-embed storm)."""
+        from reflections.memory.memory_embedding_backfill import run
+
+        candidate = _mock_vectorless("mem_bf_3")
+        provider = MagicMock()
+        provider.is_available.return_value = False
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
+        ):
+            mock_model.query.all.return_value = [candidate]
+            result = run_async(run())
+
+        assert_valid_result(result)
+        candidate.save.assert_not_called()
+        assert any("unavailable" in f.lower() for f in result["findings"])
+
+    def test_empty_queryset(self):
+        from reflections.memory.memory_embedding_backfill import run
+
+        with patch("models.memory.Memory") as mock_model:
+            mock_model.query.all.return_value = []
+            result = run_async(run())
+
+        assert_valid_result(result)
+        assert "0 vectorless" in result["summary"]
+
+    def test_skips_records_with_existing_embedding(self):
+        from reflections.memory.memory_embedding_backfill import run
+
+        embedded = MagicMock()
+        embedded.memory_id = "mem_has_vec"
+        embedded.embedding = 768  # already embedded
+        embedded.superseded_by = ""
+        provider = MagicMock()
+        provider.is_available.return_value = True
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
+        ):
+            mock_model.query.all.return_value = [embedded]
+            result = run_async(run())
+
+        assert_valid_result(result)
+        embedded.save.assert_not_called()
+        assert "0 vectorless" in result["summary"]
+
+    def test_skips_superseded_records(self):
+        from reflections.memory.memory_embedding_backfill import run
+
+        superseded = MagicMock()
+        superseded.memory_id = "mem_superseded"
+        superseded.embedding = None
+        superseded.superseded_by = "mem_replacement"
+        provider = MagicMock()
+        provider.is_available.return_value = True
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
+        ):
+            mock_model.query.all.return_value = [superseded]
+            result = run_async(run())
+
+        assert_valid_result(result)
+        superseded.save.assert_not_called()
+        assert "0 vectorless" in result["summary"]
+
+    def test_caps_reembeds_per_run(self):
+        from reflections.memory.memory_embedding_backfill import MAX_BACKFILL_PER_RUN, run
+
+        candidates = [_mock_vectorless(f"mem_cap_{i}") for i in range(MAX_BACKFILL_PER_RUN + 25)]
+        provider = MagicMock()
+        provider.is_available.return_value = True
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
+        ):
+            mock_model.query.all.return_value = candidates
+            result = run_async(run())
+
+        assert_valid_result(result)
+        saved = sum(1 for c in candidates if c.save.called)
+        assert saved == MAX_BACKFILL_PER_RUN
+
+    def test_per_record_save_failure_does_not_abort_run(self):
+        from reflections.memory.memory_embedding_backfill import run
+
+        good = _mock_vectorless("mem_good")
+        bad = _mock_vectorless("mem_bad")
+        bad.save.side_effect = RuntimeError("synthetic re-embed failure")
+        provider = MagicMock()
+        provider.is_available.return_value = True
+
+        with (
+            patch("models.memory.Memory") as mock_model,
+            patch("agent.embedding_provider.OllamaEmbeddingProvider", return_value=provider),
+            patch.dict("os.environ", {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"}, clear=False),
+        ):
+            mock_model.query.all.return_value = [bad, good]
+            result = run_async(run())
+
+        assert_valid_result(result)  # status ok despite one failure
+        good.save.assert_called_once()
+
+    def test_query_failure_returns_error(self):
+        from reflections.memory.memory_embedding_backfill import run
+
+        with patch("models.memory.Memory") as mock_model:
+            mock_model.query.all.side_effect = RuntimeError("redis down")
+            result = run_async(run())
+
+        assert result["status"] == "error"
+
+    def test_reembed_preserves_relevance_decay(self):
+        """C1 (real Redis): re-embed must NOT bump the relevance sorted-set score.
+
+        A bare memory.save() re-runs relevance's auto_now on_save, jumping the
+        stored timestamp to 'now' and un-decaying the record. The partial
+        save(update_fields=['embedding']) must leave the sorted-set score exactly
+        as it was.
+        """
+        from popoto.fields.embedding_field import get_default_provider, set_default_provider
+        from popoto.redis_db import POPOTO_REDIS_DB
+
+        from models.memory import Memory
+
+        class _RaisingProvider:
+            dimensions = 8
+
+            def embed(self, texts, input_type="document"):
+                raise RuntimeError("stubbed timeout")
+
+            def is_available(self):
+                return False
+
+        class _WorkingProvider:
+            dimensions = 8
+
+            def embed(self, texts, input_type="document"):
+                return [[0.1] * 8 for _ in texts]
+
+            def is_available(self):
+                return True
+
+        original = get_default_provider()
+        project_key = f"test-bf-relevance-{uuid.uuid4().hex[:8]}"
+        m = None
+        try:
+            # 1. Persist a real record WITHOUT a vector (raising provider).
+            set_default_provider(_RaisingProvider())
+            m = Memory(
+                agent_id="test-agent",
+                project_key=project_key,
+                content=f"relevance preservation {uuid.uuid4().hex}",
+                importance=6.0,
+                source="human",
+            )
+            m.save()
+            assert not m.embedding
+
+            # Resolve the relevance sorted-set key + member and pin an OLD score,
+            # so a regression (bare save) would visibly overwrite it to ~now.
+            rel_field_cls = type(Memory._meta.fields["relevance"])
+            ss_key = rel_field_cls.get_partitioned_sortedset_db_key(m, "relevance").redis_key
+            member = m.db_key.redis_key
+            old_score = 1_000_000.0  # a fixed, unmistakably old timestamp
+            POPOTO_REDIS_DB.zadd(ss_key, {member: old_score})
+
+            # 2. Run the backfill in apply mode against ONLY this record, with a
+            #    working provider so the re-embed actually lands a vector.
+            set_default_provider(_WorkingProvider())
+            provider_probe = MagicMock()
+            provider_probe.is_available.return_value = True
+
+            from reflections.memory.memory_embedding_backfill import run
+
+            with (
+                patch("models.memory.Memory") as mock_model,
+                patch(
+                    "agent.embedding_provider.OllamaEmbeddingProvider",
+                    return_value=provider_probe,
+                ),
+                patch.dict(
+                    "os.environ",
+                    {"MEMORY_EMBEDDING_BACKFILL_APPLY": "true"},
+                    clear=False,
+                ),
+            ):
+                mock_model.query.all.return_value = [m]
+                result = run_async(run())
+
+            assert_valid_result(result)
+            # The re-embed landed a vector...
+            assert m.embedding, "re-embed should have set a vector"
+            # ...but the relevance decay score is byte-for-byte preserved (C1).
+            new_score = POPOTO_REDIS_DB.zscore(ss_key, member)
+            assert new_score == old_score, (
+                f"relevance score changed on re-embed (bare-save regression): "
+                f"{old_score} -> {new_score}"
+            )
+        finally:
+            set_default_provider(original)
+            if m is not None:
+                try:
+                    m.delete()
+                except Exception:
+                    pass
