@@ -62,8 +62,11 @@ probe step deferring to the per-repo skill-context seam. Project-only skills are
 **Rot & hygiene (15–16, 18–20):** referenced paths resolve (skills decay as repos move —
 missing own assets FAIL, other unresolvable paths WARN) · no tracked junk files
 (README/CHANGELOG/pyc) · every bundled sub-file is referenced by SKILL.md or a sibling ·
-no husk directories (a dir without SKILL.md is a move leftover) · user-level
-`~/.claude/skills/` copies trace back to a repo source and haven't diverged.
+no husk directories (a dir without SKILL.md is a move leftover — `--fix` auto-prunes ones
+that are truly empty, i.e. contain nothing but `__pycache__`/`.DS_Store`; husks holding real
+orphaned files are never auto-deleted and keep failing rule 19 until a human deletes or
+restores them) · user-level `~/.claude/skills/` copies trace back to a repo source and
+haven't diverged.
 
 The audit must pass on itself: `--skill do-skills-audit` is the first check of a fleet run.
 
@@ -86,6 +89,10 @@ standards. Runs by default; `--no-sync` skips, `--apply` updates our template/va
 
 - `--fix` corrects trivial mechanical findings only. Merges, splits, and description
   rewrites change trigger behavior — always human-reviewed, never auto-applied.
+- One-command husk cleanup: `python .claude/skills-global/do-skills-audit/scripts/audit_skills.py --fix --no-sync`
+  prunes every empty rule-19 husk directory across both skill roots. Anything it leaves
+  behind still failing rule 19 holds real orphaned files — inspect and delete or restore
+  manually.
 - FAIL findings that persist across 2 consecutive runs are auto-filed as GitHub issues by
   the `skills-audit` reflection (daily).
 - Accepted `--arch` dispositions become one GitHub issue each, carrying the
