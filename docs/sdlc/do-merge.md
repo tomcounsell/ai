@@ -66,6 +66,11 @@ guarded `git mv` into `docs/plans/completed/`. The plan stays on `main` (not the
 branch) throughout the lifecycle — migrate it on `main` post-merge, the same as
 before, just via this command instead of a hand `git mv`.
 
+The command is evidence-gated in code, so it is safe to run after **every**
+merge: it checks the issue's live state and prints `Verdict: skipped-open`
+(exit 1) unless the tracking issue is literally closed. A multi-PR issue (PR 1
+merged, issue open for PR 2) keeps its plan in root; a `gh` outage defers.
+
 `migrate_plan_to_completed()` (the primitive this command wraps, in
 `scripts/migrate_completed_plan.py`) is also the single mechanism the
 `merged-branch-cleanup` reflection calls. That reflection is the path-independent

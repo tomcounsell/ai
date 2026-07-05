@@ -143,17 +143,32 @@ guarded `/update` step (vault file must exist; this machine must own the
 the in-repo copy, then reloads the reflection-worker subprocess so the change
 takes effect immediately.
 
+The flip is a **line-scoped text edit with an atomic write** (temp file +
+`os.replace`), never a YAML re-serialize — the vault registry is the human's
+commented source-of-truth file and must survive the flip byte-for-byte apart
+from the one `enabled:` line. It is also **one-shot**: the first arm (or a
+noop on an already-enabled entry) stamps
+`data/reflection-armed-merged-branch-cleanup`, and from then on the flag is
+human-owned — an operator's `enabled: false` in the vault is a deliberate
+disarm of an unattended push-to-main automation, and the update cron never
+re-arms over it. Delete the marker to let the next `/update` re-arm.
+
 ## Verified by
 
 - `tests/unit/test_plan_migration_invariant.py` — the Tier 0 regression test:
   a merged issue's plan is not left in root after migration, plus static
   assertions that the enforcement wiring exists (`merged-branch-cleanup`
-  registered with `enabled: true`, its `closed_issue` branch calls
-  `migrate_plan_to_completed`, `do-merge.md` carries the deterministic
-  `--issue` call).
+  registered with an `enabled` flag — deliberately not pinned `true`, since
+  the flag is per-machine mutable and a human disarm must stick; the durable
+  code-level arm is `MIGRATION_APPLY_ENABLED`, asserted in the reflection
+  tests — its `closed_issue` branch calls `migrate_plan_to_completed`, and
+  `do-merge.md` carries the deterministic `--issue` call).
 - `tests/unit/test_migrate_completed_plan.py` — the primitive itself: closed
-  → migrated, open → skipped, already-migrated → idempotent, `git mv` failure
-  → plan preserved, dirty-tree/non-main → report-only fallback.
+  → migrated, already-migrated → idempotent, `git mv` failure → plan
+  preserved, dirty-tree/non-main → report-only fallback; and the `--issue`
+  CLI's evidence gate: open or unknown issue state → `skipped-open`, never a
+  migration (a multi-PR issue keeps its plan in root until the issue truly
+  closes; a `gh` outage defers).
 - `tests/unit/reflections/test_merged_branch_cleanup.py` — the extended
   reflection branch: both evidence-gate fixes (the `is_complete` short-circuit
   no longer hides closed-issue plans; a `gh` `"unknown"` never migrates), the

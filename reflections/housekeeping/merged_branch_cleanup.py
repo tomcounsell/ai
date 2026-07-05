@@ -126,6 +126,7 @@ async def run() -> dict:
     # mentions a closed sibling issue in prose could get migrated by mistake.
     plan_issue_refs: dict[Path, list[int]] = {}
     plan_tracking_issue: dict[Path, int | None] = {}
+    plan_tracking_repo: dict[Path, str | None] = {}
     for plan_file in plan_files:
         plan_text = plan_file.read_text(errors="replace")
         refs: set[int] = set()
@@ -135,29 +136,41 @@ async def run() -> dict:
             refs.add(int(m.group(1)))
         plan_issue_refs[plan_file] = sorted(refs)
 
+        # The migration gate needs the tracking URL's OWN owner/repo, not just
+        # the number: `gh issue view N` in some project cwd would gate a
+        # destructive move on the same-numbered issue of whatever repo that cwd
+        # happens to be (PR #1903 review). A tracking URL whose repo can't be
+        # parsed defers ("unknown" state) and never migrates.
         tracking_url = extract_tracking_issue(plan_text)
         tracking_num: int | None = None
+        tracking_repo: str | None = None
         if tracking_url:
-            tm = re.search(r"/issues/(\d+)", tracking_url)
+            tm = re.search(r"github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)", tracking_url)
             if tm:
-                tracking_num = int(tm.group(1))
+                tracking_repo = tm.group(1)
+                tracking_num = int(tm.group(2))
+            else:
+                tm = re.search(r"/issues/(\d+)", tracking_url)
+                if tm:
+                    tracking_num = int(tm.group(1))
         plan_tracking_issue[plan_file] = tracking_num
+        plan_tracking_repo[plan_file] = tracking_repo
 
-    # Check issue states
-    async def check_issue_state(issue_num: int) -> tuple[int, str]:
-        if not project_wd:
+    # Check issue states. With `repo` the lookup is pinned via `gh -R` to the
+    # tracking URL's own repo (cwd-independent); without it, the legacy
+    # prose-ref path resolves against the first github project's cwd.
+    async def check_issue_state(issue_num: int, repo: str | None = None) -> tuple[int, str]:
+        if not repo and not project_wd:
             return issue_num, "unknown"
+        argv = ["gh", "issue", "view", str(issue_num), "--json", "state"]
+        if repo:
+            argv += ["-R", repo]
         try:
             proc = await asyncio.create_subprocess_exec(
-                "gh",
-                "issue",
-                "view",
-                str(issue_num),
-                "--json",
-                "state",
+                *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=project_wd,
+                cwd=project_wd if not repo else None,
             )
             stdout, _ = await proc.communicate()
             if proc.returncode == 0:
@@ -186,6 +199,27 @@ async def run() -> dict:
                 if isinstance(r, tuple):
                     issue_states[r[0]] = r[1]
 
+    # Migration-gate evidence: fetched per (number, repo) pair from the
+    # tracking URL's repo, kept separate from the prose-ref `issue_states`.
+    tracking_pairs: set[tuple[int, str]] = set()
+    for pf, num in plan_tracking_issue.items():
+        repo = plan_tracking_repo.get(pf)
+        if num is not None and repo:
+            tracking_pairs.add((num, repo))
+
+    tracking_states: dict[tuple[int, str], str] = {}
+    if tracking_pairs:
+        pair_list = sorted(tracking_pairs)
+        for i in range(0, len(pair_list), 10):
+            batch_pairs = pair_list[i : i + 10]
+            results = await asyncio.gather(
+                *[check_issue_state(n, repo=r) for n, r in batch_pairs],
+                return_exceptions=True,
+            )
+            for pair, r in zip(batch_pairs, results):
+                if isinstance(r, tuple):
+                    tracking_states[pair] = r[1]
+
     stats = {"complete": 0, "orphaned": 0, "closed_issue": 0, "active": 0, "migrated": 0}
 
     for plan_file in plan_files:
@@ -205,8 +239,11 @@ async def run() -> dict:
         # "unknown")` check was vacuously True when every ref state was
         # "unknown", which could migrate an ACTIVE plan on a gh outage).
         tracking_num = plan_tracking_issue.get(plan_file)
+        tracking_repo = plan_tracking_repo.get(plan_file)
         migration_gate_fires = (
-            tracking_num is not None and issue_states.get(tracking_num) == "closed"
+            tracking_num is not None
+            and tracking_repo is not None
+            and tracking_states.get((tracking_num, tracking_repo)) == "closed"
         )
 
         if is_complete:

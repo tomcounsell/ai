@@ -236,6 +236,11 @@ def migrate_plan_to_completed(plan_path: Path, *, apply: bool) -> str:
     Returns one of: "migrated", "already-migrated", "dirty-tree-skip",
     "rebase-conflict-skip". Never raises -- all failure modes return a verdict
     string and log the reason.
+
+    Known behavior: the final ``git push origin main`` publishes the whole
+    local main, so unpushed commits already sitting on a clean local main
+    ride along with the migration commit. Accepted for this repo's
+    always-push workflow (PR #1903 review nit).
     """
     plan_path = Path(plan_path)
 
@@ -366,11 +371,22 @@ def _gh_issue_state(issue_number: str) -> str:
 
 
 def run_issue(issue_number: str, *, apply: bool) -> int:
-    """CLI handler for --issue <N>: resolve the plan by tracking issue, migrate it."""
+    """CLI handler for --issue <N>: resolve the plan by tracking issue, migrate it.
+
+    Evidence-gated like run_sweep and the reflection: the migration only fires
+    when the tracking issue is literally "closed". A multi-PR issue (PR 1
+    merged, issue still open for PR 2) must keep its plan live in the root;
+    a gh outage ("unknown") must defer, never migrate.
+    """
     plan_file = find_plan_by_issue(issue_number)
     if not plan_file:
         print(f"Error: no plan found with tracking issue #{issue_number}")
         return 2
+
+    state = _gh_issue_state(issue_number)
+    if state != "closed":
+        print(f"Verdict: skipped-open (issue #{issue_number} state={state})")
+        return 1
 
     verdict = migrate_plan_to_completed(plan_file, apply=apply)
     print(f"Verdict: {verdict}")

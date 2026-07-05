@@ -35,14 +35,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 REFLECTION_NAME = "merged-branch-cleanup"
 OWNING_PROJECT_KEY = "valor"
+
+# One-shot marker: once the arm has fired (or found the entry already
+# enabled), the enabled flag becomes human-owned. A later `enabled: false`
+# in the vault is a deliberate operator disarm of an unattended
+# push-to-main automation — the update loop must never silently re-arm
+# over it. Delete the marker to make the next /update re-arm.
+ARM_MARKER_RELPATH = Path("data") / "reflection-armed-merged-branch-cleanup"
 
 
 @dataclass
@@ -101,29 +107,93 @@ def _this_machine_owns_valor(project_dir: Path) -> bool:
 def _flip_enabled(path: Path) -> bool:
     """Set enabled: true on REFLECTION_NAME's entry in the YAML at ``path``.
 
+    Line-scoped text edit, never a YAML re-serialize: the vault registry is
+    the human's heavily-commented source-of-truth file, and a
+    ``safe_load``/``safe_dump`` round-trip would strip every comment and
+    reformat the whole file. Only the one ``enabled:`` line inside the
+    ``- name: merged-branch-cleanup`` block is touched; the write is atomic
+    (temp file + ``os.replace``) so a crash or iCloud sync race never leaves
+    a truncated registry.
+
     Returns True iff the file was rewritten (entry existed and was not
-    already enabled). Never raises -- any parse/read failure is treated as
+    already enabled). Never raises -- any read failure is treated as
     "nothing to flip" so a malformed file can't crash the update run.
     """
     if not path.exists():
         return False
     try:
-        data = yaml.safe_load(path.read_text())
+        text = path.read_text()
     except Exception:
         return False
-    if not isinstance(data, dict) or "reflections" not in data:
+
+    lines = text.splitlines(keepends=True)
+    name_re = re.compile(r"^(\s*)(-\s+)?name:\s*" + re.escape(REFLECTION_NAME) + r"\s*(#.*)?$")
+    enabled_re = re.compile(r"^(\s*)(-\s+)?enabled:\s*(\S+)(\s*#.*)?$")
+
+    name_idx = None
+    for i, line in enumerate(lines):
+        if name_re.match(line.rstrip("\n")):
+            name_idx = i
+            break
+    if name_idx is None:
         return False
 
-    changed = False
-    for entry in data["reflections"]:
-        if isinstance(entry, dict) and entry.get("name") == REFLECTION_NAME:
-            if not entry.get("enabled", False):
-                entry["enabled"] = True
-                changed = True
+    # The entry's `name:` key is not necessarily on the dash line (YAML key
+    # order is free). Anchor on the name line's indent, then walk back to the
+    # entry's opening `- ` line to bound the block.
+    raw_name = lines[name_idx].rstrip("\n")
+    stripped_name = raw_name.lstrip()
+    if stripped_name.startswith("-"):
+        start = name_idx
+        key_indent = raw_name[: len(raw_name) - len(stripped_name)] + "  "
+    else:
+        key_indent = raw_name[: len(raw_name) - len(stripped_name)]
+        start = name_idx
+        for j in range(name_idx - 1, -1, -1):
+            s = lines[j].lstrip()
+            indent = lines[j][: len(lines[j]) - len(s)]
+            if not s:
+                break
+            if s.startswith("- ") and len(indent) < len(key_indent):
+                start = j
+                break
+            if len(indent) < len(key_indent):
+                break
 
-    if changed:
-        path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
-    return changed
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        raw = lines[j].rstrip("\n")
+        if raw.strip() and not raw.startswith(key_indent):
+            end = j
+            break
+
+    for j in range(start, end):
+        m = enabled_re.match(lines[j].rstrip("\n"))
+        if m:
+            if m.group(3).lower() in ("true", "yes", "on"):
+                return False
+            lines[j] = f"{m.group(1)}{m.group(2) or ''}enabled: true{m.group(4) or ''}\n"
+            break
+    else:
+        lines.insert(name_idx + 1, f"{key_indent}enabled: true\n")
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text("".join(lines))
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def _write_arm_marker(marker: Path) -> None:
+    """Stamp the one-shot marker; best-effort, never raises."""
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("armed by scripts/update/reflection_arm.py; delete to allow re-arm\n")
+    except Exception:
+        pass
 
 
 def arm_merged_branch_cleanup(project_dir: Path) -> ArmResult:
@@ -139,12 +209,22 @@ def arm_merged_branch_cleanup(project_dir: Path) -> ArmResult:
     if not _this_machine_owns_valor(project_dir):
         return ArmResult(True, "skipped", "this machine does not own the 'valor' project")
 
+    marker = project_dir / ARM_MARKER_RELPATH
+    if marker.exists():
+        return ArmResult(
+            True,
+            "skipped",
+            f"{REFLECTION_NAME} arm already fired once; enabled flag is human-owned now "
+            f"(delete {marker} to re-arm)",
+        )
+
     try:
         vault_changed = _flip_enabled(vault_path)
         repo_changed = _flip_enabled(project_dir / "config" / "reflections.yaml")
     except Exception as e:  # pragma: no cover - defensive
         return ArmResult(False, "error", f"failed to flip enabled: {e}")
 
+    _write_arm_marker(marker)
     if not (vault_changed or repo_changed):
         return ArmResult(True, "noop", f"{REFLECTION_NAME} already enabled")
 

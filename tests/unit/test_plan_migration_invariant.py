@@ -92,11 +92,12 @@ class TestStaticEnforcementAssertions:
         assert entry["callable"] == "reflections.maintenance.run_branch_plan_cleanup", (
             "merged-branch-cleanup callable drifted from the expected module path"
         )
-        # NOTE: `enabled` is intentionally NOT asserted True here. This task
-        # (build-tier0-mechanism) ships the mechanism report-only; the
-        # follow-up arm-reflection task flips `enabled: true` only after this
-        # test's behavioral half proves the evidence gate is green. Asserting
-        # `enabled: true` here would break before that task ever runs.
+        # The registry `enabled` flag is asserted PRESENT, deliberately not
+        # `== True`: the flag is per-machine mutable (the vault copy is the
+        # source of truth, and a human disarm must stick -- see the one-shot
+        # marker in scripts/update/reflection_arm.py). The durable code-level
+        # arm is asserted separately via MIGRATION_APPLY_ENABLED in
+        # tests/unit/reflections/test_merged_branch_cleanup.py.
         assert "enabled" in entry
 
     def test_reflection_source_calls_migrate_plan_to_completed(self):

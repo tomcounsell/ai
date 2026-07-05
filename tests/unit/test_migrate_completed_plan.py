@@ -376,3 +376,59 @@ def _chdir(path):
         yield
     finally:
         os.chdir(old)
+
+
+class TestRunIssueEvidenceGate:
+    """The --issue CLI (Site D primary path) is evidence-gated like the sweep
+    and the reflection: only a literally "closed" tracking issue migrates.
+
+    PR #1903 review blocker: a multi-PR issue (PR 1 merged, issue open for
+    PR 2) must keep its plan in root; a gh outage ("unknown") must defer.
+    """
+
+    def _setup(self, monkeypatch, tmp_path, state):
+        import scripts.migrate_completed_plan as mcp
+
+        plan = tmp_path / "docs" / "plans" / "some-plan.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("---\ntracking: https://github.com/o/r/issues/42\n---\n# Plan\n")
+        monkeypatch.setattr(mcp, "find_plan_by_issue", lambda n: plan)
+        monkeypatch.setattr(mcp, "_gh_issue_state", lambda n: state)
+        calls = []
+
+        def fake_migrate(p, *, apply):
+            calls.append((p, apply))
+            return "migrated"
+
+        monkeypatch.setattr(mcp, "migrate_plan_to_completed", fake_migrate)
+        return mcp, calls
+
+    def test_open_issue_skips_and_never_migrates(self, monkeypatch, tmp_path, capsys):
+        mcp, calls = self._setup(monkeypatch, tmp_path, "open")
+        rc = mcp.run_issue("42", apply=True)
+        assert rc == 1
+        assert calls == []
+        assert "skipped-open" in capsys.readouterr().out
+
+    def test_unknown_state_defers_never_migrates(self, monkeypatch, tmp_path, capsys):
+        """A gh outage reads as "unknown" -- deferral, never a migration."""
+        mcp, calls = self._setup(monkeypatch, tmp_path, "unknown")
+        rc = mcp.run_issue("42", apply=True)
+        assert rc == 1
+        assert calls == []
+        assert "skipped-open" in capsys.readouterr().out
+
+    def test_closed_issue_migrates(self, monkeypatch, tmp_path):
+        mcp, calls = self._setup(monkeypatch, tmp_path, "closed")
+        rc = mcp.run_issue("42", apply=True)
+        assert rc == 0
+        assert len(calls) == 1
+        assert calls[0][1] is True
+
+    def test_no_plan_found_exits_2(self, monkeypatch, tmp_path):
+        import scripts.migrate_completed_plan as mcp
+
+        monkeypatch.setattr(mcp, "find_plan_by_issue", lambda n: None)
+        gate_calls = []
+        monkeypatch.setattr(mcp, "_gh_issue_state", lambda n: gate_calls.append(n) or "closed")
+        assert mcp.run_issue("999", apply=True) == 2

@@ -367,3 +367,65 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     )
     assert result.returncode == 0, f"git {' '.join(args)} failed: {result.stderr}"
     return result
+
+
+class TestMigrationGateRepoScoping:
+    """The migration gate's gh lookup is pinned to the tracking URL's own
+    owner/repo via `gh -R`, never resolved from a project cwd (PR #1903
+    review Tech Debt: a same-numbered issue in whichever repo the first
+    github project points at must not gate a destructive move)."""
+
+    def _run_capturing_argv(self, monkeypatch, tmp_path, issue_states, migrate_mock):
+        monkeypatch.setattr(mbc, "PROJECT_ROOT", tmp_path)
+        monkeypatch.setattr(
+            mbc,
+            "load_local_projects",
+            lambda: [{"github": "tomcounsell/ai", "working_directory": str(tmp_path)}],
+        )
+        monkeypatch.setattr(mbc, "migrate_plan_to_completed", migrate_mock)
+        seen_argv = []
+        base = _gh_dispatcher(issue_states)
+
+        async def _dispatch(*args, **kwargs):
+            seen_argv.append((args, kwargs))
+            return await base(*args, **kwargs)
+
+        with patch.object(
+            mbc.asyncio,
+            "create_subprocess_exec",
+            new_callable=AsyncMock,
+            side_effect=_dispatch,
+        ):
+            asyncio.run(mbc.run())
+        return seen_argv
+
+    def test_tracking_gate_uses_dash_r_with_url_repo(self, monkeypatch, tmp_path, plans_dir):
+        _write_plan(plans_dir, "scoped-plan", issue=500)
+        migrated = []
+
+        def fake_migrate(plan_path, *, apply):
+            migrated.append(plan_path)
+            return "migrated"
+
+        seen = self._run_capturing_argv(monkeypatch, tmp_path, {500: "closed"}, fake_migrate)
+        gate_calls = [
+            a for a, kw in seen if a[0] == "gh" and a[1:3] == ("issue", "view") and "-R" in a
+        ]
+        assert gate_calls, "migration gate never issued a repo-pinned gh lookup"
+        for argv in gate_calls:
+            assert argv[argv.index("-R") + 1] == "tomcounsell/ai"
+        assert len(migrated) == 1
+
+    def test_unparseable_tracking_repo_defers(self, monkeypatch, tmp_path, plans_dir):
+        """A tracking URL with no github.com owner/repo cannot be verified ->
+        the gate defers (never migrates), same posture as an unknown state."""
+        path = plans_dir / "weird-tracking.md"
+        path.write_text("---\ntracking: https://example.com/issues/600\n---\n# W\n\n- [ ] x\n")
+        migrated = []
+
+        def fake_migrate(plan_path, *, apply):
+            migrated.append(plan_path)
+            return "migrated"
+
+        _run(monkeypatch, tmp_path, {600: "closed"}, fake_migrate)
+        assert migrated == []
