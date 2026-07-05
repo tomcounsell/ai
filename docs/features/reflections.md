@@ -193,6 +193,7 @@ it only ever rewrites the real per-machine copy that `install_worker.sh` produce
 | `memory-decay-prune` | `reflections.memory.memory_decay_prune.run` | Delete below-threshold memories with zero access (dry-run default) |
 | `memory-quality-audit` | `reflections.memory.memory_quality_audit.run` | 4-layer audit: baseline quality flags (Layer 0) + deterministic supersede of refusal/JSON-shrapnel (Layer 1) + heuristic anomaly detection (Layer 2) + Gemma classification fail-soft (Layer 3); files investigation issues for Layer-2/3 candidates |
 | `embedding-orphan-sweep` | `reflections.memory.embedding_orphan_sweep.run` | Reconcile Memory `.npy` embedding files against live records via Popoto `garbage_collect` + `sweep_stale_tempfiles` (dry-run default; opt-in via `EMBEDDING_ORPHAN_SWEEP_APPLY=true`; requires popoto >= 1.6.0) |
+| `memory-embedding-backfill` | `reflections.memory.memory_embedding_backfill.run` | Re-embed active Memory records saved without a vector (the `GracefulEmbeddingField` degradation marker, issue #1904) once the provider is healthy again; dry-run default, opt-in via `MEMORY_EMBEDDING_BACKFILL_APPLY=true`; caps at 500 re-embeds/run; partial-saves `["embedding"]` only so `relevance` decay is untouched |
 
 ### Daily PM-facing slots (consolidated)
 
@@ -383,7 +384,7 @@ The package is organized into group directories, with one file per reflection. E
 | `reflections/agents/` | `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` | Session health and Anthropic circuit management (relocated from `agent/sustainability.py`) |
 | `reflections/housekeeping/` | `redis_ttl_cleanup.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` | Routine maintenance: expiry, branch cleanup, disk, analytics |
 | `reflections/audits/` | `tech_debt_scan.py`, `redis_quality_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`, `task_backlog_check.py`, `principal_staleness.py` | Code quality, data quality, and task tracking audits |
-| `reflections/memory/` | `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py` | Memory lifecycle: pruning, quality audit, orphan sweep |
+| `reflections/memory/` | `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py`, `memory_embedding_backfill.py` | Memory lifecycle: pruning, quality audit, orphan sweep, vectorless-record backfill |
 
 **Shared helpers:**
 
@@ -701,6 +702,16 @@ Reconciles the on-disk Memory embedding store (`~/.popoto/content/.embeddings/Me
 
 For one-shot reconciliation against an existing backlog, the operator script `scripts/embedding_orphan_reconcile.py` (dry-run default, `--apply` to act) wraps the same Popoto helpers with two additional safety gates: a positive-assertion check (refuses to apply if to-delete intersects expected-keep) and a pre-flight regression guard (refuses to apply if `$Class:Memory` is empty).
 
+### `memory-embedding-backfill`
+
+The inverse of `embedding-orphan-sweep`: heals active Memory records that persisted **without** a `.npy` at all — the `GracefulEmbeddingField` degradation marker (`embedding = None`) written when the embedding provider timed out or was unreachable mid-save (issue #1904; see [Embedding Degradation](subconscious-memory.md#embedding-degradation-persist-without-vector)). Finds records with a falsy `embedding`, skips `superseded_by` records, and — once `OllamaEmbeddingProvider().is_available()` — re-embeds them so they regain the fourth (semantic-similarity) RRF signal.
+
+- **Dry-run default**: set `MEMORY_EMBEDDING_BACKFILL_APPLY=true` (also accepts `1`/`yes`) to enable actual re-embedding (matches the `EMBEDDING_ORPHAN_SWEEP_APPLY` / `MEMORY_DECAY_PRUNE_APPLY` pattern).
+- **Per-run cap**: `MAX_BACKFILL_PER_RUN = 500` — a long-outage backlog drains over several daily runs instead of re-saturating a just-recovered provider in one shot.
+- **Provider gate**: apply mode still skips every record (reporting it as a skip, not an error) when the provider is unavailable, so a still-down Ollama never triggers a re-save storm.
+- **Partial-save contract (critique C1)**: re-embed calls `memory.save(update_fields=["embedding"])`, never a bare `memory.save()`. A bare save re-runs `on_save` for every field, including `Memory.relevance` (a `DecayingSortedField` with `auto_now=True`), which would re-stamp it to "now" and silently un-decay a stale memory.
+- **Metrics emitted**: `memory.embedding_backfill_reembedded` (dimensioned by `mode: dry_run | applied`); the summary also surfaces `get_degradation_count()` from `models/graceful_embedding_field.py` — the in-process count of degraded saves observed since worker start, independent of the throttled warning log.
+
 ## Operations
 
 ### Scheduling
@@ -739,7 +750,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `reflections/agents/` | 5 agent/session health reflections (one file each): `circuit_health_gate.py`, `session_recovery_drip.py`, `session_count_throttle.py`, `failure_loop_detector.py`, `system_health_digest.py` |
 | `reflections/housekeeping/` | 4 housekeeping reflections (one file each): `redis_ttl_cleanup.py`, `merged_branch_cleanup.py`, `disk_space_check.py`, `analytics_rollup.py` |
 | `reflections/audits/` | 7 audit reflections (one file each): `tech_debt_scan.py`, `redis_quality_audit.py`, `skills_audit.py`, `hooks_audit.py`, `pr_review_audit.py`, `task_backlog_check.py`, `principal_staleness.py` |
-| `reflections/memory/` | 3 memory reflections (one file each): `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py` |
+| `reflections/memory/` | 4 memory reflections (one file each): `memory_decay_prune.py`, `memory_quality_audit.py`, `embedding_orphan_sweep.py`, `memory_embedding_backfill.py` |
 | `reflections/session_intelligence.py` | Session analysis → LLM reflection → bug issue pipeline |
 | `reflections/pm_briefings/` | Slot-driven `pm-briefings` dispatcher: `morning`, `daily_log`, `log_audit` slot modules + builder + delivery |
 | `reflections/maintenance.py` | Re-export shim (registry compat): re-exports housekeeping + audit callables under original `run_*` names |
@@ -787,3 +798,4 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 - [Hooks Best Practices & Audit](hooks-best-practices.md) — `hooks-audit` unit deep dive
 - [Skills Audit](do-skills-audit.md) — `skills-audit` unit deep dive
 - [Subconscious Memory](subconscious-memory.md#memory-consolidation) — `memory-dedup` consolidation
+- [Subconscious Memory](subconscious-memory.md#embedding-degradation-persist-without-vector) — `GracefulEmbeddingField` and the `memory-embedding-backfill` reflection it feeds (issue #1904)
