@@ -368,6 +368,11 @@ class TestBridgeShortCircuit:
         dev_session.session_id = "dev_session_id"
         dev_session.session_type = "eng"
         dev_session.status = "running"
+        # REAL str issue_url pointing at a DIFFERENT issue — required since the
+        # C1 reconciliation (commit 0d04f4ac, #1671/#1672) reads issue_url via
+        # ``.endswith()``; a bare MagicMock attribute would truthily match and
+        # falsely keep the env session.
+        dev_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
 
         mock_new_session = MagicMock()
         mock_new_session.session_id = "sdlc-local-1143"

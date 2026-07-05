@@ -46,7 +46,13 @@ PUNT_PHRASES = [
     r"\bin v2\b",
     r"\bdefer(?:red)? to v\d\b",
     r"\bpunt(?:ed)? to\b",
-    r"\bpost-merge\b",
+    # "post-merge" only counts as a punt inside a deferral construction —
+    # descriptive uses ("post-merge memory extraction", "runs post-merge")
+    # must pass (issue #1900 review noted the bare \bpost-merge\b pattern
+    # false-positived on every hyphenated mention).
+    r"\b(?:defer(?:red|ring)?|punt(?:ed|ing)?|left|leave)\b[^.;:]{0,40}\bpost-merge\b",
+    r"\bpost-merge\s+(?:follow-?up|todo)\b",
+    r"\b(?:will|to)\s+(?:be\s+)?(?:do(?:ne)?|handled?|fix(?:ed)?|address(?:ed)?|complete[d]?)\s+post-merge\b",
     r"\btodo after\b",
 ]
 

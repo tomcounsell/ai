@@ -446,20 +446,39 @@ class TestAntiRegressionGreps:
         assert result.returncode == 1, f"--working-dir still present in {path}:\n{result.stdout}"
 
     def test_no_return_valor_fallback(self):
-        """No ``return "valor"`` (or ``return 'valor'``) in the source.
+        """No ``return "valor"`` (or ``return 'valor'``) in the source, except
+        inside ``_default_project_key``.
 
-        The silent fallback was removed; any literal ``return "valor"`` would
-        indicate a regression.
+        The silent ``cmd_create`` working-dir fallback was removed; any literal
+        ``return "valor"`` outside ``_default_project_key`` would indicate a
+        regression. ``_default_project_key`` (added by commit 7c139247, #1539)
+        is an intentional env/identity.json default used only by the
+        crash-signature read subcommands — it does not feed session creation
+        or working-dir resolution.
         """
+        import ast
+
         path = self._valor_session_path()
-        # Two patterns: double-quoted and single-quoted
-        for needle in ('return "valor"', "return 'valor'"):
-            result = subprocess.run(
-                ["grep", "-n", needle, str(path)],
-                capture_output=True,
-                text=True,
-            )
-            assert result.returncode == 1, f"Found {needle!r} in {path}:\n{result.stdout}"
+        source = path.read_text()
+        tree = ast.parse(source)
+        allowed_line_ranges = [
+            (node.lineno, node.end_lineno)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "_default_project_key"
+        ]
+        assert allowed_line_ranges, (
+            "_default_project_key not found — update this test's allowlist "
+            "if the crash-signature default helper was renamed or removed"
+        )
+        offenders = []
+        for lineno, line in enumerate(source.splitlines(), start=1):
+            if 'return "valor"' in line or "return 'valor'" in line:
+                if not any(start <= lineno <= end for start, end in allowed_line_ranges):
+                    offenders.append(f"{lineno}: {line.strip()}")
+        assert not offenders, (
+            f"Found silent 'valor' fallback outside _default_project_key in {path}:\n"
+            + "\n".join(offenders)
+        )
 
     def test_no_default_valor_in_resolver(self):
         """No ``default="valor"`` (or ``default='valor'``) in the source."""

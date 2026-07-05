@@ -3,7 +3,9 @@
 Extracted from tools/sdlc_stage_query.py, sdlc_verdict.py, and sdlc_dispatch.py
 to avoid duplicating session-lookup and plan-path logic across SDLC tool modules.
 
-This module only imports models.agent_session — no circular import risk.
+Imports models.agent_session plus agent.sdlc_router (the sanctioned tools→agent
+direction — the router itself never imports tools/, so no cycle; see
+tests/unit/test_architectural_constraints.py).
 """
 
 from __future__ import annotations
@@ -14,38 +16,13 @@ import re
 import subprocess
 from pathlib import Path
 
+# Canonical home is agent/sdlc_router.py — the router needs normalize_verdict
+# and must not import from tools/. Re-exported here for the existing
+# tools/tests import path.
+from agent.sdlc_router import normalize_verdict  # noqa: F401
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
-
-
-def normalize_verdict(text: str | None) -> str:
-    """Normalize a verdict string to its canonical space-separated uppercase form.
-
-    Idempotent: calling normalize_verdict on an already-normalized string
-    returns the same string unchanged. The canonical form uses spaces (not
-    underscores) as word separators, collapses internal whitespace, and is
-    fully uppercased.
-
-    Examples::
-
-        normalize_verdict("CHANGES REQUESTED") -> "CHANGES REQUESTED"  # idempotent
-        normalize_verdict("changes_requested")  -> "CHANGES REQUESTED"
-        normalize_verdict("  Changes  Requested  ") -> "CHANGES REQUESTED"
-        normalize_verdict(None) -> ""
-        normalize_verdict("") -> ""
-
-    Args:
-        text: Raw verdict string from a skill or stored record. May contain
-            underscores, mixed case, or extra whitespace. May be None.
-
-    Returns:
-        Canonical uppercase space-form string, or ``""`` for falsy/non-str input.
-    """
-    if not text or not isinstance(text, str):
-        return ""
-    # Replace underscores with spaces, collapse runs of whitespace, uppercase.
-    return re.sub(r"\s+", " ", text.replace("_", " ")).strip().upper()
 
 
 def _resolve_target_repo() -> str | None:

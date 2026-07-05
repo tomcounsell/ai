@@ -514,10 +514,15 @@ def _make_deferred_entry(
     project_key: str = "test-proj",
     deferred_pending: bool = True,
     deferred_text: str = "Here is the answer you were looking for.",
-    transport: str = "telegram",
+    transport: str = "email",
     chat_id: str = "chat-1",
     telegram_message_id: int = 42,
 ) -> SimpleNamespace:
+    # Default transport is "email": since 7fb7e609 (#1794) the async helper is
+    # EMAIL-only — it early-returns for telegram (and None), which is delivered
+    # by the synchronous flush_deferred_self_draft_sync chokepoint in
+    # finalize_session instead (covered by
+    # tests/unit/test_deferred_self_draft_completed.py).
     extra = {"transport": transport}
     if deferred_pending:
         extra["deferred_self_draft_pending"] = True
@@ -581,7 +586,9 @@ def test_deferred_fallback_canned_notice_when_text_missing(_mock_redis):
         session_id="sess-no-text",
         agent_session_id="sess-no-text",
         project_key="test-proj",
-        extra_context={"deferred_self_draft_pending": True},  # no deferred_self_draft_text
+        # No deferred_self_draft_text; transport must be email — the async
+        # helper is email-only since 7fb7e609 (#1794).
+        extra_context={"deferred_self_draft_pending": True, "transport": "email"},
         chat_id="c",
         telegram_message_id=0,
     )

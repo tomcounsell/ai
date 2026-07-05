@@ -136,6 +136,7 @@ class TestExecutorGraniteWiring:
         with (
             patch("agent.granite_container.pty_pool._pty_pool", pool),
             patch.object(BridgeAdapter, "run", _fake_run),
+            _patch_worktree(),
             caplog.at_level(logging.INFO),
         ):
             await _execute_agent_session(session)
@@ -173,6 +174,7 @@ class TestExecutorGraniteWiring:
             patch("agent.session_executor.get_response_via_harness", _fake_harness, create=True),
             patch.object(BridgeAdapter, "run", async_mock_return("")),
             patch("agent.sdk_client.get_response_via_harness", _fake_harness, create=True),
+            _patch_worktree(),
         ):
             await _execute_agent_session(session)
 
@@ -197,6 +199,12 @@ class TestExecutorGraniteWiring:
             "transport": {"pm": "pty", "dev": "headless"},
         }
         session.save(update_fields=["project_config"])
+        # Transition to "running" so the executor's status="running" lookup
+        # resolves agent_session — in production the worker does this before
+        # dispatch, and the role_transports persistence write (plan #1842)
+        # only fires when that lookup succeeds.
+        session.status = "running"
+        session.save(update_fields=["status"])
 
         captured = []
 
@@ -208,6 +216,7 @@ class TestExecutorGraniteWiring:
         with (
             patch("agent.granite_container.pty_pool._pty_pool", pool),
             patch.object(BridgeAdapter, "run", _fake_run),
+            _patch_worktree(),
         ):
             await _execute_agent_session(session)
 
@@ -715,6 +724,7 @@ class TestReactionGating:
         with (
             patch("agent.granite_container.pty_pool._pty_pool", pool),
             patch.object(BridgeAdapter, "run", _fake_run),
+            _patch_worktree(),
             patch(
                 "agent.agent_session_queue._resolve_callbacks",
                 return_value=(_null_send, _spy_react),

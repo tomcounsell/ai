@@ -606,11 +606,54 @@ def django_project(sample_config):
 XDIST_WORKER_RE = r"exec\(eval\(sys\.stdin\.readline\(\)\)\)"
 
 
-def _reap_xdist_workers() -> None:
-    """Find and kill any xdist worker processes we can see.
+def _ppid_of(pid: int) -> int | None:
+    """Parent PID via `ps` (no psutil). None on any failure."""
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        out = result.stdout.strip()
+        return int(out) if out else None
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
 
-    Uses `pgrep` so we don't need psutil. Idempotent. Catches every
-    exception so a reap failure never blocks pytest teardown.
+
+def _ours_or_orphan(pid: int) -> bool:
+    """True if this process is an ancestor of pid, or pid is orphaned.
+
+    On a shared machine two pytest controllers can run concurrently; a
+    machine-wide reap from one run kills the other run's live workers
+    (mass `node down: Not properly terminated`). So only reap workers we
+    own (our pid appears in the ancestry chain) or workers already
+    re-parented to init (direct PPID 1 — their controller is gone, no
+    live run owns them). Anything else belongs to someone else's run.
+    """
+    me = os.getpid()
+    current = pid
+    for _ in range(32):  # ancestry depth cap; chains are short in practice
+        parent = _ppid_of(current)
+        if parent is None:
+            return False
+        if current == pid and parent == 1:
+            return True  # orphaned worker, controller already gone
+        if parent == me:
+            return True
+        if parent <= 1:
+            return False  # walked past init without meeting us: not ours
+        current = parent
+    return False
+
+
+def _reap_xdist_workers() -> None:
+    """Find and kill xdist worker processes owned by this run.
+
+    Uses `pgrep` so we don't need psutil. Scoped to our own descendants
+    plus init-orphaned workers (see _ours_or_orphan). Idempotent. Catches
+    every exception so a reap failure never blocks pytest teardown. For a
+    deliberate machine-wide sweep, use scripts/reap-xdist.sh.
     """
     try:
         result = subprocess.run(
@@ -622,7 +665,7 @@ def _reap_xdist_workers() -> None:
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return
 
-    pids = [p for p in result.stdout.split() if p.isdigit()]
+    pids = [p for p in result.stdout.split() if p.isdigit() and _ours_or_orphan(int(p))]
     if not pids:
         return
 

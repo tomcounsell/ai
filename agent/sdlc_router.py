@@ -32,15 +32,52 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
-from tools._sdlc_utils import normalize_verdict
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_verdict(text: str | None) -> str:
+    """Normalize a verdict string to its canonical space-separated uppercase form.
+
+    Canonical home (import-boundary contract): this function lives HERE, not
+    in ``tools/``, because ``agent/sdlc_router.py`` is the ground-truth module
+    that ``tools/sdlc_dispatch.py`` and ``tools/sdlc_verdict.py`` import — the
+    router must never import from ``tools/`` in return (see
+    ``tests/unit/test_architectural_constraints.py``). ``tools/_sdlc_utils``
+    re-exports it for its existing importers.
+
+    Idempotent: calling normalize_verdict on an already-normalized string
+    returns the same string unchanged. The canonical form uses spaces (not
+    underscores) as word separators, collapses internal whitespace, and is
+    fully uppercased.
+
+    Examples::
+
+        normalize_verdict("CHANGES REQUESTED") -> "CHANGES REQUESTED"  # idempotent
+        normalize_verdict("changes_requested")  -> "CHANGES REQUESTED"
+        normalize_verdict("  Changes  Requested  ") -> "CHANGES REQUESTED"
+        normalize_verdict(None) -> ""
+        normalize_verdict("") -> ""
+
+    Args:
+        text: Raw verdict string from a skill or stored record. May contain
+            underscores, mixed case, or extra whitespace. May be None.
+
+    Returns:
+        Canonical uppercase space-form string, or ``""`` for falsy/non-str input.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    # Replace underscores with spaces, collapse runs of whitespace, uppercase.
+    return re.sub(r"\s+", " ", text.replace("_", " ")).strip().upper()
+
 
 # Default maximum same-skill dispatches allowed before G4 trips. A value of 3
 # means the router may dispatch the same sub-skill up to three times in a row
@@ -386,12 +423,18 @@ def guard_g5_artifact_hash_cache(
     human comments legitimately change. G4 covers REVIEW non-determinism.
 
     Transparent migration (issue #1761 Layer 3):
-      If the cached hash is the OLD full-bytes hash (computed by
-      ``compute_plan_hash``) and the only diff is the ``revision_applied:``
-      frontmatter line, the guard transparently rewrites the stored
-      ``artifact_hash`` to the new ``compute_plan_body_hash`` value.  The
-      rewrite is idempotent — once written, subsequent calls use the new hash
-      directly.  A WARNING is emitted on every rewrite.
+      If the cached hash is the OLD full-bytes hash (supplied by the caller
+      via ``context["legacy_plan_hash"]`` — computed by
+      ``tools.sdlc_verdict.compute_plan_hash``) and the only diff is the
+      ``revision_applied:`` frontmatter line, the guard transparently rewrites
+      the stored ``artifact_hash`` to the new ``compute_plan_body_hash``
+      value.  The rewrite is idempotent — once written, subsequent calls use
+      the new hash directly.  A WARNING is emitted on every rewrite.
+
+      The legacy hash is caller-supplied (dependency inversion) because this
+      module must not import from ``tools/`` — ``tools/sdlc_dispatch.py`` and
+      ``tools/sdlc_verdict.py`` import this module, so a ``tools`` import here
+      would create a cycle (see tests/unit/test_architectural_constraints.py).
     """
     verdicts = stage_states.get("_verdicts") or {}
     record = verdicts.get("CRITIQUE")
@@ -405,30 +448,22 @@ def guard_g5_artifact_hash_cache(
     if cached_hash != current_hash:
         # Transparent migration: check if the stored hash is the legacy
         # full-bytes hash and the only delta is the revision_applied: line.
-        issue_number = (context or {}).get("issue_number")
-        if cached_hash and current_hash and issue_number:
-            try:
-                from tools._sdlc_utils import find_plan_path as _find_plan_path
-                from tools.sdlc_verdict import compute_plan_hash as _legacy_hash
-
-                plan_path = _find_plan_path(issue_number)
-                if plan_path is not None:
-                    legacy_hash = _legacy_hash(plan_path)
-                    if legacy_hash == cached_hash:
-                        # Only delta is revision_applied — rewrite in-place.
-                        logger.warning(
-                            "G5 migration: rewriting artifact_hash from legacy "
-                            "full-bytes to revision_applied-stripped hash for "
-                            "issue %s (old=%s, new=%s)",
-                            issue_number,
-                            cached_hash,
-                            current_hash,
-                        )
-                        record["artifact_hash"] = current_hash
-                        cached_hash = current_hash
-                        # Fall through to normal cache-hit evaluation below.
-            except Exception as _e:
-                logger.debug("G5 migration: exception during legacy-hash check: %s", _e)
+        # The legacy hash is caller-supplied via context (see docstring) so
+        # this module stays free of tools/ imports.
+        legacy_hash = (context or {}).get("legacy_plan_hash")
+        if legacy_hash and legacy_hash == cached_hash:
+            # Only delta is revision_applied — rewrite in-place.
+            logger.warning(
+                "G5 migration: rewriting artifact_hash from legacy "
+                "full-bytes to revision_applied-stripped hash for "
+                "issue %s (old=%s, new=%s)",
+                (context or {}).get("issue_number"),
+                cached_hash,
+                current_hash,
+            )
+            record["artifact_hash"] = current_hash
+            cached_hash = current_hash
+            # Fall through to normal cache-hit evaluation below.
         if cached_hash != current_hash:
             return None
 

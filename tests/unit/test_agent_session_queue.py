@@ -9,7 +9,7 @@ Also tests Redis pop lock acquisition and contention behavior.
 Also tests sustainability throttle guards in _pop_agent_session.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -733,7 +733,23 @@ class TestHealthCheckNoProgressRecovery:
         self, turn_count, log_path, claude_session_uuid
     ):
         """Any single progress signal (turn_count / log_path / claude_session_uuid)
-        is sufficient to keep a session from being recovered by the no-progress branch."""
+        is sufficient to keep a session from being recovered by the no-progress branch.
+
+        The own-progress fields are now double-gated on heartbeat state:
+
+        - #1614 (commit e702cf9c): they are only honoured when
+          ``last_heartbeat_at`` is within ``NO_OUTPUT_BUDGET_SECONDS`` (1800s) —
+          a session with no heartbeat at all is treated as a dead executor.
+        - #1724 (commit 2efb58ce): a FRESH heartbeat (<90s) routes through
+          sub-check B first, whose D0 never-started gate returns False outright
+          for a zero-SDK-output session past 150s — short-circuiting before the
+          own-progress fields are ever read.
+
+        So the own-progress path is exercised with a heartbeat aged between
+        ``HEARTBEAT_FRESHNESS_WINDOW`` (90s) and ``NO_OUTPUT_BUDGET_SECONDS``
+        (1800s): stale enough to skip sub-check B, fresh enough to honour the
+        fields.
+        """
         session = self._make_stuck_dev_session(
             project_key="valor",
             agent_session_id=f"progress-{turn_count}-{bool(log_path)}-{bool(claude_session_uuid)}",
@@ -742,6 +758,8 @@ class TestHealthCheckNoProgressRecovery:
             claude_session_uuid=claude_session_uuid,
             started_seconds_ago=600,  # past the 300s guard but under the 45m timeout
         )
+        # Heartbeat in the (90s, 1800s) band — see docstring (#1614 / #1724).
+        session.last_heartbeat_at = datetime.now(tz=UTC) - timedelta(seconds=120)
 
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))
@@ -837,11 +855,17 @@ class TestHealthCheckNoProgressRecovery:
                 return [session]
             return []
 
+        # granite_available defaults to False and the project-keyed pickup gate
+        # (commit bab446d8, issue #1816) defers all pops while it is False —
+        # flip it on so the pop path under test is actually reachable.
+        import agent.session_state as _session_state
+
         with (
             patch("agent.session_pickup.AgentSession") as mock_cls,
             patch("agent.session_pickup._acquire_pop_lock", return_value=True),
             patch("agent.session_pickup._release_pop_lock"),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch.object(_session_state, "granite_available", True),
         ):
             # Redis sustainability guards return falsy → proceed normally.
             mock_redis.get.return_value = None

@@ -59,11 +59,18 @@ def test_email_with_unknown_persona_falls_back_to_teammate():
     assert access == AccessLevel.TEAMMATE
 
 
-def test_project_mode_pm_overrides_teammate_session_type():
-    """`project_mode == "pm"` forces engineer rails even when session_type is not ENG."""
+def test_project_mode_pm_is_no_longer_recognized():
+    """Legacy `project_mode == "pm"` no longer forces engineer rails.
+
+    Commit dd926192 (#1633) merged the PM/Dev roles into the single Eng role:
+    only ``project_mode == "eng"`` triggers the engineer override, and callers
+    normalize unknown modes (including the legacy "pm") to None with a
+    warning. A stray "pm" reaching the resolver falls through to the default
+    teammate rails.
+    """
     persona, access, _ = _resolve_compose_args(SessionType.TEAMMATE, project_mode="pm")
-    assert persona == PersonaType.ENGINEER
-    assert access == AccessLevel.WORKER
+    assert persona == PersonaType.TEAMMATE
+    assert access == AccessLevel.TEAMMATE
 
 
 def test_project_mode_eng_overrides_teammate_session_type():

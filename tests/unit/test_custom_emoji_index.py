@@ -429,6 +429,12 @@ class TestGracefulDegradation:
                 "tools.emoji_embedding._compute_embedding",
                 return_value=[0.9, 0.1, 0.0],
             ),
+            # _softmax_sample draws stochastically (temperature=4.0 gives the
+            # 0.11-similarity candidate ~45% of the draw weight against the
+            # 0.99-similarity one), so a single-draw equality assert flakes.
+            # Pin random.random() to 0.0 so the highest-weight candidate wins
+            # deterministically while still exercising the real sampling path.
+            patch("tools.emoji_embedding.random.random", return_value=0.0),
         ):
             result = find_best_emoji("awesome")
             assert isinstance(result, EmojiResult)

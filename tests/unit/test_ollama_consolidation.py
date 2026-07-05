@@ -81,9 +81,13 @@ class TestEnsureGenerationModel:
 
 class TestModelSettings:
     def test_generation_model_default(self):
-        from config.settings import settings
+        # Assert the CODE default via a bare ModelSettings() — the process-wide
+        # `settings` singleton reflects the machine-local env override
+        # MODELS__OLLAMA_GENERATION_MODEL (written to ~/.zshenv by /setup), so
+        # reading the singleton here would test the machine, not the default.
+        from config.settings import ModelSettings
 
-        assert settings.models.ollama_generation_model == "gemma4:31b-cloud"
+        assert ModelSettings().ollama_generation_model == "gemma4:31b-cloud"
 
     def test_generation_model_env_override(self, monkeypatch):
         monkeypatch.setenv("MODELS__OLLAMA_GENERATION_MODEL", "gemma4:31b-mlx")

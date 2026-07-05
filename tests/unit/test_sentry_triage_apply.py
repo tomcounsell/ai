@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -139,14 +140,22 @@ def test_update_sentry_issue_missing_id_short_circuits() -> None:
 
 
 def _stub_issue(issue_id: str, short_id: str, title: str, count: int = 5) -> dict:
-    """Build a Sentry-issue-shaped dict for the classifier."""
+    """Build a Sentry-issue-shaped dict for the classifier.
+
+    lastSeen/firstSeen are computed relative to now — the tier-E stale check
+    (`_STALE_DAYS`) runs FIRST in `_classify_issue`, so a hardcoded date would
+    silently reclassify every stub as E once it aged past 30 days (this
+    actually happened; the original hardcoded 2026-05-25 dates went stale).
+    Tests that need a stale issue override ``lastSeen`` explicitly.
+    """
+    now = datetime.now(UTC)
     return {
         "id": issue_id,
         "shortId": short_id,
         "title": title,
         "count": count,
-        "lastSeen": "2026-05-25T00:00:00Z",
-        "firstSeen": "2026-05-20T00:00:00Z",
+        "lastSeen": (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "firstSeen": (now - timedelta(days=6)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "permalink": f"https://yudame.sentry.io/issues/{issue_id}/",
         "project": {"slug": "test-proj"},
     }

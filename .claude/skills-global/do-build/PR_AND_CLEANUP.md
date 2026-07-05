@@ -143,7 +143,7 @@ After PR is created and documentation cascade completes, the plan document is **
 - `do-merge` can read it to verify all checklist items are done
 - `do-docs` can use it as context during the DOCS stage
 
-The plan will be deleted by `do-merge` after the PR is successfully merged. The tracking issue closes automatically when the PR merges (via `Closes #N` in the PR body).
+The plan is **moved to `docs/plans/completed/`**, not deleted. This happens automatically via the merge pipeline once the tracking issue closes — `do-merge` migrates it as part of the merge, and the `merged-branch-cleanup` reflection backstops any merge path that bypasses `do-merge`. It is never a manual step here. The tracking issue closes automatically when the PR merges (via `Closes #N` in the PR body).
 
 ## Step 9: Report PR Link
 

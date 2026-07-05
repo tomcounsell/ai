@@ -190,7 +190,10 @@ class TestGetResponseViaHarnessAccumulates:
 
         captured = {}
 
-        def fake_accumulate(sid, in_tok, out_tok, cache, cost):
+        # `metered` and `role` were added to accumulate_session_tokens by the
+        # per-role transport hedge (b624607b, plan #1842) — the harness call
+        # site now always passes them as keywords.
+        def fake_accumulate(sid, in_tok, out_tok, cache, cost, *, metered=False, role=None):
             captured["args"] = (sid, in_tok, out_tok, cache, cost)
 
         with (

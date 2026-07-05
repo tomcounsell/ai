@@ -41,18 +41,46 @@ fi
 
 XDIST_WORKER_RE='exec\(eval\(sys\.stdin\.readline\(\)\)'
 
+# On a shared machine two pytest runs can be live at once; a
+# machine-wide reap from one run kills the other run's workers (mass
+# "node down: Not properly terminated"). Only reap workers this wrapper
+# owns (our PID is in the worker's ancestry) or true orphans (direct
+# PPID 1 — their controller is gone). scripts/reap-xdist.sh remains the
+# deliberate machine-wide sweep.
+ours_or_orphan() {
+    local pid="$1" current="$1" parent depth=0
+    while [ "$depth" -lt 32 ]; do
+        parent=$(ps -o ppid= -p "$current" 2>/dev/null | tr -d ' ')
+        [ -z "$parent" ] && return 1
+        if [ "$current" = "$pid" ] && [ "$parent" = "1" ]; then
+            return 0  # orphaned worker, controller already gone
+        fi
+        [ "$parent" = "$$" ] && return 0
+        [ "$parent" -le 1 ] 2>/dev/null && return 1
+        current="$parent"
+        depth=$((depth + 1))
+    done
+    return 1
+}
+
 reap_workers() {
     # Re-snapshot at reap time. The cached list (if any) is stale by
     # the time the trap fires; the live list is what we want.
-    local now_pids
+    local now_pids own_pids pid
     now_pids=$(pgrep -f "$XDIST_WORKER_RE" 2>/dev/null | sort -u | tr '\n' ' ' || true)
     [ -z "$now_pids" ] && return 0
-    echo "$now_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | while read -r pid; do
-        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    own_pids=""
+    for pid in $now_pids; do
+        echo "$pid" | grep -qE '^[0-9]+$' || continue
+        ours_or_orphan "$pid" && own_pids="$own_pids $pid"
+    done
+    [ -z "${own_pids// /}" ] && return 0
+    for pid in $own_pids; do
+        kill -TERM "$pid" 2>/dev/null || true
     done
     sleep 1
-    echo "$now_pids" | tr ' ' '\n' | grep -E '^[0-9]+$' | while read -r pid; do
-        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+    for pid in $own_pids; do
+        kill -KILL "$pid" 2>/dev/null || true
     done
 }
 

@@ -381,12 +381,22 @@ class TestStdoutStaleRetired:
         entry = self._make_entry(last_stdout_at=_ago(700))
         assert _has_progress(entry) is True
 
-    def test_fresh_heartbeats_no_stdout_old_started_at_returns_true(self):
-        """Fresh heartbeats + no stdout + old started_at → progress (deleted path)."""
+    def test_fresh_heartbeats_no_stdout_old_started_at_returns_false_d0_gate(self):
+        """Fresh heartbeats + no stdout + old started_at → no progress (D0 gate).
+
+        Updated for issue #1724 (commit 2efb58ce): the never-started D0 gate
+        now denies the fresh-heartbeat fast-path once a session with zero SDK
+        output has been running past ``NEVER_STARTED_GRACE_SECS +
+        NEVER_STARTED_CONFIRM_MARGIN_SECS`` (150s). At ``started_at=_ago(400)``
+        the gate fires, so ``_has_progress`` returns False. The False comes
+        from the D0 gate, NOT from the retired stdout-stale path (#1046 /
+        #1172) — the structural guards on the deleted constants live in
+        ``tests/unit/test_session_health_inference_removed.py``.
+        """
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(last_stdout_at=None, started_at=_ago(400))
-        assert _has_progress(entry) is True
+        assert _has_progress(entry) is False
 
     def test_fresh_heartbeats_no_stdout_young_started_at_returns_true(self):
         """Fresh heartbeats + young session: warmup tolerance preserved.
@@ -457,26 +467,40 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=_ago(30))
         assert _has_progress(entry) is True
 
-    def test_running_299s_just_inside_grace_returns_true(self):
-        """running_seconds=299 (just inside STARTUP_GRACE_SECONDS=300) → True."""
+    def test_running_299s_past_never_started_grace_returns_false(self):
+        """running_seconds=299 → False since the D0 never-started gate (#1724).
+
+        Historically this was inside STARTUP_GRACE_SECONDS (300s) and passed
+        via the #1356 fast-path. Commit 2efb58ce (issue #1724) added the D0
+        never-started gate ahead of the budget legs: a session with zero SDK
+        output running past ``NEVER_STARTED_GRACE_SECS +
+        NEVER_STARTED_CONFIRM_MARGIN_SECS`` (150s) is denied the
+        fresh-heartbeat fast-path regardless of the 300s/1800s band.
+        """
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(started_at=_ago(299))
-        assert _has_progress(entry) is True
+        assert _has_progress(entry) is False
 
-    def test_running_600s_in_band_returns_true(self):
-        """running_seconds=600s (between grace and budget) → True (in-band)."""
+    def test_running_600s_in_band_returns_false_d0_gate(self):
+        """running_seconds=600s (old #1356 in-band leg) → False since #1724.
+
+        The D0 never-started gate (commit 2efb58ce) supersedes the
+        grace-to-budget band for sessions with zero SDK output: past 150s the
+        fresh heartbeat no longer signals progress.
+        """
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(started_at=_ago(600))
-        assert _has_progress(entry) is True
+        assert _has_progress(entry) is False
 
-    def test_running_1500s_late_in_band_returns_true(self):
-        """running_seconds=1500s (~10 min before budget cutoff) → True."""
+    def test_running_1500s_late_in_band_returns_false_d0_gate(self):
+        """running_seconds=1500s (old #1356 late-band leg) → False since #1724
+        (commit 2efb58ce, D0 never-started gate)."""
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(started_at=_ago(1500))
-        assert _has_progress(entry) is True
+        assert _has_progress(entry) is False
 
     def test_running_just_over_budget_returns_false(self):
         """running_seconds=1801s (1s over NO_OUTPUT_BUDGET_SECONDS=1800) → False."""
@@ -542,9 +566,15 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=None, created_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
 
-    def test_telemetry_counter_incremented_once_on_budget_exceeded(self, monkeypatch):
-        """Counter ``tier1_falloff:no_output_budget_exceeded`` is INCR'd exactly
-        once per fall-through tick.
+    def test_d0_gate_preempts_budget_exceeded_counter(self, monkeypatch):
+        """The D0 never-started gate (#1724) fires BEFORE the #1356 budget leg.
+
+        Updated for commit 2efb58ce (issue #1724): a 2h-running session with
+        zero SDK output is denied by the D0 gate at the top of sub-check B, so
+        ``_has_progress`` returns False without ever reaching the
+        ``tier1_falloff:no_output_budget_exceeded`` INCR fall-through. This
+        pins the ordering: no budget counter is emitted for never-started
+        sessions — the D0 return happens first.
         """
         calls: list[str] = []
 
@@ -552,6 +582,13 @@ class TestSubCheckBNoOutputBudget:
             @staticmethod
             def incr(key: str) -> None:
                 calls.append(key)
+
+            @staticmethod
+            def time() -> tuple[int, int]:
+                import time as _t
+
+                now = _t.time()
+                return int(now), int((now % 1) * 1_000_000)
 
         # Patch the popoto Redis db accessor used at the call site.
         from popoto import redis_db as _redis_db_mod
@@ -565,14 +602,10 @@ class TestSubCheckBNoOutputBudget:
             project_key="proj-counter-test",
         )
         assert _has_progress(entry) is False
-        # Exactly one INCR on the new path. Other counters (tier1_flagged_total,
-        # tier2_reprieve_total) are emitted by the caller, not by _has_progress.
+        # D0 gate returns False before the budget fall-through — no INCR.
         budget_calls = [k for k in calls if k.endswith("tier1_falloff:no_output_budget_exceeded")]
-        assert len(budget_calls) == 1, (
-            f"Expected 1 INCR on budget-exceeded path; got {len(budget_calls)}: {calls}"
-        )
-        assert budget_calls[0] == (
-            "proj-counter-test:session-health:tier1_falloff:no_output_budget_exceeded"
+        assert budget_calls == [], (
+            f"D0 gate (#1724) must preempt the budget-exceeded INCR; got: {calls}"
         )
 
     def test_telemetry_counter_failure_does_not_crash(self, monkeypatch):

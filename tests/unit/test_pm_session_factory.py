@@ -144,11 +144,15 @@ class TestEngPersonaFanoutInstruction:
             "'wait-for-children' subcommand so the Eng session knows how to pause."
         )
 
-    def test_sdk_client_fanout_references_child_pm_role(self):
-        """sdk_client.py fan-out instruction must reference --role pm for child sessions."""
+    def test_sdk_client_fanout_references_child_eng_role(self):
+        """sdk_client.py fan-out instruction must reference --role eng for child sessions.
+
+        Commit dd926192 (#1633) merged the PM/Dev roles into the single Eng
+        role, so child fan-out sessions are created with ``--role eng``.
+        """
         sdk_path = Path(__file__).parent.parent.parent / "agent" / "sdk_client.py"
         source = sdk_path.read_text()
-        assert "--role pm" in source, (
-            "sdk_client.py fan-out instruction must include '--role pm' "
-            "to create child sessions (updated to --role eng in a follow-up task)."
+        assert "--role eng" in source, (
+            "sdk_client.py fan-out instruction must include '--role eng' "
+            "to create child sessions (PM/Dev merged into Eng by #1633)."
         )

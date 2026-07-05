@@ -54,11 +54,42 @@ These run in the worktree, not main.
 
 ## Plan Migration
 
-After merge, move the plan from `docs/plans/{slug}.md` to `docs/plans/completed/{slug}.md` on `main`. The plan stays on `main` (not the branch) throughout the lifecycle — migrate it on `main` post-merge.
+After merge, on `main`, run the deterministic migration primitive:
+
+```bash
+python scripts/migrate_completed_plan.py --issue <closed-issue-number> --apply
+```
+
+This resolves the plan by reading its `tracking:` frontmatter (not by guessing a
+filename from the branch slug — a slug≠filename mismatch never bites) and does a
+guarded `git mv` into `docs/plans/completed/`. The plan stays on `main` (not the
+branch) throughout the lifecycle — migrate it on `main` post-merge, the same as
+before, just via this command instead of a hand `git mv`.
+
+The command is evidence-gated in code, so it is safe to run after **every**
+merge: it checks the issue's live state and prints `Verdict: skipped-open`
+(exit 1) unless the tracking issue is literally closed. A multi-PR issue (PR 1
+merged, issue open for PR 2) keeps its plan in root; a `gh` outage defers.
+
+`migrate_plan_to_completed()` (the primitive this command wraps, in
+`scripts/migrate_completed_plan.py`) is also the single mechanism the
+`merged-branch-cleanup` reflection calls. That reflection is the path-independent
+backstop for merges that bypass `/do-merge` entirely — a raw-terminal `gh pr
+merge`, a forked `/do-sdlc` run, or a cross-machine merge all skip this
+deterministic step, so the daily reflection sweep is what eventually migrates
+those plans instead. See `docs/features/plan-migration-invariant.md`.
+
+**A non-zero exit from this command is not a no-op to ignore.** The CLI exits
+`0` only for `migrated`/`already-migrated`; it exits `1` and prints
+`Verdict: dirty-tree-skip` (or `rebase-conflict-skip`) when the primitive took
+its report-only fallback instead of moving the plan. Do not silently retry or
+swallow this — surface it in the merge report so a human knows the primary
+path did not migrate this plan and the daily reflection backstop is the only
+thing that will (within its next cycle, not immediately).
 
 ## Post-Merge Memory Extraction
 
-After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker handles it automatically via `_handle_merge_completion()`.
+After merge, the pipeline runs post-merge learning extraction. This distills PR takeaways into memories (importance=7.0). No manual action needed — the worker's post-merge learning extraction handles it automatically.
 
 ## Worktree Cleanup
 

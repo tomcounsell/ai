@@ -243,6 +243,6 @@ Cycles:     CRITIQUE(fail) -> PLAN -> CRITIQUE (max 2 cycles)
 | PATCH | /do-patch | sonnet | Targeted fix (see resume rules in PM persona) |
 | REVIEW | /do-pr-review | opus | Code review judgment |
 | DOCS | /do-docs | sonnet | Structured writing |
-| MERGE | /do-merge {pr_number} | sonnet | Programmatic gate: verifies all stages, then merges |
+| MERGE | /do-merge {pr_number} | sonnet | Programmatic merge gate: verifies all stages, then merges |
 
 The **Dev Model** column shows the model the PM should pass via `--model` when spawning a dev session for that stage (see Stage→Model Dispatch Table in PM persona).
