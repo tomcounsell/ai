@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-05
 tracking: https://github.com/tomcounsell/ai/issues/1899
 last_comment_id:
+revision_applied: true
 ---
 
 # Bridge Classification Fails With "No Anthropic API key found" (Async Path)
@@ -50,8 +51,11 @@ classification call resolves an empty key and logs at ERROR level, feeding Sentr
   genuine API/parse errors keep their ERROR-level visibility.
 - Every async classification entry point used on an inbound bridge message provably
   preserves the message when the key is missing: terminus → `RESPOND`, work-type →
-  non-fatal default, intent → `new_work`. Regression tests lock this in against the
-  empty-string production condition.
+  non-fatal sentinel default (`type=None`), intent → `new_work`. Regression tests lock this in
+  against the real production condition (the resolver now returns `None` on absence).
+- A permanently keyless process still surfaces a Sentry signal: after K=5 consecutive misses the
+  work-type classifier escalates from WARNING to a single ERROR, so a genuine misconfig is not
+  hidden by the transient-miss WARNING degrade.
 
 ## Freshness Check
 
@@ -141,78 +145,133 @@ Run via `python scripts/check_prerequisites.py docs/plans/bridge-classification-
 
 ### Key Elements
 
-- **`get_anthropic_api_key()` self-heals:** only cache a truthy resolution; an empty result
-  is returned but not cached, so the next call re-reads env/`.env` after the LaunchAgent env
-  and `.env` sourcing settle.
-- **Missing-key degrades quietly in `classify_request_async` (and its sync twin
-  `classify_request`):** distinguish "no API key" from real API/parse errors. Missing key →
-  log at WARNING and return a safe, low-confidence default (message-preserving), instead of
-  raising a `ValueError` that surfaces as an ERROR-level Sentry event. Genuine API errors and
-  JSON-decode failures keep ERROR-level logging.
+- **`get_anthropic_api_key()` self-heals AND returns `None` on absence:** only cache a truthy
+  resolution; on absence return `None` (not `""`), annotated `-> str | None`. The next call
+  re-reads env/`.env` after the LaunchAgent env and `.env` sourcing settle. Returning `None`
+  (rather than `""`) also lets the Anthropic SDK's own `os.environ["ANTHROPIC_API_KEY"]`
+  fallback resolve a freshly-populated env key at any `AsyncAnthropic(api_key=None)` call site
+  — an empty string is a *value* that suppresses that fallback, whereas `None` triggers it.
+- **Missing-key degrades quietly in the async work-type classifier only
+  (`classify_request_async`):** distinguish "no API key" from real API/parse errors. Missing
+  key → log at WARNING and return a message-preserving sentinel default, instead of raising a
+  `ValueError` that surfaces as an ERROR-level Sentry event. Genuine API errors and JSON-decode
+  failures keep ERROR-level logging. **The sync twin `classify_request` is out of scope** — it
+  has no live keyless production caller (only in-module docstring examples and tests; the sole
+  production caller is `classify_request_async` at `bridge/telegram_bridge.py:1646`). Editing it
+  would be gold-plating on a code path the Sentry event never traverses.
+- **Consecutive-miss escalation (transient vs. permanent):** a module-level
+  `_consecutive_missing_key_count` in `tools/classifier.py` distinguishes a transient startup
+  race from a permanently keyless process. Each missing-key classification logs WARNING and
+  increments the counter; once it reaches `_MISSING_KEY_ERROR_THRESHOLD` (K=5) it logs one
+  ERROR (restoring the Sentry signal for a genuine, sticky misconfig). The counter resets to
+  `0` on the first successful classification, so a self-heal clears it. This keeps startup-race
+  noise quiet while ensuring an operator still gets paged if the key never arrives.
 - **Explicit RESPOND / non-drop regression coverage:** lock in that all three inbound
-  classification entry points preserve the message when the key is empty (`""`, the real
-  production value — not just `None`).
+  classification entry points preserve the message when the key is absent (`None`, the real
+  production value after this change).
 
 ### Flow
 
-Inbound message → classification call resolves key → **populated:** normal classification →
-**empty (transient):** WARNING + message-preserving default (RESPOND / non-fatal / new_work),
-cache not poisoned → next message re-resolves the real key → normal classification resumes.
+Inbound message → classification call resolves key → **populated:** normal classification,
+miss-counter reset to 0 → **absent (transient):** WARNING + message-preserving sentinel default
+(work-type→`type=None`, terminus→RESPOND, intent→new_work), resolver returns `None` and does
+not cache it → next message re-resolves the real key → normal classification resumes → **absent
+(persistent, ≥K consecutive):** one ERROR (Sentry) flags the permanent misconfig while still
+returning the safe default.
 
 ### Technical Approach
 
-- `utils/api_keys.py`: change the early-return guard to short-circuit only on a truthy
-  cached value, and drop the `_cached_anthropic_key = ""` assignment on the empty tail
-  (return `""` without caching). Behavior for a populated key is unchanged (still cached
-  once). This is the highest-leverage change: it removes the persistence amplifier.
-- `tools/classifier.py`: in `classify_request_async` and `classify_request`, replace the
-  `if not api_key: raise ValueError(...)` with a missing-key branch that logs WARNING and
-  returns a safe default dict (e.g. `{"type": "chore", "confidence": 0.0, "reason": "no
-  anthropic api key — classification skipped"}` — the exact default type chosen so the
-  downstream routing behaves conservatively; validate against `bridge` routing defaults
-  during build). The outer `except Exception` ERROR log stays for real failures. Confirm the
-  bridge caller (`bridge/telegram_bridge.py:1646`) still handles the returned default
-  gracefully (it reads `result.get("type")`, so a default dict is fine).
-- No change to `classify_conversation_terminus` logic (already correct); only add a
-  regression test for the empty-string case.
+- `utils/api_keys.py`: change the signature to `-> str | None`; short-circuit the cache only on
+  a truthy cached value; on absence `return None` WITHOUT assigning `_cached_anthropic_key`.
+  Behavior for a populated key is unchanged (still cached once). This is the highest-leverage
+  change: it removes the persistence amplifier and enables the SDK env fallback. **Call-site
+  audit for the `"" → None` change** (all resolve safely — verified during planning):
+  - Truthiness guards — `if api_key:` / `if not api_key:` behave identically for `None` and
+    `""`: `bridge/routing.py:946,989`, `bridge/promise_gate.py:504`, `bridge/session_router.py:118`,
+    `bridge/agent_catchup.py:201`, `agent/intent_classifier.py:202`,
+    `agent/memory_extraction.py:455,717,881`, `tools/valor_calendar.py:600`,
+    `tools/classifier.py:74,169,312,401`.
+  - `AsyncAnthropic(api_key=...)` / `Anthropic(api_key=...)` constructors —
+    `agent/anthropic_client.py:76`, `bridge/read_the_room.py:430`, `agent/session_completion.py:496`,
+    `agent/memory_extraction.py:289`: passing `None` is *better* (SDK falls back to `os.environ`);
+    passing `""` suppressed that fallback. No string operations run on the return value at any
+    site, so no `AttributeError` risk.
+  - `agent/health_check.py:348` returns the resolver value directly; a `None` health probe is a
+    truthful "no key" signal (was falsy `""` before). Confirm the health-check assertion treats
+    both as absent during build.
+- `tools/classifier.py`, `classify_request_async` **only**: replace
+  `if not api_key: raise ValueError(...)` with a missing-key branch that (a) increments
+  `_consecutive_missing_key_count`, (b) logs WARNING for a transient miss or ERROR once the
+  counter crosses `_MISSING_KEY_ERROR_THRESHOLD`, and (c) returns the sentinel default
+  `{"type": None, "confidence": 0.0, "reason": "no anthropic api key — classification skipped"}`.
+  Reset `_consecutive_missing_key_count = 0` on the successful-return path (after response
+  validation). The outer `except Exception` ERROR log stays for real failures. The bridge caller
+  (`bridge/telegram_bridge.py:1646`) reads `result.get("type")`; `type=None` is already the
+  handled sentinel there — the comment at `telegram_bridge.py:1665` documents
+  `classification_type=None → default "question"`, the most conservative routing (it does not
+  spuriously spawn SDLC work). This is why the sentinel `None` is preferred over a concrete
+  `"chore"`.
+- **No durable caching of the default:** `classify_request_async` uses no JSON sidecar cache
+  (the #1182 `JsonCache` lives in `agent/intent_classifier.py`, a separate out-of-scope module
+  whose own no-key default returns *before* its cache write at `intent_classifier.py:205`, so it
+  already never persists a default). The `confidence: 0.0` sentinel therefore cannot be durably
+  cached on any in-scope path. Invariant to preserve: **a `confidence == 0.0` result must never
+  be written to a durable cache.** If a sidecar cache is ever added to `classify_request_async`,
+  guard the write with `if result["confidence"] > 0.0`.
+- No change to `classify_conversation_terminus` logic (already correct); only add a regression
+  test for the missing-key case.
 - `agent/anthropic_client.py::anthropic_slot()` constructs `AsyncAnthropic(api_key=...)` with
-  whatever the resolver returns — the cache fix means it stops receiving a stale empty string,
-  so its call sites (intent async, etc.) benefit automatically. No code change there.
+  whatever the resolver returns — the cache fix means it stops receiving a stale empty string
+  (now `None`, enabling the SDK env fallback), so its call sites benefit automatically. No code
+  change there.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `tools/classifier.py:218-220` (`except Exception` → ERROR) — after the fix, add a test
-  asserting the **missing-key** path does NOT reach this ERROR log (asserts WARNING instead),
-  and a separate test asserting a **real** API error still logs at ERROR.
+- [ ] `tools/classifier.py` `classify_request_async` (`except Exception` → ERROR) — after the
+  fix, add a test asserting a **single transient** missing-key call does NOT reach the ERROR log
+  (asserts WARNING instead), and a separate test asserting a **real** API error still logs at
+  ERROR.
+- [ ] Consecutive-miss escalation — assert that `_MISSING_KEY_ERROR_THRESHOLD` (K=5) consecutive
+  missing-key calls escalate the K-th call to ERROR (Sentry signal for a permanent misconfig),
+  and that a successful call in between resets the counter so the WARNING regime resumes.
 - [ ] `bridge/telegram_bridge.py:1653-1654` (non-fatal catch) — covered indirectly; assert
   `classify_work_type` leaves the message enqueue path intact when classification returns the
-  default.
+  sentinel default (`type=None`).
 
 ### Empty/Invalid Input Handling
-- [ ] `get_anthropic_api_key()` with empty env and no readable `.env` returns `""` and does
-  NOT cache it (subsequent populated call returns the real key).
-- [ ] `classify_request_async("")` and `classify_request_async(<text>)` with empty key return
-  the safe default dict without raising.
+- [ ] `get_anthropic_api_key()` with empty env and no readable `.env` returns `None` and does
+  NOT cache it (subsequent populated call returns the real key). Reset `_cached_anthropic_key`
+  to `None` between cases.
+- [ ] `classify_request_async("")` and `classify_request_async(<text>)` with a missing key
+  return the sentinel default (`type=None`, `confidence=0.0`) without raising.
 
 ### Error State Rendering
-- [ ] The missing-key case produces a WARNING log line (observable), not a silent swallow and
-  not an ERROR/Sentry event. Assert via `caplog`.
+- [ ] A single transient missing-key case produces a WARNING log line (observable), not a silent
+  swallow and not an ERROR/Sentry event. Assert via `caplog`. The K-th consecutive miss produces
+  exactly one ERROR line.
 
 ## Test Impact
 
 - [ ] `tests/unit/test_routing.py::test_classify_terminus_ollama_failure_defaults_to_respond` —
-  UPDATE: add/parametrize an empty-string (`""`) key case alongside the existing `None` case,
-  asserting `RESPOND` — matches the real production value.
+  UPDATE: keep the existing `None` case (now the exact production value the resolver returns on
+  absence) asserting `RESPOND`. The prior plan called for adding an `""` case; with the resolver
+  now returning `None`, `None` *is* the production condition, so no `""` case is needed.
 - [ ] `tests/unit/test_work_request_classifier.py` — UPDATE: add cases asserting
-  `classify_request` / `classify_request_async` return the safe default dict on missing key
-  (no raise) and log at WARNING (not ERROR). Existing populated-key tests are unaffected.
+  `classify_request_async` returns the sentinel default (`type=None`, `confidence=0.0`) on a
+  missing key (no raise) and logs at WARNING for a transient miss; add a case asserting K
+  consecutive misses escalate to ERROR and that a success resets the counter. Existing
+  populated-key tests are unaffected. **No changes to the sync `classify_request` tests** — that
+  function is out of scope this revision.
 - [ ] `tests/unit/test_api_keys.py` — CREATE: new file covering `get_anthropic_api_key`
-  no-cache-on-empty self-healing and truthy-caching behavior. Must reset the module-level
-  `_cached_anthropic_key` between cases (monkeypatch to `None`).
+  no-cache-on-absence self-healing (`None` returned and not cached; subsequent populated call
+  returns the real key) and truthy-caching behavior. Must reset the module-level
+  `_cached_anthropic_key` to `None` between cases (monkeypatch).
 
 No other existing tests assert the current raise-on-missing-key behavior of
-`classify_request_async`, so nothing needs DELETE/REPLACE.
+`classify_request_async`, so nothing needs DELETE/REPLACE. Tests in
+`tests/tools/test_classifier.py` and `tests/unit/test_intent_classifier.py` exercise
+populated-key or non-work-type paths and are unaffected by this scope.
 
 ## Rabbit Holes
 
@@ -227,19 +286,23 @@ No other existing tests assert the current raise-on-missing-key behavior of
 
 ## Risks
 
-### Risk 1: Chosen safe-default `type` misroutes work-type classification
-**Impact:** If the default type is wrong, PR/issue messages could be mis-bucketed when the
-key is transiently missing.
-**Mitigation:** The synchronous PR/issue fast-path at `bridge/telegram_bridge.py:1668-1674`
-already forces `type="sdlc"` for issue/PR references independent of the async classifier, so
-the default only affects genuinely ambiguous messages during a short self-healing window.
-Pick the most conservative default and document it inline.
+### Risk 1: Sentinel default misroutes work-type classification
+**Impact:** If the sentinel default routed wrongly, PR/issue messages could be mis-bucketed when
+the key is transiently missing.
+**Mitigation:** The sentinel is `type=None`, which the bridge already treats as its most
+conservative default ("question", per the `telegram_bridge.py:1665` comment) — it does not
+spawn SDLC work. The synchronous PR/issue fast-path at `bridge/telegram_bridge.py:1668-1674`
+also forces `type="sdlc"` for issue/PR references independent of the async classifier, so the
+sentinel only affects genuinely ambiguous messages during a short self-healing window.
 
-### Risk 2: Cache change alters behavior for a legitimately keyless deployment
-**Impact:** A deployment with no key would re-read `.env` files on every call (minor extra
-I/O) instead of once.
-**Mitigation:** Acceptable — keyless deployments are not a supported production state, and the
-extra cost is three `Path.exists()` checks per call. Populated deployments still cache once.
+### Risk 2: No-cache-on-absence adds `.env` re-reads on a permanently keyless process
+**Impact:** A deployment with no key re-reads `.env` files on every classification call (minor
+extra I/O) instead of once, and the WARNING-only degrade would otherwise hide a permanent
+misconfig.
+**Mitigation:** The extra cost is three `Path.exists()` checks per call; populated deployments
+still cache once. The consecutive-miss counter escalates to ERROR/Sentry after K=5 misses, so a
+genuinely keyless process is flagged for an operator to fix rather than degrading silently
+forever — bounding the re-read window to the time it takes to notice and repair the misconfig.
 
 ## Race Conditions
 
@@ -248,14 +311,22 @@ extra cost is three `Path.exists()` checks per call. Populated deployments still
 **Trigger:** A message arrives after process start but before the LaunchAgent env or `.env`
 symlink is readable, causing an empty resolution.
 **Data prerequisite:** A truthy key present in env or one of the three `.env` paths.
-**State prerequisite:** The resolver must not persist an empty resolution.
-**Mitigation:** The fix's no-cache-on-empty behavior means the empty resolution is transient
-per-call, not sticky per-process; the next call after the env settles resolves the real key.
+**State prerequisite:** The resolver must not persist an absent resolution.
+**Mitigation:** The fix's no-cache-on-absence behavior (return `None`, do not cache) means the
+absent resolution is transient per-call, not sticky per-process; the next call after the env
+settles resolves the real key.
 
 ## No-Gos (Out of Scope)
 
-- Nothing deferred — every relevant item is in scope for this plan. The fix is contained to
-  `utils/api_keys.py`, `tools/classifier.py`, and the three test files above.
+- **Sync `classify_request` missing-key hardening is out of scope** — no live keyless
+  production caller exists (only in-module docstring examples and test suites reference it; the
+  sole production caller of the classifier is `classify_request_async`). The Sentry event is
+  async-only, so editing the sync twin would be gold-plating.
+- **Intent classifiers (`classify_message_intent` / `classify_message_intent_async`, lines
+  312/401) are out of scope** — they already default to `new_work` internally and never emit
+  the "Classification failed (async)" string.
+- Otherwise nothing deferred. The fix is contained to `utils/api_keys.py`,
+  `classify_request_async` in `tools/classifier.py`, and the three test files above.
 
 ## Update System
 
@@ -283,22 +354,29 @@ safer failure mode.
   existing path).
 
 ### Inline Documentation
-- [ ] Comment in `utils/api_keys.py` explaining why empty resolutions are not cached
-  (self-healing after startup env/.env race, ref #1899).
-- [ ] Comment in `tools/classifier.py` distinguishing the missing-key WARNING path from the
-  ERROR path for real failures (ref #1899).
+- [ ] Comment in `utils/api_keys.py` explaining why absent resolutions return `None` and are not
+  cached (self-healing after startup env/.env race; `None` enables the SDK `os.environ`
+  fallback, ref #1899).
+- [ ] Comment in `tools/classifier.py` distinguishing the missing-key WARNING path (and the
+  consecutive-miss ERROR escalation) from the ERROR path for real failures (ref #1899).
 
 ## Success Criteria
 
 - [ ] Root cause documented with exact call site: `tools/classifier.py:171/219`
   (`classify_request_async`), amplified by empty-key caching in
   `utils/api_keys.py::get_anthropic_api_key`; issue's terminus attribution corrected.
-- [ ] `get_anthropic_api_key()` no longer caches empty resolutions (self-heals).
-- [ ] Missing-key classification logs at WARNING, not ERROR (no new Sentry events for this
-  condition), and returns a message-preserving default without raising.
-- [ ] `classify_conversation_terminus` returns `RESPOND` under an empty-string (`""`) key —
-  regression test added.
-- [ ] Regression tests for the key-missing path across resolver, work-type, and terminus.
+- [ ] `get_anthropic_api_key()` returns `None` on absence (annotated `-> str | None`) and no
+  longer caches absent resolutions (self-heals; enables SDK env fallback).
+- [ ] A transient missing-key classification logs at WARNING, not ERROR (no new Sentry events),
+  and returns the message-preserving sentinel default (`type=None`, `confidence=0.0`) without
+  raising. K=5 consecutive misses escalate to one ERROR (permanent-misconfig signal); a success
+  resets the counter.
+- [ ] `classify_conversation_terminus` returns `RESPOND` under a `None` key — regression test
+  present.
+- [ ] Regression tests for the key-missing path across resolver, work-type (including counter
+  escalation), and terminus.
+- [ ] The `confidence==0.0` sentinel is never written to a durable cache (no sidecar cache on
+  the in-scope path; invariant documented).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -308,8 +386,8 @@ safer failure mode.
 
 - **Builder (classification-hardening)**
   - Name: classify-builder
-  - Role: Implement the resolver no-cache-on-empty fix, the classifier missing-key WARNING
-    path, and the three regression tests.
+  - Role: Implement the resolver no-cache-on-absence (`None`) fix, the classifier missing-key
+    WARNING path with consecutive-miss ERROR escalation, and the three regression tests.
   - Agent Type: builder
   - Domain: async (see DOMAIN_FRAMING.md — async/await + shared client semantics)
   - Resume: true
@@ -330,8 +408,11 @@ safer failure mode.
 - **Assigned To**: classify-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `utils/api_keys.py::get_anthropic_api_key`, short-circuit the cache only on a truthy
-  cached value; return `""` on the empty tail WITHOUT assigning `_cached_anthropic_key = ""`.
+- In `utils/api_keys.py::get_anthropic_api_key`, change the signature to `-> str | None`;
+  short-circuit the cache only on a truthy cached value; `return None` on the absent tail
+  WITHOUT assigning `_cached_anthropic_key`.
+- Audit the `"" → None` call sites listed in Technical Approach (all resolve safely; no code
+  change needed at truthiness guards or SDK constructors).
 - Add an inline comment referencing #1899.
 
 ### 2. Harden classifier missing-key path
@@ -341,9 +422,15 @@ safer failure mode.
 - **Assigned To**: classify-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `classify_request_async` and `classify_request`, replace the raise-on-missing-key with a
-  WARNING log + safe default dict; keep the ERROR-level `except Exception` for real failures.
-- Confirm `bridge/telegram_bridge.py:1646` handles the default dict (reads `.get("type")`).
+- In `classify_request_async` **only**, replace the raise-on-missing-key with a WARNING log +
+  sentinel default dict (`{"type": None, "confidence": 0.0, "reason": "..."}`); keep the
+  ERROR-level `except Exception` for real failures. Do NOT touch the sync `classify_request` or
+  the intent classifiers.
+- Add the module-level `_consecutive_missing_key_count` and `_MISSING_KEY_ERROR_THRESHOLD`
+  (K=5): increment on each missing-key call; escalate to ERROR when the counter crosses K; reset
+  to 0 on the successful-return path.
+- Confirm `bridge/telegram_bridge.py:1646` handles the sentinel dict (reads `.get("type")`;
+  `type=None` → downstream "question" default).
 
 ### 3. Regression tests
 - **Task ID**: build-tests
@@ -352,12 +439,13 @@ safer failure mode.
 - **Assigned To**: classify-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tests/unit/test_api_keys.py`: empty resolution not cached (self-heals), truthy
-  cached once. Reset `_cached_anthropic_key` between cases.
-- Update `test_work_request_classifier.py`: missing key → default dict + WARNING (assert via
-  caplog), no raise; real API error still ERROR.
-- Update `test_routing.py`: parametrize the terminus fallback test to include empty-string
-  `""` key → `RESPOND`.
+- Create `tests/unit/test_api_keys.py`: absent resolution returns `None` and is not cached
+  (self-heals), truthy cached once. Reset `_cached_anthropic_key` to `None` between cases.
+- Update `test_work_request_classifier.py`: missing key → sentinel dict (`type=None`) + WARNING
+  (assert via caplog), no raise; K consecutive misses → one ERROR + counter reset on success;
+  real API error still ERROR.
+- Update `test_routing.py`: confirm the terminus fallback test's `None` key case asserts
+  `RESPOND` (no `""` case needed — `None` is now the production value).
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -383,24 +471,30 @@ safer failure mode.
 | Tests pass | `pytest tests/unit/test_api_keys.py tests/unit/test_work_request_classifier.py tests/unit/test_routing.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check utils/api_keys.py tools/classifier.py` | exit code 0 |
 | Format clean | `python -m ruff format --check utils/api_keys.py tools/classifier.py` | exit code 0 |
-| Empty result not cached | `grep -n '_cached_anthropic_key = ""' utils/api_keys.py` | match count == 0 |
-| Missing-key no longer raises in async classifier | `grep -c 'No Anthropic API key found for classification' tools/classifier.py` | output contains 0 |
-| Terminus empty-key test present | `grep -rn 'RESPOND' tests/unit/test_routing.py \| grep -c terminus` | output > 0 |
+| Empty result not cached | `grep -c '_cached_anthropic_key = ""' utils/api_keys.py` | output `0` |
+| Resolver returns None on absence | `grep -c 'return None' utils/api_keys.py` | output `>= 1` |
+| Missing-key no longer raises in `classify_request_async` (range-scoped to the one changed function) | `awk '/^async def classify_request_async/{cap=1; next} /^(async def\|def) /{cap=0} cap' tools/classifier.py \| grep -c 'No Anthropic API key found for classification'` | output `0` |
+| Sync + intent classifiers untouched (raise still present) | `grep -c 'No Anthropic API key found for classification' tools/classifier.py` | output `3` |
+| Consecutive-miss counter present | `grep -c '_MISSING_KEY_ERROR_THRESHOLD' tools/classifier.py` | output `>= 2` |
+| Terminus missing-key test present | `grep -rn 'RESPOND' tests/unit/test_routing.py \| grep -c terminus` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+Verdict: **NEEDS REVISION** (round 1). All six findings addressed in this revision pass.
+
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| BLOCKER | Verification grep gate unsatisfiable — string appears 4× (lines 76/171/314/403), gate expected 0 for whole file | Verification table row range-scoped to the `classify_request_async` function body via `awk`; added a companion row asserting the sync + intent classifiers keep their raise (count `3`) | The one changed function loses the raise (0); the three out-of-scope functions keep it (3). Validated the `awk` extractor against current `tools/classifier.py`. |
+| CONCERN | WARNING path collapses transient miss with permanent misconfig — no Sentry signal, unbounded `.env` re-read | Added module-level `_consecutive_missing_key_count` + `_MISSING_KEY_ERROR_THRESHOLD` (K=5): WARNING for transient, ERROR/Sentry after K consecutive, reset on success | Solution Key Elements, Technical Approach, Risk 2, tasks 2/3, tests. Bounds the re-read window to time-to-notice for a genuinely keyless process. |
+| CONCERN | Resolver should return `None` (not `""`), annotated `-> str \| None`, so SDK `os.environ` fallback can resolve a fresh key; update all call sites | Signature `-> str \| None`; `return None` on absence; audited all 15 non-test call sites (truthiness guards + SDK constructors) — all safe, `None` strictly better at constructors | Technical Approach call-site audit; task 1; test_api_keys assertions. |
+| CONCERN | Sync `classify_request` edit may be unreachable gold-plating (Sentry event is async-only) | Grepped for a live keyless sync caller — none (only docstring examples + tests). Dropped the sync edit from scope | No-Gos, Solution, tasks 2/3, Test Impact all now async-only. |
+| NIT | Safe-default `type="chore"` both asserted and punted to Open Question 1 (self-contradiction) | Pinned invariant to `confidence==0.0` / no-raise; sentinel `type=None` (downstream already maps `None → "question"`) preferred over `"chore"`; deleted Open Question 1 | Technical Approach, Risk 1, Success Criteria. |
+| NIT | #1182 JSON sidecar could durably cache the `confidence=0.0` default | Documented that `classify_request_async` uses no sidecar cache (the `JsonCache` is in the out-of-scope `agent/intent_classifier.py`, which returns its default before its cache write); pinned invariant "never cache `confidence==0.0`" + guard note if caching is ever added | Technical Approach "No durable caching of the default". |
 
 ---
 
 ## Open Questions
 
-1. Safe-default `type` for `classify_request_async` on missing key: `"chore"` (most
-   conservative — avoids spuriously spawning SDLC work) vs. a `None`/`"question"` sentinel the
-   downstream already treats as default. Confirm the preferred default, or leave to the
-   builder to pick the least-surprising value given `bridge` routing defaults.
-2. Accept the corrected root-cause framing (Sentry noise + cache-poisoning, not a
+1. Accept the corrected root-cause framing (Sentry noise + cache-poisoning, not a
    message-dropping bug)? The AC "never silent-drop" is satisfied because all three inbound
    paths already preserve the message; the plan adds proof rather than changing drop behavior.
