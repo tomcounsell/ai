@@ -174,6 +174,8 @@ class HeadlessRoleDriver:
         full_context_message: str | None = None,
         harness_fn: Callable[..., Awaitable[str]] | None = None,
         on_stdout_event: Callable[[], None] | None = None,
+        on_spawn: Callable[[int], None] | None = None,
+        on_exit: Callable[[], None] | None = None,
     ) -> None:
         self.role = role
         self.session_id = session_id
@@ -190,6 +192,12 @@ class HeadlessRoleDriver:
         self.full_context_message = full_context_message
         self._harness_fn = harness_fn
         self._on_stdout_event = on_stdout_event
+        # Spawn/exit callbacks (Race 2): on_spawn(pid) fires as soon as the
+        # subprocess pid is known — the runner records PID/PGID on the
+        # AgentSession turn record BEFORE the turn-await; on_exit() fires when
+        # the subprocess exits (clears per-turn pid tracking).
+        self._on_spawn = on_spawn
+        self._on_exit = on_exit
         # A per-role HookEdgeConsumer over the same edge file the subprocess's
         # --settings hook set writes to (turn-end reconciliation). Constructed
         # lazily so callers can inject a fake consumer in tests.
@@ -324,6 +332,12 @@ class HeadlessRoleDriver:
                     settings_path=self.settings_path,
                     metered=True,
                     role=self.role,
+                    # Own process group (Race 2 + D4): the preempt watcher
+                    # signals the whole subprocess tree via killpg, and the
+                    # worker orphan sweep reaps survivors after a crash.
+                    start_new_session=True,
+                    on_sdk_started=self._on_spawn,
+                    on_sdk_finished=self._on_exit,
                     on_stdout_event=self._on_stdout_event,
                 ),
                 timeout=self.turn_timeout_s,

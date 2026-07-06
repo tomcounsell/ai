@@ -2351,11 +2351,18 @@ async def get_response_via_harness(
     settings_path: str | None = None,
     metered: bool = False,
     role: str | None = None,
+    start_new_session: bool = False,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
+
+    ``start_new_session=True`` spawns the subprocess in its own process
+    group (session-runner role turns) so a preempt watcher can signal the
+    whole subprocess tree via ``killpg`` and the worker orphan sweep can
+    reap survivors. Default False preserves behavior for every other
+    harness consumer (message drafter, drafter-review, probes).
 
     Parses stdout as stream-json line-by-line. Extracts the final result from
     the ``result`` event, or falls back to accumulated ``content_block_delta``
@@ -2522,6 +2529,7 @@ async def get_response_via_harness(
         cmd,
         working_dir,
         proc_env,
+        start_new_session=start_new_session,
         on_sdk_started=on_sdk_started,
         on_sdk_finished=on_sdk_finished,
         on_stdout_event=on_stdout_event,
@@ -2561,6 +2569,7 @@ async def get_response_via_harness(
                 fallback_cmd,
                 working_dir,
                 proc_env,
+                start_new_session=start_new_session,
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
@@ -2614,6 +2623,7 @@ async def get_response_via_harness(
                 fallback_cmd,
                 working_dir,
                 proc_env,
+                start_new_session=start_new_session,
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
@@ -2732,6 +2742,7 @@ async def _run_harness_subprocess(
     working_dir: str,
     proc_env: dict[str, str],
     *,
+    start_new_session: bool = False,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
@@ -2814,6 +2825,11 @@ async def _run_harness_subprocess(
             cwd=working_dir,
             env=proc_env,
             limit=16 * 1024 * 1024,  # 16 MB — covers any realistic Claude response
+            # Own process group when requested (session-runner role turns):
+            # lets a preempt watcher SIGTERM/SIGKILL the whole subprocess tree
+            # via killpg without touching the worker's own group, and lets the
+            # worker-startup orphan sweep reap survivors (Race 2, plan #1924).
+            start_new_session=start_new_session,
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
