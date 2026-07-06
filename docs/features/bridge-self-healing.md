@@ -568,6 +568,62 @@ redis-cli DEL "worker:watchdog:down_ticks:$(hostname)"
 
 See [Config Architecture](config-architecture.md) for how `projects.json` fits into the broader config system.
 
+### 20. Update Release Verification (issue #1898)
+
+**Problem**: The Telegram `/update` command (and the 30-minute polling cron, both routed through `scripts/remote-update.sh`) reported `✅ update OK @ {sha}` from the shell's exit code and `git rev-parse --short HEAD` alone. Nothing restarted the bridge on this path (only the worker had a kickstart block), and nothing verified that the running processes were actually executing the pulled code. A bridge that booted once and then survived every later pull kept reporting `✅` on each cycle while running commits old, because no restart and no verification ever touched it.
+
+**Solution**: Four coordinated pieces close the gap: a boot-SHA beacon each process writes at startup, a shared classifier that reads both beacons, a bridge restart block in the shell (mirroring the pre-existing worker block), and a report path that survives the bridge's own restart.
+
+**Boot-SHA beacon** (`monitoring/boot_beacon.py::write_boot_beacon`): at startup the bridge writes `data/bridge_boot_sha` and the worker writes `data/worker_boot_sha`, each a two-line file containing the short git SHA (via `scripts/update/git.py::get_short_sha`, the same helper the classifier compares against) and an ISO 8601 timestamp. The write is best-effort: any failure logs a warning and never crashes startup. A missing or malformed beacon can only ever downgrade classification to `unknown`, never invert into a false failure.
+
+**Relevant-range classifier** (`scripts/update/service.py::verify_running_release`): for each in-role process, `_classify_process()` reads its beacon, gets the process's absolute start time via `get_process_start_ts(pid)` (a `ps -o lstart` parser, generalized from the bridge watchdog's `get_bridge_process_start_ts`), and classifies:
+
+| Classification | Condition |
+|---|---|
+| `matches` | beacon belongs to the current process image (`beacon_ts > process_start_ts`) AND `git log {boot_sha}..HEAD -- <relevant paths>` is empty |
+| `stale` | beacon belongs to the current image AND that relevant-range log is non-empty |
+| `unknown` | beacon missing/malformed, no PID, `process_start_ts` unavailable, an orphaned beacon (`beacon_ts <= process_start_ts`), or `boot_sha` unresolvable by git |
+
+Staleness is positive-only and scoped to each process's own relevant path set (bridge: `bridge/ agent/ mcp_servers/ models/ tools/ config/ pyproject.toml`; worker: `worker/ agent/ mcp_servers/ models/ tools/ bridge/ reflections/ pyproject.toml`), the same sets the restart gates diff, so classifier and restart gate agree by construction. A raw `boot_sha == HEAD` comparison is deliberately never used: docs-only or plan-migration commits advance HEAD past a healthy, correctly-un-restarted process, and a literal-equality check would false-fail on the majority of this repo's commit stream. `unknown` never fails a run and never triggers a restart. Only a positive, confirmed staleness escalates.
+
+**Bridge kickstart in `remote-update.sh`** (the core fix: a bridge restart on this path did not exist before). After the pull and the existing worker kickstart, the shell computes `NEED_BRIDGE_RESTART` from a `BEFORE_SHA..AFTER_SHA` diff of the bridge-relevant paths, gated on the bridge plist being installed on this machine (`[ -f "$BRIDGE_DST" ]`; a skills-only machine has no bridge plist and skips the block entirely). When true, it runs `launchctl kickstart -k {prefix}.bridge` as the **last** thing the script does. This is safe because the bridge holds no agent sessions (the worker is the sole session executor) and its Telethon `catch_up=True` scan backfills anything missed during the brief restart. It is the last act because the kickstart SIGKILLs the whole bridge launchd job, including `handle_update_command` and the `remote-update.sh` child it spawned, since they share the job's process group. Nothing in the shell runs after a successful kickstart. Both worker and bridge kickstart failures now surface as a distinct `RESTART FAILED` line and a non-zero terminal exit (`RESTART_FAILED || VERIFY_FAILED`), replacing the previous swallowed `echo ERROR`.
+
+Before the kickstart, the shell releases `data/update.lock` explicitly (`rmdir "$LOCK_DIR"`), because the `trap cleanup_lock EXIT` that normally releases it never fires on SIGKILL. Without the explicit release, every bridge-relevant update would orphan the lock for up to 600 seconds, and any retry or the next cron cycle in that window would hit the "already running" skip branch with no pull and no verify.
+
+**Terminal verify runs every cycle**: `python -m scripts.update.verify_release` (`scripts/update/verify_release.py`) is the shell's terminal step on every invocation, including no-op cron cycles with no new commits. This re-classifies a starved or never-restarted process instead of only checking right after a restart. It is scoped to the worker only (`--skip-bridge`) when a bridge restart is queued this cycle, since the about-to-restart bridge is not escalated as stale. It takes a `--since <epoch>` restart moment and polls (bounded, 15 attempts x 2 seconds) for the worker beacon to freshen past it before classifying, because a `kickstart -k` returns before the freshly-spawned process has written its own beacon, so an immediate read would otherwise see the pre-restart beacon and misclassify `unknown`. Exit code 1 on any positive staleness, 0 otherwise (`unknown` prints a warning but does not fail the run).
+
+**Report path splits on whether the bridge restarts this cycle** (the survivable-channel design: a bridge kickstart kills the process that ran `/update`, so it cannot always be the reporter):
+
+- **Worker-only or no-op update (no bridge restart)**: `handle_update_command` (`bridge/update.py`) survives. It re-verifies via `verify_running_release()` after the shell returns, gates `✅` on `returncode == 0 AND` no in-role `stale`, and appends per-process reload state (e.g. `(bridge current, worker restarted)`). A stale process reports `❌ update FAILED @ {sha}: {process} running {short} but HEAD is {short}` and still spawns the existing fix session. All stdout lines are scanned for `warning`/`ERROR` (previously only the first line was checked).
+- **Bridge-relevant update (bridge restart triggered)**: `handle_update_command` will be SIGKILLed, so before the kickstart the shell stages the originating chat id, reply-to message id, pulled HEAD short-SHA, and worker reload state to `data/update-pending-report` (only when a Telegram chat context is present; the pure 30-minute cron cycle has none, so nothing is staged). The **fresh bridge**, at startup right after writing its own boot-SHA beacon, calls `run_boot_release_check()` (`bridge/update.py`), which unconditionally verifies its own release, then, if the pending report exists, reuses that check to compose the `✅`/FAILED reply, sends it to the staged chat, and deletes the file.
+- On a bridge-plist machine, `handle_update_command` also sends a best-effort interim notice before invoking the shell, so the human is not left staring at a bare 👀 reaction for the multi-minute window between the bridge's self-kill and the fresh bridge's boot flush. A send failure here never blocks the update.
+
+**`--full` verify** (`scripts/update/run.py::run_release_verify`): the synchronous `/update --full` path calls `verify_running_release()` as the terminal step of the `do_service_restart=True` branch, after `install_service`'s restart. Any in-role `stale` sets `result.success = False` (non-zero exit) and names both short-SHAs; `unknown` only warns. A clean pass that finds the bridge positively `matches` clears any earlier failure sentinel (below).
+
+**Out-of-band signals for a bridge that never comes back**: the report path above depends on the fresh bridge coming up. If it crash-loops or launchd fails to relaunch it, there is no live channel to report on, reproducing the original #1898 symptom. Two backstops, both read by `monitoring/bridge_watchdog.py::check_update_release_signals()` on its normal 60-second cycle:
+
+- A fresh bridge that boots but self-classifies its own beacon `stale` writes `data/update-release-failed` (SHA lag + timestamp) via the unconditional self-check in `run_boot_release_check()`. This runs at every bridge boot regardless of whether a pending report exists, so the pure-cron trigger path (which stages nothing) still gets the backstop. A subsequent healthy boot (`matches`) clears the sentinel.
+- A `data/update-pending-report` left undrained past `UPDATE_REPORT_TTL_SECONDS` (`STARTUP_GRACE_SECONDS + 60`, i.e. the watchdog's 5-minute startup grace plus one 60-second watchdog cycle, defined once in `scripts/update/service.py` and re-imported by the watchdog), measured against the report's own staged timestamp, signals that the fresh bridge never came up to flush it.
+
+Both checks are logged at `logger.critical("[update-release] ...")` on every watchdog tick while the condition holds.
+
+**Watchdog suppression for the planned restart**: the bridge kickstart is the first *deliberate* SIGKILL of the bridge process, and without a suppression the independent 60-second watchdog would log a crash and could itself call `restart_bridge()` mid-window. `remote-update.sh` writes `data/update-restart-in-progress` (a timestamp) immediately before the kickstart. `run_health_check()` checks the marker's age against `UPDATE_RESTART_MARKER_TTL_SECONDS` (the same `STARTUP_GRACE_SECONDS + 60` formula as the report TTL, so the suppression window can never expire before the boot window it protects) and early-returns healthy while the marker is fresh, before `check_bridge_health()` runs, so neither the crash log nor the recovery-level bump fires. The fresh bridge's boot self-check clears the marker; an aged-out marker resumes normal health checking.
+
+**Files**:
+- `data/bridge_boot_sha`, `data/worker_boot_sha`: boot-SHA beacons (SHA + ISO timestamp), written at startup
+- `data/update-pending-report`: staged chat context for the fresh bridge's boot flush, deleted after a successful flush (or left in place if the fresh bridge itself boots stale)
+- `data/update-restart-in-progress`: planned-restart marker, cleared by the fresh bridge's boot self-check
+- `data/update-release-failed`: out-of-band sentinel for a bridge that boots stale, cleared on a subsequent healthy boot
+
+**Check state**:
+```bash
+cat data/bridge_boot_sha data/worker_boot_sha
+python -m scripts.update.verify_release          # manual classification against current HEAD
+cat data/update-release-failed 2>/dev/null       # present only after a stale boot
+```
+
+**Corrected docstrings**: `agent/agent_session_queue.py`'s `_trigger_restart()` and the `_check_restart_flag()` log line previously said "restarting bridge," but both actually SIGTERM the **worker** process (launchd respawns the worker, not the bridge). These are documentation-only corrections; the SIGTERM target is unchanged. The worker's deferred `data/restart-requested` flag remains independent of the bridge kickstart described above. This feature does not add bridge consumption of that flag.
+
 ## Idle SDK Teardown (issue #1128)
 
 The Claude Agent SDK's persistent `ClaudeSDKClient` connections die
