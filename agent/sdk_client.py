@@ -2355,6 +2355,7 @@ async def get_response_via_harness(
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
+    on_init: Callable[[dict], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
 
@@ -2533,6 +2534,7 @@ async def get_response_via_harness(
         on_sdk_started=on_sdk_started,
         on_sdk_finished=on_sdk_finished,
         on_stdout_event=on_stdout_event,
+        on_init=on_init,
         ttft_metadata=_ttft_meta,
     )
     # Issue #1245: accumulate counts across primary + fallback subprocess
@@ -2573,6 +2575,7 @@ async def get_response_via_harness(
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
+                on_init=on_init,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2627,6 +2630,7 @@ async def get_response_via_harness(
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
+                on_init=on_init,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2746,6 +2750,7 @@ async def _run_harness_subprocess(
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
+    on_init: Callable[[dict], None] | None = None,
     ttft_metadata: dict | None = None,
 ) -> tuple[
     str | None,
@@ -2890,6 +2895,19 @@ async def _run_harness_subprocess(
             continue
 
         event_type = data.get("type")
+
+        # Capture-at-init (plan #1924, Race 5): the `system/init` event names
+        # the NEW invocation's session_id before any work happens. Callers
+        # (session runner) persist it immediately so a preempted/killed turn's
+        # partial transcript remains the resume target — never the stale
+        # pre-turn uuid. Callback exceptions are caught + logged.
+        if event_type == "system" and data.get("subtype") == "init":
+            if on_init is not None:
+                try:
+                    on_init(data)
+                except Exception as _cb_err:
+                    logger.warning("on_init callback raised: %s", _cb_err)
+            continue
 
         if event_type == "result":
             result_text = data.get("result", "")

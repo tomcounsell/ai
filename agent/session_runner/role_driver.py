@@ -176,6 +176,7 @@ class HeadlessRoleDriver:
         on_stdout_event: Callable[[], None] | None = None,
         on_spawn: Callable[[int], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_init: Callable[[dict], None] | None = None,
     ) -> None:
         self.role = role
         self.session_id = session_id
@@ -198,16 +199,60 @@ class HeadlessRoleDriver:
         # the subprocess exits (clears per-turn pid tracking).
         self._on_spawn = on_spawn
         self._on_exit = on_exit
+        # Caller's init-event observer (fires after the driver's own
+        # capture-at-init bookkeeping below).
+        self._on_init = on_init
         # A per-role HookEdgeConsumer over the same edge file the subprocess's
         # --settings hook set writes to (turn-end reconciliation). Constructed
         # lazily so callers can inject a fake consumer in tests.
         self._consumer = consumer
         if self._consumer is None and edge_file:
             self._consumer = HookEdgeConsumer(edge_file, session_id=None)
-        # Captured on first-turn completion; drives --resume on later turns.
+        # The current claude session UUID: seeded from persisted resume
+        # scalars (seed_resume), then updated by capture-at-init on every
+        # turn (each ``--resume`` invocation forks to a NEW session id — the
+        # freshest id is always the next resume target; Race 5). Drives
+        # --resume on later turns.
         self._claude_session_id: str | None = None
         self._transcript_path: str | None = None
         self._primed = False
+        self._resume_seeded = False
+
+    def seed_resume(self, claude_session_id: str) -> None:
+        """Seed a validated persisted session UUID: --resume + skip prime.
+
+        The caller (runner init) is responsible for validation — UUID shape,
+        cwd-scoped lookup (Race 3). A seeded driver never re-primes: the
+        persona is already in the resumed session's context. The stale-UUID
+        fallback (retry once without --resume, full context) remains the
+        only recovery tier; :meth:`run_turn` builds a prime-prefixed
+        full-context message for it so a cold retry is still primed.
+        """
+        self._claude_session_id = claude_session_id
+        self._transcript_path = _headless_transcript_path(self.working_dir, claude_session_id)
+        self._primed = True
+        self._resume_seeded = True
+
+    def _handle_init(self, data: dict) -> None:
+        """Capture-at-init (Race 5): adopt the new invocation's session id.
+
+        Fires the moment the stream-json ``system/init`` event is parsed —
+        BEFORE the turn's ``result`` — so a preempted/killed turn's partial
+        transcript is the resume target, never the stale pre-turn uuid.
+        Never raises.
+        """
+        try:
+            sid = data.get("session_id")
+            if sid:
+                self._claude_session_id = str(sid)
+                self._transcript_path = _headless_transcript_path(self.working_dir, str(sid))
+        except Exception:  # noqa: BLE001
+            logger.debug("[role-driver] init-event capture failed", exc_info=True)
+        if self._on_init is not None:
+            try:
+                self._on_init(data)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[role-driver] on_init observer raised: %s", e)
 
     # -- Captured session identity (feeds the four-scalar resume persistence)
     @property
@@ -314,6 +359,15 @@ class HeadlessRoleDriver:
         turn_message, system_prompt = self._prime_args(message)
         prior_uuid = self._claude_session_id  # None on first turn
 
+        # Stale-UUID fallback context: when this turn rides --resume and the
+        # caller supplied no full-context message, build a prime-prefixed one
+        # so the harness's cold retry (the only recovery tier, D3) starts a
+        # fresh session WITH the persona instead of unprimed.
+        full_context_message = self.full_context_message
+        if prior_uuid and full_context_message is None and self.prime_path == PRIME_PATH_SLASH:
+            slash = _slash_command_for(self.role)
+            full_context_message = f"{slash} {message}" if message else slash
+
         # Race 4: drain stale edges BEFORE spawning this turn's subprocess.
         snapshot_ts = self._snapshot_edges()
 
@@ -326,7 +380,7 @@ class HeadlessRoleDriver:
                     env=self.env,
                     prior_uuid=prior_uuid,
                     session_id=self.session_id,
-                    full_context_message=self.full_context_message,
+                    full_context_message=full_context_message,
                     model=self.model,
                     system_prompt=system_prompt,
                     settings_path=self.settings_path,
@@ -339,6 +393,7 @@ class HeadlessRoleDriver:
                     on_sdk_started=self._on_spawn,
                     on_sdk_finished=self._on_exit,
                     on_stdout_event=self._on_stdout_event,
+                    on_init=self._handle_init,
                 ),
                 timeout=self.turn_timeout_s,
             )

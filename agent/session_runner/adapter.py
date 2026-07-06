@@ -91,6 +91,66 @@ def _transcript_path_from_spec(cwd: str, session_id: str) -> str:
     return os.path.join(home, ".claude", "projects", slug, f"{session_id}.jsonl")
 
 
+def sidechain_agent_ids(
+    cwd: str,
+    claude_session_id: str,
+    *,
+    projects_root: str | None = None,
+) -> list[str]:
+    """Return subagent ids from the session's sidechain directory, oldest first.
+
+    Structural ``dev_agent_id`` capture (plan #1924, Data Flow §7 / Race 5):
+    Claude Code writes each subagent's sidechain transcript to
+    ``~/.claude/projects/{cwd-slug}/{claude_session_id}/subagents/agent-*.jsonl``
+    the moment the agent is SPAWNED — so a preempt mid-Dev-spawn still
+    captures it. Agent ids are the filename stems; they are NEVER parsed
+    from PM prose. Ordered by file mtime (oldest first — the newest id is
+    the continuation target). Fail-silent: returns [] on any error.
+
+    ``projects_root`` overrides ``~/.claude/projects`` for tests.
+    """
+    if not cwd or not claude_session_id:
+        return []
+    try:
+        if projects_root is None:
+            projects_root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+        real_cwd = os.path.realpath(cwd)
+        slug = real_cwd.replace("/", "-").replace(".", "-")
+        base = os.path.join(projects_root, slug, claude_session_id, "subagents")
+        entries = []
+        for name in os.listdir(base):
+            if not (name.startswith("agent-") and name.endswith(".jsonl")):
+                continue
+            path = os.path.join(base, name)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            entries.append((mtime, name[: -len(".jsonl")]))
+        entries.sort()
+        return [agent_id for _, agent_id in entries]
+    except OSError:
+        return []
+    except Exception as e:  # noqa: BLE001 — capture must never crash a turn
+        logger.debug("[runner-adapter] sidechain scan failed: %s", e)
+        return []
+
+
+def sidechain_transcript_path(
+    cwd: str,
+    claude_session_id: str,
+    agent_id: str,
+    *,
+    projects_root: str | None = None,
+) -> str:
+    """Path of one subagent's sidechain JSONL (for the turn-history mirror)."""
+    if projects_root is None:
+        projects_root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    real_cwd = os.path.realpath(cwd) if cwd else cwd
+    slug = real_cwd.replace("/", "-").replace(".", "-")
+    return os.path.join(projects_root, slug, claude_session_id, "subagents", f"{agent_id}.jsonl")
+
+
 def _hook_edge_base_dir() -> str:
     """Base directory for per-session hook settings + edge files.
 

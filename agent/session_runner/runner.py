@@ -38,7 +38,9 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import signal
+import subprocess
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +50,8 @@ from agent.session_runner.adapter import (
     SessionRunnerAdapter,
     _append_session_event,
     _now_iso,
+    sidechain_agent_ids,
+    sidechain_transcript_path,
 )
 from agent.session_runner.role_driver import (
     HeadlessRoleDriver,
@@ -58,6 +62,7 @@ from agent.session_runner.router import (
     classify_pm_prefix,
     truncate_exit_message,
 )
+from agent.session_runner.transcript_tailer import last_assistant_text
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +114,25 @@ MAX_COMPLIANCE_NUDGES: int = int(os.environ.get("SESSION_RUNNER_MAX_COMPLIANCE_N
 # Provisional/tunable — override with SESSION_RUNNER_DRIVER_BACKSTOP_MARGIN_S.
 DRIVER_BACKSTOP_MARGIN_S: float = float(
     os.environ.get("SESSION_RUNNER_DRIVER_BACKSTOP_MARGIN_S", "120.0")
+)
+
+# Per-entry cap for the turn-history mirror text (bounded observability +
+# disaster-recovery seed; NEVER read on the normal resume path).
+# Provisional/tunable — override with SESSION_RUNNER_TURN_HISTORY_MAX_CHARS.
+TURN_HISTORY_MAX_CHARS: int = int(os.environ.get("SESSION_RUNNER_TURN_HISTORY_MAX_CHARS", "4000"))
+
+# Validation shapes for persisted resume scalars (garbage → cold start).
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_DEV_AGENT_ID_RE = re.compile(r"^agent-[A-Za-z0-9._-]{1,128}$")
+
+# Prepended to the first resumed message when a dev_agent_id survives, so the
+# PM continues the SAME dev agent across the restart (Success Criterion 3).
+DEV_CONTINUATION_PREFIX = (
+    "(Resuming session. Your dev agent {dev_agent_id} is still available from "
+    "before the restart. Continue that SAME agent for developer work; do not "
+    "spawn a new one.)\n\n"
 )
 
 # ---------------------------------------------------------------------------
@@ -209,6 +233,31 @@ class _RouteDecision:
     next_message: str | None = None
 
 
+_claude_version_cache: str | None = None
+
+
+def _probe_claude_version() -> str | None:
+    """Best-effort ``claude --version`` probe, cached process-wide.
+
+    Used only when the stream-json init event carries no version field.
+    Fail-silent — resume works without the version; it is a deploy-gate
+    signal (Risk 5a), not a functional dependency.
+    """
+    global _claude_version_cache
+    if _claude_version_cache is not None:
+        return _claude_version_cache
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"], capture_output=True, text=True, timeout=5.0, check=False
+        )
+        out = (proc.stdout or "").strip()
+        if out:
+            _claude_version_cache = out.split()[0]
+    except Exception:  # noqa: BLE001
+        return None
+    return _claude_version_cache
+
+
 def _default_pid_alive(pid: int) -> bool:
     """True when ``pid`` exists (signal 0 probe)."""
     try:
@@ -261,6 +310,7 @@ class SessionRunner:
         kill_fn: Callable[[int, int], None] | None = None,
         pid_alive_fn: Callable[[int], bool] | None = None,
         on_turn: Callable[[], None] | None = None,
+        projects_root: str | None = None,
     ) -> None:
         self._agent_session = agent_session
         self._adapter = adapter
@@ -287,11 +337,64 @@ class SessionRunner:
         self._pending_steers: list[dict] = []
         self._last_reply_text = ""
 
+        # Test seam for the sidechain scan root (~/.claude/projects).
+        self._projects_root = projects_root
+        # Structural dev-agent tracking + turn-history dedup + version cache.
+        self._dev_agent_id: str | None = None
+        self._last_dev_history_text: str | None = None
+        self._claude_version: str | None = None
+
         if steering_pop_fn is None:
             steering_pop_fn = self._default_steering_pop
         self._pop_steering = steering_pop_fn
 
         self._driver = driver if driver is not None else self._build_driver(model, harness_fn)
+
+        # -- Resume consumption (D3, four-scalar shape) ---------------------
+        # Validate + consume the persisted scalars: seed --resume, skip
+        # prime, remember dev_agent_id for reintroduction. ANY invalid
+        # scalar discards the whole context and cold-starts with prime —
+        # the stale-UUID fallback is the only other recovery tier.
+        self._resume_active = False
+        if resume is not None:
+            reason = self._resume_invalid_reason(resume)
+            if reason is None:
+                self._driver.seed_resume(resume.claude_session_id)
+                self._resume_active = True
+                self._dev_agent_id = resume.dev_agent_id
+                logger.info(
+                    "[runner] resuming claude session %s (dev_agent_id=%s)",
+                    resume.claude_session_id,
+                    resume.dev_agent_id,
+                )
+            else:
+                logger.warning(
+                    "[runner] discarding resume scalars (%s) — cold start with prime",
+                    reason,
+                )
+
+    def _resume_invalid_reason(self, ctx: ResumeContext) -> str | None:
+        """Validate persisted resume scalars; return a reason or None (valid).
+
+        Race 3: Claude session lookup is cwd-scoped — the stored
+        ``runner_cwd`` must exist on disk AND match this runner's working
+        dir, or ``--resume`` would silently miss. Garbage in any scalar
+        discards the whole context (cold start, never a crash).
+        """
+        if not ctx.claude_session_id or not _UUID_RE.match(str(ctx.claude_session_id)):
+            return f"malformed claude_session_id: {ctx.claude_session_id!r}"
+        if not ctx.runner_cwd:
+            return "missing runner_cwd (resume is cwd-scoped)"
+        if not os.path.isdir(ctx.runner_cwd):
+            return f"runner_cwd does not exist: {ctx.runner_cwd!r}"
+        if os.path.realpath(ctx.runner_cwd) != os.path.realpath(self._working_dir):
+            return (
+                f"runner_cwd mismatch: stored {ctx.runner_cwd!r} != "
+                f"working_dir {self._working_dir!r}"
+            )
+        if ctx.dev_agent_id is not None and not _DEV_AGENT_ID_RE.match(str(ctx.dev_agent_id)):
+            return f"garbage dev_agent_id: {ctx.dev_agent_id!r}"
+        return None
 
     # -- Construction helpers ----------------------------------------------
 
@@ -317,6 +420,7 @@ class SessionRunner:
             harness_fn=harness_fn,
             on_spawn=self._on_turn_spawn,
             on_exit=self._on_turn_exit,
+            on_init=self._on_harness_init,
         )
 
     def _default_steering_pop(self) -> list[dict]:
@@ -371,13 +475,47 @@ class SessionRunner:
         if handle is not None:
             handle.alive = False
 
+    def _on_harness_init(self, data: dict) -> None:
+        """Capture-at-init (Race 5): persist the new turn's resume scalars.
+
+        Fires the moment the stream-json ``system/init`` event is parsed —
+        BEFORE the turn's ``result`` — so a preempted or killed turn's
+        partial transcript remains the resume target, never the stale
+        pre-turn uuid. Persists ``claude_session_id`` + ``runner_cwd`` +
+        ``claude_version`` together. Fail-silent.
+        """
+        try:
+            sid = data.get("session_id")
+            if not sid:
+                return
+            version = data.get("version") or data.get("claude_code_version")
+            if version:
+                self._claude_version = str(version)
+            elif self._claude_version is None:
+                self._claude_version = _probe_claude_version()
+            self._adapter.persist_resume_scalars(
+                claude_session_id=str(sid),
+                runner_cwd=self._working_dir,
+                claude_version=self._claude_version,
+            )
+        except Exception as e:  # noqa: BLE001 — persistence must never crash a turn
+            logger.warning("[runner] capture-at-init persist failed: %s", e)
+
     # -- Public API ----------------------------------------------------------
 
     async def run(self, user_message: str) -> RunSummary:
-        """Run the session's turn loop to a terminal state; publish the summary."""
+        """Run the session's turn loop to a terminal state; publish the summary.
+
+        On a resumed session (crash recovery, user reply-to, external
+        ``valor-session resume``), ``user_message`` IS the reply/steer —
+        it becomes the resumed session's first message, with the surviving
+        ``dev_agent_id`` reintroduced so the PM continues the SAME dev agent.
+        """
         self._adapter.capture_event_loop()
         summary = RunSummary()
         message = user_message
+        if self._resume_active and self._dev_agent_id:
+            message = DEV_CONTINUATION_PREFIX.format(dev_agent_id=self._dev_agent_id) + message
         nudges = 0
 
         try:
@@ -393,6 +531,11 @@ class SessionRunner:
 
                 outcome, handle = await self._run_one_turn(message)
                 summary.turn_count += 1
+
+                # Structural dev-agent capture — after each turn AND on
+                # preempt (the sidechain file exists from spawn, so a
+                # preempt mid-Dev-spawn is still captured; Race 5).
+                self._capture_dev_state()
 
                 # -- Preempt outcomes (steer / timeout) ----------------------
                 if handle.killed:
@@ -425,6 +568,8 @@ class SessionRunner:
                 # -- Genuine turn end ----------------------------------------
                 self._last_reply_text = outcome.reply_text
                 self._record_turn_event(handle, turn_end_source=outcome.turn_end_source)
+                self._record_telemetry({"type": "turn_end", "source": outcome.turn_end_source})
+                self._append_turn_history("pm", outcome.reply_text)
                 self._fire_on_turn()
 
                 decision = self._route_turn(outcome)
@@ -468,6 +613,12 @@ class SessionRunner:
         self._current_handle = handle
         loop = asyncio.get_running_loop()
         started_at = loop.time()
+
+        # turn_start telemetry unblocks the #1917 class: crash-signature
+        # extraction treats a trace with no turn_start as deterministically
+        # non-resumable — PTY sessions never emitted these events, so their
+        # crash auto-resume was structurally dead. Runner sessions emit them.
+        self._record_telemetry({"type": "turn_start", "generation": handle.generation})
 
         turn_task = asyncio.create_task(self._driver.run_turn(message))
         watcher_task = asyncio.create_task(self._preempt_watcher(handle, turn_task, started_at))
@@ -716,6 +867,70 @@ class SessionRunner:
             self._on_turn()
         except Exception as e:  # noqa: BLE001
             logger.warning("[runner] on_turn hook raised: %s", e)
+
+    def _record_telemetry(self, event: dict) -> None:
+        """Append one event to the session's telemetry timeline. Fail-silent."""
+        try:
+            from agent.session_telemetry import record_telemetry_event  # noqa: PLC0415
+
+            session_id = str(getattr(self._agent_session, "session_id", "") or "")
+            if session_id:
+                record_telemetry_event(session_id, event)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[runner] telemetry write failed: %s", e)
+
+    def _append_turn_history(self, actor: str, text: str) -> None:
+        """Mirror one turn's user-visible text onto the session-event stream.
+
+        Bounded observability + disaster-recovery seed ONLY (owner mandate,
+        plan #1924): full user-visible text, tool-noise excluded (the input
+        is already the turn's final text), length capped by
+        :data:`TURN_HISTORY_MAX_CHARS`. This mirror is NEVER read on the
+        normal resume path — transcripts stay the source of truth
+        (lossless-resume is the explicit rabbit hole). Fail-silent.
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        _append_session_event(
+            self._agent_session,
+            {
+                "type": "turn_history",
+                "actor": actor,
+                "text": text[:TURN_HISTORY_MAX_CHARS],
+                "ts": _now_iso(),
+            },
+        )
+
+    def _capture_dev_state(self) -> None:
+        """Structurally capture the dev subagent id + mirror its last report.
+
+        Scans the sidechain directory under the CURRENT claude session id
+        (the file exists from the moment of spawn — a preempt mid-Dev-spawn
+        is still captured). Persists a newly-seen agent id via the
+        four-scalar writer; NEVER parses ids from PM prose. Also mirrors the
+        dev's latest user-visible text into the turn history. Fail-silent.
+        """
+        try:
+            sid = getattr(self._driver, "claude_session_id", None)
+            if not sid:
+                return
+            ids = sidechain_agent_ids(self._working_dir, sid, projects_root=self._projects_root)
+            if not ids:
+                return
+            latest = ids[-1]
+            if latest != self._dev_agent_id:
+                self._dev_agent_id = latest
+                self._adapter.persist_resume_scalars(dev_agent_id=latest)
+            transcript = sidechain_transcript_path(
+                self._working_dir, sid, latest, projects_root=self._projects_root
+            )
+            dev_text = last_assistant_text(transcript)
+            if dev_text and dev_text != self._last_dev_history_text:
+                self._last_dev_history_text = dev_text
+                self._append_turn_history("dev", dev_text)
+        except Exception as e:  # noqa: BLE001 — capture must never crash the loop
+            logger.debug("[runner] dev-state capture failed: %s", e)
 
 
 # Re-exported for the executor wiring (task 4) and tests.

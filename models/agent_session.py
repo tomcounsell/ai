@@ -199,6 +199,28 @@ class AgentSession(Model):
     # calls in the same process (#1127 PR #1135 review tech-debt).
     claude_session_uuid = IndexedField(null=True)
 
+    # === Session-runner resume scalars (plan #1924, spike #1928) ===
+    # The four-scalar resume contract for headless sessions. The PM session
+    # UUID (the sole `--resume` entry point) REUSES `claude_session_uuid`
+    # above — do not add a duplicate field. The remaining three are nullable
+    # adds; `_heal_descriptor_pollution` walks fields generically, so no
+    # backcompat code is needed.
+    #
+    # dev_agent_id: the Dev subagent continuation handle — captured
+    #   STRUCTURALLY from the sidechain directory scan
+    #   (~/.claude/projects/{slug}/{claude_session_id}/subagents/), never
+    #   parsed from PM prose. Lets a resumed session continue the SAME dev
+    #   agent across worker restarts.
+    dev_agent_id = Field(null=True)
+    # runner_cwd: exact absolute working dir of the runner — Claude session
+    #   lookup is cwd-scoped, so resume must re-invoke from this directory
+    #   (validated to exist before any --resume; Race 3).
+    runner_cwd = Field(null=True)
+    # claude_version: CLI version the session ran under — agent-continuation
+    #   behavior is version-specific (Risk 5a); deploy gates smoke the
+    #   continuation contract before trusting resume across a version bump.
+    claude_version = Field(null=True)
+
     # === Claude CLI subprocess PID (issue #1271) ===
     # The OS PID of the `claude_agent_sdk/_bundled/claude` subprocess spawned
     # for this session. Persistent across the session's lifetime (cleared on
