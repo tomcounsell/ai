@@ -53,8 +53,8 @@ _RUNNING_PROBE_STATUSES: frozenset[str] = frozenset(
 NEVER_STARTED_GRACE_SECS: int = 120
 
 # Confirmation margin added on top of NEVER_STARTED_GRACE_SECS before the
-# _never_started_past_grace predicate fires. Sized to cover worst-case granite
-# cold-start-to-first-turn latency (container spin-up + TUI boot + priming).
+# _never_started_past_grace predicate fires. Sized to cover worst-case
+# cold-start-to-first-turn latency (runner subprocess spawn + persona prime).
 # Provisional safety-chosen starting value — tune via env / adjust freely;
 # no structural change needed.
 NEVER_STARTED_CONFIRM_MARGIN_SECS: int = int(
@@ -74,31 +74,6 @@ TOOL_TIMEOUT_SUSPECT_COUNT: int = 3
 
 # Recovery attempt count that corroborates "suspect".
 RECOVERY_SUSPECT_COUNT: int = 2
-
-# How long last_pty_activity_at must be stale (beyond this) for a still-
-# heartbeating, never-turned session to count as granite-wedged. The PTY
-# diff-gate (now normalized — bridge_adapter._normalize_pty_buffer) only
-# stamps last_pty_activity_at on a genuine repaint, so a wedged-but-animating
-# TUI lets this go stale. Provisional/tunable starting value — adjust via the
-# GRANITE_WEDGED_PTY_STALE_SECS env var with no code change.
-GRANITE_WEDGED_PTY_STALE_SECS: int = int(os.environ.get("GRANITE_WEDGED_PTY_STALE_SECS", "600"))
-
-# Read-loop freshness window: last_pty_read_loop_at must be at least this fresh
-# for the read-loop to count as actively cycling (proving the container is not
-# merely dead). Local mirror of agent.session_health.HEARTBEAT_FRESHNESS_WINDOW
-# (90) — deliberately NOT imported, because this classifier must stay decoupled
-# from the kill/recovery machinery in session_health (enforced by the test
-# suite). Provisional/tunable — adjust via GRANITE_WEDGED_READLOOP_FRESH_SECS.
-GRANITE_WEDGED_READLOOP_FRESH_SECS: int = int(
-    os.environ.get("GRANITE_WEDGED_READLOOP_FRESH_SECS", "90")
-)
-
-# PTY-liveness deferral window for the never-started kill path (issue #1792).
-# When a session has never produced SDK output but is past the grace window,
-# the D0 kill is deferred if the PTY shows recent activity within this window.
-# Default: 90s (mirrors HEARTBEAT_FRESHNESS_WINDOW) — env-overridable.
-# Set to 0 or negative to disable the deferral (kill-switch).
-NEVER_STARTED_PTY_LIVENESS_SECS: int = int(os.environ.get("NEVER_STARTED_PTY_LIVENESS_SECS", "90"))
 
 # ---------------------------------------------------------------------------
 # Terminal statuses (mirror models/session_lifecycle.py — no circular import)
@@ -215,15 +190,11 @@ def _has_demonstrable_progress(session) -> bool:
     """Return True if the session's own fields prove it has started and is working.
 
     The ``never_started`` probe keys off telemetry ``turn_start`` events, but
-    granite PTY sessions emit their turns to a private transcript rather than
-    the telemetry timeline this classifier reads. A healthy granite session can
-    therefore show zero ``turn_start`` events while ``turn_count`` climbs and
-    tools fire — yielding a ``never_started`` false positive. This helper
-    consults the AgentSession's own progress fields as ground truth:
+    a session's telemetry write can lag or be lost. This helper consults the
+    AgentSession's own progress fields as ground truth:
 
       * ``turn_count > 0``           → the session has taken at least one turn.
       * ``last_tool_use_at`` fresh   → a tool fired within the suspect window.
-      * ``last_pty_activity_at`` fresh → the PTY screen painted recently.
 
     "Fresh" means within :data:`IDLE_SUSPECT_SECS`. Missing attributes count as
     no-progress (``getattr`` defaults), so legacy/stub sessions are unaffected.
@@ -238,10 +209,9 @@ def _has_demonstrable_progress(session) -> bool:
             return True
 
         now = time.time()
-        for attr in ("last_tool_use_at", "last_pty_activity_at"):
-            ts = to_unix_ts(getattr(session, attr, None))
-            if ts is not None and (now - ts) < IDLE_SUSPECT_SECS:
-                return True
+        ts = to_unix_ts(getattr(session, "last_tool_use_at", None))
+        if ts is not None and (now - ts) < IDLE_SUSPECT_SECS:
+            return True
     except Exception as exc:  # noqa: BLE001
         logger.debug("_has_demonstrable_progress swallowed exception: %r", exc)
     return False
@@ -268,53 +238,12 @@ def _classify(
     if session is not None and session_status in _RUNNING_PROBE_STATUSES:
         if not has_turn_start:
             # ----------------------------------------------------------
-            # 1a. granite_wedged probe (fresh-heartbeat / stale-screen)
+            # 1a. demonstrable-progress probe (never_started false-positive guard)
             # ----------------------------------------------------------
-            # A granite PTY session that loops on `no-new-entry` (never
-            # advances a turn) keeps its read-loop and heartbeat fresh while
-            # the rendered screen goes quiet. The normalized PTY diff-gate
-            # (bridge_adapter._normalize_pty_buffer) stamps last_pty_activity_at
-            # only on a genuine repaint, so a wedged-but-animating TUI lets
-            # last_pty_activity_at go stale even as last_pty_read_loop_at stays
-            # fresh. We fire granite_wedged ONLY when the read-loop is fresh
-            # (container actively cycling, not dead) AND last_pty_activity_at is
-            # present but stale past the grace window. Fail-soft: any missing or
-            # unconvertible field => do NOT fire (fall through to never_started);
-            # in particular a None last_pty_activity_at (never stamped) never
-            # fires, so we don't fabricate a wedge from an empty signal.
-            read_loop_at = getattr(session, "last_pty_read_loop_at", None)
-            pty_activity_at = getattr(session, "last_pty_activity_at", None)
-            read_loop_ts = to_unix_ts(read_loop_at)
-            activity_ts = to_unix_ts(pty_activity_at)
-            if read_loop_ts is not None and activity_ts is not None:
-                now = time.time()
-                read_loop_age = now - read_loop_ts
-                activity_age = now - activity_ts
-                read_loop_fresh = read_loop_age <= GRANITE_WEDGED_READLOOP_FRESH_SECS
-                pty_stale = activity_age > GRANITE_WEDGED_PTY_STALE_SECS
-                if read_loop_fresh and pty_stale:
-                    return StallVerdict(
-                        "stalled",
-                        "granite_wedged",
-                        {
-                            "read_loop_age": read_loop_age,
-                            "activity_age": activity_age,
-                            "readloop_fresh_threshold": GRANITE_WEDGED_READLOOP_FRESH_SECS,
-                            "pty_stale_threshold": GRANITE_WEDGED_PTY_STALE_SECS,
-                            "session_status": session_status,
-                        },
-                    )
-
-            # ----------------------------------------------------------
-            # 1b. demonstrable-progress probe (never_started false-positive guard)
-            # ----------------------------------------------------------
-            # A granite PTY session emits turns to its private transcript, not
-            # this telemetry timeline — so "no turn_start event" does not imply
-            # "never started". Trust the session's own progress fields to avoid a
-            # false positive on a session that is demonstrably working. This runs
-            # AFTER the granite_wedged probe so a session that progressed
-            # (turn_count > 0) and then wedged is still caught as wedged, not
-            # masked as healthy here.
+            # "No turn_start event" does not always imply "never started"
+            # (telemetry writes can lag or be lost). Trust the session's own
+            # progress fields to avoid a false positive on a session that is
+            # demonstrably working.
             if _has_demonstrable_progress(session):
                 return StallVerdict(
                     "healthy",
@@ -332,8 +261,8 @@ def _classify(
             if ts is not None:
                 elapsed = time.time() - ts
                 # Grace + confirmation margin: the margin covers worst-case
-                # granite cold-start latency (container spin-up + TUI boot +
-                # priming) before we are willing to call a session stalled.
+                # cold-start latency (runner subprocess spawn + persona prime)
+                # before we are willing to call a session stalled.
                 confirm_threshold = NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS
                 if elapsed > confirm_threshold:
                     return StallVerdict(

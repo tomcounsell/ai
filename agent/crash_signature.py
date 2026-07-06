@@ -147,12 +147,12 @@ def extract_signature(
 
     Determinism guardrail (in priority order):
 
-    1. ``session.startup_failure_kind == "plateau"``
+    1. No ``turn_start`` event in the full trace
        -> ``NON_RESUMABLE_DETERMINISTIC``, ``resumable=False``
-    2. No ``turn_start`` event in the full trace
-       -> ``NON_RESUMABLE_DETERMINISTIC``, ``resumable=False``
-    3. ``session.startup_failure_kind == "ceiling"`` + has ``turn_start``
+    2. ``session.startup_failure_kind == "ceiling"`` + has ``turn_start``
        -> resumable, classification proceeds normally with a "ceiling" prefix
+       (historical records only — nothing produces ``startup_failure_kind``
+       after the PTY teardown, plan #1924; the value stays valid in old rows)
 
     Args:
         events: Ordered list of telemetry event dicts (earliest first).
@@ -204,17 +204,8 @@ def _extract_signature_inner(
     if session is not None:
         startup_failure_kind = getattr(session, "startup_failure_kind", None)
 
-    if startup_failure_kind == "plateau":
-        form = f"{NON_RESUMABLE_DETERMINISTIC}[startup_failure=plateau]"
-        return CrashSignatureKey(
-            human_form=form,
-            hash=_sha256_hex16(form),
-            signature_class=NON_RESUMABLE_DETERMINISTIC,
-            resumable=False,
-        )
-
     # ------------------------------------------------------------------
-    # turn_start check (guardrail 2)
+    # turn_start check (guardrail 1)
     # ------------------------------------------------------------------
     has_turn = _has_turn_start(events)
 

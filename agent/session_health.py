@@ -49,19 +49,19 @@ logger = logging.getLogger(__name__)
 #
 # Compiled cmdline regex patterns. Three signatures match:
 #   - Claude CLI SDK bundle (``claude_agent_sdk/_bundled/claude``)
-#   - The native/PTY granite TUI process (D2, issue #1817): a bare or
-#     absolute-path ``claude`` invocation carrying ``--permission-mode
-#     bypassPermissions`` (see ``agent/granite_container/pty_driver.py``'s
-#     ``spawn()`` argv) that is NOT a one-shot. The two leading negative
-#     lookaheads exclude any cmdline containing a standalone ``-p`` token or
-#     ``--print`` — those are headless ``claude -p`` one-shot turns
-#     (``agent/granite_container/role_driver.py``'s ``HeadlessRoleDriver``,
+#   - An interactive ``claude`` TUI process: a bare or absolute-path
+#     ``claude`` invocation carrying ``--permission-mode bypassPermissions``
+#     that is NOT a one-shot (pre-cutover PTY orphans during rollout, or an
+#     abandoned operator TUI). The two leading negative lookaheads exclude
+#     any cmdline containing a standalone ``-p`` token or ``--print`` —
+#     those are headless ``claude -p`` one-shot turns
+#     (``agent/session_runner/role_driver.py``'s ``HeadlessRoleDriver``,
 #     also carrying ``--permission-mode bypassPermissions``), which are
 #     ALREADY governed by the separate, narrower, age-gated
 #     ``_is_stale_print_oneshot`` matcher below. Overlapping the two would
 #     let this broader regex fast-track-match (via ``is_claude``) an
-#     in-flight headless turn before its own one-shot matcher's age gate
-#     even applies — do not remove the lookaheads.
+#     in-flight headless runner turn before its own one-shot matcher's age
+#     gate even applies — do not remove the lookaheads.
 #   - Any MCP server module under ``mcp_servers/``
 #
 # The worker pattern (``python -m worker``) is INTENTIONALLY EXCLUDED:
@@ -400,48 +400,7 @@ TOOL_TIMEOUT_LOOP_INTERVAL = 30  # 30s — tightest tier (internal) budget
 # Tier budgets — env-tunable; defaults from issue #1270 / Fazm reference.
 TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
 TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
-# TEMPORARY (2026-07-06): bumped 300 -> 3000 as a stopgap while the worker
-# liveness / Bash tool-wedge fault is investigated (sessions #1915/#1916 were
-# killed at the 300s wedge boundary). Grain of salt — revert to 300 once the
-# root-cause worker-heartbeat issue is fixed. Override via TOOL_TIMEOUT_DEFAULT_SEC.
-TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 3000))
-
-# === Path-B mid-run wedge detector constants (#1724) ===
-# Stage-1 cheap quiescence gate: window of continuous PTY-screen quiescence
-# (no new paint detected by the on_pty_read callback) before a running session
-# with a tool in flight is marked a confirmed suspect for stage-2 dispatch.
-# Provisional — tune via env. The value balances false-positive risk (a slow
-# model turn that just happens to be silent) against detection latency. 180s
-# (3 minutes) accommodates slow extended-thinking turns while still catching
-# genuine wedges well within the existing TOOL_TIMEOUT_DEFAULT_SEC (300s) budget.
-# Set to 0 to disable the quiescence gate without disabling the writers.
-MID_RUN_QUIESCENCE_SECS: float = float(os.environ.get("MID_RUN_QUIESCENCE_SECS", "180"))
-
-# === Wedge-nudge producer constants (#1879) ===
-# Health-loop producer half of the mid-run steering drain / continue-nudge
-# recovery rung (see agent/steering.py's channel + latch helpers, added by
-# Task 1 of docs/plans/granite-mid-run-steering-drain-continue-nudge.md, and
-# the `_await_turn_end` mid-run drain consumer, Task 2). Threshold for how
-# long a granite PTY session's normalized frame may stay frozen
-# (`last_pty_activity_at` stale) before the 30s producer pass
-# (`_wedge_nudge_producer_tick`, riding the tool-timeout sub-loop) pushes one
-# best-effort `continue` nudge onto the wedge-nudge channel. Chosen well
-# under the 600s `_hook_turn_end_wait_s` `pm_hang` backstop (spike-3) so a
-# genuine un-stick has time to land and a real turn/tool to complete before
-# that backstop tears the session down. Env-tunable.
-NUDGE_WEDGE_THRESHOLD_S = int(os.environ.get("NUDGE_WEDGE_THRESHOLD_S", "240"))
-
-# Wedge-nudge latch TTL — should match the turn-wait budget
-# (`_hook_turn_end_wait_s`, default 600s: `config/settings.py`
-# `GraniteSettings.hook_turn_end_wait_s`, resolved via
-# `agent/granite_container/container.py::_resolve_hook_turn_end_wait_s`) so
-# at most one nudge fires per turn-wait window (Risk 3 / Race 2 in the
-# plan). Deliberately NOT dynamically synced to the container's resolved
-# value — importing a container-internal resolver into this module would
-# add coupling this producer does not need. The two constants are instead
-# conceptually paired by this comment; if the runtime default changes,
-# update both. Env-tunable.
-WEDGE_NUDGE_LATCH_TTL_S = int(os.environ.get("WEDGE_NUDGE_LATCH_TTL_S", "600"))
+TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
 
 # Internal-tier tool name set: lightweight built-in tools that should never
 # legitimately exceed 30s. Hard-coded; adding a tool is a one-line edit. Not
@@ -505,370 +464,6 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
         return None
     reason = f"tool-wedge: {tool_name} ({tier} tier) older than {budget}s"
     return tier, reason
-
-
-def _pty_quiescent_long_enough(entry: "AgentSession", now: datetime) -> bool:
-    """Return True if a default-tier tool is wedge-eligible (OK to kill); False if alive.
-
-    This is the PTY-liveness gate for the default-tier kill decision (issue #1784).
-    Return value semantics: True = "wedge-eligible, proceed with kill"; False = "defer, PTY is
-    live or liveness is unknown for a granite session."
-
-    Branch order is load-bearing — the first matching branch wins:
-
-    1. Kill-switch escape (FIRST, before any field reads): ``MID_RUN_QUIESCENCE_SECS <= 0``
-       restores age-only default-tier kill for every session (granite and SDK alike).
-       Must be first so the kill-switch is never silently defeated by a None-field
-       short-circuit below it.
-
-    2. Non-PTY / SDK escape: ``last_pty_read_loop_at is None`` — this session has no
-       granite PTY read loop and never accumulates ``mid_run_quiescent_since``. The only
-       liveness signal available is age, so return True to keep the existing 300s
-       default-tier kill for the entire SDK path. Omitting this branch would cause SDK
-       default tools to fall through to branch 3 (``mid_run_quiescent_since is None →
-       False``) and never be killed — a regression blocker.
-
-    2b. Staleness escape: ``last_pty_read_loop_at`` is stale (> ``HEARTBEAT_FRESHNESS_WINDOW``
-       seconds old). When the PTY read loop has died, stage-1 ABSTAINs and
-       ``mid_run_quiescent_since`` is unreliable — returning True here prevents a session
-       whose read loop has crashed from escaping the kill via branch 3's "None → defer" path.
-
-    3. Painting / freshly-active PTY: ``mid_run_quiescent_since is None`` — the granite PTY
-       read loop exists and is fresh (branches 2/2b didn't fire) but the screen is currently
-       painting (stage-1 cleared ``mid_run_quiescent_since``, or it was never quiescent).
-       This is the "alive, defer the kill" case — the whole point of the fix.
-
-    4. Quiescent long enough: tz-normalize ``mid_run_quiescent_since`` and return
-       ``(now - it).total_seconds() >= MID_RUN_QUIESCENCE_SECS``. True once the granite
-       PTY has been quiescent past the window (mirrors the exact predicate stage-1 uses, so
-       there is a single definition of "quiescent long enough").
-    """
-    # Branch 1: kill-switch — age-only kill restored for all sessions.
-    if MID_RUN_QUIESCENCE_SECS <= 0:
-        return True
-
-    # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
-    last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
-    if last_pty_read_loop_at is None:
-        return True
-
-    # Branch 2b: staleness escape — if the granite PTY read loop marker is itself stale
-    # (> HEARTBEAT_FRESHNESS_WINDOW seconds old), stage-1 ABSTAINs and
-    # mid_run_quiescent_since is unreliable. Treat as wedge-eligible so a session whose
-    # PTY read loop has died does not escape the kill via branch 3's "None → defer" path.
-    # This is a safety net only; the main health loop's heartbeat checks own recovery
-    # of granite sessions with a dead read loop (not this path).
-    if isinstance(last_pty_read_loop_at, datetime):
-        loop_at_aware = (
-            last_pty_read_loop_at
-            if last_pty_read_loop_at.tzinfo
-            else last_pty_read_loop_at.replace(tzinfo=UTC)
-        )
-        if (now - loop_at_aware).total_seconds() > HEARTBEAT_FRESHNESS_WINDOW:
-            return True
-
-    # Branch 3: granite PTY present but painting (or freshly active) — alive, defer kill.
-    mid_run_quiescent_since = getattr(entry, "mid_run_quiescent_since", None)
-    if mid_run_quiescent_since is None:
-        return False
-
-    # Branch 4: quiescent long enough? Normalize timezone then compare.
-    if not isinstance(mid_run_quiescent_since, datetime):
-        # Defensive: unexpected type — treat as painting to avoid a spurious kill.
-        return False
-    quiescent_aware = (
-        mid_run_quiescent_since
-        if mid_run_quiescent_since.tzinfo
-        else mid_run_quiescent_since.replace(tzinfo=UTC)
-    )
-    return (now - quiescent_aware).total_seconds() >= MID_RUN_QUIESCENCE_SECS
-
-
-def _is_granite_pty_session(entry: "AgentSession") -> bool:
-    """Single source of truth for the granite-PTY-vs-non-PTY transport check.
-
-    A granite PTY session has a ``last_pty_read_loop_at`` write (stamped by
-    the PTY read-loop liveness callback); SDK/headless sessions leave it
-    ``None``. Both the D0 priming-liveness gate (``_prime_pty_alive``) and
-    the #1879 wedge-nudge producer gate (``_wedge_nudge_eligible``) MUST use
-    exactly this predicate to exclude non-PTY sessions — a nudge or a
-    PTY-liveness deferral only makes sense for a session that actually runs
-    on a granite PTY. Factoring it here keeps the two call sites provably in
-    lock-step (critique concern 5) rather than each re-deriving the field
-    check and risking future drift.
-    """
-    return getattr(entry, "last_pty_read_loop_at", None) is not None
-
-
-def _prime_pty_alive(entry: "AgentSession", now: datetime) -> bool:
-    """Return True if the PTY is alive during priming (defer D0 kill); False if kill-eligible.
-
-    **INVERTED POLARITY vs ``_pty_quiescent_long_enough``**: this helper returns
-    ``True = session is alive, defer the kill`` and ``False = kill-eligible``.
-    ``_pty_quiescent_long_enough`` is the exact opposite (True = proceed to kill).
-    Do NOT copy its return values verbatim — a literal copy kills live sessions.
-
-    This is the PTY-liveness gate for the D0 never-started kill path (issue #1792).
-    Granite SDLC sessions can be killed during priming because the inner ``claude``
-    TUI is still booting when the ``NEVER_STARTED_GRACE_SECS + CONFIRM_MARGIN`` window
-    expires. If the PTY read loop is alive and the screen has shown recent activity,
-    the session is still booting and the kill should be deferred.
-
-    Branch order is load-bearing — first matching branch wins:
-
-    1. **Kill-switch first** (before any field reads): ``NEVER_STARTED_PTY_LIVENESS_SECS <= 0``
-       → return ``False`` (kill-eligible — disables deferral for all sessions).
-       Must be first so the kill-switch is never defeated by None-field short-circuits below.
-
-    2. **Non-PTY escape**: ``last_pty_read_loop_at is None`` → return ``False``
-       (SDK/non-granite sessions have no PTY loop; age-only kill is preserved).
-
-    3. **Stale read loop**: ``last_pty_read_loop_at`` older than ``HEARTBEAT_FRESHNESS_WINDOW``
-       (90s) → return ``False`` (dead read loop cannot prove liveness).
-
-    4. **Alive case**: read ``last_pty_activity_at``; if None or not a datetime → ``False``;
-       otherwise tz-normalize and return ``True`` iff activity is within
-       ``NEVER_STARTED_PTY_LIVENESS_SECS``.
-
-    This helper NEVER raises — all unexpected exceptions return ``False`` (kill-eligible).
-    """
-    try:
-        # Branch 1: kill-switch — disable PTY deferral, revert to age-only kill.
-        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
-
-        if NEVER_STARTED_PTY_LIVENESS_SECS <= 0:
-            return False
-
-        # Branch 2: non-PTY (SDK) session — no granite PTY, age-only kill preserved.
-        # Shared transport check (critique concern 5) so this gate and the
-        # #1879 producer gate never drift apart.
-        if not _is_granite_pty_session(entry):
-            return False
-        last_pty_read_loop_at = getattr(entry, "last_pty_read_loop_at", None)
-
-        # Branch 3: stale read loop — a dead read loop cannot prove liveness.
-        if isinstance(last_pty_read_loop_at, datetime):
-            loop_at_aware = (
-                last_pty_read_loop_at
-                if last_pty_read_loop_at.tzinfo
-                else last_pty_read_loop_at.replace(tzinfo=UTC)
-            )
-            if (now - loop_at_aware).total_seconds() > HEARTBEAT_FRESHNESS_WINDOW:
-                return False
-
-        # Branch 4: alive case — PTY has a fresh read loop; check screen activity.
-        last_activity = getattr(entry, "last_pty_activity_at", None)
-        if not isinstance(last_activity, datetime):
-            return False
-        activity_aware = (
-            last_activity if last_activity.tzinfo else last_activity.replace(tzinfo=UTC)
-        )
-        return (now - activity_aware).total_seconds() <= NEVER_STARTED_PTY_LIVENESS_SECS
-    except Exception:
-        return False
-
-
-def _wedge_nudge_eligible(entry: "AgentSession", now: datetime) -> bool:
-    """Return True if a live in-scope granite PTY session is wedge-nudge eligible.
-
-    Producer predicate for the #1879 mid-run steering drain / continue-nudge
-    recovery rung. Distinct from ``_prime_pty_alive`` (D0 priming-liveness
-    kill deferral) and ``_pty_quiescent_long_enough`` (default-tier
-    tool-timeout kill gate) — this predicate targets the *live-handle*
-    population (sessions the current worker loop is actively executing,
-    scanned every 30s by ``_wedge_nudge_producer_tick`` on the tool-timeout
-    sub-loop), and never recommends a kill. It only decides whether a
-    best-effort ``continue`` nudge should be pushed onto the separate
-    wedge-nudge steering channel (``agent/steering.py``) for a parked PTY to
-    drain mid-turn (see the ``_await_turn_end`` mid-run drain consumer,
-    Task 2 of the plan).
-
-    Gate (both required):
-
-    1. **Granite-PTY transport**: ``last_pty_read_loop_at is not None`` —
-       the exact field-presence check ``_prime_pty_alive`` already uses to
-       distinguish granite PTY sessions from non-PTY (SDK/headless)
-       sessions. Non-PTY sessions have no ``_await_turn_end`` consumer for
-       a nudge and must never be pushed to.
-    2. **Frozen frame**: ``last_pty_activity_at`` older than
-       ``NUDGE_WEDGE_THRESHOLD_S``.
-
-    IMPORTANT — why ``last_turn_at`` / ``last_tool_use_at``, not
-    ``last_pty_activity_at``, are the correct signals for judging *genuine*
-    recovery after a nudge fires (spike-2): the injected ``continue`` echo
-    is itself genuine new text (``_normalize_pty_buffer`` strips only
-    animation noise), so it advances ``last_pty_activity_at`` once on the
-    very next read. That means ``last_pty_activity_at`` freshness can NEVER
-    be trusted as "the nudge worked" — this predicate only judges "is the
-    frame frozen right now," and the one-nudge-per-window guarantee is
-    enforced entirely by the durable TTL latch (``set_wedge_nudge_latch``),
-    never by re-reading this field. Callers that want to know whether a
-    wedge genuinely un-stuck must check ``last_turn_at`` / ``last_tool_use_at``
-    advancing instead.
-
-    This predicate does not check the latch — callers must separately call
-    ``set_wedge_nudge_latch`` (the atomic acquire-and-gate) before pushing.
-    """
-    # Gate 1: granite-PTY transport — reuse the SAME predicate ``_prime_pty_alive``
-    # uses (critique concern 5), so the two never drift on how a non-PTY
-    # session is recognized.
-    if not _is_granite_pty_session(entry):
-        return False
-    last_activity = getattr(entry, "last_pty_activity_at", None)
-    if not isinstance(last_activity, datetime):
-        return False
-    activity_aware = last_activity if last_activity.tzinfo else last_activity.replace(tzinfo=UTC)
-    return (now - activity_aware).total_seconds() > NUDGE_WEDGE_THRESHOLD_S
-
-
-def _maybe_push_wedge_nudge(entry: "AgentSession", now: datetime) -> bool:
-    """Push a wedge-nudge for a live, in-scope, wedged granite PTY session (#1879).
-
-    Called every 30s from ``_wedge_nudge_producer_tick`` (the tool-timeout
-    sub-loop's producer pass) for sessions with a live in-scope handle —
-    the population the current worker loop is actively executing. That
-    population was deliberately narrowed away from the 300s running-scan's
-    ``elif`` chain by issue #1820 (BLOCKER r6) so that Fix #3's in-scope
-    progress-deadline cancel scope (``agent/agent_session_queue.py:1790``,
-    ``reason_kind="progress_deadline"``) would be the SOLE owner of
-    kill/recovery decisions for sessions the current worker loop is
-    actively executing.
-
-    Observing that population here is a deliberate, scoped exception —
-    NOT a re-widening of the #1820 split — because #1820 split *recovery /
-    kill* ownership, not *observation*: this function takes NO recovery
-    action whatsoever. It never sets ``should_recover``, never calls
-    ``_apply_recovery_transition``, and never touches ``recovery_attempts``.
-    It only pushes a best-effort steering keystroke onto a separate Redis
-    channel (``agent/steering.py``'s wedge-nudge channel, distinct from
-    ordinary operator steering) and bumps an observability counter. Because
-    the producer and Fix #3 act on disjoint *verbs* (nudge vs. cancel) over
-    the same population, this function cannot compete with, pre-empt,
-    double-fire, or race Fix #3's kill decision. The decision windows are
-    also disjoint: this nudge fires once ``last_pty_activity_at`` has been
-    stale past ``NUDGE_WEDGE_THRESHOLD_S`` (~240s) — at the 30s producer
-    cadence that lands within one tick of eligibility, well inside the 600s
-    ``_hook_turn_end_wait_s`` ``pm_hang`` backstop that self-terminates the
-    wedge shape this targets — entirely before Fix #3's 1800s
-    ``SESSION_PROGRESS_DEADLINE_S`` could ever be reached (spike-3). See
-    #1879 and #1820.
-
-    Fail-silent: any exception (including from ``push_wedge_nudge`` /
-    ``set_wedge_nudge_latch``, which are already fail-silent internally) is
-    caught here too, logged at ``warning``, and swallowed. This function
-    must never raise into the producer tick's per-session loop, and a
-    failure here must never fall through to a kill path.
-
-    Returns:
-        True if a nudge was pushed this call. False if not eligible
-        (``_wedge_nudge_eligible`` returned False), if the latch was
-        already held this turn-wait window (at most one nudge per window —
-        Risk 3 / Race 2), or on any failure.
-    """
-    try:
-        if not _wedge_nudge_eligible(entry, now):
-            return False
-
-        from agent.steering import push_wedge_nudge, set_wedge_nudge_latch
-
-        # CRITICAL — the channel must be keyed by ``session_id`` (the
-        # Telegram-derived routing key), NOT ``agent_session_id`` (the
-        # AutoKeyField UUID alias). The consumer that drains this channel —
-        # the ``_poll_wedge_nudge`` closure in
-        # ``agent/granite_container/bridge_adapter.py`` — keys it on
-        # ``self._agent_session.session_id``, exactly as the ordinary
-        # operator-steering channel does. Pushing to ``agent_session_id``
-        # here would write to a key no consumer ever reads, silently
-        # breaking the whole recovery rung end-to-end. The latch shares the
-        # same ``session_id`` so ``clear_wedge_nudge_latch`` (fired on turn
-        # completion in the bridge adapter) targets the same key.
-        session_id = entry.session_id
-        if not set_wedge_nudge_latch(session_id, ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S):
-            # Latch already held this turn-wait window — the latch
-            # acquisition itself is the gate. Do nothing further; this is
-            # the "exactly one nudge per window" guarantee (Risk 3 / Race 2).
-            return False
-
-        # Signal-channel TTL paired with the latch TTL (review blocker B2):
-        # an undrained nudge must expire with its turn-wait window rather
-        # than leak into a later healthy turn's first drain tick.
-        push_wedge_nudge(session_id, ttl_seconds=WEDGE_NUDGE_LATCH_TTL_S)
-
-        try:
-            from popoto.redis_db import POPOTO_REDIS_DB as _R_WEDGE
-
-            _R_WEDGE.incr(f"{entry.project_key}:session-health:wedge_nudge_sent")
-        except Exception:
-            logger.debug(
-                "[session-health] Failed to incr wedge_nudge_sent counter for %s",
-                session_id,
-            )
-
-        return True
-    except Exception:
-        logger.warning(
-            "[session-health] wedge-nudge producer failed for session %s",
-            getattr(entry, "agent_session_id", "unknown"),
-            exc_info=True,
-        )
-        return False
-
-
-def _wedge_nudge_producer_tick(now: datetime | None = None) -> int:
-    """30s wedge-nudge producer pass over running sessions (#1879, blocker B1).
-
-    Runs once per ``_agent_session_tool_timeout_loop`` iteration — the 30s
-    sub-loop — NOT the 300s main health loop. The cadence is load-bearing:
-    ``NUDGE_WEDGE_THRESHOLD_S`` (~240s) plus a 300s scan interval would
-    routinely land the nudge after the 600s ``pm_hang`` turn-wait window has
-    already torn the wedged session down; at 30s the push fires within one
-    tick of eligibility, leaving the wedge ~330s of window to un-stick.
-
-    Cheap by construction, preserving the sub-loop's low-cost rationale: per
-    session it is attr reads only (``_wedge_nudge_eligible`` — transport
-    field presence + one timestamp compare). Redis is touched only for an
-    eligible session (latch ``SET NX`` + one ``RPUSH``), and the in-scope
-    gate is a dict lookup on ``_active_sessions``.
-
-    In-scope gate: only sessions the CURRENT worker loop is actively
-    executing (``_active_sessions`` holds a live handle) are considered —
-    the same ``in_scope_handle is not None`` population the 300s
-    running-scan's #944 orphan elif excludes. #1820 (BLOCKER r6) gave Fix
-    #3's progress-deadline cancel scope sole *kill* ownership of that
-    population; this pass only *observes* it and pushes a best-effort nudge
-    (see ``_maybe_push_wedge_nudge``'s docstring for the full
-    verb-disjointness and window-disjointness argument).
-
-    Deliberately independent of ``TOOL_TIMEOUT_TIERS_DISABLED`` — that
-    kill-switch gags the tool-timeout *recovery* tiers, and this pass takes
-    no recovery action. Fail-silent per session; never raises into the loop.
-
-    Returns:
-        Number of nudges pushed this tick (observability / tests).
-    """
-    if now is None:
-        now = datetime.now(tz=UTC)
-    pushed = 0
-    try:
-        running_sessions = _filter_hydrated_sessions(AgentSession.query.filter(status="running"))
-    except Exception:
-        logger.warning("[session-health] wedge-nudge producer scan failed", exc_info=True)
-        return 0
-    for entry in running_sessions:
-        try:
-            if getattr(entry, "status", None) in _TERMINAL_STATUSES:
-                continue
-            if _active_sessions.get(entry.agent_session_id) is None:
-                continue
-            if _maybe_push_wedge_nudge(entry, now):
-                pushed += 1
-        except Exception:
-            logger.warning(
-                "[session-health] wedge-nudge producer tick failed for session %s",
-                getattr(entry, "agent_session_id", "unknown"),
-                exc_info=True,
-            )
-    return pushed
 
 
 # In-process cache for ``_is_memory_tight()`` (issue #1099 Mode 4). Tuple of
@@ -1363,8 +958,8 @@ def _never_started_past_grace(
         (default 120 + 30 = 150 seconds).
 
     The confirmation margin (``NEVER_STARTED_CONFIRM_MARGIN_SECS``) is stacked
-    on top of the base grace to cover worst-case granite cold-start latency
-    (container spin-up + TUI boot + priming). Both constants live in
+    on top of the base grace to cover worst-case cold-start latency (runner
+    spawn + persona prime). Both constants live in
     ``agent.session_stall_classifier`` and are env-overridable.
 
     Call sites holding a trusted ``now`` in scope MUST pass it, so this
@@ -1674,12 +1269,6 @@ def _tier2_reprieve_signal(
                      ``last_compaction_ts`` on every successful backup. Added
                      for issue #1099 Mode 3 — prevents false kills on
                      sessions that are legitimately idle post-compaction.
-      "pty_alive"  — granite transport gate (issue #1820 note 2): the session
-                     has no ``claude_pid`` (granite PTY, not SDK) and
-                     ``_pty_quiescent_long_enough`` reports the PTY read loop is
-                     alive/painting (not yet wedge-eligible). Evaluated before
-                     the psutil gates, which are a no-op for a pid-less granite
-                     session. SDK sessions never match this gate.
       "children"   — ``psutil.Process(pid).children()`` is non-empty.
                      Strongest signal: tool-subprocess execution is actively
                      happening right now. Returned in preference to "alive".
@@ -1739,28 +1328,6 @@ def _tier2_reprieve_signal(
         except (TypeError, ValueError):
             # Defensive: malformed timestamp on the entry — skip this gate.
             pass
-
-    # Granite transport-aware reprieve (issue #1820 note 2). A granite PTY
-    # session records no ``claude_pid`` (SDK-path-only,
-    # ``session_executor.py:1425``), so ``handle.pid`` is None and the psutil
-    # "children"/"alive" gates below are a structural no-op for it. Without a
-    # transport-specific gate, a legitimately-parked granite session (e.g. a
-    # ``waiting_for_children`` PM) whose PTY read loop is alive but momentarily
-    # quiet would be falsely killed at the progress deadline. Derive the
-    # reprieve from the PTY-liveness signal instead: ``_pty_quiescent_long_enough``
-    # returns False while the granite PTY read loop is alive and painting
-    # (defer the kill) and True only once it has been quiescent past the
-    # wedge-eligibility window (proceed to kill) — the exact "genuinely
-    # quiescent granite IS killed" boundary the plan requires. For SDK sessions
-    # (``last_pty_read_loop_at is None``) it returns True, so this gate never
-    # reprieves an SDK session and cannot interfere with the psutil path below.
-    if getattr(entry, "claude_pid", None) is None:
-        try:
-            if not _pty_quiescent_long_enough(entry, datetime.now(UTC)):
-                return "pty_alive"
-        except Exception as e:
-            # Defensive: never crash the health check from a PTY-liveness edge case.
-            logger.debug("[session-health] pty-liveness reprieve probe failed: %s", e)
 
     pid = handle.pid if handle is not None else None
     if pid is not None:
@@ -2457,8 +2024,8 @@ async def _apply_recovery_transition(
         auto-recovery) fire on the health/tool-timeout cadence instead of
         waiting for the 300s reap-pass tick: an out-of-band kill (this
         function) may flip the DB row terminal while the owning worker
-        loop's own ``finally`` release is stuck (e.g. a granite session
-        whose PTY container thread never returns) — this reclaims the slot
+        loop's own ``finally`` release is stuck (e.g. a runner turn whose
+        subprocess await never returns) — this reclaims the slot
         immediately. ``registry.reclaim()`` is idempotent, so it safely
         no-ops if the owning worker loop's normal release already fired
         first. Never raises into the caller — the reclaim is a self-heal,
@@ -4212,184 +3779,6 @@ async def _agent_session_health_loop() -> None:
         await asyncio.sleep(AGENT_SESSION_HEALTH_CHECK_INTERVAL)
 
 
-def _eval_mid_run_pty_stage1(entry: "AgentSession", now: datetime) -> None:
-    """Stage-1 PTY quiescence evaluation for the path-B mid-run wedge detector (#1724).
-
-    Evaluates PTY screen liveness for a single session on the 30s tool-timeout
-    sub-loop tick. Updates durable cross-tick state on ``entry`` in place and
-    persists via ``update_fields``. Does NOT recover — it only maintains the
-    ``mid_run_quiescent_since`` timestamp and flags confirmed suspects for the
-    future stage-2 dispatch (task 4). Fail-silent: never raises.
-
-    Eligibility gate:
-    - ``sdk_ever_output=True``: session has produced at least one PM turn.
-    - ``current_tool_name`` is set: a tool is currently in flight.
-    - ``last_pty_read_loop_at`` is not None: PTY writer has initialized.
-
-    Three-state PTY freshness logic (compared against ``last_heartbeat_at``):
-    1. ABSTAIN: ``last_pty_read_loop_at`` is None → writer not initialized yet.
-    2. ABSTAIN: read-loop marker is stale (> HEARTBEAT_FRESHNESS_WINDOW behind
-       ``last_heartbeat_at``) → the pexpect thread may have died; clear
-       ``mid_run_quiescent_since`` and skip this tick.
-    3. FRESH: read-loop marker is current.
-       a. Activity fresh (``last_pty_activity_at`` recently changed): NOT a
-          suspect; clear ``mid_run_quiescent_since``.
-       b. Activity stale (screen not repainting): check the snapshot tuple
-          ``(last_pty_activity_at, byte_offset)`` against the prior tick's
-          ``mid_run_pty_snapshot``. If unchanged, increment the quiescence
-          window (set ``mid_run_quiescent_since`` if not already set); if
-          ``now - mid_run_quiescent_since >= MID_RUN_QUIESCENCE_SECS``,
-          log the confirmed suspect for stage-2. If the snapshot changed,
-          reset ``mid_run_quiescent_since``.
-    """
-    try:
-        # Eligibility: must have produced output and have a tool in flight.
-        sdk_ever_output = bool(
-            getattr(entry, "last_turn_at", None) or getattr(entry, "last_tool_use_at", None)
-        )
-        if not sdk_ever_output:
-            return
-        tool_name = getattr(entry, "current_tool_name", None)
-        if not tool_name:
-            return
-
-        # Eligibility: PTY writer must have initialized.
-        last_loop_at = getattr(entry, "last_pty_read_loop_at", None)
-        if not isinstance(last_loop_at, datetime):
-            # ABSTAIN: writer never initialized (non-granite session or not yet started).
-            return
-
-        last_loop_aware = last_loop_at if last_loop_at.tzinfo else last_loop_at.replace(tzinfo=UTC)
-        last_hb_at = getattr(entry, "last_heartbeat_at", None)
-
-        # Use last_heartbeat_at as the reference clock for staleness checks.
-        # If not set, fall back to now (conservative).
-        if isinstance(last_hb_at, datetime):
-            ref_time = last_hb_at if last_hb_at.tzinfo else last_hb_at.replace(tzinfo=UTC)
-        else:
-            ref_time = now
-
-        loop_age = (ref_time - last_loop_aware).total_seconds()
-        if loop_age > HEARTBEAT_FRESHNESS_WINDOW:
-            # ABSTAIN: the pexpect read-loop writer has gone silent (thread may
-            # have died or been throttled). Clear quiescent_since so we don't
-            # accumulate stale quiescence time across a writer outage.
-            mid_qs = getattr(entry, "mid_run_quiescent_since", None)
-            if mid_qs is not None:
-                try:
-                    entry.mid_run_quiescent_since = None
-                    save = getattr(entry, "save", None)
-                    if callable(save):
-                        save(update_fields=["mid_run_quiescent_since"])
-                except Exception as _clr_err:
-                    logger.debug(
-                        "[session-health] stage-1 mid_run_quiescent_since clear failed: %s",
-                        _clr_err,
-                    )
-            logger.debug(
-                "[session-health] stage-1 ABSTAIN session=%s: "
-                "last_pty_read_loop_at stale by %.0fs (> HEARTBEAT_FRESHNESS_WINDOW=%ds)",
-                getattr(entry, "agent_session_id", "?"),
-                loop_age,
-                HEARTBEAT_FRESHNESS_WINDOW,
-            )
-            return
-
-        # PTY read-loop is fresh. Check whether the screen is repainting.
-        last_activity_at = getattr(entry, "last_pty_activity_at", None)
-        activity_fresh = False
-        if isinstance(last_activity_at, datetime):
-            act_aware = (
-                last_activity_at
-                if last_activity_at.tzinfo
-                else last_activity_at.replace(tzinfo=UTC)
-            )
-            activity_age = (now - act_aware).total_seconds()
-            # Screen is "fresh" if activity within the same HEARTBEAT_FRESHNESS_WINDOW.
-            activity_fresh = activity_age < HEARTBEAT_FRESHNESS_WINDOW
-
-        # Build current snapshot tuple string for cross-tick comparison.
-        # byte_offset is a corroborator (log but do not gate on it).
-        act_iso = last_activity_at.isoformat() if isinstance(last_activity_at, datetime) else "None"
-        # stage-1 proxy: total_input_tokens substitutes for the plan's byte_offset (raw
-        # transcript bytes) because byte_offset is not persisted on AgentSession.
-        # Safe for observe-only stage-1 (corroborator-only, never gates).
-        # Must be replaced with a persisted byte_offset before stage-2 wires recovery.
-        byte_offset = getattr(entry, "total_input_tokens", None)
-        current_snapshot = f"({act_iso},{byte_offset})"
-
-        prior_snapshot = getattr(entry, "mid_run_pty_snapshot", None)
-        mid_qs = getattr(entry, "mid_run_quiescent_since", None)
-
-        update_fields: list[str] = []
-
-        if activity_fresh:
-            # NOT a suspect: screen is repainting. Clear quiescent_since.
-            if mid_qs is not None:
-                entry.mid_run_quiescent_since = None
-                update_fields.append("mid_run_quiescent_since")
-        else:
-            # Screen is quiescent. Compare snapshot to prior tick.
-            if current_snapshot == prior_snapshot:
-                # Same snapshot as last tick: screen has not repainted.
-                if mid_qs is None:
-                    # First quiescent tick: record the start time.
-                    entry.mid_run_quiescent_since = now
-                    update_fields.append("mid_run_quiescent_since")
-                    mid_qs = now
-                # Check whether the quiescence window has been exceeded.
-                if isinstance(mid_qs, datetime):
-                    qs_aware = mid_qs if mid_qs.tzinfo else mid_qs.replace(tzinfo=UTC)
-                    quiescent_secs = (now - qs_aware).total_seconds()
-                    if MID_RUN_QUIESCENCE_SECS > 0 and quiescent_secs >= MID_RUN_QUIESCENCE_SECS:
-                        logger.warning(
-                            "[session-health] stage-1 CONFIRMED SUSPECT session=%s "
-                            "tool=%s quiescent_secs=%.0f byte_offset=%s "
-                            "(awaiting stage-2 dispatch, task #1724)",
-                            getattr(entry, "agent_session_id", "?"),
-                            tool_name,
-                            quiescent_secs,
-                            byte_offset,
-                        )
-                    else:
-                        logger.debug(
-                            "[session-health] stage-1 quiescent session=%s tool=%s "
-                            "quiescent_secs=%.0f / %.0f",
-                            getattr(entry, "agent_session_id", "?"),
-                            tool_name,
-                            quiescent_secs,
-                            MID_RUN_QUIESCENCE_SECS,
-                        )
-            else:
-                # Snapshot changed between ticks (activity resumed): reset.
-                if mid_qs is not None:
-                    entry.mid_run_quiescent_since = None
-                    update_fields.append("mid_run_quiescent_since")
-
-        # Always rewrite snapshot to current (cross-tick state persistence).
-        entry.mid_run_pty_snapshot = current_snapshot
-        update_fields.append("mid_run_pty_snapshot")
-
-        if update_fields:
-            try:
-                save = getattr(entry, "save", None)
-                if callable(save):
-                    save(update_fields=update_fields)
-            except Exception as _save_err:
-                logger.debug(
-                    "[session-health] stage-1 snapshot save failed for %s: %s",
-                    getattr(entry, "agent_session_id", "?"),
-                    _save_err,
-                )
-
-    except Exception:
-        logger.debug(
-            "[session-health] stage-1 eval raised for session %s",
-            getattr(entry, "agent_session_id", "?"),
-            exc_info=True,
-        )
-
-
 async def _agent_session_tool_timeout_check() -> None:
     """Per-tool timeout sub-loop tick (issue #1270).
 
@@ -4459,21 +3848,6 @@ async def _agent_session_tool_timeout_check() -> None:
                                 "increment failed: %s",
                                 _ns_ctr_err,
                             )
-                        # PTY-liveness gate (#1792): defer the D0 kill when the granite
-                        # PTY is demonstrably alive (screen activity within the window).
-                        # SDK/non-PTY sessions fall through (helper returns False).
-                        if _prime_pty_alive(fresh_ns, now):
-                            try:
-                                from popoto.redis_db import POPOTO_REDIS_DB as _R_PTY_DEFER
-
-                                _R_PTY_DEFER.incr(
-                                    f"{fresh_ns.project_key}:session-health:"
-                                    f"never_started_pty_deferred"
-                                )
-                            except Exception:
-                                logger.debug("Failed to incr never_started_pty_deferred counter")
-                            continue
-
                         handle_ns = _active_sessions.get(fresh_ns.agent_session_id)
                         await _apply_recovery_transition(
                             fresh_ns,
@@ -4484,48 +3858,10 @@ async def _agent_session_tool_timeout_check() -> None:
                         )
                         continue
 
-            # === Stage-1 PTY quiescence gate (path B, #1724) ===
-            # Cheap, stateless per-tick evaluation of PTY screen activity for
-            # sessions that have produced output and have a tool in flight.
-            # Updates durable state (mid_run_quiescent_since, mid_run_pty_snapshot)
-            # on the entry object and persists via update_fields. Does NOT recover —
-            # it only flags confirmed suspects for stage-2 (task 4). Fail-silent.
-            _eval_mid_run_pty_stage1(entry, now)
-
             check = _check_tool_timeout(entry)
             if check is None:
                 continue
             tier, reason = check
-
-            # PTY-liveness gate for default-tier tools on granite PTY sessions (#1784).
-            # Internal/mcp tiers keep the age-only predicate (they are short-lived tools
-            # that must not run for minutes). For the default tier, suppress the kill if
-            # the PTY is still painting — a screen still updating is never a wedge.
-            # SDK/non-granite sessions (last_pty_read_loop_at=None) always go through
-            # the age-only path (helper branch 2) so the 300s ceiling is preserved.
-            if tier == "default" and not _pty_quiescent_long_enough(entry, now):
-                logger.debug(
-                    "[session-health] tool-timeout default-tier deferred for %s "
-                    "(%s): PTY still active (mid_run_quiescent_since=%s, "
-                    "MID_RUN_QUIESCENCE_SECS=%s)",
-                    entry.agent_session_id,
-                    getattr(entry, "current_tool_name", "?"),
-                    getattr(entry, "mid_run_quiescent_since", None),
-                    MID_RUN_QUIESCENCE_SECS,
-                )
-                # Deferred-kill observability counter (critique Concern 2).
-                try:
-                    from popoto.redis_db import POPOTO_REDIS_DB as _R_DEFER
-
-                    _R_DEFER.incr(
-                        f"{entry.project_key}:session-health:tool_timeouts:default_deferred"
-                    )
-                except Exception as _def_err:
-                    logger.debug(
-                        "[session-health] tool_timeouts:default_deferred incr failed: %s",
-                        _def_err,
-                    )
-                continue
 
             # Race mitigation (issue #1270 Risk 2): re-read both fields from a
             # fresh query before we transition. PostToolUse may have fired
@@ -4553,27 +3889,6 @@ async def _agent_session_tool_timeout_check() -> None:
                 )
                 continue
             tier, reason = recheck
-
-            # Re-evaluate the PTY-liveness gate on the fresh row (#1784 race path):
-            # if the tool resumed painting between the iterator read and the re-read,
-            # abort the recovery — we must not kill a session that just resumed output.
-            if tier == "default" and not _pty_quiescent_long_enough(fresh, now):
-                logger.debug(
-                    "[session-health] tool-timeout default-tier race abort for %s "
-                    "(%s): PTY resumed painting between read and re-read",
-                    fresh.agent_session_id,
-                    getattr(fresh, "current_tool_name", "?"),
-                )
-                continue
-
-            # Extend the default-tier reason string with quiescence context so logs
-            # explain why a live-but-past-deadline default tool was killed.
-            if tier == "default":
-                reason = (
-                    f"{reason}; pty quiescent >= {MID_RUN_QUIESCENCE_SECS}s"
-                    if getattr(fresh, "last_pty_read_loop_at", None) is not None
-                    else reason
-                )
 
             # Bump per-tier counter on the session row. Best-effort; failure
             # must not block the recovery transition (matches the
@@ -4625,17 +3940,9 @@ async def _agent_session_tool_timeout_loop() -> None:
     checks (psutil, OOM defer, orphan reap) stay on their original cadence —
     we deliberately avoid running them at 30s to keep load impact bounded.
 
-    Also hosts the #1879 wedge-nudge producer pass
-    (``_wedge_nudge_producer_tick``) — attr-reads-only per session, Redis
-    only on an eligible wedge, so the low-cost rationale above holds. The
-    producer needs this 30s cadence: on the 300s main loop the ~240s
-    ``NUDGE_WEDGE_THRESHOLD_S`` nudge would routinely land after the 600s
-    ``pm_hang`` turn-wait window closed (review blocker B1). It runs outside
-    the tool-timeout kill-switch below because it takes no recovery action.
-
     Kill switch: ``TOOL_TIMEOUT_TIERS_DISABLED=1`` short-circuits each
     tool-timeout tick (parity with ``DISABLE_PROGRESS_KILL`` for the main
-    loop); the wedge-nudge producer pass is not covered by it.
+    loop).
     """
     logger.info(
         "[session-health] Per-tool timeout sub-loop started (interval=%ds, "
@@ -4651,19 +3958,6 @@ async def _agent_session_tool_timeout_loop() -> None:
         except Exception as e:
             logger.error(
                 "[session-health] Error in tool-timeout sub-loop: %s",
-                e,
-                exc_info=True,
-            )
-        # #1879 wedge-nudge producer (review blocker B1): the sole call site.
-        # Rides this 30s loop so a frame frozen past NUDGE_WEDGE_THRESHOLD_S
-        # (~240s) is nudged within one tick — the 300s main loop would push
-        # too late for the 600s pm_hang window. Own try/except so a raising
-        # producer can never disturb the tool-timeout tick above.
-        try:
-            _wedge_nudge_producer_tick()
-        except Exception as e:
-            logger.error(
-                "[session-health] Error in wedge-nudge producer tick: %s",
                 e,
                 exc_info=True,
             )
