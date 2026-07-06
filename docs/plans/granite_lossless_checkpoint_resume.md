@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Cancelled
 type: feature
 appetite: Large
 owner: Valor
@@ -7,9 +7,12 @@ created: 2026-06-17
 tracking: https://github.com/tomcounsell/ai/issues/1721
 last_comment_id:
 revision_applied: true
+superseded_by: docs/plans/granite-pty-teardown.md
 ---
 
 # Granite Lossless Checkpoint Resume
+
+> **Cancelled 2026-07-06 — superseded by the PTY teardown.** The substrate this plan would checkpoint (the two-PTY `Container` loop, its turn cursor, and the PM/Dev TUI pair) is deleted outright by `docs/plans/granite-pty-teardown.md` (#1924). The resume *outcome* ships anyway, by a far simpler route: the headless runner persists four scalars on the `AgentSession` record (PM `claude` session UUID, `dev_agent_id`, `runner_cwd`, `claude_version`) and continues via `claude --resume` — including continuation of the SAME Dev subagent across worker restarts (teardown task 3, spike #1928 evidence). There is no loop cursor to checkpoint because there is no relay loop. #1721 is closed by the teardown PR. The problem analysis below remains accurate as a description of the now-deleted architecture.
 
 ## Problem
 
