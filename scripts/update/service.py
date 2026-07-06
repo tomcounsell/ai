@@ -857,6 +857,19 @@ WORKER_RELEVANT_PATHS = [
 # stale-FAILED loop — it is skipped entirely.
 BRIDGE_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_PREFIX}.bridge.plist"
 
+# Shared TTLs for the planned bridge-restart marker (data/update-restart-in-
+# progress) and the staged pending report (data/update-pending-report) —
+# issue #1898, Decision 26. Formula: the bridge watchdog's
+# STARTUP_GRACE_SECONDS (5 min) + one 60s watchdog cycle. BOTH TTLs share the
+# formula so the watchdog-suppression window can never expire before the
+# legitimate boot window it protects. Defined here rather than in
+# monitoring/bridge_watchdog.py because scripts.update.verify_release must
+# import the marker TTL without pulling in the watchdog's module-level side
+# effects (log handler creation, redis import); the watchdog re-imports both,
+# and a test pins them to STARTUP_GRACE_SECONDS + 60.
+UPDATE_REPORT_TTL_SECONDS = 5 * 60 + 60
+UPDATE_RESTART_MARKER_TTL_SECONDS = UPDATE_REPORT_TTL_SECONDS
+
 
 def get_process_start_ts(pid: int) -> float | None:
     """Return a process's start time as a unix timestamp (``ps -o lstart``).

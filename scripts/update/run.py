@@ -421,6 +421,81 @@ def run_catchup_step(
     # Returns None unconditionally — outcome cannot influence UpdateResult.
 
 
+def run_release_verify(
+    project_dir: Path, machine_check: dict, result: UpdateResult, v: bool
+) -> None:
+    """Terminal release verify for the --full path (issue #1898).
+
+    After Step 5's synchronous restart, confirm the bridge and worker
+    actually run code at pulled HEAD — positive staleness against each
+    process's OWN relevant path set (never raw HEAD equality). Any in-role
+    ``stale`` → hard error naming both short-SHAs + ``result.success =
+    False`` (non-zero exit), a ``data/update-release-failed`` sentinel on a
+    bridge hard-fail (a stale bridge cannot be trusted to report its own
+    failure — the watchdog reads it), and a Sentry capture as the durable
+    off-machine record. ``unknown`` → warn only. Never raises.
+    """
+    try:
+        head_short = git.get_short_sha(project_dir)
+        release_check = service.verify_running_release(project_dir, head_short, machine_check)
+        for name, info in release_check.items():
+            if info.get("classification") == "unknown":
+                log(f"WARN: {name} release could not be confirmed (unknown)", v, always=True)
+                result.warnings.append(f"{name} release could not be confirmed")
+        release_stale = {
+            name: info
+            for name, info in release_check.items()
+            if info.get("classification") == "stale"
+        }
+        if not release_stale:
+            return
+        details = "; ".join(
+            f"{name} running {info.get('boot_sha') or '?'} but HEAD is {head_short}"
+            for name, info in release_stale.items()
+        )
+        log(f"ERROR: release verify FAILED @ {head_short}: {details}", v, always=True)
+        result.warnings.append(f"release verify FAILED: {details}")
+        result.success = False
+        if "bridge" in release_stale:
+            try:
+                import json as _json
+                import time as _time
+
+                sentinel = project_dir / "data" / "update-release-failed"
+                sentinel.write_text(
+                    _json.dumps(
+                        {
+                            "process": "bridge",
+                            "boot_sha": release_stale["bridge"].get("boot_sha"),
+                            "head_sha": head_short,
+                            "ts": _time.time(),
+                        }
+                    )
+                    + "\n"
+                )
+            except Exception as sentinel_err:
+                log(
+                    f"WARN: could not write update-release-failed sentinel: {sentinel_err}",
+                    v,
+                    always=True,
+                )
+        # Durable off-machine record of the hard-fail.
+        try:
+            import sentry_sdk
+
+            from monitoring.sentry_config import configure_sentry
+
+            if configure_sentry("update"):
+                sentry_sdk.capture_message(
+                    f"update release verify FAILED @ {head_short}: {details}",
+                    level="error",
+                )
+        except Exception as sentry_err:
+            log(f"WARN: Sentry capture failed: {sentry_err}", v)
+    except Exception as verify_err:
+        log(f"WARN: release verify errored (inconclusive): {verify_err}", v, always=True)
+
+
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     """Run update with given configuration."""
     result = UpdateResult()
@@ -1551,6 +1626,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 "Stale /etc/newsyslog.d/valor.conf still present — will cause "
                 "double-rotation until manually removed"
             )
+
+        # Terminal release verify (issue #1898): full-mode only — the
+        # cron-path verify lives in remote-update.sh + handle_update_command.
+        run_release_verify(project_dir, machine_check, result, v)
 
     elif result.git_result and result.git_result.commit_count > 0:
         # Cron mode: set restart flag instead of restarting

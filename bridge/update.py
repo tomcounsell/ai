@@ -1,13 +1,23 @@
 """Telegram /update command handlers.
 
 Handles both normal (/update) and force (/update --force) updates.
-Normal updates pull code and set a restart flag for graceful restart.
-Force updates flush the queue, kill running sessions, and restart immediately.
+Normal updates run remote-update.sh, which restarts the worker (and, on
+bridge-relevant changes, the bridge itself — killing this process, in which
+case the fresh bridge's boot flush reports instead). Force updates flush the
+queue, kill running sessions, and restart immediately via run.py --full.
+
+Issue #1898: the ``✅ update OK`` report is gated on a release verify — the
+running bridge/worker must have no process-relevant commits behind pulled
+HEAD before OK is printed.
 """
 
+import asyncio
+import json
 import logging
+import os
 import platform
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -15,7 +25,48 @@ from bridge.response import set_reaction
 
 _PROJECT_DIR = Path(__file__).parent.parent
 
+# Bounded beacon poll (Race 1 mitigation, issue #1898 Decision 20): 15 x 2s
+# (30s), matching run.py's worker-heartbeat freshness poll.
+UPDATE_POLL_ATTEMPTS = 15
+UPDATE_POLL_INTERVAL_SECONDS = 2
+
 logger = logging.getLogger(__name__)
+
+
+def _bridge_plist_exists() -> bool:
+    """True when the bridge plist is installed on this machine (best-effort)."""
+    try:
+        from scripts.update.service import BRIDGE_PLIST_PATH
+
+        return BRIDGE_PLIST_PATH.exists()
+    except Exception:
+        return False
+
+
+async def _verify_release_after_update(subprocess_start_ts: float) -> dict:
+    """Poll for a fresh worker beacon, then classify the running releases.
+
+    Race 1 mitigation on the inline (no-bridge-restart) path: a worker
+    kickstarted by remote-update.sh may still be booting when the shell
+    returns, so wait (bounded 15 x 2s) for its beacon to freshen past the
+    subprocess start moment — or exhaustion, after which the pre-restart
+    beacon still classifies correctly (matches on a no-op cycle, stale when
+    process-relevant commits landed). Raises on import/verify errors; the
+    caller degrades gracefully to the shell result.
+    """
+    from scripts.update.git import get_short_sha
+    from scripts.update.service import read_boot_beacon, verify_running_release
+    from scripts.update.verify import check_machine_identity
+
+    beacon_path = _PROJECT_DIR / "data" / "worker_boot_sha"
+    for _ in range(UPDATE_POLL_ATTEMPTS):
+        beacon = read_boot_beacon(beacon_path)
+        if beacon is not None and beacon[1] > subprocess_start_ts:
+            break
+        await asyncio.sleep(UPDATE_POLL_INTERVAL_SECONDS)
+    head_short = get_short_sha(_PROJECT_DIR)
+    machine_check = check_machine_identity(_PROJECT_DIR)
+    return verify_running_release(_PROJECT_DIR, head_short, machine_check)
 
 
 def _get_machine_name() -> str:
@@ -112,18 +163,43 @@ async def handle_update_command(tg_client, event):
         )
         return
 
+    # Interim notice (issue #1898, Decision 21): on a bridge-plist machine a
+    # bridge-relevant update kickstarts the bridge, SIGKILLing this coroutine
+    # mid-update — the human would otherwise stare at a bare 👀 reaction for
+    # minutes. Best-effort: a send failure never blocks the update.
+    if _bridge_plist_exists():
+        try:
+            await tg_client.send_message(
+                event.chat_id,
+                f"{machine} - ⏳ updating — if this update restarts the bridge, "
+                "confirmation will follow from the fresh bridge",
+            )
+        except Exception:
+            pass
+
+    # Export the originating chat context so a bridge-relevant run can stage
+    # data/update-pending-report before self-restarting (the fresh bridge's
+    # boot flush replies to this chat).
+    env = os.environ.copy()
+    env["UPDATE_REPORT_CHAT_ID"] = str(event.chat_id)
+    env["UPDATE_REPORT_REPLY_TO"] = str(event.message.id)
+
     try:
+        subprocess_start_ts = time.time()
         result = subprocess.run(
             ["bash", str(script_path)],
             cwd=str(_PROJECT_DIR),
             capture_output=True,
             text=True,
             timeout=120,
+            env=env,
         )
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
 
-        # First non-marker stdout line — used only for warning detection below.
+        # Non-marker stdout lines — ALL are scanned for warnings below
+        # (issue #1898: a swallowed restart ERROR on a non-first line used to
+        # slip past the old first-line-only scan).
         status_lines = [
             line
             for line in (stdout or "").split("\n")
@@ -149,18 +225,53 @@ async def handle_update_command(tg_client, event):
         except Exception:
             sha = "?"
 
+        # Release-verify gate (issue #1898): ✅ is printed only when the shell
+        # exit code is 0 AND no in-role process runs positively-stale code —
+        # a green pull with a stale running process is the exact bug #1898
+        # was filed against. Degrades gracefully (shell result only) if the
+        # verify import/call raises. Note: if the shell restarted the bridge,
+        # this coroutine was SIGKILLed and never reaches here — the fresh
+        # bridge's boot flush (run_boot_release_check) is the reporter.
+        stale_details: list[str] = []
+        reload_states: list[str] = []
+        try:
+            check = await _verify_release_after_update(subprocess_start_ts)
+            for name, info in check.items():
+                classification = info.get("classification")
+                boot_sha = info.get("boot_sha") or "?"
+                if classification == "stale":
+                    stale_details.append(f"{name} running {boot_sha} but HEAD is {sha}")
+                    reload_states.append(f"{name} STALE {boot_sha}")
+                elif classification == "unknown":
+                    reload_states.append(f"{name} unknown")
+                elif (info.get("beacon_ts") or 0) > subprocess_start_ts:
+                    reload_states.append(f"{name} restarted")
+                else:
+                    reload_states.append(f"{name} current")
+        except Exception as e:
+            logger.warning(f"[update] release verify degraded — reporting shell result only: {e}")
+
+        failed = failed or bool(stale_details)
         if failed:
-            first_err = stderr.split(chr(10))[0] if stderr else first_line
-            status = f"❌ update FAILED @ {sha}: {first_err}"
+            if stale_details:
+                status = f"❌ update FAILED @ {sha}: {'; '.join(stale_details)}"
+            else:
+                first_err = stderr.split(chr(10))[0] if stderr else first_line
+                status = f"❌ update FAILED @ {sha}: {first_err}"
         else:
             status = f"✅ update OK @ {sha}"
+        if reload_states:
+            status += f" ({', '.join(reload_states)})"
 
         if running_count > 0:
             plural = "s" if running_count != 1 else ""
             status += f" ({running_count} session{plural} running; restart queued)"
 
-        # If update had warnings or failed, queue agent session to fix
-        has_warnings = "warning" in first_line.lower()
+        # If update had warnings or failed, queue agent session to fix.
+        # ALL stdout lines are scanned (issue #1898), not only the first.
+        has_warnings = any(
+            "warning" in line.lower() or "error" in line.lower() for line in status_lines
+        )
         if failed or has_warnings:
             status += " — spawning agent session to fix"
             await _queue_fix_session(event, machine, stdout, stderr, failed)
@@ -177,6 +288,114 @@ async def handle_update_command(tg_client, event):
             event.chat_id,
             f"{machine} - update failed: {e}",
         )
+
+
+async def run_boot_release_check(tg_client) -> None:
+    """Fresh-bridge boot self-check + pending-report flush (issue #1898).
+
+    Called at bridge startup right after the boot-SHA beacon write. Two
+    INDEPENDENT steps, both best-effort (never crash startup):
+
+    1. UNCONDITIONALLY verify the running release (fresh bridge beacon +
+       worker beacon). A stale self-classification writes the
+       ``data/update-release-failed`` sentinel for the watchdog — with or
+       without a pending report (the pure 30-min cron path stages none: the
+       exact #1898 trigger path gets the backstop too). The planned-restart
+       marker ``data/update-restart-in-progress`` is cleared now that the
+       fresh bridge is up.
+    2. Only if ``data/update-pending-report`` exists (a Telegram-triggered
+       bridge-relevant update staged it before the self-kill): reuse the check
+       to compose the OK/FAILED reply, send it to the staged chat/reply-to,
+       and delete the file — but leave it in place when the fresh bridge
+       classified stale, so the watchdog's undrained-report read can escalate.
+    """
+    machine = _get_machine_name()
+    check: dict = {}
+    head_short = "?"
+    bridge_stale = False
+
+    # Step 1: unconditional self-check + sentinel + marker clear.
+    try:
+        from scripts.update.git import get_short_sha
+        from scripts.update.service import verify_running_release
+        from scripts.update.verify import check_machine_identity
+
+        head_short = get_short_sha(_PROJECT_DIR)
+        machine_check = check_machine_identity(_PROJECT_DIR)
+        check = verify_running_release(_PROJECT_DIR, head_short, machine_check)
+        bridge_info = check.get("bridge") or {}
+        bridge_stale = bridge_info.get("classification") == "stale"
+        if bridge_stale:
+            sentinel = _PROJECT_DIR / "data" / "update-release-failed"
+            sentinel.write_text(
+                json.dumps(
+                    {
+                        "process": "bridge",
+                        "boot_sha": bridge_info.get("boot_sha"),
+                        "head_sha": head_short,
+                        "ts": time.time(),
+                    }
+                )
+                + "\n"
+            )
+            logger.error(
+                "[update] fresh bridge booted STALE: running %s but HEAD is %s — "
+                "wrote update-release-failed sentinel",
+                bridge_info.get("boot_sha"),
+                head_short,
+            )
+    except Exception as e:
+        logger.warning(f"[update] boot release self-check failed (non-fatal): {e}")
+    try:
+        (_PROJECT_DIR / "data" / "update-restart-in-progress").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    # Step 2: conditional pending-report flush.
+    report_path = _PROJECT_DIR / "data" / "update-pending-report"
+    try:
+        if not report_path.exists():
+            return
+        report = json.loads(report_path.read_text())
+        sha = head_short if head_short != "?" else report.get("sha", "?")
+        worker_state = report.get("worker_state") or "worker unknown"
+
+        stale_details = [
+            f"{name} running {info.get('boot_sha') or '?'} but HEAD is {sha}"
+            for name, info in check.items()
+            if info.get("classification") == "stale"
+        ]
+        if bridge_stale:
+            bridge_state = f"bridge STALE {(check.get('bridge') or {}).get('boot_sha') or '?'}"
+        else:
+            bridge_state = "bridge restarted"
+        worker_info = check.get("worker") or {}
+        if worker_info.get("classification") == "stale":
+            worker_state = f"worker STALE {worker_info.get('boot_sha') or '?'}"
+        states = f"({bridge_state}, {worker_state})"
+
+        if stale_details:
+            status = f"❌ update FAILED @ {sha}: {'; '.join(stale_details)} {states}"
+        else:
+            status = f"✅ update OK @ {sha} {states}"
+        message = f"{machine} - {status}"
+
+        chat_id = int(report["chat_id"])
+        try:
+            await tg_client.send_message(chat_id, message, reply_to=int(report["reply_to"]))
+        except Exception:
+            # Reply target may be gone — fall back to a plain send.
+            await tg_client.send_message(chat_id, message)
+
+        if bridge_stale:
+            logger.warning(
+                "[update] pending report left in place (fresh bridge stale) for the watchdog"
+            )
+        else:
+            report_path.unlink(missing_ok=True)
+        logger.info(f"[update] flushed pending update report to chat {chat_id}")
+    except Exception as e:
+        logger.warning(f"[update] pending update report flush failed (non-fatal): {e}")
 
 
 async def handle_force_update_command(tg_client, event):

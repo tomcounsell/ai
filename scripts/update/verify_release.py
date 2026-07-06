@@ -42,13 +42,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.update import git, service, verify  # noqa: E402
 
+# Planned-restart marker freshness window: STARTUP_GRACE_SECONDS (5 min) + one
+# watchdog cycle (60s) — the shared Decision 26 formula (#1898), defined once
+# in scripts.update.service and re-imported by monitoring/bridge_watchdog.py,
+# so this CLI and the watchdog can never drift apart.
+from scripts.update.service import UPDATE_RESTART_MARKER_TTL_SECONDS  # noqa: E402
+
 POLL_ATTEMPTS = 15
 POLL_INTERVAL_SECONDS = 2
-
-# Planned-restart marker freshness window: STARTUP_GRACE_SECONDS (5 min) + one
-# watchdog cycle (60s) — the shared formula from Decision 26 (#1898), kept in
-# lockstep with monitoring/bridge_watchdog.py's UPDATE_RESTART_MARKER_TTL_SECONDS.
-UPDATE_RESTART_MARKER_TTL_SECONDS = 5 * 60 + 60
 
 
 def _restart_marker_fresh(project_dir: Path) -> bool:
