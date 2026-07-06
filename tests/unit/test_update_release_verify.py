@@ -22,6 +22,7 @@ repos with mocked pids / ``ps`` timestamps.
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
 import time
@@ -299,6 +300,74 @@ def test_swallowed_write_never_inverts_to_failed(repo, live_processes, monkeypat
     assert exit_code == 0
     assert "FAILED" not in out
     assert "could not be confirmed" in out
+
+
+# ---------------------------------------------------------------------------
+# Startup wiring: bridge + worker entry points actually call the beacon writer
+# (Test Impact: "assert the boot-SHA beacon is written at startup". Both call
+# sites live inside monolithic entry points that cannot run under pytest, so
+# this pins the wiring at the source level — the same pattern as
+# test_bridge_startup_invariant.py::test_invariant_lives_in_module.)
+# ---------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).parents[2]
+
+
+def _beacon_call_lines(source: str) -> dict[str, int]:
+    """Map ``write_boot_beacon("<name>")`` process name → call lineno."""
+    calls: dict[str, int] = {}
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "write_boot_beacon"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            calls[node.args[0].value] = node.lineno
+    return calls
+
+
+def test_bridge_startup_writes_beacon_before_boot_release_check():
+    """Bridge startup calls write_boot_beacon("bridge") BEFORE the boot
+    self-check — the fresh bridge's release must be knowable when
+    run_boot_release_check verifies it (plan: fresh-bridge boot flush)."""
+    source = (PROJECT_ROOT / "bridge" / "telegram_bridge.py").read_text()
+    calls = _beacon_call_lines(source)
+    assert "bridge" in calls, (
+        'bridge/telegram_bridge.py no longer calls write_boot_beacon("bridge") at startup (#1898)'
+    )
+    check_line = next(
+        (
+            node.lineno
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "run_boot_release_check"
+        ),
+        None,
+    )
+    assert check_line is not None, (
+        "bridge startup no longer calls run_boot_release_check (#1898 boot flush)"
+    )
+    assert calls["bridge"] < check_line, (
+        "the boot-SHA beacon must be written before run_boot_release_check verifies it"
+    )
+
+
+def test_worker_main_writes_beacon():
+    """worker/__main__.py::main calls write_boot_beacon("worker") at startup."""
+    source = (PROJECT_ROOT / "worker" / "__main__.py").read_text()
+    tree = ast.parse(source)
+    main_fn = next(
+        (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main"),
+        None,
+    )
+    assert main_fn is not None, "worker/__main__.py has no main() entry point"
+    calls = _beacon_call_lines(ast.unparse(main_fn))
+    assert "worker" in calls, (
+        'worker/__main__.py::main no longer calls write_boot_beacon("worker") at startup (#1898)'
+    )
 
 
 # ---------------------------------------------------------------------------
