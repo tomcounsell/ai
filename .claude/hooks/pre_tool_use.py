@@ -49,7 +49,7 @@ def _liveness_cooldown_ok(session_id: str, now: float) -> bool:
     The CLI hooks run as a fresh process per tool call, so the SDK-path's
     in-memory cooldown cannot coalesce writes across invocations. Persist the
     last-write timestamp in the session sidecar dir so the 5s window bounds the
-    AgentSession Redis write rate for EVERY CLI-hook session, not just granite.
+    AgentSession Redis write rate for EVERY CLI-hook session.
     Without this gate the new pre-hook write would fire uncooled system-wide on
     every tool call for every CLI-hook session.
 
@@ -92,13 +92,13 @@ def _load_agent_session_sidecar(session_id: str) -> dict:
 
 def _record_tool_start(hook_input: dict) -> None:
     """Stamp ``current_tool_name`` / ``last_tool_use_at`` on the sidecar-resolved
-    AgentSession so the #1270 tool-timeout tier loop arms for granite PM/Dev
-    PTY children (issue #1843, Gap A).
+    AgentSession so the #1270 tool-timeout tier loop arms for CLI-hook
+    sessions (issue #1843, Gap A).
 
     Mirrors ``post_tool_use.py::_update_agent_session``'s sidecar resolution —
     NOT ``agent.hooks.liveness_writers.record_tool_boundary``, which resolves
-    via ``os.environ["AGENT_SESSION_ID"]`` (unset in the granite child env and
-    would silently no-op).
+    via ``os.environ["AGENT_SESSION_ID"]`` (which can be unset in the CLI-hook
+    child env and would silently no-op).
 
     ``last_tool_use_at`` MUST be a ``datetime`` (never ``time.time()``) —
     ``session_health.py::_check_tool_timeout`` gates on
@@ -218,7 +218,7 @@ def _resolve_cli_session(hook_input: dict):
 
 
 def _enforce_tool_budget(hook_input: dict) -> None:
-    """Synchronous per-tool budget backstop for the CLI (granite-PTY) surface (#1821).
+    """Synchronous per-tool budget backstop for the CLI-hook surface (#1821).
 
     On an over-budget session, prints the deny reason to stderr and
     ``sys.exit(2)`` (Claude Code's block convention). The ``sys.exit(2)`` raises
@@ -284,7 +284,7 @@ def main():
 
     # Liveness (issue #1843, Gap A): stamp current_tool_name/last_tool_use_at
     # on the sidecar-resolved AgentSession so the #1270 tool-timeout tier loop
-    # arms for granite PM/Dev PTY children.
+    # arms for CLI-hook sessions.
     _record_tool_start(hook_input)
 
     session_id = get_session_id(hook_input)

@@ -1,6 +1,7 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("eng", "teammate", or "granite").
+Single Popoto model with session_type discriminator ("eng" or "teammate";
+"granite" persists on historical records only — see config/enums.py).
 
 Popoto does not support model inheritance, so session types are
 distinguished by the session_type field with factory methods and derived
@@ -83,8 +84,8 @@ SESSION_TYPE_TEAMMATE = SessionType.TEAMMATE
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("eng", "teammate",
-    or "granite").
+    Single Popoto model with a session_type discriminator ("eng" or
+    "teammate"; "granite" persists on historical records only).
 
     Session types (permission model):
         Eng session (session_type="eng"):
@@ -138,7 +139,7 @@ class AgentSession(Model):
     # === Identity ===
     id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    session_type = KeyField(null=True)  # "eng", "teammate", or "granite" — discriminator
+    session_type = KeyField(null=True)  # "eng" or "teammate" — discriminator
     project_key = KeyField()
     status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 

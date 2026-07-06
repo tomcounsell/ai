@@ -11,11 +11,10 @@ loops. The cooldown is best-effort: writes are coalesced, never reordered.
 
 Issue #1843 (Gap A) added a SECOND path that writes the same fields: the
 **CLI hooks** (``.claude/hooks/pre_tool_use.py`` / ``post_tool_use.py``) that
-granite's PM/Dev PTY children run. Those hooks resolve the AgentSession via
-the on-disk sidecar (``AGENT_SESSION_ID`` is unset in the granite child env),
-not via ``agent.hooks.liveness_writers.record_tool_boundary``. The test below
-covers that CLI-hook path; the full CLI-hook test suite lives in
-``tests/unit/granite_container/test_cli_hook_liveness_writes.py``.
+the runner's ``claude -p`` subprocesses run. Those hooks resolve the
+AgentSession via the on-disk sidecar when ``AGENT_SESSION_ID`` is unset in
+the child env, not via ``agent.hooks.liveness_writers.record_tool_boundary``.
+The test below covers that CLI-hook path.
 """
 
 from __future__ import annotations

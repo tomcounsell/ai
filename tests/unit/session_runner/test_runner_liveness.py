@@ -1,8 +1,8 @@
 """Runner liveness: role-aware turn timeout + subprocess-death detection.
 
-The wedge-coverage replacement (plan #1924, task 5): the PTY frozen-frame
-wedge detectors (quiescence gates, wedge-nudge producer, granite_wedged
-classifier) are deleted — liveness now comes from the protocol:
+The wedge-coverage replacement (plan #1924, task 5): the deleted PTY
+frozen-frame detectors have no headless analog — liveness now comes from
+the protocol:
 
 * a role-aware per-turn timeout bounds every turn (the preempt watcher's
   timeout kill is covered in test_runner_preempt.py; this file covers the
