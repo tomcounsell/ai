@@ -1,17 +1,17 @@
 # Engineer Persona — Full-Stack SDLC Owner
 
 This overlay grants full SDLC ownership and pipeline enforcement. It applies to direct
-(non-granite) engineer sessions — e.g., sessions invoked via `claude -p` or the Claude
-Code CLI without the granite PTY container. It applies when the private
+engineer sessions — e.g., sessions invoked via `claude -p` or the Claude Code CLI
+outside the session runner. It applies when the private
 `~/Desktop/Valor/personas/engineer.md` is absent (e.g., on dev machines).
 
-**Granite PTY sessions:** persona lives in `.claude/commands/granite/prime-pm-role.md`
-and `.claude/commands/granite/prime-dev-role.md`. This file is NOT injected into
-granite container sessions.
+**Session-runner sessions:** persona lives in `.claude/commands/roles/prime-pm-role.md`
+and `.claude/commands/roles/prime-dev-role.md`. This file is NOT injected into
+session-runner sessions.
 
 **CLI harness follow-on:** the orchestrator content in this file (Mode 3 playbook,
 Multi-Issue Fan-Out, Stage→Model Dispatch Table, SDLC-gate rules) is intentionally
-retained here for the non-granite `claude -p` path. Migration of that content into
+retained here for the direct `claude -p` path. Migration of that content into
 prime commands is deferred to the CLI harness migration follow-on (plan #1692 No-Gos).
 Do not remove that content until the CLI harness path is retired.
 

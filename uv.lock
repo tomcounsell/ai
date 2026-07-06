@@ -1918,7 +1918,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess" },
+    { name = "ptyprocess", marker = "sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450 }
 wheels = [
@@ -3324,11 +3324,9 @@ dependencies = [
     { name = "numpy" },
     { name = "ollama" },
     { name = "openai" },
-    { name = "pexpect" },
     { name = "pillow" },
     { name = "popoto" },
     { name = "psutil" },
-    { name = "ptyprocess" },
     { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
@@ -3389,11 +3387,9 @@ requires-dist = [
     { name = "onnxruntime", marker = "extra == 'knowledge'", specifier = ">=1.25.0" },
     { name = "onnxruntime", marker = "extra == 'tts'", specifier = ">=1.25.0" },
     { name = "openai", specifier = ">=1.0.0" },
-    { name = "pexpect", specifier = ">=4.9.0" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "popoto", specifier = ">=1.7.1" },
     { name = "psutil", specifier = ">=5.9.0" },
-    { name = "ptyprocess", specifier = ">=0.7.0" },
     { name = "pypdf", specifier = ">=6.13.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },

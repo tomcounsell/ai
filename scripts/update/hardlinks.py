@@ -67,6 +67,10 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "prime"),
     ("skills", "sdlc"),
     ("skills", "do-deploy"),
+    # Renamed namespace: .claude/commands/granite/ -> .claude/commands/roles/
+    # (plan #1924 PTY teardown — the prime commands survive under the new
+    # name; the stale user-level granite/ dir is removed on every machine).
+    ("commands", "granite"),
 ]
 
 # Skills tightly coupled to this repo's infrastructure (Telegram bridge,
@@ -257,12 +261,12 @@ def _sync_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> 
     """Sync command .md files, including namespaced subdirectories.
 
     Commands live either at the top level (``foo.md`` -> ``/foo``) or in a
-    namespace subdirectory (``granite/prime-pm-role.md`` ->
-    ``/granite:prime-pm-role``). The granite PTY container runs claude in
-    OTHER repos' worktrees, so its namespaced prime commands MUST sync to
-    ``~/.claude/commands/granite/`` to be resolvable there — a top-level-only
-    glob left every granite session hanging on "Unknown command:
-    /granite:prime-pm-role" (PR #1694 moved persona delivery from
+    namespace subdirectory (``roles/prime-pm-role.md`` ->
+    ``/roles:prime-pm-role``). The session runner primes claude in OTHER
+    repos' worktrees, so its namespaced prime commands MUST sync to
+    ``~/.claude/commands/roles/`` to be resolvable there — a top-level-only
+    glob once left every session hanging on "Unknown command:
+    /roles:prime-pm-role" (PR #1694 moved persona delivery from
     --append-system-prompt to these prime slash commands). Recurse with
     rglob and preserve the relative subdir so the namespace is kept intact.
     """
@@ -389,7 +393,7 @@ def _cleanup_stale_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncRe
         return
 
     # Collect inodes of all current source commands (recursing into
-    # namespace subdirs so granite/*.md are recognized as live sources).
+    # namespace subdirs so roles/*.md are recognized as live sources).
     src_inodes: set[int] = set()
     if src_dir.is_dir():
         for src_file in sorted(src_dir.rglob("*.md")):

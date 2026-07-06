@@ -14,8 +14,6 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from config.models import PINNED_CLAUDE_VERSION
-
 
 class LogLevel(StrEnum):
     """Supported logging levels."""
@@ -372,128 +370,48 @@ class FeatureSettings(BaseModel):
     )
 
 
-class GraniteSettings(BaseModel):
-    """Granite PTY container configuration (plan #1572).
+class SessionRunnerSettings(BaseModel):
+    """Headless session-runner configuration (plan #1924).
 
-    The granite container drives an interactive ``claude`` TUI session via
-    two persistent PTYs (PM + Dev) per session. The PTY pool caps
-    concurrent interactive pairs at ``pty_pool_size``; over-cap sessions
-    wait in the Redis queue. The pool size is intentionally SMALLER than
-    ``MAX_CONCURRENT_SESSIONS`` so the Redis queue absorbs over-cap
-    sessions, giving operators headroom to handle orphan-after-SIGKILL
-    without overcommitting memory.
+    The session runner executes bridge-originated sessions as one
+    ``claude -p`` subprocess per turn (``agent/session_runner/``). The PM
+    role is the single top-level session; developer work runs inside the
+    PM's turns via the ``dev`` subagent. There is no PTY, no pool, and no
+    per-role transport seam — protocol, not paint.
 
-    Growth path: default 3 → 6 once health/observability and memory
-    management land. Each PTY pair is ~400 MB resident, so pool=3 with
-    MAX_CONCURRENT_SESSIONS=8 bounds worker memory at ~9.6 GB worst case.
-    See ``docs/features/granite-pty-production.md``.
+    Env prefix: ``SESSION_RUNNER__`` (e.g. ``SESSION_RUNNER__PM_MODEL``).
+    Legacy ``GRANITE__*``/``GRANITE_*`` keys are ignored and flagged by
+    :func:`stale_granite_env_keys`.
     """
 
-    pty_pool_size: int = Field(
-        default=3,
-        ge=1,
-        le=16,
-        description=(
-            "Hard maximum concurrent PM+Dev PTY pairs. Each pair is two "
-            "interactive ``claude`` processes (~200 MB each) driving the "
-            "granite container. The PTY pool is a singleton owned by the "
-            "worker process. Override via GRANITE__PTY_POOL_SIZE env var. "
-            "Plan #1572 / docs/features/granite-pty-production.md."
-        ),
-    )
-    reprobe_interval_s: float = Field(
-        default=30.0,
-        gt=0,
-        description=(
-            "How often (seconds) to re-probe granite when the circuit is CLOSED. "
-            "Provisional/tunable — tune after observing real ollama outage rates. "
-            "Override via GRANITE_REPROBE_INTERVAL_S env var."
-        ),
-    )
-    breaker_open_threshold: int = Field(
-        default=3,
-        ge=1,
-        le=100,
-        description=(
-            "Consecutive probe failures required to trip the circuit to OPEN. "
-            "Provisional/tunable. Override via GRANITE_BREAKER_OPEN_THRESHOLD env var."
-        ),
-    )
-    breaker_cooldown_s: float = Field(
-        default=120.0,
-        gt=0,
-        description=(
-            "Seconds the circuit stays OPEN before allowing a half-open re-probe. "
-            "Provisional/tunable. Override via GRANITE_BREAKER_COOLDOWN_S env var."
-        ),
-    )
     pm_model: str = Field(
         default="opus",
         description=(
-            "Claude model alias for the PM TUI PTY. The PM/Dev sessions run "
-            "on the Claude subscription (OAuth, ANTHROPIC_API_KEY blanked), "
-            "exactly like the `claude --permission-mode bypassPermissions` "
-            "shortcut, with the model chosen at spawn time. Use UNPINNED "
-            "aliases (opus, sonnet, haiku) so the substrate tracks the latest "
-            "version. ollama models belong to the granite classifier only, "
-            "never the PTY substrate. Override via GRANITE__PM_MODEL."
+            "Claude model alias for the PM role's headless turns. Role turns "
+            "run on the Claude subscription (OAuth, ANTHROPIC_API_KEY "
+            "blanked — see agent/session_runner/role_driver.py). Use "
+            "UNPINNED aliases (opus, sonnet, haiku) so the runner tracks the "
+            "latest version. Override via SESSION_RUNNER__PM_MODEL."
         ),
     )
     dev_model: str = Field(
         default="opus",
         description=(
-            "Claude model alias for the Dev TUI PTY. See ``pm_model``. The "
-            "Dev role now owns the full SDLC pipeline (issue #1692) and fans "
-            "out to Sonnet subagents for parallel work; opus is the default "
-            "for the Dev TUI itself. Override via GRANITE__DEV_MODEL."
-        ),
-    )
-
-    # --- Per-role transport hedge (plan #1842) ---
-    pm_transport: str = Field(
-        default="pty",
-        description=(
-            "Global default transport for the PM role: ``pty`` (interactive TUI "
-            "over a PTY, flat-billed on the subscription) or ``headless`` "
-            "(one ``claude -p`` subprocess per turn, metered against the Agent "
-            "SDK credit pool). A per-project ``transport.pm`` block in "
-            "projects.json overrides this. Default ``pty`` reproduces today's "
-            "behavior exactly. Override via GRANITE__PM_TRANSPORT."
-        ),
-    )
-    dev_transport: str = Field(
-        default="pty",
-        description=(
-            "Global default transport for the Dev role: ``pty`` or ``headless``. "
-            "See ``pm_transport``. A per-project ``transport.dev`` block in "
-            "projects.json overrides this. Override via GRANITE__DEV_TRANSPORT."
-        ),
-    )
-
-    # --- Hook-driven turn returns (plan #1688) ---
-    hook_driven_turn_end: bool = Field(
-        default=True,
-        description=(
-            "Feature flag: when True (default), the granite container treats the "
-            "Claude Code ``Stop`` hook edge as the turn-completion authority and "
-            "reads the final assistant message from the hook payload's "
-            "transcript_path. The PTY idle heuristic (read_until_idle) is demoted "
-            "to a running/idle badge, liveness, and crash detection. When False, "
-            "the container falls back to the pre-#1688 idle-completion path (the "
-            "documented safety valve for a claude version that regresses the hook "
-            "contract). Override via GRANITE__HOOK_DRIVEN_TURN_END env var. "
-            "Plan #1688 / docs/features/granite-hook-driven-turn-returns.md."
+            "Claude model alias for the ``dev`` subagent's work. See "
+            "``pm_model``. The Dev owns the full SDLC pipeline (issue #1692) "
+            "and fans out to Sonnet subagents for parallel work; opus is the "
+            "default for the Dev itself. Override via SESSION_RUNNER__DEV_MODEL."
         ),
     )
     hook_turn_end_wait_s: float = Field(
         default=600.0,
         gt=0,
         description=(
-            "Outer budget (seconds) the container waits for a ``Stop`` turn-end "
-            "edge before the crash/timeout watchdog trips. The wait is always a "
-            "race against PTY EOF / !isalive() — this bound only fires when the "
-            "PTY is alive but no Stop edge arrives (the silent-hook failure mode). "
-            "Override via GRANITE__HOOK_TURN_END_WAIT_S env var."
+            "Outer budget (seconds) the runner waits for a ``Stop`` turn-end "
+            "hook edge before falling back to the subprocess exit as the "
+            "turn boundary. Provisional/tunable — tune after observing real "
+            "hook-delivery latency in production headless runs. Override via "
+            "SESSION_RUNNER__HOOK_TURN_END_WAIT_S env var."
         ),
     )
     hook_crash_resume_cap: int = Field(
@@ -501,11 +419,11 @@ class GraniteSettings(BaseModel):
         ge=1,
         le=20,
         description=(
-            "Max crash-resume attempts on a single turn before the container "
-            "escalates with an operator-terminal message instead of looping "
-            "forever. Each crash (PTY EOF with no Stop edge) resumes the same "
-            "claude session via --resume <uuid> + a verified `continue` nudge. "
-            "Override via GRANITE__HOOK_CRASH_RESUME_CAP env var."
+            "Max crash-resume attempts on a single turn before the runner "
+            "escalates with a persona-safe error instead of looping forever. "
+            "Each crash (subprocess death with no Stop edge) resumes the "
+            "same claude session via --resume <uuid>. Provisional/tunable. "
+            "Override via SESSION_RUNNER__HOOK_CRASH_RESUME_CAP env var."
         ),
     )
 
@@ -646,36 +564,11 @@ class Settings(BaseSettings):
     )
 
     # Correctness & delivery-integrity hardening (issue #1817). Documented
-    # here as the typed catalog entry; the runtime checks
-    # (scripts/update/verify.py, worker/__main__.py,
-    # agent/agent_session_queue.py) read these via `os.environ.get(...)`
+    # here as the typed catalog entry; the runtime check
+    # (agent/agent_session_queue.py) reads this via `os.environ.get(...)`
     # directly rather than through this `settings` singleton, so a value
     # changed after process startup (e.g. via test monkeypatching) takes
     # effect immediately instead of requiring a fresh Settings() instance.
-    # The version default itself lives in config/models.py
-    # (PINNED_CLAUDE_VERSION) as the single source of truth shared with the
-    # nightly ollama canary (scripts/nightly_regression_tests.py).
-    pinned_claude_version: str = Field(
-        default=PINNED_CLAUDE_VERSION,
-        description=(
-            "D1a: pinned claude CLI version the D1b scraped-TUI-marker "
-            "contract was last verified against (native installer: "
-            "~/.local/bin/claude -> "
-            "~/.local/share/claude/versions/<version>/). PROVISIONAL — "
-            "bumping requires re-verifying the D1b markers against the new "
-            "version's actual TUI output first; see "
-            "docs/features/deployment.md. Env: PINNED_CLAUDE_VERSION."
-        ),
-    )
-    claude_contract_check_enforce: bool = Field(
-        default=False,
-        description=(
-            "D1a/D1b: shared enforce flag for the claude-CLI-contract checks "
-            "(version pin drift in scripts/update/verify.py, TUI-marker "
-            "contract-check in worker/__main__.py). Default off (warn-only, "
-            "non-blocking). Env: CLAUDE_CONTRACT_CHECK_ENFORCE=1."
-        ),
-    )
     notify_healthcheck_interval: float = Field(
         default=15.0,
         gt=0,
@@ -702,7 +595,7 @@ class Settings(BaseSettings):
     models: ModelSettings = Field(default_factory=ModelSettings)
     paths: PathSettings = Field(default_factory=PathSettings)
     features: FeatureSettings = Field(default_factory=FeatureSettings)
-    granite: GraniteSettings = Field(default_factory=GraniteSettings)
+    session_runner: SessionRunnerSettings = Field(default_factory=SessionRunnerSettings)
 
     @field_validator("environment")
     @classmethod
@@ -787,3 +680,50 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
+
+# --- Stale legacy env-prefix guard (plan #1924, hard requirement) ---------
+#
+# The PTY teardown renamed the ``GraniteSettings`` group to
+# ``SessionRunnerSettings`` (env prefix ``GRANITE__*`` -> ``SESSION_RUNNER__*``)
+# and deleted the flat ``GRANITE_*`` knobs. ``extra="ignore"`` means a stale
+# key in the vault .env or a launchd plist silently does NOTHING — the exact
+# silent-failure mode the critique flagged. Warn loudly at settings import;
+# scripts/update/run.py surfaces the same list during deploy.
+
+_LEGACY_GRANITE_ENV_PREFIX = "GRANITE_"
+
+
+def stale_granite_env_keys(env_file: str | Path = ".env") -> list[str]:
+    """Return legacy ``GRANITE__*``/``GRANITE_*`` env keys that are still set.
+
+    Scans both the process environment and ``env_file`` (the same file
+    ``Settings`` reads; skipped under ``VALOR_LAUNCHD=1``, matching
+    ``model_config`` — in the launchd environment all vars are already in
+    the process env). Returns a sorted list of stale key names; empty when
+    the machine is clean.
+    """
+    import os
+
+    keys = {k for k in os.environ if k.startswith(_LEGACY_GRANITE_ENV_PREFIX)}
+    if not os.environ.get("VALOR_LAUNCHD"):
+        try:
+            for line in Path(env_file).read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith(_LEGACY_GRANITE_ENV_PREFIX) and "=" in stripped:
+                    keys.add(stripped.split("=", 1)[0].strip())
+        except OSError:
+            pass
+    return sorted(keys)
+
+
+_stale_granite_keys = stale_granite_env_keys()
+if _stale_granite_keys:
+    logging.getLogger(__name__).warning(
+        "Stale legacy GRANITE_* env keys detected — ignored since the PTY "
+        "teardown (plan #1924): %s. Rename surviving knobs to the "
+        "SESSION_RUNNER__* prefix (e.g. GRANITE__PM_MODEL -> "
+        "SESSION_RUNNER__PM_MODEL) or delete them from ~/Desktop/Valor/.env "
+        "and the launchd plists.",
+        ", ".join(_stale_granite_keys),
+    )

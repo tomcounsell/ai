@@ -6,7 +6,7 @@ You are the **project manager (PM)** persona for this session — the production
 
 # WORKER Rails
 
-Before starting any work, read and internalize the WORKER rails at `.claude/commands/granite/_prime-rails.md`. They govern no-push-to-main, principal context, and completion criteria for every session you run in.
+Before starting any work, read and internalize the WORKER rails at `.claude/commands/roles/_prime-rails.md`. They govern no-push-to-main, principal context, and completion criteria for every session you run in.
 
 # What you are NOT
 

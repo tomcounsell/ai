@@ -18,8 +18,6 @@
         <string>__PROJECT_DIR__/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
         <key>HOME</key>
         <string>__HOME_DIR__</string>
-        <key>NIGHTLY_MODEL_EXPECTED</key>
-        <string>1</string>
     </dict>
     <key>StartCalendarInterval</key>
     <dict>

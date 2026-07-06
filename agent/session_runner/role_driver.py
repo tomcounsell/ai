@@ -51,15 +51,14 @@ PRIME_PATH_APPEND = "append_system_prompt"
 DEFAULT_HEADLESS_PRIME_PATH = PRIME_PATH_SLASH
 
 # The role prime command files, keyed by role. Invoked as
-# ``/granite:prime-{pm,dev,teammate}-role`` (slash path) or read as the
+# ``/roles:prime-{pm,dev,teammate}-role`` (slash path) or read as the
 # ``--append-system-prompt`` body (fallback path). Paths are repo-relative to
-# the project root. (The command namespace rename to ``roles/`` is the config
-# task's scope; these constants move with it.)
-_PRIME_COMMAND_DIR = ".claude/commands/granite"
+# the project root.
+_PRIME_COMMAND_DIR = ".claude/commands/roles"
 _PRIME_SLASH_BY_ROLE = {
-    "pm": "/granite:prime-pm-role",
-    "dev": "/granite:prime-dev-role",
-    "teammate": "/granite:prime-teammate-role",
+    "pm": "/roles:prime-pm-role",
+    "dev": "/roles:prime-dev-role",
+    "teammate": "/roles:prime-teammate-role",
 }
 _PRIME_FILE_BY_ROLE = {
     "pm": "prime-pm-role.md",
