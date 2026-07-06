@@ -45,7 +45,7 @@ def _bridge_plist_exists() -> bool:
         from scripts.update.service import BRIDGE_PLIST_PATH
 
         return BRIDGE_PLIST_PATH.exists()
-    except Exception:
+    except Exception:  # swallow-ok: plist probe is best-effort; absence handled by caller
         return False
 
 
@@ -196,7 +196,7 @@ async def handle_update_command(tg_client, event):
                 f"{machine} - ⏳ updating — if this update restarts the bridge, "
                 "confirmation will follow from the fresh bridge",
             )
-        except Exception:
+        except Exception:  # swallow-ok: interim notice best-effort, never blocks update
             pass
 
     # Export the originating chat context so a bridge-relevant run can stage
@@ -383,7 +383,7 @@ async def run_boot_release_check(tg_client) -> None:
         logger.warning(f"[update] boot release self-check failed (non-fatal): {e}")
     try:
         (_PROJECT_DIR / "data" / "update-restart-in-progress").unlink(missing_ok=True)
-    except Exception:
+    except Exception:  # swallow-ok: marker cleanup best-effort, TTL covers misses
         pass
 
     # Step 2: conditional pending-report flush.
@@ -418,7 +418,7 @@ async def run_boot_release_check(tg_client) -> None:
         chat_id = int(report["chat_id"])
         try:
             await tg_client.send_message(chat_id, message, reply_to=int(report["reply_to"]))
-        except Exception:
+        except Exception:  # swallow-ok: reply target may be gone; falls back to a plain send below
             # Reply target may be gone — fall back to a plain send.
             await tg_client.send_message(chat_id, message)
 

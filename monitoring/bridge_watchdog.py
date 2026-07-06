@@ -776,7 +776,7 @@ def check_update_release_signals() -> list[str]:
             staged_ts = 0.0
             try:
                 staged_ts = float(json.loads(UPDATE_PENDING_REPORT.read_text()).get("staged_ts", 0))
-            except Exception:
+            except Exception:  # swallow-ok: unreadable staged ts falls back to mtime
                 pass
             if staged_ts <= 0:
                 # Unreadable staged timestamp — fall back to file mtime.

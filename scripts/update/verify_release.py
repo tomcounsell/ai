@@ -59,7 +59,7 @@ def _restart_marker_fresh(project_dir: Path) -> bool:
         if not marker.exists():
             return False
         return (time.time() - marker.stat().st_mtime) < UPDATE_RESTART_MARKER_TTL_SECONDS
-    except Exception:
+    except Exception:  # swallow-ok: unreadable marker means no suppression
         return False
 
 

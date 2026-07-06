@@ -932,7 +932,7 @@ def read_boot_beacon(beacon_path: Path) -> tuple[str, float] | None:
             return None
         beacon_ts = datetime.fromisoformat(lines[1].strip()).timestamp()
         return sha, beacon_ts
-    except Exception:
+    except Exception:  # swallow-ok: malformed/missing beacon classifies as unknown downstream
         return None
 
 
