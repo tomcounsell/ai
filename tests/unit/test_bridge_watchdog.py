@@ -720,3 +720,157 @@ class TestHibernationSuppression:
 
         output = capsys.readouterr().out
         assert "Hibernating: False" in output
+
+
+# --- Update release-verify signals (issue #1898) ---
+
+
+class TestUpdateReleaseSignals:
+    """Planned-restart suppression + sentinel/undrained-report reads (#1898)."""
+
+    HEALTHY = dict(
+        healthy=True,
+        process_running=True,
+        logs_fresh=True,
+        no_crash_pattern=True,
+        issues=[],
+        recovery_level=0,
+    )
+
+    def _patches(self, bw, tmp_path):
+        """Common patch set: hibernation off, tmp paths for every signal file."""
+        return (
+            patch("bridge.hibernation.AUTH_REQUIRED_FLAG", tmp_path / "no-hibernation"),
+            patch.object(bw, "RECOVERY_LOCK", tmp_path / "no-recovery-lock"),
+            patch.object(bw, "UPDATE_RESTART_MARKER", tmp_path / "update-restart-in-progress"),
+            patch.object(bw, "UPDATE_RELEASE_FAILED_SENTINEL", tmp_path / "update-release-failed"),
+            patch.object(bw, "UPDATE_PENDING_REPORT", tmp_path / "update-pending-report"),
+        )
+
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    @patch("monitoring.bridge_watchdog.log_crash")
+    def test_fresh_marker_suppresses_health_check_and_recovery(
+        self, mock_crash, mock_health, mock_recovery, tmp_path
+    ):
+        """Decision 19: a fresh marker early-returns True BEFORE
+        check_bridge_health — no crash logged, no recovery escalation."""
+        from monitoring import bridge_watchdog as bw
+
+        p1, p2, p3, p4, p5 = self._patches(bw, tmp_path)
+        with p1, p2, p3, p4, p5:
+            (tmp_path / "update-restart-in-progress").write_text("1234567890\n")
+            assert bw.run_health_check() is True
+
+        mock_health.assert_not_called()
+        mock_recovery.assert_not_called()
+        mock_crash.assert_not_called()
+        # The watchdog never consumes a fresh marker (the fresh bridge does).
+        assert (tmp_path / "update-restart-in-progress").exists()
+
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    def test_aged_out_marker_resumes_normal_health_checking(
+        self, mock_health, mock_recovery, tmp_path
+    ):
+        import os as _os
+        import time as _time
+
+        from monitoring import bridge_watchdog as bw
+
+        mock_health.return_value = HealthStatus(**self.HEALTHY)
+        marker = tmp_path / "update-restart-in-progress"
+        p1, p2, p3, p4, p5 = self._patches(bw, tmp_path)
+        with p1, p2, p3, p4, p5:
+            marker.write_text("old\n")
+            aged = _time.time() - (bw.UPDATE_RESTART_MARKER_TTL_SECONDS + 30)
+            _os.utime(marker, (aged, aged))
+            assert bw.run_health_check() is True
+
+        mock_health.assert_called_once()
+        mock_recovery.assert_not_called()
+        assert not marker.exists()  # aged-out marker removed
+
+    def test_marker_ttl_never_shorter_than_report_ttl(self):
+        """Decision 26: the suppression window must never expire before the
+        boot window it protects; both anchor to STARTUP_GRACE_SECONDS + 60."""
+        from monitoring import bridge_watchdog as bw
+        from scripts.update import verify_release as vr
+
+        assert bw.UPDATE_RESTART_MARKER_TTL_SECONDS >= bw.UPDATE_REPORT_TTL_SECONDS
+        assert bw.UPDATE_REPORT_TTL_SECONDS == bw.STARTUP_GRACE_SECONDS + 60
+        # verify_release's marker-freshness window shares the same constant.
+        assert vr.UPDATE_RESTART_MARKER_TTL_SECONDS == bw.UPDATE_RESTART_MARKER_TTL_SECONDS
+
+    def test_sentinel_surfaced(self, tmp_path):
+        from monitoring import bridge_watchdog as bw
+
+        sentinel = tmp_path / "update-release-failed"
+        sentinel.write_text('{"process": "bridge", "boot_sha": "659756a4"}\n')
+        with (
+            patch.object(bw, "UPDATE_RELEASE_FAILED_SENTINEL", sentinel),
+            patch.object(bw, "UPDATE_PENDING_REPORT", tmp_path / "no-report"),
+        ):
+            issues = bw.check_update_release_signals()
+        assert len(issues) == 1
+        assert "update-release-failed sentinel present" in issues[0]
+        assert "659756a4" in issues[0]
+
+    def test_undrained_report_past_ttl_surfaced(self, tmp_path):
+        import json as _json
+        import time as _time
+
+        from monitoring import bridge_watchdog as bw
+
+        report = tmp_path / "update-pending-report"
+        report.write_text(
+            _json.dumps(
+                {"chat_id": "1", "staged_ts": _time.time() - bw.UPDATE_REPORT_TTL_SECONDS - 30}
+            )
+        )
+        with (
+            patch.object(bw, "UPDATE_PENDING_REPORT", report),
+            patch.object(bw, "UPDATE_RELEASE_FAILED_SENTINEL", tmp_path / "no-sentinel"),
+        ):
+            issues = bw.check_update_release_signals()
+        assert len(issues) == 1
+        assert "undrained" in issues[0]
+        assert "never have come up" in issues[0]
+
+    def test_fresh_report_not_surfaced(self, tmp_path):
+        import json as _json
+        import time as _time
+
+        from monitoring import bridge_watchdog as bw
+
+        report = tmp_path / "update-pending-report"
+        report.write_text(_json.dumps({"chat_id": "1", "staged_ts": _time.time()}))
+        with (
+            patch.object(bw, "UPDATE_PENDING_REPORT", report),
+            patch.object(bw, "UPDATE_RELEASE_FAILED_SENTINEL", tmp_path / "no-sentinel"),
+        ):
+            assert bw.check_update_release_signals() == []
+
+    @patch("monitoring.bridge_watchdog.execute_recovery")
+    @patch("monitoring.bridge_watchdog.check_bridge_health")
+    def test_signals_logged_critical_in_health_check(
+        self, mock_health, mock_recovery, tmp_path, caplog
+    ):
+        import logging as _logging
+
+        from monitoring import bridge_watchdog as bw
+
+        mock_health.return_value = HealthStatus(**self.HEALTHY)
+        p1, p2, p3, p4, p5 = self._patches(bw, tmp_path)
+        with (
+            p1,
+            p2,
+            p3,
+            p4,
+            p5,
+            caplog.at_level(_logging.CRITICAL, logger="monitoring.bridge_watchdog"),
+        ):
+            (tmp_path / "update-release-failed").write_text('{"process": "bridge"}\n')
+            bw.run_health_check()
+
+        assert any("[update-release]" in r.message for r in caplog.records)

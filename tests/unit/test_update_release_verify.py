@@ -448,3 +448,79 @@ def test_cli_no_in_role_processes_exits_0(repo, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "no in-role processes" in out
+
+
+# ---------------------------------------------------------------------------
+# run.py --full terminal verify (run_release_verify)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def run_mod(monkeypatch):
+    """scripts.update.run with Sentry neutralized (never report to prod)."""
+    from scripts.update import run as run_module
+
+    monkeypatch.setattr("monitoring.sentry_config.configure_sentry", lambda *a, **k: False)
+    return run_module
+
+
+def test_full_verify_stale_sets_success_false_naming_both_shas(run_mod, monkeypatch, tmp_path):
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("stale", "matches"),
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is False
+    assert any("bridge running 659756a4 but HEAD is 6b5b998a" in w for w in result.warnings)
+    # Bridge hard-fail → the out-of-band sentinel is written for the watchdog.
+    sentinel = tmp_path / "data" / "update-release-failed"
+    assert sentinel.exists()
+    import json as _json
+
+    payload = _json.loads(sentinel.read_text())
+    assert payload["process"] == "bridge"
+    assert payload["boot_sha"] == "659756a4"
+    assert payload["head_sha"] == "6b5b998a"
+
+
+def test_full_verify_worker_stale_fails_without_bridge_sentinel(run_mod, monkeypatch, tmp_path):
+    (tmp_path / "data").mkdir()
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("matches", "stale"),
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is False
+    # Worker hard-fail keeps non-zero exit + Sentry; NO sentinel (Decision 5).
+    assert not (tmp_path / "data" / "update-release-failed").exists()
+
+
+def test_full_verify_unknown_warns_only(run_mod, monkeypatch, tmp_path):
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("unknown", "matches"),
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is True
+    assert any("could not be confirmed" in w for w in result.warnings)
+
+
+def test_full_verify_never_raises_on_error(run_mod, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        run_mod.git,
+        "get_short_sha",
+        lambda pd: (_ for _ in ()).throw(RuntimeError("no git")),
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)  # must not raise
+    assert result.success is True
