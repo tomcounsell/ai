@@ -1,12 +1,15 @@
 ---
-status: Planning
+status: Cancelled
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-06
 tracking: https://github.com/tomcounsell/ai/issues/1919
 last_comment_id:
+superseded_by: docs/plans/granite-pty-teardown.md
 ---
+
+> **Cancelled 2026-07-06 — absorbed, not discarded.** This plan's Open Question 1 (build vs. cutover) was answered the same day: the granite+PTY teardown is approved and planned (`docs/plans/granite-pty-teardown.md`, #1924). The delivery-path halves of this fix (`container.py` `_await_turn_end` / `_needs_human_message`) are deleted with the substrate, but the root cause lives in `hook_edge.py`, which **graduates** into the new headless runner — so the content-aware Notification classification, the central boilerplate constant, and the turn_end-over-needs_human ordering are carried as an explicit bullet of the teardown's task 1 (build-graduate), and the implementation PR closes #1919. The analysis below remains the canonical description of the defect.
 
 # Idle notification "Claude is waiting for your input" swallows the PM's real answer
 

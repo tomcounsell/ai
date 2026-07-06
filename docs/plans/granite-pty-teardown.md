@@ -41,6 +41,7 @@ These four decisions were made explicitly by the owner after the audit and are *
 - File:line anchors re-verified during the audit itself: `session_executor.py:1690-1696` (pm=headless→pty coercion), `container.py:2787` (Dev relays via PM PTY), `role_driver.py:353` (--resume chaining), `session_health.py:407` (TOOL_TIMEOUT_DEFAULT_SEC=3000 stopgap), `models/agent_session.py:499` (resume_handles written, unconsumed).
 - **Overlap:** `docs/plans/granite_lossless_checkpoint_resume.md` (status: Ready, tracking #1721) plans lossless PTY checkpoint resume. Resolved by decision D3: this plan supersedes it; task 9 marks it Cancelled with a pointer here.
 - **Overlap:** open issue #1921 proposes per-role headless default *with PTY auto-fallback* — contradicts the one-way mandate; superseded (implementation PR closes it).
+- **Overlap (same-day):** `docs/plans/idle-notification-verbatim-delivery.md` (#1919, committed 4b62c646 while this plan was being audited) parked itself as "draft pending the cutover decision." Resolved by **absorption**: its root cause — `hook_edge.py:71` unconditionally classifying every `Notification` as `needs_human`, which both leaked "Claude is waiting for your input" boilerplate to the CEO and swallowed the PM's real `[/user]` answer — lives in a module that *graduates* into the runner, so the defect would survive a naive cutover. Task 1 carries its fix into the graduated `hook_edge`; the standalone plan is Cancelled; the implementation PR closes #1919.
 
 ## Prior Art
 
@@ -315,7 +316,8 @@ No new MCP servers or `.mcp.json` changes. Integration is subtractive:
 - [ ] `TOOL_TIMEOUT_DEFAULT_SEC` default is 300 again
 - [ ] Tests pass (`/do-test`); lint/format clean
 - [ ] Documentation updated (`/do-docs`); features index has no granite-PTY entries
-- [ ] Implementation PR closes #1924, #1918, #1921 and comments-supersedes #1721
+- [ ] A boilerplate idle Notification never reaches an outbound chat message, and a `[/user]` answer coinciding with one is delivered (the #1919 class)
+- [ ] Implementation PR closes #1924, #1918, #1919, #1921 and comments-supersedes #1721
 
 ## Team Orchestration
 
@@ -341,6 +343,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Assigned To**: runner-builder — **Agent Type**: builder — **Parallel**: false
 - Create `agent/session_runner/` with `role_driver.py`, `hook_edge.py`, `hook_forwarder.py`, `transcript_tailer.py`, `router.py` (classify_pm_prefix minus `_strip_ansi`, RouteOutcome/exit-classification tables), `adapter.py` (delivery callbacks, `_persist_resume_handles`, `_publish_exit_summary`, `_transcript_path_from_spec`)
 - Sever the two audited couplings; PermissionRequest hook registration dropped from `generate_hook_settings` (doesn't fire under -p); `hook_forwarder` path constant updated
+- **Absorb the #1919 fix into graduated `hook_edge`:** remove `"Notification"` from `_NEEDS_HUMAN_EVENTS`; add content-aware classification — a Notification carrying known Claude Code boilerplate (exact idle string "Claude is waiting for your input", permission-phrasing prefix) or an empty message emits **no edge**; substantive Notifications remain `needs_human`. One central boilerplate constant, conservative matching. In the runner/driver reconciliation, prefer a `turn_end` edge over a `needs_human` edge when both arrive in one poll batch (inverts the ordering bug that swallowed the answer). Port the #1919 plan's test list against the graduated module
 - Explicit auth injection (G5): subprocess env sets `CLAUDE_CODE_OAUTH_TOKEN`, strips `ANTHROPIC_API_KEY`; never `--bare`
 - Old package untouched in this task (deletion is task 6)
 
@@ -417,7 +420,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Task ID**: build-supersede
 - **Depends On**: build-config
 - **Assigned To**: config-builder — **Agent Type**: builder — **Parallel**: true
-- `docs/plans/granite_lossless_checkpoint_resume.md` → `status: Cancelled`, superseded-by note; comment on #1721 and #1921 pointing here (closure via the PR body: Closes #1924, Closes #1918, Closes #1921)
+- `docs/plans/granite_lossless_checkpoint_resume.md` → `status: Cancelled`, superseded-by note; comment on #1721 and #1921 pointing here (closure via the PR body: Closes #1924, Closes #1918, Closes #1919, Closes #1921). `idle-notification-verbatim-delivery.md` already Cancelled at plan time (absorbed into task 1)
 
 ### 10. Validate cutover
 - **Task ID**: validate-cutover
