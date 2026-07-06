@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
 created: 2026-07-06
 tracking: https://github.com/tomcounsell/ai/issues/1924
 last_comment_id: none
+revision_applied: true
 ---
 
 # Granite PTY Teardown: All Sessions Headless via `claude -p`
@@ -51,6 +52,7 @@ These four decisions were made explicitly by the owner after the audit and are *
 - **#1688 (shipped):** hook-driven turn returns (`docs/features/granite-hook-driven-turn-returns.md`) — the turn-end mechanism that replaces idle scraping; explicitly transport-agnostic.
 - **#1681 (merged):** made the PM↔Dev shuttle zero-LLM — confirms routing is regex, not ollama.
 - **#1918 / #1843 / #1792 / #1851 / 4f9f929e:** the patch-the-heuristic lineage (see Why Previous Fixes Failed).
+- **#1724 / #1879 (merged):** the mid-run wedge/nudge lineage — mid-run quiescence constants (#1724) and the wedge-nudge steering channel (#1879). Task 5 (build-health) deletes their entire implementation surface; both close via the implementation PR.
 
 ## Research
 
@@ -136,7 +138,7 @@ Six parallel audit passes ran at plan time (2026-07-06, baseline d451c1bd) in li
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| `CLAUDE_CODE_OAUTH_TOKEN` in vault env | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('CLAUDE_CODE_OAUTH_TOKEN')"` | Subscription auth for all headless role turns |
+| `CLAUDE_CODE_OAUTH_TOKEN` in vault env | `python -c "from dotenv import dotenv_values; assert dotenv_values('$HOME/Desktop/Valor/.env').get('CLAUDE_CODE_OAUTH_TOKEN')"` | Subscription auth for all headless role turns (vault path — worktrees have no `.env` symlink) |
 | `claude` CLI on PATH | `command -v claude` | The headless substrate |
 | Worker/bridge stoppable on this machine | `./scripts/valor-service.sh status` | Cutover restart at the end of build |
 
@@ -265,7 +267,7 @@ Full audit in Spike Results (audit-4). Dispositions:
 
 - [SEPARATE-SLUG #1923] Machine-wide ollama removal — replacing `bridge/routing.py` and `tools/email_cs/triage.py` classifier calls with a small Claude call. This plan only removes ollama from the *session-execution* path (D2).
 - [SEPARATE-SLUG #1802] PM file-capable send path (screenshots/images to users). Real gap, orthogonal to the transport; unchanged by this cutover.
-- [ORDERED] Fleet deploy: `/do-deploy` + per-machine `/update` after merge (plist env regeneration requires `launchctl bootout`/`bootstrap`, and the bridge-role machine goes last after the E2E probe passes on the first machine). Human-gated post-merge event.
+- [ORDERED] Fleet deploy: `/do-deploy` + per-machine `/update` after merge (plist env regeneration requires `launchctl bootout`/`bootstrap`, and the bridge-role machine goes last after the E2E probe passes on the first machine). Human-gated post-merge event. **Includes the vault-config edit:** remove the `transport` keys from `~/Desktop/Valor/projects.json` only after the bridge-role machine's `/update` completes and the E2E probe passes — `projects.json` is iCloud-synced fleet-wide, and removing the keys at build time would strand pre-cutover machines whose live `validate_transport` path still expects them during the staged rollout window.
 - [DESTRUCTIVE] Purging historical PTY telemetry values (old `exit_reason=startup_unresolved`, `startup_failure_kind=plateau` records) from Redis/the session archive. Old records keep their historical values; only the *producers* are deleted. Review-before-execute if ever desired — not this plan.
 
 ## Update System
@@ -317,7 +319,7 @@ No new MCP servers or `.mcp.json` changes. Integration is subtractive:
 - [ ] Tests pass (`/do-test`); lint/format clean
 - [ ] Documentation updated (`/do-docs`); features index has no granite-PTY entries
 - [ ] A boilerplate idle Notification never reaches an outbound chat message, and a `[/user]` answer coinciding with one is delivered (the #1919 class)
-- [ ] Implementation PR closes #1924, #1918, #1919, #1921 and comments-supersedes #1721
+- [ ] Implementation PR closes #1924, #1918, #1919, #1921, #1724, #1879 (task 5 deletes the #1724/#1879 wedge-nudge implementation surface) and comments-supersedes #1721
 
 ## Team Orchestration
 
@@ -374,7 +376,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Assigned To**: integration-builder — **Agent Type**: builder — **Parallel**: false
 - `session_executor.py`: granite leg → SessionRunner; delete `_resolve_role_transports`, the pm-coercion guard, PTYPool imports
 - `worker/__main__.py`: delete `ensure_granite_model` probe/breaker/reprobe/deferred-resume, `verify_tui_marker_contract`, PTY pool init/orphan-kill, `_fleet_has_pty_transport_role`
-- Delete `session_pickup` granite-degraded deferral, `session_state.granite_available`, `models/child_session_gate.py`, `bridge/config_validation.validate_transport`; remove `transport` keys from `~/Desktop/Valor/projects.json`
+- Delete `session_pickup` granite-degraded deferral, `session_state.granite_available`, `models/child_session_gate.py`, `bridge/config_validation.validate_transport` (the `transport` keys in `~/Desktop/Valor/projects.json` are NOT removed at build time — that edit is sequenced into the post-merge fleet deploy; see No-Gos [ORDERED] entry)
 - `reflections/stall_advisory.py` repointed to session_runner
 
 ### 5. Health, stall, telemetry, model migration
@@ -394,6 +396,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Validates**: Verification table inverse rows
 - **Assigned To**: integration-builder — **Agent Type**: builder — **Parallel**: false
 - `git rm -r agent/granite_container/ tools/granite_loop/`; delete the 6 PTY spike/smoke/monitor scripts (`granite_tui_pty_spike*.py`, `granite_smoke_test.py`, `granite_long_hold_monitor.py`; keep `probe_slash_arguments.py` only if the prime path still references it)
+- Audit `scripts/probe_slash_arguments.py` for its pexpect import before deciding to keep it — if retained, drop or replace the pexpect usage so the extended verification grep (now covering `scripts/` and `tests/`) stays at zero
 - Repo-wide grep sweep: zero remaining `granite_container` / `pexpect` / wedge-nudge / transport-seam references (loop-wedge family explicitly preserved — audit-2 out-of-scope list)
 
 ### 7. Config, scripts, update system, prime commands
@@ -424,7 +427,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 
 ### 10. Validate cutover
 - **Task ID**: validate-cutover
-- **Depends On**: build-tests, build-config, build-supersede
+- **Depends On**: build-tests, build-config, build-supersede, build-resume
 - **Assigned To**: cutover-validator — **Agent Type**: validator — **Parallel**: false
 - Run the full Verification table; live smoke: dispatch a real eng session locally (worker running), observe PM prime → Dev turn → delivery with `ps` proving zero PTY children; steer it mid-turn and confirm preempt + resume
 
@@ -446,11 +449,11 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 |-------|---------|----------|
 | Substrate gone | `test -d agent/granite_container` | exit code 1 |
 | No dangling imports | `grep -rn "granite_container" --include='*.py' agent/ worker/ bridge/ tools/ reflections/ models/ ui/ config/ scripts/ \| wc -l` | match count == 0 |
-| pexpect gone (code) | `grep -rn "pexpect" --include='*.py' agent/ worker/ bridge/ tools/ \| wc -l` | match count == 0 |
+| pexpect gone (code) | `grep -rn "pexpect" --include='*.py' agent/ worker/ bridge/ tools/ scripts/ tests/ \| wc -l` | match count == 0 |
 | pexpect gone (deps) | `grep -c "pexpect" pyproject.toml` | match count == 0 |
 | Transport seam gone | `grep -rn "PM_TRANSPORT\|DEV_TRANSPORT\|role_transports" --include='*.py' agent/ worker/ bridge/ config/ models/ \| wc -l` | match count == 0 |
 | Wedge-nudge gone | `grep -rn "wedge_nudge" --include='*.py' agent/ \| wc -l` | match count == 0 |
-| Stopgap reverted | `grep -c '"3000"' agent/session_health.py` | match count == 0 |
+| Stopgap reverted | `grep -c 'TOOL_TIMEOUT_DEFAULT_SEC", 3000' agent/session_health.py` | match count == 0 |
 | Runner exists + PM dispatch | `grep -c "run_turn" agent/session_runner/runner.py` | output > 0 |
 | Loop-wedge family preserved | `grep -c "loop_wedged" monitoring/bridge_watchdog.py` | output > 0 |
 | Anti-criterion: no #1923 scope creep | `grep -c "OLLAMA_CLASSIFIER_MODEL" bridge/routing.py` | output > 0 |
@@ -463,7 +466,14 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| CONCERN | History & Consistency | "Stopgap reverted" verification row grepped for quoted `"3000"`, which never matches the unquoted literal at `session_health.py:407` — false green by construction | Verification table row updated | Command is now `grep -c 'TOOL_TIMEOUT_DEFAULT_SEC", 3000' agent/session_health.py` expecting 0 (absence of the old default) |
+| CONCERN | History & Consistency | Prerequisite check loaded `.env` from cwd, which fails in `.worktrees/{slug}/` (no `.env` symlink) — false prerequisite failure on every build run | Prerequisites table row 1 updated | Check now loads `$HOME/Desktop/Valor/.env` (vault path) directly |
+| CONCERN | History & Consistency | Task 5 deletes the #1724 mid-run quiescence constants and #1879 wedge-nudge channel without Prior Art or closure bookkeeping | Prior Art bullet added; Success Criteria closure line updated | PR body now carries Closes #1724, Closes #1879; task 5 (build-health) deletes their implementation surface |
+| CONCERN | Risk & Robustness (Adversary) | Task 10 (validate-cutover) did not depend on build-resume, so a DAG scheduler could validate cutover before resume consumption landed | Task 10 Depends On updated | `Depends On: build-tests, build-config, build-supersede, build-resume` |
+| CONCERN | Risk & Robustness (Operator) | "pexpect gone (code)" grep excluded `scripts/` and `tests/`, where known pexpect importers live (`probe_slash_arguments.py`, `test_session_executor_granite.py`) — possible false green | Verification row extended; task 6 checklist item added | Grep now covers `agent/ worker/ bridge/ tools/ scripts/ tests/`; task 6 audits `probe_slash_arguments.py`'s pexpect import before deciding to keep it |
+| CONCERN | Risk & Robustness (Operator) | Removing `transport` keys from iCloud-synced `projects.json` at build time would strand pre-cutover machines during the staged rollout | Task 4 checklist amended; No-Gos [ORDERED] Fleet deploy entry expanded | Vault-config edit sequenced after the bridge-role machine's `/update` + E2E probe pass |
+
+Scope & Value critic returned no findings. Verdict: **READY TO BUILD (with concerns)** — all six Implementation Notes embedded above; no blockers.
 
 ---
 
