@@ -27,7 +27,7 @@ These four decisions were made explicitly by the owner after the audit and are *
 
 | # | Decision | Choice |
 |---|---|---|
-| D1 | Session topology | **PM survives as a real session.** Two headless roles; PM↔Dev handoff becomes runner-mediated message passing (no live-terminal pairing). |
+| D1 | Session topology | **AMENDED by owner same-day, post-spike #1928: single Opus PM session; Dev runs as a resumable subagent *inside* the PM session.** The PM is the only top-level `claude -p` session; Dev is spawned via the harness's agent tool from a well-defined `dev` agent definition (built from the dev prime command) and continued across turns — and across process restarts — via agent continuation. The original choice (two headless roles + runner-mediated relay) was contingent on subagent resumability being unproven; spike #1928 proved it the same day (subagent context survives `--resume` across processes, transcript-backed), meeting the owner's recorded condition. There is no relay loop at all. |
 | D2 | ollama | **Out of the session-execution path entirely.** Worker probe, circuit breaker, reprobe loop, degraded-mode deferral, and the update green-light gate are deleted. Bridge routing and email triage keep their direct ollama calls (follow-up: #1923). |
 | D3 | Resume fidelity | **Simple `--resume`.** Persist per-role session IDs; resume injects the reply/steer as the next turn. Supersedes the #1721 lossless-checkpoint plan (loop cursor dropped). |
 | D4 | Mid-turn control | **Auto-preempt on any steer.** A steering message terminates the in-flight turn subprocess; the runner resumes with the steer injected. The PTY two-stage ctrl-c interject path is deleted. |
@@ -51,6 +51,7 @@ These four decisions were made explicitly by the owner after the audit and are *
 - **#1751 (merged):** adopted `claude setup-token` (~1-year `CLAUDE_CODE_OAUTH_TOKEN`) — the auth this cutover rides.
 - **#1688 (shipped):** hook-driven turn returns (`docs/features/granite-hook-driven-turn-returns.md`) — the turn-end mechanism that replaces idle scraping; explicitly transport-agnostic.
 - **#1681 (merged):** made the PM↔Dev shuttle zero-LLM — confirms routing is regex, not ollama.
+- **#1633 (open):** prescribed exactly the D1-amended end-state — "dependent work runs as subagents WITHIN a session." This plan delivers it for the Dev role; the child_session_gate's eventual removal remains #1633's scope (task 9 comments).
 - **#1917 (open):** crash auto-resume is structurally dead — granite PTY sessions always classify non-resumable. Task 3 resolves the non-resumable-classification half; the reflection-scheduling half is re-triaged after cutover (task 9 comments on the issue).
 - **#1918 / #1843 / #1792 / #1851 / 4f9f929e:** the patch-the-heuristic lineage (see Why Previous Fixes Failed).
 - **#1724 / #1879 (merged):** the mid-run wedge/nudge lineage — mid-run quiescence constants (#1724) and the wedge-nudge steering channel (#1879). Task 5 (build-health) deletes their entire implementation surface; both close via the implementation PR.
@@ -99,10 +100,10 @@ Six parallel audit passes ran at plan time (2026-07-06, baseline d451c1bd) in li
 1. **Entry:** Telegram message → bridge (`bridge/telegram_bridge.py`) → enqueue `AgentSession` (Redis, Popoto) — unchanged.
 2. **Worker:** `python -m worker` claims the session → `session_executor.execute_agent_session` — unchanged up to dispatch.
 3. **Dispatch (changed):** executor builds a `SessionRunner` (new `agent/session_runner/`) instead of `BridgeAdapter`+`PTYPool`+`Container`. No transport resolution — there is one transport.
-4. **Runner loop (changed):** per turn, spawn `claude -p --output-format stream-json --resume <persisted uuid>` as a subprocess in the session's `working_dir`; turn 1 primes via `/granite:prime-{role}-role` slash command. PM turn → `classify_pm_prefix` (regex) → route: `[/dev]` → Dev turn (headless, reply passed back to PM as the next PM turn message — plain string passing, no terminals); `[/user]` → deliver via callbacks; `[/complete]` → wrapup guard → exit.
+4. **Runner loop (changed, D1-amended):** per turn, spawn ONE `claude -p --output-format stream-json --resume <persisted uuid>` subprocess — the PM session — in the session's `working_dir`; turn 1 primes via the PM prime slash command. For eng work the PM spawns/continues its `dev` subagent *inside* its own turn (harness agent tool; the parent `-p` process blocks until the subagent finishes — spike Exp4). The PM's turn output routes by simplified regex: `[/user]` → deliver via callbacks; `[/complete]` → wrapup guard → exit; anything else → continue. The `[/dev]` routing token and external relay are gone — the PM calls Dev itself.
 5. **Turn end (changed):** stream-json `result` event (usage, cost, is_error) reconciled with the Stop-hook envelope (`hook_edge` NDJSON file) — no idle scraping anywhere.
 6. **Steering:** `push_steering_message()` → Redis list → runner's preempt watcher terminates the in-flight subprocess (D4) → next loop iteration drains the steer and resumes with it injected.
-7. **Persistence:** after every turn, per-role `{role, claude_session_id, transcript_path, working_dir}` handles upsert onto `AgentSession.resume_handles`; `_publish_exit_summary` writes the exit record. Resume (crash, restart, user reply) reads the handles and re-enters with `--resume`.
+7. **Persistence (owner mandate — baked into the Popoto model):** `AgentSession` carries the four resume scalars from spike #1928 — `claude_session_id` (the PM session UUID, the sole `--resume` entry point; reuses the existing `claude_session_uuid` field), `dev_agent_id` (the subagent continuation handle, captured from the parent's report at spawn), `runner_cwd` (exact absolute path — resume is cwd-scoped), `claude_version` (behavior is version-specific). `claude_session_id` is captured at `system/init` (Race 5); `dev_agent_id` upserted the turn Dev is first spawned. Additionally, a compact **turn history** is mirrored per turn (extending the existing session-event stream): `{ts, actor: pm|dev, text}` with full user-visible texts, tool-noise excluded, length env-capped — observability on the dashboard plus a recovery seed if the on-disk transcripts are ever GC'd. Transcripts remain the source of truth; the mirror is insurance. `_publish_exit_summary` unchanged.
 8. **Output:** delivery callbacks → Redis outbox → bridge → Telegram — unchanged.
 
 ## Why Previous Fixes Failed
@@ -150,7 +151,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite-pty-te
 ### Key Elements
 
 - **`agent/session_runner/` (new module, ~1,800-2,600 LOC total):** the graduated survivors under a name that retires "granite" from the session path — `role_driver.py` (HeadlessRoleDriver + prime loading), `hook_edge.py` + `hook_forwarder.py`, `transcript_tailer.py`, `router.py` (regex `classify_pm_prefix` + `RouteOutcome` exit classification), `runner.py` (the new relay loop), `adapter.py` (executor-facing construction, delivery callbacks, resume persistence, exit summary).
-- **The relay loop, re-expressed as message passing (D1):** PM and Dev are both `HeadlessRoleDriver`s. "PM↔Dev handoff" is the runner passing one role's returned text as the other role's next turn message — the substitution `_run_dev_turn_headless` already made for Dev, now applied to PM and to the relay itself. No pool, no prime phase, no startup loop, no plateau detector, no idle scraper.
+- **No relay loop at all (D1-amended):** the PM is the single top-level session, driven by `HeadlessRoleDriver`; Dev is a **well-defined subagent** — a `dev` agent definition (`.claude/agents/dev.md`, generated from the dev prime command + shared rails) that the PM spawns on first need and continues via agent continuation, across turns and across `--resume`d processes (spike #1928). PM↔Dev coordination is the harness's own agent mechanism; the runner orchestrates exactly one subprocess per turn. No pool, no prime phase, no startup loop, no plateau detector, no idle scraper, no relay.
 - **Steer-preempt (D4):** a watcher polls the steering list during a turn; on arrival it terminates the turn's subprocess (generation-token-guarded), the loop drains the steer, and the next turn `--resume`s with it injected.
 - **Simple resume (D3):** per-role handles (`claude_session_id`, `transcript_path`, `working_dir`) upserted every turn; runner init consumes them (`--resume`, skip prime). The existing stale-UUID fallback (retry once, no `--resume`, full context) is the only recovery tier.
 - **Health = protocol, not paint:** liveness is subprocess-alive + hook-edge/turn-record recency; the only ceilings are the per-turn timeout (`turn_timeout_s`) and `hook_turn_end_wait_s`. All PTY quiescence/wedge/prime heuristics in `session_health.py`, `session_stall_classifier.py`, `agent_session_queue.py`, `tool_budget.py` are deleted or collapsed.
@@ -158,14 +159,15 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite-pty-te
 
 ### Flow
 
-**Telegram message** → bridge enqueues session → **worker claims** → executor builds SessionRunner → **PM turn** (`claude -p`, resume or prime) → regex route → **[/dev]**: Dev turn → reply becomes PM's next message → … → **[/user]**: deliver to Telegram, await reply (dormant) → **[/complete]**: wrapup guard → exit summary → drafter delivery — with **any steer** killing the in-flight turn and re-entering the loop.
+**Telegram message** → bridge enqueues session → **worker claims** → executor builds SessionRunner → **PM turn** (`claude -p`, resume or prime; spawns/continues its `dev` subagent internally for eng work) → regex route on PM output → **[/user]**: deliver to Telegram, await reply (dormant) → **[/complete]**: wrapup guard → exit summary → drafter delivery — with **any steer** killing the in-flight turn (PM and its in-flight Dev together) and re-entering via `--resume`.
 
 ### Technical Approach
 
 - **Graduate-then-delete, one branch, one PR.** Move survivors into `agent/session_runner/` with imports severed, rewire the executor/worker, then `git rm -r agent/granite_container/` in the same PR. No interim state where both substrates are wired (repo rule: no parallel-run migrations).
-- **PM dispatcher = Dev dispatcher.** `_run_pm_turn` is `HeadlessRoleDriver.run_turn` with the PM prime/model — G1 and G3 close together because the relay stops being "write into the other terminal" and becomes function composition in `runner.py`.
+- **One dispatcher, period (G1+G3 dissolve).** `runner.py` is a single-session turn loop: `HeadlessRoleDriver.run_turn` for the PM, every session type. G1 (PM headless dispatcher) is just this; G3 (Dev's PM-PTY coupling) ceases to exist because Dev is no longer a sibling process — it's the PM's subagent. The Dev-side steering/unlock protocol is **baked into the `dev` agent definition at authoring time** (spike gotcha 1: post-hoc overrides are refused; design the continuation contract into the original task).
 - **Explicit auth injection (G5):** the runner (not ambient worker env) sets `CLAUDE_CODE_OAUTH_TOKEN` and strips `ANTHROPIC_API_KEY` in the subprocess env, so headless owns its auth posture deliberately. Never pass `--bare`.
-- **Roles beyond PM/Dev (G6):** teammate (and any single-role conversational session currently dispatched down the granite leg) runs the same runner in single-role mode — one driver, no relay. The `ValorAgent`/SDK bridge-chat path is untouched (already headless).
+- **Roles beyond PM/Dev (G6):** every session type is now structurally identical — one top-level session with a role prime; eng sessions additionally carry the `dev` subagent definition. Teammate sessions are the same loop with a different prime and no dev agent. The `ValorAgent`/SDK bridge-chat path is untouched (already headless; #1925's territory).
+- **Long Dev work runs inside the PM turn.** The parent `-p` process blocks until its subagent finishes (spike Exp4), so an eng PM turn containing a full Dev build is legitimately long. The per-turn timeout becomes role-aware (eng: generous, env-overridable, provisional; teammate: short) — an honest ceiling on a protocol that reports completion, not a guess about screen paint.
 - **Rename discipline:** `GraniteSettings` → `SessionRunnerSettings` (env prefix `SESSION_RUNNER__`), `.claude/commands/granite/` → `.claude/commands/roles/` with `hardlinks.py` stale-removal, "granite" survives only in (a) the postmortem/history and (b) the ollama classifier consumers outside the session path (bridge routing, email triage — #1923's territory). The rename ships with a **mandatory stale-prefix guard** (critique C3): settings load emits a loud startup warning when any legacy `GRANITE__*`/`GRANITE_*` key is present in the environment, and `/update` surfaces it during deploy — old vault overrides fail loudly instead of silently reverting to defaults.
 - **Preempt mechanics:** the runner records `(turn_generation, process_handle)` at spawn; the watcher only terminates a process whose generation matches the current turn. SIGTERM, 10s grace, SIGKILL. A preempted turn records `turn_end_source="preempted"`; its partial transcript is preserved in the Claude session JSONL and `--resume` continues from it.
 - **False-success closed at the transport (the #1916 class):** a turn either yields a stream-json `result` or the subprocess errored — there is no "plateau then auto-complete." The graduated `_run_wrapup_guard` continues to guarantee a user-facing message on the semantic layer.
@@ -204,7 +206,7 @@ Full audit in Spike Results (audit-4). Dispositions:
 - [ ] `tests/unit/test_transport_routing_matrix.py`, `test_transport_config_validation.py` — **DELETE** (no transport selector exists after cutover)
 - [ ] `tests/unit/test_worker_granite_degradation.py` — **DELETE** (degraded mode removed, D2); `tests/unit/test_worker_contract_check.py`, `tests/integration/test_worker_concurrency.py`, `tests/integration/test_progress_deadline_cancel.py`, `tests/integration/test_update_loop_wedge_recovery.py`, `tests/integration/test_worker_wedge_pending.py` — **UPDATE** (remove PTY-pool/marker-contract branches)
 - [ ] `tests/integration/test_pi_builder_e2e.py` — **DELETE** (the pi harness dies with the package; zero production consumers — supersedes the earlier UPDATE disposition)
-- [ ] **NEW:** `tests/unit/session_runner/test_runner_relay.py` (PM↔Dev message passing, route table, wrapup), `test_runner_preempt.py` (generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL), `test_runner_resume.py` (handle consumption, cwd-scoped resume, stale-UUID fallback, skip-prime), `test_runner_liveness.py` (turn timeout, subprocess-death detection — the wedge-coverage replacement)
+- [ ] **NEW:** `tests/unit/session_runner/test_runner_turns.py` (single-session loop, simplified route table, wrapup), `test_runner_dev_subagent.py` (dev agent definition contract, agent-id capture + persistence, continuation-across-resume against a fake harness), `test_runner_preempt.py` (generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL), `test_runner_resume.py` (four-scalar consumption, cwd-scoped resume, stale-UUID fallback, skip-prime, turn-history mirror), `test_runner_liveness.py` (role-aware turn timeout, subprocess-death detection — the wedge-coverage replacement)
 
 ## Rabbit Holes
 
@@ -232,6 +234,10 @@ Full audit in Spike Results (audit-4). Dispositions:
 ### Risk 4: stream-json event drift on a future CLI release
 **Impact:** the same class of breakage as the TUI, one layer down.
 **Mitigation:** categorically better surface — stream-json is a documented machine interface, already parsed in production daily, with `is_error`/nonzero-exit as a hard failure signal (drift fails loudly; the TUI failed silently). The stale-UUID fallback and error-exit paths turn parse failures into visible `exit_reason=error`, never false success.
+
+### Risk 5a: Agent-continuation behavior is CLI-version-specific
+**Impact:** a claude CLI upgrade changes sidechain layout or continuation semantics and silently breaks Dev resumability (spike evidence is from 2.1.201).
+**Mitigation:** persist `claude_version` per session; validate-cutover smoke includes a full subagent continuation round-trip across a process restart; treat CLI upgrades as deploy-gated (smoke the continuation contract before fleet rollout). Failure mode is loud (SendMessage/resume errors), not silent — categorically better than the TUI.
 
 ### Risk 5: Popoto field removal corrupts old session records
 **Impact:** dashboard or archive reads crash on records carrying deleted PTY fields.
@@ -281,7 +287,6 @@ Full audit in Spike Results (audit-4). Dispositions:
 - [SEPARATE-SLUG #1925] Removing `claude_code_sdk` / migrating the ValorAgent chat path to the harness / PydanticAI for non-harness LLM calls. This plan touches only the granite dispatch leg of `sdk_client.py`.
 - [SEPARATE-SLUG #1926] Broader guardian consolidation (watchdog fleet, stall taxonomy, crash-signature library, auto-continue machinery, `child_session_gate` removal) — deliberately post-cutover, pruned against real headless failure data.
 - [SEPARATE-SLUG #1927] AgentSession schema diet and field renaming beyond the PTY fields this plan removes.
-- [SEPARATE-SLUG #1928] Dev-as-resumable-subagent spike — its outcome informs *future* topology and neither gates nor alters this cutover.
 
 ## Update System
 
@@ -323,8 +328,9 @@ No new MCP servers or `.mcp.json` changes. Integration is subtractive:
 ## Success Criteria
 
 - [ ] `agent/granite_container/` does not exist; no source file imports it
-- [ ] An eng session dispatched from Telegram completes end-to-end (PM prime → Dev work → user delivery) with zero PTY processes spawned
-- [ ] `valor-session resume` / user reply-to resumes a session via `--resume` with prior context intact (verified by the session continuing a fact from the prior turn)
+- [ ] An eng session dispatched from Telegram completes end-to-end (PM prime → `dev` subagent work → user delivery) with zero PTY processes spawned
+- [ ] `valor-session resume` / user reply-to resumes a session via `--resume` with prior context intact — **including continuation of the SAME Dev subagent across a worker restart** (agent id read from the AgentSession record)
+- [ ] `dev_agent_id`, `runner_cwd`, `claude_version`, and the turn-history mirror are visible on `dashboard.json` for a live eng session
 - [ ] A steering message during a long Dev turn preempts it within the debounce window and the resumed turn reflects the steer
 - [ ] Worker starts and serves ENG sessions with ollama stopped (degraded-mode machinery gone)
 - [ ] A turn whose subprocess dies produces `exit_reason=error` and a persona-safe user message — never `completed` (the #1916 class)
@@ -363,13 +369,14 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - The `[/dev:pi]` harness-suffix routing and `PiSubprocessBuilder`/`parse_pi_final_text` do **not** graduate — zero production consumers outside the package (grep-verified at plan time); Dev runs on the claude harness only
 - Old package untouched in this task (deletion is task 6)
 
-### 2. Build the runner: PM headless dispatch + message-passing relay + steer-preempt
+### 2. Build the runner: single-session turn loop + `dev` subagent definition + steer-preempt
 - **Task ID**: build-runner
 - **Depends On**: build-graduate
-- **Validates**: tests/unit/session_runner/test_runner_relay.py, test_runner_preempt.py (create)
-- **Informed By**: audit-5 (G1+G3), D1, D4; Race 1
+- **Validates**: tests/unit/session_runner/test_runner_turns.py, test_runner_dev_subagent.py, test_runner_preempt.py (create)
+- **Informed By**: audit-5 (G1; G3 dissolved by D1 amendment), D1-amended (spike #1928), D4; Race 1
 - **Assigned To**: runner-builder — **Agent Type**: builder — **Parallel**: false
-- `runner.py`: two-role loop (PM turn → route → Dev turn → PM…), single-role mode for teammate-type sessions (G6), wrapup guard graduated in, per-turn progress hook, steering boundary drain
+- `runner.py`: single-session turn loop for ALL session types (PM turn → simplified route: `[/user]` deliver / `[/complete]` wrapup / else continue), wrapup guard graduated in, per-turn progress hook, steering boundary drain; role-aware turn timeout (eng generous — Dev work runs inside the PM turn; env-overridable, provisional)
+- Author `.claude/agents/dev.md` from the dev prime command + shared rails, with the steering/continuation protocol **baked into the definition** (spike gotcha 1: post-hoc overrides are refused); update the PM prime to spawn `dev` on first need, report its agent id, and continue the SAME agent on later turns
 - Preempt watcher with generation-token guard, steer debounce (3s default; env-overridable constant, provisional/tunable), SIGTERM→grace→SIGKILL, `turn_end_source="preempted"`
 - Subprocesses in own process group; PID/PGID recorded pre-await (Race 2)
 
@@ -379,7 +386,8 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Validates**: tests/unit/session_runner/test_runner_resume.py (create)
 - **Informed By**: audit-5 (G4), D3; Research (cwd-scoped resume); Race 3
 - **Assigned To**: runner-builder — **Agent Type**: builder — **Parallel**: false
-- Handles upsert per turn (add `working_dir`); runner init validates + consumes (seed `_claude_session_id`, skip prime); stale/invalid → cold start
+- Persist the four spike-#1928 scalars on `AgentSession` (owner mandate): `claude_session_id` (reuse the existing `claude_session_uuid` field), `dev_agent_id`, `runner_cwd`, `claude_version` — nullable adds, no backcompat code needed (`_heal_descriptor_pollution` walks fields generically); runner init validates + consumes (seed `--resume`, skip prime, re-introduce `dev_agent_id` in the resume prompt); stale/invalid → cold start
+- Mirror a compact **turn history** per turn by extending the existing session-event stream: `{ts, actor: pm|dev, text}` with full user-visible texts, tool-noise excluded, length env-capped — dashboard observability plus a recovery seed if on-disk transcripts are GC'd (transcripts stay the source of truth)
 - **Capture-at-init (Race 5, critique C1):** persist the new turn's `claude_session_id` as soon as the stream-json `system/init` event is parsed — *before* awaiting `result` — so a preempted or killed turn's partial transcript remains the resume target, never the stale pre-turn uuid
 - Crash-recovery/user-reply paths pass the reply/steer as the resumed first message; stall-classifier resumability no longer hardcodes granite-non-resumable (unblocks the #1917 class)
 
@@ -439,7 +447,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Task ID**: build-supersede
 - **Depends On**: build-config
 - **Assigned To**: config-builder — **Agent Type**: builder — **Parallel**: true
-- `docs/plans/granite_lossless_checkpoint_resume.md` → `status: Cancelled`, superseded-by note; comment on #1721 and #1921 pointing here (closure via the PR body: Closes #1924, Closes #1918, Closes #1919, Closes #1921). `idle-notification-verbatim-delivery.md` already Cancelled at plan time (absorbed into task 1); comment on #1917 (task 3 resolves its non-resumable-classification half; the reflection-scheduling half is re-triaged post-cutover)
+- `docs/plans/granite_lossless_checkpoint_resume.md` → `status: Cancelled`, superseded-by note; comment on #1721 and #1921 pointing here (closure via the PR body: Closes #1924, Closes #1918, Closes #1919, Closes #1921). `idle-notification-verbatim-delivery.md` already Cancelled at plan time (absorbed into task 1); comment on #1917 (task 3 resolves its non-resumable-classification half; the reflection-scheduling half is re-triaged post-cutover); comment on #1633 (D1-amended topology delivers its prescribed subagent direction for Dev; gate removal remains its scope)
 
 ### 10. Validate cutover
 - **Task ID**: validate-cutover
@@ -473,6 +481,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 | Wedge-nudge gone | `grep -rn "wedge_nudge" --include='*.py' agent/ \| wc -l` | match count == 0 |
 | Stopgap reverted | `grep -c 'TOOL_TIMEOUT_DEFAULT_SEC", 3000' agent/session_health.py` | match count == 0 |
 | Runner exists + PM dispatch | `grep -c "run_turn" agent/session_runner/runner.py` | output > 0 |
+| Dev agent definition exists | `test -f .claude/agents/dev.md` | exit code 0 |
 | Loop-wedge family preserved | `grep -c "loop_wedged" monitoring/bridge_watchdog.py` | output > 0 |
 | Anti-criterion: no #1923 scope creep | `grep -c "OLLAMA_CLASSIFIER_MODEL" bridge/routing.py` | output > 0 |
 | Anti-criterion: no PTY fallback branch | `grep -rn "fallback.*pty\|pty.*fallback" --include='*.py' -i agent/ worker/ \| wc -l` | match count == 0 |
@@ -483,6 +492,8 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 ## Critique Results
 
 Two same-day critique passes (2026-07-06), both addressed in this revision (`revision_applied: true`). Where they disagreed on `scripts/probe_slash_arguments.py` (internal: audit-and-maybe-keep; external: unconditional delete), the external blocker's **unconditional delete** won — it resolves the pexpect contradiction outright rather than managing it.
+
+**Post-critique amendment:** D1 was amended by the owner *after* both passes (single Opus PM session + resumable `dev` subagent, evidence spike #1928 — see the Locked Decisions table). The amended surfaces (Solution, Data Flow, tasks 2–3, model fields, Risk 5a) postdate both verdicts; a targeted re-critique of those sections before build is recommended.
 
 ### Internal war-room pass — verdict: READY TO BUILD (with concerns)
 
