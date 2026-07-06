@@ -525,7 +525,7 @@ The no-progress detector in `_has_progress` (`agent/session_health.py`) includes
 
 This preserves the intended behaviour for sessions that are actively running (the heartbeat loop keeps `last_heartbeat_at` fresh) while allowing recovery of zombie sessions whose executor loop exited without finalizing the session.
 
-**Gate window constraint:** the gate uses `NO_OUTPUT_BUDGET_SECONDS` (1800s), not the tighter `HEARTBEAT_FRESHNESS_WINDOW` (90s). This ensures the own-progress gate does not expire before sub-check B's no-output budget does — a session that is legitimately starting up and has `sdk_ever_output=False` must not be killed by the own-progress expiry before the normal startup budget would have triggered recovery.
+**Gate window constraint:** the gate uses `NO_OUTPUT_BUDGET_SECONDS` (1800s), not the tighter `HEARTBEAT_FRESHNESS_WINDOW` (90s) — a session that is legitimately starting up and has `sdk_ever_output=False` must not be killed by the own-progress expiry before its executor genuinely gets a chance to boot and start producing output. (`NO_OUTPUT_BUDGET_SECONDS` is this gate's own window and the Tier-2 reprieve cap's; sub-check B's fresh-heartbeat fast-path is bounded separately by the D0 never-started gate at 150s, issue #1724 — #1905 pruned sub-check B's prior 1800s-scale grace-to-budget band as unreachable, so this gate's window is no longer a comparison point for sub-check B's bound.)
 
 **Telemetry:** recoveries where `claude_session_uuid` is set but `sdk_ever_output` is False increment the `{project_key}:session-health:recoveries:zombie_uuid_no_output` Redis counter and emit a `[session-health] zombie_uuid_no_output recovery` log line.
 
