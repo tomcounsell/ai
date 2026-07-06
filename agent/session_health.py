@@ -1541,15 +1541,18 @@ def _has_progress(entry: AgentSession) -> bool:
                 return True
 
     # Sub-check B: startup-window executor-alive fallback (#1036 retained, narrowed
-    # by #1226 / #1356).
+    # by #1226 / #1724 / #1905).
     # Use last_heartbeat_at as a Tier 1 signal ONLY before the SDK has produced any
     # tool or turn output. Once sdk_ever_output is True, sub-check A is authoritative.
     # Backward-compatible: sessions from before PR #1177 (no tool/turn fields) fall
     # here and behave identically to the pre-#1226 behavior.
     #
-    # The fresh-heartbeat fast-path is gated by the no-output running-time budget
-    # added in issue #1356. See _has_progress docstring for the full rationale and
-    # the four legs of the gate (legacy/grace/in-band/budget-exceeded).
+    # The fresh-heartbeat fast-path is bounded by the D0 never-started gate (issue
+    # #1724), evaluated against the shared trusted clock (issue #1905) — it is the
+    # authoritative bound for never-started sessions (150s). For D0-gate survivors,
+    # only two legs remain: the legacy-None fast-path (both started_at and
+    # created_at unset) and the startup-grace fast-path (running_seconds <
+    # STARTUP_GRACE_SECONDS). See _has_progress docstring for the full rationale.
     if not sdk_ever_output:
         hb = getattr(entry, "last_heartbeat_at", None)
         if isinstance(hb, datetime):
