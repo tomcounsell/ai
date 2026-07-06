@@ -22,6 +22,7 @@ import pytest
 
 from agent.session_runner.hook_edge import HookEdgeConsumer
 from agent.session_runner.role_driver import (
+    _PRIME_COMMAND_DIR,
     PRIME_PATH_APPEND,
     PRIME_PATH_SLASH,
     HeadlessRoleDriver,
@@ -63,7 +64,7 @@ async def test_prime_append_system_prompt_branch(tmp_path):
     """Default (append) path injects the prime body via system_prompt, leaves
     the message intact."""
     calls = []
-    prime_dir = tmp_path / ".claude" / "commands" / "granite"
+    prime_dir = tmp_path / _PRIME_COMMAND_DIR
     prime_dir.mkdir(parents=True)
     (prime_dir / "prime-pm-role.md").write_text(
         "---\ndescription: x\n---\n\nYou are the PM persona body."
@@ -83,7 +84,7 @@ async def test_prime_append_system_prompt_branch(tmp_path):
 
 
 async def test_prime_slash_command_branch(tmp_path):
-    """Slash path prepends the role's /granite:prime-* command to the message,
+    """Slash path prepends the role's /roles:prime-* command to the message,
     with no system_prompt."""
     calls = []
     driver = HeadlessRoleDriver(
@@ -94,7 +95,7 @@ async def test_prime_slash_command_branch(tmp_path):
         harness_fn=_make_harness(record=calls),
     )
     await driver.run_turn("build it")
-    assert calls[0]["message"] == "/granite:prime-dev-role build it"
+    assert calls[0]["message"] == "/roles:prime-dev-role build it"
     assert calls[0]["system_prompt"] is None
 
 
@@ -110,7 +111,7 @@ async def test_prime_only_on_first_turn(tmp_path):
     )
     await driver.run_turn("first")
     await driver.run_turn("second")
-    assert calls[0]["message"] == "/granite:prime-dev-role first"
+    assert calls[0]["message"] == "/roles:prime-dev-role first"
     assert calls[1]["message"] == "second"  # no prime on turn 2
 
 
@@ -340,7 +341,7 @@ async def test_metered_flag_always_set(tmp_path, prime_path):
     """Every headless turn calls the harness with metered=True + role, so cost
     lands in the disjoint metered_* fields (blocker 1/2)."""
     calls = []
-    prime_dir = tmp_path / ".claude" / "commands" / "granite"
+    prime_dir = tmp_path / _PRIME_COMMAND_DIR
     prime_dir.mkdir(parents=True)
     (prime_dir / "prime-pm-role.md").write_text("body")
     driver = HeadlessRoleDriver(

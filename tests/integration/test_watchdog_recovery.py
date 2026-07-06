@@ -103,15 +103,25 @@ def _pid_lookup_for(proc: subprocess.Popen):
 class TestWatchdogDetectsUnexpectedExit:
     """Integration-level tests for worker_watchdog.check() + dispatch logic."""
 
-    def test_check_reports_healthy_while_worker_runs(self):
-        """Sanity: check() returns 'ok' or 'starting' while the fake worker lives."""
+    def test_check_reports_healthy_while_worker_runs(self, tmp_path):
+        """Sanity: check() returns a non-stale state while the fake worker lives.
+
+        ``HEARTBEAT_FILE`` is repointed to an absent tmp path: the checkout's
+        own ``data/last_worker_connected`` is refreshed only by a live worker
+        running FROM this checkout, so in any other clone/worktree its mtime
+        is arbitrarily old and the unmocked read reports "stale" regardless
+        of worker health. With the file absent, the reachable states are
+        "starting" (pgrep found a worker) or "down" — deterministic on every
+        machine while still exercising the real branch logic.
+        """
+        import monitoring.worker_watchdog as wwd
+
         proc = _spawn_fake_worker()
         try:
             time.sleep(0.3)  # let pgrep catch up
-            status = check()
-            # The fake worker has no heartbeat file so it will be "starting", not "ok".
-            # Both are non-stale non-down states.
-            assert status["status"] in ("ok", "starting", "down"), (
+            with patch.object(wwd, "HEARTBEAT_FILE", tmp_path / "absent_heartbeat"):
+                status = check()
+            assert status["status"] in ("starting", "down"), (
                 f"Unexpected status: {status['status']!r}"
             )
             # If it was found, pid must match the spawned process

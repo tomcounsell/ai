@@ -301,23 +301,31 @@ tests/
 | unit | `test_sdk_permissions.py` | 7 | SDK permissions |
 | unit | `test_workflow_sdk_integration.py` | 6 | Workflow SDK integration |
 
-### `granite` — Granite PTY container and builder harness
+### `session_runner` — Headless session runner (post-#1924 substrate)
+
+The PTY substrate (`agent/granite_container/`, `tests/unit/granite_container/`,
+`tests/granite_faults/`) was deleted by the granite-pty-teardown cutover
+(#1924). The replacement execution leg — `agent/session_runner/` — is covered
+here.
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `granite_container/test_granite_classifier.py` | 46+ | PM prefix-token classification, harness selector (strict + fallback paths) |
-| unit | `test_pi_builder.py` | 39 | `parse_pi_final_text` edge cases; `PiSubprocessBuilder` init, run_turn, timeout, cwd, close |
-| unit | `granite_container/test_container_builder_gate.py` | 10 | `PI_SUBPROCESS_TIMEOUT_S` constant, `BuilderHarness` protocol, caller-owned gate |
-| unit | `granite_container/test_fault_injection.py` | 12 | Failure-simulation harness Substrate A — one deterministic seam-injector per failure class (red-first proven); recorded-fixture consumability; no-orphan invariant. See [`docs/features/granite-failure-simulation-harness.md`](../docs/features/granite-failure-simulation-harness.md) |
-| unit | `granite_container/test_ollama_env.py` | 12 | ollama env construction + OAuth-strip no-leak contract (the PR #1612 guard) + tool-capable model picker |
-| unit | `test_nightly_regression_tests.py` | 28 | Nightly runner incl. ollama Substrate B self-skip on unreachable ollama + version-pinned `claude` canary + `NIGHTLY_OLLAMA_EXPECTED` expected-machine alerting (issue #1841) |
-| integration | `test_granite_ollama_e2e.py` | 3 | Substrate B — real `claude` binary against ollama; gated on `GRANITE_OLLAMA_SMOKE=1` + reachable; asserts a session reaches a clean reply without wedging |
-| integration | `test_pi_builder_e2e.py` | 5 | Real `pi -p --mode json` against local `ollama/gemma4:31b`; skipped if pi/ollama absent |
+| unit | `session_runner/test_runner_turns.py` | 13 | Single-session PM loop: simplified `[/user]`/`[/complete]` route table, wrapup guard, bounded nudges, boundary steering |
+| unit | `session_runner/test_runner_dev_subagent.py` | 7 | Dev agent definition contract (continuation/steering/rails baked in), PM prime spawn-once contract, ResumeContext four-scalar seam |
+| unit | `session_runner/test_runner_preempt.py` | 8 | Steer-preempt (D4): generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL escalation, timeout-as-preempt |
+| unit | `session_runner/test_runner_resume.py` | 15 | Four-scalar resume consumption, cwd-scoped resume (Race 3), stale-UUID fallback, skip-prime, capture-at-init (Race 5), `dev_agent_id` sidechain capture, turn-history mirror (bounded, never read on resume) |
+| unit | `session_runner/test_runner_liveness.py` | 9 | Role-aware turn timeout table, subprocess-death/hang/missing-binary classification (wedge-coverage replacement) |
+| unit | `session_runner/test_headless_role_driver.py` | 13 | `HeadlessRoleDriver` turn dispatch, prime injection, hook-edge turn-end reconciliation |
+| unit | `session_runner/test_hook_edge_notifications.py` | 12 | Hook settings generation, NDJSON edge consumer, Notification envelopes |
+| unit | `session_runner/headless_hook_probe.py` | — | Support module (no tests): real-CLI turn-end + prime-resolution probe harness, salvaged from the deleted granite-faults tree |
+| integration | `test_transport_dispatch_e2e.py` | 5 | Executor → `SessionRunner` → `HeadlessRoleDriver` → fake harness → delivery callback; the anti-"built-but-never-wired" gate |
+| integration | `test_headless_probe_e2e.py` | 4 | Subscription-auth env contract (always-on) + real `claude -p` turn-end/prime-resolution probes, gated on `HEADLESS_PROBE_SMOKE=1`; the canary for new `claude` releases |
 
 ### Other
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
+| unit | `test_nightly_regression_tests.py` | 28 | Nightly regression runner: suite invocation, JSON report parsing, Telegram alerting, version-pinned `claude` canary |
 | e2e | `test_telegram_flow.py` | — | Live Telegram flow stubs |
 
 ## Fixtures

@@ -42,7 +42,6 @@ def _make_mock_session(**overrides):
         "watchdog_unhealthy": None,
         "priority": "normal",
         "extra_context": None,
-        "pty_slot": None,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -400,15 +399,19 @@ class TestExtractGithubLinks:
         assert p.turn_count is None
         assert p.tool_call_count is None
 
-    def test_granite_pty_identity_fields(self):
-        """Granite PTY identity fields (issue #1648) are settable and default None/False."""
+    def test_runner_identity_fields(self):
+        """Session-runner identity fields are settable and default None/False.
+
+        Post-cutover (#1924): ``dev_pid`` and ``pty_slot`` died with the PTY
+        substrate; the surviving identity surface is exit_reason, pm_pid,
+        the two transcript paths, and user_facing_routed.
+        """
         from ui.data.sdlc import PipelineProgress
 
         # Defaults
         p = PipelineProgress(agent_session_id="x")
         assert p.exit_reason is None
         assert p.pm_pid is None
-        assert p.dev_pid is None
         assert p.pm_transcript_path is None
         assert p.dev_transcript_path is None
         assert p.user_facing_routed is False
@@ -418,48 +421,24 @@ class TestExtractGithubLinks:
             agent_session_id="x",
             exit_reason="pm_complete",
             pm_pid=1234,
-            dev_pid=5678,
             pm_transcript_path="/tmp/pm.jsonl",
             dev_transcript_path="/tmp/dev.jsonl",
             user_facing_routed=True,
         )
         assert p2.exit_reason == "pm_complete"
         assert p2.pm_pid == 1234
-        assert p2.dev_pid == 5678
         assert p2.pm_transcript_path == "/tmp/pm.jsonl"
         assert p2.dev_transcript_path == "/tmp/dev.jsonl"
         assert p2.user_facing_routed is True
 
-    def test_pty_slot_defaults_none(self):
-        """PipelineProgress.pty_slot is None when not provided (issue #1663)."""
+    def test_pty_fields_stay_deleted(self):
+        """``pty_slot`` and ``dev_pid`` must not resurface on PipelineProgress
+        (#1924 one-way cutover; names checked as strings intentionally)."""
         from ui.data.sdlc import PipelineProgress
 
         p = PipelineProgress(agent_session_id="x")
-        assert p.pty_slot is None
-
-    def test_pty_slot_roundtrips(self):
-        """PipelineProgress.pty_slot carries through a non-None value (issue #1663)."""
-        from ui.data.sdlc import PipelineProgress
-
-        p = PipelineProgress(agent_session_id="x", pty_slot=2)
-        assert p.pty_slot == 2
-
-    def test_session_to_pipeline_propagates_pty_slot(self):
-        """_session_to_pipeline populates pty_slot from AgentSession (issue #1663)."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = _make_mock_session(pty_slot=1)
-        pipeline = _session_to_pipeline(session)
-        assert pipeline.pty_slot == 1
-
-    def test_session_to_pipeline_pty_slot_none_when_absent(self):
-        """_session_to_pipeline yields pty_slot=None for sessions without a slot
-        (SDK-path and pre-deploy granite sessions) (issue #1663)."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = _make_mock_session(pty_slot=None)
-        pipeline = _session_to_pipeline(session)
-        assert pipeline.pty_slot is None
+        assert not hasattr(p, "pty_slot")
+        assert not hasattr(p, "dev_pid")
 
 
 class TestSessionToPipeline:

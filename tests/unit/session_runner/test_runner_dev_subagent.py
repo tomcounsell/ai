@@ -22,6 +22,7 @@ from __future__ import annotations
 import pathlib
 
 from agent.session_runner.adapter import SessionRunnerAdapter
+from agent.session_runner.role_driver import _PRIME_COMMAND_DIR, _PRIME_FILE_BY_ROLE
 from agent.session_runner.runner import ResumeContext, SessionRunner
 from tests.unit.session_runner.test_runner_turns import (
     FakeSession,
@@ -30,7 +31,9 @@ from tests.unit.session_runner.test_runner_turns import (
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DEV_AGENT_PATH = REPO_ROOT / ".claude" / "agents" / "dev.md"
-PM_PRIME_PATH = REPO_ROOT / ".claude" / "commands" / "granite" / "prime-pm-role.md"
+# Derived from the production seam so the commands-directory rename tracks
+# automatically (the runner reads the same constant at prime time).
+PM_PRIME_PATH = REPO_ROOT / _PRIME_COMMAND_DIR / _PRIME_FILE_BY_ROLE["pm"]
 
 
 # --------------------------------------------------------------------------

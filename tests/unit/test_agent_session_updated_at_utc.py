@@ -225,10 +225,8 @@ class TestSaveUpdatedAtOmissionAllowlist:
             ["last_sdk_heartbeat_at"],
             ["claude_pid"],
             ["harness_pid"],
+            ["pm_pid"],
             ["current_tool_name", "last_tool_use_at"],
-            ["last_pty_read_loop_at", "last_pty_activity_at"],
-            ["mid_run_quiescent_since", "mid_run_pty_snapshot"],
-            ["mid_run_quiescent_since"],
         ],
     )
     def test_allowlisted_liveness_fields_log_debug_not_warning(self, update_fields, caplog):
@@ -252,7 +250,7 @@ class TestSaveUpdatedAtOmissionAllowlist:
             ["exit_returncode"],
             # Mixed: one allowlisted + one not → still a genuine omission, WARN.
             ["last_turn_at", "status"],
-            ["mid_run_quiescent_since", "status"],
+            ["pm_pid", "status"],
         ],
     )
     def test_non_allowlisted_omission_still_warns(self, update_fields, caplog):

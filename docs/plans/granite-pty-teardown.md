@@ -193,20 +193,20 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite-pty-te
 
 Full audit in Spike Results (audit-4). Dispositions:
 
-- [ ] `tests/unit/granite_container/` — **DELETE** 31 files (~593 tests: pty_driver, pty_pool, container, transcript_tailer PTY paths, startup_parser, byob_relogin, bridge_adapter PTY paths, hook_edge PTY paths, persona_priming, fault_injection, tui_marker_contract, crash_resume, mid-run steering, etc.)
-- [ ] `tests/unit/granite_container/test_headless_role_driver.py` — **RELOCATE** to `tests/unit/session_runner/` (13 tests; replacement coverage, survives)
-- [ ] `tests/granite_faults/` — **DELETE** harness (scenarios, recorder, hook_fidelity, mocks, fixtures); **SALVAGE** `headless_hook_probe.py` into `tests/unit/session_runner/` support; `ollama_env.py` **DELETE** (its consumers die with D2)
-- [ ] `tests/integration/test_granite_container_loop.py`, `test_granite_mid_run_steering.py`, `test_granite_pty_production.py`, `test_append_system_prompt_interactive.py` — **DELETE** (8 tests; also remove the `granite_integration` marker from `pyproject.toml:179`)
-- [ ] `tests/integration/test_transport_dispatch_e2e.py` — **UPDATE**: repoint imports to `agent/session_runner/`; it becomes the runner dispatch E2E
-- [ ] `tests/integration/test_granite_ollama_e2e.py` — **REPLACE**: keep the headless turn-end/prime-resolution probe subtests, drop recorder/hook-fidelity/ollama subtests
-- [ ] `tests/unit/test_bridge_adapter_pty_normalize.py`, `test_granite_startup_diagnostic.py`, `test_granite_oauth_token_env.py` — **DELETE** (47 tests; OAuth-env coverage rewritten against the runner's explicit injection)
-- [ ] `tests/unit/test_session_executor_granite.py` — **UPDATE**: dispatch tests target SessionRunner; delete PTY-default/transport-coercion/pty-uuid tests
-- [ ] `tests/unit/test_session_health_wedge_nudge_producer.py` — **DELETE** (wedge-nudge channel is removed); `test_session_health_tool_timeout.py` — **UPDATE** (drop PTY branches, assert 300 default)
-- [ ] `tests/unit/test_session_stall_classifier.py` — **UPDATE**: delete `granite_wedged` class + PTY-field probes; keep generic stall classes
-- [ ] `tests/unit/test_transport_routing_matrix.py`, `test_transport_config_validation.py` — **DELETE** (no transport selector exists after cutover)
-- [ ] `tests/unit/test_worker_granite_degradation.py` — **DELETE** (degraded mode removed, D2); `tests/unit/test_worker_contract_check.py`, `tests/integration/test_worker_concurrency.py`, `tests/integration/test_progress_deadline_cancel.py`, `tests/integration/test_update_loop_wedge_recovery.py`, `tests/integration/test_worker_wedge_pending.py` — **UPDATE** (remove PTY-pool/marker-contract branches)
-- [ ] `tests/integration/test_pi_builder_e2e.py` — **DELETE** (the pi harness dies with the package; zero production consumers — supersedes the earlier UPDATE disposition)
-- [ ] **NEW:** `tests/unit/session_runner/test_runner_turns.py` (single-session loop, simplified route table, wrapup), `test_runner_dev_subagent.py` (dev agent definition contract, agent-id capture + persistence, continuation-across-resume against a fake harness), `test_runner_preempt.py` (generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL), `test_runner_resume.py` (four-scalar consumption, cwd-scoped resume, stale-UUID fallback, skip-prime, turn-history mirror), `test_runner_liveness.py` (role-aware turn timeout, subprocess-death detection — the wedge-coverage replacement)
+- [x] `tests/unit/granite_container/` — **DELETE** 31 files (~593 tests: pty_driver, pty_pool, container, transcript_tailer PTY paths, startup_parser, byob_relogin, bridge_adapter PTY paths, hook_edge PTY paths, persona_priming, fault_injection, tui_marker_contract, crash_resume, mid-run steering, etc.)
+- [x] `tests/unit/granite_container/test_headless_role_driver.py` — **RELOCATE** to `tests/unit/session_runner/` (13 tests; replacement coverage, survives)
+- [x] `tests/granite_faults/` — **DELETE** harness (scenarios, recorder, hook_fidelity, mocks, fixtures); **SALVAGE** `headless_hook_probe.py` into `tests/unit/session_runner/` support; `ollama_env.py` **DELETE** (its consumers die with D2)
+- [x] `tests/integration/test_granite_container_loop.py`, `test_granite_mid_run_steering.py`, `test_granite_pty_production.py`, `test_append_system_prompt_interactive.py` — **DELETE** (8 tests; also remove the `granite_integration` marker from `pyproject.toml:179`)
+- [x] `tests/integration/test_transport_dispatch_e2e.py` — **UPDATE**: repoint imports to `agent/session_runner/`; it becomes the runner dispatch E2E
+- [x] `tests/integration/test_granite_ollama_e2e.py` — **REPLACE**: keep the headless turn-end/prime-resolution probe subtests, drop recorder/hook-fidelity/ollama subtests
+- [x] `tests/unit/test_bridge_adapter_pty_normalize.py`, `test_granite_startup_diagnostic.py`, `test_granite_oauth_token_env.py` — **DELETE** (47 tests; OAuth-env coverage rewritten against the runner's explicit injection)
+- [x] `tests/unit/test_session_executor_granite.py` — **UPDATE**: dispatch tests target SessionRunner; delete PTY-default/transport-coercion/pty-uuid tests
+- [x] `tests/unit/test_session_health_wedge_nudge_producer.py` — **DELETE** (wedge-nudge channel is removed); `test_session_health_tool_timeout.py` — **UPDATE** (drop PTY branches, assert 300 default)
+- [x] `tests/unit/test_session_stall_classifier.py` — **UPDATE**: delete `granite_wedged` class + PTY-field probes; keep generic stall classes
+- [x] `tests/unit/test_transport_routing_matrix.py`, `test_transport_config_validation.py` — **DELETE** (no transport selector exists after cutover)
+- [x] `tests/unit/test_worker_granite_degradation.py` — **DELETE** (degraded mode removed, D2); `tests/unit/test_worker_contract_check.py`, `tests/integration/test_worker_concurrency.py`, `tests/integration/test_progress_deadline_cancel.py`, `tests/integration/test_update_loop_wedge_recovery.py`, `tests/integration/test_worker_wedge_pending.py` — **UPDATE** (remove PTY-pool/marker-contract branches)
+- [x] `tests/integration/test_pi_builder_e2e.py` — **DELETE** (the pi harness dies with the package; zero production consumers — supersedes the earlier UPDATE disposition)
+- [x] **NEW:** `tests/unit/session_runner/test_runner_turns.py` (single-session loop, simplified route table, wrapup), `test_runner_dev_subagent.py` (dev agent definition contract, agent-id capture + persistence, continuation-across-resume against a fake harness), `test_runner_preempt.py` (generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL), `test_runner_resume.py` (four-scalar consumption, cwd-scoped resume, stale-UUID fallback, skip-prime, turn-history mirror), `test_runner_liveness.py` (role-aware turn timeout, subprocess-death detection — the wedge-coverage replacement)
 
 ## Rabbit Holes
 

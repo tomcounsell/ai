@@ -103,16 +103,20 @@ class TestModelSettings:
 
 
 class TestSupersededRmGate:
-    """The /update gemma rm proceeds only when granite_smoke_passed AND the
-    spike-1 parity marker exists (data/spike1_parity_ok)."""
+    """The /update gemma rm proceeds only when the ollama classifier model is
+    present AND the spike-1 parity marker exists (data/spike1_parity_ok).
+
+    Post-cutover (#1924, task 7): the old `granite_smoke_passed` boolean died
+    with the PTY substrate; the gate is now classifier-presence-based.
+    """
 
     @staticmethod
-    def _should_rm(granite_smoke_passed: bool, marker_exists: bool) -> bool:
+    def _should_rm(classifier_present: bool, marker_exists: bool) -> bool:
         # Mirrors the gate predicate in scripts/update/run.py Step 4.76.
-        return granite_smoke_passed and marker_exists
+        return classifier_present and marker_exists
 
     @pytest.mark.parametrize(
-        "smoke,marker,expected",
+        "classifier,marker,expected",
         [
             (True, True, True),
             (True, False, False),
@@ -120,15 +124,17 @@ class TestSupersededRmGate:
             (False, False, False),
         ],
     )
-    def test_rm_gate_predicate(self, smoke, marker, expected):
-        assert self._should_rm(smoke, marker) is expected
+    def test_rm_gate_predicate(self, classifier, marker, expected):
+        assert self._should_rm(classifier, marker) is expected
 
     def test_run_py_gates_rm_on_both_conditions(self):
-        """The relocated rm loop must require both the boolean and the marker."""
+        """The relocated rm loop must require both the classifier probe and
+        the marker — and the retired granite_smoke boolean must stay gone."""
         src = importlib.import_module("scripts.update.run").__file__
         text = open(src).read()
         assert "spike1_parity_ok" in text
-        assert "granite_smoke_passed and spike1_parity_ok" in text
+        assert "classifier_present and spike1_parity_ok" in text
+        assert "granite_smoke_passed" not in text
 
 
 class TestImporterSmoke:

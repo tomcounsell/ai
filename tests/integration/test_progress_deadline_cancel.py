@@ -5,16 +5,18 @@ against a monkeypatched ``_pop_agent_session`` (returns one real, Redis-backed
 ``AgentSession`` then ``None``) and a caller-controlled ``_execute_agent_session``
 sentinel coroutine — the same pattern ``tests/integration/test_worker_wedge_pending.py``
 uses for ``TestWorkerLoopSemaphorePark``. The owned-task pattern, the progress-poll
-watcher, the transport-aware progress signal, the fd-PTY-kill delegation, and the
-three-branch ``CancelledError`` disambiguation are all exercised through the real
-worker-loop code path — only ``_apply_recovery_transition`` and
-``PTYPool.kill_orphans`` are patched, to isolate Fix #3's own new code from
-``_apply_recovery_transition``'s internal recovery-attempt bookkeeping (already
-covered by its own test suite).
+watcher, and the three-branch ``CancelledError`` disambiguation are all exercised
+through the real worker-loop code path — only ``_apply_recovery_transition`` is
+patched, to isolate Fix #3's own new code from ``_apply_recovery_transition``'s
+internal recovery-attempt bookkeeping (already covered by its own test suite).
+
+Post-cutover (#1924): the PTY substrate is gone, and with it the transport-aware
+PTY progress signal, the ``PTYPool.kill_orphans`` delegation, and the granite
+PTY-alive Tier-2 reprieve. The surviving deadline machinery is headless-only.
 
 Covers:
 - Acceptance criterion #2 (plan): a no-progress session is cancelled, its slot
-  reclaimed, its PTY killed, and NOT re-queued via the startup-recovery path
+  reclaimed, and NOT re-queued via the startup-recovery path
   (``deadline_cancelled`` swallow — Branch 1).
 - A progressing session is never cancelled.
 - A ``waiting_for_children``-shaped session (Tier-2 "compacting" reprieve) is
@@ -31,10 +33,6 @@ Covers:
   the owned exec_task (no orphaned subprocess) before re-raising.
 - Concern 1: a declined recovery (``_apply_recovery_transition`` returns
   False) still forces the row terminal and skips the outer finally.
-- Granite deconfliction (comment 4862216457): ``last_pty_activity_at``
-  progress is honored (fact a); the granite PTY-child kill delegates to the
-  pool's PID-targeted ``kill_orphans`` API, not the container's dead-for-pool-
-  pairs ``os.killpg`` (fact b).
 """
 
 from __future__ import annotations
@@ -185,20 +183,6 @@ def _quick_progress(tracking: dict):
     return _inner
 
 
-def _bumping_pty_activity(tracking: dict):
-    """Keeps last_pty_activity_at fresh until `tracking["stop"]` is set."""
-
-    async def _inner(session: AgentSession) -> None:
-        while not tracking.get("stop"):
-            fresh = _fresh(session)
-            if fresh is not None:
-                fresh.last_pty_activity_at = datetime.now(UTC)
-                fresh.save(update_fields=["last_pty_activity_at"])
-            await asyncio.sleep(0.03)
-
-    return _inner
-
-
 def _absorbing_sentinel(tracking: dict):
     """Reproduces the #1039 BackgroundTask/`_execute_agent_session` shape:
     registers an INNER task on the `_active_sessions` handle and awaits it
@@ -227,7 +211,7 @@ def _absorbing_sentinel(tracking: dict):
 
 
 # ---------------------------------------------------------------------------
-# Acceptance criterion #2 — no-progress session cancelled, reclaimed, PTY killed
+# Acceptance criterion #2 — no-progress session cancelled and reclaimed
 # ---------------------------------------------------------------------------
 
 
@@ -237,9 +221,8 @@ async def test_no_progress_session_cancelled_reclaimed_not_requeued(
     monkeypatch, redis_test_db, caplog
 ):
     """A session with no progress past the deadline is cancelled (Branch 1),
-    its slot is reclaimed, its PTY is killed via the pool's PID-targeted API,
-    and it is NOT re-queued via the startup-recovery ("will be re-queued by
-    startup recovery") path.
+    its slot is reclaimed, and it is NOT re-queued via the startup-recovery
+    ("will be re-queued by startup recovery") path.
     """
     registry = SlotLeaseRegistry(max_concurrent=2)
     _session_state._slot_registry = registry
@@ -261,15 +244,10 @@ async def test_no_progress_session_cancelled_reclaimed_not_requeued(
 
     loop_task = None
     try:
-        with (
-            patch.object(
-                _aq,
-                "_apply_recovery_transition",
-                AsyncMock(side_effect=_fake_apply_recovery_transition),
-            ),
-            patch(
-                "agent.granite_container.pty_pool.PTYPool.kill_orphans", return_value=0
-            ) as mock_kill,
+        with patch.object(
+            _aq,
+            "_apply_recovery_transition",
+            AsyncMock(side_effect=_fake_apply_recovery_transition),
         ):
             loop_task = await _run_worker_loop(monkeypatch, worker_key, session, _hang_forever)
 
@@ -285,10 +263,6 @@ async def test_no_progress_session_cancelled_reclaimed_not_requeued(
 
         fresh = _fresh(session)
         assert fresh is not None and fresh.status == "killed"
-
-        # Not a pool-backed granite session (no pm_pid/dev_pid) — kill_orphans
-        # must NOT fire for this SDK-shaped session.
-        mock_kill.assert_not_called()
 
         # Slot reclaimed: the session's own bound lease is freed (the
         # manually pre-occupied permit — acquired but never bound to
@@ -323,10 +297,7 @@ async def test_progressing_session_not_cancelled(monkeypatch, redis_test_db):
 
     loop_task = None
     try:
-        with (
-            patch.object(_aq, "_apply_recovery_transition", apply_recovery_mock),
-            patch("agent.granite_container.pty_pool.PTYPool.kill_orphans") as mock_kill,
-        ):
+        with patch.object(_aq, "_apply_recovery_transition", apply_recovery_mock):
             loop_task = await _run_worker_loop(
                 monkeypatch, worker_key, session, _quick_progress(tracking)
             )
@@ -338,7 +309,6 @@ async def test_progressing_session_not_cancelled(monkeypatch, redis_test_db):
 
         assert tracking.get("done") is True, "Sentinel did not complete in time"
         apply_recovery_mock.assert_not_called()
-        mock_kill.assert_not_called()
     finally:
         await _teardown_loop(loop_task, worker_key)
 
@@ -555,10 +525,7 @@ async def test_declined_recovery_forces_terminal_status(monkeypatch, redis_test_
 
     loop_task = None
     try:
-        with (
-            patch.object(_aq, "_apply_recovery_transition", declined_mock),
-            patch("agent.granite_container.pty_pool.PTYPool.kill_orphans", return_value=0),
-        ):
+        with patch.object(_aq, "_apply_recovery_transition", declined_mock):
             loop_task = await _run_worker_loop(monkeypatch, worker_key, session, _hang_forever)
 
             for _ in range(200):
@@ -584,160 +551,21 @@ async def test_declined_recovery_forces_terminal_status(monkeypatch, redis_test_
 
 
 # ---------------------------------------------------------------------------
-# Granite deconfliction (comment 4862216457)
+# Post-cutover guard (#1924) — the PTY progress/kill seams stay deleted
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_granite_session_with_fresh_pty_activity_not_killed(monkeypatch, redis_test_db):
-    """A granite PTY session with fresh `last_pty_activity_at` but
-    structurally-None `last_tool_use_at`/`last_turn_at` is NOT false-killed
-    (fact a) — `_session_progress_ts` must consume the PTY signal.
+def test_pty_deadline_seams_stay_deleted():
+    """The transport-aware PTY progress signal and the pool-targeted kill seam
+    must not resurface in the worker queue module (names checked as strings
+    intentionally — #1924 one-way cutover)."""
+    import agent.agent_session_queue as aq
 
-    Deadline is set with a wide (10x) margin over the PTY-bump interval so
-    this asserts real behavior across multiple deadline-crossings without
-    being a razor-thin timing race under parallel (xdist) load.
-    """
-    monkeypatch.setattr(_aq, "SESSION_PROGRESS_DEADLINE_S", 0.3)
+    src_names = dir(aq)
+    for gone in ("PTYPool", "kill_orphans", "_pty_quiescent_long_enough"):
+        assert gone not in src_names, f"agent_session_queue.{gone} resurfaced post-cutover"
 
-    worker_key = "test-pd-08"
-    session = _create_session(
-        "pd-granite-fresh-1",
-        last_tool_use_at=None,
-        last_turn_at=None,
-        claude_pid=None,
-        pm_pid=55501,
-        dev_pid=55502,
-    )
-
-    apply_recovery_mock = AsyncMock()
-    tracking: dict = {"stop": False}
-
-    loop_task = None
-    try:
-        with (
-            patch.object(_aq, "_apply_recovery_transition", apply_recovery_mock),
-            patch("agent.granite_container.pty_pool.PTYPool.kill_orphans") as mock_kill,
-        ):
-            loop_task = await _run_worker_loop(
-                monkeypatch, worker_key, session, _bumping_pty_activity(tracking)
-            )
-            await asyncio.sleep(1.0)  # > 3x the deadline — several crossings observed
-            tracking["stop"] = True
-
-        apply_recovery_mock.assert_not_called()
-        mock_kill.assert_not_called()
-    finally:
-        await _teardown_loop(loop_task, worker_key)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_quiescent_granite_pool_session_killed_via_pool_kill_orphans(
-    monkeypatch, redis_test_db
-):
-    """A quiescent pool-backed granite session (stale `last_pty_activity_at`,
-    `claude_pid=None`, `pm_pid`/`dev_pid` set) IS killed, and the kill
-    delegates to `PTYPool.kill_orphans({pm_pid, dev_pid})` — the PID-targeted
-    production seam, never the container's dead-for-pool-pairs `os.killpg`
-    (fact b, BLOCKER r6).
-    """
-    worker_key = "test-pd-09"
-    session = _create_session(
-        "pd-granite-stale-1",
-        last_tool_use_at=None,
-        last_turn_at=None,
-        claude_pid=None,
-        pm_pid=55601,
-        dev_pid=55602,
-    )
-
-    recovery_calls: list[dict] = []
-
-    async def _fake_apply_recovery_transition(entry, **kwargs):
-        recovery_calls.append(kwargs)
-        finalize_session(entry, "killed", reason="test: granite progress deadline")
-        return True
-
-    loop_task = None
-    try:
-        with (
-            patch.object(
-                _aq,
-                "_apply_recovery_transition",
-                AsyncMock(side_effect=_fake_apply_recovery_transition),
-            ),
-            patch(
-                "agent.granite_container.pty_pool.PTYPool.kill_orphans", return_value=2
-            ) as mock_kill,
-            patch(
-                "agent.granite_container.container.Container._close_pair_and_reap"
-            ) as mock_killpg,
-        ):
-            loop_task = await _run_worker_loop(monkeypatch, worker_key, session, _hang_forever)
-
-            for _ in range(200):
-                await asyncio.sleep(0.02)
-                if recovery_calls:
-                    break
-
-        assert recovery_calls, "Expected the deadline kill to fire for a quiescent granite session"
-        mock_kill.assert_called_once()
-        (called_pids,), _ = mock_kill.call_args
-        assert called_pids == {55601, 55602}
-        mock_killpg.assert_not_called()
-    finally:
-        await _teardown_loop(loop_task, worker_key)
-
-
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_granite_alive_pty_reprieved_at_deadline(monkeypatch, redis_test_db):
-    """A pool-backed granite session whose PTY read loop is alive/painting but
-    whose SDK + `last_pty_activity_at` progress signals are stale past the
-    deadline is REPRIEVED, not killed (issue #1820 note 2 — transport-aware
-    Tier-2 reprieve).
-
-    `claude_pid` is None, so the psutil "children"/"alive" gates in
-    `_tier2_reprieve_signal` are a structural no-op for granite. Without the
-    granite gate this legitimately-parked session (fresh `last_pty_read_loop_at`,
-    `mid_run_quiescent_since=None` → `_pty_quiescent_long_enough` reports the
-    PTY is alive) would be false-killed. The gate must reprieve it — while
-    `test_quiescent_granite_pool_session_killed_via_pool_kill_orphans` proves a
-    genuinely-quiescent granite session (no live read loop) is still killed.
-    """
-    worker_key = "test-pd-10"
-    session = _create_session(
-        "pd-granite-alive-pty-1",
-        last_tool_use_at=None,
-        last_turn_at=None,
-        last_pty_activity_at=None,  # stale — deadline driven by acquired_at
-        claude_pid=None,
-        pm_pid=55701,
-        dev_pid=55702,
-        last_pty_read_loop_at=datetime.now(UTC),  # read loop alive (< 90s)
-        mid_run_quiescent_since=None,  # PTY painting → alive, defer kill
-    )
-
-    apply_recovery_mock = AsyncMock()
-
-    loop_task = None
-    try:
-        with (
-            patch.object(_aq, "_apply_recovery_transition", apply_recovery_mock),
-            patch("agent.granite_container.pty_pool.PTYPool.kill_orphans") as mock_kill,
-        ):
-            loop_task = await _run_worker_loop(monkeypatch, worker_key, session, _hang_forever)
-            # Several deadline-exceeded polls elapse — each must reprieve.
-            await asyncio.sleep(0.6)
-
-        apply_recovery_mock.assert_not_called()
-        mock_kill.assert_not_called()
-        fresh = _fresh(session)
-        assert fresh is not None and fresh.status == "running"
-        assert (fresh.reprieve_count or 0) >= 1, (
-            "Expected the granite PTY-alive Tier-2 reprieve to have fired at least once"
+    for gone_field in ("last_pty_activity_at", "last_pty_read_loop_at", "dev_pid"):
+        assert not hasattr(AgentSession, gone_field), (
+            f"AgentSession.{gone_field} resurfaced post-cutover"
         )
-    finally:
-        await _teardown_loop(loop_task, worker_key)

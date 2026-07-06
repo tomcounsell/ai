@@ -114,7 +114,7 @@ async def test_executor_dispatches_through_real_runner_to_delivery(redis_test_db
     assert len(harness_calls) == 1, "expected exactly one PM turn"
     call = harness_calls[0]
     # First-turn persona priming via the PM prime slash command.
-    assert call["message"].startswith("/granite:prime-pm-role"), (
+    assert call["message"].startswith("/roles:prime-pm-role"), (
         f"first turn must be prime-prefixed, got: {call['message'][:80]!r}"
     )
     # The executor's harness turn input (with the original message) rides

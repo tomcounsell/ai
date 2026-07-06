@@ -186,7 +186,7 @@ async def test_seeded_driver_skips_prime_and_resumes(tmp_path):
     assert calls[0]["prior_uuid"] == VALID_UUID
     # …and the stale-UUID fallback context IS prime-prefixed, so the only
     # recovery tier cold-starts with the persona.
-    assert calls[0]["full_context_message"].startswith("/granite:prime-pm-role")
+    assert calls[0]["full_context_message"].startswith("/roles:prime-pm-role")
     assert calls[0]["full_context_message"].endswith("continue please")
 
 
