@@ -51,7 +51,7 @@ Prior to issue #1636, `gemma4:e2b` was the single local model for all Ollama wor
 
 ## See also
 
-- [Granite PTY Container: Production Path](granite-pty-production.md) — startup precondition and PTY operator details.
+- [Headless Session Runner](headless-session-runner.md) — the session-execution substrate; session dispatch has no ollama dependency (D2, issue #1924). The classifier model above serves bridge routing and email triage only.
 - [Subconscious Memory](subconscious-memory.md#title-generation) — title-generator and generation model usage.
 - [SDLC-First Routing](sdlc-first-routing.md) — bridge classifier using `OLLAMA_CLASSIFIER_MODEL`.
 - [Email CS Auto-Reply](email-cs-auto-reply.md) — email triage using `OLLAMA_CLASSIFIER_MODEL`.

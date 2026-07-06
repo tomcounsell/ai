@@ -80,9 +80,8 @@ config that syncs via iCloud, not via the update script.
 
 ## Related
 
-Both this path and the granite PTY path produce `AgentSession` records when
-they spawn an agent. The granite path additionally produces a `ContainerResult`
-and writes `exit_summary` / `exit_anomaly` events to
-`AgentSession.session_events` — see
-[Granite PTY Container: Production Path](../features/granite-pty-production.md)
-for the session-execution substrate that runs bridge-originated sessions.
+Both this path and bridge-originated sessions produce `AgentSession` records
+when they spawn an agent. Bridge-originated sessions additionally write
+`exit_summary` / `exit_anomaly` events to `AgentSession.session_events` — see
+[Headless Session Runner](../features/headless-session-runner.md) for the
+session-execution substrate that runs bridge-originated sessions.

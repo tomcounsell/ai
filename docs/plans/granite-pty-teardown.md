@@ -485,7 +485,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 | Dev agent definition exists | `test -f .claude/agents/dev.md` | exit code 0 |
 | Loop-wedge family preserved | `grep -c "loop_wedged" monitoring/bridge_watchdog.py` | output > 0 |
 | Anti-criterion: no #1923 scope creep | `grep -c "OLLAMA_CLASSIFIER_MODEL" bridge/routing.py` | output > 0 |
-| Anti-criterion: no PTY fallback branch | `grep -rn "fallback.*pty\|pty.*fallback" --include='*.py' -i agent/ worker/ \| wc -l` | match count == 0 |
+| Anti-criterion: no PTY fallback branch | `grep -rniE "fallback.*\bpty\b|\bpty\b.*fallback" --include='*.py' agent/ worker/ \| wc -l` | match count == 0 |
 | Tests pass | `scripts/pytest-clean.sh tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |

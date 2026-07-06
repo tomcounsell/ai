@@ -264,8 +264,8 @@ Both deferred follow-ups have since shipped:
   motivated these fixes (issue #1808)
 - [Worker Service](worker-service.md) — worker architecture, launchd setup, env vars
 - [Bridge Self-Healing](bridge-self-healing.md) — worker watchdog and escalation ladder
-- [Granite PTY Container: Production Path](granite-pty-production.md) — PTY pool design
-  and session execution path
+- [Headless Session Runner](headless-session-runner.md) — the current session-execution
+  substrate (no PTY pool; each turn is a short-lived `claude -p` subprocess)
 - [Slot-Lease Ownership](slot-lease-ownership.md) — the lease registry and reap
   pass built on top of this dead-man's-switch (#1820)
 - [Out-of-Domain Recovery + Per-Tool Budget Backstop](out-of-domain-recovery.md) —

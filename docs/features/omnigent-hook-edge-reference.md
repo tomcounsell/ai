@@ -71,7 +71,7 @@ This quote captures the core insight. PTY quiescence is a badge signal, not a co
 
 ### Consumed by #1688 (SHIPPED)
 
-The hook-driven turn-return feature (`docs/features/granite-hook-driven-turn-returns.md`) consumes these practices with the following implementing modules:
+The hook-driven turn-return mechanism (now graduated into `agent/session_runner/hook_edge.py`, documented in [Headless Session Runner](headless-session-runner.md)) consumes these practices with the following implementing modules:
 
 | # | Practice | Implementing module |
 |---|----------|---------------------|

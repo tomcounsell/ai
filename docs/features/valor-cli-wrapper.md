@@ -194,23 +194,23 @@ prompt is delivered verbatim. The rare collision (`valor "some prompt"
 --help` when the user genuinely wanted to create a session) is an accepted
 tradeoff consistent with argparse's greedy-help convention.
 
-### 5. PTY substrate selection is a worker concern (design boundary)
+### 5. Execution substrate selection is a worker concern (design boundary)
 
 The CLI's job is to enqueue a session. The worker selects the execution
-substrate (granite PTY container, `agent/granite_container/`) based on
-environment — not the CLI. This is the correct separation: the CLI
-knows nothing about how sessions are executed, and the worker knows nothing
-about how sessions are created.
+substrate (the [headless session runner](headless-session-runner.md),
+`agent/session_runner/`) — not the CLI. This is the correct separation: the
+CLI knows nothing about how sessions are executed, and the worker knows
+nothing about how sessions are created.
 
-Post-cutover (#1572 / PR #1612) the granite PTY container is the only
-execution substrate — all sessions route through it, and no alternate path
-remains. A "force-the-other-substrate" env knob is therefore not applicable:
-there is nothing to switch to. This is not a reserved future idea; it is a
-closed question.
+Post-cutover (#1924) the headless session runner is the only execution
+substrate — all sessions route through it, and no alternate path remains. A
+"force-the-other-substrate" env knob is therefore not applicable: there is
+nothing to switch to. This is not a reserved future idea; it is a closed
+question.
 
-`valor "do the thing"` guarantees a session is enqueued and will be run on
-the granite PTY substrate. It does not need to name the substrate to deliver
-that guarantee.
+`valor "do the thing"` guarantees a session is enqueued and will be run
+through the session runner. It does not need to name the substrate to
+deliver that guarantee.
 
 ### 6. Pre-commit hook guard #1288 — resolved (#1620)
 
@@ -243,17 +243,19 @@ wrapper's help text and this doc must keep saying it loudly, because the
 failure (`exit 1` with a stderr explanation) is the FIRST experience most
 users will have with the bare-prompt form.
 
-### 8. Per-session `--model` is currently ignored by the granite substrate
+### 8. Per-session `--model` is currently ignored by the session runner
 
 `valor agent-session --model sonnet ...` stores `model` on the AgentSession,
-and the executor resolves it (`_resolve_session_model`) — but the granite
-PTY path runs on pool-prewarmed PTYs whose models were fixed at spawn time
-from `GRANITE__PM_MODEL` / `GRANITE__DEV_MODEL`. The resolved per-session
-model is never applied. The same applies to `valor resume`: the granite
-container has no `--resume` wiring, so a "resumed" session re-runs in a
-fresh TUI without the prior transcript. Both are substrate gaps, not
-wrapper gaps — tracked in the granite production cutover doc's Known
-Limitations.
+and the executor resolves it (`_resolve_session_model`) — but each turn
+spawns via `SessionRunnerSettings.pm_model` / `dev_model`, fixed per-process
+config rather than a per-session override. The resolved per-session model is
+never applied. This is a substrate gap, not a wrapper gap.
+
+`valor resume` is no longer a gap: the runner persists the four resume
+scalars (`claude_session_uuid`, `dev_agent_id`, `runner_cwd`,
+`claude_version`) and a resumed session continues the same `--resume`d
+Claude session — including the same `dev` subagent — with its prior
+transcript intact. See [Headless Session Runner](headless-session-runner.md).
 
 ### 9. Wrapper test coverage
 
@@ -265,6 +267,11 @@ covered only by the `valor-session` integration tests plus manual smoke
 tests.
 
 ## Tests Run on the Branch
+
+Historical record from this doc's originating PR (#1612), predating the
+granite-pty-teardown cutover (#1924) — the `granite_container` paths below no
+longer exist; see [Headless Session Runner](headless-session-runner.md) for
+current test coverage.
 
 | Scope | Result |
 |-------|--------|
@@ -282,5 +289,5 @@ flagged in the wider suite for a future cleanup pass.
 
 - [Session Steering](session-steering.md) — `valor-session` CLI for create/steer/status/list/kill
 - [Agent Session Queue](agent-session-queue.md) — Queue dispatch surface underneath the wrapper
-- [Granite PTY Production Cutover](granite-pty-production.md) — The execution substrate the new sessions run on
+- [Headless Session Runner](headless-session-runner.md) — The execution substrate the new sessions run on
 - [Eng Session Architecture](eng-session-architecture.md) — How PM and Dev sessions interact

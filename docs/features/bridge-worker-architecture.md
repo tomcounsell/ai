@@ -248,7 +248,7 @@ complete_transcript(session_id, status=final_status)
     |      (see Session Telemetry)
 ```
 
-**Child-to-parent completion**: when a session has a `parent_agent_session_id`, `complete_transcript()` → `finalize_session()` synchronously calls `_finalize_parent_sync()` (in `models/session_lifecycle.py`). That function moves the parent into `waiting_for_children`, then — once every child is terminal — transitions it to `completed` (all children succeeded) or `failed` (any child failed). It is idempotent and a no-op if the parent is already terminal. If the completion-turn runner is in flight for the parent (the `pipeline_complete_pending:{parent_id}` Redis lock is held), `_finalize_parent_sync` defers the success-path transition to that runner so the final summary is delivered exactly once (issue #1058). There is no separate post-completion SDLC handler — eng, teammate, and granite sessions all finalize through this single path.
+**Child-to-parent completion**: when a session has a `parent_agent_session_id`, `complete_transcript()` → `finalize_session()` synchronously calls `_finalize_parent_sync()` (in `models/session_lifecycle.py`). That function moves the parent into `waiting_for_children`, then — once every child is terminal — transitions it to `completed` (all children succeeded) or `failed` (any child failed). It is idempotent and a no-op if the parent is already terminal. If the completion-turn runner is in flight for the parent (the `pipeline_complete_pending:{parent_id}` Redis lock is held), `_finalize_parent_sync` defers the success-path transition to that runner so the final summary is delivered exactly once (issue #1058). There is no separate post-completion SDLC handler — every session type finalizes through this single path.
 
 See [Harness Abstraction](harness-abstraction.md) for stream-json parsing, chunk suppression, health checks, and configuration, and [Harness Session Continuity](harness-session-continuity.md) for the `--resume` UUID persistence mechanism.
 
@@ -256,9 +256,9 @@ At runtime, the worker processes sessions via `_worker_loop(worker_key)` until t
 
 ### Persona Overlay Resolution (harness `--append-system-prompt`)
 
-> **Granite PTY sessions (all bridge-originated sessions) bypass this path entirely.** As of issue #1692, granite sessions receive their persona via prime commands (`.claude/commands/granite/prime-*-role.md`) run at PTY startup — no `--append-system-prompt` is set. The description below applies only to the `claude -p` headless path (non-bridge sessions).
+> **Bridge-originated sessions (PM, Dev, Teammate) bypass this path entirely.** Every session role receives its persona via role prime commands (`.claude/commands/roles/prime-*-role.md`) run by the [headless session runner](headless-session-runner.md) at turn 1 — no `--append-system-prompt` is set. The description below applies only to the direct `claude -p` path used outside the runner (e.g. the message drafter).
 
-`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) for non-granite sessions. The order is:
+`agent/session_executor.py` resolves which persona overlay to pass as the harness `system_prompt` (`--append-system-prompt`) on that direct path. The order is:
 
 1. `transport=email` or `project["email"]["persona"]` set → that persona overlay (e.g. `customer-service`), with `teammate` as fallback when the requested overlay file is missing
 2. `session_type=ENG` → `engineer` overlay (loaded via `load_eng_system_prompt`)
@@ -403,7 +403,7 @@ MAX_CONCURRENT_SESSIONS=8
 
 **PM/dev deadlock prevention:** There is no session-type-specific cap. PM sessions that spawn child dev sessions transition to `waiting_for_children`, which triggers `output_router.route_session_output` to return `"deliver"` — the PM releases its global slot before the child needs it. Child dev sessions sort ahead of peers via the child-boost ordering in `sort_key`, so they acquire the freed slot next. See issues #1004 and #1021 for the history.
 
-**Wedge detection and self-heal:** When the registry is exhausted (`registry.permits_free() == 0`) and running sessions are fewer than `MAX_CONCURRENT_SESSIONS`, the health monitor's hoisted reap pass (`_agent_session_health_check`) emits a `WARNING` leaked-slot fingerprint log line, then reclaims any lease whose owner has reached a terminal status — no process restart required (issue #1820, closing the #1537/#1808 leak class the old logging-only fingerprint could only report on). The most common production path is H3 (PTY-pool saturation): sessions hold a global slot while blocked inside `_execute_agent_session` waiting for a granite PTY pair, which can exhaust the registry when `GRANITE__PTY_POOL_SIZE < MAX_CONCURRENT_SESSIONS`. See [Worker Wedge Investigation](worker-wedge-investigation.md) for the root-cause analysis and [Slot-Lease Ownership](slot-lease-ownership.md) for the reclaim path.
+**Wedge detection and self-heal:** When the registry is exhausted (`registry.permits_free() == 0`) and running sessions are fewer than `MAX_CONCURRENT_SESSIONS`, the health monitor's hoisted reap pass (`_agent_session_health_check`) emits a `WARNING` leaked-slot fingerprint log line, then reclaims any lease whose owner has reached a terminal status — no process restart required (issue #1820, closing the #1537/#1808 leak class the old logging-only fingerprint could only report on). See [Worker Wedge Investigation](worker-wedge-investigation.md) for the root-cause analysis and [Slot-Lease Ownership](slot-lease-ownership.md) for the reclaim path.
 
 ### Redis Pop Lock (TOCTOU Prevention)
 
@@ -499,7 +499,7 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 
 - **Local eng sessions** (`session_type == ENG`) are re-queued to `pending` just like bridge sessions. These are worker-owned child sessions spawned by a parent eng session via `valor-session create --role eng`, so no human CLI is competing for the same `claude_session_uuid`. The worker can safely resume the transcript on next pickup. This lets long-running eng-orchestrated pipelines (build + test + review + docs + merge) survive scheduled worker restarts on skills-only machines. When the recovered child finalizes, parent finalization flows through `finalize_session` → `_finalize_parent_sync` (in `models/session_lifecycle.py`), which transitions the parent through `waiting_for_children` to `completed`/`failed` once all children are terminal — no user-facing send callback is involved on this path.
 - **Local Teammate sessions** continue to be abandoned. A live human CLI may hold the same `claude_session_uuid`; resuming would spawn a second harness competing at that UUID (the #986 hijack rationale).
-- **Local Granite sessions** (`session_type == GRANITE`) are abandoned. These are created by the standalone `valor-granite-loop` CLI (not the worker), so the worker must never re-execute them. The `local-` prefix ensures they reach this abandon path rather than the bridge re-queue path. A CLI run that is still in flight when the worker restarts will have its session finalized `abandoned`; the CLI's own `reject_from_terminal=False` except-block guard makes a subsequent CLI finalize a safe no-op.
+- **`session_type == GRANITE` is a historical enum value only** (records predating the headless cutover, #1924). Nothing creates new Granite-typed sessions; the standalone CLI that used to (`valor-granite-loop`) no longer exists. Any surviving pre-cutover record falls through the same abandon path as Teammate.
 - **Pre-migration records with `session_type == None`** fall through to the abandon path — a conservative default that also catches any future `SessionType` member added without explicit handling here (the gate uses explicit equality with `SessionType.ENG`).
 
 ### Summary
@@ -509,7 +509,7 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 | `pending` | Left untouched; new worker picks it up naturally |
 | `running` (bridge) | Stays `running`; new worker startup re-queues it to `pending` |
 | `running` (local `eng`) | Re-queued to `pending` (#1092); worker resumes via `claude --resume <UUID>` |
-| `running` (local `teammate`/`granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
+| `running` (local `teammate`/historical `granite`/pre-migration) | Finalized as `abandoned`; human CLI may reclaim |
 | `complete` / `failed` / `killed` | Terminal — no action taken |
 
 ### Own-progress fields are heartbeat-gated (#1614)

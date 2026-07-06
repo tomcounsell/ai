@@ -95,8 +95,7 @@ Issue [#1272](https://github.com/tomcounsell/ai/issues/1272) closes that hole wi
    (`skipped_unmerged=True`) and a `[unmerged-branch-guard]` warning is logged. The
    worktree directory is also preserved so the work remains easy to find and resume. This
    replaces the prior unconditional `git branch -D` that caused silent data loss. See
-   `docs/features/granite-pty-production.md#completion-cleanup-safety-floor-issue-1646` for
-   the full operator guide.
+   `docs/features/headless-session-runner.md` for the current execution substrate.
 
 The synthetic-slug regex `^dev-[0-9a-f]{8}$` is the safety guarantee: it matches only the synthesis output, never a real human slug.
 

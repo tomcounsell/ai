@@ -232,41 +232,30 @@ installed. `remove_newsyslog_config()` removes it via `sudo -n rm` during
 `/update --full`; when sudo isn't cached the cleanup is skipped with a
 warning and retried on the next update.
 
-## Granite PTY Pool
+## Session Execution: No Pool, No Version Pin
 
-Bridge-originated sessions execute through the granite PTY container (see
-[Granite PTY Container: Production Path](granite-pty-production.md)). The worker
-holds a bounded, singleton pool of interactive `claude` TUI pairs.
+Every session role executes through the [headless session
+runner](headless-session-runner.md) — one short-lived `claude -p` subprocess
+per turn, spawned and reaped by the runner itself. There is no long-lived
+process pool to size or bound: `MAX_CONCURRENT_SESSIONS` (default 8) is the
+only concurrency ceiling, enforced by the `SlotLeaseRegistry` (see [Bridge/Worker
+Architecture](bridge-worker-architecture.md#concurrency-controls-issue-810)).
+A worker SIGKILL leaves no PTY children to orphan-clean — each turn's
+subprocess is a bounded-lifetime child of the worker process itself.
 
-**One env var, set in `~/Desktop/Valor/.env` (optional, default is correct):**
+**CLI version drift** is handled per-session rather than via a fleet-wide
+pin: the runner persists `claude_version` on `AgentSession` for every turn
+(Risk 5a, issue #1924), so a CLI upgrade's effect on subagent-continuation
+behavior is visible per session rather than gated by a global version-pin
+apparatus. A CLI upgrade is deploy-gated — smoke the subagent-continuation
+contract on one machine (see [validate-cutover in the teardown
+plan](../plans/granite-pty-teardown.md)) before rolling the new `claude`
+version to the fleet.
 
-```bash
-# Hard max concurrent PM+Dev PTY pairs. Note the DOUBLE underscore
-# (pydantic nested-settings delimiter). Default 3.
-GRANITE__PTY_POOL_SIZE=3
-```
+### Reverting the headless cutover
 
-**Relationship to `MAX_CONCURRENT_SESSIONS`:** the pool size is intentionally
-**smaller** than `MAX_CONCURRENT_SESSIONS` (default 8) so the Redis queue
-absorbs over-cap sessions instead of overcommitting memory. Each
-`claude --permission-mode bypassPermissions` PTY consumes ~200 MB resident,
-so a full pool of 3 pairs is ~1.2 GB. Memory-constrained machines can set
-`GRANITE__PTY_POOL_SIZE=1` or `2`.
-
-**Growth path (3 → 6):** the default can rise to 6 once health/observability
-and memory management land (follow-on issues). When raising it, verify the
-`ThreadPoolExecutor` size (`min(32, os.cpu_count()+4)`) accommodates
-`MAX_CONCURRENT_SESSIONS × pool_size` long-lived threads, and update the
-semaphore-cap assertion in `tests/unit/granite_container/test_pty_pool.py`.
-
-**Orphan cleanup:** on a worker SIGKILL, PTY children survive. The next worker
-startup reads `data/granite_pty_pids.json` and PID-kills them (PID-targeted,
-never `pkill -f`, so an operator's personal `claude` session is untouched).
-
-### Reverting the granite cutover
-
-The cutover is all-or-nothing with no runtime feature flag. To roll back to the
-headless harness path on incident:
+The cutover is all-or-nothing with no runtime feature flag. To roll back on
+incident:
 
 1. `git revert <merge-sha>` (or `git revert -m 1 <merge-sha>` for a merge
    commit) and `git push`.
@@ -276,79 +265,10 @@ headless harness path on incident:
    idempotent on retried `[/user]` payloads.
 4. No manual flag toggling, no env var changes.
 
-## `claude` CLI Version Pin (D1a, issue #1817)
-
-The live `claude` CLI is installed via the **native installer**:
-`~/.local/bin/claude` is a symlink into
-`~/.local/share/claude/versions/<version>/`. It is not an npm package — it is
-never listed in `scripts/update/npm_tools.py`'s `MANAGED_PACKAGES`, and it
-must stay that way (adding it there would either no-op, since npm doesn't own
-the binary, or force-switch the fleet onto the npm install path, which is not
-how the CLI actually got onto this machine).
-
-The native installer floats `claude` to latest on auto-update. Historically,
-a minor-version bump has reworded the interactive TUI's scraped markers
-(`IDLE_BAR`, `PROMPT_GLYPH`, `SPINNER_EVIDENCE_RE` in
-`agent/granite_container/pty_driver.py`; the trust-folder prompt pattern in
-`agent/granite_container/startup_parser.py`) with no code change on our side
-— a silent, fleet-wide PTY-session hang. Two checks guard against this:
-
-- **D1a (version pin):** `scripts/update/verify.py`'s `check_claude_version_pin()`
-  compares the installed version to `PINNED_CLAUDE_VERSION`. The value has a
-  **single source of truth** in `config/models.py` (default `2.1.198`, env-
-  overridable via `PINNED_CLAUDE_VERSION`), imported by both this D1a check and
-  the #1839 ollama-canary drift alert in
-  `scripts/nightly_regression_tests.py`, and mirrored as a typed catalog entry
-  at `config/settings.py` `Settings.pinned_claude_version`. A drift logs a
-  WARNING by default (non-blocking — a version bump does not necessarily
-  break anything). Provisioning a canary against a not-yet-fleet version is
-  tracked in issue #1854.
-- **D1b (contract-check):** `worker/__main__.py` calls
-  `agent.granite_container.pty_driver.verify_tui_marker_contract()` at
-  startup, which re-runs each scraped-marker regex against a golden sample of
-  known-good CLI output. A mismatch logs CRITICAL — but only hard-fails
-  startup when at least one role is configured `pty`-transport (a fully
-  `headless` fleet is immune to TUI-marker drift by construction; see
-  `docs/features/README.md` for the per-role transport hedge).
-
-Both checks share one enforcement flag, off by default:
-
-```bash
-# Set to "1" to hard-fail /update and worker startup on a detected
-# claude-CLI-contract drift (version pin OR TUI marker mismatch). Off by
-# default — a drift does not necessarily mean anything is actually broken.
-CLAUDE_CONTRACT_CHECK_ENFORCE=1
-```
-
-### Bump procedure
-
-Bumping `PINNED_CLAUDE_VERSION` is a **deliberate** procedure, not something
-to do reflexively on every drift warning:
-
-1. Confirm the new `claude` version is actually installed and stable on at
-   least one machine (`readlink ~/.local/bin/claude`).
-2. Re-verify the D1b scraped markers still match the new version's actual
-   TUI output — run a live PTY session (or the existing granite smoke-test
-   tooling) and confirm idle detection, the trust-folder prompt, and the
-   spinner-evidence heuristic still fire correctly. If any marker's shape
-   changed, update the regex in `pty_driver.py`/`startup_parser.py` FIRST,
-   and update `verify_tui_marker_contract()`'s golden samples to match.
-3. Update the `PINNED_CLAUDE_VERSION` default in `config/models.py` (the single
-   source of truth — `scripts/update/verify.py`, `scripts/nightly_regression_tests.py`,
-   and `config/settings.py` all read it from there) to the new version string.
-4. Note the bump here (version, date, what — if anything — changed in the
-   scraped markers):
-
-   | Version | Date | Notes |
-   |---|---|---|
-   | 2.1.197 | 2026-07-02 | Initial pin (issue #1817) |
-   | 2.1.198 | 2026-07-03 | Single-sourced the pin in `config/models.py` (shared with the #1839 nightly canary); default set to the current fleet version. Markers unchanged. |
-   | 2.1.201 | 2026-07-06 | **Marker drift (issue #1918):** the renderer stopped re-emitting the bypass-permissions bar cells after a turn — the bar paints only in the welcome frame, so post-write `IDLE_BAR` checks went permanently blind (fleet-wide `startup_unresolved` plateaus since 2026-07-01). Added `AGENTS_HINT_BAR` (`← for agents`, the footer hint that DOES repaint on every turn return; live-probed at 24x80 and 50x200) as an accepted idle-bar signature alongside `IDLE_BAR`/`OVERLAY_BAR`. |
-
 ## See Also
 
 - Run `/setup` for full machine configuration
 - See `config/projects.example.json` for template
 - Check `bridge/telegram_bridge.py` for routing logic
 - See [Worker Service](worker-service.md) for standalone worker details
-- See [Granite PTY Container: Production Path](granite-pty-production.md) for the session-execution substrate
+- See [Headless Session Runner](headless-session-runner.md) for the session-execution substrate

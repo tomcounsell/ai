@@ -17,23 +17,24 @@ The worker ran **six long-lived asyncio tasks on one event loop** with no respaw
 
 ## Fixes Shipped (Stages A–B)
 
-### Fix #1 — ollama graceful degradation (`worker/__main__.py`, `agent/session_pickup.py`)
+### Fix #1 — ollama graceful degradation — removed by the headless cutover (D2, issue #1924)
 
-- **`granite_available` flag** (`agent/session_state.py`): process-global bool, default False until the startup probe passes.
-- **Non-fatal startup probe**: the `sys.exit(1)` is replaced by setting `granite_available = False` and logging a warning; the worker boots in degraded mode.
-- **`_granite_reprobe_loop`** supervised background task: re-probes `ensure_granite_model` on `GRANITE_REPROBE_INTERVAL_S` (default 30 s) and flips the flag on success. **This loop IS the circuit breaker** — it carries a consecutive-timeout counter (open after `GRANITE_BREAKER_OPEN_THRESHOLD` failures, default 3), a cooldown (`GRANITE_BREAKER_COOLDOWN_S`, default 120 s) before half-open re-probe, and CLOSED/OPEN/HALF_OPEN state transitions with log events on each flip.
-- **Pickup gate**: `agent/session_pickup._pop_agent_session` gates project-keyed (eng) session pickup on `granite_available`; sessions stay queued (not failed) while granite is unavailable and auto-resume when it recovers.
-- **Stale comment reconciliation**: comments that incorrectly claimed a runtime ollama routing role (in `worker/__main__.py` and `granite_classifier.py`) have been corrected.
+Session dispatch has no ollama dependency at all as of the headless
+session-runner cutover: the `granite_available` flag, the `ensure_granite_model`
+startup probe, the `_granite_reprobe_loop` circuit breaker, and the
+`agent/session_pickup` pickup gate are deleted outright rather than degraded.
+There is nothing to probe or breaker-guard on the session-execution path, so
+"graceful degradation" is moot — the worker starts straight into recovery and
+queue pickup. Bridge routing and email triage keep their own direct ollama
+calls for classification, untouched by this cutover; see [Local Ollama Model
+Policy](local-model-policy.md) and [Headless Session
+Runner](headless-session-runner.md).
 
-All thresholds are NAMED env-overridable constants with provisional/tunable comments (no bare literals).
+### Fix #2 — process-group teardown (superseded location: `agent/session_runner/runner.py`)
 
-### Fix #2 — process-group teardown (`agent/granite_container/container.py`)
-
-- **Deleted `_run_pkill_fallback`**: the machine-wide `pkill -f "claude --permission-mode bypassPermissions"` is gone from `container.py`.
-- **Replaced with `os.killpg(os.getpgid(pty.pid), SIGTERM→SIGKILL)`** (`_close_pair_and_reap`) scoped to each container's own `_pm_pty` / `_dev_pty` process groups. Each PTY child is a session leader (`pty.fork()` → `setsid`), so killing its pgid cannot affect bystander processes.
-- **Pool-owned pairs are excluded** via `_uses_pool_pair()`: on the production path the PTY pool owns pair lifecycle (close-on-release + PID-targeted reap), so the scoped `killpg` fires only on the self-spawned path (tests, ping-pong runs).
-- **Spawn-failure orphan reap** (callsite `container.py:~1080`): when `_spawn_pair()` raises after partially creating a child, **both** PTYs are iterated independently — a `None` pid skips silently, a non-None pid is `killpg`'d inside `try/except ProcessLookupError` so a half-created `claude` orphan cannot survive.
-- `isalive()` check before kill prevents killing an already-dead pid whose pgid might have been recycled by the OS.
+- **Deleted `_run_pkill_fallback`**: the machine-wide `pkill -f "claude --permission-mode bypassPermissions"` is gone.
+- The scoped-teardown pattern this fix established — `os.killpg` against the child's own process group rather than a machine-wide `pkill` — is the same discipline the headless session runner uses today: each turn's `claude -p` subprocess spawns in its own process group (`start_new_session=True`), and the steer-preempt / timeout paths SIGTERM → grace → SIGKILL that group specifically (`agent/session_runner/runner.py`), never a machine-wide pattern match. See [Headless Session Runner](headless-session-runner.md).
+- `isalive()` / liveness check before kill prevents killing an already-dead pid whose pgid might have been recycled by the OS.
 
 ### Fix #3 — reflection bulkhead pool (`agent/reflection_scheduler.py`, `reflections/audits/redis_quality_audit.py`)
 
@@ -46,7 +47,7 @@ All thresholds are NAMED env-overridable constants with provisional/tunable comm
 - **Exponential backoff**: first respawn waits `base_backoff_s` (default 1 s), second `2×`, and so on (capped at `window_s / 2`). Restart timestamps are tracked in a rolling window.
 - **Storm cap**: exceeding `WORKER_SUPERVISOR_MAX_RESTARTS` (default 5) within `WORKER_SUPERVISOR_WINDOW_S` (default 300 s) triggers **`_self_kill()`**, which emits an all-thread Python stack dump via `faulthandler.dump_traceback(all_threads=True)` to stderr and then delivers `SIGKILL` to the process. This is the same seam used by the dead-man's-switch (#1815). SIGKILL replaced an earlier abort-based design that triggered the macOS crash reporter (a crash dialog plus a `Python-*.ips` file) on every recycle; SIGKILL is equally unswallowable but produces no dialog and no `.ips` file. `sys.exit(1)` is explicitly avoided — a `SystemExit` raised inside an asyncio done-callback is swallowed by the event loop's callback-exception handler, so the process would keep running and the cap would silently fail.
 - **Shutdown guard**: cancelled tasks and `_shutdown_requested=True` suppress respawn.
-- **Wrapped tasks**: `session-health-monitor`, `session-tool-timeout-monitor`, `reflection-scheduler`, `session-notify-listener`, `idle-sweeper`, `granite-reprobe` (Fix #1 re-probe loop).
+- **Wrapped tasks**: `session-health-monitor`, `session-tool-timeout-monitor`, `reflection-scheduler`, `session-notify-listener`, `idle-sweeper` (the `granite-reprobe` task wrapped here was deleted along with Fix #1, D2).
 
 ## Deferred: Fix #5 → #1828
 
@@ -58,20 +59,18 @@ All new constants are NAMED, env-overridable, and marked provisional/tunable in 
 
 | Env Var | Default | Purpose |
 |---------|---------|---------|
-| `GRANITE_REPROBE_INTERVAL_S` | 30 | Re-probe interval when breaker CLOSED |
-| `GRANITE_BREAKER_OPEN_THRESHOLD` | 3 | Consecutive failures before OPEN |
-| `GRANITE_BREAKER_COOLDOWN_S` | 120 | Cooldown (s) before half-open re-probe |
 | `REFLECTION_POOL_WORKERS` | 2 | Bulkhead pool size for sync reflections |
 | `WORKER_SUPERVISOR_MAX_RESTARTS` | 5 | Storm-cap restart count within window |
 | `WORKER_SUPERVISOR_WINDOW_S` | 300 | Rolling window for restart count |
 | `WORKER_SUPERVISOR_BASE_BACKOFF_S` | 1.0 | Base backoff (s), doubles each restart |
 
+(The Fix #1 breaker constants — `GRANITE_REPROBE_INTERVAL_S`, `GRANITE_BREAKER_OPEN_THRESHOLD`, `GRANITE_BREAKER_COOLDOWN_S` — were deleted with Fix #1 itself.)
+
 ## Tests
 
-- `tests/unit/granite_container/test_container_pkill_gating.py` — Fix #2: pkill deleted, process-group teardown, bystander survival, spawn-failure partial-child orphan reap
 - `tests/unit/test_reflection_pool_bulkhead.py` — Fix #3: dedicated pool, saturation isolation, event-loop responsiveness (redis_quality_audit off-loop)
-- `tests/unit/test_worker_granite_degradation.py` — Fix #1: degraded boot, flag flip, reprobe loop, breaker OPEN, pickup deferral
 - `tests/unit/test_worker_supervisor.py` — Fix #4: respawn on crash, no respawn on cancel, backoff grows, shutdown guard, **real subprocess SIGKILL assertion**
+- Process-group teardown (Fix #2's successor) is covered by the session-runner preempt test suite — see [Headless Session Runner](headless-session-runner.md).
 
 ## Architecture Impact
 
@@ -84,6 +83,6 @@ All new constants are NAMED, env-overridable, and marked provisional/tunable in 
 ## See Also
 
 - `docs/features/bridge-worker-architecture.md` — worker background-task topology
-- `docs/features/granite-pty-production.md` — granite teardown (pkill → killpg)
+- `docs/features/headless-session-runner.md` — current process-group teardown location (pkill → killpg → runner-owned SIGTERM/SIGKILL)
 - `docs/plans/worker-fault-containment.md` — full plan with spike results, risk analysis, race conditions
 - Issue #1828 — deferred reflection subprocess split (Fix #5)

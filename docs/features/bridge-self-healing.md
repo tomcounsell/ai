@@ -485,9 +485,9 @@ This is a one-time injection at install time; updating `.env` secrets requires r
 | Worker PID absent | `down` | **Active recovery via 4-level escalation (issue #1311)** — see below |
 | ≥ threshold | `stale` | **Verified-kill escalation ladder W1→W5 (issue #1767)** — see below |
 
-**Stale-heartbeat threshold (issue #1767):** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable for conservative rollout (e.g. `HEARTBEAT_THRESHOLD=300` on first deploy). The ≥6× multiplier is the new false-positive guard: because the heartbeat is now written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, PTY saturation or thread-pool exhaustion can no longer starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy), justifying a lower threshold and an aggressive kill ladder.
+**Stale-heartbeat threshold (issue #1767):** `HEARTBEAT_THRESHOLD` defaults to `180` seconds (= 6× the 30-second heartbeat write interval) and is env-tunable for conservative rollout (e.g. `HEARTBEAT_THRESHOLD=300` on first deploy). The ≥6× multiplier is the new false-positive guard: because the heartbeat is now written by a **dedicated daemon thread** (`worker-heartbeat`, started in `worker/__main__.py`) that runs outside the asyncio event loop, thread-pool exhaustion can no longer starve heartbeat writes. A stale heartbeat therefore reliably means the worker process is genuinely wedged (not just loop-busy), justifying a lower threshold and an aggressive kill ladder.
 
-**Heartbeat thread isolation (issue #1767):** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started immediately after the granite PTY pool initializes and is stopped via `_heartbeat_stop_event` on worker shutdown. Prior to issue #1767 the heartbeat write happened inside `_agent_session_health_loop()` (inside the event loop), so PTY or thread-pool saturation could delay or skip writes entirely — the stale-heartbeat signal was unreliable. The dedicated thread removes that dependency: the only way the heartbeat can go stale now is if the worker process itself is hung.
+**Heartbeat thread isolation (issue #1767):** `_heartbeat_thread_main()` in `worker/__main__.py` runs as a `threading.Thread(name="worker-heartbeat", daemon=True)` — outside the asyncio event loop. It wakes every `WORKER_HEARTBEAT_INTERVAL` seconds (default 30, env-tunable) and calls `_write_worker_heartbeat()`. The thread is started at worker startup and is stopped via `_heartbeat_stop_event` on worker shutdown. Prior to issue #1767 the heartbeat write happened inside `_agent_session_health_loop()` (inside the event loop), so thread-pool saturation could delay or skip writes entirely — the stale-heartbeat signal was unreliable. The dedicated thread removes that dependency: the only way the heartbeat can go stale now is if the worker process itself is hung.
 
 **Verified-kill escalation ladder** (when heartbeat is stale — issue #1767):
 
@@ -497,15 +497,20 @@ When the watchdog detects `status == "stale"`, it calls `recover(status)`, which
 |------|--------|-------------|-------------|
 | W1 | `SIGTERM` | 5.0 s | If dead → done (launchd respawns) |
 | W2 | `SIGKILL` | 10.0 s | May queue against a U-state process; if dead → done |
-| W3 | `launchctl bootout gui/<uid>/com.valor.worker` | 10.0 s | Removes the launchd job so the kernel cleans the fd table on exit, allowing a PTY-master `read()` blocked in U-state to return EOF and the process to exit; if dead → done |
-| W4 | Write `worker:watchdog:critical:{host}` (TTL 1 h) + `worker:watchdog:pty_close_required:{host}` (unless `WORKER_WATCHDOG_PTY_CLOSE_DISABLED` is set) | — | CRITICAL log; operator alert. Cross-process PTY fd close is not feasible on macOS (`os.close` only owns own fds; `/proc` is Linux-only; `psutil.open_files` does not surface PTY devices — spike result, issue #1767). |
+| W3 | `launchctl bootout gui/<uid>/com.valor.worker` | 10.0 s | Removes the launchd job so the kernel cleans the fd table on exit, allowing a hung blocking syscall in U-state to return and the process to exit; if dead → done |
+| W4 | Write `worker:watchdog:critical:{host}` (TTL 1 h) | — | CRITICAL log; operator alert. |
 | W5 | Final CRITICAL log; no further automated action | — | launchd will respawn the worker once the U-state process exits (the blocking syscall returns). Session sweep runs at next startup. |
 
 **Check U-state critical signal:**
 ```bash
 redis-cli GET worker:watchdog:critical:$(hostname)
-redis-cli GET worker:watchdog:pty_close_required:$(hostname)
 ```
+
+W4 no longer writes a separate `pty_close_required` side-channel key — that
+signal existed to prompt operator PTY-fd cleanup, which has no analog for a
+`claude -p` subprocess (a session-execution turn is a short-lived, self-reaping
+child; there is no long-lived PTY master fd for a U-state hang to be blocked
+on in the first place, issue #1924).
 
 **Post-restart dead-worker session sweep (issue #1767):** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs as **Step 3a** in `worker/__main__.py`, **before** `_recover_interrupted_agent_sessions_startup` (Step 3b). The ordering is critical: Step 3b transitions all remaining `running` sessions → `pending` without checking PID liveness; if the sweep ran after, there would be no `running` sessions left to inspect. The sweep handles the dead-worker subset (dead `claude_pid`) first, finalizing those sessions to `killed`; Step 3b then re-queues the remaining genuinely-interruptible sessions (alive PID or no PID yet). The sweep:
 
@@ -849,19 +854,15 @@ Redis counters keyed by `<project_key>:session-health:`:
   timeout sub-loop (#1270, parallel 30s loop). Internal tier: lightweight
   built-ins (`Read`/`Glob`/`Grep`/`Edit`/`Write`/`NotebookEdit`/`ToolSearch`,
   30s budget). MCP tier: any `mcp__*` tool (120s budget). Default tier:
-  everything else, including `Bash`/`Task`/`Skill` (300s budget, gated on
-  PTY liveness for granite PTY sessions — see below). Each tier budget is
-  env-tunable via `TOOL_TIMEOUT_INTERNAL_SEC`, `TOOL_TIMEOUT_MCP_SEC`,
+  everything else, including `Bash`/`Task`/`Skill` (300s budget, flat
+  age-only kill). Each tier budget is env-tunable via
+  `TOOL_TIMEOUT_INTERNAL_SEC`, `TOOL_TIMEOUT_MCP_SEC`,
   `TOOL_TIMEOUT_DEFAULT_SEC`. Sub-loop is gated by `TOOL_TIMEOUT_TIERS_DISABLED`
-  (parity with `DISABLE_PROGRESS_KILL`).
-* `tool_timeouts:default_deferred` — incremented whenever a granite PTY
-  session's default-tier kill is deferred because the PTY screen is still
-  painting (`mid_run_quiescent_since is None`). Added by issue #1784: for
-  granite PTY sessions, the flat 300s age-only kill is now gated on screen
-  quiescence so long-running SDLC tools (`Bash`/`Skill`/`Task`) are not
-  falsely killed while active. SDK/non-granite sessions are unaffected (age-only
-  kill preserved). Worst-case recovery bound: ~330s (300s budget + ~30s tick).
-  Kill switch: `MID_RUN_QUIESCENCE_SECS <= 0` restores age-only kill.
+  (parity with `DISABLE_PROGRESS_KILL`). The `mid_run_quiescent_since`
+  screen-liveness deferral that used to gate the default tier for granite PTY
+  sessions (issue #1784) was deleted with the PTY substrate (issue #1924) —
+  there is no screen to defer on for a `claude -p` subprocess turn, so the
+  flat age-only kill now applies uniformly to every session.
 
 **Distinguishing kill causes in dashboards:**
 - `tier1_flagged_total` high → heartbeat writers are dying (clock/event-loop issue) OR sessions are genuinely stuck

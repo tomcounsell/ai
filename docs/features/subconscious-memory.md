@@ -168,7 +168,7 @@ The PostToolUse hook in `agent/health_check.py` checks for relevant memories on 
 
 After a session completes, extraction is scheduled from `agent/session_executor.py` **after** `complete_transcript(...)` finalizes the session (hotfix #1055):
 
-> Granite PTY sessions participate in this extraction unchanged. The granite PTY container ([Granite PTY Container: Production Path](granite-pty-production.md)) is the session-execution substrate, not a separate completion path — `_schedule_post_session_extraction` fires for granite sessions exactly as for harness sessions, on the same `complete_transcript(...)` boundary.
+> All session roles (PM, Dev, Teammate) participate in this extraction unchanged. The [Headless Session Runner](headless-session-runner.md) is the session-execution substrate, not a separate completion path — `_schedule_post_session_extraction` fires identically for every session type, on the same `complete_transcript(...)` boundary.
 
 
 1. `_schedule_post_session_extraction(session_id, response_text)` registers a fire-and-forget `asyncio.create_task` in `_pending_extraction_tasks` (a `dict[str, asyncio.Task]` keyed by `session_id` for dedup). The scheduler is **synchronous** — it does not `await` — so the dev→PM nudge fires immediately, independent of extraction latency.

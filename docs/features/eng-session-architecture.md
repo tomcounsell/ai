@@ -4,9 +4,9 @@
 
 The AgentSession model uses a **session_type discriminator** (`SessionType` enum from `config/enums.py`) to distinguish between session roles:
 
-- **Eng Session** (`session_type=SessionType.ENG`): Full-permission CLI harness session with Engineer persona. Owns the Telegram conversation, handles SDLC work (planning, coding, testing, review) and conversational responses — a single unified role for both orchestration and execution.
-- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational CLI harness session with Teammate persona. Handles informational queries in DMs and may perform operational work (running scripts, restarting services, editing docs and `.claude/` skills, managing the knowledge base). Writes to source-code paths are blocked in code with a redirect that proposes spawning an Eng session — see [Teammate Session Permissions](teammate-session-permissions.md).
-- **Granite** (`session_type=SessionType.GRANITE`): CLI-only session type, used exclusively by the standalone `valor-granite-loop` CLI. Never created by the bridge or worker.
+- **Eng Session** (`session_type=SessionType.ENG`): Full-permission session with Engineer persona, executed by the [headless session runner](headless-session-runner.md) (`agent/session_runner/`). Owns the Telegram conversation, handles SDLC work (planning, coding, testing, review) and conversational responses — a single unified role for both orchestration and execution. For SDLC work, the PM turn spawns and continues a resumable `dev` subagent inline.
+- **Teammate Session** (`session_type=SessionType.TEAMMATE`): Conversational session with Teammate persona, same runner. Handles informational queries in DMs and may perform operational work (running scripts, restarting services, editing docs and `.claude/` skills, managing the knowledge base). Writes to source-code paths are blocked in code with a redirect that proposes spawning an Eng session — see [Teammate Session Permissions](teammate-session-permissions.md).
+- **Granite** (`session_type=SessionType.GRANITE`): historical enum value only. Pre-cutover records (#1924) carry this value; nothing creates new Granite-typed sessions.
 
 Session types, persona identifiers, and classification types are defined as `StrEnum` members in `config/enums.py`. See [Standardized Enums](standardized-enums.md) for the full enum reference.
 
@@ -22,10 +22,10 @@ Messages are routed to session types via **config-driven persona resolution** (`
 
 Session type derivation from resolved persona:
 
-- **Engineer persona** -> `session_type="eng"` (Eng session, full permissions, engineer persona). Handles both quick conversational questions and SDLC work. The session uses the granite PTY container for execution (see [Granite PTY Container: Production Path](granite-pty-production.md)).
+- **Engineer persona** -> `session_type="eng"` (Eng session, full permissions, engineer persona). Handles both quick conversational questions and SDLC work. The session executes through the [headless session runner](headless-session-runner.md) (`agent/session_runner/`).
 - **Teammate persona** -> `session_type="teammate"` (Teammate session, conversational). Handles informational queries directly.
 
-There are three session types: `eng`, `teammate`, and `granite`. The first two are bridge-originated and worker-executed. `granite` is exclusively for standalone `valor-granite-loop` CLI runs -- it is created and finalized by the CLI itself, never by the worker or bridge. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
+There are three `session_type` values: `eng`, `teammate`, and `granite` (historical only — no live path creates it). The first two are bridge-originated and worker-executed. `session_type` is the **sole discriminator** for routing, permission injection, summarizer formatting, and nudge cap selection. See [Config-Driven Chat Mode](config-driven-chat-mode.md) for the config schema and resolution order.
 
 ### Persona resolution on all ingest paths (issue #1708)
 
@@ -97,7 +97,8 @@ resolve_persona(project, chat_title, is_dm)
     |-- Engineer -> Eng Session (session_type="eng")
     |       |-- Full permissions, Engineer persona
     |       |-- Handles both conversational Q&A and SDLC work
-    |       |-- Runs via granite PTY container (BridgeAdapter -> Container.run)
+    |       |-- Runs via the headless session runner (SessionRunner.run_turn);
+    |       |   PM turn spawns/continues its `dev` subagent inline for SDLC work
     |       v
     |   Telegram Response
     |
@@ -139,9 +140,9 @@ Single Popoto model (`AgentSession`) with discriminator field. Popoto ORM does n
 `sdlc-local-{N}` sessions created by `tools/sdlc_session_ensure.py` now carry
 an issue-anchored `message_text`. Before issue #1741, `message_text` was not
 passed to `create_local`, so the field was `None`. The executor then built the
-granite PTY container's first turn as "MESSAGE: None", which primed the PM with
-a phantom task and caused a silent `[/complete]` no-op — the SDLC pipeline
-appeared to succeed but did no work.
+PM's first turn as "MESSAGE: None", which primed the PM with a phantom task
+and caused a silent `[/complete]` no-op — the SDLC pipeline appeared to
+succeed but did no work.
 
 The fix populates `message_text` with:
 
@@ -149,17 +150,17 @@ The fix populates `message_text` with:
 Run the full SDLC pipeline for issue #{N}. Read the issue body for the work to be done[ ({issue_url})].
 ```
 
-This gives the granite PM a real goal anchor so it can read the issue body,
-route to the Dev, and drive the pipeline to completion.
+This gives the PM a real goal anchor so it can read the issue body, spawn its
+`dev` subagent, and drive the pipeline to completion.
 
 **Executor fail-loud guard (pre-SCOPE, `agent/session_executor.py` ~line 1541):**
 After steering-message injection and before `build_harness_turn_input` wraps
 `_turn_input` in the SCOPE header block, the executor checks the raw turn input.
 If `_turn_input` stripped equals `""` or `"None"`, the session is immediately
 finalized as `status="failed"` and an `[executor-guard]` ERROR is logged with
-reason `empty_container_message`. `BridgeAdapter.run` is never called. This
-guard catches both `None` values and the bare string `"None"` (which arises
-from `str(None)`) before they can reach the granite PM as phantom tasks.
+reason `empty_container_message`. The session runner's turn dispatch is never
+invoked. This guard catches both `None` values and the bare string `"None"`
+(which arises from `str(None)`) before they can reach the PM as a phantom task.
 
 ### Session Creation
 Sessions are created via factory methods:

@@ -72,19 +72,25 @@ The dashboard exposes session liveness as state-of-truth so operators can answer
 - `recovery_attempts`, `reprieve_count`
 - `watchdog_unhealthy` reason (when set)
 
-### Modal Granite PTY block (issue #1663)
+### Modal Session Runner Identity block (issue #1924)
 
-For sessions that ran through the granite PTY path, the modal also renders a **Granite PTY** block (below the Liveness section) gated by a Jinja guard — rendered only when at least one of the five fields is non-null:
+The modal renders a **Session Runner** block (below the Liveness section)
+gated by a Jinja guard — rendered only when at least one of the resume
+scalars is non-null:
 
 | Field | Description |
 |-------|-------------|
-| `pm_pid` | PM PTY process PID |
-| `dev_pid` | Dev PTY process PID |
-| `pm_transcript_path` | Absolute path to PM JSONL transcript; rendered as a click-to-copy chip (`copyPtyPath()` JS, `pty-transcript-chip` CSS class) |
-| `dev_transcript_path` | Absolute path to Dev JSONL transcript; same copy affordance |
-| `pty_slot` | 0-based `PTYPool` slot index the session pair occupied |
+| `claude_session_uuid` | The PM session's `--resume` entry point |
+| `dev_agent_id` | The `dev` subagent's continuation handle — the same id is expected across a worker restart if the resumed session continues the same subagent |
+| `runner_cwd` | Absolute working directory the resume is scoped to |
+| `claude_version` | CLI version the session last ran against |
 
-Non-granite (SDK-path) sessions show no Granite PTY block. See [Granite PTY Container: Production Path](granite-pty-production.md#session-modal-issue-1663) for field semantics and the `pty_slot` data-flow diagram.
+The bounded turn-history mirror (`{ts, actor: pm|dev, text}` per turn,
+extending the `session_events` stream) renders alongside this block as an
+observability feed — see [Headless Session
+Runner](headless-session-runner.md#simple-resume-d3-four-scalars). It is
+never the resume path's source of truth (the on-disk Claude transcripts are);
+it exists for dashboard visibility and as a disaster-recovery seed.
 
 ### Process-alive probe
 
@@ -127,7 +133,7 @@ The `PipelineProgress` Pydantic model is the serialization layer between Redis d
 
 **Links:** `issue_url`, `plan_url`, `pr_url`
 
-**Granite identity** (null for non-granite sessions): `pm_pid`, `dev_pid`, `pm_transcript_path`, `dev_transcript_path`, `pty_slot`
+**Session runner identity:** `claude_session_uuid`, `dev_agent_id`, `runner_cwd`, `claude_version`, plus the bounded turn-history mirror
 
 ## JSON API
 

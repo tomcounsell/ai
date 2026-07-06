@@ -351,8 +351,8 @@ Standalone Worker (python -m worker) → Sole session execution engine
               (worker/__main__.py)         → Startup: index rebuild → corrupted+orphan cleanup → dead-worker sweep (Step 3a, issue #1767) → recovery (Step 3b) → register_worker_pid (self-suicide guard)
                                            → Hourly `agent-session-cleanup` reflection: corrupted records + cross-process orphan reap (claude/MCP, PPID==1, heartbeat-gated; issue #1271)
                                            → Executes Eng session (AgentSession session_type=eng)
-                                               → Eng session handles SDLC work via granite PTY container (interactive claude TUI, PTYPool-bounded)
-                                                 (BridgeAdapter → Container.run; bridge-originated sessions; see docs/features/granite-pty-production.md)
+                                               → Eng session handles SDLC work via the headless session runner (one `claude -p` subprocess per turn; PM spawns/continues a resumable `dev` subagent inline)
+                                                 (agent/session_runner/; bridge-originated sessions; see docs/features/headless-session-runner.md)
                                            → Uses OutputHandler protocol (agent/output_handler.py)
                                            → TelegramRelayOutputHandler writes to Redis outbox
                                            → FileOutputHandler fallback for non-Telegram / dev environments

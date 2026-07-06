@@ -196,4 +196,4 @@ valor-catchup (CLI) or run_catchup_step (/update final step)
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — catchup/reconciler overview and bridge/worker process separation
 - [Message Reconciler](message-reconciler.md) — periodic ingestion-gap scanner (complement to this layer)
 - [Single-Machine Ownership](single-machine-ownership.md) — owner-scoping invariant reused by this layer
-- [Granite Operator: Interactive TUI](granite-interactive-tui.md) — production session runner whose startup failures motivated this feature
+- [Headless Session Runner](headless-session-runner.md) — production session runner; its predecessor's startup failures motivated this feature (see the [PTY-fragility postmortem](../postmortems/2026-07-06-granite-pty-fragility.md))

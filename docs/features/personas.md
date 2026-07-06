@@ -192,7 +192,7 @@ prompt = load_system_prompt()                       # engineer persona + WORKER_
 prompt = load_eng_system_prompt("/path")            # engineer persona + WORKER_RULES + work-vault CLAUDE.md
 ```
 
-`load_eng_system_prompt()` is invoked for non-granite sessions (direct `claude -p` via `get_response_via_harness`). **Granite PTY sessions** no longer use `load_eng_system_prompt()` or `--append-system-prompt` — persona is delivered via prime commands (`.claude/commands/granite/prime-*-role.md`) since issue #1692. See `docs/features/granite-pty-production.md`.
+`load_eng_system_prompt()` is invoked for the direct `claude -p` path (`get_response_via_harness`) outside the role-runner. Every bridge-originated session (PM, Dev, Teammate) instead receives its persona via role prime commands (`.claude/commands/roles/prime-*-role.md`) run at turn 1 — no `--append-system-prompt` is set on that path. See [Headless Session Runner](headless-session-runner.md).
 
 ## Related
 
