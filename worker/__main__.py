@@ -1405,9 +1405,12 @@ def main() -> None:
     # system can verify the running release matches pulled HEAD (issue #1898).
     # Best-effort like _green_heartbeat_write — a failure logs a warning and
     # never crashes startup.
-    from monitoring.boot_beacon import write_boot_beacon  # noqa: PLC0415
+    try:
+        from monitoring.boot_beacon import write_boot_beacon  # noqa: PLC0415
 
-    write_boot_beacon("worker")
+        write_boot_beacon("worker")
+    except Exception as beacon_err:
+        logger.warning(f"Boot beacon write skipped (non-fatal): {beacon_err}")
 
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")

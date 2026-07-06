@@ -2991,9 +2991,12 @@ async def main():
     # Record the SHA this bridge booted at (data/bridge_boot_sha) so the update
     # system can verify the running release matches pulled HEAD (issue #1898).
     # Best-effort — a write failure logs a warning and never crashes startup.
-    from monitoring.boot_beacon import write_boot_beacon
+    try:
+        from monitoring.boot_beacon import write_boot_beacon
 
-    write_boot_beacon("bridge")
+        write_boot_beacon("bridge")
+    except Exception as beacon_err:
+        logger.warning(f"Boot beacon write skipped (non-fatal): {beacon_err}")
 
     # Fresh-bridge boot self-check + pending-report flush (issue #1898):
     # (1) unconditionally verify the running release — a stale self-

@@ -337,9 +337,13 @@ fi
 # The pure 30-min cron path has no chat context and stages nothing.
 if $NEED_BRIDGE_RESTART && [ -n "${UPDATE_REPORT_CHAT_ID:-}" ] && [ -n "${UPDATE_REPORT_REPLY_TO:-}" ]; then
     AFTER_SHORT=$(git -C "$PROJECT_DIR" rev-parse --short "$AFTER_SHA")
-    printf '{"chat_id": "%s", "reply_to": "%s", "sha": "%s", "worker_state": "%s", "staged_ts": %s}\n' \
+    # RESTART_FAILED / VERIFY_FAILED are both known at staging time; the fresh
+    # bridge's boot flush must force a FAILED report when either bit is set —
+    # otherwise a worker whose kickstart failed (or that crash-looped before
+    # its beacon write) would flush a green OK (review blocker, PR #1914).
+    printf '{"chat_id": "%s", "reply_to": "%s", "sha": "%s", "worker_state": "%s", "staged_ts": %s, "restart_failed": %s, "verify_failed": %s}\n' \
         "$UPDATE_REPORT_CHAT_ID" "$UPDATE_REPORT_REPLY_TO" "$AFTER_SHORT" \
-        "$WORKER_STATE" "$(date +%s)" \
+        "$WORKER_STATE" "$(date +%s)" "$RESTART_FAILED" "$VERIFY_FAILED" \
         > "$PROJECT_DIR/data/update-pending-report"
     echo "[update] Staged update-pending-report for chat $UPDATE_REPORT_CHAT_ID"
 fi

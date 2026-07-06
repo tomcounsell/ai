@@ -305,18 +305,16 @@ def boot_env(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _stage_report(tmp_path, worker_state="worker restarted") -> None:
-    (tmp_path / "data" / "update-pending-report").write_text(
-        json.dumps(
-            {
-                "chat_id": "111",
-                "reply_to": "222",
-                "sha": HEAD_SHA,
-                "worker_state": worker_state,
-                "staged_ts": time.time(),
-            }
-        )
-    )
+def _stage_report(tmp_path, worker_state="worker restarted", **extra) -> None:
+    payload = {
+        "chat_id": "111",
+        "reply_to": "222",
+        "sha": HEAD_SHA,
+        "worker_state": worker_state,
+        "staged_ts": time.time(),
+    }
+    payload.update(extra)
+    (tmp_path / "data" / "update-pending-report").write_text(json.dumps(payload))
 
 
 def _set_verify(monkeypatch, results: dict) -> None:
@@ -405,6 +403,50 @@ async def test_boot_flush_stale_sends_failed_and_leaves_report(boot_env, tg_clie
     # Left in place for the watchdog's undrained-report read.
     assert (boot_env / "data" / "update-pending-report").exists()
     assert (boot_env / "data" / "update-release-failed").exists()
+
+
+@pytest.mark.asyncio
+async def test_boot_flush_staged_restart_failure_forces_failed(boot_env, tg_client, monkeypatch):
+    """Review blocker (PR #1914): a failed worker kickstart staged by the shell
+    must force FAILED even when the fresh classifications all look clean."""
+    _set_verify(monkeypatch, {"bridge": _info("matches", 100), "worker": _info("matches", -50)})
+    _stage_report(boot_env, worker_state="worker restart FAILED", restart_failed=1)
+
+    await bridge_update.run_boot_release_check(tg_client)
+
+    message = tg_client.send_message.await_args.args[1]
+    assert "❌ update FAILED" in message
+    assert "✅" not in message
+    assert "worker restart FAILED" in message
+
+
+@pytest.mark.asyncio
+async def test_boot_flush_staged_verify_failure_forces_failed(boot_env, tg_client, monkeypatch):
+    """A worker that crash-looped before its beacon write sets VERIFY_FAILED=1
+    in the shell; the flush must not report green off clean-looking beacons."""
+    _set_verify(monkeypatch, {"bridge": _info("matches", 100), "worker": _info("matches", -50)})
+    _stage_report(boot_env, verify_failed=1)
+
+    await bridge_update.run_boot_release_check(tg_client)
+
+    message = tg_client.send_message.await_args.args[1]
+    assert "❌ update FAILED" in message
+    assert "staged failure" in message
+
+
+@pytest.mark.asyncio
+async def test_boot_flush_legacy_report_without_failure_bits_still_ok(
+    boot_env, tg_client, monkeypatch
+):
+    """A report staged by an older shell (no failure-bit keys) with a healthy
+    worker_state still reports OK — absence of the keys is not a failure."""
+    _set_verify(monkeypatch, {"bridge": _info("matches", 100), "worker": _info("matches", -50)})
+    _stage_report(boot_env)
+
+    await bridge_update.run_boot_release_check(tg_client)
+
+    message = tg_client.send_message.await_args.args[1]
+    assert f"✅ update OK @ {HEAD_SHA}" in message
 
 
 @pytest.mark.asyncio

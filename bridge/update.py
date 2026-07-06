@@ -74,11 +74,12 @@ async def _verify_release_after_update(
 
     if worker_restarted:
         beacon_path = _PROJECT_DIR / "data" / "worker_boot_sha"
-        for _ in range(UPDATE_POLL_ATTEMPTS):
+        for attempt in range(UPDATE_POLL_ATTEMPTS):
             beacon = read_boot_beacon(beacon_path)
             if beacon is not None and beacon[1] > subprocess_start_ts:
                 break
-            await asyncio.sleep(UPDATE_POLL_INTERVAL_SECONDS)
+            if attempt < UPDATE_POLL_ATTEMPTS - 1:  # no sleep after the final attempt
+                await asyncio.sleep(UPDATE_POLL_INTERVAL_SECONDS)
     head_short = get_short_sha(_PROJECT_DIR)
     machine_check = check_machine_identity(_PROJECT_DIR)
     return verify_running_release(_PROJECT_DIR, head_short, machine_check)
@@ -298,9 +299,12 @@ async def handle_update_command(tg_client, event):
 
         # If update had warnings or failed, queue agent session to fix.
         # ALL stdout lines are scanned (issue #1898), not only the first.
-        has_warnings = any(
-            "warning" in line.lower() or "error" in line.lower() for line in status_lines
-        )
+        # Line-anchored markers only: a bare substring scan over-matches
+        # git-pull diffstat filenames containing "error"/"warning" (spurious
+        # fix sessions on green updates); the anchors below are exactly what
+        # remote-update.sh and the verify CLI emit.
+        _warning_prefixes = ("[update] WARN", "WARNING:", "ERROR", "RESTART FAILED")
+        has_warnings = any(line.strip().startswith(_warning_prefixes) for line in status_lines)
         if failed or has_warnings:
             status += " — spawning agent session to fix"
             await _queue_fix_session(event, machine, stdout, stderr, failed)
@@ -409,8 +413,21 @@ async def run_boot_release_check(tg_client) -> None:
             worker_state = f"worker STALE {worker_info.get('boot_sha') or '?'}"
         states = f"({bridge_state}, {worker_state})"
 
-        if stale_details:
-            status = f"❌ update FAILED @ {sha}: {'; '.join(stale_details)} {states}"
+        # Failure bits staged by remote-update.sh (known at staging time,
+        # before the self-kill): a failed worker kickstart or a failed shell
+        # verify must force FAILED even when the fresh classifications look
+        # clean — otherwise a worker that failed to restart (or crash-looped
+        # before its beacon write) would flush a green OK (review blocker).
+        staged_failure = (
+            bool(report.get("restart_failed"))
+            or bool(report.get("verify_failed"))
+            or "FAILED" in (report.get("worker_state") or "")
+        )
+        if stale_details or staged_failure:
+            reasons = list(stale_details)
+            if staged_failure and not reasons:
+                reasons.append("staged failure from the update shell (restart/verify)")
+            status = f"❌ update FAILED @ {sha}: {'; '.join(reasons)} {states}"
         else:
             status = f"✅ update OK @ {sha} {states}"
         message = f"{machine} - {status}"
