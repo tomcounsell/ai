@@ -1,6 +1,9 @@
 #!/bin/bash
-# Remote update: pull latest code, sync deps if needed, write restart flag.
+# Remote update: pull latest code, sync deps if needed, restart the worker and
+# bridge on relevant changes, then verify the running release matches HEAD.
 # Designed to run unattended (from Telegram /update command or launchd cron).
+# Note: run.py --cron writes the worker's deferred restart flag; this shell
+# performs the actual kickstarts (issue #1898).
 #
 # This script uses the modular Python update system in scripts/update/.
 # For full updates with all checks, use: python scripts/update/run.py --full
@@ -46,6 +49,27 @@ cd "$PROJECT_DIR"
 # Ensure data directory exists
 mkdir -p "$PROJECT_DIR/data"
 
+# ── Planned bridge-restart marker (issue #1898) ─────────────────────
+# Written just before the bridge kickstart at the end of a bridge-relevant
+# cycle; the watchdog suppresses crash-logging while it is fresh and the
+# fresh bridge's boot self-check clears it. The 360s freshness window must
+# stay in lockstep with UPDATE_RESTART_MARKER_TTL_SECONDS
+# (scripts/update/service.py: STARTUP_GRACE_SECONDS + one watchdog cycle).
+RESTART_MARKER="$PROJECT_DIR/data/update-restart-in-progress"
+restart_marker_fresh() {
+    [ -f "$RESTART_MARKER" ] || return 1
+    local marker_age=$(( $(date +%s) - $(stat -f %m "$RESTART_MARKER" 2>/dev/null || echo 0) ))
+    [ "$marker_age" -lt 360 ]
+}
+skip_locked() {
+    if restart_marker_fresh; then
+        echo "Update lock held — bridge restart in progress. Skipping."
+    else
+        echo "Another update is already running. Skipping."
+    fi
+    exit 0
+}
+
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
 cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -58,12 +82,10 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
             rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
             mkdir "$LOCK_DIR" 2>/dev/null || true
         else
-            echo "Another update is already running. Skipping."
-            exit 0
+            skip_locked
         fi
     else
-        echo "Another update is already running. Skipping."
-        exit 0
+        skip_locked
     fi
 fi
 trap cleanup_lock EXIT
@@ -150,6 +172,16 @@ if launchctl list | grep -q "com.valor.daydream"; then
     rm -f "$OLD_DAYDREAM_DST"
 fi
 
+# ── Restart + verify state (issue #1898) ─────────────────────────────
+# RESTART_FAILED: any worker/bridge kickstart failure — ORed into the terminal
+# exit so a passing verify can never mask a failed restart.
+# WORKER_STATE: per-process reload state staged into the pending report.
+# VERIFY_SINCE: restart moment handed to the terminal verify's beacon poll
+# (0 = nothing restarted this cycle, no poll).
+RESTART_FAILED=0
+WORKER_STATE="worker current"
+VERIFY_SINCE=0
+
 # ── Reload worker plist if present ───────────────────────────────────
 # Only restart the worker when the pull actually landed new commits that touch
 # worker-loaded code.  This prevents killing in-flight sessions every 30 minutes
@@ -209,16 +241,29 @@ PYEOF
         fi
     fi
 
+    # Restart moment — handed to the terminal verify's bounded beacon poll
+    # (Race 1 mitigation, issue #1898). Captured just before the kickstarts.
+    RESTART_TS=$(date +%s)
     if launchctl list | grep -q "$WORKER_LABEL"; then
         if $NEED_RESTART; then
             # Service is loaded — use kickstart -k to atomically kill+restart without
             # the bootout/bootstrap race condition (bootstrap error 5: label still registered).
-            if ! launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+            if launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+                WORKER_STATE="worker restarted"
+                VERIFY_SINCE=$RESTART_TS
+            else
                 # kickstart failed; fall back to bootout + bootstrap with a brief wait
                 launchctl bootout "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null || true
                 sleep 2
-                if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
-                    echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+                if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+                    WORKER_STATE="worker restarted"
+                    VERIFY_SINCE=$RESTART_TS
+                else
+                    # Distinct, scannable failure line + non-zero terminal exit.
+                    # A swallowed `echo ERROR` here is the #1898 root-cause shape.
+                    echo "RESTART FAILED: worker kickstart/bootstrap failed for $WORKER_LABEL"
+                    WORKER_STATE="worker restart FAILED"
+                    RESTART_FAILED=1
                 fi
             fi
         else
@@ -226,8 +271,13 @@ PYEOF
         fi
     else
         # Service not yet loaded (first install) — always bootstrap.
-        if ! launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
-            echo "ERROR: Failed to bootstrap $WORKER_LABEL"
+        if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+            WORKER_STATE="worker restarted"
+            VERIFY_SINCE=$RESTART_TS
+        else
+            echo "RESTART FAILED: worker bootstrap failed for $WORKER_LABEL"
+            WORKER_STATE="worker restart FAILED"
+            RESTART_FAILED=1
         fi
     fi
 fi
@@ -236,3 +286,81 @@ fi
 # (see scripts/log_rotate.py and com.valor.log-rotate.plist). The Python
 # update pipeline installs it via service.install_log_rotate_agent() —
 # no root/sudo required.
+
+# ── Bridge restart decision (issue #1898) ────────────────────────────
+# Computed BEFORE the terminal verify because the verify's scope flag depends
+# on it: the deliberately-about-to-restart bridge must not be escalated as
+# stale on the mainline success path. Restarting the bridge is safe — it
+# holds no agent sessions (the worker is the sole session executor) and its
+# Telethon catchup scan backfills any messages missed during the brief
+# restart window. Gated on a bridge-relevant diff (mirrors the #1091 worker
+# gate) and on the bridge plist being installed on this machine.
+BRIDGE_LABEL="${SERVICE_LABEL_PREFIX}.bridge"
+BRIDGE_DST="$HOME/Library/LaunchAgents/${BRIDGE_LABEL}.plist"
+NEED_BRIDGE_RESTART=false
+if [ "$BEFORE_SHA" != "$AFTER_SHA" ] && [ -f "$BRIDGE_DST" ]; then
+    if git -C "$PROJECT_DIR" diff "$BEFORE_SHA" "$AFTER_SHA" -- \
+        bridge/ agent/ mcp_servers/ models/ tools/ config/ \
+        pyproject.toml | grep -q . ; then
+        NEED_BRIDGE_RESTART=true
+    fi
+fi
+
+# ── Terminal release verify (issue #1898) ────────────────────────────
+# Runs on EVERY cycle — including no-op cron cycles with no new commits — so
+# a starved/never-restarted process is re-classified every 30 minutes instead
+# of silently reporting OK forever. --since polls (bounded 15 x 2s) for a
+# fresh worker beacon after a kickstart (Race 1); --skip-bridge scopes the
+# verify to the worker when the bridge is about to be deliberately restarted
+# below. Exit is captured, never swallowed.
+VERIFY_FAILED=0
+VERIFY_ARGS=(--since "$VERIFY_SINCE")
+if $NEED_BRIDGE_RESTART; then
+    VERIFY_ARGS+=(--skip-bridge)
+fi
+if ! "$PYTHON" -m scripts.update.verify_release "${VERIFY_ARGS[@]}"; then
+    VERIFY_FAILED=1
+fi
+
+# ── Stage the pending report for the fresh bridge (issue #1898) ──────
+# A bridge kickstart SIGKILLs this shell (and handle_update_command) by
+# process-group semantics, so the doomed process cannot report. When a
+# Telegram chat context is present in the env (exported by
+# handle_update_command), stage the report for the fresh bridge's boot flush.
+# The pure 30-min cron path has no chat context and stages nothing.
+if $NEED_BRIDGE_RESTART && [ -n "${UPDATE_REPORT_CHAT_ID:-}" ] && [ -n "${UPDATE_REPORT_REPLY_TO:-}" ]; then
+    AFTER_SHORT=$(git -C "$PROJECT_DIR" rev-parse --short "$AFTER_SHA")
+    printf '{"chat_id": "%s", "reply_to": "%s", "sha": "%s", "worker_state": "%s", "staged_ts": %s}\n' \
+        "$UPDATE_REPORT_CHAT_ID" "$UPDATE_REPORT_REPLY_TO" "$AFTER_SHORT" \
+        "$WORKER_STATE" "$(date +%s)" \
+        > "$PROJECT_DIR/data/update-pending-report"
+    echo "[update] Staged update-pending-report for chat $UPDATE_REPORT_CHAT_ID"
+fi
+
+# ── Bridge kickstart LAST (issue #1898) ──────────────────────────────
+# The kickstart SIGKILLs the bridge launchd job — and, by process-group
+# semantics, this shell too when it was spawned by handle_update_command
+# inside the bridge. It MUST therefore be the final act: nothing after a
+# successful kickstart runs. Sequence: (a) planned-restart marker so the 60s
+# watchdog does not log the deliberate restart as a crash; (b) release the
+# lock while still alive (the EXIT trap never fires on SIGKILL — an orphaned
+# lock would green-skip retries and the next cron cycle for up to 600s);
+# (c) kickstart.
+if $NEED_BRIDGE_RESTART; then
+    echo "[update] Bridge-relevant changes detected — restarting bridge"
+    date +%s > "$RESTART_MARKER"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    if ! launchctl kickstart -k "gui/$(id -u)/$BRIDGE_LABEL" 2>/dev/null; then
+        # Only reachable when the kickstart itself failed (a successful one
+        # kills this shell): surface it loudly and withdraw the marker + the
+        # staged report — no restart happened, the still-alive bridge's
+        # handle_update_command reports inline.
+        echo "RESTART FAILED: bridge kickstart failed for $BRIDGE_LABEL"
+        RESTART_FAILED=1
+        rm -f "$RESTART_MARKER" "$PROJECT_DIR/data/update-pending-report"
+    fi
+fi
+
+# Terminal exit ORs both failure sources: a passing verify must never mask a
+# kickstart failure (the #1898 root-cause shape), and vice versa.
+exit $(( RESTART_FAILED || VERIFY_FAILED ))
