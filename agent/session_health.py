@@ -400,7 +400,11 @@ TOOL_TIMEOUT_LOOP_INTERVAL = 30  # 30s — tightest tier (internal) budget
 # Tier budgets — env-tunable; defaults from issue #1270 / Fazm reference.
 TOOL_TIMEOUT_INTERNAL_SEC = int(os.environ.get("TOOL_TIMEOUT_INTERNAL_SEC", 30))
 TOOL_TIMEOUT_MCP_SEC = int(os.environ.get("TOOL_TIMEOUT_MCP_SEC", 120))
-TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 300))
+# TEMPORARY (2026-07-06): bumped 300 -> 3000 as a stopgap while the worker
+# liveness / Bash tool-wedge fault is investigated (sessions #1915/#1916 were
+# killed at the 300s wedge boundary). Grain of salt — revert to 300 once the
+# root-cause worker-heartbeat issue is fixed. Override via TOOL_TIMEOUT_DEFAULT_SEC.
+TOOL_TIMEOUT_DEFAULT_SEC = int(os.environ.get("TOOL_TIMEOUT_DEFAULT_SEC", 3000))
 
 # === Path-B mid-run wedge detector constants (#1724) ===
 # Stage-1 cheap quiescence gate: window of continuous PTY-screen quiescence
