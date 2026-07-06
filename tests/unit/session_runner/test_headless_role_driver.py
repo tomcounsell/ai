@@ -1,15 +1,16 @@
-"""Unit tests for HeadlessRoleDriver (plan #1842).
+"""Unit tests for the graduated HeadlessRoleDriver (plan #1924, task 1).
 
 Covers, in isolation with an injected ``harness_fn`` and a real (or fake)
 ``HookEdgeConsumer`` over a temp NDJSON edge file:
 
 * Prime injection — BOTH branches (slash-command and append-system-prompt).
-* Turn-end reconciliation — BOTH branches (a #1688 TURN_END envelope honored
-  when present; the clean-exit ``result`` fallback when absent).
+* Turn-end reconciliation — BOTH branches (a TURN_END envelope honored when
+  present; the clean-exit ``result`` fallback when absent).
 * Race 4 — a stale TURN_END from a prior sequential turn does not end the next.
 * Hung subprocess — bounded-wait timeout kills + classifies the turn.
 * Nonzero exit — the corruption exception propagates an exit_reason.
 * Empty result — hits the empty-output guard.
+* G5 — the subprocess env carries the explicit subscription-auth posture.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ import time
 
 import pytest
 
-from agent.granite_container.hook_edge import HookEdgeConsumer
-from agent.granite_container.role_driver import (
+from agent.session_runner.hook_edge import HookEdgeConsumer
+from agent.session_runner.role_driver import (
     PRIME_PATH_APPEND,
     PRIME_PATH_SLASH,
     HeadlessRoleDriver,
@@ -268,9 +269,9 @@ async def test_binary_missing_classified(tmp_path):
     assert outcome.exit_reason == "headless_binary_missing"
 
 
-async def test_resume_handle_shape(tmp_path, monkeypatch):
-    """After a successful first turn the driver exposes a transport-tagged
-    resume handle with the captured claude UUID + derived transcript path."""
+async def test_claude_session_id_capture(tmp_path, monkeypatch):
+    """After a successful first turn the driver exposes the captured claude
+    UUID + derived transcript path (feeds the four-scalar resume persistence)."""
     import agent.sdk_client as sdk
 
     monkeypatch.setattr(sdk, "_get_prior_session_uuid", lambda sid: "claude-uuid-xyz")
@@ -282,44 +283,56 @@ async def test_resume_handle_shape(tmp_path, monkeypatch):
         project_root=str(tmp_path),
         harness_fn=_make_harness(reply="ok"),
     )
+    assert driver.claude_session_id is None
+    assert driver.transcript_path is None
     await driver.run_turn("go")
-    handle = driver.resume_handle()
-    assert handle["role"] == "dev"
-    assert handle["transport"] == "headless"
-    assert handle["claude_session_id"] == "claude-uuid-xyz"
-    assert handle["transcript_path"].endswith("claude-uuid-xyz.jsonl")
-    assert ".claude/projects/" in handle["transcript_path"]
+    assert driver.claude_session_id == "claude-uuid-xyz"
+    assert driver.transcript_path.endswith("claude-uuid-xyz.jsonl")
+    assert ".claude/projects/" in driver.transcript_path
 
 
-def test_pty_role_driver_is_mechanical_wrapper():
-    """PTYRoleDriver delegates the actor surface to the wrapped PTYDriver and
-    exposes a pty-tagged resume handle."""
-    from unittest.mock import MagicMock
+# --------------------------------------------------------------------------
+# G5 — explicit subscription-auth env injection
+# --------------------------------------------------------------------------
 
-    from agent.granite_container.role_driver import PTYRoleDriver
 
-    pty = MagicMock()
-    pty.isalive.return_value = True
-    pty.last_resume_uuid.return_value = "resume-uuid"
-    pty.pid = 4321
-    driver = PTYRoleDriver(
-        pty,
+async def test_subprocess_env_pins_subscription_auth(tmp_path, monkeypatch):
+    """The harness env overlay strips ANTHROPIC_API_KEY (blanked so the
+    overlay overrides an inherited value), blanks the endpoint overrides, and
+    carries CLAUDE_CODE_OAUTH_TOKEN from the vault-loaded process env."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-token-abc")
+    calls = []
+    driver = HeadlessRoleDriver(
         role="pm",
-        session_id="claude-pm-uuid",
-        transcript_path="/tmp/claude-pm-uuid.jsonl",
+        session_id="sess-g5",
+        working_dir=str(tmp_path),
+        env={"AGENT_SESSION_ID": "sess-g5", "ANTHROPIC_API_KEY": "sk-leaked"},
+        harness_fn=_make_harness(record=calls),
     )
-    driver.write("hello")
-    pty.write.assert_called_once_with("hello")
-    assert driver.isalive() is True
-    assert driver.last_resume_uuid() == "resume-uuid"
-    assert driver.pid == 4321
-    handle = driver.resume_handle()
-    assert handle == {
-        "role": "pm",
-        "claude_session_id": "claude-pm-uuid",
-        "transcript_path": "/tmp/claude-pm-uuid.jsonl",
-        "transport": "pty",
-    }
+    await driver.run_turn("go")
+    env = calls[0]["env"]
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "oauth-token-abc"
+    assert env["ANTHROPIC_API_KEY"] == ""  # explicit strip, never inherited
+    assert env["ANTHROPIC_BASE_URL"] == ""
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert env["AGENT_SESSION_ID"] == "sess-g5"  # caller overlay preserved
+
+
+async def test_subprocess_env_without_vault_token(tmp_path, monkeypatch):
+    """Absent CLAUDE_CODE_OAUTH_TOKEN, the overlay still strips API-key auth
+    and does not invent a token key."""
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    calls = []
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-g5b",
+        working_dir=str(tmp_path),
+        harness_fn=_make_harness(record=calls),
+    )
+    await driver.run_turn("go")
+    env = calls[0]["env"]
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["ANTHROPIC_API_KEY"] == ""
 
 
 @pytest.mark.parametrize("prime_path", [PRIME_PATH_APPEND, PRIME_PATH_SLASH])
