@@ -26,10 +26,11 @@ class TestGoldenSamplesMatch:
         assert ok is True
         assert failed == []
 
-    def test_golden_samples_cover_all_four_markers(self):
-        """Sanity: the fixture dict itself must name all four markers."""
+    def test_golden_samples_cover_all_five_markers(self):
+        """Sanity: the fixture dict itself must name all five markers."""
         assert set(_CONTRACT_GOLDEN_SAMPLES) == {
             "IDLE_BAR",
+            "AGENTS_HINT_BAR",
             "PROMPT_GLYPH",
             "SPINNER_EVIDENCE_RE",
             "TRUST_FOLDER_PROMPT",
@@ -83,6 +84,7 @@ class TestMarkerMismatchDetected:
             "agent.granite_container.pty_driver._CONTRACT_GOLDEN_SAMPLES",
             {
                 "IDLE_BAR": "x",
+                "AGENTS_HINT_BAR": "x",
                 "PROMPT_GLYPH": "x",
                 "SPINNER_EVIDENCE_RE": "x",
                 "TRUST_FOLDER_PROMPT": "x",
@@ -93,6 +95,7 @@ class TestMarkerMismatchDetected:
         assert ok is False
         assert set(failed) == {
             "IDLE_BAR",
+            "AGENTS_HINT_BAR",
             "PROMPT_GLYPH",
             "SPINNER_EVIDENCE_RE",
             "TRUST_FOLDER_PROMPT",

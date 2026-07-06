@@ -97,6 +97,17 @@ INTERRUPTED_RE = re.compile(
 # containing "bypass ... permissions" plus the prompt glyph
 # (`>` or `❯`). Both must be present.
 IDLE_BAR = re.compile(r"bypass.{0,30}permissions", re.DOTALL)
+# v2.1.199+ settled-footer hint. From v2.1.201 the renderer no longer
+# re-emits the bypass-permissions bar cells after a turn — the bar text
+# paints ONLY in the welcome frame, so a post-write capture (turn text is
+# reset on write()) never contains it and IDLE_BAR alone can never fire
+# post-write (the 2026-07 fleet-wide startup_unresolved plateau, issue
+# #1918). What the input footer DOES repaint on every turn return is the
+# "· ← for agents" hint (live-probed on v2.1.201: two consecutive turns
+# at both 24x80 and 50x200). \s* between words tolerates the TUI's
+# whitespace-collapsed rendering (same reason OVERLAY_BAR matches
+# "Esctocancel").
+AGENTS_HINT_BAR = re.compile(r"←\s*for\s*agents", re.IGNORECASE)
 PROMPT_GLYPH = re.compile(r"[>❯]")
 # Spinner-evidence pattern for content-floor reads: proof that a model
 # turn actually RAN at some point this turn (the spinner painted, or
@@ -157,6 +168,7 @@ _CONTRACT_GOLDEN_SAMPLES: dict[str, str] = {
     "IDLE_BAR": "  bypass permissions  ",
     "PROMPT_GLYPH": "❯ ",
     "SPINNER_EVIDENCE_RE": "✻ Sprouting… (esc to interrupt)",
+    "AGENTS_HINT_BAR": " · ← for agents",
     "TRUST_FOLDER_PROMPT": "Do you trust the files in this folder?\n❯ 1. Yes, I trust this folder",
 }
 
@@ -181,6 +193,8 @@ def verify_tui_marker_contract() -> tuple[bool, list[str]]:
         failed.append("PROMPT_GLYPH")
     if not SPINNER_EVIDENCE_RE.search(_CONTRACT_GOLDEN_SAMPLES["SPINNER_EVIDENCE_RE"]):
         failed.append("SPINNER_EVIDENCE_RE")
+    if not AGENTS_HINT_BAR.search(_CONTRACT_GOLDEN_SAMPLES.get("AGENTS_HINT_BAR", "")):
+        failed.append("AGENTS_HINT_BAR")
     try:
         match = parse_startup_frame(_CONTRACT_GOLDEN_SAMPLES["TRUST_FOLDER_PROMPT"])
         if match is None or match.event != StartupEvent.TRUST_FOLDER_PROMPT:
@@ -679,8 +693,13 @@ class PTYDriver:
             stripped = _strip_ansi(self._turn_text)
             if not stripped:
                 continue
-            # C4 + C5: idle = (bypass bar OR overlay bar) AND prompt glyph.
-            bar_match = IDLE_BAR.search(stripped) or OVERLAY_BAR.search(stripped)
+            # C4 + C5: idle = (bypass bar OR agents-hint footer OR overlay
+            # bar) AND prompt glyph.
+            bar_match = (
+                IDLE_BAR.search(stripped)
+                or AGENTS_HINT_BAR.search(stripped)
+                or OVERLAY_BAR.search(stripped)
+            )
             if bar_match and PROMPT_GLYPH.search(stripped):
                 if min_content_bytes > 0:
                     if len(stripped) < min_content_bytes:
@@ -694,7 +713,11 @@ class PTYDriver:
                         continue
                 saw_idle = True
                 tail = stripped[-200:]
-                m = IDLE_BAR.search(tail) or OVERLAY_BAR.search(tail)
+                m = (
+                    IDLE_BAR.search(tail)
+                    or AGENTS_HINT_BAR.search(tail)
+                    or OVERLAY_BAR.search(tail)
+                )
                 if m:
                     s = max(0, m.start() - 20)
                     e = m.end() + 20

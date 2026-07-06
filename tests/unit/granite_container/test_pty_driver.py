@@ -307,6 +307,22 @@ class TestReadUntilIdle(unittest.TestCase):
         result = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
         self.assertTrue(result.saw_idle, f"overlay should count as idle; got {result.buffer!r}")
 
+    def test_agents_hint_footer_also_idle(self) -> None:
+        # v2.1.201 (issue #1918): post-turn frames no longer repaint the
+        # bypass-permissions bar cells — the input footer repaints the
+        # "· ← for agents" hint instead. A settled post-turn capture with
+        # that hint + the prompt glyph must count as idle.
+        driver = self._driver_with_mock(
+            [
+                "✻ Cogitated for 4s\n",
+                "❯ \n · ← for agents\n",
+            ]
+        )
+        result = driver.read_until_idle(min_content_bytes=0, timeout_s=2.0)
+        self.assertTrue(
+            result.saw_idle, f"agents-hint footer should count as idle; got {result.buffer!r}"
+        )
+
     def test_min_content_bytes_floor(self) -> None:
         # Bar+glyph present but buffer < min_content_bytes → not idle.
         driver = self._driver_with_mock(

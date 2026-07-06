@@ -343,6 +343,7 @@ to do reflexively on every drift warning:
    |---|---|---|
    | 2.1.197 | 2026-07-02 | Initial pin (issue #1817) |
    | 2.1.198 | 2026-07-03 | Single-sourced the pin in `config/models.py` (shared with the #1839 nightly canary); default set to the current fleet version. Markers unchanged. |
+   | 2.1.201 | 2026-07-06 | **Marker drift (issue #1918):** the renderer stopped re-emitting the bypass-permissions bar cells after a turn — the bar paints only in the welcome frame, so post-write `IDLE_BAR` checks went permanently blind (fleet-wide `startup_unresolved` plateaus since 2026-07-01). Added `AGENTS_HINT_BAR` (`← for agents`, the footer hint that DOES repaint on every turn return; live-probed at 24x80 and 50x200) as an accepted idle-bar signature alongside `IDLE_BAR`/`OVERLAY_BAR`. |
 
 ## See Also
 

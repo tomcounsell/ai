@@ -55,7 +55,7 @@ OPUS = "claude-opus-4-5-20251101"
 # version's actual TUI output first, then update this constant and the bump-log
 # in docs/features/deployment.md. Provisioning a canary against a not-yet-fleet
 # version is tracked separately in issue #1854.
-PINNED_CLAUDE_VERSION = os.environ.get("PINNED_CLAUDE_VERSION", "2.1.198")
+PINNED_CLAUDE_VERSION = os.environ.get("PINNED_CLAUDE_VERSION", "2.1.201")
 
 
 # =============================================================================
