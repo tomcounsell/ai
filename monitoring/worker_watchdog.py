@@ -13,12 +13,12 @@ Two recovery paths:
      W1: SIGTERM → poll 5s
      W2: SIGKILL → poll 10s  (queued against U-state; may not deliver immediately)
      W3: launchctl bootout → poll 10s  (removes launchd job; cleans fd table on exit)
-     W4: Write CRITICAL Redis key + pty_close_required hint for operator
+     W4: Write CRITICAL Redis key for operator visibility
      W5: Final alert — stop; launchd will respawn once U-state frees
 
-   Cross-process PTY fd close is NOT feasible on macOS (os.close only owns own fds,
-   /proc is Linux-only, psutil.open_files does not surface PTY devices).
-   Cite: spike result, issue #1767.
+   A genuine U-state (uninterruptible sleep) process cannot be killed from
+   userspace on macOS — SIGKILL queues until the blocking syscall returns.
+   The ladder converts that into a loud operator signal rather than a hang.
 
 2. Missing-worker active recovery (new, issue #1311): when the worker process
    is gone for >2 consecutive ticks, escalate via:
@@ -72,7 +72,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 HEARTBEAT_FILE = PROJECT_DIR / "data" / "last_worker_connected"
 # 180s = 6× the 30s heartbeat write interval (plan: ≥6× guard).
 # Safe to tighten because the heartbeat is now on its own thread (issue #1767)
-# and cannot be starved by PTY/thread-pool saturation. Env-tunable for
+# and cannot be starved by thread-pool saturation. Env-tunable for
 # conservative rollout (e.g. HEARTBEAT_THRESHOLD=300 on initial deploy).
 HEARTBEAT_THRESHOLD = int(os.environ.get("HEARTBEAT_THRESHOLD", "180"))
 LOG_FILE = PROJECT_DIR / "logs" / "worker_watchdog.log"
@@ -222,19 +222,18 @@ def recover(status: dict) -> None:
     W1: SIGTERM → poll 5s
     W2: SIGKILL → poll 10s  (queued against U-state; may not deliver immediately)
     W3: launchctl bootout → poll 10s  (removes launchd job; cleans fd table on exit)
-    W4: Write CRITICAL Redis key; set pty_close_required hint for operator
+    W4: Write CRITICAL Redis key for operator visibility
     W5: Final structured alert — stop; launchd will respawn once U-state frees
 
     Guard: PID-reuse window (~5 min on macOS). Each rung re-checks
     os.kill(pid, 0) immediately before acting to avoid acting on a recycled PID.
-    Cross-process PTY fd close is NOT feasible on macOS (os.close only owns own fds,
-    /proc is Linux-only, psutil.open_files does not surface PTY devices).
-    Cite: spike result, issue #1767.
 
-    Note: against a genuine U-state process, SIGKILL is queued until the blocking
-    syscall (os.read on PTY master) returns. W3 (bootout) removes the launchd job;
-    once the kernel cleans up the process's fd table on exit, the PTY read returns
-    EOF and the process can exit naturally, allowing launchd to respawn.
+    Note: against a genuine U-state process (uninterruptible sleep in a
+    blocking syscall — e.g. fd reads against a hung device or filesystem),
+    SIGKILL is queued until the syscall returns. W3 (bootout) removes the
+    launchd job; once the kernel cleans up the process's fd table on exit,
+    the blocked read returns and the process can exit naturally, allowing
+    launchd to respawn.
     """
     pid = status.get("pid")
     if not pid:
@@ -282,24 +281,21 @@ def recover(status: dict) -> None:
         logger.info("Watchdog W3: worker PID %d exited after bootout", pid)
         return
 
-    # W4: CRITICAL alert + operator hint
-    pty_close_disabled = os.environ.get("WORKER_WATCHDOG_PTY_CLOSE_DISABLED", "").strip()
+    # W4: CRITICAL alert
     logger.critical(
         "Watchdog W4: worker PID %d is STILL ALIVE after SIGTERM+SIGKILL+bootout — "
-        "process is in U-state (uninterruptible sleep). Cross-process PTY fd close "
-        "is not feasible on macOS. Operator intervention required: manually kill the "
-        "PTY master fds or reboot the machine. Redis CRITICAL key written.",
+        "process is in U-state (uninterruptible sleep in a blocking syscall). "
+        "Operator intervention required: investigate the hung fd/device or "
+        "reboot the machine. Redis CRITICAL key written.",
         pid,
     )
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
 
         _R.set(f"worker:watchdog:critical:{host}", f"U-state hung PID {pid}", ex=CRITICAL_KEY_TTL)
-        if not pty_close_disabled:
-            _R.set(f"worker:watchdog:pty_close_required:{host}", str(pid), ex=CRITICAL_KEY_TTL)
-        logger.info("Watchdog W4: wrote critical Redis keys for host %s", host)
+        logger.info("Watchdog W4: wrote critical Redis key for host %s", host)
     except Exception as exc:
-        logger.error("Watchdog W4: failed to write critical Redis keys: %s", exc)
+        logger.error("Watchdog W4: failed to write critical Redis key: %s", exc)
 
     # W5: Final log — launchd will respawn once U-state frees
     logger.critical(
@@ -322,8 +318,8 @@ def _bootout_worker() -> bool:
     """Run `launchctl bootout gui/<uid>/<label>` to evict the worker job.
 
     Used by W3 recovery (issue #1767) — removes the launchd job entry so the
-    kernel cleans up the process's fd table on exit, allowing a PTY master
-    read() blocking in U-state to return EOF and the process to exit.
+    kernel cleans up the process's fd table on exit, allowing an fd read
+    blocking in U-state to return and the process to exit.
     Returns True on returncode 0.
     """
     target = _service_target()

@@ -695,12 +695,10 @@ def create_app() -> FastAPI:
             "total_output_tokens": s.total_output_tokens,
             "total_cache_read_tokens": s.total_cache_read_tokens,
             "total_cost_usd": s.total_cost_usd,
-            # Per-role transport hedge (plan #1842). ``role_transports`` labels
-            # which transport each role ran on; the metered_* fields are the
-            # DISJOINT headless-leg accounting (tailer owns total_*). The
+            # The metered_* fields are the headless-runner accounting
+            # (historical PTY sessions carried total_* via the tailer). The
             # combined view sums both so operators see grand-total spend.
             # getattr with defaults so pre-feature records never KeyError.
-            "role_transports": getattr(s, "role_transports", None),
             "metered_input_tokens": getattr(s, "metered_input_tokens", 0) or 0,
             "metered_output_tokens": getattr(s, "metered_output_tokens", 0) or 0,
             "metered_cache_read_tokens": getattr(s, "metered_cache_read_tokens", 0) or 0,
@@ -714,13 +712,6 @@ def create_app() -> FastAPI:
             "current_tool_name": s.current_tool_name,
             "last_tool_use_at": s.last_tool_use_at,
             "last_turn_at": s.last_turn_at,
-            # Granite PTY read-loop freshness (#1724 / #1843 Gap B). The
-            # per-iteration read_until_idle callback refreshes
-            # last_pty_read_loop_at mid-turn, so a session wedged inside a long
-            # idle-path turn advances this field within ~1s — operators (and the
-            # stall-advisory actor) see the loop is still cycling.
-            "last_pty_read_loop_at": s.last_pty_read_loop_at,
-            "last_pty_activity_at": s.last_pty_activity_at,
             "recent_thinking_excerpt": s.recent_thinking_excerpt,
             "last_evidence_at": s.last_evidence_at,
             # BYOB scheduler-layer serialization (issue #1256, Decision 2).
@@ -738,14 +729,13 @@ def create_app() -> FastAPI:
             "recovery_attempts": s.recovery_attempts,
             "reprieve_count": s.reprieve_count,
             "process_alive": s.process_alive,
-            # Granite PTY identity (issue #1648). Null for SDK-path and
-            # pre-deploy granite sessions; populated by the granite tailer.
+            # Runner exit classification + PM subprocess identity (issue
+            # #1648). pm_pid is the current turn's `claude -p` pid; the
+            # transcript paths are populated on historical records only.
             "exit_reason": s.exit_reason,
             "pm_pid": s.pm_pid,
-            "dev_pid": s.dev_pid,
             "pm_transcript_path": s.pm_transcript_path,
             "dev_transcript_path": s.dev_transcript_path,
-            "pty_slot": s.pty_slot,
             # Output routing state (issue #1647).
             "user_facing_routed": s.user_facing_routed,
             "children": [_session_to_json(c) for c in s.children],
