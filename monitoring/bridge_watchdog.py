@@ -42,6 +42,15 @@ from monitoring.crash_tracker import (  # noqa: E402
     log_crash,
 )
 
+# Shared absolute process-start-time primitive (ps -o lstart). Moved from this
+# module to scripts/update/service.py and generalized for any PID so the
+# release verifier can classify both bridge and worker (issue #1898).
+from scripts.update.service import get_process_start_ts  # noqa: E402
+
+# Shared absolute process-start-time primitive (ps -o lstart). Moved from this
+# module to scripts/update/service.py and generalized for any PID so the
+# release verifier can classify both bridge and worker (issue #1898).
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -127,48 +136,6 @@ def is_bridge_running() -> tuple[bool, int | None]:
         return False, None
 
 
-def get_bridge_process_start_ts(pid: int) -> float | None:
-    """Return the bridge process's start time as a UTC unix timestamp.
-
-    Uses ``ps -o lstart= -p <pid>``.  Returns None on any error or unparseable
-    output.  None is treated as inconclusive — never authorise a restart based
-    on this alone (fail-safe for C3).
-
-    lstart format example: "Mon Jun 16 09:45:12 2026"
-    """
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        raw = result.stdout.strip()
-        if not raw:
-            return None
-        # lstart format: "Mon Jun 16 09:45:12 2026"
-        # Note: single-digit days are space-padded, e.g. " 6" not "06".
-        # strptime handles both with "%e" on many platforms; use "%d" with strip.
-        try:
-            dt = datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")
-        except ValueError:
-            # Some macOS versions zero-pad; try both forms
-            try:
-                dt = datetime.strptime(raw.strip(), "%a %b  %d %H:%M:%S %Y")
-            except ValueError:
-                logger.warning("get_bridge_process_start_ts: unparseable lstart=%r", raw)
-                return None
-        # ps lstart is local time; mktime() interprets it as local and returns a
-        # Unix timestamp (seconds since UTC epoch) — no explicit UTC conversion needed.
-        local_ts = time.mktime(dt.timetuple())
-        return local_ts
-    except Exception as e:
-        logger.debug("get_bridge_process_start_ts failed for pid=%s: %s", pid, e)
-        return None
-
-
 def _get_watchdog_redis() -> redis.Redis:
     """Return a decode_responses Redis client for watchdog use."""
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -204,12 +171,12 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     # Determine if bridge is within startup grace window.
     within_grace = False
     if bridge_pid is not None:
-        start_ts = get_bridge_process_start_ts(bridge_pid)
+        start_ts = get_process_start_ts(bridge_pid)
         if start_ts is None:
             # Cannot determine start time — fail-safe: treat as inconclusive for
             # grace-window purposes (do not authorise restart).
             logger.warning(
-                "assess_update_flow: get_bridge_process_start_ts returned None for "
+                "assess_update_flow: get_process_start_ts returned None for "
                 "pid=%s — suppressing wedge verdict (fail-safe C3)",
                 bridge_pid,
             )
