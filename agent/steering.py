@@ -262,4 +262,3 @@ def reset_self_draft_attempts(session_id: str) -> None:
     key = _self_draft_attempts_key(session_id)
     r.delete(key)
     logger.debug("[steering] Reset self-draft attempts for %s", session_id)
-

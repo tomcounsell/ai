@@ -13,8 +13,6 @@ from unittest.mock import patch
 
 from agent.session_stall_classifier import (
     _RUNNING_PROBE_STATUSES,
-    GRANITE_WEDGED_PTY_STALE_SECS,
-    GRANITE_WEDGED_READLOOP_FRESH_SECS,
     IDLE_STALL_SECS,
     IDLE_SUSPECT_SECS,
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
@@ -185,7 +183,7 @@ class TestNeverStartedRule:
 
 
 class TestNeverStartedProgressGuard:
-    """Granite PTY sessions emit no turn_start telemetry but still progress.
+    """Telemetry turn_start writes can lag or be lost while a session progresses.
 
     The progress-field guard must suppress the never_started false positive when
     the AgentSession's own fields show work, while leaving genuinely-idle
@@ -221,21 +219,6 @@ class TestNeverStartedProgressGuard:
         assert verdict.level == "healthy"
         assert verdict.reason == "progress_fields_fresh"
 
-    def test_fresh_last_pty_activity_skips_never_started(self):
-        import datetime
-
-        now = time.time()
-        session = SimpleNamespace(
-            status="running",
-            started_at=now - 700,
-            created_at=now - 700,
-            turn_count=0,
-            last_pty_activity_at=datetime.datetime.now(datetime.UTC),
-        )
-        verdict = classify_session_stall([], session=session)
-        assert verdict.level == "healthy"
-        assert verdict.reason == "progress_fields_fresh"
-
     def test_stale_progress_fields_still_never_started(self):
         # turn_count zero AND last activity well outside the suspect window →
         # the guard must NOT fire; the session is genuinely never-started.
@@ -246,7 +229,6 @@ class TestNeverStartedProgressGuard:
             created_at=now - 700,
             turn_count=0,
             last_tool_use_at=now - (IDLE_SUSPECT_SECS + 200),
-            last_pty_activity_at=now - (IDLE_SUSPECT_SECS + 200),
         )
         verdict = classify_session_stall([], session=session)
         assert verdict.level == "stalled"
@@ -559,213 +541,3 @@ class TestThresholdConstants:
 
     def test_recovery_suspect_count_pinned(self):
         assert RECOVERY_SUSPECT_COUNT == 2
-
-
-# ---------------------------------------------------------------------------
-# 9. granite_wedged rule (issue #1768)
-# ---------------------------------------------------------------------------
-
-
-def _dt(seconds_ago: float):
-    """tz-aware datetime `seconds_ago` in the past (UTC)."""
-    import datetime
-
-    return datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=seconds_ago)
-
-
-def _wedge_session(
-    *,
-    status: str = "running",
-    read_loop_ago: float = 0.0,
-    activity_ago: float | None = None,
-    created_ago: float = 700.0,
-) -> SimpleNamespace:
-    """Build a session stub for the granite_wedged probe.
-
-    read_loop_ago / activity_ago are seconds-in-the-past for the respective
-    PTY liveness fields (tz-aware datetimes). activity_ago=None leaves
-    last_pty_activity_at as None (never stamped).
-    """
-    now = time.time()
-    return SimpleNamespace(
-        status=status,
-        started_at=None,
-        created_at=now - created_ago,
-        last_pty_read_loop_at=_dt(read_loop_ago),
-        last_pty_activity_at=(None if activity_ago is None else _dt(activity_ago)),
-    )
-
-
-class TestGraniteWedgedRule:
-    def test_fires_fresh_readloop_stale_activity_no_turn_start(self):
-        # read-loop fresh (now), activity stale (700s ago > GRANITE_WEDGED_PTY_STALE_SECS).
-        session = _wedge_session(
-            read_loop_ago=0.0,
-            activity_ago=GRANITE_WEDGED_PTY_STALE_SECS + 100,
-        )
-        verdict = classify_session_stall([], session=session)
-        assert verdict.level == "stalled"
-        assert verdict.reason == "granite_wedged"
-        assert verdict.signals["pty_stale_threshold"] == GRANITE_WEDGED_PTY_STALE_SECS
-        assert verdict.signals["readloop_fresh_threshold"] == GRANITE_WEDGED_READLOOP_FRESH_SECS
-
-    def test_non_fire_pty_activity_fresh(self):
-        # activity recent (10s ago) — NOT stale; granite_wedged must not fire.
-        # created_ago old enough that it falls through to never_started instead.
-        session = _wedge_session(read_loop_ago=0.0, activity_ago=10.0)
-        verdict = classify_session_stall([], session=session)
-        assert verdict.reason != "granite_wedged"
-
-    def test_non_fire_turn_start_present(self):
-        # A turn_start event makes has_turn_start=True → the whole no-turn_start
-        # region (including granite_wedged) is skipped.
-        session = _wedge_session(
-            read_loop_ago=0.0,
-            activity_ago=GRANITE_WEDGED_PTY_STALE_SECS + 100,
-        )
-        events = [{"type": "turn_start", "ts": time.time() - 1500}]
-        verdict = classify_session_stall(events, session=session)
-        assert verdict.reason != "granite_wedged"
-
-    def test_non_fire_activity_none(self):
-        # last_pty_activity_at never stamped (None) → granite_wedged must not
-        # fabricate a wedge; falls through to never_started (created 700s ago).
-        session = _wedge_session(read_loop_ago=0.0, activity_ago=None)
-        verdict = classify_session_stall([], session=session)
-        assert verdict.reason != "granite_wedged"
-        assert verdict.level == "stalled"
-        assert verdict.reason == "never_started"
-
-    def test_non_fire_readloop_stale(self):
-        # read-loop stale (300s ago > GRANITE_WEDGED_READLOOP_FRESH_SECS) means the
-        # container may be dead → granite_wedged does not fire (handled by other
-        # reasons). activity is also stale.
-        assert 300 > GRANITE_WEDGED_READLOOP_FRESH_SECS
-        session = _wedge_session(
-            read_loop_ago=300.0,
-            activity_ago=GRANITE_WEDGED_PTY_STALE_SECS + 100,
-        )
-        verdict = classify_session_stall([], session=session)
-        assert verdict.reason != "granite_wedged"
-
-    def test_malformed_datetime_fields_no_raise_no_wedge(self):
-        # Junk non-datetime values for the PTY liveness fields must not raise and
-        # must not yield granite_wedged (outer try/except returns a safe verdict;
-        # to_unix_ts of junk → None → granite branch skipped).
-        now = time.time()
-        session = SimpleNamespace(
-            status="running",
-            started_at=None,
-            created_at=now - 700,
-            last_pty_read_loop_at="not-a-datetime",
-            last_pty_activity_at=object(),
-        )
-        verdict = classify_session_stall([], session=session)
-        assert verdict.reason != "granite_wedged"
-        assert verdict.level in {"healthy", "stalled", "suspect", "unclassifiable"}
-
-
-# ---------------------------------------------------------------------------
-# NEVER_STARTED_PTY_LIVENESS_SECS constant (issue #1792)
-# ---------------------------------------------------------------------------
-
-
-class TestNeverStartedPtyLivenessSecs:
-    """Verify NEVER_STARTED_PTY_LIVENESS_SECS exists, has correct default, and is env-tunable."""
-
-    def test_constant_exists(self):
-        """NEVER_STARTED_PTY_LIVENESS_SECS must be importable from session_stall_classifier."""
-        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
-
-        assert NEVER_STARTED_PTY_LIVENESS_SECS is not None
-
-    def test_constant_default_is_90(self):
-        """Default value must be 90 (mirrors HEARTBEAT_FRESHNESS_WINDOW)."""
-        import os
-
-        # Only assert the default when the env var is not set.
-        if os.environ.get("NEVER_STARTED_PTY_LIVENESS_SECS") is None:
-            from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
-
-            assert NEVER_STARTED_PTY_LIVENESS_SECS == 90, (
-                f"Expected default 90, got {NEVER_STARTED_PTY_LIVENESS_SECS}. "
-                "Set NEVER_STARTED_PTY_LIVENESS_SECS env var to override in tests."
-            )
-
-    def test_constant_is_int(self):
-        """NEVER_STARTED_PTY_LIVENESS_SECS must be an int (not a float or str)."""
-        from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
-
-        assert isinstance(NEVER_STARTED_PTY_LIVENESS_SECS, int)
-
-    def test_constant_is_env_overridable(self, monkeypatch):
-        """NEVER_STARTED_PTY_LIVENESS_SECS must be overridable via env var."""
-        import importlib
-
-        import agent.session_stall_classifier as sc
-
-        monkeypatch.setenv("NEVER_STARTED_PTY_LIVENESS_SECS", "42")
-        importlib.reload(sc)
-        try:
-            assert sc.NEVER_STARTED_PTY_LIVENESS_SECS == 42
-        finally:
-            # Explicitly delenv BEFORE reloading: monkeypatch's own teardown
-            # runs after this test function returns, so a reload here while
-            # the env var is still set to "42" would silently fail to restore
-            # the default (this was a latent cross-test pollution bug —
-            # surfaced by #1878 Part A's drift-pin test in this same module).
-            monkeypatch.delenv("NEVER_STARTED_PTY_LIVENESS_SECS", raising=False)
-            importlib.reload(sc)  # Restore original value
-
-
-# ---------------------------------------------------------------------------
-# #1878 Part A drift-pin: wiring on_read_iteration into _prime_session must
-# NOT change any stall-classifier constant, and must NOT introduce a new
-# prime-specific stall constant or the continue-nudge rung (#1879, out of
-# scope for this plan).
-# ---------------------------------------------------------------------------
-
-
-class TestPart1878ConstantsUnchanged:
-    """Pin the constant VALUES the D0 PTY-liveness gate depends on, and
-    confirm this plan introduced no new stall constants."""
-
-    def test_never_started_pty_liveness_secs_still_90(self):
-        """NEVER_STARTED_PTY_LIVENESS_SECS must remain 90 after the wiring change
-        in #1878 Part A — this task is test-only and must not alter constants."""
-        import os
-
-        if os.environ.get("NEVER_STARTED_PTY_LIVENESS_SECS") is None:
-            from agent.session_stall_classifier import NEVER_STARTED_PTY_LIVENESS_SECS
-
-            assert NEVER_STARTED_PTY_LIVENESS_SECS == 90
-
-    def test_heartbeat_freshness_window_still_90(self):
-        """HEARTBEAT_FRESHNESS_WINDOW (session_health.py) must remain 90 —
-        cross-module alignment with NEVER_STARTED_PTY_LIVENESS_SECS is load-bearing
-        for `_prime_pty_alive`'s stale-read-loop branch (session_health.py)."""
-        import os
-
-        from agent.session_health import HEARTBEAT_FRESHNESS_WINDOW
-
-        if os.environ.get("HEARTBEAT_FRESHNESS_WINDOW") is None:
-            assert HEARTBEAT_FRESHNESS_WINDOW == 90
-
-    def test_no_continue_nudge_reprieve_constant_introduced(self):
-        """The continue-nudge rung (#1879) is out of scope for this plan (Part A
-        only). Neither module should define CONTINUE_NUDGE_REPRIEVE_SECS or a
-        last_continue_nudge_at-adjacent constant yet."""
-        import agent.session_health as sh
-        import agent.session_stall_classifier as sc
-
-        assert not hasattr(sc, "CONTINUE_NUDGE_REPRIEVE_SECS")
-        assert not hasattr(sh, "CONTINUE_NUDGE_REPRIEVE_SECS")
-
-    def test_no_new_prime_specific_stall_constant(self):
-        """This plan reuses NEVER_STARTED_PTY_LIVENESS_SECS and
-        HEARTBEAT_FRESHNESS_WINDOW verbatim (per plan intent) rather than
-        introducing a dedicated prime-only liveness window constant."""
-        import agent.session_stall_classifier as sc
-
-        assert not hasattr(sc, "PRIME_PTY_LIVENESS_SECS")
-        assert not hasattr(sc, "PRIME_SESSION_LIVENESS_SECS")
