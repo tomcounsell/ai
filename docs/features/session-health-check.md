@@ -98,7 +98,7 @@ The hook also checks a Redis steering queue on every tool call (lightweight LPOP
 
 ## Related
 
-- [agent-session-health-monitor.md](agent-session-health-monitor.md) -- Queue-level health monitoring (complementary layer). See its **Per-Tool Timeout Sub-Loop** section for the parallel 30s detector that fires when a tool's PreToolUse hook fires but PostToolUse never returns (issue #1270). The same monitor's `_has_progress` Tier 1 sub-check B is bounded by a no-output running-time budget (issue #1356) so sessions whose SDK never emits a first turn cannot hold Tier 1 open indefinitely on a fresh asyncio-task heartbeat alone.
+- [agent-session-health-monitor.md](agent-session-health-monitor.md) -- Queue-level health monitoring (complementary layer). See its **Per-Tool Timeout Sub-Loop** section for the parallel 30s detector that fires when a tool's PreToolUse hook fires but PostToolUse never returns (issue #1270). The same monitor's `_has_progress` Tier 1 sub-check B is bounded by the D0 never-started gate (issue #1724, clock-consistent as of #1905) so sessions whose SDK never emits a first turn cannot hold Tier 1 open indefinitely on a fresh asyncio-task heartbeat alone.
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level crash recovery
 - `agent/health_check.py` -- Implementation source
 - `tests/unit/test_health_check.py` -- Unit tests (Haiku judge + activity stream)

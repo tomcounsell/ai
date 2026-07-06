@@ -412,19 +412,28 @@ class TestStdoutStaleRetired:
 
 
 class TestSubCheckBNoOutputBudget:
-    """Tests for the no-output running-time budget gate in sub-check B (#1356).
+    """Tests for sub-check B's D0 never-started gate (#1724, clock-consistent
+    since #1905).
 
-    Sub-check B (the legacy fresh-heartbeat fast-path) is now bounded by a
-    no-output budget defined as ``MAX_NO_OUTPUT_REPRIEVES *
-    HEARTBEAT_FRESHNESS_WINDOW`` (= 20 * 90 = 1800s = 30 min). A fresh
-    ``last_heartbeat_at`` alone passes Tier 1 only while
-    ``running_seconds < STARTUP_GRACE_SECONDS`` (300s) OR
-    ``STARTUP_GRACE_SECONDS <= running_seconds <= NO_OUTPUT_BUDGET_SECONDS``.
+    Sub-check B (the legacy fresh-heartbeat fast-path) is gated by the D0
+    never-started gate: when ``sdk_ever_output`` is False and
+    ``running_seconds`` (computed from the trusted ``now_utc`` clock, shared
+    with the gate as of issue #1905) exceeds ``NEVER_STARTED_GRACE_SECS +
+    NEVER_STARTED_CONFIRM_MARGIN_SECS`` (150s), the gate fires and sub-check B
+    returns False immediately — a fresh queue heartbeat does not signal
+    progress for a session that never produced SDK output past that bound.
 
-    Beyond the budget, when ``sdk_ever_output`` is False, sub-check B falls
-    through to the own-progress fields. With no per-turn signals and no
-    own-progress fields set, ``_has_progress`` returns False and the
-    existing Tier-2 reprieve cap escalates the session to recovery.
+    For D0-gate survivors (``running_seconds <= 150``), the retained
+    ``running_seconds < STARTUP_GRACE_SECONDS`` (300s) leg and the legacy
+    ``started_ref`` (``started_at`` or ``created_at``) None fast-path apply.
+    Because the gate and this leg now share one clock, every survivor
+    unconditionally satisfies the 300s leg — the #1356 grace-to-budget band
+    and its ``no_output_budget_exceeded`` counter that used to sit beyond it
+    are unreachable and were removed in issue #1905.
+
+    ``test_divergent_clock_d0_gate_fires_before_removed_leg`` is a regression
+    test pinning the clock-consistency invariant: it fails against the
+    pre-#1905 clock-less D0 gate call site and passes against the fixed code.
 
     The function uses ``started_ref = entry.started_at or entry.created_at``
     so that recovered sessions (whose ``started_at`` is nulled by the
@@ -503,7 +512,14 @@ class TestSubCheckBNoOutputBudget:
         assert _has_progress(entry) is False
 
     def test_running_just_over_budget_returns_false(self):
-        """running_seconds=1801s (1s over NO_OUTPUT_BUDGET_SECONDS=1800) → False."""
+        """running_seconds=1801s → False via the D0 never-started gate (#1724).
+
+        Historically this was the first tick past NO_OUTPUT_BUDGET_SECONDS
+        (1800s), where the now-removed #1356 budget leg used to hand off to
+        the INCR fall-through. The D0 gate (150s threshold) already denies
+        the fresh-heartbeat fast-path long before 1801s, so the False result
+        is unchanged — it is now reached via the gate, not the removed band.
+        """
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(started_at=_ago(1801))
@@ -566,64 +582,61 @@ class TestSubCheckBNoOutputBudget:
         entry = self._make_entry(started_at=None, created_at=_ago(4 * 3600))
         assert _has_progress(entry) is False
 
-    def test_d0_gate_preempts_budget_exceeded_counter(self, monkeypatch):
-        """The D0 never-started gate (#1724) fires BEFORE the #1356 budget leg.
+    def test_divergent_clock_d0_gate_fires_before_removed_leg(self, monkeypatch):
+        """Divergent-clock regression (#1905): the D0 gate and sub-check B's
+        ``running_seconds`` must share the single trusted ``now_utc`` clock.
 
-        Updated for commit 2efb58ce (issue #1724): a 2h-running session with
-        zero SDK output is denied by the D0 gate at the top of sub-check B, so
-        ``_has_progress`` returns False without ever reaching the
-        ``tier1_falloff:no_output_budget_exceeded`` INCR fall-through. This
-        pins the ordering: no budget counter is emitted for never-started
-        sessions — the D0 return happens first.
+        Before the #1905 clock-consistency fix, the D0 gate (line ~1560)
+        called ``_never_started_past_grace(entry)`` with no ``now`` argument,
+        so it derived its own elapsed time from the process's real wall
+        clock, while sub-check B's ``running_seconds`` (line ~1584) used the
+        trusted ``now_utc = _trusted_utc_now()`` (Redis TIME). Under >150s of
+        skew between the two clocks, the D0 gate could miss (computing a
+        local ``running_seconds <= 150``) while the trusted clock already put
+        ``running_seconds`` in ``(150, 300)`` — reaching the STARTUP_GRACE
+        leg and wrongly returning True for a session that has, by the
+        trusted clock, already failed to start.
+
+        Construction: monkeypatch ``_trusted_utc_now`` to return a
+        far-future ``T_future`` (real-now + 10000s). Set ``started_at`` so
+        the TRUSTED ``running_seconds`` (computed from ``T_future``) lands in
+        the open interval (150, 300) — here ~200s — and set
+        ``last_heartbeat_at`` fresh RELATIVE TO ``T_future`` (T_future - 30s),
+        not relative to real wall-clock now, so the fresh-heartbeat block
+        (gated by HEARTBEAT_FRESHNESS_WINDOW=90s against now_utc) is actually
+        entered.
+
+        Pre-fix (clock-less 1560 call): the D0 gate derives
+        ``datetime.now(tz=UTC)`` internally (real wall clock, ~T_future -
+        10000s), so its locally-computed running_seconds is negative/tiny —
+        well under the 150s threshold — and the gate does NOT fire. Sub-check
+        B then falls to the ``running_seconds < STARTUP_GRACE_SECONDS``
+        (300s) leg using the trusted ~200s figure, which returns True. This
+        test would FAIL (assert False, got True) against that code.
+
+        Fixed (1560 threaded ``now=now_utc``): the D0 gate evaluates the same
+        trusted ~200s figure, sees it exceeds the 150s never-started
+        threshold, and fires — returning False before the STARTUP_GRACE leg
+        is ever reached. This test PASSES against the fixed code.
+
+        Deliberately does NOT use trusted running_seconds > 1800s — that
+        construction returns False under both pre-fix and fixed code (the
+        pre-fix path falls through to the now-removed budget/INCR branch and
+        the absent own-progress fields), which is a tautology that cannot
+        discriminate the two versions.
         """
-        calls: list[str] = []
+        from datetime import timedelta
 
-        class _FakeRedis:
-            @staticmethod
-            def incr(key: str) -> None:
-                calls.append(key)
-
-            @staticmethod
-            def time() -> tuple[int, int]:
-                import time as _t
-
-                now = _t.time()
-                return int(now), int((now % 1) * 1_000_000)
-
-        # Patch the popoto Redis db accessor used at the call site.
-        from popoto import redis_db as _redis_db_mod
-
-        monkeypatch.setattr(_redis_db_mod, "POPOTO_REDIS_DB", _FakeRedis())
-
+        import agent.session_health as session_health_mod
         from agent.agent_session_queue import _has_progress
+
+        t_future = _now_utc() + timedelta(seconds=10000)
+        monkeypatch.setattr(session_health_mod, "_trusted_utc_now", lambda: t_future)
 
         entry = self._make_entry(
-            started_at=_ago(2 * 3600),  # 2h running, well past the 30-min budget
-            project_key="proj-counter-test",
+            started_at=t_future - timedelta(seconds=200),  # trusted running_seconds ~200s
+            last_heartbeat_at=t_future - timedelta(seconds=30),  # fresh relative to T_future
         )
-        assert _has_progress(entry) is False
-        # D0 gate returns False before the budget fall-through — no INCR.
-        budget_calls = [k for k in calls if k.endswith("tier1_falloff:no_output_budget_exceeded")]
-        assert budget_calls == [], (
-            f"D0 gate (#1724) must preempt the budget-exceeded INCR; got: {calls}"
-        )
-
-    def test_telemetry_counter_failure_does_not_crash(self, monkeypatch):
-        """Metrics backend outage on the new path must not crash _has_progress."""
-
-        class _BoomRedis:
-            @staticmethod
-            def incr(key: str) -> None:
-                raise RuntimeError("redis exploded")
-
-        from popoto import redis_db as _redis_db_mod
-
-        monkeypatch.setattr(_redis_db_mod, "POPOTO_REDIS_DB", _BoomRedis())
-
-        from agent.agent_session_queue import _has_progress
-
-        entry = self._make_entry(started_at=_ago(2 * 3600))
-        # Must still return False (the gate fires) — telemetry crash is swallowed.
         assert _has_progress(entry) is False
 
     def test_tier2_handoff_after_max_reprieves(self):
