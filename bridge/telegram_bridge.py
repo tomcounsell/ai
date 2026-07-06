@@ -2988,6 +2988,13 @@ async def main():
     if clear_restart_flag():
         logger.info("Cleared stale restart flag from previous update")
 
+    # Record the SHA this bridge booted at so the update system can verify the
+    # running release matches pulled HEAD (issue #1898). Best-effort — a write
+    # failure logs a warning inside the helper and never crashes startup.
+    from monitoring.boot_beacon import write_boot_beacon
+
+    write_boot_beacon("bridge")
+
     # Session recovery, index rebuild, and worker spawning are handled exclusively
     # by the standalone worker process (worker/__main__.py). The bridge only enqueues
     # AgentSession records to Redis; execution is the worker's responsibility.
