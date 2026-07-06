@@ -51,6 +51,7 @@ These four decisions were made explicitly by the owner after the audit and are *
 - **#1751 (merged):** adopted `claude setup-token` (~1-year `CLAUDE_CODE_OAUTH_TOKEN`) — the auth this cutover rides.
 - **#1688 (shipped):** hook-driven turn returns (`docs/features/granite-hook-driven-turn-returns.md`) — the turn-end mechanism that replaces idle scraping; explicitly transport-agnostic.
 - **#1681 (merged):** made the PM↔Dev shuttle zero-LLM — confirms routing is regex, not ollama.
+- **#1917 (open):** crash auto-resume is structurally dead — granite PTY sessions always classify non-resumable. Task 3 resolves the non-resumable-classification half; the reflection-scheduling half is re-triaged after cutover (task 9 comments on the issue).
 - **#1918 / #1843 / #1792 / #1851 / 4f9f929e:** the patch-the-heuristic lineage (see Why Previous Fixes Failed).
 - **#1724 / #1879 (merged):** the mid-run wedge/nudge lineage — mid-run quiescence constants (#1724) and the wedge-nudge steering channel (#1879). Task 5 (build-health) deletes their entire implementation surface; both close via the implementation PR.
 
@@ -75,7 +76,7 @@ Six parallel audit passes ran at plan time (2026-07-06, baseline d451c1bd) in li
 - **Confidence:** high
 
 ### audit-2: cross-codebase coupling (~30 files)
-- **Finding:** Two disambiguation traps. (1) "granite" is two subsystems — the ollama classifier machinery (worker breaker/reprobe/deferral, update gate, `session_state.granite_available`, `session_pickup` deferral) merely *lives* in the doomed package; decision D2 deletes that machinery deliberately rather than accidentally. (2) "wedge" is overloaded — bridge/worker **loop-wedge** detectors (`monitoring/bridge_watchdog.py`, `session_watchdog.py`, `bridge/liveness.py`, restore-wedge in `session_archive.py`) are OUT OF SCOPE and must survive; only the PTY tool-wedge/quiescence family dies. Hard-import blast radius: `session_executor.py:1821`, `agent_session_queue.py:1551`, `worker/__main__.py` (×5), `tools/granite_loop/cli.py`, `reflections/stall_advisory.py:442`, 2 spike scripts.
+- **Finding:** Two disambiguation traps. (1) "granite" is two subsystems — the ollama classifier machinery (worker breaker/reprobe/deferral, update gate, `session_state.granite_available`, `session_pickup` deferral) merely *lives* in the doomed package; decision D2 deletes that machinery deliberately rather than accidentally. (2) "wedge" is overloaded — bridge/worker **loop-wedge** detectors (`monitoring/bridge_watchdog.py`, `monitoring/session_watchdog.py`, `bridge/liveness.py`, restore-wedge in `agent/session_archive.py`) are OUT OF SCOPE and must survive; only the PTY tool-wedge/quiescence family dies. Hard-import blast radius: `session_executor.py:1821`, `agent_session_queue.py:1551`, `worker/__main__.py` (×5), `tools/granite_loop/cli.py`, `reflections/stall_advisory.py:442`, 2 spike scripts.
 - **Confidence:** high
 
 ### audit-3: config/docs/scripts surface
@@ -165,7 +166,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/granite-pty-te
 - **PM dispatcher = Dev dispatcher.** `_run_pm_turn` is `HeadlessRoleDriver.run_turn` with the PM prime/model — G1 and G3 close together because the relay stops being "write into the other terminal" and becomes function composition in `runner.py`.
 - **Explicit auth injection (G5):** the runner (not ambient worker env) sets `CLAUDE_CODE_OAUTH_TOKEN` and strips `ANTHROPIC_API_KEY` in the subprocess env, so headless owns its auth posture deliberately. Never pass `--bare`.
 - **Roles beyond PM/Dev (G6):** teammate (and any single-role conversational session currently dispatched down the granite leg) runs the same runner in single-role mode — one driver, no relay. The `ValorAgent`/SDK bridge-chat path is untouched (already headless).
-- **Rename discipline:** `GraniteSettings` → `SessionRunnerSettings` (env prefix `SESSION_RUNNER__`), `.claude/commands/granite/` → `.claude/commands/roles/` with `hardlinks.py` stale-removal, "granite" survives only in (a) the postmortem/history and (b) the ollama classifier consumers outside the session path (bridge routing, email triage — #1923's territory).
+- **Rename discipline:** `GraniteSettings` → `SessionRunnerSettings` (env prefix `SESSION_RUNNER__`), `.claude/commands/granite/` → `.claude/commands/roles/` with `hardlinks.py` stale-removal, "granite" survives only in (a) the postmortem/history and (b) the ollama classifier consumers outside the session path (bridge routing, email triage — #1923's territory). The rename ships with a **mandatory stale-prefix guard** (critique C3): settings load emits a loud startup warning when any legacy `GRANITE__*`/`GRANITE_*` key is present in the environment, and `/update` surfaces it during deploy — old vault overrides fail loudly instead of silently reverting to defaults.
 - **Preempt mechanics:** the runner records `(turn_generation, process_handle)` at spawn; the watcher only terminates a process whose generation matches the current turn. SIGTERM, 10s grace, SIGKILL. A preempted turn records `turn_end_source="preempted"`; its partial transcript is preserved in the Claude session JSONL and `--resume` continues from it.
 - **False-success closed at the transport (the #1916 class):** a turn either yields a stream-json `result` or the subprocess errored — there is no "plateau then auto-complete." The graduated `_run_wrapup_guard` continues to guarantee a user-facing message on the semantic layer.
 
@@ -201,7 +202,8 @@ Full audit in Spike Results (audit-4). Dispositions:
 - [ ] `tests/unit/test_session_health_wedge_nudge_producer.py` — **DELETE** (wedge-nudge channel is removed); `test_session_health_tool_timeout.py` — **UPDATE** (drop PTY branches, assert 300 default)
 - [ ] `tests/unit/test_session_stall_classifier.py` — **UPDATE**: delete `granite_wedged` class + PTY-field probes; keep generic stall classes
 - [ ] `tests/unit/test_transport_routing_matrix.py`, `test_transport_config_validation.py` — **DELETE** (no transport selector exists after cutover)
-- [ ] `tests/unit/test_worker_granite_degradation.py` — **DELETE** (degraded mode removed, D2); `test_worker_contract_check.py`, `test_worker_concurrency.py`, `test_progress_deadline_cancel.py`, `test_update_loop_wedge_recovery.py`, `test_worker_wedge_pending.py`, `test_pi_builder_e2e.py` — **UPDATE** (remove PTY-pool/marker-contract/pi branches)
+- [ ] `tests/unit/test_worker_granite_degradation.py` — **DELETE** (degraded mode removed, D2); `tests/unit/test_worker_contract_check.py`, `tests/integration/test_worker_concurrency.py`, `tests/integration/test_progress_deadline_cancel.py`, `tests/integration/test_update_loop_wedge_recovery.py`, `tests/integration/test_worker_wedge_pending.py` — **UPDATE** (remove PTY-pool/marker-contract branches)
+- [ ] `tests/integration/test_pi_builder_e2e.py` — **DELETE** (the pi harness dies with the package; zero production consumers — supersedes the earlier UPDATE disposition)
 - [ ] **NEW:** `tests/unit/session_runner/test_runner_relay.py` (PM↔Dev message passing, route table, wrapup), `test_runner_preempt.py` (generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL), `test_runner_resume.py` (handle consumption, cwd-scoped resume, stale-UUID fallback, skip-prime), `test_runner_liveness.py` (turn timeout, subprocess-death detection — the wedge-coverage replacement)
 
 ## Rabbit Holes
@@ -263,18 +265,29 @@ Full audit in Spike Results (audit-4). Dispositions:
 **Trigger:** prior turn's Stop envelope unconsumed when the next turn spawns.
 **Mitigation:** already solved — pre-spawn edge snapshot + freshness reconciliation graduates unchanged (`role_driver.py:269-319`); keep its tests.
 
+### Race 5: Mid-turn preempt vs. new-turn session-id capture
+**Location:** `agent/session_runner/role_driver.py` turn dispatch + handle persistence
+**Trigger:** a steer-preempt (D4) kills the subprocess after Claude has created the new turn's session but before the `result` event; if handles are only upserted at turn end, the resume pointer stays on the *pre-turn* uuid and the partial transcript D4 promises to preserve is silently discarded.
+**Data prerequisite:** the new turn's `claude_session_id` from the stream-json `system/init` event.
+**State prerequisite:** handle persisted before the turn-await begins.
+**Mitigation:** capture-at-init (task 3 bullet) — persist the handle the moment `system/init` is parsed. Test: fake CLI subprocess emits `system/init` then hangs (never emits `result`); assert the persisted `claude_session_id` equals the new turn's id after preempt, and the next `--resume` invocation is built with it.
+
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1923] Machine-wide ollama removal — replacing `bridge/routing.py` and `tools/email_cs/triage.py` classifier calls with a small Claude call. This plan only removes ollama from the *session-execution* path (D2).
 - [SEPARATE-SLUG #1802] PM file-capable send path (screenshots/images to users). Real gap, orthogonal to the transport; unchanged by this cutover.
 - [ORDERED] Fleet deploy: `/do-deploy` + per-machine `/update` after merge (plist env regeneration requires `launchctl bootout`/`bootstrap`, and the bridge-role machine goes last after the E2E probe passes on the first machine). Human-gated post-merge event. **Includes the vault-config edit:** remove the `transport` keys from `~/Desktop/Valor/projects.json` only after the bridge-role machine's `/update` completes and the E2E probe passes — `projects.json` is iCloud-synced fleet-wide, and removing the keys at build time would strand pre-cutover machines whose live `validate_transport` path still expects them during the staged rollout window.
 - [DESTRUCTIVE] Purging historical PTY telemetry values (old `exit_reason=startup_unresolved`, `startup_failure_kind=plateau` records) from Redis/the session archive. Old records keep their historical values; only the *producers* are deleted. Review-before-execute if ever desired — not this plan.
+- [SEPARATE-SLUG #1925] Removing `claude_code_sdk` / migrating the ValorAgent chat path to the harness / PydanticAI for non-harness LLM calls. This plan touches only the granite dispatch leg of `sdk_client.py`.
+- [SEPARATE-SLUG #1926] Broader guardian consolidation (watchdog fleet, stall taxonomy, crash-signature library, auto-continue machinery, `child_session_gate` removal) — deliberately post-cutover, pruned against real headless failure data.
+- [SEPARATE-SLUG #1927] AgentSession schema diet and field renaming beyond the PTY fields this plan removes.
+- [SEPARATE-SLUG #1928] Dev-as-resumable-subagent spike — its outcome informs *future* topology and neither gates nor alters this cutover.
 
 ## Update System
 
 Changes required (this feature is deployed to multiple machines via `/update`):
 
-- **`scripts/update/run.py`:** delete Step 4.75's role as a *session-execution* green-light gate (the ollama classifier smoke/pull step either goes entirely or is re-scoped to the bridge-routing consumer — D2); no PTY-substrate gating remains.
+- **`scripts/update/run.py`:** delete Step 4.75 entirely (owner-ratified in the revision pass — was Open Question 2; re-added under #1923's scope only if bridge routing needs its own gate); no PTY-substrate gating remains. Add the stale-`GRANITE__*` warning surface (see task 7).
 - **`scripts/update/verify.py`:** delete the `pty_driver.py` marker checks (lines ~112-176) — they verify files that no longer exist.
 - **`scripts/update/hardlinks.py`:** `.claude/commands/granite/` → `.claude/commands/roles/`; add stale-removal entries for the old `~/.claude/commands/granite/` links (same pattern as `RENAMED_REMOVALS`).
 - **`scripts/update/migrations.py`:** new idempotent migration — strip removed PTY fields from existing `AgentSession` records via ORM-safe operations (no raw Redis), registered in `MIGRATIONS`.
@@ -347,6 +360,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - Sever the two audited couplings; PermissionRequest hook registration dropped from `generate_hook_settings` (doesn't fire under -p); `hook_forwarder` path constant updated
 - **Absorb the #1919 fix into graduated `hook_edge`:** remove `"Notification"` from `_NEEDS_HUMAN_EVENTS`; add content-aware classification — a Notification carrying known Claude Code boilerplate (exact idle string "Claude is waiting for your input", permission-phrasing prefix) or an empty message emits **no edge**; substantive Notifications remain `needs_human`. One central boilerplate constant, conservative matching. In the runner/driver reconciliation, prefer a `turn_end` edge over a `needs_human` edge when both arrive in one poll batch (inverts the ordering bug that swallowed the answer). Port the #1919 plan's test list against the graduated module
 - Explicit auth injection (G5): subprocess env sets `CLAUDE_CODE_OAUTH_TOKEN`, strips `ANTHROPIC_API_KEY`; never `--bare`
+- The `[/dev:pi]` harness-suffix routing and `PiSubprocessBuilder`/`parse_pi_final_text` do **not** graduate — zero production consumers outside the package (grep-verified at plan time); Dev runs on the claude harness only
 - Old package untouched in this task (deletion is task 6)
 
 ### 2. Build the runner: PM headless dispatch + message-passing relay + steer-preempt
@@ -356,7 +370,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Informed By**: audit-5 (G1+G3), D1, D4; Race 1
 - **Assigned To**: runner-builder — **Agent Type**: builder — **Parallel**: false
 - `runner.py`: two-role loop (PM turn → route → Dev turn → PM…), single-role mode for teammate-type sessions (G6), wrapup guard graduated in, per-turn progress hook, steering boundary drain
-- Preempt watcher with generation-token guard, steer debounce (env-overridable constant, provisional), SIGTERM→grace→SIGKILL, `turn_end_source="preempted"`
+- Preempt watcher with generation-token guard, steer debounce (3s default; env-overridable constant, provisional/tunable), SIGTERM→grace→SIGKILL, `turn_end_source="preempted"`
 - Subprocesses in own process group; PID/PGID recorded pre-await (Race 2)
 
 ### 3. Simple resume: consume persisted handles
@@ -366,6 +380,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Informed By**: audit-5 (G4), D3; Research (cwd-scoped resume); Race 3
 - **Assigned To**: runner-builder — **Agent Type**: builder — **Parallel**: false
 - Handles upsert per turn (add `working_dir`); runner init validates + consumes (seed `_claude_session_id`, skip prime); stale/invalid → cold start
+- **Capture-at-init (Race 5, critique C1):** persist the new turn's `claude_session_id` as soon as the stream-json `system/init` event is parsed — *before* awaiting `result` — so a preempted or killed turn's partial transcript remains the resume target, never the stale pre-turn uuid
 - Crash-recovery/user-reply paths pass the reply/steer as the resumed first message; stall-classifier resumability no longer hardcodes granite-non-resumable (unblocks the #1917 class)
 
 ### 4. Rewire executor + worker; delete the transport seam and ollama gate
@@ -376,7 +391,8 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Assigned To**: integration-builder — **Agent Type**: builder — **Parallel**: false
 - `session_executor.py`: granite leg → SessionRunner; delete `_resolve_role_transports`, the pm-coercion guard, PTYPool imports
 - `worker/__main__.py`: delete `ensure_granite_model` probe/breaker/reprobe/deferred-resume, `verify_tui_marker_contract`, PTY pool init/orphan-kill, `_fleet_has_pty_transport_role`
-- Delete `session_pickup` granite-degraded deferral, `session_state.granite_available`, `models/child_session_gate.py`, `bridge/config_validation.validate_transport` (the `transport` keys in `~/Desktop/Valor/projects.json` are NOT removed at build time — that edit is sequenced into the post-merge fleet deploy; see No-Gos [ORDERED] entry)
+- Delete `session_pickup` granite-degraded deferral, `session_state.granite_available`, `bridge/config_validation.validate_transport` (the `transport` keys in `~/Desktop/Valor/projects.json` are NOT removed at build time — that edit is sequenced into the post-merge fleet deploy so pre-cutover machines aren't stranded mid-rollout; see No-Gos [ORDERED] entry)
+- **Retain `models/child_session_gate.py`** (external critique C4): re-enabling child-session fanout is a real behavior change with no named replacement bound. Rewrite its docstring to the post-PTY rationale (semantic redundancy + no independent fanout cap until #1633's subagent refactor lands or #1926 names a cap); removal is deferred, not smuggled into this cutover
 - `reflections/stall_advisory.py` repointed to session_runner
 
 ### 5. Health, stall, telemetry, model migration
@@ -395,8 +411,7 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Depends On**: build-integrate, build-health
 - **Validates**: Verification table inverse rows
 - **Assigned To**: integration-builder — **Agent Type**: builder — **Parallel**: false
-- `git rm -r agent/granite_container/ tools/granite_loop/`; delete the 6 PTY spike/smoke/monitor scripts (`granite_tui_pty_spike*.py`, `granite_smoke_test.py`, `granite_long_hold_monitor.py`; keep `probe_slash_arguments.py` only if the prime path still references it)
-- Audit `scripts/probe_slash_arguments.py` for its pexpect import before deciding to keep it — if retained, drop or replace the pexpect usage so the extended verification grep (now covering `scripts/` and `tests/`) stays at zero
+- `git rm -r agent/granite_container/ tools/granite_loop/`; delete the PTY probe/spike/smoke/monitor scripts **unconditionally**: `granite_tui_pty_spike*.py` (×3), `granite_smoke_test.py`, `granite_long_hold_monitor.py`, and `scripts/probe_slash_arguments.py` (external blocker B1: it drives the real TUI via pexpect — its purpose dies with the TUI; the slash-prime path is already empirically verified under `-p` at `role_driver.py:56-62`. Unconditional deletion supersedes the internal pass's audit-and-maybe-keep disposition)
 - Repo-wide grep sweep: zero remaining `granite_container` / `pexpect` / wedge-nudge / transport-seam references (loop-wedge family explicitly preserved — audit-2 out-of-scope list)
 
 ### 7. Config, scripts, update system, prime commands
@@ -406,7 +421,8 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Informed By**: audit-3
 - **Assigned To**: config-builder — **Agent Type**: builder — **Parallel**: false
 - `config/settings.py`: `GraniteSettings` → `SessionRunnerSettings` (keep `pm_model`, `dev_model`, `hook_turn_end_wait_s`, `hook_crash_resume_cap`; supervisor trio unchanged; delete pool/transport/flag fields + breaker/reprobe if the update-gate re-scope removes their consumer); `.env.example` updated
-- `pyproject.toml`: remove `valor-granite-loop`, `pexpect`, `granite_integration` marker
+- `pyproject.toml`: remove `valor-granite-loop`, `pexpect`, **`ptyprocess`** (`pyproject.toml:37`, "Low-level PTY spawn backing pexpect" — PTY-only, no other consumer; critique C2), `granite_integration` marker
+- **Stale-prefix guard (hard requirement, was Open Question 3):** settings load warns loudly on any legacy `GRANITE__*`/`GRANITE_*` env key; `scripts/update/run.py` surfaces the warning during deploy
 - Update system changes per ## Update System (run.py, verify.py, hardlinks.py rename + stale removal, migrations.py already in task 5)
 - `.claude/commands/granite/` → `.claude/commands/roles/`: scrub PTY framing from the four prime commands (persona content unchanged); update `role_driver` prime-path constants
 - Vault: revert `~/Desktop/Valor/.env` `TOOL_TIMEOUT_DEFAULT_SEC` to 300
@@ -423,11 +439,11 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 - **Task ID**: build-supersede
 - **Depends On**: build-config
 - **Assigned To**: config-builder — **Agent Type**: builder — **Parallel**: true
-- `docs/plans/granite_lossless_checkpoint_resume.md` → `status: Cancelled`, superseded-by note; comment on #1721 and #1921 pointing here (closure via the PR body: Closes #1924, Closes #1918, Closes #1919, Closes #1921). `idle-notification-verbatim-delivery.md` already Cancelled at plan time (absorbed into task 1)
+- `docs/plans/granite_lossless_checkpoint_resume.md` → `status: Cancelled`, superseded-by note; comment on #1721 and #1921 pointing here (closure via the PR body: Closes #1924, Closes #1918, Closes #1919, Closes #1921). `idle-notification-verbatim-delivery.md` already Cancelled at plan time (absorbed into task 1); comment on #1917 (task 3 resolves its non-resumable-classification half; the reflection-scheduling half is re-triaged post-cutover)
 
 ### 10. Validate cutover
 - **Task ID**: validate-cutover
-- **Depends On**: build-tests, build-config, build-supersede, build-resume
+- **Depends On**: build-resume, build-tests, build-config, build-supersede
 - **Assigned To**: cutover-validator — **Agent Type**: validator — **Parallel**: false
 - Run the full Verification table; live smoke: dispatch a real eng session locally (worker running), observe PM prime → Dev turn → delivery with `ps` proving zero PTY children; steer it mid-turn and confirm preempt + resume
 
@@ -449,8 +465,10 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 |-------|---------|----------|
 | Substrate gone | `test -d agent/granite_container` | exit code 1 |
 | No dangling imports | `grep -rn "granite_container" --include='*.py' agent/ worker/ bridge/ tools/ reflections/ models/ ui/ config/ scripts/ \| wc -l` | match count == 0 |
-| pexpect gone (code) | `grep -rn "pexpect" --include='*.py' agent/ worker/ bridge/ tools/ scripts/ tests/ \| wc -l` | match count == 0 |
+| pexpect gone (code) | `grep -rn "pexpect" --include='*.py' agent/ worker/ bridge/ tools/ scripts/ tests/ monitoring/ \| wc -l` | match count == 0 |
 | pexpect gone (deps) | `grep -c "pexpect" pyproject.toml` | match count == 0 |
+| ptyprocess gone (deps) | `grep -c "ptyprocess" pyproject.toml` | match count == 0 |
+| No live GRANITE__ readers | `grep -rn "GRANITE__" --include='*.py' agent/ worker/ bridge/ models/ ui/ \| wc -l` | match count == 0 |
 | Transport seam gone | `grep -rn "PM_TRANSPORT\|DEV_TRANSPORT\|role_transports" --include='*.py' agent/ worker/ bridge/ config/ models/ \| wc -l` | match count == 0 |
 | Wedge-nudge gone | `grep -rn "wedge_nudge" --include='*.py' agent/ \| wc -l` | match count == 0 |
 | Stopgap reverted | `grep -c 'TOOL_TIMEOUT_DEFAULT_SEC", 3000' agent/session_health.py` | match count == 0 |
@@ -464,21 +482,35 @@ Tier 1 core as declared in the template; domain framing for async/concurrency (t
 
 ## Critique Results
 
+Two same-day critique passes (2026-07-06), both addressed in this revision (`revision_applied: true`). Where they disagreed on `scripts/probe_slash_arguments.py` (internal: audit-and-maybe-keep; external: unconditional delete), the external blocker's **unconditional delete** won — it resolves the pexpect contradiction outright rather than managing it.
+
+### Internal war-room pass — verdict: READY TO BUILD (with concerns)
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | CONCERN | History & Consistency | "Stopgap reverted" verification row grepped for quoted `"3000"`, which never matches the unquoted literal at `session_health.py:407` — false green by construction | Verification table row updated | Command is now `grep -c 'TOOL_TIMEOUT_DEFAULT_SEC", 3000' agent/session_health.py` expecting 0 (absence of the old default) |
 | CONCERN | History & Consistency | Prerequisite check loaded `.env` from cwd, which fails in `.worktrees/{slug}/` (no `.env` symlink) — false prerequisite failure on every build run | Prerequisites table row 1 updated | Check now loads `$HOME/Desktop/Valor/.env` (vault path) directly |
 | CONCERN | History & Consistency | Task 5 deletes the #1724 mid-run quiescence constants and #1879 wedge-nudge channel without Prior Art or closure bookkeeping | Prior Art bullet added; Success Criteria closure line updated | PR body now carries Closes #1724, Closes #1879; task 5 (build-health) deletes their implementation surface |
-| CONCERN | Risk & Robustness (Adversary) | Task 10 (validate-cutover) did not depend on build-resume, so a DAG scheduler could validate cutover before resume consumption landed | Task 10 Depends On updated | `Depends On: build-tests, build-config, build-supersede, build-resume` |
-| CONCERN | Risk & Robustness (Operator) | "pexpect gone (code)" grep excluded `scripts/` and `tests/`, where known pexpect importers live (`probe_slash_arguments.py`, `test_session_executor_granite.py`) — possible false green | Verification row extended; task 6 checklist item added | Grep now covers `agent/ worker/ bridge/ tools/ scripts/ tests/`; task 6 audits `probe_slash_arguments.py`'s pexpect import before deciding to keep it |
+| CONCERN | Risk & Robustness (Adversary) | Task 10 (validate-cutover) did not depend on build-resume, so a DAG scheduler could validate cutover before resume consumption landed | Task 10 Depends On updated | `Depends On: build-resume, build-tests, build-config, build-supersede` |
+| CONCERN | Risk & Robustness (Operator) | "pexpect gone (code)" grep excluded `scripts/` and `tests/`, where known pexpect importers live (`probe_slash_arguments.py`, `test_session_executor_granite.py`) — possible false green | Verification row extended | Grep now covers `agent/ worker/ bridge/ tools/ scripts/ tests/ monitoring/`; the audit-and-keep option for `probe_slash_arguments.py` was superseded by the external pass's unconditional delete |
 | CONCERN | Risk & Robustness (Operator) | Removing `transport` keys from iCloud-synced `projects.json` at build time would strand pre-cutover machines during the staged rollout | Task 4 checklist amended; No-Gos [ORDERED] Fleet deploy entry expanded | Vault-config edit sequenced after the bridge-role machine's `/update` + E2E probe pass |
 
-Scope & Value critic returned no findings. Verdict: **READY TO BUILD (with concerns)** — all six Implementation Notes embedded above; no blockers.
+### External reviewer pass — verdict: NEEDS REVISION (1 blocker)
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency | `probe_slash_arguments.py` conditional keep contradicts pexpect removal; verification grep blind to `scripts/` | Task 6: unconditional delete; Verification row widened | Critique's claim that `agent/session_health.py` imports pexpect re-verified FALSE at revision time — no change needed there |
+| CONCERN | Risk & Robustness | Missing race: mid-turn preempt leaves resume pointer on stale pre-turn uuid | Race 5 added; task 3 capture-at-init bullet | Fake-CLI test: emit `system/init` then hang; assert persisted id == new turn's id post-preempt |
+| CONCERN | History & Consistency | `ptyprocess>=0.7.0` dangling post-cutover | Task 7 removal + Verification row | `pyproject.toml:37`; no consumer outside pexpect |
+| CONCERN | Scope & Value | Env-prefix rename creates silent-failure mode via stale vault overrides | Rename kept (owner clarity mandate); stale-prefix guard made a hard task 7 requirement | Loud settings-load warning + `/update` surfacing; was Open Question 3 |
+| CONCERN | Scope & Value | `child_session_gate.py` deletion is an unexamined behavior change | Task 4: gate retained, docstring rewritten; removal deferred to #1633/#1926 | Gate rationale verified: pool scarcity (dies) + semantic redundancy (survives) |
+| CONCERN | Structural 2b | `build-resume` orphaned in task graph | Task 10 Depends On += build-resume | Same finding as internal Adversary row — converged independently |
+| NIT | Scope & Value | #1917 cited but untracked | Prior Art entry + task 9 comment bullet | Only the non-resumable-classification half resolves here; no Closes claim |
+| NIT | Structural 2c | Five worker test files mislabeled `tests/unit/` | Test Impact paths corrected to `tests/integration/` | `test_pi_builder_e2e.py` also flipped UPDATE→DELETE (pi harness dies) |
+| NIT | Structural 2c | `session_watchdog.py` cited without directory | audit-2 text: `monitoring/session_watchdog.py` | Keeps task 6's preservation grep accurate |
 
 ---
 
 ## Open Questions
 
-1. **Steer-preempt debounce default** — proposed 3s batching window (env-overridable, provisional per convention) so rapid-fire steers cause one preempt, not N. Any objection to 3s?
-2. **Update-gate re-scope (D2 detail)** — Step 4.75's ollama smoke currently green-lights deploys. Since bridge routing still uses ollama until #1923, should the step be (a) deleted now and re-added under #1923's scope if needed, or (b) kept but demoted to a warn-only check tied to the bridge role? Plan assumes (a) — delete now, simplest.
-3. **`SessionRunnerSettings` env prefix** — plan renames `GRANITE__*` → `SESSION_RUNNER__*`. The vault `.env` on each machine may carry old-prefix overrides; `/update` propagation will simply stop reading them (defaults apply). Acceptable, or should the update script warn on stale `GRANITE__*` keys?
+None — all three original questions were resolved in the revision pass: (1) steer-preempt debounce set to 3s default, env-overridable (task 2); (2) update-gate Step 4.75 deleted now, re-added under #1923 only if needed (Update System); (3) env-prefix rename kept with a mandatory stale-prefix guard (task 7, Critique Results).
