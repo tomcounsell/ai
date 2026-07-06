@@ -66,8 +66,12 @@ class TestPmPrimeShape(unittest.TestCase):
     def setUp(self) -> None:
         self.body = PM_PRIME.read_text()
 
-    def test_documents_dev_token(self) -> None:
-        self.assertIn("[/dev]", self.body)
+    def test_dev_routing_token_retired(self) -> None:
+        # D1-amended (plan #1924): developer work runs via the PM's `dev`
+        # subagent inside the turn — the [/dev] routing token is retired.
+        self.assertNotIn("[/dev]", self.body)
+        self.assertIn("dev", self.body)
+        self.assertIn("Agent tool", self.body)
 
     def test_documents_user_token(self) -> None:
         self.assertIn("[/user]", self.body)
@@ -82,17 +86,15 @@ class TestPmPrimeShape(unittest.TestCase):
         # drift from the code (the nit-3 fix). We assert against the
         # live compiled pattern rather than a hardcoded string so any
         # future change to PREFIX_TOKEN_RE forces a doc update here.
-        from agent.granite_container.granite_classifier import PREFIX_TOKEN_RE
-
-        self.assertIn(PREFIX_TOKEN_RE.pattern, self.body)
+        # The PM prime documents the session runner's simplified route
+        # table ([/user] | [/complete]); the [/dev] token is retired.
+        self.assertIn(r"^\[/(user|complete)\]\s*$", self.body)
         self.assertIn("deterministic", self.body.lower())
 
     def test_forbids_custom_pm_tools(self) -> None:
-        # Invariant #7: PM has no custom tools (no `send_to_dev`, no
-        # `reply_to_user`). The persona body should explicitly note
-        # this so the model doesn't propose to add them.
-        self.assertIn("send_to_dev", self.body)
-        self.assertIn("reply_to_user", self.body)
+        # Invariant #7: PM registers no custom tools. The persona body
+        # should explicitly note this so the model doesn't propose them.
+        self.assertIn("custom tools", self.body)
 
     def test_instructs_no_code_writes(self) -> None:
         # The PM does not write code in the PoC; the developer does.

@@ -396,9 +396,8 @@ class SessionRunner:
 
                 # -- Preempt outcomes (steer / timeout) ----------------------
                 if handle.killed:
-                    self._record_turn_event(
-                        handle, turn_end_source=handle.kill_cause or "preempted"
-                    )
+                    source = "timeout" if handle.kill_cause == "timeout" else "preempted"
+                    self._record_turn_event(handle, turn_end_source=source)
                     if handle.kill_cause == "timeout":
                         # Graceful preempt, not an error: partial work stays
                         # in the transcript; surface needs-attention.
@@ -411,15 +410,16 @@ class SessionRunner:
                     continue
 
                 # -- Turn-level failures -------------------------------------
+                if outcome.exit_reason is not None and outcome.exit_reason != "empty_output":
+                    # Subprocess failure: never "completed" (the #1916 class).
+                    summary.exit_reason = "error"
+                    summary.exit_message = truncate_exit_message(outcome.exit_reason)
+                    self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
+                    break
                 if outcome.exit_reason == "empty_output" or not (outcome.reply_text or "").strip():
                     # Empty/whitespace-only PM turn → wrap-up guard, never an
                     # infinite loop (plan Failure Path).
                     summary.exit_reason = "pm_empty_turn"
-                    break
-                if outcome.exit_reason is not None:
-                    summary.exit_reason = "error"
-                    summary.exit_message = truncate_exit_message(outcome.exit_reason)
-                    self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
                     break
 
                 # -- Genuine turn end ----------------------------------------
