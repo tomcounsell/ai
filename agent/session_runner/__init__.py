@@ -29,4 +29,16 @@ Modules:
   the exit-classification tables.
 - :mod:`~agent.session_runner.adapter` — executor-facing construction:
   delivery callbacks, exit summary, four-scalar resume persistence.
+- :mod:`~agent.session_runner.runner` — ``SessionRunner``: the single-session
+  turn loop (route → deliver → steer-preempt → resume) the executor drives.
 """
+
+from agent.session_runner.adapter import RunSummary, SessionRunnerAdapter
+from agent.session_runner.runner import ResumeContext, SessionRunner
+
+__all__ = [
+    "ResumeContext",
+    "RunSummary",
+    "SessionRunner",
+    "SessionRunnerAdapter",
+]

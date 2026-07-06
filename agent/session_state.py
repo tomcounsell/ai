@@ -111,12 +111,6 @@ def get_loop_tick() -> float | None:
 # session and exit instead of waiting for new work.
 _shutdown_requested: bool = False
 
-# Granite availability flag — True once ensure_granite_model() succeeds at
-# startup; flipped by _granite_reprobe_loop as the circuit opens/closes.
-# CPython GIL makes plain bool reads/writes atomic; no lock needed.
-# Written by worker.__main__; read by agent_session_queue._worker_loop.
-granite_available: bool = False
-
 # Callbacks registered by the bridge for sending messages and reactions
 _send_callbacks: dict[str | tuple[str, str], SendCallback] = {}
 _reaction_callbacks: dict[str | tuple[str, str], ReactionCallback] = {}

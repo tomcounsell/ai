@@ -439,7 +439,7 @@ def _emit_recovery_event(
     feed so a kill-succeeds-but-catchup-fails outcome is durably visible, not
     merely a WARNING log line that scrolls away. Fail-soft (never raises)."""
     try:
-        from agent.granite_container.bridge_adapter import (
+        from agent.session_runner.adapter import (
             _append_session_event,
             _now_iso,
         )

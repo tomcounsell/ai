@@ -297,6 +297,7 @@ class SessionRunner:
         working_dir: str,
         session_type: str | None = "eng",
         model: str | None = None,
+        session_env: dict[str, str] | None = None,
         driver: HeadlessRoleDriver | None = None,
         harness_fn: Callable[..., Awaitable[str]] | None = None,
         resume: ResumeContext | None = None,
@@ -329,6 +330,12 @@ class SessionRunner:
         self._kill = kill_fn or os.kill
         self._pid_alive = pid_alive_fn or _default_pid_alive
         self._on_turn = on_turn
+        # Per-session subprocess env overlay (SESSION_TYPE for the
+        # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
+        # attribution, CLAUDE_CODE_TASK_LIST_ID for task-list isolation,
+        # VALOR_PARENT_SESSION_ID for child-session linking, Telegram/Sentry
+        # auth). Merged under the driver's subscription-auth overlay (G5).
+        self._session_env = dict(session_env) if session_env else None
         # Per-turn progress state.
         self._generation = 0
         self._current_handle: _TurnHandle | None = None
@@ -412,6 +419,7 @@ class SessionRunner:
             session_id=session_id,
             working_dir=self._working_dir,
             model=model,
+            env=self._session_env,
             settings_path=settings_path,
             edge_file=edge_file,
             # The watcher's timeout-preempt fires FIRST; the driver's own

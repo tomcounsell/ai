@@ -390,68 +390,11 @@ async def validate_bot_live_flags(config: dict, resolver) -> tuple[set[int], str
     return (quarantine_ids, detail)
 
 
-_VALID_TRANSPORTS = frozenset({"pty", "headless"})
-_VALID_TRANSPORT_ROLES = frozenset({"pm", "dev"})
-
-
-def validate_transport(config: dict) -> None:
-    """Enforce that every project ``transport`` block is well-formed (plan #1842).
-
-    A project may declare an optional ``transport`` block selecting the
-    per-role session transport::
-
-        "transport": {"pm": "pty", "dev": "headless"}
-
-    Rules (each violation names the offending project key):
-      - ``transport`` must be a dict (mapping) when present.
-      - keys must be within ``{"pm", "dev"}``.
-      - values must be within ``{"pty", "headless"}``.
-
-    An absent ``transport`` block is valid (the role defaults to ``pty`` via
-    ``settings.granite``). Raises ``ConfigValidationError`` aggregating every
-    problem so the operator sees them all at once.
-    """
-    projects = config.get("projects", {})
-    errors: list[str] = []
-
-    for proj_key, proj_cfg in projects.items():
-        if not isinstance(proj_cfg, dict):
-            continue
-        if "transport" not in proj_cfg:
-            continue
-        transport = proj_cfg.get("transport")
-        if not isinstance(transport, dict):
-            errors.append(f"project '{proj_key}' has a non-dict 'transport' block: {transport!r}")
-            continue
-        for role, value in transport.items():
-            if role not in _VALID_TRANSPORT_ROLES:
-                errors.append(
-                    f"project '{proj_key}' transport has unknown role key '{role}' "
-                    f"(valid roles: {sorted(_VALID_TRANSPORT_ROLES)})"
-                )
-                continue
-            if value not in _VALID_TRANSPORTS:
-                errors.append(
-                    f"project '{proj_key}' transport.{role} has invalid value {value!r} "
-                    f"(valid transports: {sorted(_VALID_TRANSPORTS)})"
-                )
-                continue
-            # PM headless is not yet supported (plan #1842 v1). The PM startup /
-            # login / plateau machinery is PTY-coupled and territory-restricted
-            # (#1843 owns the PTY read loop), so PM runs on PTY only. Dev headless
-            # is the metered worker leg that ships in v1. Reject pm=headless with a
-            # clear message rather than crashing deep in the container.
-            if role == "pm" and value == "headless":
-                errors.append(
-                    f"project '{proj_key}' transport.pm=headless is not yet supported "
-                    "(PM headless not yet supported — only the Dev role may run "
-                    "headless in v1; keep transport.pm=pty)"
-                )
-
-    if errors:
-        raise ConfigValidationError(
-            "projects.json transport failed validation:\n  - " + "\n  - ".join(errors)
-        )
+# NOTE (plan #1924): the per-project ``transport`` block is no longer
+# validated — there is one execution transport (headless ``claude -p``) and
+# no seam. Stale ``transport`` keys still present in a not-yet-migrated
+# ``projects.json`` are simply ignored by every loader; they are removed from
+# the vault config during the post-merge fleet deploy (No-Gos [ORDERED]).
 
 
 def validate_projects_config(config: dict) -> None:
@@ -468,7 +411,6 @@ def validate_projects_config(config: dict) -> None:
         validate_telegram_groups,
         validate_email_routing,
         validate_telegram_bots,
-        validate_transport,
     ):
         try:
             fn(config)
