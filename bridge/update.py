@@ -30,6 +30,12 @@ _PROJECT_DIR = Path(__file__).parent.parent
 UPDATE_POLL_ATTEMPTS = 15
 UPDATE_POLL_INTERVAL_SECONDS = 2
 
+# Shell subprocess budget: the historical 120s shell allowance plus the full
+# 30s verify-poll window the shell's terminal verify_release step may burn —
+# a near-limit worker-relevant update must not TimeoutExpired despite
+# succeeding.
+UPDATE_SHELL_TIMEOUT_SECONDS = 120 + UPDATE_POLL_ATTEMPTS * UPDATE_POLL_INTERVAL_SECONDS
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,7 +49,9 @@ def _bridge_plist_exists() -> bool:
         return False
 
 
-async def _verify_release_after_update(subprocess_start_ts: float) -> dict:
+async def _verify_release_after_update(
+    subprocess_start_ts: float, worker_restarted: bool = True
+) -> dict:
     """Poll for a fresh worker beacon, then classify the running releases.
 
     Race 1 mitigation on the inline (no-bridge-restart) path: a worker
@@ -51,19 +59,26 @@ async def _verify_release_after_update(subprocess_start_ts: float) -> dict:
     returns, so wait (bounded 15 x 2s) for its beacon to freshen past the
     subprocess start moment — or exhaustion, after which the pre-restart
     beacon still classifies correctly (matches on a no-op cycle, stale when
-    process-relevant commits landed). Raises on import/verify errors; the
-    caller degrades gracefully to the shell result.
+    process-relevant commits landed).
+
+    ``worker_restarted=False`` skips the poll entirely (the shell's
+    ``--since 0`` principle): when no worker restart happened this cycle the
+    beacon can never freshen past ``subprocess_start_ts``, so polling would
+    burn the full 30s window on every no-op /update for nothing — classify
+    the existing beacon directly. Raises on import/verify errors; the caller
+    degrades gracefully to the shell result.
     """
     from scripts.update.git import get_short_sha
     from scripts.update.service import read_boot_beacon, verify_running_release
     from scripts.update.verify import check_machine_identity
 
-    beacon_path = _PROJECT_DIR / "data" / "worker_boot_sha"
-    for _ in range(UPDATE_POLL_ATTEMPTS):
-        beacon = read_boot_beacon(beacon_path)
-        if beacon is not None and beacon[1] > subprocess_start_ts:
-            break
-        await asyncio.sleep(UPDATE_POLL_INTERVAL_SECONDS)
+    if worker_restarted:
+        beacon_path = _PROJECT_DIR / "data" / "worker_boot_sha"
+        for _ in range(UPDATE_POLL_ATTEMPTS):
+            beacon = read_boot_beacon(beacon_path)
+            if beacon is not None and beacon[1] > subprocess_start_ts:
+                break
+            await asyncio.sleep(UPDATE_POLL_INTERVAL_SECONDS)
     head_short = get_short_sha(_PROJECT_DIR)
     machine_check = check_machine_identity(_PROJECT_DIR)
     return verify_running_release(_PROJECT_DIR, head_short, machine_check)
@@ -137,11 +152,18 @@ async def _queue_fix_session(event, machine: str, stdout: str, stderr: str, fail
 
 
 async def handle_update_command(tg_client, event):
-    """Run remote update script and send results as standalone message.
+    """Run remote-update.sh and send the release-verified result (#1898).
 
-    Pulls code and syncs deps but does NOT restart the bridge.
-    If code changed, writes a restart flag that the session queue picks up
-    between sessions for a graceful restart when idle.
+    The shell pulls code, restarts the worker on a worker-relevant diff, and —
+    on a bridge-relevant diff with the bridge plist installed — kickstarts the
+    bridge as its FINAL act, which SIGKILLs this coroutine by process-group
+    semantics. On that path the fresh bridge's boot flush
+    (:func:`run_boot_release_check`) is the reporter, replying via the chat
+    context exported into the shell env. When the shell returns (worker-only /
+    no-op update), the ``✅`` is gated on a release verify: shell exit 0 AND
+    no in-role process running positively-stale code; a stale process reports
+    ``❌ update FAILED`` naming its lagging short-SHA, with per-process reload
+    state appended.
     """
     machine = _get_machine_name()
     logger.info(f"[update] /update received from chat {event.chat_id}")
@@ -191,7 +213,7 @@ async def handle_update_command(tg_client, event):
             cwd=str(_PROJECT_DIR),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=UPDATE_SHELL_TIMEOUT_SECONDS,
             env=env,
         )
         stdout = result.stdout.strip()
@@ -235,7 +257,14 @@ async def handle_update_command(tg_client, event):
         stale_details: list[str] = []
         reload_states: list[str] = []
         try:
-            check = await _verify_release_after_update(subprocess_start_ts)
+            # Poll only when the shell actually restarted the worker (its
+            # "[update] Worker restarted" stdout marker) — the shell's
+            # --since 0 principle: on a no-op cycle the beacon can never
+            # freshen, so polling would burn the full 30s window for nothing.
+            worker_restarted = any("Worker restarted" in line for line in status_lines)
+            check = await _verify_release_after_update(
+                subprocess_start_ts, worker_restarted=worker_restarted
+            )
             for name, info in check.items():
                 classification = info.get("classification")
                 boot_sha = info.get("boot_sha") or "?"
@@ -280,7 +309,7 @@ async def handle_update_command(tg_client, event):
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
-            f"{machine} - update timed out after 120s",
+            f"{machine} - update timed out after {UPDATE_SHELL_TIMEOUT_SECONDS}s",
         )
     except Exception as e:
         logger.error(f"[update] /update failed: {e}")
@@ -344,6 +373,12 @@ async def run_boot_release_check(tg_client) -> None:
                 bridge_info.get("boot_sha"),
                 head_short,
             )
+        elif bridge_info.get("classification") == "matches":
+            # Fleet recovered — clear any earlier sentinel so the watchdog
+            # stops surfacing a resolved failure every 60s forever. Positive
+            # `matches` only: an `unknown` boot must not erase a genuine
+            # failure record.
+            (_PROJECT_DIR / "data" / "update-release-failed").unlink(missing_ok=True)
     except Exception as e:
         logger.warning(f"[update] boot release self-check failed (non-fatal): {e}")
     try:
