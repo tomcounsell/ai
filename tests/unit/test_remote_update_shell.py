@@ -195,6 +195,8 @@ def test_bridge_kickstart_on_relevant_diff_with_plist(harness):
     assert len(verify) == 1
     assert "--skip-bridge" in verify[0]
     assert "--since 0 " not in verify[0] + " "
+    # Positive stdout marker gating handle_update_command's beacon poll.
+    assert "Worker restarted" in result.stdout
     assert result.returncode == 0
 
 
@@ -303,3 +305,16 @@ def test_lock_collision_without_marker_prints_generic_skip(harness):
     result = harness.run()
     assert result.returncode == 0
     assert "Another update is already running" in result.stdout
+
+
+def test_marker_freshness_literal_matches_python_ttl():
+    """The shell's hardcoded marker-freshness window must equal the shared
+    Python constant (Decision 26 formula) — drift fails this test."""
+    import re
+
+    from scripts.update.service import UPDATE_RESTART_MARKER_TTL_SECONDS
+
+    script = REAL_SCRIPT.read_text()
+    match = re.search(r'\[ "\$marker_age" -lt (\d+) \]', script)
+    assert match, "marker freshness check not found in remote-update.sh"
+    assert int(match.group(1)) == UPDATE_RESTART_MARKER_TTL_SECONDS

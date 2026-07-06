@@ -207,6 +207,30 @@ async def test_env_export_of_chat_context(update_env, tg_client, event):
     assert env["UPDATE_REPORT_REPLY_TO"] == "222"
 
 
+@pytest.mark.asyncio
+async def test_poll_skipped_when_shell_shows_no_worker_restart(update_env, tg_client, event):
+    """No 'Worker restarted' stdout marker → the beacon poll is skipped
+    (the shell's --since 0 principle on the inline path)."""
+    await bridge_update.handle_update_command(tg_client, event)
+    call = bridge_update._verify_release_after_update.await_args
+    assert call.kwargs["worker_restarted"] is False
+
+
+@pytest.mark.asyncio
+async def test_poll_enabled_when_shell_shows_worker_restart(update_env, tg_client, event):
+    update_env["stdout"] = "[update] Pull complete\n[update] Worker restarted\n"
+    await bridge_update.handle_update_command(tg_client, event)
+    call = bridge_update._verify_release_after_update.await_args
+    assert call.kwargs["worker_restarted"] is True
+
+
+def test_shell_timeout_covers_verify_poll_budget():
+    """The subprocess budget must cover the shell's 30s verify-poll window."""
+    assert bridge_update.UPDATE_SHELL_TIMEOUT_SECONDS >= 120 + (
+        bridge_update.UPDATE_POLL_ATTEMPTS * bridge_update.UPDATE_POLL_INTERVAL_SECONDS
+    )
+
+
 # ---------------------------------------------------------------------------
 # _verify_release_after_update: bounded beacon poll (Race 1, inline path)
 # ---------------------------------------------------------------------------
@@ -226,6 +250,22 @@ async def test_beacon_poll_bounded_at_15_attempts(monkeypatch):
     result = await bridge_update._verify_release_after_update(time.time())
     assert result == canned
     assert len(reads) == bridge_update.UPDATE_POLL_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_beacon_poll_skipped_entirely_when_worker_not_restarted(monkeypatch):
+    """worker_restarted=False → straight to classification, zero beacon reads."""
+    reads = []
+    monkeypatch.setattr(
+        "scripts.update.service.read_boot_beacon", lambda p: reads.append(1) or None
+    )
+    monkeypatch.setattr("scripts.update.git.get_short_sha", lambda pd: SHELL_SHA)
+    monkeypatch.setattr("scripts.update.verify.check_machine_identity", lambda pd: {"projects": []})
+    canned = {"worker": _info("matches", -50)}
+    monkeypatch.setattr("scripts.update.service.verify_running_release", lambda pd, h, mc: canned)
+    result = await bridge_update._verify_release_after_update(time.time(), worker_restarted=False)
+    assert result == canned
+    assert reads == []
 
 
 @pytest.mark.asyncio
@@ -308,6 +348,9 @@ async def test_pure_cron_stale_boot_writes_sentinel_without_report(
 async def test_boot_flush_sends_ok_and_drains_report(boot_env, tg_client, monkeypatch):
     _set_verify(monkeypatch, {"bridge": _info("matches", 100), "worker": _info("matches", -50)})
     _stage_report(boot_env)
+    # Pre-seed a sentinel from an earlier failed cycle: a healthy boot must
+    # clear it, or the watchdog logs CRITICAL every 60s forever.
+    (boot_env / "data" / "update-release-failed").write_text('{"process": "bridge"}\n')
 
     await bridge_update.run_boot_release_check(tg_client)
 
@@ -320,6 +363,33 @@ async def test_boot_flush_sends_ok_and_drains_report(boot_env, tg_client, monkey
     assert "(bridge restarted, worker restarted)" in message
     assert not (boot_env / "data" / "update-pending-report").exists()
     assert not (boot_env / "data" / "update-release-failed").exists()
+
+
+@pytest.mark.asyncio
+async def test_healthy_boot_clears_preseeded_sentinel_without_report(
+    boot_env, tg_client, monkeypatch
+):
+    """Fleet recovered on a pure-cron boot (no report) → sentinel cleared."""
+    _set_verify(monkeypatch, {"bridge": _info("matches", 100), "worker": _info("matches", -50)})
+    sentinel = boot_env / "data" / "update-release-failed"
+    sentinel.write_text('{"process": "bridge", "boot_sha": "659756a4"}\n')
+
+    await bridge_update.run_boot_release_check(tg_client)
+
+    assert not sentinel.exists()
+    tg_client.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_boot_does_not_clear_sentinel(boot_env, tg_client, monkeypatch):
+    """An inconclusive boot must not erase a genuine failure record."""
+    _set_verify(monkeypatch, {"bridge": _info("unknown", 100), "worker": _info("matches", -50)})
+    sentinel = boot_env / "data" / "update-release-failed"
+    sentinel.write_text('{"process": "bridge", "boot_sha": "659756a4"}\n')
+
+    await bridge_update.run_boot_release_check(tg_client)
+
+    assert sentinel.exists()
 
 
 @pytest.mark.asyncio

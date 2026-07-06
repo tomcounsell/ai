@@ -433,7 +433,9 @@ def run_release_verify(
     False`` (non-zero exit), a ``data/update-release-failed`` sentinel on a
     bridge hard-fail (a stale bridge cannot be trusted to report its own
     failure — the watchdog reads it), and a Sentry capture as the durable
-    off-machine record. ``unknown`` → warn only. Never raises.
+    off-machine record. ``unknown`` → warn only. A clean pass with the bridge
+    positively ``matches`` clears any earlier sentinel (fleet recovered).
+    Never raises.
     """
     try:
         head_short = git.get_short_sha(project_dir)
@@ -448,6 +450,15 @@ def run_release_verify(
             if info.get("classification") == "stale"
         }
         if not release_stale:
+            if release_check.get("bridge", {}).get("classification") == "matches":
+                # Fleet recovered — clear any earlier out-of-band sentinel so
+                # the watchdog stops surfacing a resolved failure every 60s.
+                # Positive `matches` only: an `unknown` pass must not erase a
+                # genuine failure record.
+                try:
+                    (project_dir / "data" / "update-release-failed").unlink(missing_ok=True)
+                except Exception as unlink_err:
+                    log(f"WARN: could not clear update-release-failed sentinel: {unlink_err}", v)
             return
         details = "; ".join(
             f"{name} running {info.get('boot_sha') or '?'} but HEAD is {head_short}"

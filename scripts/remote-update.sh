@@ -282,6 +282,13 @@ PYEOF
     fi
 fi
 
+if [ "$WORKER_STATE" = "worker restarted" ]; then
+    # Positive stdout marker: handle_update_command gates its bounded 15 x 2s
+    # beacon poll on this line — a no-op /update must not burn the full poll
+    # window waiting for a beacon that can never freshen.
+    echo "[update] Worker restarted"
+fi
+
 # Log rotation is handled by the user-space log-rotate LaunchAgent
 # (see scripts/log_rotate.py and com.valor.log-rotate.plist). The Python
 # update pipeline installs it via service.install_log_rotate_agent() —

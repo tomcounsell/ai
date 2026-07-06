@@ -593,3 +593,37 @@ def test_full_verify_never_raises_on_error(run_mod, monkeypatch, tmp_path):
     result = run_mod.UpdateResult()
     run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)  # must not raise
     assert result.success is True
+
+
+def test_full_verify_clean_pass_clears_preseeded_sentinel(run_mod, monkeypatch, tmp_path):
+    """Fleet recovered → the out-of-band sentinel is cleared so the watchdog
+    stops surfacing a resolved failure every 60s (review fix, #1898)."""
+    (tmp_path / "data").mkdir()
+    sentinel = tmp_path / "data" / "update-release-failed"
+    sentinel.write_text('{"process": "bridge", "boot_sha": "659756a4"}\n')
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("matches", "matches"),
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert result.success is True
+    assert not sentinel.exists()
+
+
+def test_full_verify_unknown_pass_does_not_clear_sentinel(run_mod, monkeypatch, tmp_path):
+    """An inconclusive pass must not erase a genuine failure record."""
+    (tmp_path / "data").mkdir()
+    sentinel = tmp_path / "data" / "update-release-failed"
+    sentinel.write_text('{"process": "bridge", "boot_sha": "659756a4"}\n')
+    monkeypatch.setattr(run_mod.git, "get_short_sha", lambda pd: "6b5b998a")
+    monkeypatch.setattr(
+        run_mod.service,
+        "verify_running_release",
+        lambda pd, head, mc: _canned_results("unknown", "matches"),
+    )
+    result = run_mod.UpdateResult()
+    run_mod.run_release_verify(tmp_path, FULL_MACHINE_CHECK, result, v=False)
+    assert sentinel.exists()
