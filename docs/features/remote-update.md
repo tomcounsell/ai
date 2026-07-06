@@ -8,6 +8,8 @@ tracking: https://github.com/tomcounsell/ai/issues/24
 
 # Remote Update: Telegram Command + Auto-Sync Cron
 
+> **Update (issue #1898)**: the design below predates release verification. `remote-update.sh` now also restarts the **bridge** (mirroring the worker kickstart described here) on bridge-relevant changes, and both `/update` and the cron path verify the running release before reporting `✅`. See [Bridge Self-Healing #20](bridge-self-healing.md#20-update-release-verification-issue-1898) for the current design.
+
 ## Problem
 
 We update Valor's codebase almost daily, but changes only take effect on the machine where they're committed. The other 3 machines running Valor keep serving stale code until someone manually SSHs in or runs `/update` locally via Claude Code.

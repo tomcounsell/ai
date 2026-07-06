@@ -6,7 +6,9 @@ import logging
 import os
 import plistlib
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -578,7 +580,6 @@ def restart_webui(project_dir: Path, force: bool = False) -> bool:
     listening on port 8500, return True without killing the process. Pass
     force=True to kill+restart (used after git pull pulls new code).
     """
-    import time
 
     pids = get_webui_pids()
     if pids and not force:
@@ -820,3 +821,202 @@ def install_caffeinate() -> bool:
         return True
     except Exception:
         return False
+
+
+# === Release verification via boot-SHA beacons (issue #1898) ===
+
+# Per-process relevant path sets — IDENTICAL to the restart gates' diff sets in
+# scripts/remote-update.sh (#1091 relevant-diff design). Classifier and restart
+# gate must agree by construction: a process is `stale` only when commits
+# touching ITS OWN paths landed after its boot SHA. Raw `boot_sha != HEAD`
+# equality is deliberately never used — docs-only commits legitimately advance
+# HEAD past healthy, correctly-un-restarted processes.
+BRIDGE_RELEVANT_PATHS = [
+    "bridge/",
+    "agent/",
+    "mcp_servers/",
+    "models/",
+    "tools/",
+    "config/",
+    "pyproject.toml",
+]
+WORKER_RELEVANT_PATHS = [
+    "worker/",
+    "agent/",
+    "mcp_servers/",
+    "models/",
+    "tools/",
+    "bridge/",
+    "reflections/",
+    "pyproject.toml",
+]
+
+# Bridge eligibility uses the same on-disk plist signal as the restart gate in
+# remote-update.sh (Decision 23, #1898): a machine with the bridge role but no
+# installed plist has no restart path, so it must not enter a permanent
+# stale-FAILED loop — it is skipped entirely.
+BRIDGE_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{SERVICE_PREFIX}.bridge.plist"
+
+# Shared TTLs for the planned bridge-restart marker (data/update-restart-in-
+# progress) and the staged pending report (data/update-pending-report) —
+# issue #1898, Decision 26. Formula: the bridge watchdog's
+# STARTUP_GRACE_SECONDS (5 min) + one 60s watchdog cycle. BOTH TTLs share the
+# formula so the watchdog-suppression window can never expire before the
+# legitimate boot window it protects. Defined here rather than in
+# monitoring/bridge_watchdog.py because scripts.update.verify_release must
+# import the marker TTL without pulling in the watchdog's module-level side
+# effects (log handler creation, redis import); the watchdog re-imports both,
+# and a test pins them to STARTUP_GRACE_SECONDS + 60.
+UPDATE_REPORT_TTL_SECONDS = 5 * 60 + 60
+UPDATE_RESTART_MARKER_TTL_SECONDS = UPDATE_REPORT_TTL_SECONDS
+
+
+def get_process_start_ts(pid: int) -> float | None:
+    """Return a process's start time as a unix timestamp (``ps -o lstart``).
+
+    Generalized from the bridge watchdog's ``get_bridge_process_start_ts``
+    (issue #1898) — works for any PID (bridge, worker). Returns None on any
+    error or unparseable output. None is treated as inconclusive by callers:
+    the release verifier classifies ``unknown`` (fail-safe, never a restart
+    or a FAILED report), and the watchdog never authorises a restart on it.
+
+    lstart format example: "Mon Jun 16 09:45:12 2026"
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        raw = result.stdout.strip()
+        if not raw:
+            return None
+        # lstart format: "Mon Jun 16 09:45:12 2026"
+        # Note: single-digit days are space-padded, e.g. " 6" not "06".
+        # strptime handles both with "%e" on many platforms; use "%d" with strip.
+        try:
+            dt = datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            # Some macOS versions zero-pad; try both forms
+            try:
+                dt = datetime.strptime(raw.strip(), "%a %b  %d %H:%M:%S %Y")
+            except ValueError:
+                logger.warning("get_process_start_ts: unparseable lstart=%r", raw)
+                return None
+        # ps lstart is local time; mktime() interprets it as local and returns a
+        # Unix timestamp (seconds since UTC epoch) — no explicit UTC conversion needed.
+        local_ts = time.mktime(dt.timetuple())
+        return local_ts
+    except Exception as e:
+        logger.debug("get_process_start_ts failed for pid=%s: %s", pid, e)
+        return None
+
+
+def read_boot_beacon(beacon_path: Path) -> tuple[str, float] | None:
+    """Read a boot-SHA beacon file written by ``monitoring.boot_beacon``.
+
+    Returns ``(boot_sha, beacon_ts)`` or None when the beacon is missing,
+    empty, or malformed (all of which classify ``unknown``, never ``stale``).
+    """
+    try:
+        if not beacon_path.exists():
+            return None
+        lines = beacon_path.read_text().strip().splitlines()
+        if len(lines) < 2:
+            return None
+        sha = lines[0].strip()
+        if not sha:
+            return None
+        beacon_ts = datetime.fromisoformat(lines[1].strip()).timestamp()
+        return sha, beacon_ts
+    except Exception:  # swallow-ok: malformed/missing beacon classifies as unknown downstream
+        return None
+
+
+def _classify_process(
+    project_dir: Path,
+    head_sha: str,
+    process_name: str,
+    pid: int | None,
+    relevant_paths: list[str],
+) -> dict:
+    """Classify one process's running release as matches | stale | unknown.
+
+    - ``matches``: the beacon belongs to the current image
+      (``beacon_ts > process_start_ts``) AND
+      ``git log {boot_sha}..{head_sha} -- <relevant_paths>`` is empty — no
+      process-relevant commits landed since it booted (``boot_sha == HEAD``
+      is the trivial subcase; docs-only commits ahead still match).
+    - ``stale`` (positive staleness only): beacon belongs to the current
+      image AND the relevant-range log is non-empty.
+    - ``unknown``: beacon missing/empty/malformed, no PID,
+      ``process_start_ts`` unavailable, orphaned beacon
+      (``beacon_ts <= process_start_ts``), or ``boot_sha`` unresolvable by
+      git. ``unknown`` never fails a run and never triggers a restart.
+    """
+    result = {
+        "running": pid is not None,
+        "boot_sha": None,
+        "beacon_ts": None,
+        "process_start_ts": None,
+        "classification": "unknown",
+    }
+    beacon = read_boot_beacon(project_dir / "data" / f"{process_name}_boot_sha")
+    if beacon is None:
+        return result
+    result["boot_sha"], result["beacon_ts"] = beacon
+    if pid is None:
+        return result
+    start_ts = get_process_start_ts(pid)
+    result["process_start_ts"] = start_ts
+    if start_ts is None:
+        return result
+    if result["beacon_ts"] <= start_ts:
+        # Orphaned beacon: predates the current process image — inconclusive.
+        return result
+    try:
+        log_result = run_cmd(
+            ["git", "log", "--oneline", f"{result['boot_sha']}..{head_sha}", "--", *relevant_paths],
+            cwd=project_dir,
+        )
+    except Exception as e:
+        logger.debug("verify_running_release: git log failed for %s: %s", process_name, e)
+        return result
+    if log_result.returncode != 0:
+        # boot_sha unresolvable (e.g. history rewrite) — inconclusive.
+        return result
+    result["classification"] = "matches" if not log_result.stdout.strip() else "stale"
+    return result
+
+
+def verify_running_release(project_dir: Path, head_sha: str, machine_check: dict) -> dict:
+    """Verify the running bridge/worker releases against pulled HEAD (#1898).
+
+    Returns ``{process_name: {running, boot_sha, beacon_ts, process_start_ts,
+    classification}}`` with classification in ``{matches, stale, unknown}``
+    per :func:`_classify_process` (positive staleness against the process's
+    OWN relevant path set — never raw HEAD equality).
+
+    Per-process machine-role gating (same gates run.py Step 5 uses):
+
+    - bridge: ``machine_check["bridge_projects"]`` truthy AND the bridge
+      plist exists on disk (the same signal the restart gate uses —
+      Decision 23), so verify and restart can never diverge.
+    - worker: ``machine_check["projects"]`` truthy.
+
+    A machine lacking a role (or plist) skips that process entirely — no
+    beacon read, no warning.
+    """
+    results: dict = {}
+    if machine_check.get("bridge_projects") and BRIDGE_PLIST_PATH.exists():
+        results["bridge"] = _classify_process(
+            project_dir, head_sha, "bridge", get_bridge_pid(), BRIDGE_RELEVANT_PATHS
+        )
+    if machine_check.get("projects"):
+        results["worker"] = _classify_process(
+            project_dir, head_sha, "worker", get_worker_pid(), WORKER_RELEVANT_PATHS
+        )
+    return results

@@ -1401,6 +1401,17 @@ def main() -> None:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+    # Record the SHA this worker booted at (data/worker_boot_sha) so the update
+    # system can verify the running release matches pulled HEAD (issue #1898).
+    # Best-effort like _green_heartbeat_write — a failure logs a warning and
+    # never crashes startup.
+    try:
+        from monitoring.boot_beacon import write_boot_beacon  # noqa: PLC0415
+
+        write_boot_beacon("worker")
+    except Exception as beacon_err:
+        logger.warning(f"Boot beacon write skipped (non-fatal): {beacon_err}")
+
     # Set environment hint that we're running as standalone worker
     os.environ.setdefault("VALOR_WORKER_MODE", "standalone")
 

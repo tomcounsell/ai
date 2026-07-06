@@ -2988,6 +2988,30 @@ async def main():
     if clear_restart_flag():
         logger.info("Cleared stale restart flag from previous update")
 
+    # Record the SHA this bridge booted at (data/bridge_boot_sha) so the update
+    # system can verify the running release matches pulled HEAD (issue #1898).
+    # Best-effort — a write failure logs a warning and never crashes startup.
+    try:
+        from monitoring.boot_beacon import write_boot_beacon
+
+        write_boot_beacon("bridge")
+    except Exception as beacon_err:
+        logger.warning(f"Boot beacon write skipped (non-fatal): {beacon_err}")
+
+    # Fresh-bridge boot self-check + pending-report flush (issue #1898):
+    # (1) unconditionally verify the running release — a stale self-
+    #     classification writes the data/update-release-failed sentinel and
+    #     the planned-restart marker is cleared now that we are up;
+    # (2) if a Telegram-triggered bridge restart staged
+    #     data/update-pending-report, flush the OK/FAILED reply to that chat.
+    # Best-effort — must never crash startup.
+    try:
+        from bridge.update import run_boot_release_check
+
+        await run_boot_release_check(client)
+    except Exception as e:
+        logger.warning(f"Boot release check failed (non-fatal): {e}")
+
     # Session recovery, index rebuild, and worker spawning are handled exclusively
     # by the standalone worker process (worker/__main__.py). The bridge only enqueues
     # AgentSession records to Redis; execution is the worker's responsibility.

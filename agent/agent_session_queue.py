@@ -1242,16 +1242,18 @@ def _check_restart_flag() -> bool:
         logger.info(f"Restart requested but {len(running)} session(s) still running — deferring")
         return False
 
-    logger.info(f"Restart flag found ({flag_content}), no running sessions — restarting bridge")
+    logger.info(f"Restart flag found ({flag_content}), no running sessions — restarting worker")
     return True
 
 
 def _trigger_restart() -> None:
-    """Trigger graceful bridge restart by sending SIGTERM to self.
+    """Trigger a graceful WORKER restart by sending SIGTERM to the worker PID (self).
 
-    SIGTERM is caught by the existing _shutdown_handler in the bridge which
-    sets SHUTTING_DOWN=True and calls _graceful_shutdown(). Launchd KeepAlive
-    restarts the process with new code.
+    This runs inside the standalone worker's queue loop, so `os.getpid()` is
+    the WORKER process — not the bridge. Launchd KeepAlive respawns the worker
+    with new code. Nothing on this path restarts the bridge (the bridge only
+    clears stale flags at startup; its restart happens via the remote-update.sh
+    kickstart — issue #1898).
     """
     _RESTART_FLAG.unlink(missing_ok=True)
     logger.info("Triggering graceful restart via SIGTERM...")

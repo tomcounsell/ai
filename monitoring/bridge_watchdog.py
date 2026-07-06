@@ -42,6 +42,19 @@ from monitoring.crash_tracker import (  # noqa: E402
     log_crash,
 )
 
+# Shared absolute process-start-time primitive (ps -o lstart). Moved from this
+# module to scripts/update/service.py and generalized for any PID so the
+# release verifier can classify both bridge and worker (issue #1898). The two
+# TTL constants (Decision 26: BOTH = STARTUP_GRACE_SECONDS + one 60s watchdog
+# cycle, so the suppression window can never expire before the boot window it
+# protects) live in scripts.update.service so scripts.update.verify_release
+# can share them without importing this module's side effects.
+from scripts.update.service import (  # noqa: E402
+    UPDATE_REPORT_TTL_SECONDS,
+    UPDATE_RESTART_MARKER_TTL_SECONDS,
+    get_process_start_ts,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -65,6 +78,17 @@ ERROR_LOG = PROJECT_DIR / "logs" / "bridge.error.log"
 DATA_DIR = PROJECT_DIR / "data"
 RECOVERY_LOCK = DATA_DIR / "recovery-in-progress"
 AUTO_REVERT_ENABLED_FILE = DATA_DIR / "auto-revert-enabled"
+
+# Update release-verify signals (issue #1898):
+# - UPDATE_RESTART_MARKER: written by remote-update.sh just before its
+#   deliberate bridge kickstart; suppresses crash-logging/recovery while fresh.
+# - UPDATE_RELEASE_FAILED_SENTINEL: written by a fresh bridge that boots and
+#   self-classifies stale (or by run.py --full on a bridge hard-fail).
+# - UPDATE_PENDING_REPORT: staged /update reply; undrained past its TTL means
+#   the fresh bridge never came up to flush it.
+UPDATE_RESTART_MARKER = DATA_DIR / "update-restart-in-progress"
+UPDATE_RELEASE_FAILED_SENTINEL = DATA_DIR / "update-release-failed"
+UPDATE_PENDING_REPORT = DATA_DIR / "update-pending-report"
 
 # Thresholds
 LOG_STALENESS_THRESHOLD = 300  # 5 minutes - logs older than this are stale
@@ -127,48 +151,6 @@ def is_bridge_running() -> tuple[bool, int | None]:
         return False, None
 
 
-def get_bridge_process_start_ts(pid: int) -> float | None:
-    """Return the bridge process's start time as a UTC unix timestamp.
-
-    Uses ``ps -o lstart= -p <pid>``.  Returns None on any error or unparseable
-    output.  None is treated as inconclusive — never authorise a restart based
-    on this alone (fail-safe for C3).
-
-    lstart format example: "Mon Jun 16 09:45:12 2026"
-    """
-    try:
-        result = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        raw = result.stdout.strip()
-        if not raw:
-            return None
-        # lstart format: "Mon Jun 16 09:45:12 2026"
-        # Note: single-digit days are space-padded, e.g. " 6" not "06".
-        # strptime handles both with "%e" on many platforms; use "%d" with strip.
-        try:
-            dt = datetime.strptime(raw, "%a %b %d %H:%M:%S %Y")
-        except ValueError:
-            # Some macOS versions zero-pad; try both forms
-            try:
-                dt = datetime.strptime(raw.strip(), "%a %b  %d %H:%M:%S %Y")
-            except ValueError:
-                logger.warning("get_bridge_process_start_ts: unparseable lstart=%r", raw)
-                return None
-        # ps lstart is local time; mktime() interprets it as local and returns a
-        # Unix timestamp (seconds since UTC epoch) — no explicit UTC conversion needed.
-        local_ts = time.mktime(dt.timetuple())
-        return local_ts
-    except Exception as e:
-        logger.debug("get_bridge_process_start_ts failed for pid=%s: %s", pid, e)
-        return None
-
-
 def _get_watchdog_redis() -> redis.Redis:
     """Return a decode_responses Redis client for watchdog use."""
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -204,12 +186,12 @@ def assess_update_flow(r: redis.Redis, bridge_pid: int | None) -> tuple[bool, st
     # Determine if bridge is within startup grace window.
     within_grace = False
     if bridge_pid is not None:
-        start_ts = get_bridge_process_start_ts(bridge_pid)
+        start_ts = get_process_start_ts(bridge_pid)
         if start_ts is None:
             # Cannot determine start time — fail-safe: treat as inconclusive for
             # grace-window purposes (do not authorise restart).
             logger.warning(
-                "assess_update_flow: get_bridge_process_start_ts returned None for "
+                "assess_update_flow: get_process_start_ts returned None for "
                 "pid=%s — suppressing wedge verdict (fail-safe C3)",
                 bridge_pid,
             )
@@ -772,6 +754,45 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
     return False
 
 
+def check_update_release_signals() -> list[str]:
+    """Surface out-of-band update-release failure signals (issue #1898).
+
+    Read-only: returns human-readable issue strings for (1) the
+    ``data/update-release-failed`` sentinel a stale fresh bridge wrote at
+    boot, and (2) a ``data/update-pending-report`` left undrained past
+    ``UPDATE_REPORT_TTL_SECONDS`` measured against the report's OWN staged
+    timestamp (the fresh bridge never came up to flush it). Richer
+    alerting/escalation is deliberately out of scope (#1898 No-Gos).
+    """
+    issues: list[str] = []
+    try:
+        if UPDATE_RELEASE_FAILED_SENTINEL.exists():
+            content = UPDATE_RELEASE_FAILED_SENTINEL.read_text().strip()[:200]
+            issues.append(f"update-release-failed sentinel present: {content}")
+    except Exception as e:
+        logger.debug("Could not read update-release-failed sentinel: %s", e)
+    try:
+        if UPDATE_PENDING_REPORT.exists():
+            staged_ts = 0.0
+            try:
+                staged_ts = float(json.loads(UPDATE_PENDING_REPORT.read_text()).get("staged_ts", 0))
+            except Exception:  # swallow-ok: unreadable staged ts falls back to mtime
+                pass
+            if staged_ts <= 0:
+                # Unreadable staged timestamp — fall back to file mtime.
+                staged_ts = UPDATE_PENDING_REPORT.stat().st_mtime
+            report_age = time.time() - staged_ts
+            if report_age > UPDATE_REPORT_TTL_SECONDS:
+                issues.append(
+                    f"update pending report undrained for {int(report_age)}s "
+                    f"(TTL {UPDATE_REPORT_TTL_SECONDS}s) — "
+                    "the fresh bridge may never have come up"
+                )
+    except Exception as e:
+        logger.debug("Could not read update-pending-report: %s", e)
+    return issues
+
+
 def run_health_check() -> bool:
     """Run a single health check cycle. Returns True if healthy."""
     # Check hibernation state before any recovery action.
@@ -807,6 +828,36 @@ def run_health_check() -> bool:
                 RECOVERY_LOCK.unlink()
         except Exception:
             pass
+
+    # Planned-restart suppression (issue #1898, Decision 19): remote-update.sh
+    # writes data/update-restart-in-progress just before its deliberate bridge
+    # kickstart. While the marker is fresh, skip the health check entirely —
+    # this suppresses BOTH log_crash("bridge_dead_on_watchdog_check") AND the
+    # recovery_level bump → execute_recovery() → restart_bridge() that would
+    # otherwise race the planned restart. The fresh bridge's boot self-check
+    # clears the marker; an aged-out marker resumes normal health checking.
+    try:
+        if UPDATE_RESTART_MARKER.exists():
+            marker_age = time.time() - UPDATE_RESTART_MARKER.stat().st_mtime
+            if marker_age < UPDATE_RESTART_MARKER_TTL_SECONDS:
+                logger.info(
+                    "Planned update restart in progress (marker age %.0fs) — skipping health check",
+                    marker_age,
+                )
+                return True
+            logger.warning(
+                "Planned-restart marker aged out (%.0fs) — removing and resuming health checks",
+                marker_age,
+            )
+            UPDATE_RESTART_MARKER.unlink(missing_ok=True)
+    except Exception as e:
+        logger.debug("Planned-restart marker check failed: %s", e)
+
+    # Out-of-band update-release failure signals (issue #1898): surfaced loudly
+    # on every cycle so a stale/never-came-up fresh bridge cannot silence its
+    # own alarm.
+    for release_issue in check_update_release_signals():
+        logger.critical("[update-release] %s", release_issue)
 
     status = check_bridge_health()
 
