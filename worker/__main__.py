@@ -1401,9 +1401,10 @@ def main() -> None:
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
-    # Record the SHA this worker booted at so the update system can verify the
-    # running release matches pulled HEAD (issue #1898). Best-effort like
-    # _green_heartbeat_write — a failure logs a warning and never crashes startup.
+    # Record the SHA this worker booted at (data/worker_boot_sha) so the update
+    # system can verify the running release matches pulled HEAD (issue #1898).
+    # Best-effort like _green_heartbeat_write — a failure logs a warning and
+    # never crashes startup.
     from monitoring.boot_beacon import write_boot_beacon  # noqa: PLC0415
 
     write_boot_beacon("worker")

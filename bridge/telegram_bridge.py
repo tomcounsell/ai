@@ -2988,9 +2988,9 @@ async def main():
     if clear_restart_flag():
         logger.info("Cleared stale restart flag from previous update")
 
-    # Record the SHA this bridge booted at so the update system can verify the
-    # running release matches pulled HEAD (issue #1898). Best-effort — a write
-    # failure logs a warning inside the helper and never crashes startup.
+    # Record the SHA this bridge booted at (data/bridge_boot_sha) so the update
+    # system can verify the running release matches pulled HEAD (issue #1898).
+    # Best-effort — a write failure logs a warning and never crashes startup.
     from monitoring.boot_beacon import write_boot_beacon
 
     write_boot_beacon("bridge")
