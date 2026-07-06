@@ -1,20 +1,21 @@
 # Per-Role Transport Hedge
 
 Config-selectable transport per granite role (PM / Dev): interactive **PTY**
-(flat-billed on the Claude subscription) or **headless** `claude -p` (metered
-against the Agent SDK credit pool). The default reproduces today's behavior
-exactly — both roles on PTY. Plan: `docs/plans/per-role-transport-hedge.md`
-(issue #1842).
+or **headless** `claude -p`. As of today **both bill the same** — flat on the
+Claude subscription via the OAuth credential. The default reproduces today's
+behavior exactly — both roles on PTY. Plan:
+`docs/plans/per-role-transport-hedge.md` (issue #1842).
 
 ## Why this exists
 
 The granite container drives every bridge-originated session through two Claude
-Code sessions (PM + Dev). Interactive PTY sessions bill flat on the
-subscription; every headless path (`claude -p`, Agent SDK) draws metered usage
-credits. Anthropic's billing policy for programmatic use has moved once and can
-move again. This feature is the hedge: flip a role to the transport that is
-economically favorable at the time, with the cost of the metered leg surfaced so
-a flip is never silent.
+Code sessions (PM + Dev). Today both transports bill flat on the subscription;
+a policy change moving headless/programmatic use (`claude -p`, Agent SDK) onto
+metered usage credits is **anticipated but not in effect** — Anthropic's
+billing policy for programmatic use has moved once and can move again. This
+feature is the hedge built in advance: flip a role to the transport that is
+economically favorable at the time, with the cost of the (potentially metered)
+headless leg surfaced so a flip is never silent.
 
 ## Configuration
 

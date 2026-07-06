@@ -14,7 +14,8 @@ This is the production cutover of the container first landed in PR #1570
 (see [`granite-interactive-tui.md`](granite-interactive-tui.md)). All bridge
 sessions route through `Container`; **the transport per role is
 config-selectable** (plan #1842): each of PM / Dev runs on an interactive PTY
-(the default, flat-billed) or headless `claude -p` (metered). The default —
+(the default) or headless `claude -p` (billed identically today; the metered
+hedge exists for an anticipated policy change). The default —
 both roles on PTY — reproduces the original cutover behavior exactly. See
 [`per-role-transport.md`](per-role-transport.md) for the selector, the headless
 role driver, cost surfacing, and the flip runbook. A regression in the PTY path
