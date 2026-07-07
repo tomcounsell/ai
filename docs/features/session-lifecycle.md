@@ -90,6 +90,8 @@ Recovery now confirms subprocess termination before deciding how to transition:
 
 **PID-reuse caveat:** a recorded `claude_pid` could in principle be recycled by an unrelated process before recovery runs. The window is the sub-second recovery path and this matches the existing PPID==1 reaper's assumptions; the residual risk is accepted rather than tracking PID generations.
 
+**User-facing notification (issue #1937 — silent-resume inversion):** the requeue-to-`pending` branch above is an auto-resuming interruption and is **silent** — no "I was interrupted" message is sent; the user next hears from the session when it actually finishes or fails. Only the "not confirmed dead" escalation to `failed` is terminal, and that branch delivers a last-resort `INTERRUPT_NO_RESUME` notice (`_deliver_terminal_interrupt_notice` in `agent/session_health.py`) when neither the deferred self-draft fallback nor the tool-timeout degraded notice already spoke for this exit. See [Reason-Aware Interrupt Messaging and Failure Notification](pm-final-delivery.md#reason-aware-interrupt-messaging-and-failure-notification-issue-1877-silent-resume-inversion) for the full send-site design.
+
 ## Kill-is-Terminal Invariant
 
 `valor-session kill` is a hard guarantee. Once a session is killed (or in any terminal state), no routine pipeline-progression code path may transition it to a different terminal status. This invariant is enforced symmetrically by both lifecycle entry points:

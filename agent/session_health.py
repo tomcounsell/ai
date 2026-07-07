@@ -1703,7 +1703,7 @@ async def _deliver_oneshot_dedup_notice(
 async def _deliver_tool_timeout_degraded_notice(
     entry: "AgentSession",
     tool_name: str | None,
-) -> None:
+) -> bool:
     """Send a one-shot degraded-service notice when a tool timeout leads to
     session failure.
 
@@ -1713,6 +1713,19 @@ async def _deliver_tool_timeout_degraded_notice(
     dedup, fail-open on Redis outage) live in ``_deliver_oneshot_dedup_notice``.
 
     Never raises; failures are logged at WARNING and swallowed.
+
+    Returns:
+        True only if this call actually delivered the notice; False if the
+        dedup key was already held by an earlier send, or if delivery itself
+        raised. Callers that gate a sibling terminal notice on "did this
+        already speak" (see the subprocess-survived escalation branch below)
+        must use this return value rather than treating the call as
+        automatically successful — a silently swallowed send-callback
+        exception must not suppress the terminal notice. (Residual edge case:
+        an earlier-tick dedup collision also returns False here, which could
+        in theory cause the terminal notice to fire alongside an
+        already-delivered degraded notice — over-notification, not silence,
+        so it fails toward this issue's goal rather than against it.)
     """
     session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
     project_key = getattr(entry, "project_key", None) or "unknown"
@@ -1737,6 +1750,7 @@ async def _deliver_tool_timeout_degraded_notice(
             _R2.incr(f"{project_key}:session-health:tool_timeout_degraded_delivered")
         except Exception:
             pass
+    return sent
 
 
 async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
@@ -2438,8 +2452,13 @@ async def _apply_recovery_transition(
             await _deliver_deferred_self_draft_fallback(entry)
             _degraded_sent = False
             if not _has_deferred and reason_kind == "tool_timeout":
-                await _deliver_tool_timeout_degraded_notice(entry, tool_name)
-                _degraded_sent = True
+                # Gate on actual delivery, not call-intent: a swallowed
+                # send-callback exception inside the degraded-notice helper
+                # must not be mistaken for "the user was told something" —
+                # that would suppress the terminal notice too and produce a
+                # fully silent terminal failure (the exact regression class
+                # this issue exists to prevent).
+                _degraded_sent = await _deliver_tool_timeout_degraded_notice(entry, tool_name)
             # Last-resort terminal voice: only when neither the real answer nor
             # the degraded notice already spoke, so the branch never
             # double-messages. Also deduped against the two send sites via the

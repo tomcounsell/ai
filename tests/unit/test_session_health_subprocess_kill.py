@@ -521,9 +521,17 @@ def _run_escalation(entry, *, reason_kind):
     return mock_deferred, mock_degraded, mock_terminal
 
 
-def test_escalation_branch_emits_exactly_one_user_facing_send():
+def test_escalation_branch_attempts_at_most_one_user_facing_send():
     """Critique BLOCKER guard: across all three branch shapes, the
-    subprocess-survived escalation branch emits exactly one user-facing send.
+    subprocess-survived escalation branch attempts at most one user-facing
+    send. This verifies call-intent mutual exclusion, not delivery success —
+    the mocked sibling helpers here always resolve truthy regardless of the
+    real send outcome, so it cannot observe whether a message actually
+    reached the user. `_deliver_tool_timeout_degraded_notice` now returns a
+    bool reflecting real delivery, and the escalation branch gates
+    `_degraded_sent` on that return value (not on having merely called it) —
+    see its docstring for the residual edge case that return value doesn't
+    cover.
 
     `_deliver_deferred_self_draft_fallback` is called unconditionally by the
     branch in every case (its own internal `deferred_self_draft_pending` gate
@@ -553,3 +561,47 @@ def test_escalation_branch_emits_exactly_one_user_facing_send():
     )
     degraded_iii.assert_not_awaited()
     terminal_iii.assert_awaited_once()
+
+
+def test_escalation_branch_speaks_when_degraded_notice_silently_fails():
+    """Regression guard for the call-intent-vs-delivery-success gap flagged in
+    plan critique concern #2: if `_deliver_tool_timeout_degraded_notice`
+    resolves to False (its send callback raised and it swallowed the
+    exception per its own contract), the branch must NOT mistake the mere
+    *attempt* for a delivered message — the terminal notice must still fire,
+    or the escalation branch would produce a fully silent terminal failure,
+    the exact regression class this issue exists to prevent.
+    """
+    entry = _escalation_entry(extra_context={})
+    survived = session_health.SubprocessKillResult(confirmed_dead=False, signal_sent=True)
+    with (
+        patch("models.session_lifecycle.finalize_session"),
+        patch("models.session_lifecycle.transition_status"),
+        patch.object(session_health, "_tier2_reprieve_signal", return_value=None),
+        patch("agent.agent_session_queue._ensure_worker"),
+        patch("popoto.redis_db.POPOTO_REDIS_DB"),
+        patch.object(session_health, "_confirm_subprocess_dead", return_value=survived),
+        patch.object(
+            session_health, "_deliver_deferred_self_draft_fallback", new_callable=AsyncMock
+        ),
+        patch.object(
+            session_health,
+            "_deliver_tool_timeout_degraded_notice",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as mock_degraded,
+        patch.object(
+            session_health, "_deliver_terminal_interrupt_notice", new_callable=AsyncMock
+        ) as mock_terminal,
+    ):
+        asyncio.run(
+            session_health._apply_recovery_transition(
+                entry,
+                reason="test-reason",
+                reason_kind="tool_timeout",
+                handle=None,
+                worker_key="worker-1",
+            )
+        )
+    mock_degraded.assert_awaited_once()
+    mock_terminal.assert_awaited_once()
