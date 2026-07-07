@@ -66,9 +66,14 @@ No prior *failed* fix exists for this exact behavior — #1877 succeeded at what
 
 1. **Entry point**: a killer/shutdown path cancels a running session's asyncio task
    (worker shutdown, health-check kill, deadline kill, recovery re-queue).
-2. **Reason write (optional)**: a killer that knows the outcome writes
-   `cancel-reason:{session_id}` via `set_cancel_reason` — `"no_resume"` for terminal,
-   `"resume"` for re-queue. Absent when it's a plain worker shutdown.
+2. **Reason write (optional, post-change contract)**: after this change the **only** value any
+   caller writes is `"no_resume"`, and only when the outcome is predicted terminal
+   (`session_health.py:2161` writes it iff `_predicted_terminal`; other killers write it for a
+   known-terminal kill). Every non-terminal path — re-queue, plain worker shutdown, an
+   unpredicted-terminal escalation before its re-stamp — writes **nothing**, leaving the
+   `cancel-reason:{session_id}` key **absent**. The retired `"resume"` value is never written by
+   any call site. So the reader's world shrinks to two states: `"no_resume"` present (a killer
+   owns a terminal narrative) or absent (silence).
 3. **CancelledError propagates** into `agent/messenger.py`'s run loop (handler at 296-368)
    and/or the completion runner (`agent/session_completion.py::_send_interrupted_message`).
 4. **Copy selection (the change point)**: today each site reads the reason and picks
@@ -84,11 +89,27 @@ No prior *failed* fix exists for this exact behavior — #1877 succeeded at what
 7. **Late-terminal escalation (the silent-terminal gap this inversion introduces)**: when the
    pre-cancel prediction was non-terminal, step 2 wrote no reason, so the send sites in steps
    4-6 stayed silent and never took the dedup key. If the subprocess then survives
-   cancel+SIGTERM+SIGKILL, `session_health.py`'s escalation branch finalizes the session to
-   the terminal `failed` status *after* that window. This branch now re-stamps `no_resume`
-   **and delivers `INTERRUPT_NO_RESUME` itself** (behind the shared `interrupted-sent` SET-NX,
-   which it wins because no earlier site took it), so a genuinely terminal failure is never
-   silently dropped.
+   cancel+SIGTERM+SIGKILL, `session_health.py`'s escalation branch (2330-2346) finalizes the
+   session to the terminal `failed` status *after* that window. This branch now re-stamps
+   `no_resume` **and may deliver `INTERRUPT_NO_RESUME` itself** — but only as a **last-resort
+   voice**, because the same branch already runs two other user-facing deliveries on **disjoint**
+   dedup keys: `_deliver_deferred_self_draft_fallback` (delivers the real answer;
+   `deferred_self_draft_pending` gate) and, for `reason_kind == "tool_timeout"`,
+   `_deliver_tool_timeout_degraded_notice` (key `tool_timeout:degraded_sent`). Those keys do
+   **not** dedup against `interrupted-sent`, so an unconditional terminal send here would
+   double-message. Two guards make the terminal notice fire **exactly once, and only when the
+   branch would otherwise be silent**:
+   - **Code-level gate** against the sibling deliveries: send the terminal notice only when
+     `not _has_deferred and not _degraded_sent` (no real answer went out, and no degraded notice
+     went out). This is the guard the shared key cannot provide.
+   - **Shared `interrupted-sent:{session_id}` SET-NX** (120s TTL — the same key and TTL the two
+     send sites use) against the messenger/completion send sites: if a predicted-terminal cancel
+     already fired `INTERRUPT_NO_RESUME` from a send site, that site holds the key and the helper
+     skips. If Redis is unreachable during acquisition, the helper **sends anyway** (fail-safe,
+     matching both send sites and `_deliver_tool_timeout_degraded_notice`).
+   The helper is correct whether or not an earlier send fired: the shared key dedups the
+   send-site case, the code gate dedups the sibling-helper case, so a genuinely terminal failure
+   is neither silently dropped nor double-announced.
 
 ## Architectural Impact
 
@@ -136,16 +157,41 @@ No prerequisites — this work is internal to `agent/` and has no external depen
   send sites already fired the resume line and the branch merely "degraded safely." Under the
   new copy, the pre-cancel prediction writes **nothing** for a non-terminal prediction, so the
   send sites stayed **silent** and never acquired the `interrupted-sent` dedup key. If this
-  branch only re-stamps `no_resume` (as today), a genuinely terminal failure is delivered to
-  the user as **complete silence** — a regression the inversion introduces. Fix: after
-  re-stamping `no_resume`, this branch must **own the terminal send** — acquire the shared
-  `interrupted-sent:{session_id}` SET-NX dedup key and deliver `INTERRUPT_NO_RESUME` itself
-  (via the existing `_resolve_callbacks` + `send_cb` mechanism already used by
-  `_deliver_tool_timeout_degraded_notice`). Because the earlier send sites saw an absent
-  reason and skipped the dedup key, this branch wins the SET-NX and the terminal notice lands
-  exactly once. Add a small helper `_deliver_terminal_interrupt_notice(entry)` mirroring the
-  existing degraded-notice delivery (dedup on `interrupted-sent:{session_id}`, resolve
-  transport from `extra_context`, `FileOutputHandler` fallback, never raises).
+  branch only re-stamps `no_resume` (as today), a genuinely terminal failure could be delivered
+  to the user as **complete silence** — a regression the inversion introduces. But this same
+  branch **already runs two other user-facing deliveries** before finalizing:
+  `_deliver_deferred_self_draft_fallback(entry)` (unconditional — delivers the real answer when
+  `deferred_self_draft_pending` is set) and, when `not _has_deferred and reason_kind ==
+  "tool_timeout"`, `_deliver_tool_timeout_degraded_notice(entry, tool_name)`. Those helpers use
+  **disjoint** dedup keys (`deferred_self_draft` state and `tool_timeout:degraded_sent`
+  respectively) that do **not** dedup against `interrupted-sent`. Dropping an **unconditional**
+  terminal send into this branch therefore double-messages on essentially every
+  subprocess-survived escalation (the real answer / degraded notice already spoke). **Fix
+  (critique BLOCKER):** after re-stamping `no_resume`, capture whether the degraded notice fired
+  (`_degraded_sent`) and gate the terminal send so it fires **only when the branch would
+  otherwise be silent**:
+
+  ```python
+  set_cancel_reason(entry.session_id, "no_resume")
+  _has_deferred = (getattr(entry, "extra_context", None) or {}).get("deferred_self_draft_pending")
+  await _deliver_deferred_self_draft_fallback(entry)
+  _degraded_sent = False
+  if not _has_deferred and reason_kind == "tool_timeout":
+      await _deliver_tool_timeout_degraded_notice(entry, tool_name)
+      _degraded_sent = True
+  # Last-resort terminal voice: only when neither the real answer nor the
+  # degraded notice already spoke, so the branch never double-messages.
+  if not _has_deferred and not _degraded_sent:
+      await _deliver_terminal_interrupt_notice(entry)
+  ```
+
+  The `interrupted-sent:{session_id}` SET-NX inside the helper still dedups against the two
+  send sites (if a predicted-terminal cancel already fired from a send site, the helper skips);
+  the **code-level gate** above is what dedups against the two sibling helper deliveries the
+  shared key cannot see. Together they guarantee **exactly one** user-facing send from this
+  branch. Add a small helper `_deliver_terminal_interrupt_notice(entry)` — see the Technical
+  Approach for its exact dedup key/TTL and fail-safe contract, and the NIT-consolidation note
+  that factors its delivery mechanics out of `_deliver_tool_timeout_degraded_notice`.
 - **`agent/session_executor.py:703-714`**: the `== "no_resume"` read stays (it suppresses a
   duplicate `FAILURE_NOTICE`), **but its surrounding comment (703-707) and the docstring at
   690-694 must be corrected** — both currently narrate a "stale `resume` reason from an
@@ -190,16 +236,52 @@ Terminal kill → killer writes `cancel-reason=no_resume` → `CancelledError` �
   the terminal notice explicitly (below), so the comment must describe *that*, not a silent
   degradation.
 - **`session_health.py:2330-2346` (subprocess-survived escalation branch):** keep the
-  `set_cancel_reason(entry.session_id, "no_resume")` re-stamp, then call a new
-  `_deliver_terminal_interrupt_notice(entry)` helper that (a) SET-NX acquires
-  `interrupted-sent:{session_id}` (the same key the two send sites use, so it dedups against a
-  hypothetical earlier send), (b) on acquisition resolves `send_cb` via `_resolve_callbacks`
-  (transport from `extra_context`, `FileOutputHandler` fallback) and `await`s
-  `send_cb(chat_id, INTERRUPT_NO_RESUME, telegram_message_id, entry)`, and (c) swallows every
-  error (logs at WARNING) so it never blocks finalization. Rewrite the branch's stale comment
-  at **2338-2343** ("if the interrupt send already fired it degrades safely to the resume
-  copy") to describe the new explicit-send behavior. Place the helper next to
-  `_deliver_tool_timeout_degraded_notice` and follow its exact structure.
+  `set_cancel_reason(entry.session_id, "no_resume")` re-stamp, then apply the gated-send block
+  shown in the Solution (`_degraded_sent` capture + `if not _has_deferred and not
+  _degraded_sent: await _deliver_terminal_interrupt_notice(entry)`). Rewrite the branch's stale
+  comment at **2338-2343** ("if the interrupt send already fired it degrades safely to the
+  resume copy") to describe the new gated last-resort send.
+
+  The new `_deliver_terminal_interrupt_notice(entry)` helper's **delivery mechanics** (transport
+  resolution via `_resolve_callbacks` from `extra_context`, `FileOutputHandler` fallback, WARNING
+  swallow so finalization never blocks) mirror `_deliver_tool_timeout_degraded_notice`, but the
+  **dedup key, TTL, and message differ** — this is the reconciliation the critique flagged
+  (Concern 2): do **not** copy the model helper's `tool_timeout:degraded_sent:{session_id}` key
+  or its 3600s TTL. The terminal helper MUST use:
+  - **Dedup key:** `interrupted-sent:{session_id}` — the exact shared key the two send sites use,
+    so it dedups against a hypothetical earlier send-site delivery.
+  - **TTL:** `ex=120` — matching the send sites (`messenger.py:319`,
+    `session_completion.py:1156`), **not** the degraded helper's `ex=3600`.
+  - **Message:** the `INTERRUPT_NO_RESUME` copy (not the degraded-service string).
+
+  **Fail-safe on Redis outage (Concern 1):** the SET-NX must fail *open*, exactly like the two
+  send sites (`"…lock failed…; sending anyway"` / `"…lock unavailable…; sending anyway"`) and the
+  model helper (`"…lock failed…; proceeding anyway"`). Only a **successful** `acquired is False`
+  (key legitimately already held) suppresses the send. A Redis **exception** during acquisition
+  is caught, logged at WARNING as a dedup failure, and the helper **still sends** the notice —
+  never swallow the terminal send just because the dedup key could not be reached. Structure:
+
+  ```python
+  try:
+      acquired = POPOTO_REDIS_DB.set(f"interrupted-sent:{session_id}", "1", nx=True, ex=120)
+      if acquired is False:            # legitimately already held -> the one send happened elsewhere
+          return
+  except Exception as _lock_err:       # Redis unreachable -> fail open, still send
+      logger.warning("[session-health] interrupted-sent lock failed for %s: %s; sending anyway",
+                     session_id, _lock_err)
+  # ...resolve send_cb, await send_cb(chat_id, INTERRUPT_NO_RESUME, telegram_message_id, entry)
+  ```
+
+  **NIT — helper duplication (eliminate, don't note-and-leave):** the terminal helper and
+  `_deliver_tool_timeout_degraded_notice` would otherwise be ~90% identical (same callback
+  resolution, fallback, telemetry-swallow, fail-open lock). Factor the shared mechanics into one
+  private `_deliver_oneshot_dedup_notice(entry, *, dedup_key, ttl, message)` that both call —
+  the degraded helper passes `(dedup_key="tool_timeout:degraded_sent:{sid}", ttl=3600,
+  message=<degraded copy>)`, the terminal helper passes `(dedup_key="interrupted-sent:{sid}",
+  ttl=120, message=INTERRUPT_NO_RESUME)`. This keeps the differing key/TTL/message as the only
+  parameters and prevents a second near-duplicate helper (repo NO-LEGACY rule). Refactoring the
+  existing degraded helper to route through the shared core is in scope; its behavior and its
+  own dedup key/TTL are unchanged (covered by existing degraded-notice tests).
 - **`session_executor.py:703-714` + docstring 690-694:** the `== "no_resume"` guard is correct
   and stays. Update only the prose: delete the "stale `resume` reason from an
   interrupt-and-requeue" narrative (that state is now impossible) and restate the contract as
@@ -274,6 +356,8 @@ Terminal kill → killer writes `cancel-reason=no_resume` → `CancelledError` �
 New coverage to add:
 - [ ] `tests/unit/test_messenger_cancelled_error.py` — ADD: `test_resume_reason_sends_nothing` and `test_absent_reason_sends_nothing` (both assert `send_callback.assert_not_awaited()` and that the handler still re-raises).
 - [ ] `tests/unit/test_session_health_subprocess_kill.py` — ADD: `test_subprocess_survived_escalation_delivers_no_resume_when_no_earlier_send` (pre-cancel prediction non-terminal → send sites silent → subprocess survives → escalation branch delivers exactly one `INTERRUPT_NO_RESUME`) and `test_escalation_send_deduped_when_interrupted_sent_already_held` (if the shared `interrupted-sent` key is already held, the escalation branch sends nothing — no double message).
+- [ ] `tests/unit/test_session_health_subprocess_kill.py` — ADD (critique BLOCKER guard): `test_escalation_branch_emits_exactly_one_user_facing_send`. Assert the subprocess-survived escalation branch produces **exactly one** user-facing delivery across all three sends by spying `_deliver_deferred_self_draft_fallback`, `_deliver_tool_timeout_degraded_notice`, and the terminal helper. Three cases: (i) deferred self-draft pending → real answer sent, `_degraded_sent` False, terminal notice **not** sent (gated by `not _has_deferred`); (ii) `reason_kind == "tool_timeout"`, no deferred → degraded notice sent, terminal notice **not** sent (gated by `not _degraded_sent`); (iii) no deferred, non-`tool_timeout` kind → terminal notice **is** the only send. In every case total user-facing sends from the branch == 1 (no double message).
+- [ ] `tests/unit/test_session_health_subprocess_kill.py` — ADD (Concern 1 fail-safe): `test_terminal_interrupt_notice_sends_when_dedup_redis_errors`. Patch the `interrupted-sent` SET-NX to raise → assert the terminal helper logs the dedup failure at WARNING and **still** awaits the send (fail-open), and that a legitimate `acquired is False` (key already held) instead suppresses the send.
 - [ ] `tests/integration/test_pm_final_delivery.py` — ADD: `test_interrupt_resume_delivers_real_answer_with_zero_interim_sends` (absent-reason interrupt → zero interim lifecycle sends → resumed session's real work-product still delivered exactly once). Backs the Success Criterion for Concern 4.
 
 ## Rabbit Holes
@@ -304,11 +388,17 @@ there, a genuinely terminal failure would be delivered as complete silence — t
 regression this inversion could introduce.
 **Mitigation:** For (a), keep the explicit `no_resume` → `INTERRUPT_NO_RESUME` send at both
 sites; the KEEP tests (`test_no_resume_reason_sends_no_resume_copy`, the integration
-`no_resume` test) guard this. For (b), the escalation branch now owns the terminal send via
-`_deliver_terminal_interrupt_notice` (behind the shared `interrupted-sent` SET-NX), guarded by
-a new unit test asserting the escalation path delivers exactly one `INTERRUPT_NO_RESUME` when
-no earlier send fired. Verification grep confirms `INTERRUPT_NO_RESUME` is referenced at both
-send sites and in `session_health.py`.
+`no_resume` test) guard this. For (b), the escalation branch now owns a **gated** last-resort
+terminal send via `_deliver_terminal_interrupt_notice` — fired only when
+`not _has_deferred and not _degraded_sent` (so it never double-messages the sibling
+`_deliver_deferred_self_draft_fallback` / `_deliver_tool_timeout_degraded_notice` deliveries),
+and additionally deduped against the two send sites by the shared `interrupted-sent` SET-NX.
+This introduces its own hazard — a **double message** — if the gate is dropped; that is covered
+by two new unit tests: one asserting the escalation path delivers exactly **one**
+`INTERRUPT_NO_RESUME` when the branch is otherwise silent, and one asserting **zero** terminal
+sends when a deferred self-draft or degraded notice already fired (the sibling-delivery gate).
+Verification grep confirms `INTERRUPT_NO_RESUME` is referenced at both send sites and in
+`session_health.py`.
 
 ### Risk 2: `session_health.py:2161` guard change alters the FAILURE_NOTICE-suppression contract
 **Impact:** `session_executor.py:708` suppresses `FAILURE_NOTICE` when reason is `no_resume`.
@@ -440,10 +530,17 @@ than adding a capability.
   no write; update the 2144-2154 pre-cancel comment, including the stale 2150-2152
   "degrades safely to the resume copy" sentence.
 - In `agent/session_health.py:2330-2346` (subprocess-survived escalation branch): after the
-  `no_resume` re-stamp, call a new `_deliver_terminal_interrupt_notice(entry)` helper (modeled
-  on `_deliver_tool_timeout_degraded_notice`) that SET-NX acquires `interrupted-sent:{session_id}`
-  and, on acquisition, delivers `INTERRUPT_NO_RESUME` via `_resolve_callbacks`; never raises.
-  Rewrite the stale 2338-2343 comment to describe this explicit send.
+  `no_resume` re-stamp, capture `_degraded_sent` and add the **gated** terminal send
+  `if not _has_deferred and not _degraded_sent: await _deliver_terminal_interrupt_notice(entry)`
+  (per the Solution block) so the branch never double-messages the sibling
+  `_deliver_deferred_self_draft_fallback` / `_deliver_tool_timeout_degraded_notice` deliveries.
+  Add the new `_deliver_terminal_interrupt_notice(entry)` helper using dedup key
+  `interrupted-sent:{session_id}` with `ex=120` (NOT the degraded helper's key/TTL), delivering
+  `INTERRUPT_NO_RESUME` via `_resolve_callbacks`, **failing open** on a Redis SET-NX error
+  (log WARNING, still send), never raising. Factor the shared delivery mechanics into
+  `_deliver_oneshot_dedup_notice(entry, *, dedup_key, ttl, message)` and route both the terminal
+  helper and `_deliver_tool_timeout_degraded_notice` through it (NIT — eliminate duplication).
+  Rewrite the stale 2338-2343 comment to describe the gated last-resort send.
 - In `agent/session_executor.py` (docstring 690-694, comment 703-707): correct the prose to
   drop the now-impossible "stale `resume` reason" narrative; leave the `== "no_resume"` logic.
 - In `agent/cancel_reason.py`: update module + function docstrings to drop `INTERRUPT_RESUME`
@@ -524,6 +621,39 @@ than adding a capability.
   "End-to-end resume still delivers the real answer" plus an integration test
   (`test_interrupt_resume_delivers_real_answer_with_zero_interim_sends`) and a documented
   manual-verification fallback. See Success Criteria, Failure Path Test Strategy, Test Impact.
+
+**Critique verdict (2026-07-08, second pass): NEEDS REVISION.** Second revision pass addressed
+all findings:
+
+- **BLOCKER — escalation branch double-messages the user.** The prior revision dropped an
+  *unconditional* `_deliver_terminal_interrupt_notice(entry)` into the
+  `elif not _subprocess_confirmed_dead:` branch, which already fires
+  `_deliver_deferred_self_draft_fallback` (the real answer) and, on `tool_timeout`,
+  `_deliver_tool_timeout_degraded_notice` — both on disjoint dedup keys that never dedup against
+  `interrupted-sent`, so the new send fired on essentially every escalation → guaranteed double
+  message. Fixed: the send is now gated `if not _has_deferred and not _degraded_sent:
+  await _deliver_terminal_interrupt_notice(entry)`, with `_degraded_sent` captured when the
+  degraded notice fires. See Solution (`session_health.py:2330-2346` bullet, code block), Data
+  Flow step 7, Technical Approach, Risk 1(b), task 1, and the new
+  `test_escalation_branch_emits_exactly_one_user_facing_send` unit test asserting exactly one
+  user-facing send from this branch.
+- **Concern 1 — helper goes silent on Redis outage.** Reconciled: the terminal helper now
+  **fails open** — a Redis exception during `interrupted-sent` SET-NX is logged at WARNING and the
+  send proceeds anyway (matching both send sites and the model helper); only a successful
+  `acquired is False` suppresses. See Technical Approach (fail-safe code block), task 1, and the
+  new `test_terminal_interrupt_notice_sends_when_dedup_redis_errors` test.
+- **Concern 2 — "follow exact structure" vs required key/TTL.** Reconciled: the plan now
+  separates the helper's *delivery mechanics* (mirror `_deliver_tool_timeout_degraded_notice`)
+  from its *dedup identity*, which MUST be `interrupted-sent:{session_id}` at `ex=120` — NOT the
+  degraded helper's `tool_timeout:degraded_sent` / `ex=3600`. See Technical Approach
+  (`session_health.py:2330-2346` bullet).
+- **Concern 3 — stale write-contract narrative in Data Flow step 2.** Rewritten: step 2 now
+  states the post-change contract (`"no_resume"` is the only value ever written, and only when
+  predicted terminal; all other paths leave the key absent; `"resume"` is never written).
+- **NIT — helper duplication.** Eliminated (not just noted): the shared delivery mechanics are
+  factored into `_deliver_oneshot_dedup_notice(entry, *, dedup_key, ttl, message)`, called by
+  both the terminal helper and `_deliver_tool_timeout_degraded_notice`. See Technical Approach
+  and task 1.
 
 <!-- Above populated during the revision pass; /do-plan-critique may append its next verdict. -->
 
