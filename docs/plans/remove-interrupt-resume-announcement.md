@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-07
 tracking: https://github.com/tomcounsell/ai/issues/1937
 last_comment_id:
+revision_applied: true
 ---
 
 # Remove the "I was interrupted, will resume automatically" announcement
@@ -80,6 +81,14 @@ No prior *failed* fix exists for this exact behavior — #1877 succeeded at what
    resume/absent, nothing is delivered; the session later resumes and delivers its real
    answer (Finish) — or, on crash, the separate `FAILURE_NOTICE` path in
    `agent/session_executor.py` delivers Fail.
+7. **Late-terminal escalation (the silent-terminal gap this inversion introduces)**: when the
+   pre-cancel prediction was non-terminal, step 2 wrote no reason, so the send sites in steps
+   4-6 stayed silent and never took the dedup key. If the subprocess then survives
+   cancel+SIGTERM+SIGKILL, `session_health.py`'s escalation branch finalizes the session to
+   the terminal `failed` status *after* that window. This branch now re-stamps `no_resume`
+   **and delivers `INTERRUPT_NO_RESUME` itself** (behind the shared `interrupted-sent` SET-NX,
+   which it wins because no earlier site took it), so a genuinely terminal failure is never
+   silently dropped.
 
 ## Architectural Impact
 
@@ -121,8 +130,29 @@ No prerequisites — this work is internal to `agent/` and has no external depen
   Keep the functions generic.
 - **`agent/session_health.py:2161`**: stop writing `"resume"` — write `"no_resume"` only
   when the outcome is predicted terminal, otherwise write nothing.
-- **`agent/session_executor.py:708`**: unchanged — it reads `== "no_resume"` to suppress a
-  duplicate `FAILURE_NOTICE` and is not a send site.
+- **`agent/session_health.py:2330-2346` (subprocess-survived escalation branch)**: this
+  branch escalates a session to the terminal `failed` status *after* the cancel/send window
+  has already passed. Under the old copy, the pre-cancel prediction wrote `"resume"`, so the
+  send sites already fired the resume line and the branch merely "degraded safely." Under the
+  new copy, the pre-cancel prediction writes **nothing** for a non-terminal prediction, so the
+  send sites stayed **silent** and never acquired the `interrupted-sent` dedup key. If this
+  branch only re-stamps `no_resume` (as today), a genuinely terminal failure is delivered to
+  the user as **complete silence** — a regression the inversion introduces. Fix: after
+  re-stamping `no_resume`, this branch must **own the terminal send** — acquire the shared
+  `interrupted-sent:{session_id}` SET-NX dedup key and deliver `INTERRUPT_NO_RESUME` itself
+  (via the existing `_resolve_callbacks` + `send_cb` mechanism already used by
+  `_deliver_tool_timeout_degraded_notice`). Because the earlier send sites saw an absent
+  reason and skipped the dedup key, this branch wins the SET-NX and the terminal notice lands
+  exactly once. Add a small helper `_deliver_terminal_interrupt_notice(entry)` mirroring the
+  existing degraded-notice delivery (dedup on `interrupted-sent:{session_id}`, resolve
+  transport from `extra_context`, `FileOutputHandler` fallback, never raises).
+- **`agent/session_executor.py:703-714`**: the `== "no_resume"` read stays (it suppresses a
+  duplicate `FAILURE_NOTICE`), **but its surrounding comment (703-707) and the docstring at
+  690-694 must be corrected** — both currently narrate a "stale `resume` reason from an
+  interrupt-and-requeue" scenario that can no longer occur (`"resume"` is never written after
+  this change). Rewrite the prose to describe the new signal set only (`"no_resume"` present →
+  a killer owns the terminal narrative; absent → no killer narrative). The code logic is
+  unchanged; only the comment/docstring text changes so it stops contradicting reality.
 
 ### Flow
 
@@ -153,7 +183,29 @@ Terminal kill → killer writes `cancel-reason=no_resume` → `CancelledError` �
   generic "I was interrupted" line.
 - **`session_health.py:2161`:** replace the ternary write with a guarded write:
   `if _predicted_terminal: set_cancel_reason(entry.session_id, "no_resume")`. Update the
-  2144-2154 comment to drop the resume-prediction rationale (only terminal is signalled now).
+  **2144-2154 pre-cancel comment** to drop the resume-prediction rationale (only terminal is
+  signalled now), and specifically rewrite the stale sentence at **2150-2152** —
+  "…degrades safely to the resume copy (pre-#1877 behavior) if the send already fired" —
+  since there is no longer any resume copy to degrade to. The escalation branch now delivers
+  the terminal notice explicitly (below), so the comment must describe *that*, not a silent
+  degradation.
+- **`session_health.py:2330-2346` (subprocess-survived escalation branch):** keep the
+  `set_cancel_reason(entry.session_id, "no_resume")` re-stamp, then call a new
+  `_deliver_terminal_interrupt_notice(entry)` helper that (a) SET-NX acquires
+  `interrupted-sent:{session_id}` (the same key the two send sites use, so it dedups against a
+  hypothetical earlier send), (b) on acquisition resolves `send_cb` via `_resolve_callbacks`
+  (transport from `extra_context`, `FileOutputHandler` fallback) and `await`s
+  `send_cb(chat_id, INTERRUPT_NO_RESUME, telegram_message_id, entry)`, and (c) swallows every
+  error (logs at WARNING) so it never blocks finalization. Rewrite the branch's stale comment
+  at **2338-2343** ("if the interrupt send already fired it degrades safely to the resume
+  copy") to describe the new explicit-send behavior. Place the helper next to
+  `_deliver_tool_timeout_degraded_notice` and follow its exact structure.
+- **`session_executor.py:703-714` + docstring 690-694:** the `== "no_resume"` guard is correct
+  and stays. Update only the prose: delete the "stale `resume` reason from an
+  interrupt-and-requeue" narrative (that state is now impossible) and restate the contract as
+  "`no_resume` present → a killer owns the terminal exit narrative, suppress; absent → no
+  killer narrative, send the failure notice." This is a comment/docstring-only edit — no logic
+  change.
 - **`cancel_reason.py`:** update docstrings (module 1-31, `set_cancel_reason` 45-58,
   `get_cancel_reason` 69-80) to remove `INTERRUPT_RESUME` and the "`resume` = re-queued"
   semantics. State the signal is now: `"no_resume"` present → terminal no-resume copy;
@@ -179,7 +231,23 @@ Terminal kill → killer writes `cancel-reason=no_resume` → `CancelledError` �
 - [ ] Terminal-fail rendering preserved: `INTERRUPT_NO_RESUME` still delivered on
   `no_resume`, and `FAILURE_NOTICE` still delivered on crash (unchanged
   `session_executor.py` path). Assert both still reach the chat.
-- [ ] Grep-clean check that no "will resume automatically" copy renders anywhere.
+- [ ] Grep-clean check that the deleted literal `"I was interrupted and will resume
+  automatically"` renders nowhere. (Scope the grep to the exact literal — the retained
+  `INTERRUPT_NO_RESUME` docstring legitimately contains "…Nothing will resume automatically",
+  so a broad `"will resume automatically"` grep would false-positive.)
+
+### Real-Answer-Survives-Resume Coverage
+- [ ] **Interrupt→auto-resume→real answer delivered (integration).** Add a test to
+  `tests/integration/test_pm_final_delivery.py` that: (1) interrupts a session with an
+  absent/non-terminal cancel-reason, (2) asserts **zero** interim lifecycle sends
+  (`send_cb.assert_not_awaited()` across the interrupt window), (3) drives the resumed session
+  to completion, and (4) asserts the real work-product message is delivered exactly once. This
+  is the guardrail that silencing the interrupt copy did not swallow the answer (Success
+  Criterion "End-to-end resume still delivers the real answer"). If a full resume cannot be
+  simulated in-process, split into (a) the in-process "zero interim sends" assertion above and
+  (b) a documented manual verification: trigger a `/update` restart mid-session in a test chat
+  and confirm the chat shows no interrupt line but does receive the eventual answer — record
+  the observation in the PR.
 
 ## Test Impact
 
@@ -201,8 +269,12 @@ Terminal kill → killer writes `cancel-reason=no_resume` → `CancelledError` �
 - [ ] `tests/unit/test_cancel_reason.py` (round-trips `"resume"`, L48-49) — UPDATE: `set/get` stay generic so the round-trip still passes; retitle the `"resume"` case to a neutral non-`no_resume` value (e.g. `"other"`) since `"resume"` is no longer a produced value, keeping the "non-`no_resume` reads back verbatim" contract.
 - [ ] `tests/unit/test_session_executor_failure_notification.py` (L101 patches `get_cancel_reason` → `"resume"`) — UPDATE (cosmetic): the assertion (non-`no_resume` does not suppress `FAILURE_NOTICE`) still holds; swap the `"resume"` sentinel for a neutral value to avoid implying `"resume"` is still produced.
 
+- [ ] `tests/unit/test_session_health_subprocess_kill.py` — UPDATE: the subprocess-survived escalation branch now delivers `INTERRUPT_NO_RESUME`; any existing assertion that the branch sends nothing must be updated. Existing kill/finalize assertions (status → `failed`, orphan-reaper ownership) stay.
+
 New coverage to add:
 - [ ] `tests/unit/test_messenger_cancelled_error.py` — ADD: `test_resume_reason_sends_nothing` and `test_absent_reason_sends_nothing` (both assert `send_callback.assert_not_awaited()` and that the handler still re-raises).
+- [ ] `tests/unit/test_session_health_subprocess_kill.py` — ADD: `test_subprocess_survived_escalation_delivers_no_resume_when_no_earlier_send` (pre-cancel prediction non-terminal → send sites silent → subprocess survives → escalation branch delivers exactly one `INTERRUPT_NO_RESUME`) and `test_escalation_send_deduped_when_interrupted_sent_already_held` (if the shared `interrupted-sent` key is already held, the escalation branch sends nothing — no double message).
+- [ ] `tests/integration/test_pm_final_delivery.py` — ADD: `test_interrupt_resume_delivers_real_answer_with_zero_interim_sends` (absent-reason interrupt → zero interim lifecycle sends → resumed session's real work-product still delivered exactly once). Backs the Success Criterion for Concern 4.
 
 ## Rabbit Holes
 
@@ -215,18 +287,28 @@ New coverage to add:
 - **Removing the `interrupted-sent` dedup entirely.** It is still needed for the `no_resume`
   send that both sites can race. Do not delete it — only move its acquisition onto the send
   path.
-- **Touching `session_executor.py:708`.** It reads `no_resume` to suppress a duplicate
-  `FAILURE_NOTICE`; it is correct as-is. Leave it.
+- **Changing `session_executor.py:708` *logic*.** The `== "no_resume"` read that suppresses a
+  duplicate `FAILURE_NOTICE` is correct as-is — leave the logic. (The comment/docstring prose
+  around it, 690-694 and 703-707, *does* get corrected — see Technical Approach — because it
+  narrates a now-impossible `"resume"` state, but that is a text-only edit, not a logic touch.)
 
 ## Risks
 
 ### Risk 1: A genuine terminal stop goes silent
-**Impact:** If the inversion is written so that `no_resume` also falls through to silence, a
-user whose session was truly killed would get no notice.
-**Mitigation:** Keep the explicit `no_resume` → `INTERRUPT_NO_RESUME` send at both sites; the
-KEEP tests (`test_no_resume_reason_sends_no_resume_copy`, the integration `no_resume` test)
-guard this. Verification grep confirms `INTERRUPT_NO_RESUME` is still referenced at both send
-sites.
+**Impact:** Two ways this could happen. (a) If the inversion is written so that `no_resume`
+also falls through to silence, a user whose session was truly killed would get no notice.
+(b) **The late-terminal escalation gap:** the subprocess-survived branch in
+`session_health.py` predicts non-terminal *before* the cancel (so writes nothing → the send
+sites stay silent), then escalates to `failed` *after* the cancel. Without an explicit send
+there, a genuinely terminal failure would be delivered as complete silence — the exact
+regression this inversion could introduce.
+**Mitigation:** For (a), keep the explicit `no_resume` → `INTERRUPT_NO_RESUME` send at both
+sites; the KEEP tests (`test_no_resume_reason_sends_no_resume_copy`, the integration
+`no_resume` test) guard this. For (b), the escalation branch now owns the terminal send via
+`_deliver_terminal_interrupt_notice` (behind the shared `interrupted-sent` SET-NX), guarded by
+a new unit test asserting the escalation path delivers exactly one `INTERRUPT_NO_RESUME` when
+no earlier send fired. Verification grep confirms `INTERRUPT_NO_RESUME` is referenced at both
+send sites and in `session_health.py`.
 
 ### Risk 2: `session_health.py:2161` guard change alters the FAILURE_NOTICE-suppression contract
 **Impact:** `session_executor.py:708` suppresses `FAILURE_NOTICE` when reason is `no_resume`.
@@ -253,9 +335,11 @@ and the flap-dedup integration test.
 
 ## No-Gos (Out of Scope)
 
-Nothing deferred — every relevant item (both send sites, the constant retirement, the dead
-`"resume"` write in `session_health.py`, and the `cancel_reason.py` docstring cleanup) is in
-scope for this plan.
+Nothing deferred — every relevant item is in scope for this plan: both send sites, the
+constant retirement, the dead `"resume"` write in `session_health.py`, the new
+escalation-branch terminal send that closes the silent-terminal gap, the stale-comment
+corrections in `session_health.py` (2150-2152, 2338-2343) and `session_executor.py`
+(690-694, 703-707), and the `cancel_reason.py` docstring cleanup.
 
 ## Update System
 
@@ -278,8 +362,13 @@ simply receives one fewer lifecycle line.
   interrupt state from the lifecycle-notification description; state that auto-resuming
   interruptions are silent and only Finish / Fail (`FAILURE_NOTICE`, `INTERRUPT_NO_RESUME`)
   are surfaced.
-- [ ] Grep `docs/` for "resume automatically" / `INTERRUPT_RESUME` and scrub any stale
-  references (e.g. any lingering mention from the #1877 work).
+- [ ] Scrub `docs/features/session-isolation.md:222` — the watchdog paragraph states the
+  `CancelledError` handler "sends 'I was interrupted and will resume automatically' to the
+  user." Rewrite it to reflect the silent-resume behavior (auto-resuming interruptions are
+  silent; only terminal `INTERRUPT_NO_RESUME` / `FAILURE_NOTICE` surface).
+- [ ] Grep `docs/features/` for "resume automatically" / `INTERRUPT_RESUME` and scrub any
+  remaining stale references from the #1877 work. (Leave `docs/plans/completed/*.md` and this
+  plan doc untouched — they are historical record and legitimately quote the retired copy.)
 
 ### Inline Documentation
 - [ ] Update module/handler docstrings in `agent/notification_copy.py`,
@@ -293,10 +382,18 @@ than adding a capability.
 
 - [ ] A `/update`-driven worker restart (cancel with absent/`resume` reason) sends **nothing**
   to the chat — asserted by the new silence tests at both send sites.
+- [ ] **End-to-end resume still delivers the real answer.** When a session is interrupted with
+  an absent/non-terminal reason and then auto-resumes, the chat receives **zero** interim
+  lifecycle messages *and* the eventual real work-product message is still delivered. Silencing
+  the interrupt copy must not swallow the actual answer. Verified by an integration test
+  (below) — the point of this whole change is fewer noise lines, not a lost answer.
 - [ ] A terminal kill (`cancel-reason=no_resume`) still delivers `INTERRUPT_NO_RESUME`, and a
   crash still delivers `FAILURE_NOTICE` — asserted by the KEEP tests.
-- [ ] No "will resume automatically" copy and no `INTERRUPT_RESUME` symbol remain anywhere
-  (grep-clean over `agent/`, `tests/`, `docs/`).
+- [ ] The deleted literal `"I was interrupted and will resume automatically"` and the
+  `INTERRUPT_RESUME` symbol remain nowhere in **code or active docs** — grep-clean over
+  `agent/`, `tests/`, and `docs/features/`, scoped to the exact literal so the retained
+  `INTERRUPT_NO_RESUME` docstring does not false-fail it. (Archived `docs/plans/completed/*`
+  and this plan doc keep the historical quote by design.)
 - [ ] No duplicate sends on the terminal-fail path (dedup preserved; dual-fire test green).
 - [ ] `"resume"` is no longer written by any `set_cancel_reason` call site.
 - [ ] Tests pass (`/do-test`).
@@ -327,7 +424,7 @@ than adding a capability.
 ### 1. Remove the constant and invert the send sites
 - **Task ID**: build-interrupt-removal
 - **Depends On**: none
-- **Validates**: tests/unit/test_messenger_cancelled_error.py, tests/unit/test_deliver_pipeline_completion.py, tests/integration/test_pm_final_delivery.py, tests/unit/test_cancel_reason.py, tests/unit/test_session_executor_failure_notification.py
+- **Validates**: tests/unit/test_messenger_cancelled_error.py, tests/unit/test_deliver_pipeline_completion.py, tests/integration/test_pm_final_delivery.py, tests/unit/test_cancel_reason.py, tests/unit/test_session_executor_failure_notification.py, tests/unit/test_session_health_subprocess_kill.py
 - **Assigned To**: interrupt-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -340,10 +437,18 @@ than adding a capability.
   reason is `"no_resume"`; on `no_resume`, SET-NX then send `INTERRUPT_NO_RESUME`. Drop the
   `INTERRUPT_RESUME` import; update this + the ~L604 docstring.
 - In `agent/session_health.py:2161`: write `"no_resume"` only when predicted terminal, else
-  no write; update the 2144-2154 comment.
+  no write; update the 2144-2154 pre-cancel comment, including the stale 2150-2152
+  "degrades safely to the resume copy" sentence.
+- In `agent/session_health.py:2330-2346` (subprocess-survived escalation branch): after the
+  `no_resume` re-stamp, call a new `_deliver_terminal_interrupt_notice(entry)` helper (modeled
+  on `_deliver_tool_timeout_degraded_notice`) that SET-NX acquires `interrupted-sent:{session_id}`
+  and, on acquisition, delivers `INTERRUPT_NO_RESUME` via `_resolve_callbacks`; never raises.
+  Rewrite the stale 2338-2343 comment to describe this explicit send.
+- In `agent/session_executor.py` (docstring 690-694, comment 703-707): correct the prose to
+  drop the now-impossible "stale `resume` reason" narrative; leave the `== "no_resume"` logic.
 - In `agent/cancel_reason.py`: update module + function docstrings to drop `INTERRUPT_RESUME`
   and the `"resume"` semantics.
-- Update all tests per the Test Impact section and add the two new silence tests.
+- Update all tests per the Test Impact section and add the new silence + escalation-send tests.
 - Run `python -m ruff format .` (no lint per repo rule).
 
 ### 2. Validate
@@ -370,15 +475,57 @@ than adding a capability.
 | Tests pass | `pytest tests/unit/test_messenger_cancelled_error.py tests/unit/test_deliver_pipeline_completion.py tests/unit/test_cancel_reason.py tests/unit/test_session_executor_failure_notification.py tests/integration/test_pm_final_delivery.py -q` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | INTERRUPT_RESUME retired (code) | `grep -rn "INTERRUPT_RESUME" agent/` | exit code 1 |
-| No resume-copy anywhere | `grep -rn "will resume automatically" agent/ tests/ docs/` | exit code 1 |
+| Deleted resume-copy literal gone (code) | `grep -rn "I was interrupted and will resume automatically" agent/ tests/` | exit code 1 |
+| Active feature docs scrubbed | `grep -rn "I was interrupted and will resume automatically" docs/features/` | exit code 1 |
 | No "resume" cancel-reason written | `grep -rn 'set_cancel_reason([^)]*"resume"' agent/` | exit code 1 |
 | no_resume send preserved (messenger) | `grep -c "INTERRUPT_NO_RESUME" agent/messenger.py` | output > 0 |
 | no_resume send preserved (completion) | `grep -c "INTERRUPT_NO_RESUME" agent/session_completion.py` | output > 0 |
 | FAILURE_NOTICE suppression preserved | `grep -c 'get_cancel_reason(session_id) == "no_resume"' agent/session_executor.py` | output > 0 |
+| Terminal-interrupt notice sent from escalation branch | `grep -c "INTERRUPT_NO_RESUME" agent/session_health.py` | output > 0 |
+
+> **Grep-gate note (critique BLOCKER fix).** The retained `INTERRUPT_NO_RESUME`
+> docstring in `agent/notification_copy.py` legitimately contains the substring
+> "…Nothing will resume automatically." A broad `grep -rn "will resume
+> automatically"` would therefore false-fail this plan's own gate (exit 0 instead
+> of 1) and could bait a builder into deleting correct retained copy just to force
+> exit 1. The gate is scoped to the **exact deleted literal** — `"I was interrupted
+> and will resume automatically"` — which is unique to the retired
+> `INTERRUPT_RESUME` constant and its copy-asserting tests. That literal must be
+> gone; the `INTERRUPT_NO_RESUME` docstring wording is deliberately untouched.
+>
+> The automated gate is scoped to `agent/ tests/` (code) and `docs/features/` (active docs),
+> **not** the whole `docs/` tree. Archived `docs/plans/completed/*.md` and this plan document
+> itself legitimately quote the deleted literal as historical record; a `grep -rn … docs/`
+> gate would false-fail on those. `docs/features/session-isolation.md:222` actively describes
+> the old copy and **is** in scope for the Documentation scrub.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Critique verdict (2026-07-07): NEEDS REVISION.** Revision pass addressed all findings:
+
+- **BLOCKER — grep-gate collision.** The acceptance grep is narrowed from the broad
+  `"will resume automatically"` to the exact deleted literal
+  `"I was interrupted and will resume automatically"`, so the retained `INTERRUPT_NO_RESUME`
+  docstring ("…Nothing will resume automatically") no longer false-fails the gate. See
+  Verification table + grep-gate note, and the matching wording in Failure Path Test Strategy
+  and Success Criteria.
+- **Concern 1 — silent terminal via subprocess-survived escalation.** The escalation branch
+  (`session_health.py:2330-2346`) now owns acquiring the shared `interrupted-sent` dedup key
+  and sending `INTERRUPT_NO_RESUME` via a new `_deliver_terminal_interrupt_notice` helper. See
+  Solution, Data Flow step 7, Technical Approach, Risk 1(b), task 1, and the new escalation
+  unit tests.
+- **Concern 2 — stale "degrades to resume copy" comment (2150-2152).** Explicitly listed for
+  update in the file-level task list (Solution, Technical Approach `session_health.py:2161`
+  bullet, task 1), alongside the escalation-branch comment at 2338-2343.
+- **Concern 3 — stale "resume" narrative in `session_executor.py:703-707` (+ docstring
+  690-694).** Reclassified from "unchanged" to a comment/docstring-only correction (logic
+  stays). See Solution, Technical Approach, Rabbit Holes, and task 1.
+- **Concern 4 — no criterion for real answer surviving resume.** Added Success Criterion
+  "End-to-end resume still delivers the real answer" plus an integration test
+  (`test_interrupt_resume_delivers_real_answer_with_zero_interim_sends`) and a documented
+  manual-verification fallback. See Success Criteria, Failure Path Test Strategy, Test Impact.
+
+<!-- Above populated during the revision pass; /do-plan-critique may append its next verdict. -->
 
 ---
 
