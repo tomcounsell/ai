@@ -151,7 +151,7 @@ checks once before the final commit and fix any issues manually.
 - **You are the orchestrator, not a builder** - Never use Write/Edit tools directly
 - **Deploy agents via Task tool** - Each task in the plan becomes a Task tool call
 - **Respect dependencies** - Don't start a task until its `Depends On` tasks are complete
-- **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
+- **Run parallel tasks together, always in the foreground** - Tasks with `Parallel: true` and no blocking dependencies run simultaneously via multiple `run_in_background: false` Task calls in the same message, never via background scheduling (see WORKFLOW.md Step 3 — a fork has one turn and cannot be resumed by a background notification, issue #1915)
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
 - **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C $TARGET_REPO/.worktrees/{slug}` for git commands, subshells `(cd $TARGET_REPO/.worktrees/{slug} && ...)` when scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. For cross-repo builds, use `--repo $TARGET_GH_REPO` with `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
