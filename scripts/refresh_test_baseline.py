@@ -69,6 +69,13 @@ DEFAULT_GLOBAL_TIMEOUT_CAP = 7200
 # default ``--global-timeout``, so a rough number is sufficient.
 _FALLBACK_TEST_COUNT_ESTIMATE = 1500
 
+# Below this many usable/surviving runs, flaky classification is impossible
+# (there's no majority to compare against) -- a degraded baseline written
+# silently under this condition looks identical to a healthy one but bakes
+# in every transient flake as "real" (issue #1853). Refuse to write it
+# silently: emit a loud WARNING and exit non-zero instead.
+MIN_USABLE_RUNS_FOR_FLAKY_DETECTION = 2
+
 
 def classify(
     outcomes_per_run: list[str],
@@ -519,12 +526,20 @@ def main(argv: list[str] | None = None) -> int:
         preserved_notes=preserved_notes,
     )
 
+    degraded = len(successful_runs) < MIN_USABLE_RUNS_FOR_FLAKY_DETECTION
+    degraded_warning = (
+        f"WARNING: only {len(successful_runs)} usable run(s) -- flaky classification unavailable"
+    )
+
     if args.dry_run:
         write_baseline("-", baseline)
         sys.stderr.write("\n--- summary ---\n")
         sys.stderr.write(format_summary(baseline) + "\n")
         if failed_runs:
             sys.stderr.write(f"discarded runs : {failed_runs}\n")
+        if degraded:
+            sys.stderr.write(degraded_warning + "\n")
+            return 1
         return 0
 
     write_baseline(output_path, baseline)
@@ -532,6 +547,9 @@ def main(argv: list[str] | None = None) -> int:
     sys.stdout.write(format_summary(baseline) + "\n")
     if failed_runs:
         sys.stdout.write(f"discarded runs : {failed_runs}\n")
+    if degraded:
+        sys.stdout.write(degraded_warning + "\n")
+        return 1
     return 0
 
 
