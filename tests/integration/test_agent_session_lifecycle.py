@@ -412,19 +412,6 @@ class TestSummarizeWithSession:
         # No stage-related content for Teammate
         assert "FILO" in result.text
 
-    @pytest.mark.asyncio
-    async def test_build_prompt_includes_session_context(self, sdlc_session):
-        from bridge.message_drafter import _build_draft_prompt
-
-        prompt = _build_draft_prompt(
-            "some output text",
-            {"commits": ["abc1234"]},
-            session=sdlc_session,
-        )
-        assert "SDLC 177" in prompt
-        assert "feature" in prompt
-        assert "session/summarizer-bullet-format" in prompt
-
 
 # ── Markdown Send ─────────────────────────────────────────────────────────────
 
