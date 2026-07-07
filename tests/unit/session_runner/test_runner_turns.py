@@ -326,3 +326,56 @@ def test_role_aware_turn_timeout():
     assert turn_timeout_for("teammate") < turn_timeout_for("eng")
     assert turn_timeout_for(None) == turn_timeout_for("eng")
     assert turn_timeout_for("teammate") > 0
+
+
+# --------------------------------------------------------------------------
+# Compliance-miss accounting (PR #1930 review, A3)
+# --------------------------------------------------------------------------
+
+
+async def test_compliance_misses_counted_in_summary():
+    """A prefix-less turn increments RunSummary.compliance_misses, and the
+    published exit_summary event carries the count."""
+    runner, deliveries, session, _ = make_runner(["no prefix here", "[/user]\nok"])
+    summary = await runner.run("go")
+    assert deliveries == ["ok"]
+    assert summary.exit_reason == "pm_user"
+    assert summary.compliance_misses == 1
+    exit_events = [e for e in session.session_events if e["type"] == "exit_summary"]
+    assert exit_events[-1]["compliance_misses"] == 1
+
+
+async def test_clean_routing_reports_zero_compliance_misses():
+    runner, _, _, _ = make_runner(["[/user]\nhello"])
+    summary = await runner.run("go")
+    assert summary.compliance_misses == 0
+
+
+# --------------------------------------------------------------------------
+# session_events entry cap (PR #1930 review, A6)
+# --------------------------------------------------------------------------
+
+
+def test_session_events_list_is_capped(monkeypatch):
+    """_append_session_event trims the list to the entry cap (the whole
+    ListField re-serializes per save — an unbounded list is quadratic write
+    amplification), preserving any exit_summary entry."""
+    from agent.session_runner import adapter as adapter_module
+
+    monkeypatch.setattr(adapter_module, "SESSION_EVENTS_MAX_ENTRIES", 10)
+    session = FakeSession()
+    adapter_module._append_session_event(
+        session, {"type": "exit_summary", "exit_reason": "pm_user"}
+    )
+    for i in range(30):
+        adapter_module._append_session_event(session, {"type": "runner_turn", "n": i})
+
+    events = session.session_events
+    kinds = [e["type"] for e in events]
+    # Bounded: at most the cap plus the preserved exit_summary entry.
+    assert len(events) <= 11
+    # The exit_summary entry survives trimming.
+    assert "exit_summary" in kinds
+    # Newest entries retained, oldest trimmed.
+    assert events[-1]["n"] == 29
+    assert all(e["n"] != 0 for e in events if e["type"] == "runner_turn")

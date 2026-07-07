@@ -21,7 +21,7 @@ wiring:
   ``_is_non_clean_runner_exit``.
 
 These are unit tests of the executor's flow (the runner is faked); the
-integration test in ``tests/integration/test_transport_dispatch_e2e.py``
+integration test in ``tests/integration/test_runner_dispatch_e2e.py``
 drives the REAL runner + adapter + role driver with a fake harness.
 """
 
@@ -482,3 +482,88 @@ class TestReactionGating:
             f"exit_reason={exit_reason!r}, user_facing_routed={user_facing_routed} → "
             f"expected is_error={is_error}, got emoji={actual_emoji!r}"
         )
+
+
+class TestRunnerFinalStatus:
+    """Runner error exits must finalize the AgentSession as ``failed``, never
+    ``completed`` (plan #1924 Success Criterion — the #1916 class).
+
+    ``SessionRunner.run()`` never raises (errors become
+    ``summary.exit_reason="error"/"exception"``), so ``task.error`` alone
+    cannot gate finalization: the executor must also consult
+    ``_is_non_clean_runner_exit`` when computing the terminal status.
+    """
+
+    @pytest.mark.parametrize(
+        "task_error,exit_reason,expected",
+        [
+            (None, "error", "failed"),
+            (None, "exception", "failed"),
+            (None, "turn_timeout", "failed"),
+            (None, "pm_max_turns", "failed"),
+            (None, "pm_complete", "completed"),
+            (None, "steer_abort", "completed"),
+            (None, None, "completed"),
+            (RuntimeError("boom"), "pm_complete", "failed"),
+        ],
+    )
+    def test_runner_final_status_helper(self, task_error, exit_reason, expected):
+        from agent.session_executor import _runner_final_status
+
+        session = MagicMock()
+        session.exit_reason = exit_reason
+        assert _runner_final_status(task_error, session) == expected
+
+    def test_runner_final_status_without_agent_session(self):
+        """agent_session=None (lookup race) degrades to task_error-only gating."""
+        from agent.session_executor import _runner_final_status
+
+        assert _runner_final_status(None, None) == "completed"
+        assert _runner_final_status(RuntimeError("x"), None) == "failed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exit_reason,expected_status",
+        [
+            ("error", "failed"),
+            ("exception", "failed"),
+            ("pm_complete", "completed"),
+        ],
+    )
+    async def test_terminal_status_tracks_runner_exit(
+        self, redis_test_db, exit_reason, expected_status
+    ):
+        """End-to-end through the executor: a fake runner that publishes a
+        non-clean exit_reason (as the real adapter's publish_exit_summary
+        does) yields a ``failed`` terminal AgentSession status."""
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.save(update_fields=["status"])
+
+        async def _null_send(*args, **kwargs):
+            pass
+
+        async def _null_react(*args, **kwargs):
+            pass
+
+        def _on_run(fake_runner: FakeSessionRunner) -> None:
+            agent_session = fake_runner.init_kwargs.get("agent_session")
+            if agent_session is not None:
+                agent_session.exit_reason = exit_reason
+
+        FakeSessionRunner.on_run = staticmethod(_on_run)
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            patch(
+                "agent.agent_session_queue._resolve_callbacks",
+                return_value=(_null_send, _null_react),
+            ),
+        ):
+            await _execute_agent_session(session)
+
+        rows = list(AgentSession.query.filter(session_id=session.session_id))
+        assert rows, "AgentSession row vanished"
+        rows.sort(key=lambda s: s.created_at or 0, reverse=True)
+        assert rows[0].status == expected_status

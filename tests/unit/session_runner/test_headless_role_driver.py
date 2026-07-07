@@ -355,3 +355,64 @@ async def test_metered_flag_always_set(tmp_path, prime_path):
     await driver.run_turn("go")
     assert calls[0]["metered"] is True
     assert calls[0]["role"] == "pm"
+
+
+# --------------------------------------------------------------------------
+# Nonzero exit without a result event (PR #1930 review, A5 — residual #1916)
+# --------------------------------------------------------------------------
+
+
+def _status_harness(reply, returncode, result_event_fired):
+    """Fake harness that reports the subprocess exit status via the
+    ``on_exit_status`` callback (as get_response_via_harness does)."""
+
+    async def _fake(message, working_dir, **kwargs):
+        on_exit_status = kwargs.get("on_exit_status")
+        if on_exit_status is not None:
+            on_exit_status(returncode, result_event_fired)
+        return reply
+
+    return _fake
+
+
+async def test_nonzero_exit_without_result_event_is_not_a_clean_turn(tmp_path):
+    """A subprocess that exits nonzero WITHOUT a ``result`` event but WITH
+    partial streamed text must be classified as a failed turn, not a clean
+    ``turn_end_source="result"`` turn."""
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-a5",
+        working_dir=str(tmp_path),
+        harness_fn=_status_harness("partial streamed text", 1, False),
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.exit_reason == "headless_nonzero_exit_no_result"
+    assert outcome.turn_ended is False
+
+
+async def test_nonzero_exit_with_result_event_stays_clean(tmp_path):
+    """A result event is the protocol's completion signal — a nonzero exit
+    AFTER it does not invalidate the turn."""
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-a5b",
+        working_dir=str(tmp_path),
+        harness_fn=_status_harness("real result", 1, True),
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.exit_reason is None
+    assert outcome.turn_ended is True
+    assert outcome.turn_end_source == "result"
+
+
+async def test_zero_exit_without_result_event_stays_clean(tmp_path):
+    """Accumulated-text fallback on a CLEAN exit remains a valid turn."""
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-a5c",
+        working_dir=str(tmp_path),
+        harness_fn=_status_harness("accumulated text", 0, False),
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.exit_reason is None
+    assert outcome.turn_ended is True

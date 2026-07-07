@@ -147,8 +147,8 @@ OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
 # =============================================================================
 
 # The single local classifier model, shared by bridge routing, memory-audit,
-# and email triage. Kept in sync with granite_classifier.DEFAULT_MODEL, which
-# imports this constant (single source of truth).
+# and email triage. Consumers import this constant directly (single source
+# of truth).
 OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"
 
 # Minimum host RAM (GB) required to run a local gemma4:31b-mlx generation model.

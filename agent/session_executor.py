@@ -60,6 +60,21 @@ def _is_non_clean_runner_exit(agent_session) -> bool:
     return exit_reason not in _CLEAN_RUNNER_EXIT_REASONS
 
 
+def _runner_final_status(task_error, agent_session) -> str:
+    """Terminal AgentSession status for a finished runner session.
+
+    ``SessionRunner.run()`` never raises — subprocess failures and loop
+    exceptions become ``summary.exit_reason="error"/"exception"`` — so
+    ``task_error`` alone cannot gate finalization: a failed run would
+    finalize ``completed`` (the #1916 class). Consult the runner's persisted
+    ``exit_reason`` alongside ``task_error``; ``agent_session=None`` (lookup
+    race) degrades to task_error-only gating.
+    """
+    if task_error or _is_non_clean_runner_exit(agent_session):
+        return "failed"
+    return "completed"
+
+
 def _resolve_session_model(session: AgentSession | None) -> str | None:
     """D1 precedence cascade for session model.
 
@@ -1981,10 +1996,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             try:
                 from bridge.session_transcript import complete_transcript
 
+                # Non-clean runner exits (error/exception/timeout — the runner
+                # never raises) finalize as failed, never completed (#1916).
                 final_status = (
                     "active"
                     if chat_state.defer_reaction
-                    else ("completed" if not task.error else "failed")
+                    else _runner_final_status(task.error, agent_session)
                 )
                 if not chat_state.defer_reaction:
                     complete_transcript(session.session_id, status=final_status)
@@ -1997,7 +2014,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 logger.warning(
                     f"AgentSession update failed for session {session.agent_session_id} "
                     f"session {session.session_id} (operation: finalize status to "
-                    f"{'completed' if not task.error else 'failed'}): {e}"
+                    f"{_runner_final_status(task.error, agent_session)}): {e}"
                 )
                 # Defensive fallback: if complete_transcript failed and the session is
                 # still running, finalize directly so we never leave a ghost `running`
@@ -2015,7 +2032,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                         _auth = get_authoritative_session(session.session_id)
                         if _auth is not None and _auth.status == "running":
-                            _fallback_status = "completed" if not task.error else "failed"
+                            _fallback_status = _runner_final_status(task.error, agent_session)
                             finalize_session(
                                 _auth,
                                 _fallback_status,
@@ -2051,7 +2068,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     from bridge.session_transcript import complete_transcript
                     from models.session_lifecycle import StatusConflictError
 
-                    final_status = "completed" if not task.error else "failed"
+                    # agent_session is None here (lookup race) — degrades to
+                    # task_error-only gating inside _runner_final_status.
+                    final_status = _runner_final_status(task.error, None)
                     complete_transcript(session.session_id, status=final_status)
                     logger.info(
                         "Fallback finalization: session %s → %s (agent_session was None)",
@@ -2200,8 +2219,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 logger.warning(f"Failed to set reaction: {e}")
 
         # Auto-mark session as done after successful completion
-        # Skip when auto-continue deferred — continuation session will handle cleanup
-        if not task.error and not chat_state.defer_reaction:
+        # Skip when auto-continue deferred — continuation session will handle
+        # cleanup — and on non-clean runner exits (a failed run must not
+        # mark_work_done or auto-delete its branch as if it succeeded).
+        if (
+            not task.error
+            and not _is_non_clean_runner_exit(agent_session)
+            and not chat_state.defer_reaction
+        ):
             try:
                 from agent.branch_manager import mark_work_done
                 from agent.worktree_manager import (  # noqa: PLC0415

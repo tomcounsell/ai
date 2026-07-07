@@ -219,20 +219,27 @@ class _TurnHandle:
     generation: int
     pid: int | None = None
     pgid: int | None = None
-    alive: bool = False
     killed: bool = False
     kill_cause: str | None = None  # "steer" | "timeout"
 
 
 @dataclass
 class _RouteDecision:
-    """Internal result of routing one completed PM turn."""
+    """Internal result of routing one completed PM turn.
+
+    ``compliance_miss`` mirrors the classifier's flag so the run loop can
+    accumulate ``RunSummary.compliance_misses``.
+    """
 
     should_break: bool
     exit_reason: str | None = None
     next_message: str | None = None
+    compliance_miss: bool = False
 
 
+# Process-wide ``claude --version`` cache. "" is the cached-failure sentinel:
+# a machine whose probe failed must not re-run the blocking subprocess on
+# every turn.
 _claude_version_cache: str | None = None
 
 
@@ -241,21 +248,25 @@ def _probe_claude_version() -> str | None:
 
     Used only when the stream-json init event carries no version field.
     Fail-silent — resume works without the version; it is a deploy-gate
-    signal (Risk 5a), not a functional dependency.
+    signal (Risk 5a), not a functional dependency. Failures are cached (""
+    sentinel) so a broken binary costs at most one probe per process.
+
+    Blocking (subprocess.run) — never call this on the event-loop thread
+    with a cold cache; :meth:`SessionRunner._on_harness_init` dispatches it
+    to a worker thread.
     """
     global _claude_version_cache
     if _claude_version_cache is not None:
-        return _claude_version_cache
+        return _claude_version_cache or None
     try:
         proc = subprocess.run(
             ["claude", "--version"], capture_output=True, text=True, timeout=5.0, check=False
         )
         out = (proc.stdout or "").strip()
-        if out:
-            _claude_version_cache = out.split()[0]
+        _claude_version_cache = out.split()[0] if out else ""
     except Exception:  # noqa: BLE001
-        return None
-    return _claude_version_cache
+        _claude_version_cache = ""
+    return _claude_version_cache or None
 
 
 def _default_pid_alive(pid: int) -> bool:
@@ -304,6 +315,7 @@ class SessionRunner:
         max_turns: int = DEFAULT_MAX_TURNS,
         turn_timeout_s: float | None = None,
         steering_pop_fn: Callable[[], list[dict]] | None = None,
+        steering_push_fn: Callable[[dict], None] | None = None,
         steer_poll_interval_s: float = STEER_POLL_INTERVAL_S,
         steer_debounce_s: float = STEER_DEBOUNCE_S,
         term_grace_s: float = PREEMPT_TERM_GRACE_S,
@@ -354,6 +366,9 @@ class SessionRunner:
         if steering_pop_fn is None:
             steering_pop_fn = self._default_steering_pop
         self._pop_steering = steering_pop_fn
+        if steering_push_fn is None:
+            steering_push_fn = self._default_steering_push
+        self._push_steering = steering_push_fn
 
         self._driver = driver if driver is not None else self._build_driver(model, harness_fn)
 
@@ -427,7 +442,6 @@ class SessionRunner:
             turn_timeout_s=self._turn_timeout_s + self._term_grace_s + DRIVER_BACKSTOP_MARGIN_S,
             harness_fn=harness_fn,
             on_spawn=self._on_turn_spawn,
-            on_exit=self._on_turn_exit,
             on_init=self._on_harness_init,
         )
 
@@ -439,6 +453,42 @@ class SessionRunner:
         if not session_id:
             return []
         return pop_all_steering_messages(session_id)
+
+    def _default_steering_push(self, msg: dict) -> None:
+        """Push one steering message back onto this session's Redis list."""
+        from agent.steering import push_steering_message  # noqa: PLC0415
+
+        session_id = str(getattr(self._agent_session, "session_id", "") or "")
+        if not session_id:
+            return
+        push_steering_message(
+            session_id,
+            msg.get("text") or "",
+            sender=msg.get("sender") or "runner-requeue",
+            is_abort=bool(msg.get("is_abort")),
+        )
+
+    def _requeue_pending_steers(self) -> None:
+        """Re-push steers popped mid-turn but never injected into a turn.
+
+        Fires on loop exit: a steer popped by the watcher during the
+        debounce, when the turn then completes naturally and routes
+        ``[/user]``/``[/complete]``, would otherwise be silently dropped —
+        the executor's leftover-steering re-enqueue drains only the Redis
+        list. Fail-silent.
+        """
+        if not self._pending_steers:
+            return
+        steers, self._pending_steers = self._pending_steers, []
+        for msg in steers:
+            try:
+                self._push_steering(msg)
+            except Exception as e:  # noqa: BLE001 — never crash the terminal path
+                logger.warning(
+                    "[runner] failed to re-push pending steer (%r dropped): %s",
+                    (msg.get("text") or "")[:80],
+                    e,
+                )
 
     # -- Spawn/exit bookkeeping (Race 2) ------------------------------------
 
@@ -453,7 +503,6 @@ class SessionRunner:
         if handle is None:
             return
         handle.pid = pid
-        handle.alive = True
         try:
             handle.pgid = os.getpgid(pid)
         except Exception:  # noqa: BLE001 — fake pids in tests, races in prod
@@ -477,12 +526,6 @@ class SessionRunner:
         except Exception as e:  # noqa: BLE001
             logger.debug("[runner] pm_pid persist failed: %s", e)
 
-    def _on_turn_exit(self) -> None:
-        """Clear liveness on the current handle when the subprocess exits."""
-        handle = self._current_handle
-        if handle is not None:
-            handle.alive = False
-
     def _on_harness_init(self, data: dict) -> None:
         """Capture-at-init (Race 5): persist the new turn's resume scalars.
 
@@ -500,7 +543,15 @@ class SessionRunner:
             if version:
                 self._claude_version = str(version)
             elif self._claude_version is None:
-                self._claude_version = _probe_claude_version()
+                if _claude_version_cache is not None:
+                    # Cache warm (success or cached failure) — instant read.
+                    self._claude_version = _claude_version_cache or None
+                else:
+                    # Cold cache: this callback fires on the harness's async
+                    # stream-json read loop, and the probe blocks up to 5s —
+                    # dispatch it to a worker thread and persist the version
+                    # when it lands (upsert semantics; sid/cwd go out now).
+                    self._schedule_version_probe()
             self._adapter.persist_resume_scalars(
                 claude_session_id=str(sid),
                 runner_cwd=self._working_dir,
@@ -508,6 +559,36 @@ class SessionRunner:
             )
         except Exception as e:  # noqa: BLE001 — persistence must never crash a turn
             logger.warning("[runner] capture-at-init persist failed: %s", e)
+
+    def _schedule_version_probe(self) -> None:
+        """Run ``claude --version`` off-loop; persist the result when known.
+
+        The probe result (including a failure) is cached process-wide, so
+        this dispatches at most one real subprocess per worker process.
+        Fail-silent — the version is a deploy-gate signal, never a
+        functional dependency.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (sync test contexts): the blocking call is safe.
+            self._claude_version = _probe_claude_version()
+            return
+
+        future = loop.run_in_executor(None, _probe_claude_version)
+
+        def _adopt(fut: asyncio.Future) -> None:
+            try:
+                version = fut.result()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[runner] off-loop version probe failed: %s", e)
+                return
+            if not version or self._claude_version is not None:
+                return
+            self._claude_version = version
+            self._adapter.persist_resume_scalars(claude_version=version)
+
+        future.add_done_callback(_adopt)
 
     # -- Public API ----------------------------------------------------------
 
@@ -581,6 +662,8 @@ class SessionRunner:
                 self._fire_on_turn()
 
                 decision = self._route_turn(outcome)
+                if decision.compliance_miss:
+                    summary.compliance_misses += 1
                 if decision.should_break:
                     summary.exit_reason = decision.exit_reason or summary.exit_reason
                     break
@@ -607,6 +690,12 @@ class SessionRunner:
             logger.error("[runner] session loop raised: %s", e, exc_info=True)
             summary.exit_reason = "exception"
             summary.exit_message = truncate_exit_message(f"{type(e).__name__}: {e}")
+
+        # Steers popped mid-turn but never injected (the turn completed
+        # naturally during the debounce and the loop exited) go back to the
+        # Redis steering list — the executor's leftover-steering re-enqueue
+        # drains only that list, so anything left here would be dropped.
+        self._requeue_pending_steers()
 
         summary.user_facing_routed = self._adapter.user_facing_routed or summary.user_facing_routed
         self._adapter.publish_exit_summary(summary)
@@ -791,27 +880,32 @@ class SessionRunner:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
         classification = classify_pm_prefix(text)
+        miss = classification.compliance_miss
 
         if classification.destination == "user" and classification.payload:
             self._adapter.on_user_payload(classification.payload)
-            return _RouteDecision(should_break=True, exit_reason="pm_user")
+            return _RouteDecision(should_break=True, exit_reason="pm_user", compliance_miss=miss)
 
         if classification.destination == "complete":
             payload = classification.payload or ""
             if payload:
                 self._adapter.on_complete_payload(payload)
-            return _RouteDecision(should_break=True, exit_reason="pm_complete")
+            return _RouteDecision(
+                should_break=True, exit_reason="pm_complete", compliance_miss=miss
+            )
 
         # A substantive needs-human edge alongside an unroutable turn: the
         # hook already filtered boilerplate (#1919), so this message is a
         # genuine question for the human — deliver the PM's text.
         if outcome.needs_human is not None and text.strip():
             self._adapter.on_user_payload(text.strip())
-            return _RouteDecision(should_break=True, exit_reason="pm_user")
+            return _RouteDecision(should_break=True, exit_reason="pm_user", compliance_miss=miss)
 
         # Anything else — legacy [/dev], unknown prefix, empty payload —
         # continues the loop with a bounded compliance nudge.
-        return _RouteDecision(should_break=False, next_message=PM_COMPLIANCE_NUDGE)
+        return _RouteDecision(
+            should_break=False, next_message=PM_COMPLIANCE_NUDGE, compliance_miss=miss
+        )
 
     # -- Wrap-up guard (graduated) ---------------------------------------------
 

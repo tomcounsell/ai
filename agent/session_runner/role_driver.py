@@ -370,6 +370,12 @@ class HeadlessRoleDriver:
         # Race 4: drain stale edges BEFORE spawning this turn's subprocess.
         snapshot_ts = self._snapshot_edges()
 
+        # Exit-status capture (residual #1916): the harness reports each
+        # subprocess's (returncode, result_event_fired); the LAST invocation
+        # (a stale-UUID fallback retry supersedes the primary) is the turn's
+        # authoritative exit shape.
+        exit_statuses: list[tuple[int | None, bool]] = []
+
         outcome = HeadlessTurnOutcome()
         try:
             reply = await asyncio.wait_for(
@@ -393,6 +399,7 @@ class HeadlessRoleDriver:
                     on_sdk_finished=self._on_exit,
                     on_stdout_event=self._on_stdout_event,
                     on_init=self._handle_init,
+                    on_exit_status=lambda rc, fired: exit_statuses.append((rc, fired)),
                 ),
                 timeout=self.turn_timeout_s,
             )
@@ -440,6 +447,25 @@ class HeadlessRoleDriver:
         outcome.claude_session_id = self._claude_session_id
         outcome.transcript_path = self._transcript_path
         self._primed = True
+
+        # Nonzero exit WITHOUT a result event (residual #1916): the harness
+        # returned partial accumulated text from a crashed subprocess — that
+        # is a failed turn, never a clean one. (A nonzero exit AFTER a
+        # result event keeps the result: the event is the protocol's
+        # completion signal. Preempt/timeout kills are caught by the runner's
+        # handle.killed; a zero-output crash hit empty_output above.)
+        if exit_statuses:
+            returncode, result_event_fired = exit_statuses[-1]
+            if returncode not in (None, 0) and not result_event_fired:
+                logger.error(
+                    "[role-driver] %s turn subprocess exited %s without a result "
+                    "event (%d chars of partial text) — classifying as failed",
+                    self.role,
+                    returncode,
+                    len(reply),
+                )
+                outcome.exit_reason = "headless_nonzero_exit_no_result"
+                return outcome
 
         # Turn-end reconciliation: prefer a fresh TURN_END envelope; else the
         # clean subprocess exit is the authoritative boundary (fallback).

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Literal, NamedTuple
+from typing import Literal
 
 # ---------------------------------------------------------------------------
 # Prefix-token classification (deterministic regex parse)
@@ -114,11 +114,16 @@ def classify_pm_prefix(pm_text: str) -> ClassificationResult:
     # Strict match failed; try a more permissive fallback. The PM may have
     # included the token mid-line or with light surrounding text — that's a
     # compliance miss by the strict definition but a correct classification.
+    # The matched token is STRIPPED from the payload: the payload is delivered
+    # verbatim to the human, and no raw system string may ever reach the CEO.
     fallback = PREFIX_TOKEN_FALLBACK_RE.search(pm_text[:200])
     if fallback:
+        before = pm_text[: fallback.start()].strip()
+        after = pm_text[fallback.end() :].strip()
+        payload = f"{before}\n{after}" if before and after else (before or after)
         return ClassificationResult(
             destination=fallback.group(1),  # type: ignore[arg-type]
-            payload=pm_text.strip(),
+            payload=payload,
             compliance_miss=True,
             raw_first_line=first_line,
         )
@@ -132,20 +137,8 @@ def classify_pm_prefix(pm_text: str) -> ClassificationResult:
 
 
 # ---------------------------------------------------------------------------
-# Route outcome + exit classification
+# Exit classification
 # ---------------------------------------------------------------------------
-
-
-class RouteOutcome(NamedTuple):
-    """Return value of the runner's per-turn routing decision.
-
-    ``should_break`` True means the turn loop should exit after this routing
-    decision. ``exit_reason`` carries the terminal ``exit_reason`` to set
-    when ``should_break`` is True (None means the loop should continue).
-    """
-
-    should_break: bool
-    exit_reason: str | None
 
 
 # Clean exits: the run ended the way a healthy session ends. Everything else

@@ -347,7 +347,7 @@ def _heartbeat_thread_main() -> None:
     """Dedicated daemon thread for worker heartbeat writes, inverted into a
     dead-man's switch (issue #1815 fix #1).
 
-    Runs independently of the asyncio event loop so PTY/thread-pool
+    Runs independently of the asyncio event loop so thread-pool
     saturation (incident 2026-06-23, issue #1767) cannot prevent heartbeat
     writes. The loop wakes every WORKER_HEARTBEAT_INTERVAL seconds and delegates
     each cycle to :func:`_heartbeat_cycle`.
@@ -858,7 +858,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     loop_tick_task.add_done_callback(_loop_tick_task_done)
 
     # Start dedicated heartbeat daemon thread (issue #1767, inverted #1815).
-    # Runs outside the asyncio event loop so PTY/thread-pool saturation
+    # Runs outside the asyncio event loop so thread-pool saturation
     # cannot starve heartbeat writes. daemon=True ensures it cannot outlive
     # the worker process even on abnormal exit.
     _heartbeat_stop_event.clear()

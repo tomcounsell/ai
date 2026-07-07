@@ -23,8 +23,8 @@ Modules:
   classification (#1919).
 - :mod:`~agent.session_runner.hook_forwarder` — the fail-silent hook script
   Claude Code invokes; appends envelopes to the per-session edge file.
-- :mod:`~agent.session_runner.transcript_tailer` — incremental JSONL
-  transcript telemetry + last-assistant-text reads.
+- :mod:`~agent.session_runner.transcript_tailer` — last-assistant-text reads
+  from JSONL transcripts (the dev turn-history mirror).
 - :mod:`~agent.session_runner.router` — regex PM-prefix classification and
   the exit-classification tables.
 - :mod:`~agent.session_runner.adapter` — executor-facing construction:

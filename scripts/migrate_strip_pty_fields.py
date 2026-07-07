@@ -22,7 +22,8 @@ Safety properties:
 - **Idempotent**: re-running finds zero records with stale fields → no-op.
 - **Concurrent-safe**: only TERMINAL-status records are rewritten (the
   worker never writes terminal rows); non-terminal records are skipped and
-  reported (they hydrate fine; a later run strips them once terminal).
+  reported (they hydrate fine; the migration runs once per machine, so any
+  residual stale fields on then-live rows age out via the record's TTL).
   The base ``popoto.Model.save`` is used directly so ``updated_at`` is
   preserved as loaded (the AgentSession override would restamp it and
   falsify freshness on old records).
@@ -118,8 +119,9 @@ def migrate(apply: bool = False) -> dict:
             if status not in TERMINAL_STATUSES:
                 # Live rows are actively written by the worker — do not
                 # rewrite them out from under it. Popoto ignores the stale
-                # fields on load, so deferral is safe; a later run strips
-                # the record once it is terminal.
+                # fields on load, so deferral is safe; the migration runs
+                # once per machine, so residual stale fields on then-live
+                # rows simply age out via the record's TTL.
                 stats["deferred_non_terminal"] += 1
                 logger.info(
                     "  DEFER %s (status=%s): stale fields %s left in place",

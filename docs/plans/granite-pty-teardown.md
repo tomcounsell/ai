@@ -333,7 +333,7 @@ No new MCP servers or `.mcp.json` changes. Integration is subtractive:
 - [ ] `dev_agent_id`, `runner_cwd`, `claude_version`, and the turn-history mirror are visible on `dashboard.json` for a live eng session
 - [ ] A steering message during a long Dev turn preempts it within the debounce window and the resumed turn reflects the steer
 - [ ] Worker starts and serves ENG sessions with ollama stopped (degraded-mode machinery gone)
-- [ ] A turn whose subprocess dies produces `exit_reason=error` and a persona-safe user message — never `completed` (the #1916 class)
+- [x] A turn whose subprocess dies produces `exit_reason=error` and a persona-safe user message — never `completed` (the #1916 class)
 - [ ] `TOOL_TIMEOUT_DEFAULT_SEC` default is 300 again
 - [ ] Tests pass (`/do-test`); lint/format clean
 - [ ] Documentation updated (`/do-docs`); features index has no granite-PTY entries

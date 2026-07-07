@@ -23,7 +23,7 @@ Both public functions are fail-silent: every body is wrapped in
 policy so a capture failure can never block a hook or the TUI.
 
 Capture surface: local Claude Code TUI sessions (via the ``UserPromptSubmit`` and
-``Stop`` hooks). Bridge-driven eng/granite sessions are out of scope — there is no
+``Stop`` hooks). Bridge-driven sessions are out of scope — there is no
 human-in-the-TUI there.
 
 See ``docs/features/tui-interaction-capture.md`` and the plan at

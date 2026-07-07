@@ -194,9 +194,9 @@ def generate_hook_settings(
     forwarder = forwarder_path or _FORWARDER_PATH
     # Embed the edge path as the forwarder's first CLI arg so concurrent
     # sessions sharing one process env still write to separate per-session
-    # edge files. Quoted so a path with spaces survives the shell Claude Code
-    # runs the hook under.
-    command = f'python3 {forwarder} "{edge_path}"'
+    # edge files. Both paths are quoted so a path with spaces survives the
+    # shell Claude Code runs the hook under.
+    command = f'python3 "{forwarder}" "{edge_path}"'
     # A single matcher-"" hook entry fires the forwarder for the event; the
     # PreToolUse entry narrows to the AskUserQuestion tool so ordinary tool
     # calls do not flood the edge file.

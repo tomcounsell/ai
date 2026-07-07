@@ -310,15 +310,16 @@ here.
 
 | Level | File | Tests | Description |
 |-------|------|------:|-------------|
-| unit | `session_runner/test_runner_turns.py` | 13 | Single-session PM loop: simplified `[/user]`/`[/complete]` route table, wrapup guard, bounded nudges, boundary steering |
+| unit | `session_runner/test_runner_turns.py` | 19 | Single-session PM loop: simplified `[/user]`/`[/complete]` route table, wrapup guard, bounded nudges, boundary steering, compliance-miss accounting, `session_events` entry cap |
 | unit | `session_runner/test_runner_dev_subagent.py` | 7 | Dev agent definition contract (continuation/steering/rails baked in), PM prime spawn-once contract, ResumeContext four-scalar seam |
-| unit | `session_runner/test_runner_preempt.py` | 8 | Steer-preempt (D4): generation-token guard, kill-at-boundary race, SIGTERM→SIGKILL escalation, timeout-as-preempt |
-| unit | `session_runner/test_runner_resume.py` | 15 | Four-scalar resume consumption, cwd-scoped resume (Race 3), stale-UUID fallback, skip-prime, capture-at-init (Race 5), `dev_agent_id` sidechain capture, turn-history mirror (bounded, never read on resume) |
-| unit | `session_runner/test_runner_liveness.py` | 9 | Role-aware turn timeout table, subprocess-death/hang/missing-binary classification (wedge-coverage replacement) |
-| unit | `session_runner/test_headless_role_driver.py` | 13 | `HeadlessRoleDriver` turn dispatch, prime injection, hook-edge turn-end reconciliation |
-| unit | `session_runner/test_hook_edge_notifications.py` | 12 | Hook settings generation, NDJSON edge consumer, Notification envelopes |
+| unit | `session_runner/test_runner_preempt.py` | 8 | Steer-preempt (D4): generation-token guard, kill-at-boundary race (pending steers re-pushed on loop exit), SIGTERM→SIGKILL escalation, timeout-as-preempt |
+| unit | `session_runner/test_runner_resume.py` | 19 | Four-scalar resume consumption, cwd-scoped resume (Race 3), stale-UUID fallback, skip-prime, capture-at-init (Race 5) + off-loop version probe, `dev_agent_id` sidechain capture, turn-history mirror (bounded, never read on resume) |
+| unit | `session_runner/test_runner_liveness.py` | 14 | Role-aware turn timeout table, subprocess-death/hang/missing-binary classification (wedge-coverage replacement) |
+| unit | `session_runner/test_headless_role_driver.py` | 18 | `HeadlessRoleDriver` turn dispatch, prime injection, hook-edge turn-end reconciliation, nonzero-exit-no-result classification |
+| unit | `session_runner/test_router_classification.py` | 6 | PM-prefix classifier: strict-token payloads, fallback token stripping (no raw `[/user]` ever delivered) |
+| unit | `session_runner/test_hook_edge_notifications.py` | 21 | Hook settings generation, NDJSON edge consumer, Notification envelopes |
 | unit | `session_runner/headless_hook_probe.py` | — | Support module (no tests): real-CLI turn-end + prime-resolution probe harness, salvaged from the deleted granite-faults tree |
-| integration | `test_transport_dispatch_e2e.py` | 5 | Executor → `SessionRunner` → `HeadlessRoleDriver` → fake harness → delivery callback; the anti-"built-but-never-wired" gate |
+| integration | `test_runner_dispatch_e2e.py` | 2 | Executor → `SessionRunner` → `HeadlessRoleDriver` → fake harness → delivery callback; the anti-"built-but-never-wired" gate |
 | integration | `test_headless_probe_e2e.py` | 4 | Subscription-auth env contract (always-on) + real `claude -p` turn-end/prime-resolution probes, gated on `HEADLESS_PROBE_SMOKE=1`; the canary for new `claude` releases |
 
 ### Other

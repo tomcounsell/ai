@@ -23,10 +23,12 @@ from hook_utils.constants import (
 # ---------------------------------------------------------------------------
 # Sidecar-resolved AgentSession liveness write (issue #1843, Gap A)
 #
-# Granite's PM/Dev `claude` PTY children run this CLI hook (not the SDK
-# in-process hooks in agent/hooks/pre_tool_use.py), so `AGENT_SESSION_ID` is
-# unset in their env — `agent.hooks.liveness_writers.record_tool_boundary`
-# would silently no-op. Resolve the AgentSession the same way
+# This CLI hook runs in every `claude` subprocess. Session-runner role turns
+# carry `AGENT_SESSION_ID` in their env (the executor injects it), but other
+# `claude` processes running this hook (local TUI sessions, ad-hoc
+# subprocesses) may not — there,
+# `agent.hooks.liveness_writers.record_tool_boundary` would silently no-op.
+# Resolve the AgentSession the same way
 # `post_tool_use.py::_update_agent_session` does: read the per-session
 # sidecar JSON directly (no popoto import needed for the sidecar itself),
 # then look up the AgentSession record via its `agent_session_id`.

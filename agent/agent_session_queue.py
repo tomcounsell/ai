@@ -1729,7 +1729,7 @@ async def _worker_loop(
             # `_execute_agent_session` now runs as an OWNED child task,
             # watched by a small on-loop poll loop, instead of a plain
             # `await`. This is NOT a wall-clock cap (#1172 removed that) — it
-            # resets on any tool/turn/PTY activity and only fires when
+            # resets on any tool/turn activity and only fires when
             # progress genuinely stalls past SESSION_PROGRESS_DEADLINE_S.
             deadline_cancelled = False
             # Telemetry-once latch (CONCERN r6): tier1/tier2 counters fire on
@@ -1918,7 +1918,7 @@ async def _worker_loop(
                     # worker-loop task itself was cancelled
                     # (`.cancelling() > 0`). `asyncio.wait` does NOT cancel
                     # exec_task when the waiter itself is cancelled, so the
-                    # SDK subprocess/PTY would otherwise still be running
+                    # runner subprocess would otherwise still be running
                     # (orphan). Tear it down BEFORE re-raising, or startup
                     # recovery re-queues a still-`running` row → double
                     # execution (Blocker 1, round 2).
@@ -2019,7 +2019,7 @@ async def _worker_loop(
                 # the owned-task region above for any reason with `exec_task`
                 # still pending — e.g. a plain Exception raised from inside
                 # the progress-deadline while-loop itself, not from awaiting
-                # `exec_task` — cancel it so no subprocess/PTY is orphaned.
+                # `exec_task` — cancel it so no runner subprocess is orphaned.
                 # No-op on every other exit path: Branches 1-3 above and the
                 # normal-completion path all already leave `exec_task` done.
                 # `exec_task` is always bound here — it is assigned

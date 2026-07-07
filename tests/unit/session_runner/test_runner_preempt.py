@@ -241,10 +241,12 @@ async def test_steer_during_completion_drains_at_boundary_no_kill():
 
     driver = SlowishDriver()
     kills = []
+    pushed: list[dict] = []
     pops = [[], [{"text": "late steer"}]]
     runner, deliveries, _ = make_preempt_runner(
         driver,
         steering=lambda: pops.pop(0) if pops else [],
+        steering_push_fn=lambda m: pushed.append(m),
         kill_fn=lambda p, s: kills.append((p, s)),
         killpg_fn=lambda p, s: kills.append((p, s)),
         steer_debounce_s=0.3,  # turn finishes inside the debounce window
@@ -253,8 +255,11 @@ async def test_steer_during_completion_drains_at_boundary_no_kill():
     assert kills == []  # generation/done guard held
     assert deliveries == ["natural finish"]
     assert summary.exit_reason == "pm_user"
-    # The undelivered steer is retained for a future boundary, not lost.
-    assert runner._pending_steers and runner._pending_steers[0]["text"] == "late steer"
+    # The undelivered steer is pushed back to the steering list on loop exit
+    # (PR #1930 review, A7) — the executor's leftover-steering re-enqueue
+    # drains only the Redis list, so retaining it in-memory would drop it.
+    assert [m["text"] for m in pushed] == ["late steer"]
+    assert runner._pending_steers == []
 
 
 # --------------------------------------------------------------------------

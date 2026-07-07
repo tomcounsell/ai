@@ -439,3 +439,81 @@ async def test_mirror_is_not_read_on_resume(tmp_path):
     await runner.run("continue")
     assert "POISON" not in driver.calls[0]
     assert deliveries == ["clean"]
+
+
+# --------------------------------------------------------------------------
+# claude --version probe: failure caching + off-loop dispatch (PR #1930, A2)
+# --------------------------------------------------------------------------
+
+
+def test_probe_failure_is_cached(monkeypatch):
+    """A failed ``claude --version`` probe is cached — a machine with a
+    broken binary must not re-block on the probe every turn."""
+    from agent.session_runner import runner as runner_module
+
+    calls: list = []
+
+    def _boom(*args, **kwargs):
+        calls.append(args)
+        raise OSError("no claude binary")
+
+    monkeypatch.setattr(runner_module, "_claude_version_cache", None)
+    monkeypatch.setattr(runner_module.subprocess, "run", _boom)
+    assert runner_module._probe_claude_version() is None
+    assert runner_module._probe_claude_version() is None
+    assert len(calls) == 1
+
+
+def test_probe_success_is_cached(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent.session_runner import runner as runner_module
+
+    calls: list = []
+
+    def _ok(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(stdout="2.0.14 (Claude Code)", returncode=0)
+
+    monkeypatch.setattr(runner_module, "_claude_version_cache", None)
+    monkeypatch.setattr(runner_module.subprocess, "run", _ok)
+    assert runner_module._probe_claude_version() == "2.0.14"
+    assert runner_module._probe_claude_version() == "2.0.14"
+    assert len(calls) == 1
+
+
+async def test_init_version_probe_runs_off_loop(monkeypatch, tmp_path):
+    """When the init event carries no version field, the probe is dispatched
+    to a worker thread — never run synchronously on the event-loop thread
+    (a blocking subprocess.run there stalls the whole worker loop)."""
+    import threading
+
+    from agent.session_runner import runner as runner_module
+
+    loop_thread = threading.get_ident()
+    probe_threads: list[int] = []
+
+    def _fake_probe():
+        probe_threads.append(threading.get_ident())
+        return "9.9.9"
+
+    monkeypatch.setattr(runner_module, "_claude_version_cache", None)
+    monkeypatch.setattr(runner_module, "_probe_claude_version", _fake_probe)
+    runner, _driver, _deliveries, session = make_resume_runner(
+        ["[/user]\nok"], resume=None, working_dir=str(tmp_path)
+    )
+    runner._on_harness_init({"session_id": VALID_UUID})
+
+    for _ in range(200):
+        if probe_threads:
+            break
+        await asyncio.sleep(0.01)
+    assert probe_threads, "version probe never ran"
+    assert probe_threads[0] != loop_thread, "probe ran on the event-loop thread"
+
+    # The probed version is adopted and persisted once known.
+    for _ in range(200):
+        if getattr(session, "claude_version", None) == "9.9.9":
+            break
+        await asyncio.sleep(0.01)
+    assert session.claude_version == "9.9.9"

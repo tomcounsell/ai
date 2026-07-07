@@ -65,6 +65,16 @@ DEFAULT_DELIVERY_TIMEOUT_S: float = float(
 # so the bridge relay drains them within the same expiry window.
 _OUTBOX_TTL = 3600
 
+# Cap on ``session_events`` entries. The whole ListField re-serializes on
+# every save, so an unbounded list is quadratic write amplification on
+# long-lived sessions. Mirrors the CHAT_LOG_MAX_ENTRIES pattern
+# (models/agent_session.py); ``exit_summary`` entries are preserved when
+# trimming. Provisional/tunable — override with
+# SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES.
+SESSION_EVENTS_MAX_ENTRIES: int = int(
+    os.environ.get("SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES", "200")
+)
+
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for ``session_events`` entries."""
@@ -181,6 +191,10 @@ def _append_session_event(agent_session, event: dict) -> None:
     partial-save pattern (``save(update_fields=["session_events",
     "updated_at"])``).
 
+    The list is trimmed to :data:`SESSION_EVENTS_MAX_ENTRIES` (oldest
+    entries dropped, ``exit_summary`` entries preserved) so a long-lived
+    session cannot grow the per-save serialization without bound.
+
     All writes fail silently — observability must never crash the run.
     """
     if agent_session is None:
@@ -191,6 +205,15 @@ def _append_session_event(agent_session, event: dict) -> None:
             events = []
             agent_session.session_events = events
         events.append(event)
+        if len(events) > SESSION_EVENTS_MAX_ENTRIES:
+            overflow = len(events) - SESSION_EVENTS_MAX_ENTRIES
+            preserved = [
+                e
+                for e in events[:overflow]
+                if isinstance(e, dict) and e.get("type") == "exit_summary"
+            ]
+            del events[:overflow]
+            events[:0] = preserved
         save = getattr(agent_session, "save", None)
         if callable(save):
             agent_session.updated_at = datetime.now(UTC)
