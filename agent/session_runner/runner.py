@@ -903,7 +903,12 @@ class SessionRunner:
         _append_session_event(
             self._agent_session,
             {
+                # Dual-keyed like the adapter's other dashboard-visible runner
+                # events: ``event_type`` is the stream's canonical dashboard
+                # key (SessionEvent convention, read by ui/data/sdlc.py's
+                # _parse_history); ``type`` stays for the DR-seed filter.
                 "type": "turn_history",
+                "event_type": "turn_history",
                 "actor": actor,
                 "text": text[:TURN_HISTORY_MAX_CHARS],
                 "ts": _now_iso(),

@@ -736,6 +736,11 @@ def create_app() -> FastAPI:
             "pm_pid": s.pm_pid,
             "pm_transcript_path": s.pm_transcript_path,
             "dev_transcript_path": s.dev_transcript_path,
+            # Headless-runner resume scalars (#1924, Success Criterion 3).
+            # getattr-defaulted so objects predating the fields never break.
+            "dev_agent_id": getattr(s, "dev_agent_id", None),
+            "runner_cwd": getattr(s, "runner_cwd", None),
+            "claude_version": getattr(s, "claude_version", None),
             # Output routing state (issue #1647).
             "user_facing_routed": s.user_facing_routed,
             "children": [_session_to_json(c) for c in s.children],

@@ -339,6 +339,14 @@ class PipelineProgress(BaseModel):
     pm_transcript_path: str | None = None
     dev_transcript_path: str | None = None
 
+    # === Headless-runner resume scalars (#1924, Success Criterion 3) ===
+    # What a simple resume would consume: the Dev subagent continuation
+    # handle, the exact runner working dir, and the CLI version the session
+    # ran under. All nullable — records predating the cutover lack them.
+    dev_agent_id: str | None = None
+    runner_cwd: str | None = None
+    claude_version: str | None = None
+
     # Output routing state (issue #1647)
     # True once a user-facing message has been routed for this session.
     user_facing_routed: bool = False
@@ -652,6 +660,14 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
                 "granite_delivery_dropped",
             ):
                 text = raw_text or event_type
+            elif event_type == "turn_history" or entry.get("type") == "turn_history":
+                # Headless-runner turn mirror (#1924): label with the actor
+                # (pm|dev) so PM vs Dev turns are distinguishable in the feed.
+                # The ``type``-key fallback tolerates mirror entries written
+                # before the writer dual-keyed them (exit_anomaly precedent).
+                event_type = "turn_history"
+                actor = entry.get("actor") or "pm"
+                text = f"[{actor}] {raw_text}" if raw_text else f"[{actor}]"
             elif entry.get("type") == "exit_anomaly":
                 reason = entry.get("exit_reason", "unknown")
                 text = f"exit anomaly: {reason}"
@@ -980,6 +996,9 @@ def _session_to_pipeline(session) -> PipelineProgress:
         pm_pid=_safe_nullable_int(getattr(session, "pm_pid", None)),
         pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
         dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
+        dev_agent_id=_safe_str(getattr(session, "dev_agent_id", None)),
+        runner_cwd=_safe_str(getattr(session, "runner_cwd", None)),
+        claude_version=_safe_str(getattr(session, "claude_version", None)),
         user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
         stall_advisory=stall_advisory,
         stall_advisory_reason=stall_advisory_reason,

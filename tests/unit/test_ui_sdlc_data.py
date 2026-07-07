@@ -431,6 +431,25 @@ class TestExtractGithubLinks:
         assert p2.dev_transcript_path == "/tmp/dev.jsonl"
         assert p2.user_facing_routed is True
 
+    def test_resume_scalar_fields(self):
+        """Resume scalars (#1924 Success Criterion 3) are settable, default None."""
+        from ui.data.sdlc import PipelineProgress
+
+        p = PipelineProgress(agent_session_id="x")
+        assert p.dev_agent_id is None
+        assert p.runner_cwd is None
+        assert p.claude_version is None
+
+        p2 = PipelineProgress(
+            agent_session_id="x",
+            dev_agent_id="agent-abc123",
+            runner_cwd="/Users/x/src/proj",
+            claude_version="2.0.5",
+        )
+        assert p2.dev_agent_id == "agent-abc123"
+        assert p2.runner_cwd == "/Users/x/src/proj"
+        assert p2.claude_version == "2.0.5"
+
     def test_pty_fields_stay_deleted(self):
         """``pty_slot`` and ``dev_pid`` must not resurface on PipelineProgress
         (#1924 one-way cutover; names checked as strings intentionally)."""
@@ -612,6 +631,34 @@ class TestSessionToPipeline:
         assert pipeline.parent_agent_session_id is None
         assert pipeline.context_summary is None
 
+    def test_resume_scalars_populated(self):
+        """The three resume scalars flow from AgentSession to PipelineProgress."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            dev_agent_id="agent-dev42",
+            runner_cwd="/Users/x/src/ai/.worktrees/slug",
+            claude_version="2.0.5",
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.dev_agent_id == "agent-dev42"
+        assert pipeline.runner_cwd == "/Users/x/src/ai/.worktrees/slug"
+        assert pipeline.claude_version == "2.0.5"
+
+    def test_resume_scalars_absent_on_old_records(self):
+        """Old AgentSession records without the resume scalars must not raise."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session()
+        del mock_session.dev_agent_id
+        del mock_session.runner_cwd
+        del mock_session.claude_version
+
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.dev_agent_id is None
+        assert pipeline.runner_cwd is None
+        assert pipeline.claude_version is None
+
 
 class TestParentChildGrouping:
     """Tests for parent/child session grouping in get_all_sessions."""
@@ -749,6 +796,47 @@ class TestHistoryParsing:
         assert events[0].event_type == "exit_anomaly"
         assert "crash" in events[0].text
         assert events[0].timestamp == 555.0
+
+    def test_turn_history_event_labeled_with_actor(self):
+        """Runner turn-history mirror entries surface with actor + text, not
+        as generic 'system' events (#1924 Success Criterion 3)."""
+        from ui.data.sdlc import _parse_history
+
+        history = [
+            {
+                "type": "turn_history",
+                "event_type": "turn_history",
+                "actor": "dev",
+                "text": "built the thing",
+                "ts": "2026-07-07T10:00:00+00:00",
+            },
+            {
+                "type": "turn_history",
+                "event_type": "turn_history",
+                "actor": "pm",
+                "text": "reviewed and shipped",
+                "ts": "2026-07-07T10:01:00+00:00",
+            },
+        ]
+        events = _parse_history(history)
+        assert len(events) == 2
+        assert events[0].event_type == "turn_history"
+        assert "dev" in events[0].text
+        assert "built the thing" in events[0].text
+        assert events[1].event_type == "turn_history"
+        assert "pm" in events[1].text
+        assert "reviewed and shipped" in events[1].text
+
+    def test_turn_history_type_only_entry_tolerated(self):
+        """Mirror entries written before the dual-key fix (type-only) still
+        parse as labeled turn history, not 'system' (exit_anomaly precedent)."""
+        from ui.data.sdlc import _parse_history
+
+        events = _parse_history([{"type": "turn_history", "actor": "pm", "text": "hi", "ts": "t"}])
+        assert len(events) == 1
+        assert events[0].event_type == "turn_history"
+        assert "pm" in events[0].text
+        assert "hi" in events[0].text
 
     def test_ts_key_used_for_timestamp_when_no_timestamp(self):
         """Events with 'ts' key (granite format) populate the timestamp field."""

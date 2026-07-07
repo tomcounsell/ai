@@ -403,7 +403,11 @@ async def test_turn_history_mirror_shape_and_cap(tmp_path):
     assert len(entries) == 1
     entry = entries[0]
     assert entry["actor"] == "pm"
-    assert set(entry) >= {"ts", "actor", "text", "type"}
+    # Dual-keyed like the adapter's other dashboard-visible runner events:
+    # ``event_type`` is the stream's canonical dashboard key (SessionEvent
+    # convention), ``type`` stays for the disaster-recovery seed filter.
+    assert entry["event_type"] == "turn_history"
+    assert set(entry) >= {"ts", "actor", "text", "type", "event_type"}
     # Full user-visible text, length env-capped.
     assert len(entry["text"]) == TURN_HISTORY_MAX_CHARS
 
