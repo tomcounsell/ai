@@ -4,7 +4,7 @@ type: bug
 appetite: Large
 owner: Valor Engels
 created: 2026-07-07
-tracking: https://github.com/valorengels/ai/issues/1915
+tracking: https://github.com/tomcounsell/ai/issues/1915
 last_comment_id:
 ---
 
