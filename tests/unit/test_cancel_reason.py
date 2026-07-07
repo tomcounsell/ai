@@ -1,8 +1,11 @@
-"""Unit tests for the transient cancel-reason signal (#1877 defect #1).
+"""Unit tests for the transient cancel-reason signal (#1877 defect #1;
+narrowed to a terminal-only signal by the silent-resume inversion).
 
 Contract:
-  * unset key → get returns None (send site defaults to resume copy)
-  * set/get round-trip returns the written reason
+  * unset key → get returns None (send site defaults to silence)
+  * set/get round-trip returns the written reason verbatim, whatever it is —
+    the API stays generic even though "no_resume" is the only value any call
+    site in this repo actually writes
   * the read is NON-destructive (no pop/delete; repeated reads keep returning it)
   * Redis unavailable → both helpers swallow the error; get returns None, never raises
 """
@@ -45,8 +48,11 @@ def test_set_get_round_trip():
     with patch("popoto.redis_db.POPOTO_REDIS_DB", fake):
         set_cancel_reason("sess-1", "no_resume")
         assert get_cancel_reason("sess-1") == "no_resume"
-        set_cancel_reason("sess-2", "resume")
-        assert get_cancel_reason("sess-2") == "resume"
+        # The API stays generic: a non-"no_resume" value round-trips verbatim
+        # too, even though no call site in this repo writes anything other
+        # than "no_resume" post-inversion.
+        set_cancel_reason("sess-2", "other")
+        assert get_cancel_reason("sess-2") == "other"
 
 
 def test_read_is_non_destructive():
