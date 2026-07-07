@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-07-07
 tracking: https://github.com/tomcounsell/ai/issues/1932
 last_comment_id:
+revision_applied: true
 ---
 
 # SDLC router: crashed re-review dead-end (row 8b) + row 3 open-PR step-aside
@@ -158,7 +159,7 @@ No prerequisites — this work modifies a pure in-process decision function and 
 
 **`sdlc-tool next-skill` (state: PATCH done, PR open, re-review crashed)** → router evaluates rows → **row 8d matches** → `Dispatch(/do-pr-review, row_id="8d")` → re-review runs → pipeline continues (no human intervention).
 
-**`sdlc-tool next-skill` (state: PR open, non-stale NEEDS REVISION critique)** → row 3 predicate sees `pr_number` → steps aside → **row 7/8/9 owns the PR-stage state** → PR-stage skill dispatched (never `/do-plan`).
+**`sdlc-tool next-skill` (state: PR open, no review yet, non-stale NEEDS REVISION critique)** → row 3 predicate sees `pr_number` → steps aside → **row 7 owns the PR-stage state** → `Dispatch(/do-pr-review, row_id="7")` (never `/do-plan`).
 
 ### Technical Approach
 
@@ -262,8 +263,8 @@ No agent integration required — this is an internal change to the SDLC router 
 
 - [ ] Reproduction test for gap (a) added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, REVIEW marker ≠ in_progress} → currently `Blocked("no matching dispatch rule")`.
 - [ ] After fix (a): that state → `Dispatch(skill="/do-pr-review", row_id="8d")`.
-- [ ] Reproduction test for gap (b) added and RED before the fix: {PR open, non-stale NEEDS REVISION critique, `last` not plan-family} → currently `Dispatch("/do-plan", row_id="3")`.
-- [ ] After fix (b): that state → a PR-stage dispatch (row 7/8/…), never `/do-plan` and never `Blocked`.
+- [ ] Reproduction test for gap (b) added and RED before the fix: {PR open, non-stale NEEDS REVISION critique, `last` not plan-family, no review yet} → currently `Dispatch("/do-plan", row_id="3")`.
+- [ ] After fix (b): that state → `Dispatch(skill="/do-pr-review", row_id="7")` (pinned), plus the general invariant `skill != "/do-plan"` asserted separately.
 - [ ] Regression: existing 8b, 8c, and stale-critique (2b) states still route to their own rows.
 - [ ] `.claude/skills/sdlc/SKILL.md` row count and description updated; any `len(DISPATCH_TABLE)`/"16 rows" assertion updated in lockstep.
 - [ ] Tests pass (`/do-test`).
@@ -297,7 +298,7 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Agent Type**: builder
 - **Parallel**: false
 - Add a test for gap (a): build `stage_states`/`meta` via existing helpers for {PATCH completed, PR open, `last_dispatched_skill=/do-pr-review`, no REVIEW verdict, REVIEW marker not in_progress}; assert current result is `Blocked` with reason `"no matching dispatch rule"`.
-- Add a test for gap (b): {PR open, non-stale NEEDS REVISION critique, `last` not plan-family, no `proposed_skill`}; assert current result is `Dispatch(skill="/do-plan", row_id="3")`.
+- Add a test for gap (b): {PR open, no review yet (`REVIEW` in `(None, "pending", "ready")`, no review verdict), non-stale NEEDS REVISION critique, `last` not plan-family, no `proposed_skill`}; assert current result is `Dispatch(skill="/do-plan", row_id="3")`.
 - Run both; confirm they capture the buggy behavior (these will be inverted after the fix).
 
 ### 2. Fix (a): add row 8d recovery
@@ -317,7 +318,11 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `if meta.get("pr_number"): return False` at the top of `_rule_critique_needs_revision`, with a comment citing #1932.
-- Flip the gap-(b) test to assert a PR-stage dispatch (assert `skill != "/do-plan"` and result is a `Dispatch`, and specifically the expected PR-stage row for the constructed state).
+- Flip the gap-(b) test to assert the pinned outcome for the constructed state
+  (PR open, no review yet): `Dispatch(skill=SKILL_DO_PR_REVIEW, row_id="7")`.
+  Add a second, separate assertion for the general invariant
+  (`result.skill != SKILL_DO_PLAN`) so the two failure modes (wrong row vs.
+  regression to `/do-plan`) are distinguishable in CI output.
 
 ### 4. Regression + parity
 - **Task ID**: build-regression
@@ -353,22 +358,36 @@ No agent integration required — this is an internal change to the SDLC router 
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| N/A | (unrecoverable) | The `/do-plan-critique` run recorded verdict `NEEDS REVISION` (`sdlc-tool verdict get --stage CRITIQUE --issue-number 1932`) but the critic session crashed before persisting its findings text anywhere durable — no issue comment, no `Critique Results` row, no session telemetry with reasoning. Only the verdict string and `artifact_hash` survive. `logs/worker/sdlc-local-1932.log` shows the session was stopped mid-run. This is the same failure family issue #1932 itself describes (row 8b dead-end after a crashed subagent) — confirmed independently while trying to recover the critique's own output. | This revision | Resolved the plan's own two Open Questions directly (see below) as the best-available substitute for the lost critique feedback, since the specific findings text could not be recovered. |
 
 ---
 
-## Open Questions
+## Revision Notes (this pass)
 
-1. **Fix (a) shape — new row 8d vs. widen 8b?** The plan proposes a discrete
-   marker-agnostic row 8d (disjoint from 8b/8c) rather than widening 8b's
-   `last == /do-patch` guard, because widening risks entangling the
-   patch→re-review happy path. Confirm this is the preferred approach, or if you
-   want 8b widened instead.
-2. **Fix (b) target row assertion.** For the open-PR + NEEDS REVISION case, the
-   expected PR-stage destination depends on the constructed review state (row 7
-   if no review yet, row 8 if changes requested, etc.). Should the test pin one
-   canonical destination (e.g. row 7, "PR exists, no review"), or assert the
-   weaker invariant "any PR-stage row, never `/do-plan`"? The plan currently
-   does both.
+The prior critique's specific findings were unrecoverable (see Critique Results
+row above). In their place, this revision resolves the plan's two Open
+Questions — the same ambiguities a critic would most likely have flagged —
+so the plan can proceed to build without an outstanding decision:
+
+1. **Fix (a) shape — new row 8d vs. widen 8b: DECIDED — row 8d.** Keeping this
+   as a discrete, disjoint recovery row (not widening 8b) avoids entangling the
+   patch→re-review happy path with crash recovery, matches the row 2c precedent
+   (marker-agnostic recovery added as its own row, not folded into an existing
+   predicate), and keeps 8b's contract ("last dispatch was `/do-patch`")
+   unchanged for the tests that already pin it. No plan or code change needed
+   beyond what was already specified — this decision is now final, not open.
+2. **Fix (b) target row assertion: DECIDED — pin the exact row, plus the
+   general invariant.** The gap-(b) reproduction test constructs one concrete
+   state (PR open, no review yet, non-stale NEEDS REVISION critique, `last`
+   not plan-family) — that state is deterministic under
+   `_rule_pr_exists_no_review` (row 7: `REVIEW in (None, "pending", "ready")`
+   and no review verdict recorded). The test asserts the exact outcome
+   `Dispatch(skill=SKILL_DO_PR_REVIEW, row_id="7")` for that constructed state
+   *and* the weaker invariant (`result.skill != SKILL_DO_PLAN`) as a named,
+   separate assertion so a future refactor that changes which PR-stage row
+   wins still fails loudly on the specific-row assertion rather than silently
+   passing on the weak one alone. Both the Step by Step Tasks (task 3) and
+   Success Criteria below are updated to reflect the pinned row.
