@@ -55,6 +55,18 @@ def test_docs_only_with_changelog(tmp_path):
     assert res.shape == "docs-only"
 
 
+def test_docs_only_env_example(tmp_path):
+    res = classify(
+        changed_files=[".env.example"],
+        net_lines=6,
+        has_new=False,
+        has_deleted=False,
+        repo_root=tmp_path,
+    )
+    assert res.shape == "docs-only"
+    assert res.allowlist_used == "docs-only"
+
+
 def test_lockfile_only_happy_path(tmp_path):
     res = classify(
         changed_files=["uv.lock"],
@@ -153,6 +165,19 @@ def test_mixed_50pct_exact_match(tmp_path):
 def test_mixed_single_py_only_no_safe_shape_claim(tmp_path):
     """A single-file python change is plain feature, not 'claimed mixed'."""
     assert detect_mixed(["agent/feature.py"]) is None
+
+
+def test_env_example_plus_py_is_mixed_not_safe(tmp_path):
+    res = classify(
+        changed_files=[".env.example", "config/settings.py"],
+        net_lines=8,
+        has_new=False,
+        has_deleted=False,
+        repo_root=tmp_path,
+    )
+    assert res.shape == "mixed"
+    assert res.claimed_shape == "docs-only"
+    assert "config/settings.py" in res.disqualifiers
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +330,12 @@ def test_partition_lockfile():
     matched, unmatched = partition_by_allowlist(["uv.lock", "pyproject.toml"], "lockfile-only")
     assert matched == ["uv.lock"]
     assert unmatched == ["pyproject.toml"]
+
+
+def test_partition_env_example():
+    matched, unmatched = partition_by_allowlist([".env.example", "agent/y.py"], "docs-only")
+    assert matched == [".env.example"]
+    assert unmatched == ["agent/y.py"]
 
 
 def test_docs_only_does_not_match_py_md_chain():
