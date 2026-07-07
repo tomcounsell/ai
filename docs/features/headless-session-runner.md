@@ -24,7 +24,7 @@ process pool, no idle-scraping startup phase.
 |--------|------|
 | `runner.py` | The single-session turn loop for every session type: spawn one `claude -p` per turn, route the PM's output, run the steer-preempt watcher, own resume-scalar persistence timing. |
 | `role_driver.py` | `HeadlessRoleDriver` — builds the subprocess invocation (prime slash command vs. resume), parses stream-json, reconciles the hook-edge snapshot against the turn's own edges. |
-| `router.py` | `classify_pm_prefix` (regex, zero LLM calls) and the `RouteOutcome` exit-classification table. |
+| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the exit-classification vocabulary (`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS`). |
 | `hook_edge.py` / `hook_forwarder.py` | The turn-end/needs-human signal path: a fail-silent NDJSON forwarder writes each hook event to a per-session file; the consumer tails it with a durable `(event_cursor, byte_offset, fingerprint)` cursor. |
 | `transcript_tailer.py` | Incremental JSONL transcript reads for dashboard telemetry (byte-offset cadence, unchanged from the prior implementation). |
 | `adapter.py` | Executor-facing construction: delivery callbacks, the four-scalar resume persistence, exit-summary publication. |
@@ -98,7 +98,10 @@ A compact **turn-history mirror** — `{ts, actor: pm|dev, text}` — is appende
 to the existing session-event stream every turn. It is observability and a
 disaster-recovery seed if on-disk transcripts are ever garbage-collected; the
 on-disk Claude transcripts remain the source of truth and the mirror is never
-read on the normal resume path.
+read on the normal resume path. The event stream is capped at
+`SESSION_RUNNER_SESSION_EVENTS_MAX_ENTRIES` (default 200, oldest entries
+dropped first, `exit_summary` entries preserved) so a long-lived session's
+per-save serialization stays bounded.
 
 Stale or invalid scalars (missing `runner_cwd`, unknown `claude_session_uuid`)
 discard cleanly to a cold start with a full first-turn prime — there is no
@@ -136,8 +139,10 @@ this cutover.
 
 Health is protocol-derived, not screen-derived: subprocess-alive plus
 hook-edge/turn-record recency. The only ceilings are the per-turn timeout and
-`hook_turn_end_wait_s`. A turn whose subprocess dies without a `result` event
-always resolves to `exit_reason=error` with a persona-safe user message —
+`hook_turn_end_wait_s`. A turn whose subprocess exits nonzero without a
+`result` event classifies as `exit_reason=headless_nonzero_exit_no_result`
+even when partial streamed text accumulated; any non-clean `exit_reason`
+finalizes the `AgentSession` as `failed` with a persona-safe user message —
 never a false `completed` (closing the class of failure documented in the
 [PTY-fragility postmortem](../postmortems/2026-07-06-granite-pty-fragility.md)).
 
@@ -157,7 +162,7 @@ prior substrate was retired outright rather than patched again.
 |------|---------|
 | `agent/session_runner/runner.py` | Turn loop, steer-preempt watcher, resume-scalar timing |
 | `agent/session_runner/role_driver.py` | Subprocess construction, prime vs. resume, stream-json parse |
-| `agent/session_runner/router.py` | `classify_pm_prefix`, `RouteOutcome` |
+| `agent/session_runner/router.py` | `classify_pm_prefix`, exit-classification frozensets |
 | `agent/session_runner/hook_edge.py`, `hook_forwarder.py` | Turn-end / needs-human hook signal path |
 | `agent/session_runner/transcript_tailer.py` | Dashboard telemetry transcript reads |
 | `agent/session_runner/adapter.py` | Executor wiring, delivery callbacks, resume persistence |
