@@ -1616,43 +1616,57 @@ def _compose_tool_timeout_steering(tool_name: str, original_request: str | None)
     )
 
 
-async def _deliver_tool_timeout_degraded_notice(
+async def _deliver_oneshot_dedup_notice(
     entry: "AgentSession",
-    tool_name: str | None,
-) -> None:
-    """Send a one-shot degraded-service notice when a tool timeout leads to
-    session failure.
+    *,
+    dedup_key: str,
+    ttl: int,
+    message: str,
+) -> bool:
+    """Shared delivery mechanics for a one-shot, deduped, user-facing notice.
 
-    Idempotent: the first caller wins via Redis SETNX on
-    ``tool_timeout:degraded_sent:{session_id}`` (1 h TTL). Subsequent calls
-    return immediately.
+    Factored out of ``_deliver_tool_timeout_degraded_notice`` (NIT: eliminate
+    duplication rather than growing a second near-identical helper) so both it
+    and ``_deliver_terminal_interrupt_notice`` share the same callback
+    resolution, ``FileOutputHandler`` fallback, and fail-open dedup lock —
+    only the dedup key, TTL, and message text differ per caller.
+
+    Idempotent: the first caller wins via Redis SETNX on ``dedup_key`` (``ttl``
+    seconds). A **successful** ``acquired is False`` (the key is legitimately
+    already held) suppresses the send. A Redis **exception** during
+    acquisition fails *open*: it is logged at WARNING and the send proceeds
+    anyway — dedup unavailability must never silence a genuine notice.
 
     Transport is read from ``entry.extra_context["transport"]`` — AgentSession
-    has no top-level ``transport`` field.  Falls back to FileOutputHandler when
+    has no top-level ``transport`` field. Falls back to FileOutputHandler when
     no registered callback is found.
 
     Never raises; failures are logged at WARNING and swallowed.
+
+    Returns:
+        True if the message was sent, False if it was suppressed by dedup or
+        delivery failed.
     """
+    session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
     try:
-        session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
         project_key = getattr(entry, "project_key", None) or "unknown"
 
-        # Atomic dedup: only the first caller sends the notice (1 h window).
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
-            lock_key = f"tool_timeout:degraded_sent:{session_id}"
-            acquired = _R.set(lock_key, "1", nx=True, ex=3600)
-            if not acquired:
+            acquired = _R.set(dedup_key, "1", nx=True, ex=ttl)
+            if acquired is False:
                 logger.debug(
-                    "[session-health] degraded notice already sent for %s — skipping",
+                    "[session-health] one-shot notice already sent for %s (key=%s) — skipping",
                     session_id,
+                    dedup_key,
                 )
-                return
+                return False
         except Exception as _lock_err:
             logger.warning(
-                "[session-health] degraded notice lock failed for %s: %s; proceeding anyway",
+                "[session-health] one-shot notice lock failed for %s (key=%s): %s; sending anyway",
                 session_id,
+                dedup_key,
                 _lock_err,
             )
 
@@ -1669,18 +1683,52 @@ async def _deliver_tool_timeout_degraded_notice(
             _fallback = FileOutputHandler()
             send_cb = _fallback.send
 
-        # Compose the user-facing degraded notice.
-        tool_label = tool_name or "the requested service"
-        message = (
-            f"I couldn't finish that — the {tool_label} service didn't respond. "
-            f"Please try again shortly; everything else is working."
-        )
-
         chat_id = getattr(entry, "chat_id", None) or ""
         telegram_message_id = getattr(entry, "telegram_message_id", None) or 0
 
         await send_cb(chat_id, message, telegram_message_id, entry)
+        return True
 
+    except Exception as _err:
+        logger.warning(
+            "[session-health] _deliver_oneshot_dedup_notice failed for %s (key=%s): %s",
+            session_id,
+            dedup_key,
+            _err,
+        )
+        return False
+
+
+async def _deliver_tool_timeout_degraded_notice(
+    entry: "AgentSession",
+    tool_name: str | None,
+) -> None:
+    """Send a one-shot degraded-service notice when a tool timeout leads to
+    session failure.
+
+    Idempotent: the first caller wins via Redis SETNX on
+    ``tool_timeout:degraded_sent:{session_id}`` (1 h TTL). Subsequent calls
+    return immediately. Delivery mechanics (transport resolution, fallback,
+    dedup, fail-open on Redis outage) live in ``_deliver_oneshot_dedup_notice``.
+
+    Never raises; failures are logged at WARNING and swallowed.
+    """
+    session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+    project_key = getattr(entry, "project_key", None) or "unknown"
+
+    tool_label = tool_name or "the requested service"
+    message = (
+        f"I couldn't finish that — the {tool_label} service didn't respond. "
+        f"Please try again shortly; everything else is working."
+    )
+
+    sent = await _deliver_oneshot_dedup_notice(
+        entry,
+        dedup_key=f"tool_timeout:degraded_sent:{session_id}",
+        ttl=3600,
+        message=message,
+    )
+    if sent:
         # Best-effort telemetry counter.
         try:
             from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
@@ -1689,12 +1737,41 @@ async def _deliver_tool_timeout_degraded_notice(
         except Exception:
             pass
 
-    except Exception as _err:
-        logger.warning(
-            "[session-health] _deliver_tool_timeout_degraded_notice failed for %s: %s",
-            getattr(entry, "session_id", "?"),
-            _err,
-        )
+
+async def _deliver_terminal_interrupt_notice(entry: "AgentSession") -> None:
+    """Last-resort terminal-interrupt notice for the subprocess-survived
+    escalation branch (issue: silent-terminal gap introduced by the
+    interrupt-resume-announcement removal).
+
+    When the pre-cancel prediction was non-terminal, the cancel-reason key was
+    never written, so the two ``CancelledError`` send sites
+    (``agent/messenger.py``, ``agent/session_completion.py``) stayed silent and
+    never acquired the ``interrupted-sent`` dedup key. If the subprocess then
+    survives cancel+SIGTERM+SIGKILL, the escalation branch finalizes the
+    session to the terminal ``failed`` status — a genuinely terminal outcome
+    that would otherwise be delivered as complete silence. This helper is the
+    last-resort voice for that case.
+
+    Uses the exact shared ``interrupted-sent:{session_id}`` dedup key (120s
+    TTL) that both send sites use — NOT the degraded-notice helper's
+    ``tool_timeout:degraded_sent`` key or its 3600s TTL — so it dedups against
+    a hypothetical earlier send-site delivery. The caller is responsible for
+    the code-level gate (``not _has_deferred and not _degraded_sent``) that
+    dedups against the sibling ``_deliver_deferred_self_draft_fallback`` /
+    ``_deliver_tool_timeout_degraded_notice`` deliveries — the shared dedup key
+    alone cannot see those.
+
+    Never raises; failures are logged at WARNING and swallowed.
+    """
+    from agent.notification_copy import INTERRUPT_NO_RESUME  # noqa: PLC0415
+
+    session_id = getattr(entry, "session_id", None) or getattr(entry, "agent_session_id", None)
+    await _deliver_oneshot_dedup_notice(
+        entry,
+        dedup_key=f"interrupted-sent:{session_id}",
+        ttl=120,
+        message=INTERRUPT_NO_RESUME,
+    )
 
 
 def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None = None) -> None:
@@ -2141,15 +2218,19 @@ async def _apply_recovery_transition(
         reason,
     )
 
-    # Cancel-reason signal (#1877 defect #1). When THIS function owns the cancel
-    # (handle present), predict the resume-ness of the outcome and write it BEFORE
-    # cancelling, so the interrupt-message send (which fires during the cancel
-    # await below) selects the right copy. `is_local` (abandoned) and the
-    # exhausted-attempts ceiling (failed) are known here and are terminal ->
-    # no_resume; otherwise the transition most likely re-queues to pending ->
-    # resume. The subprocess-survived escalation to `failed` is only known after
-    # the cancel; it re-stamps no_resume in its own branch below and degrades
-    # safely to the resume copy (pre-#1877 behavior) if the send already fired.
+    # Cancel-reason signal (#1877 defect #1; silent-resume inversion). When THIS
+    # function owns the cancel (handle present), predict whether the outcome is
+    # terminal and write it BEFORE cancelling, so the send sites (which fire
+    # during the cancel await below) know whether to speak. `is_local`
+    # (abandoned) and the exhausted-attempts ceiling (failed) are known here and
+    # are terminal -> write `no_resume`. Otherwise the transition most likely
+    # re-queues to pending -> the outcome is non-terminal, so we write nothing
+    # and the send sites stay silent (an auto-resuming interruption is silent by
+    # design). The subprocess-survived escalation to `failed` is only known
+    # after the cancel; that branch below re-stamps `no_resume` and now owns an
+    # explicit, gated terminal send of its own (`_deliver_terminal_interrupt_notice`)
+    # rather than silently degrading, since there is no longer a resume copy to
+    # fall back to.
     # When handle is None the caller (progress-deadline Fix #3) owns the cancel
     # and writes its own reason, so we skip here to avoid a wrong prediction.
     if handle is not None and handle.task is not None and not handle.task.done():
@@ -2158,7 +2239,8 @@ async def _apply_recovery_transition(
         _predicted_terminal = (
             is_local or ((entry.recovery_attempts or 0) + 1) >= MAX_RECOVERY_ATTEMPTS
         )
-        set_cancel_reason(entry.session_id, "no_resume" if _predicted_terminal else "resume")
+        if _predicted_terminal:
+            set_cancel_reason(entry.session_id, "no_resume")
 
     # Cancel the in-flight session task if we have a handle and the task
     # reference has been populated. Cancelling the populated task terminates
@@ -2335,12 +2417,17 @@ async def _apply_recovery_transition(
             # ``failed`` terminal status so the in-process orphan reaper
             # (_TERMINAL_STATUSES) owns cleanup. Do NOT null ``started_at`` into
             # a pending record.
-            # Cancel-reason re-stamp (#1877 defect #1): this escalation to the
-            # terminal `failed` status was NOT predictable before the cancel
-            # above (it depends on the post-cancel subprocess-confirmation), so
-            # the pre-cancel prediction may have written `resume`. Correct it to
-            # `no_resume`; if the interrupt send already fired it degrades safely
-            # to the resume copy (documented acceptable degradation).
+            # Cancel-reason re-stamp (#1877 defect #1; silent-resume inversion):
+            # this escalation to the terminal `failed` status was NOT
+            # predictable before the cancel above (it depends on the
+            # post-cancel subprocess-confirmation), so the pre-cancel
+            # prediction may have written nothing (non-terminal prediction),
+            # leaving the send sites silent and never holding the
+            # `interrupted-sent` dedup key. Correct the reason to `no_resume`
+            # here, then deliver a gated last-resort terminal notice below --
+            # gated so this branch never double-messages the sibling
+            # `_deliver_deferred_self_draft_fallback` / `_deliver_tool_timeout_degraded_notice`
+            # deliveries that already ran (see the send-decision block below).
             from agent.cancel_reason import set_cancel_reason
 
             set_cancel_reason(entry.session_id, "no_resume")
@@ -2348,8 +2435,16 @@ async def _apply_recovery_transition(
                 "deferred_self_draft_pending"
             )
             await _deliver_deferred_self_draft_fallback(entry)
+            _degraded_sent = False
             if not _has_deferred and reason_kind == "tool_timeout":
                 await _deliver_tool_timeout_degraded_notice(entry, tool_name)
+                _degraded_sent = True
+            # Last-resort terminal voice: only when neither the real answer nor
+            # the degraded notice already spoke, so the branch never
+            # double-messages. Also deduped against the two send sites via the
+            # shared `interrupted-sent` SET-NX inside the helper.
+            if not _has_deferred and not _degraded_sent:
+                await _deliver_terminal_interrupt_notice(entry)
             finalize_session(
                 entry,
                 "failed",

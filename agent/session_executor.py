@@ -690,8 +690,9 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
       a no-resume exit narrative it has written ``cancel-reason:{session_id}=no_resume``
       (and sent its own interrupt message); this function returns early so the user is
       not sent two competing exit stories (folded-in critique concern: cross-class dedup
-      collision). A stale ``resume`` reason does NOT suppress the notice — a session
-      that was requeued and then genuinely crashed still deserves the failure copy.
+      collision). An absent cancel-reason does NOT suppress the notice — a session that
+      was silently auto-resumed (or requeued) and then genuinely crashed still deserves
+      the failure copy.
     * **Never blocks finalization.** The send is bounded by a 2s ``wait_for`` and
       every error (including the timeout) is swallowed — this coroutine never
       raises, so the caller's finalize path always proceeds.
@@ -701,10 +702,12 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
         from agent.notification_copy import FAILURE_NOTICE
 
         # Cross-class dedup collision (critique concern): a killer that already
-        # owns a *no-resume* exit narrative must not be double-messaged. We key on
-        # "no_resume" specifically (not merely "present"): a stale "resume" reason
-        # from an interrupt-and-requeue followed by a genuine crash in the same TTL
-        # window should still surface the failure notice, not be silently swallowed.
+        # owns a *no-resume* exit narrative must not be double-messaged. The
+        # post-silent-resume contract narrows the signal to two states:
+        # `"no_resume"` present -> a killer owns the terminal exit narrative,
+        # suppress this notice; absent -> no killer narrative (the interruption
+        # was silent and the session either resumed or is genuinely crashing
+        # now), so the failure notice must still surface.
         if get_cancel_reason(session_id) == "no_resume":
             logger.info(
                 "[%s] Failure notice suppressed — a killer already owns the "

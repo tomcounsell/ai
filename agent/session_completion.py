@@ -600,9 +600,11 @@ async def _deliver_pipeline_completion(
       * Idempotent via Redis SETNX on
         ``pipeline_complete_pending:{parent_id}`` (60s TTL). Secondary
         invocations log at INFO and return.
-      * CancelledError-safe: on shutdown, best-effort deliver an
-        "I was interrupted" line (dedup'd on ``interrupted-sent:{session_id}``)
-        then re-raise to preserve asyncio semantics.
+      * CancelledError-safe: on shutdown, silent unless the cancel-reason is
+        the terminal ``"no_resume"``, in which case best-effort deliver the
+        terminal no-resume interrupt notice (dedup'd on
+        ``interrupted-sent:{session_id}``) then re-raise to preserve asyncio
+        semantics.
       * All other exceptions are caught and logged; the session finalization
         path still runs so the parent never lingers ``"running"`` indefinitely.
 
@@ -1148,7 +1150,19 @@ async def _send_interrupted_message(
     parent: AgentSession,
     session_id: str,
 ) -> None:
-    """Best-effort 'I was interrupted' delivery with Risk-6 flap-dedup."""
+    """Best-effort terminal no-resume interrupt delivery with Risk-6 flap-dedup.
+
+    An interruption the machinery will recover from (re-queue + auto-resume) is
+    SILENT. We read the cancel-reason first and only acquire the dedup key and
+    send when the reason is the terminal ``"no_resume"``; absent or any other
+    value returns immediately with no send.
+    """
+    from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
+
+    reason = get_cancel_reason(session_id)
+    if reason != "no_resume":
+        return
+
     should_send = True
     try:
         from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
@@ -1169,17 +1183,12 @@ async def _send_interrupted_message(
     if not should_send:
         return
 
-    # Reason-aware copy (#1877 defect #1). We reach here only after WINNING the
-    # interrupted-sent SET-NX above, so this is the single sending site for this
-    # session_id. Read the cancel-reason non-destructively (180s TTL is the only
-    # reclaimer); absent/unknown -> resume copy (historical default).
-    from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
-    from agent.notification_copy import INTERRUPT_NO_RESUME, INTERRUPT_RESUME  # noqa: PLC0415
+    from agent.notification_copy import INTERRUPT_NO_RESUME  # noqa: PLC0415
 
-    reason = get_cancel_reason(session_id)
-    msg = INTERRUPT_NO_RESUME if reason == "no_resume" else INTERRUPT_RESUME
     try:
-        await asyncio.wait_for(send_cb(chat_id, msg, telegram_message_id, parent), timeout=2.0)
+        await asyncio.wait_for(
+            send_cb(chat_id, INTERRUPT_NO_RESUME, telegram_message_id, parent), timeout=2.0
+        )
     except (TimeoutError, Exception) as send_err:
         logger.warning("[completion-runner] interrupted send failed/timed out: %s", send_err)
 
