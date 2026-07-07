@@ -1,5 +1,5 @@
 ---
-status: Built
+status: docs_complete
 pr: https://github.com/tomcounsell/ai/pull/1930
 type: chore
 appetite: Large
