@@ -1,5 +1,6 @@
 ---
-status: Ready
+status: Built
+pr: https://github.com/tomcounsell/ai/pull/1930
 type: chore
 appetite: Large
 owner: Valor Engels
