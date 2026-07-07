@@ -25,7 +25,7 @@ that the router should recover automatically.
   `last_dispatched_skill` is now `/do-pr-review` (not `/do-patch`), so row 8b
   no longer matches. Row 8c (`_rule_review_in_progress_no_verdict`, line 967)
   only fires when `REVIEW == in_progress`; if the crash left the REVIEW marker
-  in any other state, 8c also misses. All 16 rows fall through →
+  in any other state, 8c also misses. All 17 rows fall through →
   `Blocked("no matching dispatch rule")`. A human/supervisor must notice and
   re-dispatch the review by hand (exactly what happened in the #1924 endgame).
 
@@ -117,7 +117,7 @@ The two bugs live entirely in step 2 (G3 seam for fix b) and step 3 (missing REV
 - **Coupling:** unchanged. The new row and the row-3 guard use existing helpers (`_latest_review_verdict`, `_critique_verdict_is_stale`, `meta.get("pr_number")`).
 - **Data ownership:** unchanged.
 - **Reversibility:** trivial — revert the predicate edits and the one new row.
-- **Parity contract:** the router's row set is mirrored in `.claude/skills/sdlc/SKILL.md` ("16 rows"). Adding a recovery row (fix a) requires updating that count and the row description so the docstring/SKILL parity stays honest.
+- **Parity contract:** the router's row set is mirrored in `.claude/skills/sdlc/SKILL.md`, which currently claims "16 rows." Verified against `git grep -c 'DispatchRule(' agent/sdlc_router.py` on baseline commit `8485db99`: the table actually has **17** rows today (`1,2,2b,2c,3,4a,4b,4c,5,6,7,8,8b,8c,9,10,10b`) — SKILL.md's "16 rows" claim is already off-by-one *before* this plan touches anything. Adding row 8d brings the table to **18** rows. This plan's documentation task fixes SKILL.md to state "18 rows" (the correct post-fix count), which also retires the pre-existing baseline drift rather than compounding it (i.e. it does not naively bump whatever SKILL.md currently says by one).
 
 ## Appetite
 
@@ -221,6 +221,29 @@ No prerequisites — this work modifies a pure in-process decision function and 
 - **Fix (b) is the minimal guard** — one line at the top of
   `_rule_critique_needs_revision`, matching the shape of the row-8b staleness
   step-aside so the two read as siblings.
+- **8d's `last == /do-pr-review` check is not the same antipattern this issue
+  diagnoses, and that distinction is now explicit.** The root-cause pattern
+  named in "Why Previous Fixes Failed" is recovery predicates hinging on
+  `last_dispatched_skill` matching one narrow expected value as a *routing*
+  discriminator — e.g. row 8b requiring `last == /do-patch` to decide "should
+  we go to review next," which breaks the instant a crash leaves `last` at an
+  unexpected value. Row 8d's use of `last == /do-pr-review` is a different
+  kind of check: it is not choosing *where to route*, it is confirming *what
+  crashed*. 8d's five-part predicate (`pr_number` set, `PATCH == completed`,
+  no recorded REVIEW verdict, `REVIEW ∈ {completed, failed}`, `last ==
+  /do-pr-review`) already narrows to a single reachable state by the other
+  four conditions; `last == /do-pr-review` is the confirming signal that the
+  dangling REVIEW marker was left by a review dispatch specifically (as
+  opposed to, say, a stale marker from some earlier, already-resolved review
+  cycle) — it is evidence corroborating the diagnosis, not a brittle gate an
+  unrelated crash could dodge. Contrast with row 2c's generalization: 2c was
+  made marker-agnostic because its bug *was* a `last`-as-router coupling
+  (matching only one exact prior-skill value to decide the next hop). 8d has
+  no such coupling to remove — it dispatches `/do-pr-review` regardless of
+  what `last` was, using `last` only to help identify the terminal-but-empty
+  REVIEW marker as review-crash residue rather than pre-review residue.
+  Decision: keep the check as specified; it is intentional and safe, not an
+  instance of the antipattern.
 - **G4 loop-bound (Concern-2).** Mirror row 8c's docstring convention: 8d's
   docstring states "Loop-bound by G4 (guard_g4_oscillation): same_stage_dispatch_count
   caps re-dispatches and escalates to a human if the re-review keeps
@@ -233,8 +256,10 @@ No prerequisites — this work modifies a pure in-process decision function and 
 - **Reuse existing helpers:** `_latest_review_verdict`, `meta.get("pr_number")`,
   `stage_states.get("REVIEW")`, `SKILL_DO_PATCH`, `SKILL_DO_PR_REVIEW`,
   `_rule_pr_exists_no_review`. No new helpers required.
-- **Update SKILL.md** row count ("16 rows" → "17 rows") and add the 8d row
-  description so the router↔SKILL parity holds.
+- **Update SKILL.md** row count (currently mislabeled "16 rows"; actual
+  baseline per `grep -c 'DispatchRule(' agent/sdlc_router.py` is 17; correct
+  post-fix value is "18 rows") and add the 8d row description so the
+  router↔SKILL parity holds.
 
 ## Spike Results
 
@@ -261,7 +286,7 @@ No prerequisites — this work modifies a pure in-process decision function and 
 ## Test Impact
 
 - [ ] `tests/unit/test_sdlc_router.py` — UPDATE (additive): add a `TestReReviewCrashRecovery` class (fix a: reproduction pinned to `REVIEW ∈ {completed, failed}`, the `_rule_pr_exists_no_review == False` companion assertion, row 7/8b/8c regression checks, and the G4 loop-bound test) and a `TestRow3OpenPrStepAside` class (fix b) using the existing `_base_meta`/`_base_states`/`_dispatch_history` helpers. No existing test cases change behavior.
-- [ ] Router↔SKILL parity check (if a parity test exists over `DISPATCH_TABLE` row count / docstrings) — UPDATE: bump expected row count to include 8d. Grep for any test asserting `len(DISPATCH_TABLE)` or "16 rows" and update in lockstep with SKILL.md.
+- [ ] Router↔SKILL parity check (if a parity test exists over `DISPATCH_TABLE` row count / docstrings) — UPDATE: bump expected row count to 18 (17 baseline + 8d) rather than incrementing whatever the test currently hardcodes. Grep for any test asserting `len(DISPATCH_TABLE)` or a hardcoded row-count string and update in lockstep with SKILL.md; prefer deriving the expected count from `len(DISPATCH_TABLE)` at test time over a second hardcoded literal.
 
 No other test files touch the router. Justification: `decide_next_dispatch` is imported only by `sdlc-tool` and `tests/unit/test_sdlc_router.py`; the change is additive (one new row + one guard line) and does not alter any existing row's output for states those tests already cover.
 
@@ -287,8 +312,8 @@ No other test files touch the router. Justification: `decide_next_dispatch` is i
 **Mitigation:** With a PR open, PR-stage rows (7/8/8b/8c/8d/9/10) already own the state; the correct action on shipped code is review/patch/merge, not re-plan. Add a test asserting the open-PR + NEEDS REVISION state routes to a PR-stage skill (not `Blocked`, not `/do-plan`).
 
 ### Risk 3: SKILL.md parity drift
-**Impact:** Adding a row without updating `.claude/skills/sdlc/SKILL.md` breaks the documented "16 rows" contract and any parity test.
-**Mitigation:** Update SKILL.md row count and add the 8d description in the same PR; grep for hardcoded "16 rows" strings.
+**Impact:** SKILL.md's row-count claim is *already* wrong at baseline (says "16 rows" when the table has 17) — adding row 8d without fixing both the pre-existing drift and the new increment leaves the documented contract wrong in two ways, and any parity test would either miss the baseline error or lock in a stale count.
+**Mitigation:** Update SKILL.md to state "18 rows" (17 baseline, verified via `grep -c 'DispatchRule(' agent/sdlc_router.py`, plus 8d) rather than incrementing whatever string is currently there; add the 8d description in the same PR. Prefer a Verification check that derives the count dynamically (`grep -c 'DispatchRule('`) over a hardcoded literal so this can't silently drift again.
 
 ## Race Conditions
 
@@ -310,7 +335,7 @@ No agent integration required — this is an internal change to the SDLC router 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `.claude/skills/sdlc/SKILL.md` — bump the router row count ("16 rows" → "17 rows") and add the row 8d description (crashed re-review recovery). Note the row-3 open-PR step-aside alongside the existing staleness step-aside.
+- [ ] Update `.claude/skills/sdlc/SKILL.md` — correct the router row count to "18 rows" (SKILL.md currently says "16 rows," which was already off-by-one against the actual baseline of 17 before this plan; 8d brings it to 18 — fix the underlying drift, not just increment the existing wrong string) and add the row 8d description (crashed re-review recovery). Note the row-3 open-PR step-aside alongside the existing staleness step-aside.
 - [ ] Update `docs/features/` router/SDLC-pipeline doc if one enumerates the dispatch rows (grep `docs/features` for "row 8b"/"8c"/"dispatch rule"); add 8d and the row-3 guard. If none enumerates rows, state so in the PR.
 
 ### Inline Documentation
@@ -327,7 +352,7 @@ No agent integration required — this is an internal change to the SDLC router 
 - [ ] After fix (b): that state → `Dispatch(skill="/do-pr-review", row_id="7")` (pinned), plus the general invariant `skill != "/do-plan"` asserted separately.
 - [ ] Regression: existing 7, 8b, 8c, and stale-critique (2b) states still route to their own rows after 8d is added.
 - [ ] G4 loop-bound regression test: repeatedly dispatch `/do-pr-review` for the gap-(a) reproduction state, incrementing `same_stage_dispatch_count` past `MAX_SAME_STAGE_DISPATCHES`, and assert the router escalates to `Blocked` with `guard_id="G4"` instead of looping forever on row 8d.
-- [ ] `.claude/skills/sdlc/SKILL.md` row count and description updated; any `len(DISPATCH_TABLE)`/"16 rows" assertion updated in lockstep.
+- [ ] `.claude/skills/sdlc/SKILL.md` row count corrected to "18 rows" (not just incremented from whatever it currently says) and description updated; any `len(DISPATCH_TABLE)` assertion updated in lockstep; prefer a dynamic `grep -c 'DispatchRule('`-derived check over a new hardcoded literal.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -394,7 +419,7 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Parallel**: false
 - Add/confirm tests that row 7 (`REVIEW in (None, "pending", "ready")`), 8b (`last=/do-patch`), 8c (`REVIEW=in_progress`), and 2b (stale critique) states still route to their own rows unchanged after 8d is added.
 - Add a G4 loop-bound regression test for row 8d (Concern-2): starting from the gap-(a) reproduction state, set `meta["last_dispatched_skill"] = SKILL_DO_PR_REVIEW` and `meta["same_stage_dispatch_count"] = MAX_SAME_STAGE_DISPATCHES` (reusing the existing G4 test helpers/constants already in `tests/unit/test_sdlc_router.py` for other guarded rows); assert `decide_next_dispatch(...)` returns `Blocked` with `guard_id="G4"` rather than `Dispatch(row_id="8d")` — proving repeated crash-and-redispatch cycles escalate to a human instead of looping.
-- Update `.claude/skills/sdlc/SKILL.md` row count and add the 8d description + row-3 step-aside note. Update any `len(DISPATCH_TABLE)`/"16 rows" assertion.
+- Update `.claude/skills/sdlc/SKILL.md` row count to "18 rows" (correcting the pre-existing "16 rows" baseline drift, not just incrementing it) and add the 8d description + row-3 step-aside note. Update any `len(DISPATCH_TABLE)` assertion, preferring a dynamically-derived check over a hardcoded literal.
 
 ### 5. Validation
 - **Task ID**: validate-all
@@ -415,7 +440,7 @@ No agent integration required — this is an internal change to the SDLC router 
 | Row 8d exists | `grep -c '"8d"' agent/sdlc_router.py` | output > 0 |
 | Row 3 has PR step-aside | `grep -c 'pr_number' agent/sdlc_router.py` | output > 0 |
 | Gap-a recovery covered | `grep -rc 'row_id == "8d"\|row_id=="8d"\|"8d"' tests/unit/test_sdlc_router.py` | output > 0 |
-| SKILL parity updated | `grep -c '17 rows' .claude/skills/sdlc/SKILL.md` | output > 0 |
+| SKILL parity holds | `test "$(grep -c 'DispatchRule(' agent/sdlc_router.py)" = "$(grep -oP '\d+(?= rows)' .claude/skills/sdlc/SKILL.md \| head -1)" && echo MATCH` | prints `MATCH` (derives both sides dynamically so the check can't drift out of sync again; expect `18` on each side post-fix) |
 | Lint clean | `python -m ruff check agent/sdlc_router.py tests/unit/test_sdlc_router.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/sdlc_router.py tests/unit/test_sdlc_router.py` | exit code 0 |
 | Row 3 never plans with open PR | `grep -c 'if meta.get("pr_number"): return False' agent/sdlc_router.py` | output > 0 |
@@ -495,3 +520,39 @@ CRITIQUE`. See the corresponding rows added to Critique Results above.
 
 No open questions remain; the plan proceeds to `/do-plan-critique` (pass 3)
 for verification that these three items are resolved to satisfaction.
+
+## Revision Notes (pass 3)
+
+This pass addresses the CRITIQUE pass-2 verdict (`NEEDS REVISION`, 1 BLOCKER + 1
+non-blocking CONCERN):
+
+1. **BLOCKER — SKILL.md row-count parity fix started from a wrong baseline.**
+   Verified directly against current main rather than trusting the critique's
+   number blindly: `grep -c 'DispatchRule(' agent/sdlc_router.py` returns **17**
+   at baseline (commit `8485db99`), with row_ids
+   `1,2,2b,2c,3,4a,4b,4c,5,6,7,8,8b,8c,9,10,10b`. SKILL.md's "16 rows" claim was
+   already off-by-one *before* this plan's changes. Every "17 rows" reference
+   in the plan (Technical Approach, Documentation task, Success Criteria,
+   Verification, Risk 3, Problem section's "16 rows fall through") has been
+   corrected: the pre-existing baseline gap is now treated as in-scope for this
+   plan's documentation task (SKILL.md is fixed to say "18 rows" — the true
+   post-8d count — not incremented from whatever it currently claims), and the
+   Verification check now derives both sides of the parity comparison
+   dynamically (`grep -c 'DispatchRule('` vs. a `grep -oP` extraction from
+   SKILL.md) instead of asserting a hardcoded literal, so it cannot drift out
+   of sync again.
+2. **CONCERN — row 8d's `last == /do-pr-review` predicate looked like the
+   same last-coupling antipattern the plan itself names as root cause.**
+   Decision: keep the check, with reasoning now documented inline in Technical
+   Approach. The antipattern is `last` used as a *routing* discriminator (row
+   8b/2b-before-generalization style: "if last == X, go to Y"). Row 8d's
+   `last == /do-pr-review` is not deciding *where* to route (it always
+   dispatches `/do-pr-review` for its band) — it is one of five conjunctive
+   conditions confirming *what crashed*, narrowing an already-narrow band
+   (`REVIEW ∈ {completed, failed}`, no verdict, PR open, patch completed) to
+   confirm the dangling marker was left by a review dispatch specifically. No
+   generalization needed; documented as an intentional, safe narrow check
+   rather than an instance of the pattern being fixed.
+
+Both items resolved without introducing new open questions. Plan proceeds to
+`/do-plan-critique` (pass 3) for verification.
