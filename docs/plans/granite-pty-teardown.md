@@ -313,18 +313,18 @@ No new MCP servers or `.mcp.json` changes. Integration is subtractive:
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/headless-session-runner.md` — the new execution model: runner loop, role drivers, hook-edge turn returns, steer-preempt, simple resume, liveness (absorbs the rewritten `granite-hook-driven-turn-returns.md` content)
-- [ ] Delete `docs/features/granite-pty-production.md`, `granite-interactive-tui.md`, `granite-login-recovery.md`, `granite-failure-simulation-harness.md`, `granite-hook-driven-turn-returns.md` (content absorbed above)
-- [ ] Rewrite the execution-path sections of `docs/features/bridge-worker-architecture.md` and `docs/features/eng-session-architecture.md`
-- [ ] Update `docs/features/README.md` index (sort check enforces)
-- [ ] Update `CLAUDE.md` architecture diagram (the "granite PTY container" line) and Quick Commands if any die
-- [ ] Update `docs/features/session-steering.md` for boundary-drain + auto-preempt semantics
-- [ ] Mark `docs/plans/granite_lossless_checkpoint_resume.md` frontmatter `status: Cancelled` with a superseded-by pointer to this plan
-- [ ] Keep `docs/infra/granite-oauth-token.md` (the surviving auth doc); scrub its PTY framing
+- [x] Create `docs/features/headless-session-runner.md` — the new execution model: runner loop, role drivers, hook-edge turn returns, steer-preempt, simple resume, liveness (absorbs the rewritten `granite-hook-driven-turn-returns.md` content)
+- [x] Delete `docs/features/granite-pty-production.md`, `granite-interactive-tui.md`, `granite-login-recovery.md`, `granite-failure-simulation-harness.md`, `granite-hook-driven-turn-returns.md` (content absorbed above)
+- [x] Rewrite the execution-path sections of `docs/features/bridge-worker-architecture.md` and `docs/features/eng-session-architecture.md`
+- [x] Update `docs/features/README.md` index (sort check enforces)
+- [x] Update `CLAUDE.md` architecture diagram (the "granite PTY container" line) and Quick Commands if any die
+- [x] Update `docs/features/session-steering.md` for boundary-drain + auto-preempt semantics
+- [x] Mark `docs/plans/granite_lossless_checkpoint_resume.md` frontmatter `status: Cancelled` with a superseded-by pointer to this plan
+- [x] Keep `docs/infra/granite-oauth-token.md` (the surviving auth doc); scrub its PTY framing
 
 ### Inline Documentation
-- [ ] Module docstring on `agent/session_runner/` stating the protocol-not-paint contract and the one-way mandate
-- [ ] Docstrings preserved on graduated modules (hook_edge's "never touches the PTY" contract becomes "the only turn-end source")
+- [x] Module docstring on `agent/session_runner/` stating the protocol-not-paint contract and the one-way mandate
+- [x] Docstrings preserved on graduated modules (hook_edge's "never touches the PTY" contract becomes "the only turn-end source")
 
 ## Success Criteria
 
