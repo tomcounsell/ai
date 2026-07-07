@@ -1632,10 +1632,11 @@ async def _deliver_oneshot_dedup_notice(
     only the dedup key, TTL, and message text differ per caller.
 
     Idempotent: the first caller wins via Redis SETNX on ``dedup_key`` (``ttl``
-    seconds). A **successful** ``acquired is False`` (the key is legitimately
-    already held) suppresses the send. A Redis **exception** during
-    acquisition fails *open*: it is logged at WARNING and the send proceeds
-    anyway — dedup unavailability must never silence a genuine notice.
+    seconds). A **successful** SETNX call that reports the key is already held
+    (redis-py returns ``None``/``False`` on a failed ``nx=True`` set) suppresses
+    the send. A Redis **exception** during acquisition fails *open*: it is
+    logged at WARNING and the send proceeds anyway — dedup unavailability must
+    never silence a genuine notice.
 
     Transport is read from ``entry.extra_context["transport"]`` — AgentSession
     has no top-level ``transport`` field. Falls back to FileOutputHandler when
@@ -1655,7 +1656,7 @@ async def _deliver_oneshot_dedup_notice(
             from popoto.redis_db import POPOTO_REDIS_DB as _R  # noqa: PLC0415
 
             acquired = _R.set(dedup_key, "1", nx=True, ex=ttl)
-            if acquired is False:
+            if not acquired:
                 logger.debug(
                     "[session-health] one-shot notice already sent for %s (key=%s) — skipping",
                     session_id,
