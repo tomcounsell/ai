@@ -184,6 +184,40 @@ into the next run's parse step. The aggregator wraps `ET.parse()` in
 proceed. If all N runs produce `ParseError` or outer-timeout, the tool exits
 non-zero without writing.
 
+### Nameless-`<testcase>` resilience (issue #1853)
+
+xdist/execnet worker crashes can occasionally emit a `<testcase>` element
+with no `name` attribute. Before this fix, `parse_junitxml` raised
+`JunitxmlParseError` on that single element and the caller discarded the
+**entire run** — on 2026-07-02 this silently degraded a 3-run refresh to a
+1-run baseline (`runs: 1`), which misclassifies every transient flake as
+`real` (there's no majority to compare against with only one observation).
+
+`parse_junitxml` now handles a nameless `<testcase>` per-element instead of
+per-run:
+
+- If it has an `<error>` child, it's a genuine collection error — classify
+  it as `collection_error` under a best-effort node id (`classname` if
+  present, else a synthetic `<unknown>::<index>` placeholder).
+- Otherwise, skip just that one element and keep parsing the rest of the
+  run normally.
+
+The whole run is only discarded for a true `ParseError` (truncated/malformed
+XML) or a `FileNotFoundError`, never for one structurally-odd testcase.
+
+### Loud failure below 2 usable runs
+
+Flaky classification requires a majority across runs — with 0 or 1 usable
+runs there's no way to distinguish a flake from a deterministic failure.
+`refresh_test_baseline.py` now refuses to let a degraded run count pass
+silently: when the count of usable/surviving runs is below
+`MIN_USABLE_RUNS_FOR_FLAKY_DETECTION` (2), it appends a
+`WARNING: only N usable run(s) -- flaky classification unavailable` line to
+the summary output (stdout in normal mode, stderr in `--dry-run`) **and**
+exits non-zero, even though it still writes the (degraded) baseline it was
+able to build. A CI/cron job that checks the exit code will no longer
+mistake a flaky-blind single-run baseline for a healthy multi-run one.
+
 ### Dirty-tree capture
 
 The refresh tool captures `git rev-parse --short HEAD` plus a `-dirty` suffix
@@ -229,6 +263,64 @@ true:
 - `commit` ends with `-dirty`
 
 The warning suggests running `python scripts/refresh_test_baseline.py`.
+
+### Staleness decision (issue #1933)
+
+The baseline drifted to ~60 days stale before PR #1930, producing 40 false
+regression flags at that PR's merge gate. The resolution keeps the existing
+soft-warn and adds a lightweight detector, but deliberately does **not**
+change how staleness is enforced:
+
+- **Soft-warn kept, no hard-block.** `data/main_test_baseline.json` is
+  per-machine (see Data ownership below); hard-blocking every merge on a
+  machine because a local file is old would be strictly worse than a
+  warning — it would halt all merges until someone runs a multi-minute
+  3× full-suite refresh. The existing 14-day soft-warn already fired and
+  was actionable at PR #1930 (a manual re-classification pass, not a missed
+  regression).
+- **No scheduled full-suite auto-regeneration.** A weekly 3×-full-suite
+  reflection running on a live worker machine would reintroduce the
+  Redis-collision / memory-thrash hazard that parallel full-suite runs are
+  already known to cause on this project. Rejected as a fix.
+- **New: a cheap age-only detector reflection.** `reflections/housekeeping/test_baseline_refresh_check.py`
+  reads `data/main_test_baseline.json`'s `generated_at` and compares it
+  against `STALENESS_THRESHOLD` (imported from `scripts/baseline_gate.py` —
+  single source of truth). It runs **no tests** — only reads a small JSON
+  file — so it carries none of the full-suite hazard. It turns silent
+  60-day drift into a visible weekly nudge; the operator then runs the
+  (now #1853-corrected) `refresh_test_baseline.py` manually once the
+  machine is quiescent.
+- **`_baseline_post_merge_update.py` intentionally does not refresh
+  `generated_at`.** Its decay logic ages out stale `real` entries after
+  repeated non-occurrence on merged PRs, but decaying entries is not the
+  same as re-observing `main` — so `generated_at` staying untouched is
+  correct, and periodic operator-run regeneration remains necessary. The
+  new detector reflection is what surfaces that need instead of relying on
+  someone to notice.
+
+#### Deploying the detector reflection
+
+The reflection module ships in this repo, but only runs once registered in
+the per-machine, gitignored, iCloud-synced `~/Desktop/Valor/reflections.yaml`
+(see `docs/features/reflections.md` for the registry format). Add an entry
+like:
+
+```yaml
+- name: test-baseline-refresh-check
+  description: "Warn when data/main_test_baseline.json is older than the merge-gate's staleness threshold"
+  every: 604800s   # weekly
+  priority: low
+  execution_type: function
+  callable: "reflections.housekeeping.test_baseline_refresh_check.run"
+  enabled: true
+  output_sink: log_only
+```
+
+No `scripts/update/run.py` change is required — the YAML scheduler picks up
+the callable via `importlib` once the entry exists. Since the reflection
+scheduler subprocess (`python -m reflections`, `com.valor.reflection-worker`)
+is itself only installed on worker/bridge machines, no separate role gate is
+needed on the entry.
 
 ### Bootstrap path
 
@@ -316,19 +408,27 @@ the 5% noise threshold.
 ## Tests
 
 - `tests/unit/test_refresh_test_baseline.py` — junitxml parsing (including
-  truncated-file safety), classifier precedence, exact-prefix timeout match
-  vs. loose substring, dirty-tree commit capture, `--merge` note
-  preservation, `--dry-run` defaults.
+  truncated-file safety, and the #1853 nameless-`<testcase>` classify-or-skip
+  paths), classifier precedence, exact-prefix timeout match vs. loose
+  substring, dirty-tree commit capture, `--merge` note preservation,
+  `--dry-run` defaults, and the `main()` degraded-run (<2 usable runs) loud
+  WARNING + non-zero exit path.
 - `tests/unit/test_do_merge_baseline.py` — schema-v1 load (backwards compat), schema-v2 load,
   new-regression detection (including the PR #1054/#1070 count-coincident
   scenario), flaky pass-through, `hung`/`import_error` pass-through,
   staleness warnings for all three triggers.
+- `tests/unit/reflections/test_test_baseline_refresh_check.py` — the
+  staleness-detector reflection: stale → `warning`, fresh → `ok`, and
+  missing/malformed/directory-shaped baseline → benign `ok` (never raises).
 
 ## See also
 
 - `scripts/refresh_test_baseline.py` — refresh tool
 - `scripts/baseline_gate.py` — merge-gate comparison logic
 - `scripts/_baseline_common.py` — shared junitxml parsing helpers
+- `reflections/housekeeping/test_baseline_refresh_check.py` — weekly age-only
+  staleness detector (issue #1933; requires a per-machine
+  `~/Desktop/Valor/reflections.yaml` entry to actually run)
 - `.claude/commands/do-merge.md` — orchestration
 - [Test Reliability Flaky Filter](test-reliability-flaky-filter.md) — PR #484,
   the PR-branch retry filter (different layer)
