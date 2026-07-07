@@ -4,11 +4,11 @@ The worker's global concurrency slot is owned. Every held permit carries an
 explicit `owner_session_id`, so any actor — the health-check reaper, an
 out-of-band killer, or the owning worker loop — can release it idempotently. A
 session parked with no progress past its deadline is cancelled from the scope
-that owns its execution task: its slot is force-released and its PTY children
-are killed at the file-descriptor level.
+that owns its execution task: its slot is force-released and its runner
+subprocess is torn down via task cancellation.
 
 This is the continuation of [`worker-liveness-recovery.md`](worker-liveness-recovery.md)
-(#1815), which landed the dead-man's-switch and bounded PTY waits and deferred
+(#1815), which landed the dead-man's-switch and deferred
 these two fixes to #1820. Issue #1821 (fixes #5/#6) builds on the lease registry
 described here.
 
@@ -132,42 +132,23 @@ a small on-loop poller. When `now - last_progress > SESSION_PROGRESS_DEADLINE_S`
 while `exec_task` is not done, the watcher consults the shared reprieve gate and,
 if it says kill, finalizes then cancels.
 
-### Transport-aware progress signal
+### Progress signal
 
 `_session_progress_ts(session, acquired_at)` is the max over every progress
-signal that happens to be populated — no hard transport branch:
+signal that happens to be populated:
 
-- **SDK sessions** bump `last_tool_use_at` and `last_turn_at`.
-- **Granite PTY sessions** run the CLI hooks, which never populate those SDK
-  fields — they are structurally dead there. Granite's real progress signal is
-  `last_pty_activity_at` (#1724, refreshed per PTY read-loop iteration by #1843),
-  which is always included in the max. Consuming only the SDK fields for granite
-  would leave `acquired_at` as the sole non-`None` signal and false-kill every
-  granite session the instant it crossed the deadline.
+- `last_tool_use_at` — bumped by the PreToolUse/PostToolUse hooks.
+- `last_turn_at` — bumped on the stream-json `result` event.
 - `acquired_at` — the lease's bind timestamp — is the fallback baseline present
-  for every session regardless of transport, so the deadline is always
-  well-defined.
+  for every session, so the deadline is always well-defined even for a
+  never-started session with no other signal.
 
-### Granite PTY-child kill scope
+### Kill scope
 
-`_apply_recovery_transition`'s `claude_pid` SIGKILL escalation is SDK-path-only
-(`claude_pid` is set only on the SDK path). A granite session runs its container
-on a worker thread (`await asyncio.to_thread(container.run)`) and records no
-`claude_pid`, so a task-cancel cannot stop the OS thread — recovery would leave
-the granite PTY children alive until the orphan reaper.
-
-`_fd_pty_kill(session)` closes that gap, transport-branched:
-
-- **Pool-backed granite** (`claude_pid is None` and `pm_pid`/`dev_pid` set):
-  delegates to the PTYPool's PID-targeted `kill_orphans({pm_pid, dev_pid})` —
-  specific PIDs, never a whole process group, so it can never race the pool's
-  background respawn or kill a PID the pool already recycled. It reads the pool's
-  registry (populated by #1851/#1860); it does **not** re-register PIDs.
-- **Self-spawned granite / SDK session**: no-op. The container's own
-  `_close_pair_and_reap` killpg runs on close for self-spawned pairs, and the SDK
-  path is covered by `_apply_recovery_transition`'s `claude_pid` escalation.
-
-This shares #1843 fix 1's routing — it does not add a fourth kill ladder.
+Subprocess teardown rides `exec_task.cancel()`: the headless session runner's
+harness kills its own `claude -p` child on cancellation (the runner spawns each
+turn's subprocess in its own process group), and the worker-startup orphan
+sweep reaps any survivor.
 
 ### The #1039 SessionHandle contract is honored
 
@@ -180,18 +161,19 @@ completes normally), so an out-of-band killer cancelling `handle.task` tears dow
 the SDK subprocess without propagating `CancelledError` into the worker loop —
 the worker survives. Wiring `handle.task = exec_task` would tear down the healthy
 worker on such a cancel and would be silently reversed by the executor anyway.
-Fix #3's own deadline cancel targets the local `exec_task` reference directly and
-kills the SDK subprocess/PTY itself via `_fd_pty_kill`.
+Fix #3's own deadline cancel targets the local `exec_task` reference directly;
+the runner subprocess is torn down by that cancellation (the harness kills its
+own `claude -p` child).
 
 ### `CancelledError` disambiguation
 
-On expiry the order is fixed: (a) `_fd_pty_kill`; (b) `registry.reclaim(...)`;
-(c) `_apply_recovery_transition(reason_kind="progress_deadline")`, capturing the
-return; (c') if recovery declined (`MAX_RECOVERY_ATTEMPTS` / OOM-defer), re-read
-the row fresh and force `transition_status(..., "cancelled")` only if not already
+On expiry the order is fixed: (a) `registry.reclaim(...)`;
+(b) `_apply_recovery_transition(reason_kind="progress_deadline")`, capturing the
+return; (b') if recovery declined (`MAX_RECOVERY_ATTEMPTS` / OOM-defer), re-read
+the row fresh and force `finalize_session(..., "cancelled")` only if not already
 terminal (a concurrent killer may have won the race — do not overwrite its
-terminal state); (c'') set `finalized_by_execute=True` so the outer `finally` is
-skipped; (d) `exec_task.cancel()` + `await`.
+terminal state); (b'') set `finalized_by_execute=True` so the outer `finally` is
+skipped; (c) `exec_task.cancel()` + `await`.
 
 The `except asyncio.CancelledError` branch inspects `deadline_cancelled`:
 
@@ -201,7 +183,7 @@ The `except asyncio.CancelledError` branch inspects `deadline_cancelled`:
 - **`False`** — genuine worker shutdown. Because `asyncio.wait({exec_task})` does
   not cancel its watched task when the waiter is cancelled, the branch first
   cancels `exec_task` and bounded-awaits it (`asyncio.wait_for(exec_task,
-  TASK_CANCEL_TIMEOUT)`) to tear down the orphaned subprocess/PTY, then logs
+  TASK_CANCEL_TIMEOUT)`) to tear down the orphaned runner subprocess, then logs
   "interrupted", sets `session_completed=True`, and re-raises so startup recovery
   re-queues — but only after teardown.
 
@@ -216,19 +198,12 @@ the first kill-decision, latched by `np_telemetry_emitted`), never once per
 `PROGRESS_POLL_S` tick for a long-reprieved session. A `waiting_for_children` PM
 is reprieved, not killed.
 
-The reprieve gate itself (`_tier2_reprieve_signal`) is transport-aware. On the
-SDK path it reprieves when the recorded `claude_pid` still has live child
-processes or a non-zombie status (psutil). A granite session records no
-`claude_pid`, so those psutil gates are a structural no-op for it — a granite
-`waiting_for_children` PM whose own PTY is momentarily quiet would otherwise be
-false-killed once its progress signals aged past the deadline. For a granite
-session (`claude_pid is None`) the gate derives the reprieve from the PTY
-read-loop liveness signal instead: `_pty_quiescent_long_enough` reports the PTY
-as alive/painting (defer the kill, reprieve as `"pty_alive"`) until it has been
-quiescent past the wedge-eligibility window, at which point the session is
-genuinely quiescent and is killed — the same "fresh PTY reprieves, quiescent PTY
-is killed" boundary the progress signal enforces, now applied to the reprieve
-decision as well.
+The reprieve gate itself (`_tier2_reprieve_signal`) reprieves when a compaction
+completed within `COMPACT_REPRIEVE_WINDOW_SEC`, or when the recorded handle pid
+still has live child processes ("children") or a non-zombie status ("alive",
+psutil). Sessions that have never produced any output are subject to the
+reprieve-escalation cap (`MAX_NO_OUTPUT_REPRIEVES`) so an alive-but-silent
+session is eventually recovered rather than reprieved forever.
 
 The running-scan `no_progress` elif is **narrowed** on the in-scope handle (not
 deleted), retaining the #944 shared-`worker_key` orphan net for worker-alive

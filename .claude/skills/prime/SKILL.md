@@ -18,13 +18,13 @@ This is **Valor** - an AI coworker that runs on its own Mac. Not an assistant, n
 
 ```
 Telegram → Bridge (Telethon) → Redis AgentSession queue (bridge is I/O only)
-Standalone Worker (python -m worker) → sole session execution engine → Claude Agent SDK / granite PTY
+Standalone Worker (python -m worker) → sole session execution engine → headless session runner (`agent/session_runner/`, one `claude -p` subprocess per turn)
 Reflection scheduler (python -m reflections) → own launchd subprocess; enqueues recurring work the worker executes
 ```
 
 **Key components:**
 - **Bridge** (`bridge/telegram_bridge.py`): Telegram user account via Telethon; enqueues sessions and routes output (nudge loop) — no SDLC awareness
-- **Worker** (`worker/__main__.py`): executes AgentSessions via the Claude Agent SDK (`agent/sdk_client.py`)
+- **Worker** (`worker/__main__.py`): executes AgentSessions via the headless session runner (`agent/session_runner/`, harness in `agent/sdk_client.py`)
 - **MCP Servers** (`.mcp.json`): modular capabilities (memory, BYOB, Sentry, Notion); GitHub via `gh` CLI
 - **Identity** (`config/identity.json` + `config/personas/segments/`): structured identity data and composable persona segments
 
