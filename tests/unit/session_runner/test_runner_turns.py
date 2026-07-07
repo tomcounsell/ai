@@ -10,10 +10,15 @@ Covers, with a scripted fake driver and a sync delivery callback:
 * Empty/whitespace-only PM text → wrap-up guard (plan Failure Path).
 * Turn failure → ``exit_reason="error"`` (never completed) + persona-safe
   apology delivered.
+* Async send_cb on the runner's own loop (the production delivery shape):
+  same-thread handoff counts as routed, wrap-up guard does not fire, and
+  failure recovery re-enqueues to the outbox.
 * Steering boundary drain: abort at boundary, steer text injected.
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 
@@ -186,6 +191,102 @@ async def test_needs_human_edge_with_unroutable_text_delivers():
     summary = await runner.run("go")
     assert deliveries == ["Which environment should I target?"]
     assert summary.exit_reason == "pm_user"
+
+
+# --------------------------------------------------------------------------
+# Async send_cb on the loop thread (the production delivery shape)
+# --------------------------------------------------------------------------
+
+
+def make_async_runner(script, *, session=None, **kwargs):
+    """Build (runner, deliveries, session, driver) with an ASYNC send_cb.
+
+    Mirrors production: ``TelegramRelayOutputHandler.send`` is a coroutine
+    function and the runner delivers from its own event loop's thread, so
+    ``_deliver_sync`` takes the same-thread fire-and-forget path.
+    """
+    session = session or FakeSession()
+    deliveries: list[str] = []
+
+    async def send_cb(chat_id, payload, reply_to, agent_session):
+        deliveries.append(payload)
+
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (send_cb, None)
+    )
+    driver = ScriptedDriver(script)
+    runner = SessionRunner(
+        agent_session=session,
+        adapter=adapter,
+        working_dir="/tmp/wd",
+        driver=driver,
+        steering_pop_fn=lambda: [],
+        **kwargs,
+    )
+    return runner, deliveries, session, driver
+
+
+async def test_async_send_cb_same_thread_counts_as_routed_no_wrapup():
+    """Production shape: async send_cb, delivery on the runner's own loop.
+
+    The same-thread handoff has guaranteed outbox recovery, so it counts as
+    routed: the wrap-up guard must NOT fire (no duplicate messages, no
+    OPERATOR_TERMINAL_MESSAGE) and exactly one payload reaches the human.
+    """
+    runner, deliveries, _, driver = make_async_runner(["[/user]\nhello human"])
+    summary = await runner.run("do the thing")
+    # Drain the fire-and-forget delivery task scheduled on this loop.
+    await asyncio.sleep(0)
+    assert deliveries == ["hello human"]
+    assert summary.user_facing_routed is True
+    assert summary.exit_reason == "pm_user"
+    assert len(driver.calls) == 1  # wrap-up guard never ran an extra turn
+
+
+async def test_deliver_sync_async_cb_same_thread_returns_true():
+    """Adapter-level: _deliver_sync from the captured loop's own thread
+    returns True (handed off with guaranteed outbox recovery)."""
+    session = FakeSession()
+    delivered: list[str] = []
+
+    async def send_cb(chat_id, payload, reply_to, agent_session):
+        delivered.append(payload)
+
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (send_cb, None)
+    )
+    adapter.capture_event_loop()
+    result = adapter._deliver_sync(send_cb, 111, "payload", 222, session, 5.0)
+    assert result is True
+    await asyncio.sleep(0)
+    assert delivered == ["payload"]
+
+
+async def test_deliver_sync_same_thread_failure_reenqueues_outbox(monkeypatch):
+    """Adapter-level: when the fire-and-forget task raises, the done-callback
+    re-enqueues the payload to the Redis outbox (recovery preserved)."""
+    session = FakeSession()
+
+    async def send_cb(chat_id, payload, reply_to, agent_session):
+        raise RuntimeError("telegram down")
+
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (send_cb, None)
+    )
+    adapter.capture_event_loop()
+    enqueued: list[tuple] = []
+
+    def fake_enqueue(chat_id, payload, reply_to, file_paths=None):
+        enqueued.append((chat_id, payload, reply_to))
+        return True
+
+    monkeypatch.setattr(adapter, "_enqueue_to_outbox", fake_enqueue)
+    result = adapter._deliver_sync(send_cb, 111, "payload", 222, session, 5.0)
+    assert result is True  # handed off; recovery is the done-callback's job
+    # Let the task run, then let its done-callback (call_soon) fire.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert enqueued == [(111, "payload", 222)]
 
 
 # --------------------------------------------------------------------------

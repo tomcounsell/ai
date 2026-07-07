@@ -34,8 +34,10 @@ non-asyncio thread. :meth:`SessionRunnerAdapter.capture_event_loop` must be
 called on the worker's asyncio thread before the run; ``_deliver_sync``
 schedules the async ``send_cb`` onto that captured loop via
 ``asyncio.run_coroutine_threadsafe(...).result(timeout=...)`` when called
-from another thread, and falls back to fire-and-forget + outbox recovery
-when already on the loop thread.
+from another thread. When already on the loop thread (the production case:
+the runner runs on the captured loop), it schedules fire-and-forget with a
+done-callback that re-enqueues to the Redis outbox on failure — a handoff
+with guaranteed recovery, which counts as delivered (returns True).
 """
 
 from __future__ import annotations
@@ -247,9 +249,10 @@ class SessionRunnerAdapter:
         # captured ref is the only way _deliver_sync can reach the loop.
         self._loop: asyncio.AbstractEventLoop | None = None
         # Set to True by the user/complete callbacks when _deliver_sync
-        # returns True (confirmed delivery). Propagated to
+        # returns True (delivered, re-enqueued to outbox, or handed off to
+        # the running loop with guaranteed outbox recovery). Propagated to
         # agent_session.user_facing_routed in publish_exit_summary so the
-        # executor's emoji branch can distinguish a real delivery from a
+        # executor's emoji branch can distinguish a routed delivery from a
         # session that was never routed to the user.
         self._user_facing_routed: bool = False
 
@@ -399,13 +402,19 @@ class SessionRunnerAdapter:
 
     @property
     def user_facing_routed(self) -> bool:
-        """Whether a confirmed user-facing delivery happened this run."""
+        """Whether a user-facing delivery happened this run (confirmed, or
+        handed off to the loop with guaranteed outbox recovery)."""
         return self._user_facing_routed
 
     # -- Delivery callbacks ---------------------------------------------------
 
     def _make_user_callback(self) -> Callable[[str], None]:
-        """Build the callable for ``[/user]`` payloads."""
+        """Build the callable for ``[/user]`` payloads.
+
+        The ``delivered`` field on the emitted ``runner_user_routed`` event
+        follows the ``_deliver_sync`` contract: True means confirmed, or
+        handed off with guaranteed outbox recovery.
+        """
         send_cb = self._send_cb
         chat_id = self._chat_id
         reply_to = self._reply_to_msg_id
@@ -433,7 +442,12 @@ class SessionRunnerAdapter:
         return _on_user
 
     def _make_complete_callback(self) -> Callable[[str], None]:
-        """Build the callable for ``[/complete]`` payloads."""
+        """Build the callable for ``[/complete]`` payloads.
+
+        The ``delivered`` field on the emitted ``runner_complete_routed``
+        event follows the ``_deliver_sync`` contract: True means confirmed,
+        or handed off with guaranteed outbox recovery.
+        """
         send_cb = self._send_cb
         chat_id = self._chat_id
         reply_to = self._reply_to_msg_id
@@ -477,11 +491,13 @@ class SessionRunnerAdapter:
         thread itself as fire-and-forget with an outbox-recovery
         done-callback (blocking there would deadlock the loop).
 
-        Returns True when the payload is delivered synchronously or
-        re-enqueued to the outbox before returning; False when neither
-        happened (sync send_cb raised, a pre-scheduling error occurred, or
-        the same-thread fire-and-forget path where outbox recovery is
-        deferred to a done-callback).
+        Returns True when the payload is delivered synchronously,
+        re-enqueued to the outbox before returning, or handed off to the
+        running loop with guaranteed outbox recovery (the same-thread
+        fire-and-forget path: its done-callback re-enqueues iff the task
+        failed or was cancelled, so the payload is never silently lost).
+        Returns False when the payload will not be delivered (sync send_cb
+        raised, or a pre-scheduling error occurred).
 
         On a missing/closed loop or a delivery timeout, the error is logged,
         the payload is re-enqueued to the Redis outbox, and a session_events
@@ -557,9 +573,13 @@ class SessionRunnerAdapter:
                         logger.exception("[runner-adapter] same-thread re-enqueue callback failed")
 
                 task.add_done_callback(_reenqueue_same_thread_on_failure)
-                # Fire-and-forget: delivery is not yet confirmed, so return
-                # False; the caller will not set user_facing_routed.
-                return False
+                # Handed off with guaranteed outbox recovery — the same
+                # guarantee level as the other outbox-recovery paths, so
+                # return True. In production every delivery takes this path
+                # (async send_cb on the runner's own loop); returning False
+                # here made every healthy session look unrouted, firing the
+                # wrap-up guard and delivering duplicate messages.
+                return True
             # Cross-thread path: schedule on the captured worker loop and
             # block until delivered.
             _async_delivery_started = True
