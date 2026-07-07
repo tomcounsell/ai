@@ -2,8 +2,8 @@
 
 A pure ALLOW/DENY evaluator (the omnigent ``enforcement.py`` model — explicitly
 NOT a background monitor) called inline from BOTH PreToolUse hook surfaces:
-``agent/hooks/pre_tool_use.py`` (SDK/headless path) and
-``.claude/hooks/pre_tool_use.py`` (interactive ``claude`` TUI / granite-PTY
+``agent/hooks/pre_tool_use.py`` (SDK path) and
+``.claude/hooks/pre_tool_use.py`` (headless ``claude -p`` runner
 path). Because the check runs at the point each tool call is dispatched, it
 denies a runaway session inline even when every background health loop is frozen
 — which is the whole point (the existing ``_agent_session_tool_timeout_loop`` is
@@ -48,24 +48,20 @@ def _env_true(name: str, default: str) -> bool:
 # Max tool calls a single session may issue before the inline deny fires.
 # Provisional, tune after observing real rates.
 #
-# Granite shared-counter caveat: on the granite path ``tool_call_count`` sums PM
-# + Dev sub-agent tool calls (each sub-agent burns the same session counter), so
-# the effective per-role ceiling is ~half this value and a trip can deny BOTH PM
-# and Dev mid-build. That is bounded by this conservative default and the
-# TOOL_BUDGET_ENABLED kill-switch — a MAX-tuning consideration (granite may want
-# a higher MAX), NOT a reason to gate the deny off.
+# Shared-counter note: ``tool_call_count`` sums the PM session's own tool
+# calls AND its dev subagent's tool calls (the D1 topology runs Dev inside
+# the PM session, sharing one counter), so the effective per-role ceiling is
+# lower than this value. Bounded by the conservative default and the
+# TOOL_BUDGET_ENABLED kill-switch — a MAX-tuning consideration, NOT a reason
+# to gate the deny off.
 MAX_TOOL_CALLS_PER_SESSION = int(os.environ.get("MAX_TOOL_CALLS_PER_SESSION", "1000"))
 
 # Per-session cost cap in USD. Provisional, tune after observing real rates.
 #
-# SDK/headless-path-only — currently a NO-OP on granite sessions: nothing under
-# ``agent/granite_container/`` populates ``total_cost_usd`` (the interactive TUI
-# transcript carries no cost line), so on granite ``total_cost_usd`` stays 0.0
-# and this cap can never fire. ``total_cost_usd`` is written solely by
-# ``agent/sdk_client.py`` (SDK ``ResultMessage.total_cost_usd`` + the headless
-# ``claude -p stream-json`` ``result`` event). The cost dimension is kept
-# (harmless: cost=0 → allow) but in production only the tool-call cap is the
-# operative granite backstop.
+# ``total_cost_usd`` is written by ``agent/sdk_client.py`` (SDK
+# ``ResultMessage.total_cost_usd`` + the headless ``claude -p stream-json``
+# ``result`` event) — the same harness every runner turn rides, so the cost
+# dimension is live for all session types.
 SESSION_COST_CAP_USD = float(os.environ.get("SESSION_COST_CAP_USD", "50.0"))
 
 # Master switch: enables the budget AND the inline DENY. DEFAULT ON — a deny
@@ -130,7 +126,6 @@ def evaluate_tool_budget(session) -> BudgetVerdict:
             False,
             f"per-session tool-call budget reached ({calls}/{MAX_TOOL_CALLS_PER_SESSION})",
         )
-    # Cost branch is dead on granite (cost stays 0.0); live only on SDK/headless.
     if cost >= SESSION_COST_CAP_USD:
         return BudgetVerdict(
             False,
@@ -186,7 +181,7 @@ def record_budget_trip(session, verdict: BudgetVerdict) -> None:
     increment ``{project_key}:tool-budget:tripped``, log a WARNING, and set the
     race-free hook-owned ``budget_tripped`` + ``budget_tripped_reason`` fields
     (a FIELD write, NEVER a ``status`` write — a hook-driven status write would
-    race the granite ``bridge_adapter``'s partitioned ``update_fields`` saves).
+    race the runner adapter's partitioned ``update_fields`` saves).
 
     Only when ``TOOL_BUDGET_AUTO_PAUSE`` is set does the deny ALSO (b) transition
     status → ``paused_budget`` (via the status owner, ``transition_status`` — the
@@ -243,7 +238,7 @@ def _set_budget_tripped_flag(session, verdict: BudgetVerdict) -> None:
 
     Uses a narrow ``save(update_fields=...)`` so no other field is clobbered.
     ``budget_tripped`` / ``budget_tripped_reason`` are fields NO other writer
-    touches, so they are always race-free (unlike ``status``, which the granite
+    touches, so they are always race-free (unlike ``status``, which the runner
     adapter writes through its own partitioned saves).
     """
     try:

@@ -13,7 +13,7 @@
             <span class="badge badge-{{ pipeline.status }}{% if pipeline.is_stale %} stale{% endif %}">{{ pipeline.status }}</span>
             {% endif %}
             {% if pipeline.exit_reason and pipeline.exit_reason not in ("pm_complete", "pm_user") %}
-            <span class="badge bg-warning text-dark" title="Granite PTY exit reason">exit: {{ pipeline.exit_reason }}</span>
+            <span class="badge bg-warning text-dark" title="Session runner exit reason">exit: {{ pipeline.exit_reason }}</span>
             {% endif %}
             {% if pipeline.status in ("completed", "failed") and not pipeline.user_facing_routed %}
             <span class="badge bg-secondary" title="No user-facing message was sent for this session">no user msg</span>
@@ -127,43 +127,6 @@
             </div>
         </div>
 
-        {% if pipeline.pm_pid is not none or pipeline.dev_pid is not none or pipeline.pm_transcript_path is not none or pipeline.dev_transcript_path is not none or pipeline.pty_slot is not none %}
-        <h3 class="mt-4">Granite PTY</h3>
-        <table class="data-table compact mb-4">
-            {% if pipeline.pty_slot is not none %}
-            <tr><td class="text-secondary">PTY slot</td><td class="mono">{{ pipeline.pty_slot }}</td></tr>
-            {% endif %}
-            {% if pipeline.pm_pid is not none %}
-            <tr><td class="text-secondary">PM PID</td><td class="mono">{{ pipeline.pm_pid }}</td></tr>
-            {% endif %}
-            {% if pipeline.dev_pid is not none %}
-            <tr><td class="text-secondary">Dev PID</td><td class="mono">{{ pipeline.dev_pid }}</td></tr>
-            {% endif %}
-            {% if pipeline.pm_transcript_path is not none %}
-            <tr>
-                <td class="text-secondary">PM transcript</td>
-                <td>
-                    <span class="modal-id-chip pty-transcript-chip"
-                          title="{{ pipeline.pm_transcript_path }}"
-                          onclick="copyPtyPath(this)"
-                          data-path="{{ pipeline.pm_transcript_path }}">{{ pipeline.pm_transcript_path | truncate(48, True, "…") }}</span>
-                </td>
-            </tr>
-            {% endif %}
-            {% if pipeline.dev_transcript_path is not none %}
-            <tr>
-                <td class="text-secondary">Dev transcript</td>
-                <td>
-                    <span class="modal-id-chip pty-transcript-chip"
-                          title="{{ pipeline.dev_transcript_path }}"
-                          onclick="copyPtyPath(this)"
-                          data-path="{{ pipeline.dev_transcript_path }}">{{ pipeline.dev_transcript_path | truncate(48, True, "…") }}</span>
-                </td>
-            </tr>
-            {% endif %}
-        </table>
-        {% endif %}
-
         {% if pipeline.stages %}
         <div class="stage-indicator mb-4">
             {% for stage in pipeline.stages %}
@@ -271,9 +234,6 @@
 .resume-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
 .modal-ids-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .modal-id-chip { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; opacity: 0.55; cursor: default; }
-.pty-transcript-chip { cursor: pointer; opacity: 0.75; }
-.pty-transcript-chip:hover { opacity: 1; background: var(--bg-hover, #2a2a3e); }
-.pty-transcript-chip.copied { color: var(--success, #4caf50); border-color: var(--success, #4caf50); }
 .timeline-collapse-toggle { font-size: 11px; color: var(--text-muted); cursor: pointer; padding: 2px 0 8px 0; margin-left: 4px; }
 .timeline-collapse-toggle:hover { color: var(--text-secondary); }
 </style>
@@ -298,14 +258,6 @@ function copyResumeCommand(el) {
         el.classList.add('copied');
         var orig = el.textContent;
         el.textContent = '\u2713 copied';
-        setTimeout(function() { el.textContent = orig; el.classList.remove('copied'); }, 1500);
-    });
-}
-function copyPtyPath(el) {
-    navigator.clipboard.writeText(el.dataset.path).then(function() {
-        el.classList.add('copied');
-        var orig = el.textContent;
-        el.textContent = '✓ copied';
         setTimeout(function() { el.textContent = orig; el.classList.remove('copied'); }, 1500);
     });
 }

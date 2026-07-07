@@ -1,20 +1,24 @@
 """Temporary stopgap (issue #1633): block creation of NEW child agent sessions.
 
-PR #1612 cut session execution over to granite PTY containers that run their
-own PM+Dev claude TUI pair from a bounded pool. Parent sessions spawning child
-AgentSessions (the old PM->Dev pattern):
+Post-PTY rationale (plan #1924 cutover): sessions now run as headless
+``claude -p`` subprocesses via ``agent/session_runner/`` — there is no PTY
+pool, so the original starvation/deadlock argument is gone. The gate is
+RETAINED because parent sessions spawning child AgentSessions remain:
 
-- double-consume scarce pool slots and risk starvation/deadlock when a parent
-  in ``waiting_for_children`` holds a slot its child needs, and
-- are semantically redundant -- the container owns the PM/Dev split.
+- semantically redundant -- dependent work runs as subagents WITHIN the
+  session (the D1 topology: the PM continues its ``dev`` subagent across
+  turns), and
+- unbounded -- with the pool gone there is no independent fanout cap on
+  concurrent child sessions until #1633's subagent refactor lands or #1926
+  (guardian consolidation) names a cap.
 
-Issue #1633 prescribes the full refactor (dependent work runs as subagents
-WITHIN a session). Until that lands, every path that attaches a parent at
-session-CREATION time is refused. Existing child sessions are unaffected:
-resume, steer, kill, ``children`` listing, and ``waiting_for_children``
-lifecycle handling all keep working, and PM continuation chains
+Re-enabling child-session fanout is a real behavior change with no named
+replacement bound; removal of this gate is #1633's scope, deferred — not
+smuggled into the cutover. Existing child sessions are unaffected: resume,
+steer, kill, ``children`` listing, and ``waiting_for_children`` lifecycle
+handling all keep working, and PM continuation chains
 (``session_completion.py`` create_pm, issue #1195) are deliberately exempt --
-their parents are terminal and hold no pool slot.
+their parents are terminal.
 
 Emergency escape hatch: ``VALOR_ALLOW_CHILD_SESSIONS=1`` bypasses the block
 with a loud warning at each creation site.
@@ -33,8 +37,8 @@ CHILD_SESSIONS_DISABLED_MESSAGE = (
 
 BYPASS_WARNING = (
     f"WARNING: {BYPASS_ENV_VAR}=1 -- creating a child agent session despite "
-    "the #1633 block. Child sessions double-consume granite PTY pool slots "
-    "and can starve or deadlock the pool."
+    "the #1633 block. Child-session fanout has no independent concurrency "
+    "cap; dependent work should run as subagents inside the session instead."
 )
 
 

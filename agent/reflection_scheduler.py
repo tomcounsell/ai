@@ -48,7 +48,7 @@ SCHEDULER_TICK_INTERVAL = 60
 # Per-tick cap on concurrently dispatched function-type reflections.
 # At worker startup all ~30 reflections are overdue; without a cap they fire
 # as concurrent asyncio tasks in a single pass, saturating the event loop and
-# starving time-sensitive coroutines (e.g. granite delivery callbacks).
+# starving time-sensitive coroutines (e.g. session delivery callbacks).
 # Remaining due reflections are deferred to the next tick (~60s later).
 # Provisional / tunable — override via REFLECTION_STARTUP_MAX_CONCURRENT env var.
 REFLECTION_STARTUP_MAX_CONCURRENT = int(os.environ.get("REFLECTION_STARTUP_MAX_CONCURRENT", "4"))
@@ -725,7 +725,7 @@ class ReflectionScheduler:
                     )
                     function_dispatched_this_tick += 1
                     # Yield the event loop between dispatches so time-sensitive
-                    # coroutines (e.g. granite delivery callbacks) can be scheduled.
+                    # coroutines (e.g. session delivery callbacks) can be scheduled.
                     await asyncio.sleep(0)
                 else:
                     logger.info("[reflection] %s is due, executing", entry.name)

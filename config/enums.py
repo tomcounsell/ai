@@ -15,14 +15,13 @@ from enum import StrEnum
 
 
 class SessionType(StrEnum):
-    """Discriminator for AgentSession: eng, teammate, or granite.
+    """Discriminator for AgentSession: eng or teammate.
 
-    ``GRANITE`` is used exclusively by the standalone ``valor-granite-loop``
-    CLI (``tools/granite_interactive_tui_poc/cli.py``). Bridge-originated
-    sessions that run through the granite PTY container are typed as
-    ``ENG`` — ``GRANITE`` labels only direct CLI invocations so
-    they appear in the dashboard and ``valor-session list`` without being
-    misclassified as bridge-originated sessions.
+    ``GRANITE`` is a historical value: its sole producer (the standalone
+    ``valor-granite-loop`` CLI) was deleted with the PTY substrate (plan
+    #1924). The value is retained so pre-cutover Redis records that carry
+    ``session_type="granite"`` keep hydrating and rendering; nothing creates
+    new sessions with it. Removal is #1927's (schema diet) scope.
     """
 
     ENG = "eng"

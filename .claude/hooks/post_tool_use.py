@@ -456,8 +456,8 @@ def _update_agent_session(hook_input: dict) -> None:
     every tool boundary (issue #1843, Gap A) — mirrors the Pre=set / Post=clear
     contract of ``agent.hooks.liveness_writers.record_tool_boundary``, but
     writes directly on this sidecar-resolved session (that helper resolves via
-    ``os.environ["AGENT_SESSION_ID"]``, which is unset in the granite child
-    env and would silently no-op). ``last_tool_use_at`` MUST be a ``datetime``
+    ``os.environ["AGENT_SESSION_ID"]``, which can be unset in the CLI-hook
+    child env and would silently no-op). ``last_tool_use_at`` MUST be a ``datetime``
     (never ``time.time()``) — ``session_health.py::_check_tool_timeout`` gates
     on ``isinstance(last_at, datetime)`` and silently no-ops on a float.
 

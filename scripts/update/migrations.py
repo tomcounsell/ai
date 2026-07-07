@@ -151,6 +151,37 @@ def _migrate_steering_queue_drain(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_strip_pty_session_fields(project_dir: Path) -> str | None:
+    """Strip removed PTY fields (+resume_handles) from existing AgentSession records.
+
+    Plan #1924 task 5 removed dev_pid/pty_slot/last_pty_*/mid_run_*/
+    role_transports/resume_handles from the model. This runs the ORM-safe
+    strip script (atomic delete+recreate per terminal record; idempotent —
+    see scripts/migrate_strip_pty_fields.py). Returns None on success,
+    error string on failure.
+    """
+    script = project_dir / "scripts" / "migrate_strip_pty_fields.py"
+    if not script.exists():
+        return "migration script not found"
+
+    python = project_dir / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python), str(script), "--apply"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            return f"exit code {result.returncode}: {result.stderr[-500:]}"
+        return None
+    except subprocess.TimeoutExpired:
+        return "migration timed out after 300s"
+    except Exception as e:  # swallow-ok: error returned as string to caller for logging
+        return str(e)
+
+
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing.
 
@@ -187,6 +218,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "steering_queue_drain": (
         _migrate_steering_queue_drain,
         "Drain residual AgentSession.queued_steering_messages into the Redis steering list",
+    ),
+    "strip_pty_session_fields": (
+        _migrate_strip_pty_session_fields,
+        "Strip removed PTY fields (+resume_handles) from existing AgentSession records",
     ),
 }
 

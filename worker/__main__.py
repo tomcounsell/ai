@@ -40,7 +40,7 @@ if not os.environ.get("VALOR_LAUNCHD"):
 
 logger = logging.getLogger("worker")
 
-# Shared mutable state (granite_available, shutdown_requested, etc.)
+# Shared mutable state (shutdown_requested, etc.) lives in agent.session_state.
 
 # Set to True when SIGTERM is received; causes main() to exit with code 1
 # so launchd applies ThrottleInterval (10s) instead of the default ~10-minute throttle.
@@ -80,21 +80,6 @@ _heartbeat_stop_event = threading.Event()
 # Stop event for the session-archive periodic export daemon thread (issue #1825)
 # — set on worker shutdown.
 _session_archive_stop_event = threading.Event()
-
-# Granite re-probe / circuit breaker — provisional, tunable via env.
-# Grain of salt: defaults below are PROVISIONAL — tune after observing real
-# ollama outage / false-positive rates in logs/worker.log.
-# How often to probe granite when the circuit is closed.
-GRANITE_REPROBE_INTERVAL_S: float = float(os.environ.get("GRANITE_REPROBE_INTERVAL_S", "30"))
-# Consecutive probe timeouts/failures before the circuit trips to OPEN.
-GRANITE_BREAKER_OPEN_THRESHOLD: int = int(os.environ.get("GRANITE_BREAKER_OPEN_THRESHOLD", "3"))
-# How long the circuit stays OPEN before allowing a half-open re-probe.
-GRANITE_BREAKER_COOLDOWN_S: float = float(os.environ.get("GRANITE_BREAKER_COOLDOWN_S", "120"))
-
-# Module-level alias — the authoritative flag lives in agent.session_state
-# (so agent_session_queue._worker_loop can read it without a circular import).
-# This alias is provided for readability in worker.__main__ code that writes the flag.
-# GRANITE_AVAILABLE is not a constant; it is mutated by _granite_reprobe_loop.
 
 # Background-task supervisor constants (Fix #4, #1816) — all env-overridable.
 # Grain of salt: defaults below are PROVISIONAL / conservative — tune after
@@ -362,7 +347,7 @@ def _heartbeat_thread_main() -> None:
     """Dedicated daemon thread for worker heartbeat writes, inverted into a
     dead-man's switch (issue #1815 fix #1).
 
-    Runs independently of the asyncio event loop so PTY/thread-pool
+    Runs independently of the asyncio event loop so thread-pool
     saturation (incident 2026-06-23, issue #1767) cannot prevent heartbeat
     writes. The loop wakes every WORKER_HEARTBEAT_INTERVAL seconds and delegates
     each cycle to :func:`_heartbeat_cycle`.
@@ -532,204 +517,6 @@ def _load_projects(project_filter: str | None = None) -> dict:
     return all_projects
 
 
-async def _granite_reprobe_loop() -> None:
-    """Background circuit breaker that re-probes granite and updates granite_available.
-
-    States:
-      CLOSED  — probe every GRANITE_REPROBE_INTERVAL_S; success keeps it closed;
-                failure increments the consecutive-failure counter.
-      OPEN    — entered when consecutive failures reach GRANITE_BREAKER_OPEN_THRESHOLD;
-                waits GRANITE_BREAKER_COOLDOWN_S then moves to HALF_OPEN.
-      HALF_OPEN — tries a single probe; success → CLOSED + granite_available=True;
-                  failure → back to OPEN (reset cooldown).
-
-    Logs every state transition. CancelledError exits cleanly (normal shutdown path).
-    The probe call uses asyncio.to_thread so the synchronous ensure_granite_model
-    does not block the event loop.
-    """
-    import agent.session_state as _ss  # noqa: PLC0415
-    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
-
-    # Circuit state strings (lowercase as required by ruff N806)
-    state_closed = "closed"
-    state_open = "open"
-    state_half_open = "half_open"
-
-    # Start closed; initial availability already set by the startup probe.
-    state = state_closed
-    consecutive_failures = 0 if _ss.granite_available else 1  # count startup failure
-
-    logger.debug(
-        "Granite reprobe loop started (state=%s, granite_available=%s)",
-        state,
-        _ss.granite_available,
-    )
-
-    try:
-        while True:
-            if state == state_closed:
-                await asyncio.sleep(GRANITE_REPROBE_INTERVAL_S)
-                ok, detail = await asyncio.to_thread(ensure_granite_model)
-                if ok:
-                    if not _ss.granite_available:
-                        logger.info(
-                            "Granite classifier recovered: %s. Resuming deferred sessions.",
-                            detail,
-                        )
-                        _ss.granite_available = True
-                        _resume_deferred_granite_sessions()
-                    consecutive_failures = 0
-                    # Stay closed
-                else:
-                    consecutive_failures += 1
-                    logger.warning(
-                        "Granite probe failed (%d/%d): %s",
-                        consecutive_failures,
-                        GRANITE_BREAKER_OPEN_THRESHOLD,
-                        detail,
-                    )
-                    if _ss.granite_available:
-                        _ss.granite_available = False
-                        logger.warning(
-                            "Granite unavailable — ENG sessions will be deferred to paused_circuit."
-                        )
-                    if consecutive_failures >= GRANITE_BREAKER_OPEN_THRESHOLD:
-                        state = state_open
-                        logger.warning(
-                            "Granite circuit breaker OPEN after %d consecutive failures. "
-                            "Cooling down for %.0fs before next probe.",
-                            consecutive_failures,
-                            GRANITE_BREAKER_COOLDOWN_S,
-                        )
-
-            elif state == state_open:
-                await asyncio.sleep(GRANITE_BREAKER_COOLDOWN_S)
-                state = state_half_open
-                logger.info("Granite circuit breaker HALF_OPEN — attempting re-probe.")
-
-            elif state == state_half_open:
-                ok, detail = await asyncio.to_thread(ensure_granite_model)
-                if ok:
-                    state = state_closed
-                    consecutive_failures = 0
-                    _ss.granite_available = True
-                    logger.info(
-                        "Granite circuit breaker CLOSED after half-open success: %s. "
-                        "Resuming deferred sessions.",
-                        detail,
-                    )
-                    _resume_deferred_granite_sessions()
-                else:
-                    state = state_open
-                    logger.warning(
-                        "Granite half-open probe failed: %s. Circuit back to OPEN, "
-                        "cooling down for %.0fs.",
-                        detail,
-                        GRANITE_BREAKER_COOLDOWN_S,
-                    )
-
-    except asyncio.CancelledError:
-        logger.debug("Granite reprobe loop cancelled (shutdown).")
-
-
-def _resume_deferred_granite_sessions() -> None:
-    """Set the worker:recovering Redis flag so session_recovery_drip re-queues
-    paused_circuit sessions that were deferred due to granite unavailability.
-
-    Uses a best-effort approach: if Redis is unreachable the drip will simply
-    not fire on the next tick, but granite will be available again at that point
-    so the next enqueue will proceed normally anyway.
-    """
-    try:
-        import os  # noqa: PLC0415
-
-        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
-
-        project_key = os.environ.get("VALOR_PROJECT_KEY", "valor").strip() or "valor"
-        r = POPOTO_REDIS_DB
-        rec_key = f"{project_key}:worker:recovering"
-        r.set(rec_key, "1", ex=3600)  # TTL: 1 hour, drip clears it when queues drain
-        logger.info(
-            "Set %s flag — session_recovery_drip will re-queue paused_circuit sessions.",
-            rec_key,
-        )
-    except Exception as e:
-        logger.warning("Could not set worker:recovering flag for granite recovery: %s", e)
-
-
-def _any_pty_role_configured() -> bool:
-    """D1b (issue #1817): True if at least one role (globally or per-project)
-    resolves to PTY transport, anywhere across the fleet.
-
-    Runs at worker startup, before any specific session/project is known, so
-    this scans EVERY project's ``transport.pm``/``transport.dev`` override in
-    projects.json in addition to the global default
-    (``settings.granite.pm_transport`` / ``dev_transport``). A single
-    project overriding to "pty" while the global default is "headless" (or
-    vice versa) still counts — the D1b contract-check only needs ONE
-    PTY-transport role anywhere in the fleet to become load-bearing; a fully
-    headless fleet must not be hard-failed by a check that only matters for
-    the interactive TUI (#1842 — a headless role's ``claude -p`` one-shot
-    carries no PTY bytes and is immune to TUI-marker drift by construction).
-
-    Fails OPEN (returns True) on any config-read error: a false "no PTY role
-    configured" would silently disarm a load-bearing contract-check, which
-    is worse than running one extra fingerprint check unnecessarily.
-    """
-    from config.settings import settings
-
-    if settings.granite.pm_transport == "pty" or settings.granite.dev_transport == "pty":
-        return True
-
-    try:
-        from bridge.routing import load_config  # noqa: PLC0415
-
-        cfg = load_config()
-        projects_cfg = cfg.get("projects", {}) if isinstance(cfg, dict) else {}
-        for project in projects_cfg.values():
-            if not isinstance(project, dict):
-                continue
-            transport = project.get("transport")
-            if not isinstance(transport, dict):
-                continue
-            if transport.get("pm") == "pty" or transport.get("dev") == "pty":
-                return True
-    except Exception as e:
-        logger.debug(
-            "[worker-startup] projects.json transport scan failed (fail-open, "
-            "assuming a PTY role IS configured): %s",
-            e,
-        )
-        return True
-
-    return False
-
-
-def _evaluate_contract_check_gate(contract_ok: bool, pty_configured: bool, enforce: bool) -> str:
-    """Pure decision function for the D1b startup contract-check gate (issue #1817).
-
-    Separated from `_run_worker`'s I/O (logging, sys.exit) so the branching
-    logic is directly unit-testable without mocking worker startup.
-
-    Returns one of:
-      - "pass": markers matched their golden sample — nothing to report.
-      - "skip_headless": markers mismatched, but no PTY-transport role is
-        configured (fully headless fleet) — a headless `claude -p` one-shot
-        carries no PTY bytes and is immune to TUI-marker drift by
-        construction (#1842), so this is NOT an operator-actionable failure.
-      - "warn": markers mismatched, a PTY-transport role IS configured, but
-        CLAUDE_CONTRACT_CHECK_ENFORCE is not set — log CRITICAL and continue.
-      - "hard_fail": markers mismatched, a PTY-transport role IS configured,
-        AND CLAUDE_CONTRACT_CHECK_ENFORCE=1 — the caller must refuse to
-        start (sys.exit) rather than let sessions silently hang to timeout.
-    """
-    if contract_ok:
-        return "pass"
-    if not pty_configured:
-        return "skip_headless"
-    return "hard_fail" if enforce else "warn"
-
-
 async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     """Main worker coroutine.
 
@@ -840,55 +627,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
         sys.exit(1)
 
     logger.info("CLI harness 'claude' found on PATH")
-
-    # D1b (issue #1817): startup contract-check on the scraped TUI markers
-    # the PTY driver depends on for idle detection (IDLE_BAR, PROMPT_GLYPH,
-    # SPINNER_EVIDENCE_RE, the trust-folder prompt pattern). A routine
-    # `claude` auto-update that rewords one of these strings is otherwise a
-    # SILENT fleet-wide outage — every PTY session hangs to timeout instead
-    # of detecting idle, with no exception and no crash. This converts that
-    # into a loud, operator-visible signal. See `_evaluate_contract_check_gate`
-    # for the (independently unit-testable) decision logic.
-    try:
-        from agent.granite_container.pty_driver import verify_tui_marker_contract
-
-        _contract_ok, _failed_markers = verify_tui_marker_contract()
-        _pty_configured = True if _contract_ok else _any_pty_role_configured()
-        _enforce = os.environ.get("CLAUDE_CONTRACT_CHECK_ENFORCE") == "1"
-        _decision = _evaluate_contract_check_gate(_contract_ok, _pty_configured, _enforce)
-
-        if _decision == "pass":
-            logger.info("CLI harness contract-check passed (TUI markers OK)")
-        elif _decision == "skip_headless":
-            logger.info(
-                "CLI harness contract-check: marker(s) %s mismatched, but no "
-                "PTY-transport role is configured (fully headless fleet) — "
-                "skipping. Headless turns carry no PTY bytes and are immune "
-                "to TUI-marker drift by construction.",
-                ", ".join(_failed_markers),
-            )
-        elif _decision == "warn":
-            logger.critical(
-                "CLI harness contract-check FAILED — scraped TUI marker(s) "
-                "%s no longer match their golden sample and a PTY-transport "
-                "role is configured. A stale marker means every interactive "
-                "session silently hangs to timeout instead of detecting idle "
-                "(issue #1817 D1b). Continuing anyway — set "
-                "CLAUDE_CONTRACT_CHECK_ENFORCE=1 to refuse startup on this "
-                "condition.",
-                ", ".join(_failed_markers),
-            )
-        else:  # "hard_fail"
-            logger.critical(
-                "CLI harness contract-check FAILED — scraped TUI marker(s) "
-                "%s no longer match their golden sample and a PTY-transport "
-                "role is configured. Refusing to start "
-                "(CLAUDE_CONTRACT_CHECK_ENFORCE=1).",
-                ", ".join(_failed_markers),
-            )
-            sys.exit(1)
-    except Exception as e:
-        logger.warning(f"CLI harness contract-check error (non-fatal): {e}")
 
     # Under launchd (VALOR_LAUNCHD=1), skip the subprocess smoke test entirely.
     # asyncio.create_subprocess_exec hangs indefinitely under macOS TCC/TTY restrictions
@@ -1068,99 +806,16 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     except Exception as e:
         logger.warning(f"Orphaned process cleanup failed (non-fatal): {e}")
 
-    # Step 4b: Kill orphaned granite PTY children from prior runs.
-    # The PTYPool records spawned PM/Dev PIDs to data/granite_pty_pids.json so
-    # a worker-process restart can still kill orphan PTYs (plan #1572, Risk 1
-    # / OPS-3). PID-targeted kill avoids pkill -f matching an operator's
-    # personal interactive `claude` session on a different project.
-    try:
-        from agent.granite_container.pty_pool import _kill_orphaned_pty_pids
-
-        killed_pids = _kill_orphaned_pty_pids()
-        if killed_pids:
-            logger.info(f"Killed {killed_pids} orphaned granite PTY subprocess(es)")
-    except Exception as e:
-        logger.warning(f"Granite PTY orphan cleanup failed (non-fatal): {e}")
-
-    # Step 4b.5: Verify the granite classifier model is present and responsive.
-    # The only ollama call is ensure_granite_model() — a one-time startup probe
-    # and a background re-probe loop. Classification of PM prefix tokens is pure
-    # regex (classify_pm_prefix); PTY sessions run on Claude OAuth subscription,
-    # not ollama. When the probe succeeds, granite_available is set True and ENG
-    # sessions are dispatched normally. When it fails, the worker starts in
-    # DEGRADED mode: granite_available stays False, ENG sessions are deferred to
-    # paused_circuit, and _granite_reprobe_loop retries in the background until
-    # the model becomes reachable (circuit breaker: OPEN after
-    # GRANITE_BREAKER_OPEN_THRESHOLD consecutive failures, COOLDOWN before
-    # half-open re-probe). Non-ENG sessions (TEAMMATE) proceed unaffected.
-    import agent.session_state as _ss_granite  # noqa: PLC0415
-    from agent.granite_container.granite_classifier import ensure_granite_model  # noqa: PLC0415
-
-    granite_ok, granite_detail = await asyncio.to_thread(ensure_granite_model)
-    if not granite_ok:
-        logger.warning(
-            "Granite classifier unavailable: %s. Starting in degraded mode — "
-            "ENG sessions will be deferred to paused_circuit until granite "
-            "becomes reachable. Fix with 'ollama pull granite4.1:3b'.",
-            granite_detail,
-        )
-        _ss_granite.granite_available = False
-    else:
-        logger.info("Granite classifier ready: %s", granite_detail)
-        _ss_granite.granite_available = True
-
-    # Start _granite_reprobe_loop as a supervised background task — it doubles as the
-    # circuit breaker, toggling granite_available as the model appears/disappears.
-    # supervise() respawns with exponential backoff; storm cap → _self_kill() SIGKILL.
-    reprobe_task = supervise("granite-reprobe", _granite_reprobe_loop)
-
-    # Step 4c: Initialize the granite PTY pool singleton (plan #1572).
-    # The pool pre-warms GRANITE__PTY_POOL_SIZE (default 3) interactive
-    # ``claude --permission-mode bypassPermissions`` pairs. Sessions
-    # acquire/release pairs via async context manager; over-cap sessions
-    # wait in the Redis queue.
-    try:
-        from agent.granite_container.pty_pool import initialize_pty_pool
-
-        _pty_pool = initialize_pty_pool()
-        await _pty_pool.initialize()
-        logger.info(f"Granite PTY pool initialized: pool_size={_pty_pool.pool_size}")
-    except Exception as e:
-        logger.warning(f"Granite PTY pool initialization failed (non-fatal): {e}")
-
     # Step 5: Start worker loops -- one per project's known chat_ids
     # Workers are started on-demand by _ensure_worker when sessions are enqueued.
-    # For startup, we need to kick workers for any pending sessions.
-    # Gate: when granite is unavailable, ENG sessions are deferred to paused_circuit
-    # so they are not silently mis-routed. Non-ENG sessions (TEAMMATE) proceed.
+    # For startup, we need to kick workers for any pending sessions. Startup
+    # goes straight to recovery + queue pickup — there is no model probe, no
+    # degraded mode, and no deferral gate (D2, plan #1924).
     from models.agent_session import AgentSession  # noqa: PLC0415
-    from models.session_lifecycle import transition_status  # noqa: PLC0415
 
     pending_sessions = list(AgentSession.query.filter(status="pending"))
-    deferred_count = 0
     started_workers: set[str] = set()
     for session in pending_sessions:
-        session_type = getattr(session, "session_type", None)
-        if not _ss_granite.granite_available and session_type == "eng":
-            # Defer ENG sessions until granite becomes reachable.
-            try:
-                transition_status(
-                    session,
-                    "paused_circuit",
-                    reason="granite-degrade: startup probe failed; resumes when granite recovers",
-                )
-                deferred_count += 1
-                logger.info(
-                    "Deferred ENG session %s to paused_circuit (granite unavailable)",
-                    getattr(session, "session_id", "?"),
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not defer ENG session %s to paused_circuit: %s",
-                    getattr(session, "session_id", "?"),
-                    e,
-                )
-            continue
         wk = session.worker_key
         if wk not in started_workers:
             _ensure_worker(wk, is_project_keyed=session.is_project_keyed)
@@ -1169,8 +824,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     logger.info(
         f"Worker started: {len(projects)} project(s), "
         f"{len(pending_sessions)} pending session(s), "
-        f"{len(started_workers)} worker loop(s), "
-        f"{deferred_count} ENG session(s) deferred (granite degraded)"
+        f"{len(started_workers)} worker loop(s)"
     )
 
     # Write heartbeat immediately so dashboard shows green without waiting
@@ -1204,7 +858,7 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     loop_tick_task.add_done_callback(_loop_tick_task_done)
 
     # Start dedicated heartbeat daemon thread (issue #1767, inverted #1815).
-    # Runs outside the asyncio event loop so PTY/thread-pool saturation
+    # Runs outside the asyncio event loop so thread-pool saturation
     # cannot starve heartbeat writes. daemon=True ensures it cannot outlive
     # the worker process even on abnormal exit.
     _heartbeat_stop_event.clear()
@@ -1355,13 +1009,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # (Reflection scheduler runs out-of-process — issue #1828 — so there is no
     # reflection task to cancel here.)
 
-    # Cancel granite re-probe / circuit breaker loop (Fix #1)
-    reprobe_task.cancel()
-    try:
-        await reprobe_task
-    except asyncio.CancelledError:
-        pass
-
     # Cancel idle-sweeper (issue #1128)
     if idle_sweep_task is not None:
         idle_sweep_task.cancel()
@@ -1369,22 +1016,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
             await idle_sweep_task
         except asyncio.CancelledError:
             pass
-
-    # Drain the granite PTY pool's in-flight respawn tasks (POOL-1).
-    # The pool's per-slot `event` is only set after `_spawn_slot`
-    # completes; if the worker exits before a respawn finishes, the
-    # slot is left in `respawning` permanently and the next worker
-    # process's `_load_persisted_pids` will not see the in-flight
-    # spawn. We drain the asyncio.Tasks here so respawns either
-    # complete or are visibly cancelled.
-    try:
-        from agent.granite_container.pty_pool import get_pty_pool
-
-        _pool = get_pty_pool()
-        _pool.shutdown()
-        await _pool.drain_respawns()
-    except Exception as e:
-        logger.warning(f"Granite PTY pool drain failed (non-fatal): {e}")
 
     logger.info("Worker shutdown complete")
 

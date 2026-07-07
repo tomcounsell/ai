@@ -297,6 +297,71 @@ class TestGetResponseViaHarness:
         assert result == "some output"
 
     @pytest.mark.asyncio
+    async def test_on_exit_status_reports_nonzero_no_result(self):
+        """``on_exit_status`` fires with (returncode, result_event_fired) so
+        the role driver can classify a nonzero-exit-no-result turn as a
+        failure instead of a clean turn (PR #1930 review, A5)."""
+        from agent.sdk_client import get_response_via_harness
+
+        lines = [
+            json.dumps(
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": "partial"},
+                    },
+                }
+            ),
+            # No result event — process exits nonzero mid-stream.
+        ]
+        stdout_data = "\n".join(lines) + "\n"
+        statuses: list[tuple] = []
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_proc = AsyncMock()
+            mock_proc.stdout = _async_lines(stdout_data)
+            mock_proc.communicate = AsyncMock(return_value=(b"", b"boom\n"))
+            mock_proc.returncode = 1
+            mock_exec.return_value = mock_proc
+
+            result = await get_response_via_harness(
+                message="test",
+                working_dir="/tmp",
+                on_exit_status=lambda rc, fired: statuses.append((rc, fired)),
+            )
+
+        assert result == "partial"
+        assert statuses == [(1, False)]
+
+    @pytest.mark.asyncio
+    async def test_on_exit_status_reports_result_event_fired(self):
+        """A clean run with a result event reports (0, True)."""
+        from agent.sdk_client import get_response_via_harness
+
+        lines = [
+            json.dumps({"type": "result", "result": "done", "session_id": "sess_x"}),
+        ]
+        stdout_data = "\n".join(lines) + "\n"
+        statuses: list[tuple] = []
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_proc = AsyncMock()
+            mock_proc.stdout = _async_lines(stdout_data)
+            mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+            mock_proc.returncode = 0
+            mock_exec.return_value = mock_proc
+
+            result = await get_response_via_harness(
+                message="test",
+                working_dir="/tmp",
+                on_exit_status=lambda rc, fired: statuses.append((rc, fired)),
+            )
+
+        assert result == "done"
+        assert statuses == [(0, True)]
+
+    @pytest.mark.asyncio
     async def test_empty_output(self):
         """Returns empty string when no output is produced."""
         from agent.sdk_client import get_response_via_harness

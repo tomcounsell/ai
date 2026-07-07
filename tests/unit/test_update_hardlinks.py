@@ -175,16 +175,16 @@ def test_sync_skills_prune_leaves_foreign_skill_dirs_alone(fake_project, fake_ho
 
 
 def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
-    """Namespaced commands (e.g. granite/prime-pm-role.md) must hardlink globally.
+    """Namespaced commands (e.g. roles/prime-pm-role.md) must hardlink globally.
 
-    Regression for the granite PTY production hang: PR #1694 moved persona
-    delivery to /granite:prime-pm-role slash commands living in
-    .claude/commands/granite/. The granite container runs claude in OTHER
-    repos' worktrees, so the command is only resolvable if it syncs to
-    ~/.claude/commands/granite/. A top-level-only glob left it unsynced, and
-    every granite session hung on "Unknown command: /granite:prime-pm-role".
+    Regression origin: PR #1694 moved persona delivery to namespaced slash
+    commands living under a .claude/commands/ subdirectory, and a
+    top-level-only glob left them unsynced — every session primed in another
+    repo's worktree hung on "Unknown command". The runner still resolves
+    /roles:prime-*-role commands in OTHER repos' worktrees, so namespace
+    recursion stays load-bearing post-#1924.
     """
-    src_ns = fake_project / ".claude" / "commands" / "granite"
+    src_ns = fake_project / ".claude" / "commands" / "roles"
     src_ns.mkdir(parents=True)
     src_cmd = src_ns / "prime-pm-role.md"
     src_cmd.write_text("---\nname: prime-pm-role\n---\nPrime the PM persona.\n")
@@ -195,6 +195,6 @@ def test_sync_commands_recurses_into_namespace_subdirs(fake_project, fake_home):
         hardlinks.HardlinkSyncResult(),
     )
 
-    dst_cmd = fake_home / ".claude" / "commands" / "granite" / "prime-pm-role.md"
-    assert dst_cmd.exists(), "namespaced command was not synced into ~/.claude/commands/granite/"
+    dst_cmd = fake_home / ".claude" / "commands" / "roles" / "prime-pm-role.md"
+    assert dst_cmd.exists(), "namespaced command was not synced into ~/.claude/commands/roles/"
     assert os.stat(src_cmd).st_ino == os.stat(dst_cmd).st_ino, "synced as copy, not hardlink"

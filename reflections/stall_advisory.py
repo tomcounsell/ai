@@ -41,9 +41,7 @@ logger = logging.getLogger("reflections.stall_advisory")
 
 # Stalled reasons that the action-mode is allowed to act on. Other stalled
 # reasons (e.g. kill_transition) are observed but never killed by this path.
-_ACTIONABLE_STALL_REASONS = frozenset(
-    {"never_started", "granite_wedged", "idle_gap_exceeded_stall"}
-)
+_ACTIONABLE_STALL_REASONS = frozenset({"never_started", "idle_gap_exceeded_stall"})
 
 # TTL on the cross-tick consecutive-observation counter (~2x the 300s reflection
 # cadence) so the count decays if a session stops being reported as stalled.
@@ -439,7 +437,7 @@ def _emit_recovery_event(
     feed so a kill-succeeds-but-catchup-fails outcome is durably visible, not
     merely a WARNING log line that scrolls away. Fail-soft (never raises)."""
     try:
-        from agent.granite_container.bridge_adapter import (
+        from agent.session_runner.adapter import (
             _append_session_event,
             _now_iso,
         )

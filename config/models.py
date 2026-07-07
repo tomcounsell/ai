@@ -40,25 +40,6 @@ OPUS = "claude-opus-4-5-20251101"
 
 
 # =============================================================================
-# CLAUDE CLI (native-installer) VERSION PIN
-# =============================================================================
-# Single source of truth for the pinned `claude` CLI version. The native
-# installer floats ~/.local/bin/claude -> ~/.local/share/claude/versions/<v>/
-# to latest on auto-update, so a fleet-wide bump can silently shift the scraped
-# TUI contract the granite PTY driver depends on (D1b) out from under us. Two
-# consumers pin against this constant:
-#   - scripts/update/verify.py    (D1a update-time drift check)
-#   - scripts/nightly_regression_tests.py (#1839 ollama-canary drift alert)
-# and config/settings.py mirrors it as the typed catalog entry. Read via env so
-# a fleet override or a test monkeypatch takes effect without a code change.
-# Bumping the default is DELIBERATE: re-verify the D1b markers against the new
-# version's actual TUI output first, then update this constant and the bump-log
-# in docs/features/deployment.md. Provisioning a canary against a not-yet-fleet
-# version is tracked separately in issue #1854.
-PINNED_CLAUDE_VERSION = os.environ.get("PINNED_CLAUDE_VERSION", "2.1.201")
-
-
-# =============================================================================
 # OPENROUTER API ENDPOINTS
 # Override via environment variables for custom/proxy deployments
 # =============================================================================
@@ -154,9 +135,9 @@ OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
 # =============================================================================
 # LOCAL OLLAMA MODELS
 # Local Ollama steady state per machine:
-#   - granite4.1:3b  — classification / structured-output (the model already
-#     resident for the granite PTY operator; reused for bridge message routing,
-#     memory-audit, and email triage). This is the single local classifier.
+#   - granite4.1:3b  — classification / structured-output (bridge message
+#     routing, memory-audit, and email triage). This is the single local
+#     classifier; its removal is issue #1923's scope.
 #   - nomic-embed-text — embeddings (out of scope here).
 #   - gemma4:31b-mlx — OPTIONAL local generation on RAM-rich Apple-Silicon hosts
 #     (otherwise generation goes to Ollama Cloud gemma4:31b-cloud). Selected by
@@ -165,10 +146,9 @@ OPENROUTER_GEMMA4_FREE = "google/gemma-4-e2b:free"
 # settings.models.ollama_generation_model. gemma4:e2b is retired (superseded).
 # =============================================================================
 
-# The single local classifier model. Granite is already resident for the PTY
-# operator, so reusing it for bridge routing / memory-audit / email triage costs
-# zero extra GPU memory. Kept in sync with granite_classifier.DEFAULT_MODEL,
-# which imports this constant (single source of truth).
+# The single local classifier model, shared by bridge routing, memory-audit,
+# and email triage. Consumers import this constant directly (single source
+# of truth).
 OLLAMA_CLASSIFIER_MODEL = "granite4.1:3b"
 
 # Minimum host RAM (GB) required to run a local gemma4:31b-mlx generation model.
@@ -226,8 +206,7 @@ def _is_cloud_tag(model: str) -> bool:
 def ensure_generation_model(model: str | None = None) -> tuple[bool, str]:
     """Detection helper for the free-text *generation* model (NOT a startup gate).
 
-    Unlike ``ensure_granite_model`` (a hard worker precondition for the
-    classifier), this is a config-layer availability probe shared by ``/setup``,
+    This is a config-layer availability probe (never a startup gate) shared by ``/setup``,
     ``/update``, and the memory title-generator. Each caller consumes the typed
     ``(model_available, detail)`` result per its own failure-cost profile:
     ``/update`` warns, the title-generator skips persistence, the ai-judge
@@ -241,8 +220,7 @@ def ensure_generation_model(model: str | None = None) -> tuple[bool, str]:
     - local ``-mlx`` / other tag → **RAM-guard FIRST**: an ``-mlx`` tag on a
       host below ``MIN_LOCAL_GEN_RAM_GB`` returns ``(False, ...)`` WITHOUT
       pulling, so a misconfigured small host never triggers an ~18-20 GB pull.
-      Above the threshold, probe→pull-once→re-probe (mirrors
-      ``ensure_granite_model`` for the local branch only).
+      Above the threshold, probe→pull-once→re-probe.
 
     Args:
         model: generation tag to check. When ``None``, reads

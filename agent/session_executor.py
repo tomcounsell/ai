@@ -32,22 +32,23 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-_CLEAN_GRANITE_EXIT_REASONS = frozenset(
+_CLEAN_RUNNER_EXIT_REASONS = frozenset(
     {"pm_complete", "pm_user", "pm_floor_delivered", "steer_abort"}
 )
 
 
-def _is_non_clean_granite_exit(agent_session) -> bool:
-    """Return True when the session has a granite exit_reason that signals a real failure.
+def _is_non_clean_runner_exit(agent_session) -> bool:
+    """Return True when the session has a runner exit_reason that signals a real failure.
 
-    None exit_reason = non-granite session or not yet set = clean (default behavior).
-    Clean granite exits: pm_complete (normal end), pm_user (user message sent),
+    None exit_reason = not yet set = clean (default behavior).
+    Clean runner exits: pm_complete (normal end), pm_user (user message sent),
     pm_floor_delivered (wrap-up guard delivered PM's last assistant message directly
     when the PM produced a real but prefix-less response — issue #1719),
     steer_abort (operator-requested abort via a steering message; the user-facing
     "Session stopped at your request." is delivered before the loop breaks — #1779).
-    Everything else (exception, pm_hang, dev_hang, startup_unresolved, pm_no_user_message,
-    pm_max_turns) is non-clean → REACTION_ERROR.
+    Everything else (error, exception, turn_timeout, pm_empty_turn, pm_max_turns —
+    the exit-classification vocabulary in ``agent/session_runner/router.py``)
+    is non-clean → REACTION_ERROR.
 
     This does NOT suppress the success reaction for clean+communicated=False completions
     (those still get REACTION_SUCCESS or REACTION_COMPLETE via the normal branch).
@@ -56,7 +57,22 @@ def _is_non_clean_granite_exit(agent_session) -> bool:
     exit_reason = getattr(agent_session, "exit_reason", None)
     if exit_reason is None:
         return False
-    return exit_reason not in _CLEAN_GRANITE_EXIT_REASONS
+    return exit_reason not in _CLEAN_RUNNER_EXIT_REASONS
+
+
+def _runner_final_status(task_error, agent_session) -> str:
+    """Terminal AgentSession status for a finished runner session.
+
+    ``SessionRunner.run()`` never raises — subprocess failures and loop
+    exceptions become ``summary.exit_reason="error"/"exception"`` — so
+    ``task_error`` alone cannot gate finalization: a failed run would
+    finalize ``completed`` (the #1916 class). Consult the runner's persisted
+    ``exit_reason`` alongside ``task_error``; ``agent_session=None`` (lookup
+    race) degrades to task_error-only gating.
+    """
+    if task_error or _is_non_clean_runner_exit(agent_session):
+        return "failed"
+    return "completed"
 
 
 def _resolve_session_model(session: AgentSession | None) -> str | None:
@@ -80,38 +96,6 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
         return explicit
     fallback = settings.models.session_default_model
     return fallback or None
-
-
-# Per-role transport hedge (plan #1842). The concept is named ``role_transports``
-# everywhere in code to avoid colliding with the existing *channel* ``transport``
-# (telegram/email) at session_executor.py:1083-1091 and BridgeAdapter(transport=).
-_VALID_ROLE_TRANSPORTS = ("pty", "headless")
-
-
-def _resolve_role_transports(project_config: dict | None) -> dict[str, str]:
-    """Resolve the per-role transport map from config precedence (plan #1842).
-
-    Precedence, closest wins:
-      1. project block ``projects.<key>.transport.{pm,dev}``
-      2. ``settings.granite.pm_transport`` / ``dev_transport``
-         (env ``GRANITE__PM_TRANSPORT`` / ``GRANITE__DEV_TRANSPORT``)
-      3. literal ``"pty"``
-
-    Returns ``{"pm": <transport>, "dev": <transport>}``. Config validation at
-    update time (``bridge/config_validation.py::validate_transport``) is the
-    primary gate; this resolver assumes validated config but tolerates a raw
-    projects.json read (returns whatever it finds — the executor applies a
-    defensive fail-loud backstop on the resolved values).
-    """
-    block = {}
-    if isinstance(project_config, dict):
-        raw = project_config.get("transport")
-        if isinstance(raw, dict):
-            block = raw
-    return {
-        "pm": block.get("pm") or settings.granite.pm_transport or "pty",
-        "dev": block.get("dev") or settings.granite.dev_transport or "pty",
-    }
 
 
 def _tick_backstop_check_compaction(
@@ -1664,65 +1648,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 "name": session.project_key,
             }
 
-        # Per-role transport hedge (plan #1842). Resolve once at dispatch and
-        # persist onto the AgentSession so all later reads (dashboard, analytics,
-        # resume-handle tagging, worker recovery) use the persisted value — a
-        # config flip mid-flight never mutates an in-flight session (Race 2).
-        # A revived session that already has a persisted map reuses it verbatim.
-        if agent_session is not None and getattr(agent_session, "role_transports", None):
-            role_transports = dict(agent_session.role_transports)
-        else:
-            role_transports = _resolve_role_transports(project_config)
-            if agent_session is not None:
-                try:
-                    agent_session.role_transports = role_transports
-                    agent_session.save(update_fields=["role_transports", "updated_at"])
-                except Exception as _rt_err:  # noqa: BLE001
-                    logger.debug(
-                        f"[{session.project_key}] Failed to persist role_transports "
-                        f"(non-fatal): {_rt_err}"
-                    )
-        # PM headless is not yet supported (plan #1842 v1). Config validation
-        # rejects ``transport.pm=headless``, but a ``GRANITE__PM_TRANSPORT`` env
-        # override or ``settings.granite.pm_transport`` bypasses that gate. Coerce
-        # defensively to ``pty`` so a stray pm=headless never reaches the
-        # PTY-coupled PM startup / login / plateau machinery.
-        if role_transports.get("pm") == "headless":
-            logger.warning(
-                "[executor-guard] session %s: transport.pm=headless is unsupported; "
-                "coercing to pty (PM headless not yet supported in v1)",
-                session.agent_session_id,
-            )
-            role_transports["pm"] = "pty"
-        # Defensive fail-loud backstop: config validation at update time is the
-        # primary gate, but an invalid resolved value must never silently default.
-        _bad = [
-            f"{role}={val!r}"
-            for role, val in role_transports.items()
-            if val not in _VALID_ROLE_TRANSPORTS
-        ]
-        if _bad:
-            _rt_reason = (
-                f"invalid_role_transport: {', '.join(_bad)} (valid: {list(_VALID_ROLE_TRANSPORTS)})"
-            )
-            logger.error(
-                "[executor-guard] session %s: %s",
-                session.agent_session_id,
-                _rt_reason,
-            )
-            try:
-                from models.session_lifecycle import (  # noqa: PLC0415
-                    StatusConflictError,
-                    finalize_session,
-                )
-
-                finalize_session(session, "failed", reason=_rt_reason)
-            except StatusConflictError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                logger.error("[executor-guard] role_transport finalize raised: %s", exc)
-            return
-
         # Check the Redis steering queue before starting this agent turn. If the
         # session has pending steering messages (written by steer_session() or
         # the PM), pop the first one and use it as the user input for this turn.
@@ -1774,13 +1699,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # #1460 sdlc-local silent no-op). Guard the PRE-SCOPE value: once
         # build_harness_turn_input wraps _turn_input in the SCOPE header block, the
         # bare "None" is buried inside "MESSAGE: None" and can never be detected by a
-        # strip()=="None" check. Container.__init__'s own "if not user_message.strip()"
-        # guard also misses it because the SCOPE block is non-empty. Catch it here.
+        # strip()=="None" check. Catch it here, before the runner is constructed.
         _pre_scope = "" if _turn_input is None else str(_turn_input).strip()
         if _pre_scope == "" or _pre_scope == "None":
-            _guard_reason = f"empty_container_message: _turn_input stripped to {_turn_input!r}"
+            _guard_reason = f"empty_turn_input: _turn_input stripped to {_turn_input!r}"
             logger.error(
-                "[executor-guard] session %s: refusing empty container message — %s",
+                "[executor-guard] session %s: refusing empty turn input — %s",
                 session.agent_session_id,
                 _guard_reason,
             )
@@ -1809,21 +1733,20 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     pass
             return
 
-        # All session types route through the granite container (plan #1572),
-        # but each role's transport is now config-selectable (plan #1842):
-        # ``role_transports`` (resolved above) picks ``pty`` (interactive TUI
-        # over a PTY, driven by PTYRoleDriver — the default, byte-identical to
-        # #1572) or ``headless`` (one ``claude -p`` subprocess per turn via
-        # HeadlessRoleDriver, reusing the preserved harness in
-        # ``agent/sdk_client.py``). Both legs share the Container orchestration
-        # loop; only the actor-turn driver differs. See
-        # docs/features/per-role-transport.md.
-        from agent.granite_container.bridge_adapter import BridgeAdapter
-        from agent.granite_container.pty_pool import get_pty_pool
+        # All session types route through the headless session runner (plan
+        # #1924): one ``claude -p`` stream-json subprocess per turn via
+        # SessionRunner/HeadlessRoleDriver, reusing the preserved harness in
+        # ``agent/sdk_client.py``. There is one execution transport and no
+        # seam. See docs/features/headless-session-runner.md.
         from agent.sdk_client import (
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
+        )
+        from agent.session_runner import (
+            ResumeContext,
+            SessionRunner,
+            SessionRunnerAdapter,
         )
 
         project_key = project_config.get("_key", "valor") if project_config else "valor"
@@ -1846,7 +1769,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
         logger.info(
             f"{log_prefix} Routing {_session_type or 'unknown'} session to the "
-            "granite PTY container"
+            "headless session runner"
         )
 
         # Streaming chunks from the CLI harness are suppressed for all session types
@@ -1878,17 +1801,17 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
 
         # D1 precedence cascade: session.model > settings > codebase default.
-        # Applied to the PM TUI PTY via the spawn-on-acquire spec below; the
-        # Dev PTY stays on GRANITE__DEV_MODEL.
+        # Applied to the runner's PM subprocess; the Dev role runs as a
+        # subagent inside the PM session (D1, plan #1924).
         _effective_model = _resolve_session_model(agent_session)
 
         # Persona is now delivered entirely via the prime commands
-        # (.claude/commands/granite/prime-pm-role.md and prime-dev-role.md).
-        # The compose_system_prompt / --append-system-prompt path has been
-        # removed (issue #1692). Email-spawned sessions receive the
-        # prime-teammate-role prime; session_type drives the prime selection
-        # inside the container. The _resolve_compose_args resolver is
-        # preserved for future prime-command selection keyed on email.persona.
+        # (the role prime slash commands the HeadlessRoleDriver prepends on
+        # the first turn). The compose_system_prompt / --append-system-prompt
+        # path has been removed (issue #1692). Email-spawned sessions receive
+        # the teammate prime; session_type drives the prime selection inside
+        # the runner. The _resolve_compose_args resolver is preserved for
+        # future prime-command selection keyed on email.persona.
         _composed_persona, _composed_access_level, _ = _resolve_compose_args(
             session_type=_session_type,
             project=project_config,
@@ -1902,45 +1825,64 @@ async def _execute_agent_session(session: AgentSession) -> None:
             f"(source=prime-command; no system-prompt injection)"
         )
 
-        # Build the BridgeAdapter for the granite PTY container path.
-        # The adapter is single-shot (one BridgeAdapter, one Container.run,
-        # one user-message). It resolves the bridge send_cb once at
-        # construction and publishes mid-loop `[/user]` / `[/complete]`
+        # Build the SessionRunnerAdapter + SessionRunner (plan #1924). The
+        # adapter is single-shot (one adapter, one runner.run, one
+        # user-message). It resolves the bridge send_cb once at construction
+        # — keyed by (project_key, transport) per the repo's delivery-channel
+        # convention — and publishes mid-loop `[/user]` / `[/complete]`
         # payloads through the registered callback. No mid-loop delivery
-        # surfaces via BackgroundTask — the adapter's `run` returns `""`
-        # and BackgroundTask has `send_result=False` so the harness layer
-        # does NOT double-deliver (plan #1572, "Drop standalone
-        # format_short_result" / SIMP-1).
-        # The adapter receives the per-session env (SESSION_TYPE for the
+        # surfaces via BackgroundTask — `do_work` returns `""` and
+        # BackgroundTask has `send_result=False` so the harness layer does
+        # NOT double-deliver.
+        # The runner receives the per-session env (SESSION_TYPE for the
         # pre_tool_use PM Bash restrictions, AGENT_SESSION_ID for hook
         # attribution, CLAUDE_CODE_TASK_LIST_ID for task-list isolation,
         # VALOR_PARENT_SESSION_ID for child-session linking) and the
-        # D1-resolved model. No pm_system_prompt is passed — persona arrives
+        # D1-resolved model. No system prompt is passed — persona arrives
         # via the prime commands only (issue #1692).
-        _bridge_adapter = BridgeAdapter(
+        _runner_adapter = SessionRunnerAdapter(
             agent_session=agent_session,
             project_key=project_key,
             transport=_transport or "telegram",
-            pool=get_pty_pool(),
-            session_env=_harness_env,
-            pm_model=_effective_model,
-            session_type=_session_type,
-            role_transports=role_transports,
         )
 
-        # The message the container receives. The container has no
-        # `claude --resume` wiring, so EVERY container run is a brand-new
-        # TUI session — the minimal-context message the harness paired
-        # with `--resume {prior_uuid}` would arrive as a context-free
-        # fragment. Always send the full-context turn input so resumed
-        # (reply-to) threads keep their conversation context.
-        _container_message = _harness_input
+        # Four-scalar resume (D3, spike #1928): hand the persisted scalars to
+        # the runner, which validates them (UUID shape, cwd-scoped lookup,
+        # dev_agent_id shape) and consumes them — seed `--resume`, skip the
+        # prime, reintroduce the SAME dev agent. Any invalid scalar discards
+        # the whole context and cold-starts with the prime. Only built when a
+        # prior claude session UUID exists; a fresh session passes resume=None.
+        _resume_ctx = None
+        _prior_uuid = getattr(agent_session, "claude_session_uuid", None) if agent_session else None
+        if _prior_uuid:
+            _resume_ctx = ResumeContext(
+                claude_session_id=_prior_uuid,
+                dev_agent_id=getattr(agent_session, "dev_agent_id", None),
+                runner_cwd=getattr(agent_session, "runner_cwd", None),
+                claude_version=getattr(agent_session, "claude_version", None),
+            )
+
+        _runner = SessionRunner(
+            agent_session=agent_session,
+            adapter=_runner_adapter,
+            working_dir=str(working_dir),
+            session_type=_session_type,
+            model=_effective_model,
+            session_env=_harness_env,
+            resume=_resume_ctx,
+        )
+
+        # The message the runner receives: the full-context turn input, so
+        # resumed (reply-to) threads keep their conversation context. On a
+        # resumed session this IS the reply/steer — the runner injects it as
+        # the resumed session's first message. The runner self-emits
+        # turn_start/turn_end telemetry per turn; the executor must not
+        # double-emit.
+        _runner_message = _harness_input
 
         async def do_work() -> str:
-            return await _bridge_adapter.run(
-                user_message=_container_message,
-                working_dir=str(working_dir),
-            )
+            await _runner.run(_runner_message)
+            return ""
 
         # Pass working_dir so BackgroundTask._watchdog can detect a vanished
         # worktree mid-run (issue #1357). Pre-existing local `working_dir` is
@@ -1955,7 +1897,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             working_dir=str(working_dir),
             project_key=getattr(session, "project_key", None),
         )
-        # `send_result=False` is the right call: the BridgeAdapter publishes
+        # `send_result=False` is the right call: the runner adapter publishes
         # `[/user]` and `[/complete]` payloads mid-loop through the bridge
         # callback. Returning "" keeps the harness layer from double-delivering.
         await task.run(do_work(), send_result=False)
@@ -2054,10 +1996,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             try:
                 from bridge.session_transcript import complete_transcript
 
+                # Non-clean runner exits (error/exception/timeout — the runner
+                # never raises) finalize as failed, never completed (#1916).
                 final_status = (
                     "active"
                     if chat_state.defer_reaction
-                    else ("completed" if not task.error else "failed")
+                    else _runner_final_status(task.error, agent_session)
                 )
                 if not chat_state.defer_reaction:
                     complete_transcript(session.session_id, status=final_status)
@@ -2070,7 +2014,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 logger.warning(
                     f"AgentSession update failed for session {session.agent_session_id} "
                     f"session {session.session_id} (operation: finalize status to "
-                    f"{'completed' if not task.error else 'failed'}): {e}"
+                    f"{_runner_final_status(task.error, agent_session)}): {e}"
                 )
                 # Defensive fallback: if complete_transcript failed and the session is
                 # still running, finalize directly so we never leave a ghost `running`
@@ -2088,7 +2032,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                         _auth = get_authoritative_session(session.session_id)
                         if _auth is not None and _auth.status == "running":
-                            _fallback_status = "completed" if not task.error else "failed"
+                            _fallback_status = _runner_final_status(task.error, agent_session)
                             finalize_session(
                                 _auth,
                                 _fallback_status,
@@ -2124,7 +2068,9 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     from bridge.session_transcript import complete_transcript
                     from models.session_lifecycle import StatusConflictError
 
-                    final_status = "completed" if not task.error else "failed"
+                    # agent_session is None here (lookup race) — degrades to
+                    # task_error-only gating inside _runner_final_status.
+                    final_status = _runner_final_status(task.error, None)
                     complete_transcript(session.session_id, status=final_status)
                     logger.info(
                         "Fallback finalization: session %s → %s (agent_session was None)",
@@ -2249,18 +2195,18 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 emoji = None  # Clear reaction
             elif task.error:
                 emoji = REACTION_ERROR
-            elif _is_non_clean_granite_exit(agent_session):
-                # Non-clean granite exit_reason (exception, hang, etc.) → ERROR reaction
-                # regardless of whether the session communicated. Only applies when
-                # exit_reason is explicitly set to a non-clean value (granite path only).
+            elif _is_non_clean_runner_exit(agent_session):
+                # Non-clean runner exit_reason (error, exception, timeout, etc.)
+                # → ERROR reaction regardless of whether the session communicated.
+                # Only applies when exit_reason is explicitly set to a non-clean value.
                 emoji = REACTION_ERROR
             elif messenger.has_communicated() or getattr(
                 agent_session, "user_facing_routed", False
             ):
-                # The granite container delivers [/user]/[/complete] payloads
-                # through BridgeAdapter, never through messenger.send(), so
-                # has_communicated() stays False even on a real delivery.
-                # BridgeAdapter._publish_exit_summary sets
+                # The session runner delivers [/user]/[/complete] payloads
+                # through SessionRunnerAdapter, never through messenger.send(),
+                # so has_communicated() stays False even on a real delivery.
+                # The adapter's publish_exit_summary sets
                 # agent_session.user_facing_routed=True when delivery succeeded;
                 # OR'ing it here makes the emoji branch mean what it should
                 # (issue #1647).
@@ -2273,8 +2219,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 logger.warning(f"Failed to set reaction: {e}")
 
         # Auto-mark session as done after successful completion
-        # Skip when auto-continue deferred — continuation session will handle cleanup
-        if not task.error and not chat_state.defer_reaction:
+        # Skip when auto-continue deferred — continuation session will handle
+        # cleanup — and on non-clean runner exits (a failed run must not
+        # mark_work_done or auto-delete its branch as if it succeeded).
+        if (
+            not task.error
+            and not _is_non_clean_runner_exit(agent_session)
+            and not chat_state.defer_reaction
+        ):
             try:
                 from agent.branch_manager import mark_work_done
                 from agent.worktree_manager import (  # noqa: PLC0415

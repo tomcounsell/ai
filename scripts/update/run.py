@@ -1065,9 +1065,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Ensures the configured ollama_generation_model. For a :cloud tag this is a
     # near-no-op reachability/signin check (no heavy local pull); for an -mlx tag
     # it is the RAM-guarded probe→pull-once path inside ensure_generation_model().
-    # The granite *classifier* is covered separately by Step 4.75. The superseded
-    # gemma4:e2b rm is deferred to AFTER Step 4.75 and gated on the granite
-    # smoke-test + spike-1 parity marker (see Step 4.76).
+    # The granite *classifier* stays for bridge routing (its removal is issue
+    # #1923's scope). The superseded gemma4:e2b rm is gated on classifier
+    # presence + the spike-1 parity marker (see Step 4.76).
     if config.do_ollama:
         from config.models import ensure_generation_model
         from config.settings import settings as _settings
@@ -1182,106 +1182,46 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             )
             config = replace(config, do_service_restart=False)
 
-    # Step 4.75: Verify granite4.1:3b is present and responsive — green-light gate.
-    # The granite classifier is the routing brain of the PTY container; every
-    # AgentSession dispatch goes through it. If the model is absent or
-    # unresponsive, the worker's PTY pool initialises but every session
-    # silently mis-routes. Pull the model automatically if Ollama is running
-    # but the model is missing; fail the update (suppress restart) if the
-    # smoke test can't get a response within 30s.
-    granite_smoke_passed = False
-    if config.do_service_restart:
-        granite_model = "granite4.1:3b"
-        log("Checking granite classifier model...", v)
-        granite_check = verify.check_ollama(granite_model)
-        if not granite_check.available:
-            if granite_check.error and "Not installed" not in granite_check.error:
-                # Ollama is running but model is missing — pull it.
-                log(
-                    f"  Pulling {granite_model} (required for PTY routing)...",
-                    v,
-                    always=True,
-                )
-                if verify.pull_ollama_model(granite_model):
-                    log(f"  {granite_model} pulled", v, always=True)
-                    granite_check = verify.check_ollama(granite_model)
-                else:
-                    log(
-                        f"FAIL: Could not pull {granite_model} — skipping service restart\n"
-                        f"  Run: ollama pull {granite_model}",
-                        v,
-                        always=True,
-                    )
-                    result.warnings.append(
-                        f"granite classifier missing; service restart skipped: "
-                        f"run 'ollama pull {granite_model}'"
-                    )
-                    config = replace(config, do_service_restart=False)
-            else:
-                log(
-                    f"FAIL: Ollama not installed — {granite_model} unavailable,"
-                    " skipping service restart",
-                    v,
-                    always=True,
-                )
-                result.warnings.append(
-                    "granite classifier unavailable (Ollama not installed); service restart skipped"
-                )
-                config = replace(config, do_service_restart=False)
+    # Step 4.75: Surface stale legacy GRANITE_* env keys (plan #1924). The
+    # settings group renamed to SESSION_RUNNER__* when the PTY substrate was
+    # deleted; pydantic ignores unknown keys silently, so a stale vault/plist
+    # override would otherwise be a silent no-op on this machine forever.
+    # Non-blocking: warn loudly here and let settings import warn at runtime.
+    # (The former Step 4.75 granite-classifier green-light gate was deleted
+    # with the PTY substrate — classifier gating, if bridge routing needs
+    # one, is issue #1923's scope.)
+    try:
+        from config.settings import stale_granite_env_keys
 
-        if granite_check.available:
-            log(f"  Smoke testing {granite_model}...", v)
-            try:
-                import subprocess as _sp
+        _stale_granite = stale_granite_env_keys(project_dir / ".env")
+        if _stale_granite:
+            _stale_msg = (
+                "stale legacy GRANITE_* env keys (ignored since plan #1924's "
+                f"PTY teardown): {', '.join(_stale_granite)} — rename to "
+                "SESSION_RUNNER__* or delete from ~/Desktop/Valor/.env and "
+                "the launchd plists"
+            )
+            log(f"WARN: {_stale_msg}", v, always=True)
+            result.warnings.append(_stale_msg)
+    except Exception as _stale_exc:
+        log(f"WARN: stale GRANITE_* env-key scan failed: {_stale_exc}", v)
 
-                _smoke = _sp.run(
-                    ["ollama", "run", granite_model, "respond with the single word: ready"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
-                if _smoke.returncode == 0 and _smoke.stdout.strip():
-                    log(f"  {granite_model} smoke test passed", v)
-                    granite_smoke_passed = True
-                else:
-                    log(
-                        f"FAIL: {granite_model} smoke test returned no output"
-                        " — skipping service restart",
-                        v,
-                        always=True,
-                    )
-                    result.warnings.append(
-                        f"granite classifier smoke test failed; service restart skipped: "
-                        f"{_smoke.stderr.strip() or 'empty response'}"
-                    )
-                    config = replace(config, do_service_restart=False)
-            except _sp.TimeoutExpired:
-                log(
-                    f"FAIL: {granite_model} smoke test timed out — skipping service restart",
-                    v,
-                    always=True,
-                )
-                result.warnings.append(
-                    "granite classifier smoke test timed out; service restart skipped"
-                )
-                config = replace(config, do_service_restart=False)
-            except Exception as _e:
-                result.warnings.append(f"granite classifier smoke test error: {_e}")
-                config = replace(config, do_service_restart=False)
-
-    # Step 4.76: Retire superseded Ollama models (relocated AFTER the granite
-    # smoke-test). The gemma4:e2b rm is irreversible per-machine, so it is gated
-    # on BOTH (a) the granite smoke-test having passed earlier in THIS run
-    # (granite_smoke_passed — read the boolean, never `rm`'s exit code, which is
-    # 0 even when the model is already absent), AND (b) the spike-1 parity marker
-    # `data/spike1_parity_ok` (shadow-mode, a valid poor-parity response, needs
-    # gemma resident — never delete it out from under shadow-mode). If either is
-    # missing, the machine keeps its superseded models until both conditions hold.
+    # Step 4.76: Retire superseded Ollama models. The gemma4:e2b rm is
+    # irreversible per-machine, so it is gated on BOTH (a) the granite
+    # classifier model being PRESENT on this machine (presence check only —
+    # the former Step 4.75 restart-blocking smoke gate died with the PTY
+    # substrate, plan #1924; never delete gemma while its replacement
+    # classifier is absent), AND (b) the spike-1 parity marker
+    # `data/spike1_parity_ok` (shadow-mode, a valid poor-parity response,
+    # needs gemma resident — never delete it out from under shadow-mode). If
+    # either is missing, the machine keeps its superseded models until both
+    # conditions hold.
     if config.do_ollama:
-        from config.models import OLLAMA_SUPERSEDED_MODELS
+        from config.models import OLLAMA_CLASSIFIER_MODEL, OLLAMA_SUPERSEDED_MODELS
 
+        classifier_present = verify.check_ollama(OLLAMA_CLASSIFIER_MODEL).available
         spike1_parity_ok = (project_dir / "data" / "spike1_parity_ok").exists()
-        if granite_smoke_passed and spike1_parity_ok:
+        if classifier_present and spike1_parity_ok:
             log("Cleaning up superseded Ollama models...", v)
             for old_model in OLLAMA_SUPERSEDED_MODELS:
                 try:
@@ -1305,8 +1245,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log(f"  WARN: Failed to remove {old_model}: {e}", v)
         else:
             reason = []
-            if not granite_smoke_passed:
-                reason.append("granite smoke-test not passed this run")
+            if not classifier_present:
+                reason.append("granite classifier model not present")
             if not spike1_parity_ok:
                 reason.append("spike-1 parity marker absent")
             log(

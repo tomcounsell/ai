@@ -325,14 +325,12 @@ def accumulate_session_tokens(
         cache_read_tokens: Cache-read input tokens for this turn (fallback 0).
         cost_usd: Dollar cost for this turn, taken verbatim from the SDK/CLI.
             Never recomputed. Fallback 0.0 on None.
-        metered: When True (plan #1842, headless leg), write the DISJOINT
-            ``metered_*`` fields instead of the ``total_*`` scalars, and emit a
-            ``session.metered_cost_usd`` ledger metric. The transcript tailer
-            owns ``total_*`` (absolute writes, PTY roles only); the headless
-            leg owns ``metered_*`` (additive). Because the two writers target
-            non-overlapping fields, mixed-transport accounting is
-            non-clobbering by construction (Race 1). Default False keeps every
-            existing caller writing ``total_*``.
+        metered: When True (session-runner role turns), write the DISJOINT
+            ``metered_*`` fields instead of the ``total_*`` scalars, and emit
+            a ``session.metered_cost_usd`` ledger metric. Default False keeps
+            every other caller (drafter, probes) writing ``total_*``; the two
+            writers target non-overlapping fields, so the accounting is
+            non-clobbering by construction.
         role: Role label ("pm"/"dev") for the metered ledger-metric dimension.
             Ignored unless ``metered`` is True.
     """
@@ -2351,11 +2349,26 @@ async def get_response_via_harness(
     settings_path: str | None = None,
     metered: bool = False,
     role: str | None = None,
+    start_new_session: bool = False,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
+    on_init: Callable[[dict], None] | None = None,
+    on_exit_status: Callable[[int | None, bool], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
+
+    ``on_exit_status`` fires once per subprocess invocation (primary and any
+    fallback retry) with ``(returncode, result_event_fired)``; the last
+    invocation's status is the turn's authoritative exit shape. The session
+    runner's role driver uses it to classify a nonzero exit without a
+    ``result`` event as a failed turn (residual #1916 surface).
+
+    ``start_new_session=True`` spawns the subprocess in its own process
+    group (session-runner role turns) so a preempt watcher can signal the
+    whole subprocess tree via ``killpg`` and the worker orphan sweep can
+    reap survivors. Default False preserves behavior for every other
+    harness consumer (message drafter, drafter-review, probes).
 
     Parses stdout as stream-json line-by-line. Extracts the final result from
     the ``result`` event, or falls back to accumulated ``content_block_delta``
@@ -2522,9 +2535,12 @@ async def get_response_via_harness(
         cmd,
         working_dir,
         proc_env,
+        start_new_session=start_new_session,
         on_sdk_started=on_sdk_started,
         on_sdk_finished=on_sdk_finished,
         on_stdout_event=on_stdout_event,
+        on_init=on_init,
+        on_exit_status=on_exit_status,
         ttft_metadata=_ttft_meta,
     )
     # Issue #1245: accumulate counts across primary + fallback subprocess
@@ -2561,9 +2577,12 @@ async def get_response_via_harness(
                 fallback_cmd,
                 working_dir,
                 proc_env,
+                start_new_session=start_new_session,
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
+                on_init=on_init,
+                on_exit_status=on_exit_status,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2614,9 +2633,12 @@ async def get_response_via_harness(
                 fallback_cmd,
                 working_dir,
                 proc_env,
+                start_new_session=start_new_session,
                 on_sdk_started=on_sdk_started,
                 on_sdk_finished=on_sdk_finished,
                 on_stdout_event=on_stdout_event,
+                on_init=on_init,
+                on_exit_status=on_exit_status,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2732,9 +2754,12 @@ async def _run_harness_subprocess(
     working_dir: str,
     proc_env: dict[str, str],
     *,
+    start_new_session: bool = False,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
+    on_init: Callable[[dict], None] | None = None,
+    on_exit_status: Callable[[int | None, bool], None] | None = None,
     ttft_metadata: dict | None = None,
 ) -> tuple[
     str | None,
@@ -2747,6 +2772,12 @@ async def _run_harness_subprocess(
     int,
 ]:
     """Execute a harness subprocess and parse stream-json output.
+
+    ``on_exit_status`` (optional) fires once per subprocess, after exit, with
+    ``(returncode, result_event_fired)`` — the session runner's role driver
+    uses it to classify a nonzero exit WITHOUT a ``result`` event as a failed
+    turn even when partial streamed text accumulated (residual #1916
+    surface). Callback exceptions are caught and logged.
 
     Returns ``(result_text, session_id_from_harness, returncode, usage, cost_usd,
     stderr_snippet, num_turns, tool_call_count)``.
@@ -2814,6 +2845,11 @@ async def _run_harness_subprocess(
             cwd=working_dir,
             env=proc_env,
             limit=16 * 1024 * 1024,  # 16 MB — covers any realistic Claude response
+            # Own process group when requested (session-runner role turns):
+            # lets a preempt watcher SIGTERM/SIGKILL the whole subprocess tree
+            # via killpg without touching the worker's own group, and lets the
+            # worker-startup orphan sweep reap survivors (Race 2, plan #1924).
+            start_new_session=start_new_session,
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
@@ -2874,6 +2910,19 @@ async def _run_harness_subprocess(
             continue
 
         event_type = data.get("type")
+
+        # Capture-at-init (plan #1924, Race 5): the `system/init` event names
+        # the NEW invocation's session_id before any work happens. Callers
+        # (session runner) persist it immediately so a preempted/killed turn's
+        # partial transcript remains the resume target — never the stale
+        # pre-turn uuid. Callback exceptions are caught + logged.
+        if event_type == "system" and data.get("subtype") == "init":
+            if on_init is not None:
+                try:
+                    on_init(data)
+                except Exception as _cb_err:
+                    logger.warning("on_init callback raised: %s", _cb_err)
+            continue
 
         if event_type == "result":
             result_text = data.get("result", "")
@@ -2985,6 +3034,15 @@ async def _run_harness_subprocess(
         stderr_text = stderr_data.decode("utf-8", errors="replace") if stderr_data else ""
         stderr_snippet = stderr_text[:2000]
         logger.warning(f"Harness exited with code {returncode}: {stderr_text[:500]}")
+
+    # Surface the subprocess exit shape to the caller (session-runner role
+    # driver): result_text is non-None here iff a `result` event fired —
+    # the accumulated-text fallback below returns full_text separately.
+    if on_exit_status is not None:
+        try:
+            on_exit_status(returncode, result_text is not None)
+        except Exception as _cb_err:
+            logger.warning("on_exit_status callback raised: %s", _cb_err)
 
     if result_text is not None:
         return (
@@ -3324,7 +3382,8 @@ async def get_agent_response_sdk(
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
     # Resolve session_type FIRST — it determines permission restrictions injected below.
-    # Eng session (session_type="eng") gets full pipeline instructions via granite container.
+    # Eng sessions (session_type="eng") run through the headless session runner
+    # (agent/session_runner/); the role prime slash commands carry the persona.
     _session_type = None
     _session_model = None
     _session_extra_context: dict = {}

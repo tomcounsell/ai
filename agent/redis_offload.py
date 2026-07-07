@@ -59,8 +59,8 @@ REDIS_OFFLOAD_ENABLED = os.environ.get("REDIS_OFFLOAD_ENABLED", "true").strip().
 
 # Bulkhead pool for off-loop Redis I/O. Isolated from the shared asyncio
 # default executor so a slow/restarting Redis cannot starve unrelated
-# offloads (granite probes, session_executor's `run_in_executor` calls, etc.)
-# that also rely on that shared default pool.
+# offloads (session_executor's `run_in_executor` calls, the runner's
+# version probe, etc.) that also rely on that shared default pool.
 #
 # Invariant: this pool's worker count, plus `REFLECTION_POOL_WORKERS`
 # (agent/reflection_scheduler.py's bulkhead, which this pool mirrors), plus

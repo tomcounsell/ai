@@ -97,16 +97,17 @@ def test_transport_fields_default_safely_on_fresh_record(sample_session):
     assert combined == 0.0
 
 
-def test_transport_fields_roundtrip(sample_session):
-    """role_transports + metered_* persist and read back for dashboard display."""
-    sample_session.role_transports = {"pm": "pty", "dev": "headless"}
+def test_metered_fields_roundtrip(sample_session):
+    """metered_* persist and read back for dashboard display.
+
+    Post-cutover (#1924): ``role_transports`` died with the transport
+    selector; the metered token/cost fields survive as PydanticAI-drafter
+    accounting.
+    """
     sample_session.metered_cost_usd = 1.5
     sample_session.metered_input_tokens = 300
-    sample_session.save(
-        update_fields=["role_transports", "metered_cost_usd", "metered_input_tokens"]
-    )
+    sample_session.save(update_fields=["metered_cost_usd", "metered_input_tokens"])
     rows = list(AgentSession.query.filter(session_id=sample_session.session_id))
     reloaded = rows[0]
-    assert reloaded.role_transports == {"pm": "pty", "dev": "headless"}
     assert reloaded.metered_cost_usd == 1.5
     assert reloaded.metered_input_tokens == 300

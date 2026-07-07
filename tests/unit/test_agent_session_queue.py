@@ -855,17 +855,13 @@ class TestHealthCheckNoProgressRecovery:
                 return [session]
             return []
 
-        # granite_available defaults to False and the project-keyed pickup gate
-        # (commit bab446d8, issue #1816) defers all pops while it is False —
-        # flip it on so the pop path under test is actually reachable.
-        import agent.session_state as _session_state
-
+        # Post-cutover (#1924): the granite_available pickup gate is deleted —
+        # project-keyed pops need no substrate-availability flag.
         with (
             patch("agent.session_pickup.AgentSession") as mock_cls,
             patch("agent.session_pickup._acquire_pop_lock", return_value=True),
             patch("agent.session_pickup._release_pop_lock"),
             patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
-            patch.object(_session_state, "granite_available", True),
         ):
             # Redis sustainability guards return falsy → proceed normally.
             mock_redis.get.return_value = None

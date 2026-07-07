@@ -329,24 +329,23 @@ class PipelineProgress(BaseModel):
     reprieve_count: int = 0
     process_alive: bool | None = None
 
-    # === Granite container PTY identity (issue #1648) ===
-    # Populated for sessions running on the granite PTY path. Null for
-    # SDK-path sessions and pre-deploy granite sessions.
+    # === Runner exit classification + PM subprocess identity (issue #1648) ===
+    # exit_reason uses the runner's exit-classification vocabulary; pm_pid is
+    # the current turn's `claude -p` subprocess pid. The transcript paths are
+    # populated on historical (pre-cutover) records only. All nullable —
+    # readers tolerate absent fields on old records.
     exit_reason: str | None = None
     pm_pid: int | None = None
-    dev_pid: int | None = None
     pm_transcript_path: str | None = None
     dev_transcript_path: str | None = None
-    pty_slot: int | None = None
 
-    # === Granite PTY read-loop freshness (issue #1724 / #1843 Gap B) ===
-    # ``last_pty_read_loop_at`` is stamped on every inner read_until_idle poll
-    # tick (throttled to <=1/sec), so a granite session wedged mid-turn on the
-    # idle-fallback path advances it within ~1s — the operator-visible signal
-    # that the read loop is still cycling. ``last_pty_activity_at`` is
-    # diff-gated (stamped only on genuine repaint).
-    last_pty_read_loop_at: float | None = None
-    last_pty_activity_at: float | None = None
+    # === Headless-runner resume scalars (#1924, Success Criterion 3) ===
+    # What a simple resume would consume: the Dev subagent continuation
+    # handle, the exact runner working dir, and the CLI version the session
+    # ran under. All nullable — records predating the cutover lack them.
+    dev_agent_id: str | None = None
+    runner_cwd: str | None = None
+    claude_version: str | None = None
 
     # Output routing state (issue #1647)
     # True once a user-facing message has been routed for this session.
@@ -661,6 +660,14 @@ def _parse_history(history_list: list | None) -> list[PipelineEvent]:
                 "granite_delivery_dropped",
             ):
                 text = raw_text or event_type
+            elif event_type == "turn_history" or entry.get("type") == "turn_history":
+                # Headless-runner turn mirror (#1924): label with the actor
+                # (pm|dev) so PM vs Dev turns are distinguishable in the feed.
+                # The ``type``-key fallback tolerates mirror entries written
+                # before the writer dual-keyed them (exit_anomaly precedent).
+                event_type = "turn_history"
+                actor = entry.get("actor") or "pm"
+                text = f"[{actor}] {raw_text}" if raw_text else f"[{actor}]"
             elif entry.get("type") == "exit_anomaly":
                 reason = entry.get("exit_reason", "unknown")
                 text = f"exit anomaly: {reason}"
@@ -754,7 +761,7 @@ def _safe_float(val) -> float | None:
 def _safe_nullable_int(val) -> int | None:
     """Return val as an int if it's a real integer value, else None.
 
-    Used for nullable int fields (pm_pid, dev_pid) where MagicMock or other
+    Used for nullable int fields (pm_pid) where MagicMock or other
     non-integer values should coerce to None rather than raise.
     """
     if val is None:
@@ -987,12 +994,11 @@ def _session_to_pipeline(session) -> PipelineProgress:
         process_alive=process_alive,
         exit_reason=_safe_str(getattr(session, "exit_reason", None)),
         pm_pid=_safe_nullable_int(getattr(session, "pm_pid", None)),
-        dev_pid=_safe_nullable_int(getattr(session, "dev_pid", None)),
         pm_transcript_path=_safe_str(getattr(session, "pm_transcript_path", None)),
         dev_transcript_path=_safe_str(getattr(session, "dev_transcript_path", None)),
-        pty_slot=_safe_nullable_int(getattr(session, "pty_slot", None)),
-        last_pty_read_loop_at=_safe_float(getattr(session, "last_pty_read_loop_at", None)),
-        last_pty_activity_at=_safe_float(getattr(session, "last_pty_activity_at", None)),
+        dev_agent_id=_safe_str(getattr(session, "dev_agent_id", None)),
+        runner_cwd=_safe_str(getattr(session, "runner_cwd", None)),
+        claude_version=_safe_str(getattr(session, "claude_version", None)),
         user_facing_routed=bool(getattr(session, "user_facing_routed", False)),
         stall_advisory=stall_advisory,
         stall_advisory_reason=stall_advisory_reason,

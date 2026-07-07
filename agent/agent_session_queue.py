@@ -1474,109 +1474,23 @@ PROGRESS_POLL_S = float(os.environ.get("PROGRESS_POLL_S", 30))
 def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
     """Max over all PRESENT progress signals for ``session`` (issue #1820 Fix #3).
 
-    Transport-aware WITHOUT a hard transport branch (Granite deconfliction,
-    comment 4862216457, fact a) — this is the max over every signal that
-    happens to be populated, so it is correct for whichever transport is
-    live and needs no dependency on #1843 fix 2:
+    The max over every signal that happens to be populated:
 
-      * **SDK sessions** bump ``last_tool_use_at`` (PreToolUse/PostToolUse
-        hooks) and ``last_turn_at`` (sdk_client ``result`` event).
-      * **Granite PTY sessions** run the CLI hooks, which never populate
-        those SDK fields — they are structurally dead there (the CLI hooks
-        bump only ``updated_at`` + ``tool_call_count``). Consuming only the
-        SDK fields for granite would leave ``acquired_at`` as the sole
-        non-None signal, false-killing every granite session the instant it
-        crosses the deadline. The #1724 PTY-liveness signal
-        ``last_pty_activity_at`` (``models/agent_session.py:392``,
-        diff-gate-stamped by the PTY read-loop callback) is granite's real
-        progress signal, so it is always included in the max.
+      * ``last_tool_use_at`` — bumped by the PreToolUse/PostToolUse hooks.
+      * ``last_turn_at`` — bumped on the stream-json ``result`` event.
       * ``acquired_at`` — the slot lease's bind timestamp, captured by the
         caller at the same moment ``registry.bind()`` records it (issue
-        #1820 "lease-at-bind-only") — is the fallback baseline present for
-        EVERY session regardless of transport or registry availability, so
-        the deadline is always well-defined even for a never-started
-        session with no other signal.
-
-    If #1843 fix 2 lands first and makes the granite CLI hooks additionally
-    populate the SDK fields, both signals are simply fresh and the max picks
-    the freshest — this function has no hard dependency either way.
+        #1820 "lease-at-bind-only") — the fallback baseline present for
+        EVERY session regardless of registry availability, so the deadline
+        is always well-defined even for a never-started session with no
+        other signal.
     """
     candidates = [
         _ts(getattr(session, "last_tool_use_at", None)),
         _ts(getattr(session, "last_turn_at", None)),
-        _ts(getattr(session, "last_pty_activity_at", None)),
         acquired_at,
     ]
     return max(c for c in candidates if c is not None)
-
-
-def _fd_pty_kill(session: AgentSession) -> None:
-    """Fd-level PTY kill for the progress-deadline cancel scope (issue #1820 Fix #3).
-
-    Closes the granite kill-scope gap ``_apply_recovery_transition``'s
-    ``claude_pid`` SIGKILL escalation cannot reach: a granite session runs
-    its container on a worker thread
-    (``await asyncio.to_thread(container.run)``, ``bridge_adapter.py:695``)
-    and records no ``claude_pid`` (SDK-path-only, ``session_executor.py:1425``),
-    so a task-cancel cannot stop the OS thread — recovery would otherwise
-    leave the granite PTY children alive until the orphan reaper sweeps them.
-
-    Transport-branched (BLOCKER r6 — comment 4862216457, fact b):
-
-      * **Pool-backed granite session** (``session.claude_pid is None`` AND
-        ``session.pm_pid``/``session.dev_pid`` set — stamped at
-        ``bridge_adapter.py:810-815`` from the acquired pool pair): delegate
-        to the PTYPool's **PID-targeted** kill,
-        ``PTYPool.kill_orphans({pm_pid, dev_pid})`` (``pty_pool.py:276``) —
-        specific PIDs, never a whole process group, so it can never race the
-        pool's background respawn or kill a PID the pool already recycled
-        for a different session's slot.
-      * **Self-spawned granite** (tests/ping-pong) or an **SDK session**:
-        no-op (log and return). The container's own ``_close_pair_and_reap``
-        killpg (``container.py:1032-1052``) already runs on close for a
-        self-spawned pair — that path is gated behind
-        ``if not self._uses_pool_pair()`` and is DEAD for pool pairs (the
-        production transport), so it is deliberately NOT reused here:
-        reusing it would kill nothing where it matters and could race the
-        pool's respawn. The SDK path is already covered by
-        ``_apply_recovery_transition``'s ``claude_pid`` SIGKILL escalation.
-
-    Never raises into the caller — a failed or missing PTY kill must not
-    block the reclaim+finalize that follows it.
-    """
-    try:
-        if session.claude_pid is None and (
-            session.pm_pid is not None or session.dev_pid is not None
-        ):
-            from agent.granite_container.pty_pool import PTYPool
-
-            pids = {p for p in (session.pm_pid, session.dev_pid) if p is not None}
-            killed = PTYPool.kill_orphans(pids)
-            logger.warning(
-                "[worker] Fix #3 fd-PTY-kill: PTYPool.kill_orphans(%s) for session %s "
-                "killed=%d (pool-backed granite, production transport)",
-                pids,
-                session.agent_session_id,
-                killed,
-            )
-        else:
-            logger.debug(
-                "[worker] Fix #3 fd-PTY-kill: no-op for session %s "
-                "(claude_pid=%s, pm_pid=%s, dev_pid=%s — not a pool-backed granite "
-                "session; SDK claude_pid SIGKILL or the container's own close-time "
-                "reap already cover it)",
-                session.agent_session_id,
-                session.claude_pid,
-                session.pm_pid,
-                session.dev_pid,
-            )
-    except Exception:
-        logger.warning(
-            "[worker] Fix #3 fd-PTY-kill failed for session %s (non-fatal, "
-            "proceeding to reclaim+finalize regardless)",
-            session.agent_session_id,
-            exc_info=True,
-        )
 
 
 async def _worker_loop(
@@ -1815,7 +1729,7 @@ async def _worker_loop(
             # `_execute_agent_session` now runs as an OWNED child task,
             # watched by a small on-loop poll loop, instead of a plain
             # `await`. This is NOT a wall-clock cap (#1172 removed that) — it
-            # resets on any tool/turn/PTY activity and only fires when
+            # resets on any tool/turn activity and only fires when
             # progress genuinely stalls past SESSION_PROGRESS_DEADLINE_S.
             deadline_cancelled = False
             # Telemetry-once latch (CONCERN r6): tier1/tier2 counters fire on
@@ -1843,8 +1757,7 @@ async def _worker_loop(
             # `except Exception`) and (2) be silently reversed by :1891
             # anyway — so it is deliberately never done. Fix #3's OWN
             # deadline cancel targets `exec_task` directly (the local
-            # reference below) and kills the SDK subprocess/PTY itself via
-            # `_fd_pty_kill`; it never touches the handle.
+            # reference below); it never touches the handle.
             try:
                 while not exec_task.done():
                     done, _ = await asyncio.wait({exec_task}, timeout=PROGRESS_POLL_S)
@@ -1876,8 +1789,10 @@ async def _worker_loop(
                         continue  # active children / compaction — reprieve, keep watching
                     deadline_cancelled = True
                     # FINALIZE FIRST — at the watcher scope, before cancel
-                    # reaches the CancelledError handler below.
-                    _fd_pty_kill(current)  # BLOCKER r6: transport-branched.
+                    # reaches the CancelledError handler below. Subprocess
+                    # teardown rides exec_task.cancel() below (the harness
+                    # kills its own `claude -p` child on cancellation); the
+                    # worker-startup orphan sweep reaps any survivor.
                     if registry is not None:
                         registry.reclaim(session.agent_session_id)  # free the slot
                     did_finalize = await _apply_recovery_transition(
@@ -2003,7 +1918,7 @@ async def _worker_loop(
                     # worker-loop task itself was cancelled
                     # (`.cancelling() > 0`). `asyncio.wait` does NOT cancel
                     # exec_task when the waiter itself is cancelled, so the
-                    # SDK subprocess/PTY would otherwise still be running
+                    # runner subprocess would otherwise still be running
                     # (orphan). Tear it down BEFORE re-raising, or startup
                     # recovery re-queues a still-`running` row → double
                     # execution (Blocker 1, round 2).
@@ -2104,7 +2019,7 @@ async def _worker_loop(
                 # the owned-task region above for any reason with `exec_task`
                 # still pending — e.g. a plain Exception raised from inside
                 # the progress-deadline while-loop itself, not from awaiting
-                # `exec_task` — cancel it so no subprocess/PTY is orphaned.
+                # `exec_task` — cancel it so no runner subprocess is orphaned.
                 # No-op on every other exit path: Branches 1-3 above and the
                 # normal-completion path all already leave `exec_task` done.
                 # `exec_task` is always bound here — it is assigned

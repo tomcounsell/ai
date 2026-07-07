@@ -42,7 +42,6 @@ def _make_mock_session(**overrides):
         "watchdog_unhealthy": None,
         "priority": "normal",
         "extra_context": None,
-        "pty_slot": None,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -400,15 +399,19 @@ class TestExtractGithubLinks:
         assert p.turn_count is None
         assert p.tool_call_count is None
 
-    def test_granite_pty_identity_fields(self):
-        """Granite PTY identity fields (issue #1648) are settable and default None/False."""
+    def test_runner_identity_fields(self):
+        """Session-runner identity fields are settable and default None/False.
+
+        Post-cutover (#1924): ``dev_pid`` and ``pty_slot`` died with the PTY
+        substrate; the surviving identity surface is exit_reason, pm_pid,
+        the two transcript paths, and user_facing_routed.
+        """
         from ui.data.sdlc import PipelineProgress
 
         # Defaults
         p = PipelineProgress(agent_session_id="x")
         assert p.exit_reason is None
         assert p.pm_pid is None
-        assert p.dev_pid is None
         assert p.pm_transcript_path is None
         assert p.dev_transcript_path is None
         assert p.user_facing_routed is False
@@ -418,48 +421,43 @@ class TestExtractGithubLinks:
             agent_session_id="x",
             exit_reason="pm_complete",
             pm_pid=1234,
-            dev_pid=5678,
             pm_transcript_path="/tmp/pm.jsonl",
             dev_transcript_path="/tmp/dev.jsonl",
             user_facing_routed=True,
         )
         assert p2.exit_reason == "pm_complete"
         assert p2.pm_pid == 1234
-        assert p2.dev_pid == 5678
         assert p2.pm_transcript_path == "/tmp/pm.jsonl"
         assert p2.dev_transcript_path == "/tmp/dev.jsonl"
         assert p2.user_facing_routed is True
 
-    def test_pty_slot_defaults_none(self):
-        """PipelineProgress.pty_slot is None when not provided (issue #1663)."""
+    def test_resume_scalar_fields(self):
+        """Resume scalars (#1924 Success Criterion 3) are settable, default None."""
         from ui.data.sdlc import PipelineProgress
 
         p = PipelineProgress(agent_session_id="x")
-        assert p.pty_slot is None
+        assert p.dev_agent_id is None
+        assert p.runner_cwd is None
+        assert p.claude_version is None
 
-    def test_pty_slot_roundtrips(self):
-        """PipelineProgress.pty_slot carries through a non-None value (issue #1663)."""
+        p2 = PipelineProgress(
+            agent_session_id="x",
+            dev_agent_id="agent-abc123",
+            runner_cwd="/Users/x/src/proj",
+            claude_version="2.0.5",
+        )
+        assert p2.dev_agent_id == "agent-abc123"
+        assert p2.runner_cwd == "/Users/x/src/proj"
+        assert p2.claude_version == "2.0.5"
+
+    def test_pty_fields_stay_deleted(self):
+        """``pty_slot`` and ``dev_pid`` must not resurface on PipelineProgress
+        (#1924 one-way cutover; names checked as strings intentionally)."""
         from ui.data.sdlc import PipelineProgress
 
-        p = PipelineProgress(agent_session_id="x", pty_slot=2)
-        assert p.pty_slot == 2
-
-    def test_session_to_pipeline_propagates_pty_slot(self):
-        """_session_to_pipeline populates pty_slot from AgentSession (issue #1663)."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = _make_mock_session(pty_slot=1)
-        pipeline = _session_to_pipeline(session)
-        assert pipeline.pty_slot == 1
-
-    def test_session_to_pipeline_pty_slot_none_when_absent(self):
-        """_session_to_pipeline yields pty_slot=None for sessions without a slot
-        (SDK-path and pre-deploy granite sessions) (issue #1663)."""
-        from ui.data.sdlc import _session_to_pipeline
-
-        session = _make_mock_session(pty_slot=None)
-        pipeline = _session_to_pipeline(session)
-        assert pipeline.pty_slot is None
+        p = PipelineProgress(agent_session_id="x")
+        assert not hasattr(p, "pty_slot")
+        assert not hasattr(p, "dev_pid")
 
 
 class TestSessionToPipeline:
@@ -633,6 +631,34 @@ class TestSessionToPipeline:
         assert pipeline.parent_agent_session_id is None
         assert pipeline.context_summary is None
 
+    def test_resume_scalars_populated(self):
+        """The three resume scalars flow from AgentSession to PipelineProgress."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session(
+            dev_agent_id="agent-dev42",
+            runner_cwd="/Users/x/src/ai/.worktrees/slug",
+            claude_version="2.0.5",
+        )
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.dev_agent_id == "agent-dev42"
+        assert pipeline.runner_cwd == "/Users/x/src/ai/.worktrees/slug"
+        assert pipeline.claude_version == "2.0.5"
+
+    def test_resume_scalars_absent_on_old_records(self):
+        """Old AgentSession records without the resume scalars must not raise."""
+        from ui.data.sdlc import _session_to_pipeline
+
+        mock_session = _make_mock_session()
+        del mock_session.dev_agent_id
+        del mock_session.runner_cwd
+        del mock_session.claude_version
+
+        pipeline = _session_to_pipeline(mock_session)
+        assert pipeline.dev_agent_id is None
+        assert pipeline.runner_cwd is None
+        assert pipeline.claude_version is None
+
 
 class TestParentChildGrouping:
     """Tests for parent/child session grouping in get_all_sessions."""
@@ -770,6 +796,47 @@ class TestHistoryParsing:
         assert events[0].event_type == "exit_anomaly"
         assert "crash" in events[0].text
         assert events[0].timestamp == 555.0
+
+    def test_turn_history_event_labeled_with_actor(self):
+        """Runner turn-history mirror entries surface with actor + text, not
+        as generic 'system' events (#1924 Success Criterion 3)."""
+        from ui.data.sdlc import _parse_history
+
+        history = [
+            {
+                "type": "turn_history",
+                "event_type": "turn_history",
+                "actor": "dev",
+                "text": "built the thing",
+                "ts": "2026-07-07T10:00:00+00:00",
+            },
+            {
+                "type": "turn_history",
+                "event_type": "turn_history",
+                "actor": "pm",
+                "text": "reviewed and shipped",
+                "ts": "2026-07-07T10:01:00+00:00",
+            },
+        ]
+        events = _parse_history(history)
+        assert len(events) == 2
+        assert events[0].event_type == "turn_history"
+        assert "dev" in events[0].text
+        assert "built the thing" in events[0].text
+        assert events[1].event_type == "turn_history"
+        assert "pm" in events[1].text
+        assert "reviewed and shipped" in events[1].text
+
+    def test_turn_history_type_only_entry_tolerated(self):
+        """Mirror entries written before the dual-key fix (type-only) still
+        parse as labeled turn history, not 'system' (exit_anomaly precedent)."""
+        from ui.data.sdlc import _parse_history
+
+        events = _parse_history([{"type": "turn_history", "actor": "pm", "text": "hi", "ts": "t"}])
+        assert len(events) == 1
+        assert events[0].event_type == "turn_history"
+        assert "pm" in events[0].text
+        assert "hi" in events[0].text
 
     def test_ts_key_used_for_timestamp_when_no_timestamp(self):
         """Events with 'ts' key (granite format) populate the timestamp field."""

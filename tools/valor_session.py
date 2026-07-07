@@ -669,15 +669,11 @@ class ResumeResult:
     error: str | None = None
     model: str | None = None
     claude_session_uuid: str | None = None
-    # Set on a successful granite-session resume (#1836 Part C). Populating
-    # `claude_session_uuid` from the PM handle (Part B) only clears the
-    # resume gate -- it does NOT make the worker re-enter the prior PM
-    # transcript. Cold->warm re-entry (reading `resume_handles`, feeding the
-    # stored UUID into `--resume`, cursor replay) is #1721's scope and is
-    # not landed. Without this warning, a bare `success=True` reads to an
-    # operator as full continuation; this gives a runtime signal at the
-    # call site instead of relying on docs alone. `None` for non-granite
-    # (SDK-client) resumes, which are unaffected.
+    # Optional operator-facing caveat surfaced by the CLI on resume. None in
+    # the normal case: the runner consumes the persisted four-scalar resume
+    # context (claude_session_uuid + dev_agent_id + runner_cwd +
+    # claude_version) and re-enters the prior transcript via `--resume`
+    # (plan #1924, D3 simple resume).
     warning: str | None = None
 
 
@@ -753,24 +749,11 @@ def resume_session(session, message: str, *, source: str = "cli") -> "ResumeResu
             error=f"Could not transition to pending: {e}",
         )
 
-    # Granite sessions are the only writer of `resume_handles` (populated
-    # by `BridgeAdapter._persist_resume_handles`) -- its presence is the
-    # signal that the gate above just passed via the PM-handle mirror
-    # (Part B), not a durable SDK-client `claude_session_uuid` write via
-    # `_store_claude_session_uuid`. Surface the honest re-entry caveat
-    # (#1836 Part C) so the operator doesn't read a bare `success=True`
-    # as full transcript continuation -- true cold->warm re-entry is
-    # #1721, not landed.
-    _warning = None
-    if getattr(session, "resume_handles", None):
-        _warning = "resumed as a fresh session; prior-transcript re-entry pending #1721"
-
     return ResumeResult(
         success=True,
         session_id=session_id,
         model=getattr(session, "model", None),
         claude_session_uuid=getattr(session, "claude_session_uuid", None),
-        warning=_warning,
     )
 
 

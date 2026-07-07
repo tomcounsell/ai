@@ -324,8 +324,8 @@ def main():
                 parent_agent_session_id = os.environ.get("VALOR_PARENT_SESSION_ID")
 
                 # Stopgap (#1633): do not create NEW parent-linked child records.
-                # The granite PTY container owns the PM/Dev split; parent-linked
-                # children risk pool-slot starvation. Skip record creation
+                # Dependent work runs as subagents inside the session (D1);
+                # parent-linked children have no independent fanout cap. Skip
                 # entirely (no Redis write) -- the subprocess itself still runs,
                 # and the attach path above keeps EXISTING child sessions
                 # working. Escape hatch: VALOR_ALLOW_CHILD_SESSIONS=1.

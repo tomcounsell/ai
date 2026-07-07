@@ -212,6 +212,53 @@ class TestEmailHealthAlerts:
         assert health["email_alert"] == "auth_failed"
 
 
+class TestDashboardSessionSerialization:
+    """dashboard.json session objects carry the headless-runner resume
+    scalars (#1924 Success Criterion 3): dev_agent_id, runner_cwd,
+    claude_version."""
+
+    def test_dashboard_json_sessions_include_resume_scalars(self, client):
+        from unittest.mock import patch
+
+        from ui.data.sdlc import PipelineProgress
+
+        progress = PipelineProgress(
+            agent_session_id="resume-scalars-1",
+            dev_agent_id="agent-dev42",
+            runner_cwd="/Users/x/src/ai/.worktrees/slug",
+            claude_version="2.0.5",
+        )
+        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        (session,) = [
+            s for s in response.json()["sessions"] if s["agent_session_id"] == "resume-scalars-1"
+        ]
+        assert session["dev_agent_id"] == "agent-dev42"
+        assert session["runner_cwd"] == "/Users/x/src/ai/.worktrees/slug"
+        assert session["claude_version"] == "2.0.5"
+
+    def test_dashboard_json_resume_scalars_default_none(self, client):
+        """PipelineProgress without the scalars set serializes them as None
+        (old records never break the dashboard)."""
+        from unittest.mock import patch
+
+        from ui.data.sdlc import PipelineProgress
+
+        progress = PipelineProgress(agent_session_id="resume-scalars-2")
+        with patch("ui.data.sdlc.get_all_sessions", return_value=[progress]):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        (session,) = [
+            s for s in response.json()["sessions"] if s["agent_session_id"] == "resume-scalars-2"
+        ]
+        assert session["dev_agent_id"] is None
+        assert session["runner_cwd"] is None
+        assert session["claude_version"] is None
+
+
 class TestArchiveHealth:
     """The dashboard's ``archive`` health block surfaces
     ``agent.session_archive.get_archive_status()`` -- issue #1825,

@@ -1,6 +1,7 @@
 """AgentSession model - unified lifecycle tracking for agent work.
 
-Single Popoto model with session_type discriminator ("eng", "teammate", or "granite").
+Single Popoto model with session_type discriminator ("eng" or "teammate";
+"granite" persists on historical records only — see config/enums.py).
 
 Popoto does not support model inheritance, so session types are
 distinguished by the session_type field with factory methods and derived
@@ -83,8 +84,8 @@ SESSION_TYPE_TEAMMATE = SessionType.TEAMMATE
 class AgentSession(Model):
     """Unified model for all Agent SDK sessions, discriminated by session_type.
 
-    Single Popoto model with a session_type discriminator ("eng", "teammate",
-    or "granite").
+    Single Popoto model with a session_type discriminator ("eng" or
+    "teammate"; "granite" persists on historical records only).
 
     Session types (permission model):
         Eng session (session_type="eng"):
@@ -138,7 +139,7 @@ class AgentSession(Model):
     # === Identity ===
     id = AutoKeyField()
     session_id = Field()  # Telegram-derived session identifier (e.g., tg_project_chatid_msgid)
-    session_type = KeyField(null=True)  # "eng", "teammate", or "granite" — discriminator
+    session_type = KeyField(null=True)  # "eng" or "teammate" — discriminator
     project_key = KeyField()
     status = IndexedField(default="pending")  # Non-key field with secondary index for .filter()
 
@@ -198,6 +199,28 @@ class AgentSession(Model):
     # could miss a just-saved row across partial `save(update_fields=...)`
     # calls in the same process (#1127 PR #1135 review tech-debt).
     claude_session_uuid = IndexedField(null=True)
+
+    # === Session-runner resume scalars (plan #1924, spike #1928) ===
+    # The four-scalar resume contract for headless sessions. The PM session
+    # UUID (the sole `--resume` entry point) REUSES `claude_session_uuid`
+    # above — do not add a duplicate field. The remaining three are nullable
+    # adds; `_heal_descriptor_pollution` walks fields generically, so no
+    # backcompat code is needed.
+    #
+    # dev_agent_id: the Dev subagent continuation handle — captured
+    #   STRUCTURALLY from the sidechain directory scan
+    #   (~/.claude/projects/{slug}/{claude_session_id}/subagents/), never
+    #   parsed from PM prose. Lets a resumed session continue the SAME dev
+    #   agent across worker restarts.
+    dev_agent_id = Field(null=True)
+    # runner_cwd: exact absolute working dir of the runner — Claude session
+    #   lookup is cwd-scoped, so resume must re-invoke from this directory
+    #   (validated to exist before any --resume; Race 3).
+    runner_cwd = Field(null=True)
+    # claude_version: CLI version the session ran under — agent-continuation
+    #   behavior is version-specific (Risk 5a); deploy gates smoke the
+    #   continuation contract before trusting resume across a version bump.
+    claude_version = Field(null=True)
 
     # === Claude CLI subprocess PID (issue #1271) ===
     # The OS PID of the `claude_agent_sdk/_bundled/claude` subprocess spawned
@@ -283,55 +306,43 @@ class AgentSession(Model):
     # fields generically. Default False keeps existing sessions unaffected.
     requires_real_chrome = Field(default=False)
 
-    # === Granite container user-facing delivery tracking (issue #1647) ===
-    # Set to True by BridgeAdapter._publish_exit_summary when at least one
-    # [/user] or non-empty [/complete] payload was confirmed delivered to the
-    # user channel during the granite container run. The executor's emoji branch
+    # === Runner user-facing delivery tracking (issue #1647) ===
+    # Set to True by SessionRunnerAdapter.publish_exit_summary when at least
+    # one [/user] or non-empty [/complete] payload was confirmed delivered to
+    # the user channel during the runner session. The executor's emoji branch
     # at session_executor.py reads this via getattr(..., False) to choose
     # REACTION_COMPLETE instead of the bare-emoji REACTION_SUCCESS, because the
-    # granite path never calls messenger.send() so has_communicated() stays False.
+    # runner path never calls messenger.send() so has_communicated() stays False.
     # Default False keeps existing sessions unaffected (no migration needed).
     user_facing_routed = Field(default=False)
 
-    # Granite-path exit reason (pm_complete, pm_user, pm_max_turns, dev_hang,
-    # pm_hang, startup_unresolved, pm_no_user_message, exception).
-    # Status mapping untouched; dashboard renders warning chip for non-clean values.
+    # Runner exit reason — the exit-classification vocabulary in
+    # agent/session_runner/router.py (pm_complete, pm_user, pm_floor_delivered,
+    # steer_abort, error, exception, turn_timeout, pm_empty_turn, pm_max_turns).
+    # Historical PTY values (dev_hang, pm_hang, startup_unresolved, ...) persist
+    # in old records and stay valid. Status mapping untouched; dashboard renders
+    # a warning chip for non-clean values.
     exit_reason = Field(null=True, default=None)
 
-    # === Granite container PTY identity (issue #1648 dashboard telemetry) ===
-    # Populated by BridgeAdapter._publish_exit_summary from ContainerResult.
-    # Nullable: non-granite sessions and pre-deploy granite sessions leave these
-    # as None. The dashboard uses them to surface active PTY processes and
-    # link to transcript files.
-    #
-    # PM PTY OS process ID. Nullable; None when the session is not running on
-    # the granite path or when the PTY has already exited.
+    # === Runner PM subprocess identity ===
+    # PM `claude -p` OS process ID for the CURRENT turn, persisted by the
+    # runner's on-spawn callback (agent/session_runner/runner.py::
+    # _on_turn_spawn) BEFORE the turn-await blocks (Race 2) — a worker crash
+    # mid-turn leaves a reapable record. Nullable; None before the first
+    # turn's subprocess exists.
     pm_pid = IntField(null=True)
-    # Dev PTY OS process ID.
-    dev_pid = IntField(null=True)
     # Absolute path to the PM Claude Code JSONL transcript file.
     # Follows Claude Code's naming: ~/.claude/projects/{cwd-slug}/{uuid}.jsonl
     pm_transcript_path = Field(null=True)
-    # Absolute path to the Dev Claude Code JSONL transcript file.
+    # Absolute path to the Dev Claude Code JSONL transcript file (historical
+    # records only — the D1 topology runs Dev as a subagent whose sidechain
+    # lives under the PM transcript; nothing writes this post-cutover).
     dev_transcript_path = Field(null=True)
-    # Stable physical PTYPool slot index (0-based). Correlated to a specific
-    # (pm_pid, dev_pid) pair only via co-persisted fields — the slot itself is
-    # recycled after each session. The dashboard uses this to show which pool
-    # slot the session occupied.
-    pty_slot = IntField(null=True)
 
-    # === Granite startup failure diagnostic (issue #1710) ===
-    # Populated by BridgeAdapter._publish_exit_summary when the granite
-    # container exits startup_unresolved. Nullable: only set on failed startups.
-    #
-    # startup_failure_kind: "plateau" (N consecutive identical no-progress
-    #   cycles) or "ceiling" (burned the full STARTUP_HARD_CEILING_S).
-    #   Coordination surface for #1539's auto-resume policy: plateau = do NOT
-    #   auto-resume (deterministic stuck), ceiling = slow/never-settled cold start.
+    # === Startup failure diagnostic (issue #1710; historical records only) ===
+    # Nothing produces these after the PTY teardown (plan #1924); the values
+    # persist in pre-cutover records and remain readable.
     startup_failure_kind = Field(null=True, default=None)
-    # startup_captured_frame: size-capped PM+Dev buffer snapshot from the
-    #   moment of failure. Human-readable, stripped of ANSI. Lets the dashboard
-    #   and #1538's recorder show the diagnosis without re-deriving it.
     startup_captured_frame = Field(null=True, default=None)
 
     # === Crash-recovery reflection fields (issue #1539) ===
@@ -378,30 +389,6 @@ class AgentSession(Model):
     recovery_attempts = IntField(default=0)
     # Count of Tier 2 reprieves (activity-positive saves) for post-hoc analysis.
     reprieve_count = IntField(default=0)
-
-    # === PTY liveness signals (path B — mid-run wedge detection, #1724) ===
-    # Stamped every read-loop iteration (each _cycle_idle call), unconditionally.
-    # Proves the pexpect read loop is still cycling inside the container thread.
-    # Distinct from last_heartbeat_at (queue-layer) and last_sdk_heartbeat_at
-    # (messenger-layer): those are async; this is synchronous with the PTY loop.
-    last_pty_read_loop_at = DatetimeField(null=True)
-    # Stamped when the normalized screen buffer differs from the prior read.
-    # Proves the PTY screen is still repainting (model/TUI actively rendering).
-    # None until the first screen change after session start.
-    last_pty_activity_at = DatetimeField(null=True)
-    # Cross-tick durable state: UTC timestamp when the screen first went
-    # quiescent (no new paint since last_pty_activity_at). Set on first quiescent
-    # tick; cleared when activity resumes. Used by stage-1 to measure how long
-    # the PTY has been silent while a tool is in flight.
-    mid_run_quiescent_since = DatetimeField(null=True)
-    # Cross-tick durable state: serialized (last_pty_activity_at_iso, total_input_tokens)
-    # Note: total_input_tokens is used as the best available proxy for byte_offset (the plan
-    # specified byte_offset, but it lives only on in-memory tailer cursors and is not persisted
-    # onto AgentSession). This substitution is safe for stage-1 observe-only (the field is an
-    # optional corroborator, never a gating conjunct per plan D2/concern #3), but the discrepancy
-    # should be resolved before stage-2 uses this tuple as a CAS precondition.
-    # None until the first stage-1 evaluation.
-    mid_run_pty_snapshot = Field(null=True)
 
     # === Harness subprocess PID (issue #1269) ===
     # PID of the live `claude -p stream-json` subprocess for THIS session, when
@@ -471,8 +458,8 @@ class AgentSession(Model):
     # (agent/tool_budget.py) when a session exhausts MAX_TOOL_CALLS_PER_SESSION
     # or SESSION_COST_CAP_USD. Written ONLY by the budget hooks via a narrow
     # save(update_fields=["budget_tripped", "budget_tripped_reason", ...]) —
-    # NEVER a status write (a hook-driven status write would race the granite
-    # bridge_adapter's partitioned update_fields saves). No other writer touches
+    # NEVER a status write (a hook-driven status write would race the runner
+    # adapter's partitioned update_fields saves). No other writer touches
     # these fields, so they are always race-free; the dashboard,
     # `valor-session status`, and the adapter/worker READ them. Both default
     # falsy and Popoto is schema-on-read, so existing records need NO data
@@ -480,32 +467,12 @@ class AgentSession(Model):
     budget_tripped = Field(default=False)
     budget_tripped_reason = Field(null=True, default=None)
 
-    # === Per-role transport hedge (plan #1842) ===
-    # Resolved once at dispatch from config precedence
-    # (projects.<key>.transport.{pm,dev} > settings.granite.{pm,dev}_transport
-    # > "pty") and immutable for the session's lifetime. Shape:
-    # {"pm": "pty"|"headless", "dev": "pty"|"headless"}. Readers: dashboard,
-    # analytics, resume-handle tagging, and the worker recovery path (which
-    # MUST reuse this rather than re-resolving against a since-flipped config).
-    # Nullable — a pre-feature revived session with no persisted value degrades
-    # to the both-PTY default.
-    role_transports = DictField(null=True)
-
-    # Transport-agnostic resume handles (schema shared with #1721): a list of
-    # {"role", "claude_session_id", "transcript_path", "transport"} entries,
-    # persisted at spawn/first-turn capture for BOTH transports. This plan's
-    # DoD is "written and shaped correctly" only — CONSUMPTION (loop cursor,
-    # --resume re-entry, skip-priming) is #1721's scope.
-    resume_handles = ListField(null=True)
-
     # === Metered-leg accounting (plan #1842) ===
-    # DISJOINT from the total_* scalars above. The transcript tailer writes the
-    # ABSOLUTE total_* scalars (PTY roles only); the headless leg writes these
+    # DISJOINT from the total_* scalars above (which historical PTY sessions
+    # populated via the transcript tailer). The headless runner writes these
     # metered_* fields ADDITIVELY via accumulate_session_tokens(metered=True).
-    # Because the two writers target non-overlapping fields, mixed-transport
-    # accounting is non-clobbering by construction (Race 1). Displayed grand
-    # total = total_* + metered_*, summed at read time. Nullable/default 0 for
-    # forward-compat with pre-feature records.
+    # Displayed grand total = total_* + metered_*, summed at read time.
+    # Nullable/default 0 for forward-compat with pre-feature records.
     metered_input_tokens = IntField(default=0)
     metered_output_tokens = IntField(default=0)
     metered_cache_read_tokens = IntField(default=0)
@@ -951,13 +918,11 @@ class AgentSession(Model):
         return await super().async_create(**kwargs)
 
     # Fields whose partial saves intentionally omit ``updated_at`` at high
-    # frequency (liveness heartbeats, PID bookkeeping, and the granite
-    # wedge-detector's cross-tick state). Omitting the stamp here is by-design —
-    # the dedicated heartbeat/freshness fields ARE the freshness signal, so
-    # advancing ``updated_at`` would be redundant — and a WARNING per write is
-    # pure log noise (several lines per heartbeat per session, far worse for
-    # granite-container sessions whose PTY read-loop and per-tool boundaries
-    # fire at >=1 Hz) that buries genuine warnings. We downgrade these to DEBUG;
+    # frequency (liveness heartbeats and PID bookkeeping). Omitting the stamp
+    # here is by-design — the dedicated heartbeat/freshness fields ARE the
+    # freshness signal, so advancing ``updated_at`` would be redundant — and a
+    # WARNING per write is pure log noise (several lines per heartbeat per
+    # session) that buries genuine warnings. We downgrade these to DEBUG;
     # any other omission (e.g. ``status``) still warns. A combined partial save
     # is only downgraded when EVERY field in it is on this allowlist.
     _UPDATED_AT_OMISSION_OK_FIELDS = frozenset(
@@ -968,17 +933,13 @@ class AgentSession(Model):
             "last_stdout_at",
             "claude_pid",
             "harness_pid",
-            # Turn-boundary liveness (sdk_client result handler + granite on_turn)
+            # Runner PM subprocess pid (per-turn spawn bookkeeping, Race 2)
+            "pm_pid",
+            # Turn-boundary liveness (stream-json result handler)
             "last_turn_at",
             # Tool-boundary liveness (Pre/PostToolUse hooks, fires per tool call)
             "current_tool_name",
             "last_tool_use_at",
-            # Granite PTY read-loop liveness stamps (#1724; fire at >=1 Hz)
-            "last_pty_read_loop_at",
-            "last_pty_activity_at",
-            # Granite stage-1 wedge-detector cross-tick state (per health tick)
-            "mid_run_quiescent_since",
-            "mid_run_pty_snapshot",
         }
     )
 

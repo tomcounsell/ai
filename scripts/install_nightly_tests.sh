@@ -18,10 +18,10 @@ LABEL="${SERVICE_LABEL_PREFIX}.nightly-tests"
 PLIST_DST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
 # ── Bridge-role gate ────────────────────────────────────────────────────
-# Nightly tests exercise the granite real-loop integration test, which is only
-# meaningful on a machine that has at least one Telegram-configured (bridge)
-# project assigned to it. Non-bridge machines (e.g. skills-only laptops) skip
-# the install and remove any stale plist from a prior install.
+# Nightly-test alerts route through the Telegram bridge, so the schedule is
+# only meaningful on a machine that has at least one Telegram-configured
+# (bridge) project assigned to it. Non-bridge machines (e.g. skills-only
+# laptops) skip the install and remove any stale plist from a prior install.
 #
 # Mirrors the has_email_role() pattern from scripts/install_email_bridge.sh.
 has_bridge_role() {

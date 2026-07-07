@@ -20,7 +20,7 @@
 #   3. Honors the caller's cwd (worktree agents test the worktree).
 #
 # Usage:
-#   scripts/pytest-clean.sh tests/unit/granite_container/
+#   scripts/pytest-clean.sh tests/unit/session_runner/
 #   scripts/pytest-clean.sh -k "test_pick" tests/unit/
 #   scripts/pytest-clean.sh -x   # all args pass through to pytest
 #

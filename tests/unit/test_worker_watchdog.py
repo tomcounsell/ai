@@ -815,26 +815,13 @@ class TestRecoverW4CriticalAlert:
         written_keys = [call[0][0] for call in mock_r.set.call_args_list]
         assert any("worker:watchdog:critical:" in k for k in written_keys)
 
-    def test_w4_pty_close_required_key_written_by_default(self, isolated_state, monkeypatch):
-        """By default (env var not set), pty_close_required key is written."""
+    def test_w4_never_writes_pty_close_required_key(self, isolated_state, monkeypatch):
+        """Post-cutover (#1924): the pty_close_required side-channel died with
+        the PTY substrate — W4 recovery must never write it, regardless of the
+        retired WORKER_WATCHDOG_PTY_CLOSE_DISABLED env var (name checked as a
+        string intentionally; a reappearance means a partial revert)."""
         status = {"pid": 12345, "heartbeat_age": 700.0}
         monkeypatch.delenv("WORKER_WATCHDOG_PTY_CLOSE_DISABLED", raising=False)
-        mock_r = MagicMock()
-        with (
-            patch("os.kill"),
-            patch.object(wwd, "_poll_pid_dead", return_value=False),
-            patch.object(wwd, "_bootout_worker"),
-            patch("popoto.redis_db.POPOTO_REDIS_DB", mock_r),
-        ):
-            wwd.recover(status)
-
-        written_keys = [call[0][0] for call in mock_r.set.call_args_list]
-        assert any("pty_close_required" in k for k in written_keys)
-
-    def test_w4_pty_close_required_key_suppressed_when_disabled(self, isolated_state, monkeypatch):
-        """When WORKER_WATCHDOG_PTY_CLOSE_DISABLED is set, pty_close_required key is NOT written."""
-        status = {"pid": 12345, "heartbeat_age": 700.0}
-        monkeypatch.setenv("WORKER_WATCHDOG_PTY_CLOSE_DISABLED", "1")
         mock_r = MagicMock()
         with (
             patch("os.kill"),
