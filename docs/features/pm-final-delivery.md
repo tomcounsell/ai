@@ -95,7 +95,7 @@ Two distinct pieces replace the marker:
      asyncio shutdown semantics. An auto-resuming interruption (the common
      case) sends nothing — the session re-queues and its real answer arrives
      later. See
-     [Reason-Aware Interrupt Messaging and Failure Notification](#reason-aware-interrupt-messaging-and-failure-notification-issue-1877)
+     [Reason-Aware Interrupt Messaging and Failure Notification](#reason-aware-interrupt-messaging-and-failure-notification-issue-1877-silent-resume-inversion)
      below.
 
 `schedule_pipeline_completion(...)` wraps the runner in a tracked
@@ -221,6 +221,21 @@ silent), not a choice between two announcements:
   `_deliver_tool_timeout_degraded_notice` deliveries. Without this last
   resort, that branch would finalize to `failed` in complete silence — the
   exact regression class issue #1937 exists to prevent.
+- **Shared delivery mechanics:** `_deliver_terminal_interrupt_notice` and
+  `_deliver_tool_timeout_degraded_notice` both delegate their SETNX-dedup +
+  transport-resolve + `FileOutputHandler`-fallback + send logic to a common
+  `_deliver_oneshot_dedup_notice(entry, *, dedup_key, ttl, message) -> bool`
+  helper — the terminal notice calls it with
+  `dedup_key=f"interrupted-sent:{session_id}"` / `ttl=120`, the degraded
+  notice with its own `tool_timeout:degraded_sent` key / longer TTL.
+  `_deliver_tool_timeout_degraded_notice` returns that `bool` (previously
+  `None`), and the escalation branch gates `_degraded_sent` on the actual
+  return value rather than on merely having called it — a swallowed
+  send-callback exception inside the degraded notice no longer silently
+  suppresses the terminal notice too (issue #1937 build-stage fix; regression
+  covered by
+  `test_escalation_branch_speaks_when_degraded_notice_silently_fails` in
+  `tests/unit/test_session_health_subprocess_kill.py`).
 - **Deliberately not wired:** supersede and PM-cancel finalize sessions that
   are not currently `running`, so no `CancelledError` interrupt send ever
   fires on those paths — there is nothing for a cancel-reason to influence,
