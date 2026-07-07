@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -13,7 +13,40 @@ revision_applied: true
 
 ## Critique Revision (2026-07-07)
 
-Revised to address CRITIQUE's NEEDS REVISION verdict (1 BLOCKER + 4 concerns):
+### Second revision — CRITIQUE pass 2 (1 NEW BLOCKER + 3 concerns + 1 nit)
+
+- **BLOCKER — Risk 1 mitigation was factually false; post-`init`-then-hang subprocess.** Broadening
+  `sdk_ever_output` to include `last_stdout_at` presence means a subprocess that streams `init` once
+  and then hangs derives `sdk_ever_output=True` and escapes the never-started gate. The plan claimed
+  "idle-gap / turn-deadline detectors key on `last_stdout_at`/`last_activity` freshness and DO fire" —
+  **verified FALSE**: `grep -n "last_stdout_at\|last_activity" agent/session_health.py` returns ZERO
+  hits. Resolution: adopted **option (a)** — the real backstop for a post-`init` hang is the
+  **whole-turn deadline** (runner preempt watcher `runner.py:764` firing `_kill_turn(cause="timeout")`,
+  with the driver's `asyncio.wait_for(..., timeout=turn_timeout_s)` at `role_driver.py:404` as the
+  backstop). Risk 1, the Success Criterion, and Step 5 rewritten to cite that mechanism honestly,
+  including the **detection-latency tradeoff** (a genuine post-`init` hang is now caught at the
+  whole-turn deadline — `ENG_TURN_TIMEOUT_S`=7200s / `TEAMMATE`=900s — not at the ~150s never-started
+  gate). The finer idle-gap-on-`last_stdout_at`-freshness detector remains the deferred follow-up
+  (Open Question 1). Option (b) (build the idle-gap detector now) was rejected as a scope expansion
+  with no correctness justification: the whole-turn deadline already recovers the hung turn.
+- **Concern — Element 1 hard constraint.** The composing 1-arg `on_init` adapter is now **mandatory**;
+  the inline-inside-`_on_harness_init` alternative is **forbidden** because `_on_harness_init`'s
+  early-return (`runner.py:540`, `if not sid: return`) and its wrapping try/except (`:538`/`:560`)
+  would skip the stamp on a `session_id`-less or persist-failing init event.
+- **Concern — Element 3 reframed as co-equal regression fix.** Verified `record_turn_boundary` has a
+  single caller (`sdk_client.py:2936`, worker-side result handler) and reads `AGENT_SESSION_ID`, which
+  is set ONLY in the subprocess env overlay (`session_executor.py:1783`, value = `agent_session_id`).
+  In the worker process it is unset → `last_turn_at` is **~100% dead today**, and even where set the
+  `agt_xxx` value can never match `filter(session_id=...)`. Element 3 + Appetite relabeled from
+  "defense-in-depth" to a co-equal regression fix.
+- **Concern — Element 2 scope guard corrected.** The guard omitted site 2 (`_has_progress` sub-check
+  B). Verified `_has_progress` feeds `should_recover` (`session_health.py:3136`) — a recovery-path
+  consumer, not a mid-turn cadence detector. Guard reworded to enumerate all four recovery-path sites.
+- **Nit — line citation.** `runner.py:431` verified CORRECT at HEAD (`session_id = str(getattr(...) or
+  "")`); the critique's "~426" reading was stale. Citation anchored to `_build_driver` and the quoted
+  code corrected to include the `or ""` guard.
+
+### First revision — CRITIQUE pass 1 (1 BLOCKER + 4 concerns)
 
 - **BLOCKER — fourth derivation site.** `sdk_ever_output` is derived at FOUR sites, not three; the
   missed one is `_tier2_reprieve_signal` (`session_health.py:1310`), a *second* wedge route via the
@@ -166,7 +199,8 @@ signal being present. No behavior change for sessions that already emit tool/tur
 
 **Medium.** Three focused code edits (wire `on_stdout_event` in the runner; extend the
 `sdk_ever_output` derivation across **all four** sites via one helper; fix the
-`record_turn_boundary` id resolution as defense-in-depth) plus deterministic unit reproductions, a
+`record_turn_boundary` id resolution — a co-equal regression fix, since `last_turn_at` is a dead
+writer today) plus deterministic unit reproductions, a
 driver-seam test, and a docs update. The session-health derivation change is small but
 load-bearing and spans four sites (one of them a second wedge route via the reprieve cap), so it
 warrants careful red-first testing rather than a Small-appetite drive-by.
@@ -189,11 +223,18 @@ None. `last_stdout_at`, `last_tool_use_at`, `last_turn_at` all already exist on 
    - `on_stdout_event` → a **0-arg** adapter that calls `_stamp_stdout_liveness()`.
    - `on_init` must **compose** with (not replace) the existing `self._on_harness_init` — that
      callback persists `claude_session_uuid` + `runner_cwd` + `claude_version` via
-     `persist_resume_scalars` (`runner.py:529-561`) and MUST keep doing so. Wrap it: a **1-arg**
-     adapter `def _on_init(data): self._on_harness_init(data); self._stamp_stdout_liveness()`, or
-     add the stamp as the final step inside `_on_harness_init` itself. The `init` event is the first
-     proof of output and must count immediately, before any assistant token — but never at the cost
-     of the resume-scalar persistence that `_on_harness_init` owns.
+     `persist_resume_scalars` (`runner.py:529-561`) and MUST keep doing so. **HARD CONSTRAINT:** use a
+     separate **1-arg** composing adapter —
+     `def _on_init(data): self._on_harness_init(data); self._stamp_stdout_liveness()` — passed as the
+     driver's `on_init`. **The inline-inside-`_on_harness_init` alternative is FORBIDDEN.** Reason
+     (verified): `_on_harness_init` early-returns at `runner.py:540` (`sid = data.get("session_id");
+     if not sid: return`) and wraps its whole body in a try/except (`:538` try, `:560` except), so a
+     stamp placed inside it would be **skipped** on any `session_id`-less init event or if
+     `persist_resume_scalars` raises. The composing adapter stamps *after* `_on_harness_init` returns,
+     unconditionally — the `init` event is the first proof of output and must count immediately,
+     before any assistant token, and independently of whether the resume-scalar persistence
+     succeeded. `_on_harness_init` itself is left byte-for-byte unchanged (it keeps owning
+     resume-scalar persistence).
 
    `_stamp_stdout_liveness()` stamps `last_stdout_at = datetime.now(tz=UTC)` on the AgentSession
    (mirroring `session_executor.py:1506-1509`, same fail-silent + 5s-cooldown discipline). This
@@ -211,26 +252,40 @@ None. `last_stdout_at`, `last_tool_use_at`, `last_turn_at` all already exist on 
    output. **Post-edit assertion (critique BLOCKER gate):** `grep -n "sdk_ever_output = bool("
    agent/session_health.py` and `grep -n "_sdk_ever_output = bool(" agent/session_health.py` must
    BOTH return zero hits — every inline derivation is replaced by the helper. **Scope guard:** this
-   changes ONLY the never-started/zombie gate and the reprieve-cap "no output ever" guard. Mid-turn
-   stall detectors that legitimately need a tool/turn cadence (per-tool timeout tiers, idle-gap) are
-   NOT loosened — see No-Gos.
+   broadens the "no output ever" input at all FOUR recovery-path sites and nowhere else — site 1
+   `_never_started_past_grace` (never-started gate), site 2 `_has_progress` sub-check B (verified a
+   recovery-path consumer: its result gates `should_recover` at `session_health.py:3136`, not any
+   live turn), site 3 `_tier2_reprieve_signal` (reprieve-cap guard), site 4 the
+   `zombie_uuid_no_output` recovery classifier (`:2057`). None of the four is a mid-turn cadence
+   detector. Detectors that legitimately need a tool/turn cadence (per-tool timeout tiers, and
+   `_has_progress` **sub-check A**'s freshness comparison — which is untouched) are NOT loosened; only
+   the presence-based "has the SDK EVER produced output" input is broadened — see No-Gos.
 
-3. **Fix the `record_turn_boundary` id resolution (defense-in-depth) — plumb the true
-   `AgentSession.session_id`.** `record_turn_boundary` (`sdk_client.py:2936` →
-   `agent/hooks/liveness_writers.py:136`) reads `os.environ.get("AGENT_SESSION_ID")` and filters
-   `AgentSession.query.filter(session_id=...)`. In the worker process that env var is unset — and
-   critically, even where it IS set (the subprocess CLI-hook path) it holds `agent_session_id`
-   (`agt_xxx`), NOT the `session_id` the filter keys on. The harness result event's
-   `data.get("session_id")` is the **Claude UUID** — also wrong for the filter. The ONLY correct
-   value for `filter(session_id=...)` is the true `AgentSession.session_id`, which the runner already
-   has in hand at `runner.py:431` (`session_id = str(getattr(self._agent_session, "session_id", ""))`
-   — the same value it passes to `HeadlessRoleDriver(session_id=...)`). **Plumbing path:** add an
-   optional `session_id: str | None = None` param to `record_turn_boundary`; thread the runner's true
+3. **Fix the `record_turn_boundary` id resolution (co-equal regression fix, NOT defense-in-depth) —
+   plumb the true `AgentSession.session_id`.** `record_turn_boundary`
+   (`agent/hooks/liveness_writers.py:129`, called once from `sdk_client.py:2936`) reads
+   `os.environ.get("AGENT_SESSION_ID")` and filters `AgentSession.query.filter(session_id=...)`.
+   **Verified: `last_turn_at` is ~100% dead today.** Two stacked reasons:
+   (i) `record_turn_boundary` has a *single* caller — `sdk_client.py:2936`, the harness `result`-event
+   handler, which runs in the **worker** process; `AGENT_SESSION_ID` is injected only into the
+   *subprocess* env overlay (`session_executor.py:1783`), so in the worker it is unset →
+   `record_turn_boundary` returns False before any write. (ii) Even where the env var *is* set (the
+   in-subprocess CLI-hook path / child-spawn overlay), its value is `agent_session_id` (`agt_xxx`,
+   `session_executor.py:1783: "AGENT_SESSION_ID": session.agent_session_id`), which can **never** match
+   `filter(session_id=...)` — `session_id` is the distinct Telegram-derived key
+   (`models/agent_session.py:141`). The harness result event's `data.get("session_id")` is the
+   **Claude UUID** — also wrong for the filter. The ONLY correct value for `filter(session_id=...)` is
+   the true `AgentSession.session_id`, which the runner already has in hand in `_build_driver`
+   (`runner.py:431`: `session_id = str(getattr(self._agent_session, "session_id", "") or "")` — the
+   same value it passes to `HeadlessRoleDriver(session_id=...)`). **Plumbing path:** add an optional
+   `session_id: str | None = None` param to `record_turn_boundary`; thread the runner's true
    `AgentSession.session_id` through the harness stream call (`sdk_client.py` stream fn) down to the
    `result`-event handler at `:2936`, which passes it explicitly. When `session_id` is None, fall
-   back to `os.environ` (preserves the in-subprocess CLI-hook call sites unchanged). This is a
-   correctness fix for the fallback signal; it does not by itself close the in-grace wedge
-   (Elements 1+2 do).
+   back to `os.environ` (preserves the in-subprocess CLI-hook call sites unchanged). Because
+   `last_turn_at` is one of the three OR-signals feeding `sdk_ever_output` and is currently a dead
+   writer, restoring it is a genuine regression fix — not merely belt-and-suspenders. It does not by
+   itself close the toolless-streaming in-grace wedge (Elements 1+2 do); the two fixes are
+   complementary.
 
 ### Flow
 
@@ -333,15 +388,35 @@ one helper) and the runner wiring.
 ## Risks
 
 ### Risk 1: Masking a genuinely wedged subprocess that emits `init` then truly hangs
-Counting `last_stdout_at` as progress means a subprocess that streamed `init` and then hung with no
-further output could still be marked as "produced output" and escape the never-started gate.
-**Mitigation:** the never-started gate's job is narrowly "SDK never produced ANY output" — a subprocess
-that streamed `init` genuinely did produce output, so escaping *this specific* gate is correct. A
-post-`init` hang that produces no further stdout is a *different* failure mode owned by the idle-gap /
-turn-deadline detectors, which key on `last_stdout_at`/`last_activity` freshness and DO fire when
-stdout goes stale. Verify in Build that an idle-gap or turn-timeout detector still catches a
-post-`init` stall (add a test asserting a stale-`last_stdout_at` session is still recoverable via the
-non-never-started path).
+Counting `last_stdout_at` *presence* as progress means a subprocess that streamed `init` and then
+hung with no further output is marked as "produced output" and escapes the never-started gate
+permanently (the derivation is presence-based, not freshness-based).
+**What actually catches it (verified).** There is **no** idle-gap / freshness detector on
+`last_stdout_at` — `grep -n "last_stdout_at\|last_activity" agent/session_health.py` returns ZERO
+hits, so the earlier claim that session-health idle-gap detectors "key on last_stdout_at freshness"
+was false. The real backstop for a post-`init` hang is the **whole-turn deadline** enforced by the
+runner, not by session-health:
+- The runner's preempt watcher (`_run_preempt_watcher`, `runner.py:764`) checks
+  `(loop.time() - started_at) >= self._turn_timeout_s` every poll and calls
+  `_kill_turn(cause="timeout")` — this fires FIRST.
+- The driver's `asyncio.wait_for(harness_fn(...), timeout=self.turn_timeout_s)` (`role_driver.py:404`)
+  is the backstop; on expiry it sets `outcome.hung=True` / `exit_reason="headless_turn_timeout"`.
+- `turn_timeout_s = turn_timeout_for(session_type)` (`runner.py:334/183`): `ENG_TURN_TIMEOUT_S`=7200s
+  for PM/eng, `TEAMMATE_TURN_TIMEOUT_S`=900s (both env-overridable). The driver's own `wait_for` is
+  set slightly higher (`_turn_timeout_s + _term_grace_s + DRIVER_BACKSTOP_MARGIN_S`, `runner.py:442`).
+
+**Accepted tradeoff (honest).** Because the whole-turn deadline is a wall-clock timer measured from
+turn start — NOT an idle-gap on stdout freshness — a genuine post-`init` hang is now caught at the
+turn deadline (up to 7200s for a PM/eng turn) rather than at the ~150s never-started gate. This is a
+detection-latency regression *for the rare init-then-immediate-hang case only*, and it is the correct
+tradeoff: a subprocess that streamed `init` genuinely produced output, so the never-started gate
+(whose sole question is "did the SDK EVER produce output") SHOULD NOT fire on it; the hung turn is
+still recovered, just via the coarser existing backstop. Tightening this to a fast idle-gap detector
+keyed on `last_stdout_at` *freshness* is the deferred follow-up (Open Question 1) — a scope expansion
+with no correctness justification here, since the turn deadline already recovers the turn.
+**Build verification:** add a deterministic test (small injected `turn_timeout_s`) asserting a
+fake-harness turn that emits `init` then hangs is preempted/killed via the turn-deadline path
+(`outcome.hung=True` / `exit_reason="headless_turn_timeout"`), NOT via the never-started gate.
 
 ### Risk 2: Redis write amplification from per-stdout-chunk stamping
 Stamping `last_stdout_at` on every stdout event could hammer Redis on a chatty turn.
@@ -429,8 +504,14 @@ through module-level `_derive_sdk_ever_output`, including `_tier2_reprieve_signa
 - `record_turn_boundary(session_id=...)` writes `last_turn_at` keyed on the true
   `AgentSession.session_id` (not the env `agent_session_id`, not the Claude UUID) without depending on
   worker `os.environ` — verified by unit test.
-- A post-`init` stall (stdout goes stale) is still recoverable via a non-never-started detector —
-  verified by a regression test (Risk 1 guard).
+- A post-`init` stall (stdout goes stale after the init stamp) is still recovered — NOT via the
+  never-started gate (it correctly no longer fires, since `init` is real output) but via the
+  **whole-turn deadline**: with a small injected `turn_timeout_s`, a fake-harness turn that emits
+  `init` then hangs is preempted/killed through the turn-deadline path (`role_driver.py:404`
+  `asyncio.wait_for` → `outcome.hung=True` / `exit_reason="headless_turn_timeout"`, and/or the
+  `runner.py:764` watcher `_kill_turn(cause="timeout")`). Verified by a deterministic regression test
+  (Risk 1 guard). The detection-latency tradeoff (turn deadline, not ~150s never-started gate) is
+  documented and accepted.
 - `python -m ruff format . && python -m ruff check .` clean; the named unit tests pass.
 
 ## Step by Step Tasks
@@ -462,8 +543,13 @@ which passes it explicitly — NOT `data.get("session_id")` (Claude UUID). Keep 
 fallback for the in-subprocess CLI-hook call sites.
 
 ### 5. Risk-1 regression guard
-Confirm a stale-`last_stdout_at` post-`init` session is still caught by an idle-gap/turn-deadline
-detector (not the never-started gate). Add/adjust the test accordingly.
+Confirm a post-`init`-then-hang turn is still recovered by the **whole-turn deadline** (NOT the
+never-started gate, which correctly no longer fires once `init` stamped `last_stdout_at`). Write a
+deterministic driver/runner test with a small injected `turn_timeout_s` and a fake harness that emits
+`init` then hangs; assert the turn is preempted/killed via the turn-deadline path (`role_driver.py:404`
+`asyncio.wait_for` → `outcome.hung=True` / `exit_reason="headless_turn_timeout"`, and/or the
+`runner.py:764` watcher `_kill_turn(cause="timeout")`). Do NOT assert any session-health idle-gap
+detector on `last_stdout_at` freshness — none exists (verified zero grep hits).
 
 ### N-1. Documentation
 Update `docs/features/headless-session-runner.md` and the session-lifecycle/session-health reference
@@ -488,9 +574,13 @@ helper — the reprieve *cadence* logic and the per-tool/idle-gap detectors are 
 
 1. **Should `last_stdout_at` freshness (not just presence) gate a mid-turn stall detector too?**
    This plan uses `last_stdout_at` only to satisfy the "SDK ever produced output" never-started gate.
-   A follow-up could use its *freshness* as a first-class mid-turn liveness input (the true headless
-   analogue of PTY Gap B's `last_pty_read_loop_at`). Deferring unless critique deems the Risk-1 guard
-   insufficient. Confirm whether an existing idle-gap detector already keys on `last_stdout_at`.
+   **Verified during this revision:** `session_health.py` has NO detector keyed on `last_stdout_at`
+   or `last_activity` freshness (zero grep hits) — so the only backstop for a post-`init` hang is the
+   coarse whole-turn deadline (`turn_timeout_s`, up to 7200s for PM/eng; see Risk 1). A follow-up
+   could add a first-class mid-turn idle-gap detector on `last_stdout_at` *freshness* (the true
+   headless analogue of PTY Gap B's `last_pty_read_loop_at`) to catch a post-`init` hang closer to the
+   ~150s mark instead of at the turn deadline. Deferred as a scope expansion — the whole-turn deadline
+   already recovers the hung turn, so this is a latency optimization, not a correctness gap.
 2. **Was the observed wedge a toolless turn, or did a tool call fire but the sidecar liveness write
    no-op?** Recon strongly indicates toolless (no tool/liveness log lines at all), and the fix is
    robust either way. If Build's repro shows the sidecar path also failing under the worktree cwd,
