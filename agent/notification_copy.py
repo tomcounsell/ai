@@ -7,10 +7,6 @@ A copy change is therefore a single-file edit that ripples to every send site
 and every copy-asserting test at once (issue #1877).
 
 Constants:
-  * ``INTERRUPT_RESUME`` — the session was interrupted but the worker will
-    re-queue and resume it automatically; the user need do nothing. This is the
-    historical default preserved verbatim so the resume case behaves exactly as
-    before.
   * ``INTERRUPT_NO_RESUME`` — the session was stopped by a killer that finalized
     it to a terminal, non-resumable status (deadline kill, health-check kill,
     exhausted recovery attempts). Nothing will resume automatically.
@@ -19,9 +15,6 @@ Constants:
 """
 
 from __future__ import annotations
-
-# Interrupted, worker WILL resume automatically (unchanged historical copy).
-INTERRUPT_RESUME = "I was interrupted and will resume automatically. No action needed."
 
 # Interrupted, worker will NOT resume automatically.
 INTERRUPT_NO_RESUME = (
