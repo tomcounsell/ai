@@ -106,8 +106,8 @@ either path.
 ## Architectural Impact
 
 - **New dependencies:** none.
-- **Interface changes:** `SessionRunner` gains a public `terminate_current_turn(confirm: bool)` coroutine so teardown paths ask the owner to kill rather than reaching around it. `_confirm_subprocess_dead` gains process-group awareness (derives the group from the live pid via `os.getpgid`). No new `SessionHandle` field: the group is `pgid == pid` under `start_new_session`, derived at each call site (critique nit).
-- **Coupling:** decreases the health-checker's reach-around coupling. Two call surfaces, cleanly split by whether a runner reference is in scope: the **executor** (holds `_runner`) routes through `SessionRunner.terminate_current_turn`; the **health checker** (holds only a `SessionHandle`, no runner ref) uses the shared `_confirm_subprocess_dead` primitive against the handle's pid. This split is a fixed rule, not a per-call choice (resolves former Open Question #2).
+- **Interface changes:** `agent/session_runner/runner.py::_run_one_turn`'s `finally` becomes self-reaping (kills + confirms its process group on any teardown). `SessionRunner` also gains a convenience `terminate_current_turn()` coroutine (no gate depends on it). `_confirm_subprocess_dead` gains process-group awareness (derives the group from the pid via `os.getpgid`). No new `SessionHandle` field; no change to `agent/worktree_manager.py` or the executor `finally` cleanup.
+- **Coupling:** the runner becomes the single owner of subprocess teardown — the reap lives in its own `finally`, so no external module reaches around it. The health checker keeps only its existing `SessionHandle.task.cancel()` + `_confirm_subprocess_dead(pid_snapshot)` backstop; it does not call into the runner. The executor cleanup is unchanged and correct by the finally-ordering guarantee (Fix 1/Fix 3).
 - **Data ownership:** the runner is the single writer of the **live (non-terminal)** subprocess identity for runner sessions — `claude_pid` set on spawn, cleared on turn exit. The terminal clearer is unchanged: `models/session_lifecycle.py::finalize_session` (`:479`) nulls `claude_pid` on every terminal transition (a deliberate #1271 behavior so the PPID==1 reaper's `find_by_claude_pid` falls through). No new post-terminal reader is added (Fix 4 no-go).
 - **Reversibility:** high — each fix is an additive guard/kill at a named site; reverting any one restores prior behavior without schema cleanup.
 
@@ -130,124 +130,133 @@ internal to `agent/` and its tests; no secrets, services, or API keys involved.
 
 ### Key Elements
 
-- **Runner-owned termination (`SessionRunner.terminate_current_turn`)**: an
-  authoritative, external-callable coroutine that SIGTERM→grace→SIGKILLs the
-  current turn's process group (reusing `_signal_turn`/`_kill_turn`) and confirms
-  exit. The recovery path and executor call this instead of reaching around the
-  runner.
-- **Runner reaps on teardown**: `_run_one_turn`'s `finally` cancels `turn_task`
-  and reaps the live process group whenever the coroutine is torn down
-  (external cancel or exception), so a cancelled `SessionHandle.task` no longer
-  orphans a detached `claude -p`.
-- **Spawn-site backstop**: `_run_harness_subprocess` kills its process group in a
-  `finally`/`except CancelledError` if the awaiting coroutine is cancelled while
-  the process is alive — protects every harness caller.
+- **Runner reaps on teardown (the load-bearing gate)**: `_run_one_turn`'s
+  `finally` cancels `turn_task` and SIGTERM→SIGKILLs + confirms its process group
+  whenever the coroutine is torn down (external cancel, exception, normal exit), so
+  a cancelled `SessionHandle.task` no longer orphans a detached `claude -p`.
+  Because the `finally` completes before control returns to the awaiting executor
+  body, the group is provably dead before both the recovery-path confirm and the
+  executor cleanup — the ordering guarantee that closes both defects.
+- **Runner convenience API (`SessionRunner.terminate_current_turn`)**: a public
+  coroutine to preempt the current turn's group; no gate depends on it (the
+  executor `finally` cannot use it — `_current_handle` is already `None` by then).
+- **Generic-harness backstop**: `_run_harness_subprocess` kills its process group
+  in a `finally` if the awaiting coroutine is cancelled while the process is
+  alive — protects the non-runner harness callers.
 - **Live-identity surfacing**: the runner writes `AgentSession.claude_pid` on
-  spawn (in addition to the existing `pm_pid`) and clears `claude_pid` on turn
-  exit, so the recovery path's `_confirm_subprocess_dead` targets the real live
-  process. The process group is derived from the pid via `os.getpgid` at kill
-  time (no cached field).
-- **Cleanup gated on confirmed death**: the executor confirms the subprocess dead
-  before worktree/branch cleanup; `worktree_busy_check`/`remove_worktree` refuse
-  to delete a worktree whose owning session's subprocess group is still alive.
+  spawn (in addition to `pm_pid`) and clears it on turn exit, so the recovery
+  path's `_confirm_subprocess_dead` targets the real live process. The recovery
+  path snapshots the pid BEFORE cancelling (the teardown clears it on the same
+  unwind). The group is derived from the pid via `os.getpgid` at kill time.
+- **Cleanup correct by construction (no new gate)**: the executor cleanup and
+  `worktree_manager` are unchanged; Fix 1's finally-ordering guarantees the
+  subprocess is already dead when the executor cleanup runs. Earlier "confirm
+  before cleanup" gates were inert (read already-nulled state) and were dropped.
 - **No reaper backstop**: the orphan reaper is left unchanged (Fix 4 no-go). The
   primary fixes make a live-but-terminal process unreachable; a worker-parented
   reaper leg was examined and rejected as net-negative risk (see No-Gos).
 
 ### Flow
 
-Health check flags `no_progress` → `_apply_recovery_transition` cancels
-`SessionHandle.task` → runner `_run_one_turn` finally reaps the turn's process
-group → `terminate_current_turn`/`_confirm_subprocess_dead` confirms exit →
-**only if confirmed dead** requeue `pending` (else escalate `failed`) → on
-terminal exit the executor `finally` confirms dead again → **only then**
-`cleanup_after_merge` removes worktree + branch. If the executor's confirm still
-cannot kill the group, cleanup is SKIPPED and the orphaned worktree is surfaced
-via a WARNING/alert (never deleted under a live child).
-
+Health check flags `no_progress` → `_apply_recovery_transition` snapshots
+`claude_pid`, cancels `SessionHandle.task` → runner `_run_one_turn` `finally`
+reaps + confirms the turn's process group (completes before the awaiting body
+returns) → recovery-path `_confirm_subprocess_dead(pid_snapshot)` verifies the
+group is gone → **only if confirmed dead** requeue `pending` (else escalate
+`failed`) → on terminal exit the executor `finally` runs `cleanup_after_merge`,
+which is safe because the runner `finally` already reaped the group. In the
+pathological unkillable case the runner `finally` logs a WARNING naming the
+session for manual reclamation (no auto-reaper).
 ### Technical Approach
 
-**Fix 1 — Runner reaps its subprocess on cancellation (defect #1, root cause).**
+**Fix 1 — Runner reaps its subprocess group on teardown (THE load-bearing fix for both defects).**
 - `agent/session_runner/runner.py::_run_one_turn` `finally` (`:732`): if
   `turn_task` is not done, cancel it and await it suppressing `CancelledError`;
-  if `handle.pid` is set and the group is still alive, kill the pgid and confirm
-  exit. **Cancellation-path timing (critique Concern):** the health checker's
+  if `handle.pid` is set and the group is still alive, SIGTERM→short-grace→SIGKILL
+  the pgid and **confirm exit** (bounded `os.killpg(pgid, 0)` poll) before the
+  `finally` returns. Because this `finally` runs as the runner coroutine unwinds —
+  and Python guarantees it completes before control returns to the awaiting
+  executor body — the subprocess group is provably dead before BOTH the recovery
+  path's post-cancel confirm AND the executor's own cleanup `finally`
+  (`session_executor.py:2292`) run. This single ordering guarantee closes Defect #1
+  (no orphan survives the cancelled `handle.task`) and Defect #2 (the executor
+  cleanup that runs later in the same unwind can only run after the group is dead).
+  It is the sole load-bearing gate; Fix 2 is the recovery-path confirm/escalate
+  backstop, and there is no executor-side or worktree-side gate (see Fix 3).
+- **Cancellation-path timing:** the health checker's
   `await asyncio.wait_for(handle.task, TASK_CANCEL_TIMEOUT)` (`session_health.py:2265`,
-  0.25s) can time out if this `finally` runs a long SIGTERM grace. On the
-  external-cancel teardown path the `finally` therefore issues a **fast SIGKILL
-  on the pgid (no long grace)** so it never exceeds `TASK_CANCEL_TIMEOUT`; the
-  authoritative graceful escalation (SIGTERM→grace→SIGKILL, bounded by
-  `SUBPROCESS_KILL_TIMEOUT=3.0s`, offloaded via `run_in_executor`) belongs to the
-  recovery path's `_confirm_subprocess_dead` that runs immediately after. Steer/
+  0.25s) may time out if this `finally`'s SIGTERM grace + confirm exceeds 0.25s —
+  that is fine: on timeout the recovery path proceeds to its own bounded
+  `_confirm_subprocess_dead` (Fix 2) which finishes the job. Keep the `finally`'s
+  grace short (sub-second) so the common path stays inside the budget. Steer/
   timeout preempts (the internal `_preempt_watcher` path) keep the existing
-  graceful `_kill_turn` grace — only the external-cancel teardown fast-kills.
+  graceful `_kill_turn` grace unchanged.
 - Add public `async def terminate_current_turn(self)`: kills `_current_handle`'s
   group (graceful SIGTERM→grace→SIGKILL) and polls for confirmed exit. No
-  `confirm` parameter — the only caller always wants the blocking-confirm path
-  (critique nit). This is the external kill entry point the **executor** calls (it
-  holds a runner ref); the health checker does NOT call it (no runner ref) and
-  instead relies on `SessionHandle.task.cancel()` + `_confirm_subprocess_dead`.
-- Defense-in-depth at the spawn site: `agent/sdk_client.py::_run_harness_subprocess`
-  wrap `await proc.communicate()` (`:3012`) with `try/finally` (or
-  `except asyncio.CancelledError`) that, if the coroutine is cancelled while
-  `proc.returncode is None`, `os.killpg(os.getpgid(proc.pid), SIGTERM)` → short
-  grace → `SIGKILL`. Protects any caller, not just the runner.
+  `confirm` parameter (critique nit). This is a convenience entry point for a
+  caller that holds a runner ref and wants to preempt the current turn; note that
+  the teardown reaping above does NOT depend on anyone calling it (the executor
+  `finally` cannot use it — `_current_handle` is already `None` by then; see Fix 3).
+- Generic-harness backstop at the spawn site (NOT runner-path defense — the runner
+  `finally` already covers the runner path): `agent/sdk_client.py::_run_harness_subprocess`
+  wrap `await proc.communicate()` (`:3012`) with `try/finally` that, if the
+  coroutine is cancelled while `proc.returncode is None`,
+  `os.killpg(os.getpgid(proc.pid), SIGTERM)` → short grace → `SIGKILL`, swallowing
+  `ProcessLookupError` (group already gone) and re-raising `CancelledError` after
+  signalling. This protects the OTHER two `_run_harness_subprocess` call sites
+  (`sdk_client.py:2534,2576,2632`) that are not the runner (critique nit).
 
-**Fix 2 — Recovery path targets the real process (defect #1, confirmation).**
+**Fix 2 — Recovery path confirms/escalates against a pre-cancel pid snapshot (defect #1 backstop, gates AC#1 requeue).**
 - `agent/session_runner/runner.py::_on_turn_spawn` (`:495`): additionally set
   `self._agent_session.claude_pid = pid` (alongside the existing `pm_pid` write at
-  `:522`) and save it — the runner already holds `self._agent_session`, so this is
-  a same-object write with no cross-module reach. Do NOT try to write
-  `SessionHandle.pid`/`_active_sessions` from the runner: those live in
-  `agent/session_state.py`/the health checker and the runner has no reference to
-  them (critique Concern). The recovery-path confirm reads `entry.claude_pid`
-  (`session_health.py:2296`), so the `AgentSession.claude_pid` write is sufficient
-  and the registry write is unnecessary. No cached `pgid` anywhere — the runner's
-  `_TurnHandle` already carries `pgid`, and the confirm path derives the group via
-  `os.getpgid(pid)` (`pgid == pid` under `start_new_session`). Clear `claude_pid`
-  at turn exit (mirroring the `_on_sdk_finished`/`harness_pid` pattern) so a stale
-  finished-turn PID is never confirmed-dead-falsely while the next turn runs.
-- **Writer reconciliation:** two sites touch `claude_pid` — Fix 2 sets it on spawn
-  and clears on turn exit (live value); `models/session_lifecycle.py::finalize_session`
-  (`:479`) clears it on the terminal transition (unchanged #1271 behavior). The
-  recovery path reads `claude_pid` while the session is still `running` (before it
-  decides to finalize), so the live value is present exactly when the
-  recovery-path confirm needs it.
+  `:522`) and save it — same-object write, no cross-module reach. Do NOT write
+  `SessionHandle.pid`/`_active_sessions` from the runner (the runner has no
+  reference to them — critique Concern). Clear `claude_pid` at turn exit. No cached
+  `pgid` anywhere — derive via `os.getpgid(pid)` at kill time (`pgid == pid` under
+  `start_new_session`).
+- **Snapshot-before-cancel (critique Concern — clear-vs-recovery-read race):**
+  in `_apply_recovery_transition`, capture `pid_snapshot = getattr(entry, "claude_pid", None)`
+  BEFORE `handle.task.cancel()`, and pass `pid_snapshot` (NOT a post-await re-read)
+  into `_confirm_subprocess_dead`. The cancel triggers the runner teardown that
+  clears `claude_pid` on the same unwind, so a post-await re-read would degenerate
+  to `_confirm_subprocess_dead(None)` (a false confirm). The snapshot keeps the
+  3.0s escalation meaningful: it verifies the group Fix 1 should have reaped is
+  actually gone; if not, escalate to `failed` (existing #1537 branch).
+- **Writer reconciliation:** two sites touch `claude_pid` — Fix 2 sets on spawn /
+  clears on turn exit (live value); `models/session_lifecycle.py::finalize_session`
+  (`:479`) clears on the terminal transition (unchanged #1271 behavior). No new
+  post-terminal reader is added.
 - `agent/session_health.py::_confirm_subprocess_dead` (`:1490`): derive the group
-  from the pid (`os.getpgid`) and signal the GROUP (`os.killpg`) rather than the
-  bare PID so a detached group with grandchildren (MCP servers) is fully reaped;
-  `pgid == pid` under `start_new_session`, so `killpg(pid)` is correct and safe.
-  Confirm via `os.killpg(pgid, 0)`. Retain the existing `pid is None`/`pid<=0`
-  short-circuit unchanged.
+  from the (snapshotted) pid via `os.getpgid` and signal the GROUP (`os.killpg`)
+  so a detached group with grandchildren (MCP servers) is fully reaped; `pgid == pid`
+  under `start_new_session`. Confirm via `os.killpg(pgid, 0)`. Retain the existing
+  `pid is None`/`pid<=0` short-circuit unchanged.
 - Result: the existing #1537 ordering (cancel → confirm-dead → requeue-only-if-dead
-  / escalate-`failed`) now protects runner sessions — AC#1.
+  / escalate-`failed`) now protects runner sessions, and gates the requeue so
+  "old confirmed exited before respawn" holds — AC#1.
 
-**Fix 3 — Executor confirms death before worktree cleanup (defect #2).**
-- `agent/session_executor.py::_execute_agent_session` `finally` (`:2292`): before
-  the synthetic-slug cleanup block (`:2300-2327`), confirm the session's
-  subprocess is dead by calling the runner's `terminate_current_turn`. Guard the
-  runner reference with `locals().get("_runner")` — `_runner` is assigned inside
-  the try body (`:1868`), so a setup exception before its construction (worktree
-  provisioning, adapter/config errors — plausible triggers of this very `finally`)
-  would leave it unbound; if it is `None`, nothing was spawned to confirm and the
-  confirm is skipped. This mirrors the adjacent `locals().get("slug")`/
-  `locals().get("working_dir")` pattern at the same site (critique Concern). Only
-  run `cleanup_after_merge` after confirmed exit. With Fix 1 reaping on the
-  runner-coroutine teardown that precedes this `finally`, confirmation is normally
-  instantaneous; it is a hard gate for the race. In the rare case the group still
-  will not die, SKIP cleanup and emit a WARNING/alert naming the orphaned worktree
-  as a known residual — deleting under a live child is never acceptable, and
-  nothing else auto-deletes it, so it must be surfaced, not silently leaked
-  (critique Concern).
-- Defense-in-depth at the deletion site: `agent/worktree_manager.py::worktree_busy_check`
-  currently `continue`s past any row whose `status in TERMINAL_STATUSES` (`:472`)
-  BEFORE the body runs — which is exactly why Defect #2's `failed` row slips
-  through. **Modify the skip condition at `:472` itself** so a terminal row is
-  treated as "not busy" ONLY when its owning subprocess group is confirmed dead;
-  a terminal row with a live group falls through to a busy result and blocks
-  deletion. A liveness branch placed anywhere after the existing `continue` would
-  be dead for terminal rows (critique Concern). Makes AC#2 an invariant enforced
-  at the deletion site, not only at the caller.
+**Fix 3 — No executor-side or worktree-side gate; rely on Fix 1's finally-ordering (defect #2).**
+- Defect #2 is closed by Fix 1's ordering guarantee, NOT by a new gate. The two
+  gates an earlier revision proposed here were **inert** (3-critic finding):
+  (a) an executor-side `terminate_current_turn` in the `:2292` `finally` operates
+  on `_current_handle`, which `_run_one_turn`'s `finally` already nulled
+  (`runner.py:736`) as `_runner.run()` unwound — it would kill `None`; and
+  (b) a `worktree_busy_check` liveness check at `:472` runs only on terminal rows,
+  whose `claude_pid` `finalize_session` already nulled — `_confirm_subprocess_dead(None)`
+  returns `confirmed_dead=True` and deletion proceeds (Defect #2 unchanged), while
+  reading `pm_pid` there revives the PID-reuse live-kill hazard the Fix 4 no-go
+  exists to avoid.
+- Therefore: **do NOT add a gate in `agent/session_executor.py` and do NOT modify
+  `agent/worktree_manager.py`.** The executor `finally` cleanup (`:2292-2327`) is
+  left as-is; it is correct once Fix 1 guarantees the runner `finally` reaped the
+  group earlier in the same unwind. The load-bearing invariant is the runner
+  `finally`, not a downstream check that reads already-nulled state (critique
+  BLOCKER, option a — scope-tightest, honest tests).
+- **Pathological residual (critique Concern):** SIGKILL is uncatchable, so Fix 1's
+  confirm virtually always succeeds. If a group is somehow unkillable, Fix 1's
+  `finally` logs a WARNING naming the session; document a manual reclamation step
+  (`git worktree prune` + directory removal) in the Documentation section so an
+  operator has a break-glass path. No auto-reaper (Fix 4 no-go).
 
 **Fix 4 — Reaper backstop (AC#4) — EXPLICIT NO-GO (answered, not implemented).**
 
@@ -281,14 +290,13 @@ statement):
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_run_one_turn` `finally` and `terminate_current_turn` must not swallow the reaping failure silently — assert a `logger.warning`/kill-counter side effect when a signalled group refuses to die within the grace window.
+- [ ] `_run_one_turn` `finally` must not swallow the reaping failure silently — assert a `logger.warning`/kill-counter side effect when a signalled group refuses to die within the grace window.
 - [ ] `_run_harness_subprocess` cancellation cleanup: assert the `except CancelledError`/`finally` re-raises `CancelledError` after killing the group (cancellation semantics preserved), and logs at debug/warning on `killpg` error rather than swallowing.
-- [ ] The executor pre-cleanup confirm must log and still finalize the row if confirm times out (never block session finalization on a stuck kill) — assert the observable WARNING/alert naming the orphaned worktree + that cleanup is SKIPPED (never forced under a live child).
+- [ ] The runner `_run_one_turn` `finally` must, in the pathological unkillable case, log a WARNING naming the session rather than swallowing the failure — assert the observable WARNING; the executor cleanup remains unchanged (its safety comes from the finally-ordering, not a new gate).
 
 ### Empty/Invalid Input Handling
-- [ ] `_confirm_subprocess_dead` with `pid=None`, `pid<=0`, and an already-dead PID — assert the group path degrades to the existing PID/None behavior (no crash, correct `confirmed_dead`).
-- [ ] `worktree_busy_check` with a session whose `claude_pid`/`pgid` is None — assert it falls back to the existing status-based decision (no false "busy").
-- [ ] `worktree_busy_check` on a terminal row whose subprocess group is still alive returns busy (blocks deletion); on a dead group it returns not-busy (permits deletion) — the deletion-site invariant.
+- [ ] `_confirm_subprocess_dead` with `pid=None`, `pid<=0`, and an already-dead PID — assert the group path degrades to the existing None/already-dead behavior (no crash, correct `confirmed_dead`). `worktree_manager` and the executor `finally` are unchanged (no new liveness branch).
+- [ ] Recovery path with `claude_pid` cleared mid-teardown — assert the pre-cancel snapshot keeps `_confirm_subprocess_dead` targeting the real pid (not `None`).
 
 ### Error State Rendering
 - [ ] When the recovery path escalates to `failed` because the group would not die, assert the existing terminal user-facing notice path still fires exactly once (no regression to the #1537 single-send guarantee).
@@ -297,7 +305,7 @@ statement):
 
 - [ ] `tests/unit/test_session_health_subprocess_kill.py::TestConfirmSubprocessDead` — UPDATE: cover the process-group (`killpg`) path in addition to the PID path; keep None/already-dead cases.
 - [ ] `tests/unit/test_session_health_subprocess_kill.py::TestRecoveryBranching::test_no_pid_recorded_requeues_normally` — UPDATE: for runner sessions `claude_pid` is now SET on spawn, so this "no pid" case must be re-scoped to genuinely-absent-pid sessions; add a sibling asserting a runner session with a live group escalates to `failed`, not requeues.
-- [ ] `tests/unit/test_worktree_manager.py::TestCleanupAfterMerge` — UPDATE: `worktree_busy_check`/`remove_worktree` now consult process liveness; add a case where a live owning-session group blocks deletion and a dead one permits it.
+- [ ] `tests/unit/test_worktree_manager.py::TestCleanupAfterMerge` — NO CHANGE: `worktree_manager` is intentionally not modified (the earlier liveness-gate idea was inert — Fix 3). Listed so the audit records it was considered and left untouched; a new integration test (task 4) asserts the runner-finally reap precedes executor cleanup instead.
 - [ ] `tests/unit/test_session_health_orphan_process_reap.py::TestOrphanProcessReap` — NO CHANGE: the reaper is deliberately not modified (Fix 4 no-go). Listed for the reader's benefit so the audit records that these tests were considered and intentionally left untouched.
 - [ ] `tests/unit/session_runner/test_runner_preempt.py` — UPDATE: add a case that external cancellation of the run task reaps the current turn's process group (new `_run_one_turn` finally behavior) without regressing the steer/timeout preempt cases.
 
@@ -316,7 +324,7 @@ statement):
 
 ### Risk 2: Confirm-dead stalls the worker event loop
 **Impact:** a hung subprocess could block the health tick or the executor finally while polling for exit.
-**Mitigation:** keep `_confirm_subprocess_dead` synchronous but offloaded via `run_in_executor` (already the pattern at `session_health.py:2292`); bound polling by `SUBPROCESS_KILL_TIMEOUT` (3.0s). The executor pre-cleanup confirm uses the same bounded, offloaded call and SKIPS cleanup (surfacing an alert for the orphaned worktree) rather than blocking finalization if the group will not die.
+**Mitigation:** keep the recovery-path `_confirm_subprocess_dead` synchronous but offloaded via `run_in_executor` (already the pattern at `session_health.py:2292`); bound polling by `SUBPROCESS_KILL_TIMEOUT` (3.0s). The runner `finally`'s reap uses a short grace so it does not stall the executor unwind; SIGKILL is uncatchable so confirmation is near-instant.
 
 ### Risk 3: claude_pid set-on-spawn / clear-on-exit races with recovery
 **Impact:** a recovery firing in the window between turn-exit clear and next-turn set could read a stale/None `claude_pid`.
@@ -335,8 +343,8 @@ statement):
 **Location:** `agent/session_executor.py:2292-2327`.
 **Trigger:** the executor `finally` runs cleanup while the runner coroutine's own reaping is still in flight.
 **Data prerequisite:** the subprocess must be confirmed dead before `cleanup_after_merge`.
-**State prerequisite:** the pre-cleanup confirm gate must observe the runner's reap outcome.
-**Mitigation:** the runner-coroutine teardown (Fix 1) completes before the executor `finally` for the same task (the finally runs after the awaited body returns/raises); the pre-cleanup confirm is a second, bounded gate; the `worktree_busy_check` process-liveness check is the last line.
+**State prerequisite:** the runner `finally` must reap+confirm before the executor `finally` runs.
+**Mitigation:** Python guarantees `_run_one_turn`'s `finally` (Fix 1) completes as the runner coroutine unwinds, and the executor `finally` runs only after the awaited `_runner.run()` body returns/raises — so the reap strictly precedes the cleanup within the same executor task. No separate executor/worktree gate is needed (and an earlier one was inert).
 
 ### Race 3: No reaper-backstop race (Fix 4 no-go)
 **Location:** N/A — the plan does not add a reaper leg.
@@ -380,17 +388,17 @@ ENOENT-wedged survivor and no ghost pipeline (AC#3).
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/headless-session-runner.md` with the subprocess-lifecycle contract: the runner owns termination (`terminate_current_turn`), reaps its process group on teardown, and publishes live pid/pgid to `claude_pid`/`SessionHandle`.
+- [ ] Update `docs/features/headless-session-runner.md` with the subprocess-lifecycle contract: the runner reaps + confirms its process group in `_run_one_turn`'s `finally` on every teardown, writes the live pid to `claude_pid` (cleared on turn exit), and the finally-ordering guarantees cleanup runs only after the group is dead. Include the manual reclamation runbook (`git worktree prune` + dir removal) for the pathological unkillable case.
 - [ ] Update `docs/features/pm-session-liveness.md` (or `session-lifecycle.md`) to document the "confirm subprocess dead before requeue AND before worktree cleanup" ordering guarantee, and note the deliberate no-go on a worker-parented reaper leg.
 - [ ] Add an entry to `docs/features/README.md` index if a new doc section is introduced (keep the table sorted).
 
 ### Inline Documentation
-- [ ] Docstrings on `SessionRunner.terminate_current_turn`, the `_run_one_turn` finally reaping, the `_confirm_subprocess_dead` group path, and the executor pre-cleanup confirm, each citing #1938.
+- [ ] Docstrings on `SessionRunner.terminate_current_turn`, the `_run_one_turn` finally reap+confirm (noting the finally-ordering guarantee), and the `_confirm_subprocess_dead` group path + pre-cancel snapshot, each citing #1938.
 
 ## Success Criteria
 
 - [ ] After a `no_progress` recovery of a headless-runner session, exactly one `claude -p` subprocess exists for the session: the old group is confirmed exited before respawn (AC#1).
-- [ ] After `running → failed`, the session's subprocess group is confirmed exited before `cleanup_after_merge`/`remove_worktree` runs (AC#2).
+- [ ] After `running → failed`, the session's subprocess group is confirmed exited before `cleanup_after_merge` runs — guaranteed by the runner `finally` reaping earlier in the same executor-task unwind (AC#2).
 - [ ] A test reproduces "kill decision while subprocess alive" and asserts: no ENOENT-wedged survivor (worktree not deleted under a live child), and no ghost pipeline (no post-terminal turn/commit) (AC#3).
 - [ ] Reaper-backstop question answered: the plan records an explicit NO-GO with rationale (AC#4 is satisfied by "implemented or explicit no-go with rationale"). The orphan reaper is left unmodified.
 - [ ] `grep -c "claude_pid" agent/session_runner/runner.py` shows the runner writes `claude_pid` on spawn (invariant that Fix 2 landed).
@@ -440,23 +448,23 @@ parallel builders needed — the fixes are sequenced and share the same files
 - `_on_turn_spawn` writes `self._agent_session.claude_pid` on spawn; clear `claude_pid` on turn exit. No `SessionHandle`/`pgid` writes from the runner — derive the group via `os.getpgid(pid)` at kill time.
 - Extend `_confirm_subprocess_dead` with the `killpg` group path.
 
-### 3. Executor + worktree cleanup gated on confirmed death
-- **Task ID**: build-cleanup-gate
+### 3. Confirm the ordering invariant (no new gate)
+- **Task ID**: verify-ordering-invariant
 - **Depends On**: build-live-identity
-- **Validates**: tests/unit/test_worktree_manager.py
+- **Validates**: tests/unit/session_runner/test_runner_preempt.py
 - **Assigned To**: runner-teardown-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Executor `finally` confirms dead (via `locals().get("_runner")`-guarded `terminate_current_turn`) before `cleanup_after_merge`; on confirm-timeout, SKIP cleanup and alert. Modify `worktree_busy_check`'s terminal-row skip condition (`:472`) to require group-dead.
+- Confirm (by reading + a unit test) that `_run_one_turn`'s `finally` reap+confirm completes before the awaiting executor body returns, so `agent/session_executor.py`'s cleanup `finally` and `agent/worktree_manager.py` need NO change. Add a WARNING log in the runner `finally` for the pathological unkillable case (manual-reclamation break-glass).
 
 ### 4. Integration test: kill-while-alive → no survivor, no ghost pipeline
 - **Task ID**: build-integration-ac3
-- **Depends On**: build-cleanup-gate
+- **Depends On**: verify-ordering-invariant
 - **Validates**: tests/integration (new test)
 - **Assigned To**: runner-teardown-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Reproduce a recovery/failure while a fake long-lived subprocess (own process group) is alive; assert it is confirmed dead before requeue and before worktree cleanup, and that the worktree survives (cleanup skipped) until the process exits.
+- Reproduce a recovery/failure while a fake long-lived subprocess (own process group) is alive; assert the runner `finally` reaps + confirms the group, that the recovery path requeues only after confirmed exit (else escalates `failed`), and that the executor cleanup runs only after the group is dead (no ENOENT-wedged survivor, no ghost pipeline).
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -479,24 +487,23 @@ parallel builders needed — the fixes are sequenced and share the same files
 | Check | Command | Expected |
 |-------|---------|----------|
 | Subprocess-kill tests pass | `pytest tests/unit/test_session_health_subprocess_kill.py -q` | exit code 0 |
-| Worktree manager tests pass | `pytest tests/unit/test_worktree_manager.py -q` | exit code 0 |
-| Orphan-reap tests pass | `pytest tests/unit/test_session_health_orphan_process_reap.py -q` | exit code 0 |
+| Worktree manager tests still pass (no regression) | `pytest tests/unit/test_worktree_manager.py -q` | exit code 0 |
+| Orphan-reap tests still pass (reaper unchanged) | `pytest tests/unit/test_session_health_orphan_process_reap.py -q` | exit code 0 |
 | Runner preempt tests pass | `pytest tests/unit/session_runner/test_runner_preempt.py -q` | exit code 0 |
 | Runner writes claude_pid on spawn | `grep -c "claude_pid" agent/session_runner/runner.py` | output > 0 |
-| Executor confirms dead before cleanup | `grep -n "confirm" agent/session_executor.py \| grep -in "cleanup\|dead"` | exit code 0 |
+| Runner finally reaps its process group | `grep -c "killpg" agent/session_runner/runner.py` | output > 0 |
+| worktree_manager NOT modified (Fix 3 no-gate) | `git diff --name-only origin/main -- agent/worktree_manager.py \| wc -l` | output contains 0 |
 | Format clean | `python -m ruff format --check agent/ tests/` | exit code 0 |
 
 ## Critique Results
 
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
 **Round 1 (NEEDS REVISION → addressed):**
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | History & Consistency | Fix 4 keyed on `find_by_claude_pid` resolving a TERMINAL session, but `finalize_session:479` nulls `claude_pid` on terminal — the leg can never match. | Rev 1 re-keyed on `pm_pid`; Rev 2 (below) elected the Fix 4 no-go entirely. | Superseded by the round-2 blocker + no-go. |
-| CONCERN | Risk & Robustness | Fix 3 liveness check placed after `worktree_busy_check`'s terminal-row `continue` (`:472`) is dead for terminal rows. | Fix 3 now modifies the `:472` skip condition itself (terminal AND group-dead ⇒ skip; else busy). | Executor-side confirm independently covers AC#2. |
-| CONCERN | Risk & Robustness | `TASK_CANCEL_TIMEOUT` (0.25s) can truncate the runner finally's SIGTERM grace. | Runner finally fast-SIGKILLs on the external-cancel path; recovery-side `_confirm_subprocess_dead` (bounded 3.0s, offloaded) is the authoritative graceful escalator. | Budgets reconciled in Fix 1. |
-| CONCERN | Scope & Value | Two kill surfaces unresolved while Steps commit to both. | Resolved: executor routes through `terminate_current_turn`; health checker uses `_confirm_subprocess_dead`. | Fixed rule in Architectural Impact. |
+| CONCERN | Risk & Robustness | Fix 3 liveness check placed after `worktree_busy_check`'s terminal-row `continue` (`:472`) is dead for terminal rows. | Round-3 superseded: the whole `worktree_busy_check` gate was dropped (inert); Fix 1's finally-ordering covers AC#2 instead. | See Round 3. |
+| CONCERN | Risk & Robustness | `TASK_CANCEL_TIMEOUT` (0.25s) can truncate the runner finally's SIGTERM grace. | Runner finally uses a short grace; on `wait_for` timeout the recovery-side `_confirm_subprocess_dead` (bounded 3.0s, offloaded) finishes the job. | Reconciled in Fix 1. |
+| CONCERN | Scope & Value | Two kill surfaces unresolved while Steps commit to both. | Round-3 superseded: the executor no longer calls into the runner; `terminate_current_turn` is a convenience API, and the health checker keeps `_confirm_subprocess_dead`. | See Round 3. |
 | CONCERN | History & Consistency | "Single writer of live-subprocess identity" omits `finalize_session`. | Claim scoped to "live (non-terminal) value"; `finalize_session:479` named as terminal clearer. | — |
 | NIT | Scope & Value | `SessionHandle.pgid` caches a pure function of `pid`. | Dropped the cached field; derive via `os.getpgid(pid)`. | — |
 
@@ -505,9 +512,17 @@ parallel builders needed — the fixes are sequenced and share the same files
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Risk & Robustness + History & Consistency | `pm_pid`-keyed reaper leg can SIGKILL a live session: `pm_pid` is never cleared, so under OS PID reuse a dead terminal session's `pm_pid` can equal a live session's current PID. | Elected the Fix 4 **NO-GO** (durable rationale in No-Gos). Primary fixes 1-3 make the leak unreachable; the reaper is left unmodified. | Removes the PID-reuse hazard entirely; the PPID==1 net still covers worker-dead orphans. |
 | CONCERN | History & Consistency | Fix 2 said `_on_turn_spawn` writes `SessionHandle.pid` into `_active_sessions` — a cross-module reach the runner cannot make. | Fix 2 now writes only `self._agent_session.claude_pid` (same object); the recovery path reads `entry.claude_pid`, so no registry write is needed. `_TurnHandle` vs `SessionHandle` terminology corrected. | — |
-| CONCERN | Risk & Robustness | Fix 3's "leave the worktree for the reaper" is inaccurate — nothing auto-deletes an orphaned worktree. | On confirm-timeout the executor SKIPS cleanup and emits a WARNING/alert naming the orphaned worktree as a known residual; never deletes under a live child. | — |
-| CONCERN | Risk & Robustness | `_runner` may be unbound in the executor `finally`. | Guard with `locals().get("_runner")`, mirroring the adjacent slug/working_dir pattern; skip confirm if unbound (nothing was spawned). | — |
+| CONCERN | Risk & Robustness | Fix 3's "leave the worktree for the reaper" is inaccurate. | Round-3 superseded: no executor SKIP branch; the runner `finally` reaps before cleanup, and the pathological-unkillable case is a WARNING + documented manual reclamation. | See Round 3. |
+| CONCERN | Risk & Robustness | `_runner` may be unbound in the executor `finally`. | Round-3 superseded: the executor `finally` no longer calls into the runner at all, so there is no unbound-`_runner` risk. | See Round 3. |
 | NIT | Scope & Value | `terminate_current_turn(confirm=True)` param is speculative. | Dropped the parameter; the only caller always confirms. | — |
+
+**Round 3 (NEEDS REVISION → addressed):**
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + History & Consistency + Scope & Value | Fix 3's two "confirm-dead-before-cleanup" gates are inert: the executor's `terminate_current_turn` runs after `_run_one_turn` nulled `_current_handle`; `worktree_busy_check` reads `claude_pid` already nulled by `finalize_session:479`, and reading `pm_pid` there revives the Fix 4 PID-reuse hazard. | Adopted option (a): DROP both gates. `_run_one_turn`'s `finally` reaps + confirms the group, and Python's finally-ordering guarantees that completes before the executor cleanup `finally` in the same unwind — so AC#2 holds structurally with no downstream gate. `agent/worktree_manager.py` and the executor `finally` are unchanged. | Fix 1 is the single load-bearing gate; Fix 2 is the recovery-path confirm/escalate backstop. |
+| CONCERN | Risk & Robustness | Recovery's authoritative confirm reads `claude_pid` after Fix 2 clears it on the same teardown → `_confirm_subprocess_dead(None)` false confirm. | Snapshot `pid_snapshot = entry.claude_pid` BEFORE `handle.task.cancel()` and confirm against the snapshot (Fix 2). Added a Race + test bullet. | The `wait_for(0.25s)` may time out; the 3.0s snapshot confirm finishes the job. |
+| CONCERN | Risk & Robustness (Operator) | SKIP-cleanup-on-timeout leaks worktrees with no reclamation path (Fix 4 forbids a reaper). | No SKIP branch now (cleanup is unconditional-but-safe post-reap). For the theoretical unkillable case, the runner `finally` WARNs and the docs carry a manual `git worktree prune` runbook. | Documented in the Documentation section. |
+| NIT | Scope & Value | Spawn-site backstop overlaps Fix 1 on the runner path. | Reframed as generic-harness protection for the two non-runner `_run_harness_subprocess` call sites; swallow `ProcessLookupError`, re-raise `CancelledError`. | Not load-bearing for AC#1. |
 
 ---
 
@@ -518,6 +533,8 @@ No open questions — all prior questions are resolved in-plan:
 1. **Reaper backstop (Fix 4): implement or no-go?** → RESOLVED: explicit NO-GO
    with rationale (two critique rounds showed every keying reintroduces the
    plan's own root-cause hazard). AC#4 permits this.
-2. **Runner-owned kill API vs. shared helper?** → RESOLVED: keep both, split by a
-   fixed rule — executor routes through `terminate_current_turn` (it holds a
-   runner ref); the health checker uses `_confirm_subprocess_dead` (it does not).
+2. **Runner-owned kill API vs. shared helper?** → RESOLVED: the load-bearing reap
+   lives in `_run_one_turn`'s `finally` (no caller needed). `terminate_current_turn`
+   is a convenience preempt API; the health checker keeps its
+   `SessionHandle.task.cancel()` + `_confirm_subprocess_dead(pid_snapshot)` backstop.
+   The executor `finally` does NOT call into the runner (Round-3 correction).
