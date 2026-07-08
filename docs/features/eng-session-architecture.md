@@ -206,7 +206,7 @@ Workers are keyed by `worker_key` -- either `project_key`, `slug`, or `chat_id`:
 - **Eng sessions**: slugless Eng sessions and Eng sessions at main-checkout stages (PLAN/ISSUE/CRITIQUE/MERGE) use `project_key` and serialize per project. Slugged Eng sessions at worktree stages (BUILD/TEST/PATCH/REVIEW/DOCS) use `slug` and can run concurrently with siblings.
 - **Teammate sessions**: always use `chat_id`.
 
-Sessions sharing a working tree serialize; isolated sessions (distinct slugs at worktree stages) can run in parallel.
+Sessions sharing a working tree serialize; isolated sessions (distinct slugs at worktree stages) can run in parallel. Each issue's build fork exclusively owns `.worktrees/{slug}` and `session/{slug}` from the plan slug -- see [SDLC Fork Turn-Boundary Invariant](sdlc-fork-turn-boundary.md) for the slug-identity-always-wins ownership rule and the turn-boundary invariant that keeps `context: fork` SDLC skills from ending a turn with a live background child.
 
 ### Per-Worker-Key Workers
 - `_ensure_worker(worker_key, is_project_keyed)` -- starts a worker per key
