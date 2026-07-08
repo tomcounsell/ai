@@ -65,6 +65,7 @@ Each model is processed independently -- one model failure does not abort the sw
 | `worker/__main__.py` | Worker startup using `run_cleanup()` for all-model rebuild (step 1) |
 | `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`) and model discovery (`_get_all_models()`) |
 | `config/reflections.yaml` | Reflection registry entry for `ReflectionScheduler` |
+| `monitoring/sentry_config.py` | `drop_orphan_noise()` Sentry `before_send` filter (see Sentry Orphan-Noise Filter) |
 
 ## Inline Orphan Prevention (Defensive srem)
 
@@ -76,7 +77,19 @@ The defensive `srem` is non-fatal (wrapped in try/except) and depends on three P
 
 ## Verification
 
-After the cleanup reflection runs, `grep -rn "import redis" agent/` should return zero hits, and bridge logs should show no `"one or more redis keys points to missing objects"` warnings.
+After the cleanup reflection runs, `grep -rn "import redis" agent/` should return zero hits, and bridge logs should show reduced `"one or more redis keys points to missing objects"` warnings.
+
+## Sentry Orphan-Noise Filter
+
+The cleanup infrastructure above **reduces** but cannot **eliminate** transient orphan-index entries: the orphan lifecycle is inherent to Popoto + TTL (Redis SETs have no per-member TTL, so a hash expiry always leaves a ghost SET member until the next sweep). Popoto's `Query` logger emits `"one or more redis keys points to missing objects. Debug with Model.query.keys(clean=True)"` at `error` level on **every** query that touches such a ghost — and the worker polls `AgentSession.query.all()` in a tight loop. Sentry's default `LoggingIntegration` captures each of these as an event, which accumulated **68k+ benign events** on Sentry issue `VALOR-S` (issue #1835).
+
+The churn is benign-transient: the `if redis_hash` guard in Popoto's `get_many_objects` already silently skips ghost hashes, so **no stale data is ever returned**. Three prior orphan-reduction fixes (#860, #1459, #1874) each lowered the volume but none removed the noise, because the error fires on every hit, not once per orphan. Rather than chase the last orphan, the noise is filtered at the Sentry layer:
+
+- **`drop_orphan_noise(event, hint)` in `monitoring/sentry_config.py`** is a `before_send` hook that returns `None` (drops the event) when the event's logged message contains the orphan substring. It checks `logentry.formatted`, `logentry.message`, and the top-level `message` field, and wraps the match in try/except so a filter bug can never suppress a real error.
+- **The worker** (`worker/__main__.py`) — the primary emitter — passes `before_send=drop_orphan_noise` to `configure_sentry("worker", ...)` (previously `None`).
+- **The bridge** (`bridge/telegram_bridge.py`) composes it: `_sentry_before_send` runs the hibernation check first, then delegates to `drop_orphan_noise`.
+
+This filters the **Sentry** noise only — the diagnostic still appears in bridge/worker logs (a `logging.Filter` on the `POPOTO.Query` logger was rejected because it would hide the diagnostic from logs entirely). Modifying Popoto's source to downgrade the log level was also rejected: Popoto is a pip-installed dependency, and monkey-patching would break on upgrade. The `before_send` layer intercepts after Popoto logs but before Sentry captures.
 
 ## Related: Disk-Side Embedding Orphan Cleanup
 
