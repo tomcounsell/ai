@@ -55,8 +55,15 @@ After documentation gate passes and pre-PR verification succeeds, advance to the
 
 ```bash
 git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
-# For cross-repo builds, add: --repo $TARGET_GH_REPO
-gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
+
+# Reuse an existing open PR for this head (live-ref, no search-index lag).
+# Cross-repo builds MUST include --repo $TARGET_GH_REPO on BOTH the list and create.
+EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number')  # add: --repo $TARGET_GH_REPO
+if [ -n "$EXISTING_PR" ]; then
+  echo "Reusing PR #$EXISTING_PR"
+else
+  # For cross-repo builds, add: --repo $TARGET_GH_REPO
+  gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Summary
 [Brief description of what was built]
 
@@ -84,6 +91,7 @@ gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 Closes #[issue-number]
 EOF
 )"
+fi
 ```
 
 **Important**: The PR creation step is handled by the BUILD ORCHESTRATOR (this skill), NOT by individual builder agents. Builder agents focus on their assigned tasks, while the orchestrator creates the final PR after all tasks complete and gates pass.

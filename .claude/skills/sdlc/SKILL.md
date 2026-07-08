@@ -89,6 +89,8 @@ git -C "$SDLC_TARGET_REPO" branch -a
 ```bash
 # 2c. Check if a PR already exists
 gh pr list --search "#{issue_number}" --state open
+# Note: --search lags GitHub's index. Once the slug/branch name is known, a
+# live-ref cross-check is also available: gh pr list --head session/{slug} --state open
 ```
 
 If a PR exists, fetch its full state for assessment:
