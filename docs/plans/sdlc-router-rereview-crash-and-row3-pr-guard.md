@@ -656,42 +656,42 @@ No agent integration required — this is an internal change to the SDLC router 
 
 ## Success Criteria
 
-- [ ] Reproduction test for gap (a), case FAILED, added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_FAILED`, DOCS pending} → currently `Blocked("no matching dispatch rule")`.
-- [ ] Reproduction test for gap (a), case COMPLETED, added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_COMPLETED`, DOCS pending} → currently `Dispatch(skill="/do-docs", row_id="9")` (a misroute, **not** Blocked — row 9 does not check the verdict).
-- [ ] Companion assertion (both cases): `_rule_pr_exists_no_review(stage_states, meta, context)` returns `False` — proves the repro is genuinely outside row 7's coverage.
-- [ ] Companion assertion (COMPLETED case, pre-fix): `_rule_review_approved_docs_not_done(stage_states, meta, context)` returns `True` — proves the row-9 misroute is real; and `False` for the FAILED case.
-- [ ] After fix (a): both cases → `Dispatch(skill="/do-pr-review", row_id="8d")` (8d and row 9 are disjoint by verdict after fix (c), so this holds regardless of table order).
-- [ ] Regression: row 9's legitimate case (`REVIEW == completed` **with** an APPROVED verdict, DOCS pending) still routes to `Dispatch(skill="/do-docs", row_id="9")` after 8d is added and fix (c) lands (row 9 requires the APPROVED verdict; 8d steps aside because a verdict is recorded).
-- [ ] Row 8d's docstring asserts disjointness from row 7 (`REVIEW in (None, "pending", "ready")`), row 8b (`last == /do-patch`), and row 8c (`REVIEW == in_progress`) via explicit step-asides, and notes it is disjoint from row 9 by verdict (8d requires no recorded verdict; row 9 requires APPROVED) — mirroring 8c's own docstring step-aside style.
+- [x] Reproduction test for gap (a), case FAILED, added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_FAILED`, DOCS pending} → currently `Blocked("no matching dispatch rule")`.
+- [x] Reproduction test for gap (a), case COMPLETED, added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_COMPLETED`, DOCS pending} → currently `Dispatch(skill="/do-docs", row_id="9")` (a misroute, **not** Blocked — row 9 does not check the verdict).
+- [x] Companion assertion (both cases): `_rule_pr_exists_no_review(stage_states, meta, context)` returns `False` — proves the repro is genuinely outside row 7's coverage.
+- [x] Companion assertion (COMPLETED case, pre-fix): `_rule_review_approved_docs_not_done(stage_states, meta, context)` returns `True` — proves the row-9 misroute is real; and `False` for the FAILED case.
+- [x] After fix (a): both cases → `Dispatch(skill="/do-pr-review", row_id="8d")` (8d and row 9 are disjoint by verdict after fix (c), so this holds regardless of table order).
+- [x] Regression: row 9's legitimate case (`REVIEW == completed` **with** an APPROVED verdict, DOCS pending) still routes to `Dispatch(skill="/do-docs", row_id="9")` after 8d is added and fix (c) lands (row 9 requires the APPROVED verdict; 8d steps aside because a verdict is recorded).
+- [x] Row 8d's docstring asserts disjointness from row 7 (`REVIEW in (None, "pending", "ready")`), row 8b (`last == /do-patch`), and row 8c (`REVIEW == in_progress`) via explicit step-asides, and notes it is disjoint from row 9 by verdict (8d requires no recorded verdict; row 9 requires APPROVED) — mirroring 8c's own docstring step-aside style.
 
 **Fix (b1) — row 3 open-PR step-aside (`last` not plan-family):**
-- [ ] Reproduction test for gap (b1) added and RED before the fix: {PR open, non-stale NEEDS REVISION critique, `last` not plan-family, no review yet} → currently `Dispatch("/do-plan", row_id="3")`.
-- [ ] After fix (b1): that state → `Dispatch(skill="/do-pr-review", row_id="7")` (pinned), plus the general invariant `skill != "/do-plan"` asserted separately.
+- [x] Reproduction test for gap (b1) added and RED before the fix: {PR open, non-stale NEEDS REVISION critique, `last` not plan-family, no review yet} → currently `Dispatch("/do-plan", row_id="3")`.
+- [x] After fix (b1): that state → `Dispatch(skill="/do-pr-review", row_id="7")` (pinned), plus the general invariant `skill != "/do-plan"` asserted separately.
 
 **Fix (b2) — G1 open-PR step-aside (`last == /do-plan-critique`) [pass-5 BLOCKER]:**
-- [ ] Reproduction test for gap (b2) added and RED before the fix: {PR open, NEEDS REVISION critique, `last == /do-plan-critique`} → currently `Dispatch("/do-plan", row_id="G1")` (proves the guard-path route the row-3 fix alone does not close).
-- [ ] After fix (b2): that state → `Dispatch(row_id="G3")` (a PR-stage skill), plus the invariant `skill != "/do-plan"` asserted separately.
-- [ ] Regression: with **no** PR open, G1 still routes NEEDS REVISION + `last == /do-plan-critique` → `Dispatch("/do-plan", row_id="G1")` (G1's normal plan↔critique contract unchanged).
+- [x] Reproduction test for gap (b2) added and RED before the fix: {PR open, NEEDS REVISION critique, `last == /do-plan-critique`} → currently `Dispatch("/do-plan", row_id="G1")` (proves the guard-path route the row-3 fix alone does not close).
+- [x] After fix (b2): that state → `Dispatch(row_id="G3")` (a PR-stage skill), plus the invariant `skill != "/do-plan"` asserted separately.
+- [x] Regression: with **no** PR open, G1 still routes NEEDS REVISION + `last == /do-plan-critique` → `Dispatch("/do-plan", row_id="G1")` (G1's normal plan↔critique contract unchanged).
 
 **Fix (b3) — G5 open-PR step-aside (warm artifact-hash cache) [pass-6 BLOCKER]:**
-- [ ] Reproduction test for gap (b3) added and RED before the fix: {PR open, cached CRITIQUE verdict = NEEDS REVISION with `artifact_hash = H`, `context["current_plan_hash"] = H` (cache hit), `last` not plan-family} → currently `Dispatch("/do-plan", row_id="G5")` (proves G5 shadows row 3's step-aside whenever the hash cache is warm).
-- [ ] After fix (b3): that state → `Dispatch("/do-pr-review", row_id="7")` (G5 defers → row 3 steps aside → row 7), plus the invariant `skill != "/do-plan"` asserted separately.
-- [ ] Second case `last == /do-plan-critique` on a warm cache → post-fix `Dispatch(row_id="G3")` (G1 defers via b2, G3 trips before G5 is reached), `skill != "/do-plan"`.
-- [ ] Regression: with **no** PR open, G5 still re-dispatches `/do-plan` off the warm cache (`row_id="G5"`) — G5's cache-reuse contract unchanged; plus a MAJOR_REWORK-verdict variant confirming the gate covers both verdicts.
+- [x] Reproduction test for gap (b3) added and RED before the fix: {PR open, cached CRITIQUE verdict = NEEDS REVISION with `artifact_hash = H`, `context["current_plan_hash"] = H` (cache hit), `last` not plan-family} → currently `Dispatch("/do-plan", row_id="G5")` (proves G5 shadows row 3's step-aside whenever the hash cache is warm).
+- [x] After fix (b3): that state → `Dispatch("/do-pr-review", row_id="7")` (G5 defers → row 3 steps aside → row 7), plus the invariant `skill != "/do-plan"` asserted separately.
+- [x] Second case `last == /do-plan-critique` on a warm cache → post-fix `Dispatch(row_id="G3")` (G1 defers via b2, G3 trips before G5 is reached), `skill != "/do-plan"`.
+- [x] Regression: with **no** PR open, G5 still re-dispatches `/do-plan` off the warm cache (`row_id="G5"`) — G5's cache-reuse contract unchanged; plus a MAJOR_REWORK-verdict variant confirming the gate covers both verdicts.
 
 **Fix (c) — row 9 verdict-gate at source [pass-5 CONCERN 1]:**
-- [ ] Reproduction test added and RED before the fix: {PR open, `REVIEW == completed`, empty verdict, DOCS pending, `last` non-review skill} → currently `Dispatch("/do-docs", row_id="9")` (the misroute open to any `last`, which 8d's narrow gate does not close).
-- [ ] After fix (c): that state → `Blocked` (row 9 steps aside on missing APPROVED verdict; 8d steps aside on `last != /do-pr-review`) — safe escalation, not a silent docs advance.
-- [ ] `_rule_review_approved_docs_not_done` returns `False` post-fix for the empty-verdict completed state and `True` for the APPROVED-verdict completed state.
+- [x] Reproduction test added and RED before the fix: {PR open, `REVIEW == completed`, empty verdict, DOCS pending, `last` non-review skill} → currently `Dispatch("/do-docs", row_id="9")` (the misroute open to any `last`, which 8d's narrow gate does not close).
+- [x] After fix (c): that state → `Blocked` (row 9 steps aside on missing APPROVED verdict; 8d steps aside on `last != /do-pr-review`) — safe escalation, not a silent docs advance.
+- [x] `_rule_review_approved_docs_not_done` returns `False` post-fix for the empty-verdict completed state and `True` for the APPROVED-verdict completed state.
 
 **Cross-cutting:**
-- [ ] Regression: existing 7, 8b, 8c, and stale-critique (2b) states still route to their own rows after 8d/fix(c) land.
-- [ ] G4 loop-bound regression test (pass-5 CONCERN 2, D5-aware): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries sharing `skill == /do-pr-review` and an **identical** `stage_snapshot` equal to the 8d crash state; assert the derived `same_stage_dispatch_count` reaches the cap (D5 does not reset it — snapshot stable) and `decide_next_dispatch` → `Blocked(guard_id="G4")`. Companion contrast: a history whose snapshot **moves** between dispatches → D5 resets → not `Blocked(G4)`.
-- [ ] G4 churn-limitation documenting test (pass-6 CONCERN 1): a `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` `/do-pr-review` entries whose REVIEW marker *alternates* `completed`/`failed` → derived count does **not** reach the cap and `decide_next_dispatch` → `Dispatch(row_id="8d")` (G4 does not bound the churn case). Explicitly named/commented as a documented deferred limitation, not a failing requirement.
-- [ ] CLI smoke test (pass-6 NIT): the `sdlc-tool next-skill` code path returns a PR-stage skill (not `/do-plan`) for the fix-(b3) warm-cache open-PR state — proving the fix is reachable through the agent-facing surface, not only the pure function.
-- [ ] `.claude/skills/sdlc/SKILL.md` row count corrected to "18 rows" (not just incremented from whatever it currently says); row-9 gate, row-3 step-aside, and G1 + G5 step-asides documented; any `len(DISPATCH_TABLE)` assertion updated in lockstep; prefer a dynamic `grep -c 'DispatchRule('`-derived check over a new hardcoded literal, and anchor the SKILL.md side to the `dispatch rules (\d+ rows)` phrase.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Regression: existing 7, 8b, 8c, and stale-critique (2b) states still route to their own rows after 8d/fix(c) land.
+- [x] G4 loop-bound regression test (pass-5 CONCERN 2, D5-aware): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries sharing `skill == /do-pr-review` and an **identical** `stage_snapshot` equal to the 8d crash state; assert the derived `same_stage_dispatch_count` reaches the cap (D5 does not reset it — snapshot stable) and `decide_next_dispatch` → `Blocked(guard_id="G4")`. Companion contrast: a history whose snapshot **moves** between dispatches → D5 resets → not `Blocked(G4)`.
+- [x] G4 churn-limitation documenting test (pass-6 CONCERN 1): a `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` `/do-pr-review` entries whose REVIEW marker *alternates* `completed`/`failed` → derived count does **not** reach the cap and `decide_next_dispatch` → `Dispatch(row_id="8d")` (G4 does not bound the churn case). Explicitly named/commented as a documented deferred limitation, not a failing requirement.
+- [x] CLI smoke test (pass-6 NIT): the `sdlc-tool next-skill` code path returns a PR-stage skill (not `/do-plan`) for the fix-(b3) warm-cache open-PR state — proving the fix is reachable through the agent-facing surface, not only the pure function.
+- [x] `.claude/skills/sdlc/SKILL.md` row count corrected to "18 rows" (not just incremented from whatever it currently says); row-9 gate, row-3 step-aside, and G1 + G5 step-asides documented; any `len(DISPATCH_TABLE)` assertion updated in lockstep; prefer a dynamic `grep -c 'DispatchRule('`-derived check over a new hardcoded literal, and anchor the SKILL.md side to the `dispatch rules (\d+ rows)` phrase.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
