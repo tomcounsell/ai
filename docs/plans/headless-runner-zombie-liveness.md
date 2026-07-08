@@ -13,6 +13,57 @@ revision_applied: true
 
 ## Critique Revision (2026-07-07)
 
+### Fourth revision — CRITIQUE pass 3, FULL depth (2026-07-08, 1 BLOCKER + 4 concerns, converged
+across two independent critique runs)
+
+- **BLOCKER — Element 1's cooldown citation was factually false.** Element 1 claimed
+  `_stamp_stdout_liveness()` "mirrors `session_executor.py:1506-1509`, same fail-silent +
+  5s-cooldown discipline." **Verified false:** that closure (`_on_stdout_event`,
+  `session_executor.py:1509-1518`) has **zero** cooldown — it calls
+  `session.save(update_fields=["last_stdout_at"])` unconditionally on every stdout line, and
+  `on_stdout_event` fires on every non-empty stdout line (`sdk_client.py:2898-2904`). The real
+  cooldown precedent (`COOLDOWN_WINDOW_SEC = 5.0`) lives only in `agent/hooks/liveness_writers.py`,
+  which the plan's own Technical Approach section already cites correctly elsewhere — an internal
+  contradiction. Fixed below (Element 1, Technical Approach): the citation now points solely at
+  `liveness_writers.py`'s cooldown pattern, and cooldown state is explicitly required to be
+  **per-session-keyed** (a bare module/class-level timestamp would let one session's stdout
+  suppress another's stamp under concurrent `SessionRunner`s — reintroducing the exact false
+  positive this plan fixes).
+- **Concern — a dead, uncoordinated duplicate writer already exists and must be removed.** Both
+  critique runs independently found `agent/session_executor.py:1509-1518`'s `_on_stdout_event`
+  closure, wired into `BossMessenger(on_stdout_event=...)` at `:1520-1528` — a **prior, unlanded
+  attempt at this exact signal**. It is dead in production (`grep -rn "notify_stdout_event" agent/
+  tests/` shows zero call sites outside one unit test; `messenger` is never passed to
+  `SessionRunner(...)` at `:1868-1876`). Leaving it in place after this plan lands would create two
+  independent, uncoordinated `last_stdout_at` writers — a latent violation of both the
+  single-authoritative-module directive (third revision) and this repo's no-legacy-code norm. Added
+  as a new Prior Art bullet and a new cleanup task (Step 3.5) deleting the dead closure and its
+  `BossMessenger` wiring.
+- **Concern — no production-validation gate ties back to the reported incident.** Every Success
+  Criterion was unit/grep-level; the one criterion that would demonstrate the actual fix — the
+  motivating `sdlc-local-1933`/`1934` wedge class no longer recurring — was pushed to No-Gos as
+  purely optional. Added a non-blocking Final Validation checklist item: grep the
+  `zombie_uuid_no_output` Redis counter (`session_health.py:2154`, key pattern
+  `{project_key}:session-health:recoveries:zombie_uuid_no_output`) post-deploy and note the result
+  in the PR description.
+- **Concern — widened post-init-hang detection window has no compensating observability.** Risk 1
+  accepts detection latency growing from ~150s to up to `turn_timeout_s` (7200s for PM/eng) with no
+  side-channel signal in between. Added an observability note to Risk 1: a debug-level log line
+  inside `_stamp_stdout_liveness()`'s success branch (distinct from its fail-silent path) so
+  operators can positively confirm the fix is firing post-deploy, distinguishing "wired and live"
+  from "present but silently inert" (the exact failure mode the dead `BossMessenger` writer above
+  demonstrates is possible in this codebase).
+- **Concern (acknowledged, not actioned) — Element 3 bundles an independently-dead signal repair.**
+  Both critique runs flagged `record_turn_boundary`'s fix as orthogonal to the reported wedge (it
+  only fires at end-of-turn, after the 150s grace has already elapsed, so it cannot by itself
+  prevent a toolless-turn zombie verdict — Elements 1+2 are independently sufficient for that).
+  **Decision: kept in scope**, per CRITIQUE-pass-2's original reframing (`last_turn_at` is one of
+  the three OR-inputs `derive_sdk_ever_output` reads, and is currently ~100% dead — leaving it
+  unfixed means the single-authoritative function has a permanently-inert third input). To bound
+  the risk both critiques raised, Element 3 is now called out as an **independently revertible
+  commit** with its own Test Impact entries, so it can be reverted alone post-merge without
+  reopening the primary wedge fix if it causes trouble.
+
 ### Third revision — owner design directive (2026-07-07T08:35:19Z, issue comment 4901774113)
 
 Tom's directive, issued after CRITIQUE pass 2 landed: *"One authoritative liveness signal makes
@@ -191,6 +242,15 @@ moved; the derivation logic itself is untouched.
 
 ## Prior Art
 
+- **`session_executor.py:1509-1528` — a prior, unlanded attempt at this exact signal (found during
+  CRITIQUE pass 3).** An `_on_stdout_event` closure already stamps `last_stdout_at` unconditionally
+  (no cooldown) on every stdout line, wired into `BossMessenger(on_stdout_event=...)`. It is dead in
+  production: `grep -rn "notify_stdout_event" agent/ tests/` returns zero call sites outside
+  `tests/unit/test_messenger_callbacks.py`, and `messenger` is never passed into
+  `SessionRunner(...)` (`session_executor.py:1868-1876`). This plan's Element 1 re-solves the same
+  problem at the correct layer (the runner's driver callbacks, which the live stream actually
+  drives) and Step 3.5 deletes the dead closure so only one `last_stdout_at` writer exists
+  post-merge.
 - **#1843 / `granite-wire-silent-wedge-signals` (CLOSED).** Fixed this exact "silent no-progress"
   class for the PTY runner. **Gap A** wired CLI-hook liveness writes so tool boundaries populate
   `current_tool_name`/`last_tool_use_at` via sidecar resolution
@@ -319,9 +379,17 @@ None. `last_stdout_at`, `last_tool_use_at`, `last_turn_at` all already exist on 
      succeeded. `_on_harness_init` itself is left byte-for-byte unchanged (it keeps owning
      resume-scalar persistence).
 
-   `_stamp_stdout_liveness()` stamps `last_stdout_at = datetime.now(tz=UTC)` on the AgentSession
-   (mirroring `session_executor.py:1506-1509`, same fail-silent + 5s-cooldown discipline). This
-   restores the per-stream-activity liveness signal the PTY teardown dropped.
+   `_stamp_stdout_liveness()` stamps `last_stdout_at = datetime.now(tz=UTC)` on the AgentSession,
+   fail-silent, with a **per-session-keyed** cooldown mirroring `agent/hooks/liveness_writers.py`'s
+   `COOLDOWN_WINDOW_SEC = 5.0` discipline (CRITIQUE pass 3 BLOCKER fix — the cooldown state must be
+   keyed by `session_id`, e.g. an instance attribute on `SessionRunner` or a dict keyed by
+   `session_id`, NOT a bare module/class-level timestamp, otherwise one session's stdout stream
+   could suppress a concurrently-running session's stamp within the same worker process,
+   reintroducing the exact false positive this plan fixes). **Do NOT** mirror the pre-existing
+   `session_executor.py:1509-1518` `_on_stdout_event` closure — that closure has zero cooldown
+   (unconditional save on every stdout line) and is itself dead code being removed by Step 3.5; it
+   is not a cooldown precedent. This restores the per-stream-activity liveness signal the PTY
+   teardown dropped.
 
 2. **Recognize stream activity in the derivation — all FOUR sites, relocated to
    `agent/session_runner/` (owner directive, third revision).** Create
@@ -391,8 +459,11 @@ Post-fix: init event → `last_stdout_at` stamped (t≈few seconds) → `sdk_eve
 - Add a `_stamp_stdout_liveness()` helper in `SessionRunner` (alongside the existing turn-spawn/init
   observers) that resolves the AgentSession by the true `session_id` and saves `last_stdout_at` with
   `update_fields=["last_stdout_at"]`, fail-silent, with a short in-memory cooldown to bound Redis
-  write rate (mirror `liveness_writers.COOLDOWN_WINDOW_SEC = 5.0`). Expose it through **two** driver
-  adapters (Element 1): a 0-arg `on_stdout_event` adapter, and a 1-arg `on_init` adapter that first
+  write rate (mirror `liveness_writers.COOLDOWN_WINDOW_SEC = 5.0` — **per-session-keyed**, e.g. a
+  `SessionRunner` instance attribute or a dict keyed by `session_id`; NOT a bare module/class-level
+  timestamp, which would let one session's stdout suppress another's stamp under concurrent
+  `SessionRunner`s — CRITIQUE pass 3 BLOCKER fix). Expose it through **two** driver adapters
+  (Element 1): a 0-arg `on_stdout_event` adapter, and a 1-arg `on_init` adapter that first
   delegates to `_on_harness_init` (preserving `persist_resume_scalars`) and then stamps.
 - Create **`agent/session_runner/liveness.py`** exporting `derive_sdk_ever_output(entry) -> bool`
   (owner directive, third revision — relocated from a `session_health.py`-local helper). In
@@ -470,9 +541,20 @@ Post-fix: init event → `last_stdout_at` stamped (t≈few seconds) → `sdk_eve
       explicit-`session_id` path; keep the env-fallback no-op case.
 - [ ] `tests/unit/session_runner/headless_hook_probe.py` — no change expected (it exercises turn-end
       hook firing, not liveness); confirm it still passes.
+- [ ] **`tests/unit/test_messenger_callbacks.py`** (CRITIQUE pass 3, Step 3.5) — UPDATE:
+      `test_notify_stdout_event_invokes_callback` exercises `BossMessenger.notify_stdout_event()` in
+      isolation and is unaffected by removing the dead `on_stdout_event=_on_stdout_event` wiring in
+      `session_executor.py` (the messenger class itself is untouched, only its unused call site is
+      removed) — confirm it still passes; no test deletion needed since the test targets the
+      messenger unit, not the dead wiring.
+- [ ] **New: cooldown-keying test (CRITIQUE pass 3 BLOCKER fix)** — assert two concurrently
+      instantiated `SessionRunner`/driver pairs (distinct `session_id`s) each get an independent
+      `last_stdout_at` stamp within the same 5s window, proving the cooldown state is per-session-
+      keyed and not a shared module/class-level timestamp. Lives alongside the Step 3 runner tests.
 
 No existing tests are DELETED or REPLACED — the changes are additive to the derivation (four sites,
-one function, relocated) and the runner wiring.
+one function, relocated), the runner wiring, and removal of one dead, already-unreferenced call site
+in `session_executor.py`.
 
 ## Rabbit Holes
 
@@ -520,6 +602,16 @@ with no correctness justification here, since the turn deadline already recovers
 **Build verification:** add a deterministic test (small injected `turn_timeout_s`) asserting a
 fake-harness turn that emits `init` then hangs is preempted/killed via the turn-deadline path
 (`outcome.hung=True` / `exit_reason="headless_turn_timeout"`), NOT via the never-started gate.
+**Observability (CRITIQUE pass 3 concern):** widening the detection window from ~150s to up to
+`turn_timeout_s` means a genuine post-`init` hang goes silent for longer with no compensating
+signal. `_stamp_stdout_liveness()`'s success branch (after the `update_fields=["last_stdout_at"]`
+save) must emit a distinct debug-level log line (e.g. `logger.debug("stdout_liveness_stamped",
+session_id=session_id)`) so a post-deploy `grep stdout_liveness_stamped logs/worker.log` can
+positively confirm the fix is firing, rather than only inferring it from the absence of zombie
+verdicts — this is the same "looks fixed but is silently inert" failure mode the dead
+`session_executor.py` `_on_stdout_event`/`BossMessenger` writer (Prior Art) demonstrates is
+possible in this codebase. Pure observability — it does not feed the recovery/reprieve state
+machine.
 
 ### Risk 2: Redis write amplification from per-stdout-chunk stamping
 Stamping `last_stdout_at` on every stdout event could hammer Redis on a chatty turn.
@@ -647,14 +739,28 @@ import check). Flip test (a) green at both sites; add
 ### 3. Wire `on_stdout_event`/`on_init` liveness in the runner (two adapters)
 Add the `_stamp_stdout_liveness` helper to `SessionRunner`. Pass a 0-arg adapter as
 `on_stdout_event`, and a 1-arg `on_init` adapter that delegates to `_on_harness_init` (preserving
-`persist_resume_scalars`) then stamps. Fail-silent + 5s cooldown. Flip tests (b) and (c) green;
-confirm the resume-scalar persistence test still passes.
+`persist_resume_scalars`) then stamps. Fail-silent + **per-session-keyed** 5s cooldown (CRITIQUE
+pass 3 BLOCKER fix). Emit the debug-level `stdout_liveness_stamped` log on the success branch (Risk
+1 observability note). Flip tests (b) and (c) green; confirm the resume-scalar persistence test
+still passes.
 
-### 4. Fix `record_turn_boundary` id resolution
+### 3.5. Delete the dead duplicate liveness writer (CRITIQUE pass 3, Prior Art)
+Remove `agent/session_executor.py:1509-1518`'s `_on_stdout_event` closure and its
+`on_stdout_event=_on_stdout_event` kwarg in the `BossMessenger(...)` construction (`:1520-1528`) —
+a prior, unlanded, uncoordinated attempt at the same signal, dead in production (`messenger` is
+never passed to `SessionRunner`). Run `grep -rn "notify_stdout_event\|on_stdout_event"
+agent/session_executor.py` and confirm zero remaining references. This is an independently
+revertible commit, separate from Step 3's new runner-owned writer — a build that only did Step 3
+would (harmlessly) leave two writers; this step is what makes the single-authoritative-module
+directive actually hold post-merge.
+
+### 4. Fix `record_turn_boundary` id resolution (independently revertible — see fourth-revision note)
 Add the optional `session_id` param. Plumb the true `AgentSession.session_id` from the runner
 (`runner.py:431`) through the `sdk_client.py` stream fn to the result-event call site (`:2936`),
 which passes it explicitly — NOT `data.get("session_id")` (Claude UUID). Keep the `os.environ`
-fallback for the in-subprocess CLI-hook call sites.
+fallback for the in-subprocess CLI-hook call sites. Land as its own commit within the PR so it can
+be reverted alone post-merge without reopening the Elements-1+2 wedge fix, per the fourth-revision
+CRITIQUE note (this element does not by itself close the toolless-streaming wedge).
 
 ### 5. Risk-1 regression guard
 Confirm a post-`init`-then-hang turn is still recovered by the **whole-turn deadline** (NOT the
@@ -671,11 +777,16 @@ per the Documentation section.
 
 ### N. Final Validation
 Run the named unit tests + `ruff`. Run the three BLOCKER-gate greps (two zero-hit, one single-hit
-import). Confirm no mid-turn stall detector was loosened: the diff in `session_health.py` must touch
-ONLY the four `sdk_ever_output` derivation sites (now a single-line call to the imported
+import), plus `grep -rn "notify_stdout_event\|on_stdout_event" agent/session_executor.py` (Step 3.5,
+must be zero hits). Confirm no mid-turn stall detector was loosened: the diff in `session_health.py`
+must touch ONLY the four `sdk_ever_output` derivation sites (now a single-line call to the imported
 `agent.session_runner.liveness.derive_sdk_ever_output`) plus the new import — no derivation logic
 remains inline in `session_health.py`. The reprieve *cadence* logic and the per-tool/idle-gap
 detectors are unchanged; only the "no output ever" input to the reprieve-cap guard is broadened.
+**Post-deploy, non-blocking (CRITIQUE pass 3 concern):** after the fix ships, grep
+`logs/worker.log` for `stdout_liveness_stamped` to confirm the write path is actually firing, and
+check the `{project_key}:session-health:recoveries:zombie_uuid_no_output` Redis counter
+(`session_health.py:2154`) for a drop in new increments; note the result in the PR description.
 
 ## Verification
 
