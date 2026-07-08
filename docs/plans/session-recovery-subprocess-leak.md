@@ -136,8 +136,9 @@ internal to `agent/` and its tests; no secrets, services, or API keys involved.
   normal exit), so a cancelled `SessionHandle.task` no longer orphans a detached
   `claude -p`. The reap has no interruptible `await`, so the recovery path's
   `wait_for` re-cancel cannot abort it. Because the inner-task `finally` completes
-  before `await task.run(...)` returns to the outer executor coroutine, the group
-  is provably dead before both the recovery-path confirm and the executor cleanup.
+  before `await task._task` (`session_executor.py:1967`) resolves in the outer
+  coroutine, the group is provably dead before both the recovery-path confirm and
+  the executor cleanup `finally`.
 - **Generic-harness backstop**: `_run_harness_subprocess` kills its process group
   in a `finally` if the awaiting coroutine is cancelled while the process is
   alive — protects the non-runner harness callers.
@@ -158,13 +159,14 @@ internal to `agent/` and its tests; no secrets, services, or API keys involved.
 
 Health check flags `no_progress` → `_apply_recovery_transition` snapshots
 `claude_pid`, cancels `SessionHandle.task` → runner `_run_one_turn` `finally`
-reaps + confirms the turn's process group (completes before the awaiting body
-returns) → recovery-path `_confirm_subprocess_dead(pid_snapshot)` verifies the
-group is gone → **only if confirmed dead** requeue `pending` (else escalate
-`failed`) → on terminal exit the executor `finally` runs `cleanup_after_merge`,
-which is safe because the runner `finally` already reaped the group. In the
-pathological unkillable case the runner `finally` logs a WARNING naming the
-session for manual reclamation (no auto-reaper).
+reaps + confirms the turn's process group (synchronously, completing before
+`await task._task` at `session_executor.py:1967` resolves) → recovery-path
+`_confirm_subprocess_dead(pid_snapshot)` verifies the group is gone → **only if
+confirmed dead** requeue `pending` (else escalate `failed`) → on terminal exit the
+executor `finally` runs `cleanup_after_merge`, safe because the runner `finally`
+already reaped the group. In the pathological reap-failed case the runner sets a
+`runner_reap_failed` marker; the executor cleanup SKIPS deletion for that session
+and logs it for manual reclamation (no auto-reaper).
 ### Technical Approach
 
 **Fix 1 — Runner reaps its subprocess group on teardown, cancellation-proof (THE load-bearing fix for both defects).**
@@ -186,27 +188,33 @@ session for manual reclamation (no auto-reaper).
   case (SIGKILL death is near-instant), an acceptable teardown cost. Steer/timeout
   preempts (the internal `_preempt_watcher` path) keep the existing graceful
   `_kill_turn` SIGTERM grace unchanged — only the teardown `finally` fast-kills.
-- **Topology (round-4 correction):** `handle.task` is the INNER `BackgroundTask._task`
-  wrapping `do_work → _runner.run → _run_one_turn` (`session_executor.py:1916`); the
-  executor cleanup `finally` lives in the OUTER coroutine that does
-  `await task.run(do_work())` (`:1906`). `await task.run(...)` does not return until
-  the inner task is fully done (its `finally` completed). Because the inner
-  `finally`'s reap is synchronous, the group is confirmed dead before the inner
-  task completes, hence before the outer cleanup `finally` runs. This is the AC#2
-  ordering guarantee, now robust to the double-cancel.
-- On a reap that cannot confirm death (pathological unkillable group), emit a
-  structured signal — a `runner_reap_failed` session event (reusing
-  `_append_session_event`, `runner.py:510`) and/or a kill-failure counter mirroring
-  `_increment_subprocess_kill_counter` — in addition to a WARNING, so a leak is
-  operator-visible, not just a log line (round-4 Concern). Assert it in a test.
-- Generic-harness backstop at the spawn site (NOT runner-path defense — the runner
-  `finally` already covers the runner path): `agent/sdk_client.py::_run_harness_subprocess`
+- **Topology (round-5 correction):** `handle.task` is the INNER `BackgroundTask._task`
+  wrapping `do_work → _runner.run → _run_one_turn` (`session_executor.py:1916`).
+  Note `task.run(do_work())` at `:1906` returns IMMEDIATELY — `BackgroundTask.run`
+  (`agent/messenger.py:256`) only does `asyncio.create_task(...)`. The real inner-task
+  join is `await task._task` at `session_executor.py:1967`, and the executor cleanup
+  `finally` is the outer coroutine's finally at `:2292`. When the recovery path
+  cancels the inner `task._task`, awaiting it at `:1967` resolves ONLY after the
+  inner `_run_one_turn` `finally` completes its synchronous reap; the resulting
+  `CancelledError` (a `BaseException`) passes the `except Exception` at `:1968` and
+  reaches the cleanup `finally` at `:2292`. So the group is confirmed dead before
+  the outer cleanup runs — the AC#2 ordering guarantee, robust to the double-cancel.
+- On a reap that cannot confirm death (pathological unkillable / D-state group),
+  set a durable `runner_reap_failed` session event via `_append_session_event`
+  (`runner.py:510`) plus a WARNING — ONE deterministic side effect the operator
+  test asserts (round-5 nit). The executor's synthetic-slug cleanup (Fix 3) skips
+  deletion when that marker is present for the session, so no worktree is deleted
+  under a possibly-live child even in this case (round-5 Concern).
+- Generic-harness backstop at the spawn site: `agent/sdk_client.py::_run_harness_subprocess`
   wrap `await proc.communicate()` (`:3012`) with `try/finally` that, if the
   coroutine is cancelled while `proc.returncode is None`,
   `os.killpg(os.getpgid(proc.pid), SIGKILL)`, swallowing `ProcessLookupError`
-  (group already gone) and re-raising `CancelledError` after signalling. This
-  protects the OTHER two `_run_harness_subprocess` call sites
-  (`sdk_client.py:2534,2576,2632`) that are not the runner (round-4 nit). No public
+  (group already gone) and re-raising `CancelledError` after signalling. This is
+  IN scope (not a separable follow-up): the same orphan-on-cancel leak afflicts
+  the three non-runner `_run_harness_subprocess` call sites
+  (`sdk_client.py:2534,2576,2632`), and a single `finally` at the shared spawn
+  helper covers all callers uniformly (round-5 Concern; corrects the earlier
+  "two" miscount — there are three). No public
   `terminate_current_turn` API is added — it would be an unused surface that invites
   a future caller to reach around the finally-ordering invariant (round-4 Concern).
 
@@ -239,8 +247,8 @@ session for manual reclamation (no auto-reaper).
   / escalate-`failed`) now protects runner sessions, and gates the requeue so
   "old confirmed exited before respawn" holds — AC#1.
 
-**Fix 3 — No executor-side or worktree-side gate; rely on Fix 1's finally-ordering (defect #2).**
-- Defect #2 is closed by Fix 1's ordering guarantee, NOT by a new gate. The two
+**Fix 3 — No inert gate; rely on Fix 1's finally-ordering, plus a durable-marker skip for the rare reap-failed case (defect #2).**
+- Defect #2 is closed by Fix 1's ordering guarantee, NOT by an inert gate. The two
   gates an earlier revision proposed here were **inert** (3-critic finding):
   (a) an executor-side `terminate_current_turn` in the `:2292` `finally` operates
   on `_current_handle`, which `_run_one_turn`'s `finally` already nulled
@@ -250,17 +258,21 @@ session for manual reclamation (no auto-reaper).
   returns `confirmed_dead=True` and deletion proceeds (Defect #2 unchanged), while
   reading `pm_pid` there revives the PID-reuse live-kill hazard the Fix 4 no-go
   exists to avoid.
-- Therefore: **do NOT add a gate in `agent/session_executor.py` and do NOT modify
-  `agent/worktree_manager.py`.** The executor `finally` cleanup (`:2292-2327`) is
-  left as-is; it is correct once Fix 1 guarantees the runner `finally` reaped the
-  group earlier in the same unwind. The load-bearing invariant is the runner
-  `finally`, not a downstream check that reads already-nulled state (critique
-  BLOCKER, option a — scope-tightest, honest tests).
-- **Pathological residual (critique Concern):** SIGKILL is uncatchable, so Fix 1's
-  confirm virtually always succeeds. If a group is somehow unkillable, Fix 1's
-  `finally` logs a WARNING naming the session; document a manual reclamation step
-  (`git worktree prune` + directory removal) in the Documentation section so an
-  operator has a break-glass path. No auto-reaper (Fix 4 no-go).
+- Therefore: **do NOT modify `agent/worktree_manager.py`.** The executor `finally`
+  cleanup (`:2292-2327`) is correct once Fix 1 guarantees the runner `finally`
+  reaped+confirmed the group earlier in the same unwind. The load-bearing invariant
+  is the runner `finally`, not a downstream check that reads already-nulled state
+  (round-3 BLOCKER, option a).
+- **Durable-marker skip for the reap-failed residual (round-5 Concern):** the ONE
+  path where the group might still be alive at cleanup time is a pathological
+  reap-failure (uninterruptible D-state child defeating the ~1s SIGKILL confirm).
+  There, Fix 1 set a durable `runner_reap_failed` session event. The executor's
+  synthetic-slug cleanup block (`:2300-2327`) reads that marker (NOT nulled state —
+  it is a fresh, durable signal, so this gate is NOT inert) and SKIPS
+  `cleanup_after_merge` when present, logging the orphaned worktree. This makes
+  "no worktree deleted under a live child" a hard guarantee, not merely a
+  best-effort one. Manual reclamation (`git worktree prune` + directory removal) is
+  documented for the skipped case. No auto-reaper (Fix 4 no-go).
 
 **Fix 4 — Reaper backstop (AC#4) — EXPLICIT NO-GO (answered, not implemented).**
 
@@ -344,11 +356,11 @@ statement):
 **Mitigation:** `_on_turn_spawn` is invoked synchronously by the harness on spawn (before the awaited `communicate`); the `_run_one_turn` finally reaps whatever `_current_handle` points at, so even a cancel-during-spawn reaps the just-spawned group. Confirm-dead is idempotent.
 
 ### Race 2: Executor cleanup vs. runner still tearing down (cross-task)
-**Location:** inner `handle.task` (`BackgroundTask._task`, `session_executor.py:1916`) vs. the outer coroutine's cleanup `finally` (`session_executor.py:2292-2327`), which does `await task.run(do_work())` at `:1906`.
-**Trigger:** the recovery path cancels the inner `handle.task` and re-cancels on `wait_for` timeout; the outer cleanup `finally` must not run before the group is dead.
+**Location:** inner `handle.task` (`BackgroundTask._task`, `session_executor.py:1916`), joined by `await task._task` at `session_executor.py:1967`, vs. the outer coroutine's cleanup `finally` (`:2292-2327`). Note `task.run(...)` at `:1906` returns immediately (`agent/messenger.py:256` only `create_task`s).
+**Trigger:** the recovery path cancels the inner `task._task` and re-cancels on `wait_for` timeout; the outer cleanup `finally` must not run before the group is dead.
 **Data prerequisite:** the subprocess group must be confirmed dead before `cleanup_after_merge`.
-**State prerequisite:** the inner-task `finally`'s reap+confirm must complete before `await task.run(...)` returns to the outer coroutine.
-**Mitigation:** Fix 1's inner `finally` reap is SYNCHRONOUS (SIGKILL + poll, no interruptible `await`), so a re-delivered `CancelledError` cannot abort it; it runs to completion before the inner task is marked done. `await task.run(...)` does not return until the inner task is done, so the outer cleanup `finally` runs strictly after the group is confirmed dead. No separate executor/worktree gate is needed (an earlier one was inert).
+**State prerequisite:** the inner-task `finally`'s synchronous reap+confirm must complete before `await task._task` (`:1967`) resolves.
+**Mitigation:** Fix 1's inner `finally` reap is SYNCHRONOUS (SIGKILL + poll, no interruptible `await`), so a re-delivered `CancelledError` cannot abort it; it runs to completion before the inner task is marked done. Awaiting an externally-cancelled task at `:1967` resolves only after that task's `finally` has run, and the resulting `CancelledError` (`BaseException`) passes `except Exception` at `:1968` to reach the cleanup `finally` at `:2292` — so cleanup runs strictly after the group is confirmed dead. The rare reap-failed case is additionally gated by the `runner_reap_failed` marker skip (Fix 3).
 
 ### Race 3: No reaper-backstop race (Fix 4 no-go)
 **Location:** N/A — the plan does not add a reaper leg.
@@ -402,8 +414,8 @@ ENOENT-wedged survivor and no ghost pipeline (AC#3).
 ## Success Criteria
 
 - [ ] After a `no_progress` recovery of a headless-runner session, exactly one `claude -p` subprocess exists for the session: the old group is confirmed exited before respawn (AC#1).
-- [ ] After `running → failed`, the session's subprocess group is confirmed exited before `cleanup_after_merge` runs — guaranteed by the runner inner-task `finally` synchronously reaping+confirming before `await task.run(...)` returns to the outer executor coroutine that owns cleanup (AC#2).
-- [ ] A test reproduces "kill decision while subprocess alive" and asserts: no ENOENT-wedged survivor (worktree not deleted under a live child), and no ghost pipeline (no post-terminal turn/commit) (AC#3).
+- [ ] After `running → failed`, the session's subprocess group is confirmed exited before `cleanup_after_merge` runs — guaranteed by the runner inner-task `finally` synchronously reaping+confirming before `await task._task` (`session_executor.py:1967`) resolves in the outer coroutine that owns cleanup; the rare reap-failed case is marker-gated to skip cleanup (AC#2).
+- [ ] A test reproduces "kill decision while subprocess alive" and asserts: the group is confirmed dead by the runner reap, no ENOENT-wedged survivor (worktree not deleted under a live child — including the reap-failed case, which is marker-gated to skip cleanup), and no ghost pipeline (no post-terminal turn/commit) (AC#3).
 - [ ] Reaper-backstop question answered (AC#4): the durable NO-GO rationale lives in No-Gos; the executable evidence is the Verification rows "worktree_manager NOT modified" and "orphan-reap tests still pass (reaper unchanged)".
 - [ ] `grep -c "claude_pid" agent/session_runner/runner.py` shows the runner writes `claude_pid` on spawn (invariant that Fix 2 landed).
 - [ ] Tests pass (`/do-test`, narrow scope).
@@ -452,14 +464,14 @@ parallel builders needed — the fixes are sequenced and share the same files
 - `_on_turn_spawn` writes `self._agent_session.claude_pid` on spawn; clear `claude_pid` on turn exit. No `SessionHandle`/`pgid` writes from the runner — derive the group via `os.getpgid(pid)` at kill time.
 - Extend `_confirm_subprocess_dead` with the `killpg` group path.
 
-### 3. Confirm the ordering invariant (no new gate)
+### 3. Confirm the ordering invariant + reap-failed marker skip
 - **Task ID**: verify-ordering-invariant
 - **Depends On**: build-live-identity
-- **Validates**: tests/unit/session_runner/test_runner_preempt.py
+- **Validates**: tests/unit/session_runner/test_runner_preempt.py, tests/unit/test_session_executor*.py
 - **Assigned To**: runner-teardown-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Confirm (by reading + a unit test) that `_run_one_turn`'s `finally` reap+confirm completes before the awaiting executor body returns, so `agent/session_executor.py`'s cleanup `finally` and `agent/worktree_manager.py` need NO change. Add a WARNING log in the runner `finally` for the pathological unkillable case (manual-reclamation break-glass).
+- Confirm (by reading + a unit test) that `_run_one_turn`'s `finally` reap+confirm completes before `await task._task` (`session_executor.py:1967`) resolves in the outer coroutine, so `agent/worktree_manager.py` needs NO change. Add the small `runner_reap_failed`-marker skip to the executor synthetic-slug cleanup (`:2300-2327`) for the pathological reap-failed case.
 
 ### 4. Integration test: kill-while-alive → no survivor, no ghost pipeline
 - **Task ID**: build-integration-ac3
@@ -531,12 +543,20 @@ parallel builders needed — the fixes are sequenced and share the same files
 **Round 4 (NEEDS REVISION → addressed):**
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness + History & Consistency | The sole reap (`_run_one_turn` finally, SIGTERM→await-grace→SIGKILL) is interruptible: the recovery path's `wait_for(handle.task, 0.25s)` re-cancels on timeout and aborts the reap mid-grace after only SIGTERM; and `handle.task` is the INNER task while cleanup is in the OUTER coroutine, so "same-task unwind" was wrong — the worktree could be deleted under a SIGTERM-surviving child. | Make the reap SYNCHRONOUS + SIGKILL-first (no interruptible `await`), so no re-cancel can abort it; corrected the topology (inner `handle.task` vs outer cleanup coroutine) and showed `await task.run(...)` returns only after the inner `finally` completes → group confirmed dead before cleanup. | Fix 1 rewritten; Race 2 rewritten; regression test fires a second `.cancel()` mid-reap. |
+| BLOCKER | Risk & Robustness + History & Consistency | The sole reap (`_run_one_turn` finally, SIGTERM→await-grace→SIGKILL) is interruptible: the recovery path's `wait_for(handle.task, 0.25s)` re-cancels on timeout and aborts the reap mid-grace after only SIGTERM; and `handle.task` is the INNER task while cleanup is in the OUTER coroutine, so "same-task unwind" was wrong — the worktree could be deleted under a SIGTERM-surviving child. | Make the reap SYNCHRONOUS + SIGKILL-first (no interruptible `await`), so no re-cancel can abort it; corrected the topology (round-5 re-anchored the inner-task join to `await task._task` at `session_executor.py:1967`, since `task.run()` at `:1906` returns immediately). | Fix 1 rewritten; Race 2 rewritten; regression test fires a second `.cancel()` mid-reap. |
 | CONCERN | Scope & Value | `terminate_current_turn` ships as unused public surface. | Dropped it entirely — no public runner kill API; the reap lives in the `finally`. | Removed from Fix 1, Step 1, Architectural Impact, Key Elements, Docs, Open Questions. |
 | CONCERN | Risk & Robustness (Operator) | A reap failure/leak surfaces only as a log line. | Emit a `runner_reap_failed` session event (`_append_session_event`, `runner.py:510`) + kill-failure counter alongside the WARNING; assert in a test. | Operator-visible signal. |
 | NIT | Scope & Value | AC#2 overstated the guarantee. | With the synchronous SIGKILL+confirm, "confirmed dead before cleanup" is now literally true; AC#2 reworded to state the inner-`finally`-before-outer-`await`-return mechanism. | — |
 | NIT | Scope & Value | AC#4 was a tautology. | Rationale moved to No-Gos; the executable evidence is the Verification "worktree_manager NOT modified" + "orphan-reap tests unchanged" rows. | — |
 | NIT | History & Consistency | Freshness cited `:2292` for the confirm call at `:2296`. | Corrected to `:2296` (`:2292` is the `run_in_executor` wrapper open). | — |
+
+**Round 5 (NEEDS REVISION → addressed):**
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | All three (converged) | AC#2/Fix 1/Race 2 cited `await task.run(...)` at `:1906` as the inner-task join, but `BackgroundTask.run` only `create_task`s and returns immediately; the real join is `await task._task` at `session_executor.py:1967`. Citation defect — the ordering conclusion still holds. | Re-anchored Fix 1 topology, Race 2, Flow, AC#2, and Task 3 to `await task._task` at `:1967`; noted `task.run()` returns immediately and the `CancelledError` (`BaseException`) passes `except Exception` at `:1968` to the cleanup `finally` at `:2292`. | Mechanism/citation fix, not a redesign. |
+| CONCERN | Risk & Robustness | Unconditional `:2292` cleanup could delete the worktree under a live child in the pathological reap-failed case, contradicting AC#3. | The runner sets a durable `runner_reap_failed` event; the executor synthetic-slug cleanup SKIPS deletion when it is present (a non-inert, durable-marker gate). AC#3 reworded to a confirmed-dead guarantee. | Makes "no deletion under a live child" a hard guarantee. |
+| CONCERN | Scope & Value | The `_run_harness_subprocess` backstop is separable non-runner scope; also a "two vs three" miscount. | Justified as in-scope (same orphan-on-cancel leak at all three call sites, one shared `finally`); corrected the count to three (`2534/2576/2632`). | — |
+| NIT | Scope & Value | `runner_reap_failed` "event and/or counter" under-specified. | Pinned to ONE deterministic side effect: the `runner_reap_failed` session event (asserted by the operator-visibility test). | — |
 
 ---
 
