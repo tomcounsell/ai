@@ -182,6 +182,29 @@ def _migrate_strip_pty_session_fields(project_dir: Path) -> str | None:
         return str(e)
 
 
+def _migrate_confirm_issue_number_field_readable(project_dir: Path) -> str | None:
+    """Confirm AgentSession.issue_number (issue #1954) is readable on legacy rows.
+
+    Purely additive, nullable field -- no backfill is required. This is a
+    read-only confirmation step: it loads a small sample of existing
+    AgentSession records and accesses ``.issue_number`` on each one to prove
+    Popoto's lazy-load descriptor healing resolves cleanly for rows written
+    before the field existed. Writes nothing. Returns None on success
+    (including "no sessions to check"), error string on unexpected failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.agent_session import AgentSession
+
+        for session in list(AgentSession.query.all())[:5]:
+            _ = session.issue_number  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing.
 
@@ -222,6 +245,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "strip_pty_session_fields": (
         _migrate_strip_pty_session_fields,
         "Strip removed PTY fields (+resume_handles) from existing AgentSession records",
+    ),
+    "confirm_issue_number_field_readable": (
+        _migrate_confirm_issue_number_field_readable,
+        "Confirm AgentSession.issue_number (issue #1954) reads cleanly on legacy rows",
     ),
 }
 
