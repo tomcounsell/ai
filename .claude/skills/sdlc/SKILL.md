@@ -10,6 +10,10 @@ This skill is a **router**, not an orchestrator. It assesses where work stands, 
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 
+## Worktree & branch ownership
+
+**Slug identity always wins.** Each issue's build fork exclusively owns `.worktrees/{slug}` and `session/{slug}`, derived from the plan slug — this is the single source of truth (`worktree_manager.py` + `resolve_branch_for_stage`). Do NOT pre-allocate per-supervisor `.worktrees/sdlc-{N}` lanes: nothing reads a lane override, so lane instructions are silently dropped and every issue's builders land in `.worktrees/{slug}` regardless. Converging fork + supervisor onto one branch per plan is deliberate — it structurally collapses duplicate PRs, since GitHub permits only one open PR per head branch. Concurrent builders inside the one slug worktree must write disjoint file sets (do-build's `Parallel: true` convention: no shared-file writes).
+
 ## Cross-Repo Resolution
 
 For cross-project SDLC work, three resolution mechanisms cover the three different operations the pipeline runs:
@@ -89,6 +93,8 @@ git -C "$SDLC_TARGET_REPO" branch -a
 ```bash
 # 2c. Check if a PR already exists
 gh pr list --search "#{issue_number}" --state open
+# Cross-check with live refs — the --search index lags GitHub; --head queries live refs:
+#   gh pr list --head session/{slug} --state open   (reuse if present; keyed by head branch, not issue #)
 ```
 
 If a PR exists, fetch its full state for assessment:

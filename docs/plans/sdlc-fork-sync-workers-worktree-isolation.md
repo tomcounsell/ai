@@ -259,13 +259,13 @@ No agent integration required — this changes SDLC skill-orchestration prose an
 - [x] do-sdlc §3c stage dispatch passes `run_in_background: false` explicitly (plus Hard Rule 6).
 
 **Delivered by this plan:**
-- [ ] do-build's PR step runs `gh pr list --head session/{slug}` (with `--repo $TARGET_GH_REPO` for cross-repo) before `gh pr create` and reuses an existing PR.
-- [ ] `sdlc/SKILL.md`'s search-based PR probe carries a live-ref `--head` cross-check note.
-- [ ] do-sdlc / sdlc docs declare slug-identity-always-wins ownership of `.worktrees/{slug}` + `session/{slug}`; no lane allocation.
-- [ ] `worktree_manager.py` and `resolve_branch_for_stage` are unchanged (confirmed by diff).
-- [ ] `tests/unit/test_sdlc_fork_no_background.py` scans **every** `context: fork` skill (incl. pthread, do-pr-review) for the background-then-exit pattern, plus the do-build PR-guard and do-sdlc positive assertions; fails loudly if any fork skill reintroduces the pattern.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] do-build's PR step runs `gh pr list --head session/{slug}` (with `--repo $TARGET_GH_REPO` for cross-repo) before `gh pr create` and reuses an existing PR.
+- [x] `sdlc/SKILL.md`'s search-based PR probe carries a live-ref `--head` cross-check note.
+- [x] do-sdlc / sdlc docs declare slug-identity-always-wins ownership of `.worktrees/{slug}` + `session/{slug}`; no lane allocation.
+- [x] `worktree_manager.py` and `resolve_branch_for_stage` are unchanged (confirmed by diff).
+- [x] `tests/unit/test_sdlc_fork_no_background.py` scans **every** `context: fork` skill (incl. pthread, do-pr-review) for the background-then-exit pattern, plus the do-build PR-guard and do-sdlc positive assertions; fails loudly if any fork skill reintroduces the pattern.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

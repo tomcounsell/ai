@@ -34,6 +34,12 @@ former Dev prime command plus the shared WORKER rails, with the
 steering/continuation contract baked in at authoring time (a subagent cannot
 be handed a continuation protocol after the fact).
 
+`dev` itself is resumable, but the leaf `context: fork` skills it calls
+(`/do-build`, `/do-plan-critique`, `/do-pr-review`) are not: each gets one
+non-resumable turn and must reach terminal state before returning. See
+[SDLC Fork Turn-Boundary Invariant](sdlc-fork-turn-boundary.md) for that
+invariant and the test that guards it.
+
 ## Turn Loop
 
 ```
