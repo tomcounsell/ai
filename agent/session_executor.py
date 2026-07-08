@@ -17,6 +17,7 @@ from agent.session_completion import (
 from agent.session_health import HEARTBEAT_WRITE_INTERVAL
 from agent.session_logs import save_session_snapshot
 from agent.session_revival import _session_branch_name
+from agent.session_runner.router import CLEAN_EXIT_REASONS as _CLEAN_RUNNER_EXIT_REASONS
 from agent.session_state import (
     SessionHandle,
     _active_sessions,
@@ -32,16 +33,14 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-_CLEAN_RUNNER_EXIT_REASONS = frozenset(
-    {"pm_complete", "pm_user", "pm_floor_delivered", "steer_abort"}
-)
-
 
 def _is_non_clean_runner_exit(agent_session) -> bool:
     """Return True when the session has a runner exit_reason that signals a real failure.
 
     None exit_reason = not yet set = clean (default behavior).
-    Clean runner exits: pm_complete (normal end), pm_user (user message sent),
+    Clean runner exits: pm_complete (normal end), pm_user (real ``[/user]`` answer
+    the PM chose to deliver), pm_needs_human (runner-forwarded needs-input prompt
+    from a ``needs_human`` hook edge on an unroutable turn — distinct from pm_user),
     pm_floor_delivered (wrap-up guard delivered PM's last assistant message directly
     when the PM produced a real but prefix-less response — issue #1719),
     steer_abort (operator-requested abort via a steering message; the user-facing

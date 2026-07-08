@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: chore
 appetite: Small
 owner: Valor Engels
@@ -193,14 +193,14 @@ No agent integration required — this is a runner/executor-internal change. No 
 
 ## Success Criteria
 
-- [ ] `runner.py:1062` emits `exit_reason="pm_needs_human"`; `1047` and `1088` still emit `pm_user`.
-- [ ] `pm_needs_human` is a member of both `CLEAN_EXIT_REASONS` and `WRAPUP_ELIGIBLE_EXIT_REASONS` in `router.py`.
-- [ ] `session_executor.py` recognizes `pm_needs_human` as clean via a single imported set (no second literal to maintain).
-- [ ] A needs-human-edge exit yields REACTION_COMPLETE + terminal `completed` (asserted in `test_session_executor_runner_dispatch.py`).
-- [ ] `docs/features/headless-session-runner.md` documents the new reason.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] `grep` confirms `session_executor.py` imports `CLEAN_EXIT_REASONS` from `agent.session_runner.router` (no duplicated literal set).
+- [x] `runner.py:1062` emits `exit_reason="pm_needs_human"`; `1047` and `1088` still emit `pm_user`.
+- [x] `pm_needs_human` is a member of both `CLEAN_EXIT_REASONS` and `WRAPUP_ELIGIBLE_EXIT_REASONS` in `router.py`.
+- [x] `session_executor.py` recognizes `pm_needs_human` as clean via a single imported set (no second literal to maintain).
+- [x] A needs-human-edge exit yields REACTION_COMPLETE + terminal `completed` (asserted in `test_session_executor_runner_dispatch.py`).
+- [x] `docs/features/headless-session-runner.md` documents the new reason.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] `grep` confirms `session_executor.py` imports `CLEAN_EXIT_REASONS` from `agent.session_runner.router` (no duplicated literal set).
 
 ## Team Orchestration
 

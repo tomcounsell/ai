@@ -24,7 +24,7 @@ process pool, no idle-scraping startup phase.
 |--------|------|
 | `runner.py` | The single-session turn loop for every session type: spawn one `claude -p` per turn, route the PM's output, run the steer-preempt watcher, own resume-scalar persistence timing. |
 | `role_driver.py` | `HeadlessRoleDriver` — builds the subprocess invocation (prime slash command vs. resume), parses stream-json, reconciles the hook-edge snapshot against the turn's own edges. |
-| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the exit-classification vocabulary (`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS`). |
+| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the exit-classification vocabulary (`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS`). `pm_user` (a real `[/user]` answer the PM chose to deliver) and `pm_needs_human` (a runner-forwarded needs-input prompt, from a `needs_human` hook edge firing on an otherwise-unroutable turn) are both clean, wrap-up-eligible exits — kept distinct so the dashboard and reaction gate can tell "the PM answered" from "the PM paused, waiting on the human" (issue #1922). |
 | `hook_edge.py` / `hook_forwarder.py` | The turn-end/needs-human signal path: a fail-silent NDJSON forwarder writes each hook event to a per-session file; the consumer tails it with a durable `(event_cursor, byte_offset, fingerprint)` cursor. |
 | `transcript_tailer.py` | Incremental JSONL transcript reads for dashboard telemetry (byte-offset cadence, unchanged from the prior implementation). |
 | `adapter.py` | Executor-facing construction: delivery callbacks, the four-scalar resume persistence, exit-summary publication. |
@@ -195,6 +195,14 @@ even when partial streamed text accumulated; any non-clean `exit_reason`
 finalizes the `AgentSession` as `failed` with a persona-safe user message —
 never a false `completed` (closing the class of failure documented in the
 [PTY-fragility postmortem](../postmortems/2026-07-06-granite-pty-fragility.md)).
+
+`exit_reason=pm_needs_human` (added in issue #1922) is a clean exit, not a
+liveness failure: it fires when a `needs_human` hook edge accompanies an
+otherwise-unroutable turn, and the runner delivers the PM's text as a genuine
+question to the human. `session_executor.py` recognizes it via the single
+imported `CLEAN_EXIT_REASONS` set (no separate literal to drift out of sync),
+so it never falls into the `failed`/error-reaction path that a genuinely
+non-clean `exit_reason` would.
 
 ## Supersedes
 

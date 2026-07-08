@@ -13,6 +13,8 @@ Routing is the simplified regex table (:mod:`agent.session_runner.router`):
 - ``[/user]``      → deliver via the adapter's user callback, exit ``pm_user``
 - ``[/complete]``  → deliver the summary, exit ``pm_complete`` (wrap-up guard
   backstops an empty delivery)
+- needs_human edge on an unroutable turn → deliver the PM's text, exit
+  ``pm_needs_human`` (distinct from a real ``[/user]`` answer, see below)
 - anything else    → continue (bounded compliance nudge, then the wrap-up
   guard — never an infinite loop)
 
@@ -1056,10 +1058,14 @@ class SessionRunner:
 
         # A substantive needs-human edge alongside an unroutable turn: the
         # hook already filtered boilerplate (#1919), so this message is a
-        # genuine question for the human — deliver the PM's text.
+        # genuine question for the human — deliver the PM's text. Tagged
+        # ``pm_needs_human`` (not ``pm_user``) since this is a runner-forwarded
+        # needs-input prompt, not a real ``[/user]`` answer the PM chose to send.
         if outcome.needs_human is not None and text.strip():
             self._adapter.on_user_payload(text.strip())
-            return _RouteDecision(should_break=True, exit_reason="pm_user", compliance_miss=miss)
+            return _RouteDecision(
+                should_break=True, exit_reason="pm_needs_human", compliance_miss=miss
+            )
 
         # Anything else — legacy [/dev], unknown prefix, empty payload —
         # continues the loop with a bounded compliance nudge.
