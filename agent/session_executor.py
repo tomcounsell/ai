@@ -195,6 +195,49 @@ def _tick_backstop_check_compaction(
         )
 
 
+def _tick_issue_lock_renewal(
+    session: AgentSession,
+    agent_session: AgentSession | None,
+) -> None:
+    """Renew the per-issue SDLC ownership lock on the tier-1 (60s) heartbeat tick.
+
+    Issue #1954: an in-progress eng session working an issue must keep the
+    per-issue ``touch_issue_lock()`` lock alive for as long as it is ticking,
+    or the lock's ``ISSUE_LOCK_TTL_SECONDS`` (300s) will expire mid-session
+    and let a second independent process claim the same issue (the #1915
+    duplicate-PR root cause). This is deliberately called from the tier-1
+    (60s) heartbeat block, NOT the 25-minute calendar block elsewhere in
+    ``_heartbeat_loop`` -- that slower cadence would blow straight past the
+    300s TTL and defeat the purpose of renewal.
+
+    Guarded on ``agent_session.session_type == "eng"`` and a resolved
+    (truthy) ``agent_session.issue_number`` -- non-eng sessions and eng
+    sessions with no associated issue never touch the lock.
+
+    Best-effort and side-effect-only: never raises, returns nothing. A
+    Redis hiccup or missing field never blocks the heartbeat loop.
+    """
+    if agent_session is None:
+        return
+    if getattr(agent_session, "session_type", None) != "eng":
+        return
+    issue_number = getattr(agent_session, "issue_number", None)
+    if not issue_number:
+        return
+
+    try:
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        session_id = getattr(session, "session_id", None) or ""
+        touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - renewal must never crash the heartbeat loop
+        logger.debug(
+            "[%s] issue-lock renewal failed (non-fatal): %s",
+            getattr(session, "session_id", "<unknown>"),
+            exc,
+        )
+
+
 # -----------------------------------------------------------------------------
 # Post-session memory extraction scheduling (hotfix #1055)
 # -----------------------------------------------------------------------------
@@ -1960,6 +2003,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         session.session_id,
                         hb_err,
                     )
+
+                # Issue-lock renewal (issue #1954): tier-1 (60s) block, NOT the
+                # 25-min calendar block below -- see _tick_issue_lock_renewal
+                # docstring for why that cadence would blow past
+                # ISSUE_LOCK_TTL_SECONDS (300s) and let the lock expire mid-cycle.
+                _tick_issue_lock_renewal(session, agent_session)
 
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
                 if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:

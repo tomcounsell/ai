@@ -65,7 +65,7 @@ import json
 import logging
 import sys
 
-from tools._sdlc_utils import find_session, session_owns_issue
+from tools._sdlc_utils import find_session, renew_issue_lock_for_session, session_owns_issue
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,12 @@ def write_marker(
             file=sys.stderr,
         )
         return {"error": "ownership_divert"}, 1
+
+    # Issue-lock renewal (issue #1954): a stage-marker write is evidence of an
+    # in-progress BUILD/TEST/REVIEW-stage recurrence, so touch the per-issue
+    # SDLC ownership lock to keep it alive. Best-effort side effect -- runs
+    # regardless of whether the state-machine write below succeeds or fails.
+    renew_issue_lock_for_session(session)
 
     # PRESENT_WRITE_FAILED is the ONLY loud case: the session resolved but the
     # state-machine write rejects or raises.

@@ -207,6 +207,46 @@ class TestWriteMarker:
         assert result == {"stage": "REVIEW", "status": "in_progress"}
         find_mock.assert_called_once_with(None, issue_number=1558, ensure=True)
 
+    def test_successful_write_renews_issue_lock(self):
+        """Issue #1954: a stage-marker write is evidence of an in-progress
+        BUILD/TEST/REVIEW-stage recurrence, so a successful write must renew
+        the per-issue SDLC ownership lock via the shared
+        renew_issue_lock_for_session() helper."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_session.issue_number = 1954
+        mock_sm = MagicMock()
+        mock_sm.states = {"PLAN": "in_progress"}
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
+            patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
+            patch("models.session_lifecycle.touch_issue_lock") as mock_touch,
+        ):
+            result, code = write_marker(stage="PLAN", status="completed", issue_number=1954)
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "completed"}
+        mock_touch.assert_called_once()
+        args, kwargs = mock_touch.call_args
+        assert args[0] == 1954
+        assert kwargs.get("ttl") is not None
+
+    def test_degraded_no_session_does_not_touch_issue_lock(self):
+        """No session resolved → nothing to renew; touch_issue_lock must not fire."""
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=None),
+            patch("models.session_lifecycle.touch_issue_lock") as mock_touch,
+        ):
+            write_marker(stage="PLAN", status="completed", issue_number=1954)
+
+        mock_touch.assert_not_called()
+
 
 class TestCLI:
     """Tests for CLI argument parsing."""

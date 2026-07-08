@@ -261,6 +261,41 @@ class TestRecordDispatchIssueLock:
         assert ok is True
         lock_mock.assert_not_called()
 
+    def test_cli_record_renews_lock_via_record_dispatch_for_session(self):
+        """Issue #1954 Task 4: the `dispatch record` CLI subcommand's existing
+        Task-3 wiring (record_dispatch_for_session() calling touch_issue_lock()
+        directly) already satisfies "dispatch record renews the lock" -- no
+        separate/additional CLI-layer call is added. This exercises the CLI
+        entry point (_cli_record) end-to-end through the unmocked
+        record_dispatch_for_session() to confirm the renewal fires as a side
+        effect of the subcommand, not just of the lower-level helper in
+        isolation."""
+        from tools import sdlc_dispatch
+
+        session = MagicMock(name="issue_session")
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/1954"
+        session.session_id = "sdlc-local-1954"
+
+        find_mock = MagicMock(return_value=session)
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-1954"))
+
+        args = SimpleNamespace(
+            session_id=None, issue_number=1954, skill="/do-build", pr_number=None
+        )
+
+        with (
+            patch.object(sdlc_dispatch, "_find_session", find_mock),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("tools.stage_states_helpers.update_stage_states", return_value=True),
+        ):
+            result = sdlc_dispatch._cli_record(args)
+
+        assert result["ok"] is True
+        lock_mock.assert_called_once()
+        args_called = lock_mock.call_args.args
+        assert args_called[0] == 1954
+        assert args_called[1] == "sdlc-local-1954"
+
     def test_two_sessions_same_issue_second_refused(self, monkeypatch):
         """End-to-end (real Redis, no mocking of touch_issue_lock): two
         record_dispatch_for_session() calls for the same issue from distinct

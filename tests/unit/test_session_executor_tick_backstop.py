@@ -8,7 +8,7 @@ save. Never crashes the executor.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,7 +17,7 @@ from agent.sdk_client import (
     clear_turn_count,
     record_turn_count,
 )
-from agent.session_executor import _tick_backstop_check_compaction
+from agent.session_executor import _tick_backstop_check_compaction, _tick_issue_lock_renewal
 
 
 @pytest.fixture(autouse=True)
@@ -174,3 +174,73 @@ class TestTurnCountTracker:
         from agent.sdk_client import get_turn_count
 
         assert get_turn_count("sess-A") is None
+
+
+class TestIssueLockRenewal:
+    """Tests for _tick_issue_lock_renewal — the tier-1 (60s) heartbeat's
+    issue #1954 renewal side effect. Must fire for a live `eng` session with
+    a resolved issue_number, and must NOT fire for a non-eng session, a
+    session with no issue_number, or a missing agent_session -- see
+    _tick_issue_lock_renewal's docstring for why this lives in the tier-1
+    (60s) block rather than the 25-minute calendar block.
+    """
+
+    def test_eng_session_with_issue_number_renews_lock(self):
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 1954
+
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            _tick_issue_lock_renewal(session, agent_session)
+
+        mock_touch.assert_called_once()
+        args, kwargs = mock_touch.call_args
+        assert args[0] == 1954
+        assert args[1] == "sess-1"
+        assert kwargs.get("ttl") is not None
+
+    def test_non_eng_session_does_not_renew_lock(self):
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "teammate"
+        agent_session.issue_number = 1954
+
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            _tick_issue_lock_renewal(session, agent_session)
+
+        mock_touch.assert_not_called()
+
+    def test_eng_session_without_issue_number_does_not_renew_lock(self):
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = None
+
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            _tick_issue_lock_renewal(session, agent_session)
+
+        mock_touch.assert_not_called()
+
+    def test_missing_agent_session_does_not_renew_lock(self):
+        session = _make_session()
+
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            # Must not raise
+            _tick_issue_lock_renewal(session, None)
+
+        mock_touch.assert_not_called()
+
+    def test_touch_issue_lock_exception_is_swallowed(self):
+        """A Redis hiccup during renewal must never crash the heartbeat loop."""
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 1954
+
+        with patch(
+            "models.session_lifecycle.touch_issue_lock",
+            side_effect=RuntimeError("redis exploded"),
+        ):
+            # Must not raise
+            _tick_issue_lock_renewal(session, agent_session)

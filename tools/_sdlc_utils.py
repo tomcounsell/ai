@@ -337,6 +337,70 @@ def find_session(
     return None
 
 
+def _parse_issue_number_from_url(issue_url: str | None) -> int | None:
+    """Extract the GitHub issue number from an ``issue_url``.
+
+    Mirrors ``tools.sdlc_dispatch._parse_issue_number_from_url`` (kept private
+    there too -- this is a small enough regex that a shared import wasn't
+    worth the coupling). Returns ``None`` if ``issue_url`` is falsy or does
+    not contain an ``issues/N`` segment. Never raises.
+    """
+    if not issue_url:
+        return None
+    match = re.search(r"issues/(\d+)", issue_url)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def renew_issue_lock_for_session(session, session_id: str | None = None) -> None:
+    """Renew the per-issue SDLC ownership lock as a side effect of a write.
+
+    Shared helper (issue #1954) for SDLC CLI subcommands that fire during an
+    in-progress BUILD/TEST/REVIEW stage and therefore have an established
+    recurrence path to lean on for renewal -- currently wired into
+    ``sdlc_stage_marker.write_marker()`` only. ``sdlc_dispatch``'s
+    ``record`` subcommand does NOT call this helper: its underlying
+    ``record_dispatch_for_session()`` already calls ``touch_issue_lock()``
+    directly as part of its own contention-check-and-refuse logic, so wiring
+    this helper there too would touch the same Redis key twice per call for
+    no benefit.
+
+    Deliberately NOT wired into ``verdict record`` or ``meta-set`` (critique
+    scope-narrowing, #1954): those fire during PLAN/CRITIQUE-stage
+    bookkeeping with no established recurrence path through an in-progress
+    BUILD/TEST/REVIEW stage, so renewing there would be speculative.
+
+    Derives the issue number from ``session.issue_number`` (the write-once
+    mirror field set by ``ensure_session()``) when present, falling back to
+    parsing ``session.issue_url`` for sessions that predate that field or
+    were matched via the bridge issue_url/message_text passes.
+
+    Best-effort and side-effect-only: never raises, returns nothing. A
+    lock-touch failure (Redis hiccup, missing issue number) never blocks or
+    alters the caller's write outcome.
+    """
+    if session is None:
+        return
+
+    issue_number = getattr(session, "issue_number", None) or _parse_issue_number_from_url(
+        getattr(session, "issue_url", None)
+    )
+    if not issue_number:
+        return
+
+    try:
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        sid = session_id or getattr(session, "session_id", None) or ""
+        touch_issue_lock(issue_number, sid, ttl=ISSUE_LOCK_TTL_SECONDS)
+    except Exception as e:
+        logger.debug(f"renew_issue_lock_for_session: touch_issue_lock failed (non-fatal): {e}")
+
+
 def session_owns_issue(session, issue_number) -> bool:
     """Return True iff the session owns the issue by one of the three predicates
     that find_session_by_issue resolves on. Never raises.
