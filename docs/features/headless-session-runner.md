@@ -166,7 +166,7 @@ itself is minted and rotated.
 `SESSION_RUNNER__`: `pm_model`, `dev_model`, `hook_turn_end_wait_s`,
 `hook_crash_resume_cap`, plus the per-turn timeout and the steer debounce
 (both env-overridable, provisional). A settings-load warning fires loudly if
-any legacy `GRANITE__*`/`GRANITE_*` env key is still present, so a stale
+a residual `GRANITE__*`/`GRANITE_*` env key is still present, so a stale
 vault override never silently reverts to defaults; `/update` surfaces the
 same warning during deploy.
 

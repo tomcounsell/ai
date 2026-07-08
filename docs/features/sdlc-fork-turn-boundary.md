@@ -35,8 +35,8 @@ Commit `8542ffb19` (2026-07-07) landed the fix:
   `[true if Parallel: true]`).
 - `do-build/WORKFLOW.md:76` — an explicit bold rule forbidding background dispatch
   inside the fork.
-- `do-build/WORKFLOW.md:98-104` — the old 15-minute poll/monitor/resume block is
-  replaced by an in-turn "results already in hand" verification.
+- `do-build/WORKFLOW.md:98-104` — the 15-minute poll/monitor/resume block is now an
+  in-turn "results already in hand" verification.
 - `do-build/SKILL.md:154` — orchestrator rule: "Run parallel tasks together, always
   in the foreground."
 - `do-sdlc/SKILL.md:24` — Hard Rule 6: "ALWAYS dispatch with `run_in_background: false`,
