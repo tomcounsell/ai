@@ -1043,7 +1043,10 @@ def _rule_review_crashed_after_dispatch(stage_states: dict, meta: dict, context:
         last dispatch was ``/do-patch`` (not ``/do-pr-review``) — step aside
         if it matches.
       - Row 8c (``_rule_review_in_progress_no_verdict``) owns
-        REVIEW == in_progress — step aside if REVIEW is in_progress.
+        REVIEW == in_progress. No separate step-aside line is needed here:
+        the earlier ``stage_states.get("REVIEW") not in (STATUS_COMPLETED,
+        STATUS_FAILED)`` restriction already excludes the in_progress band
+        by construction.
       - Row 9 (``_rule_review_approved_docs_not_done``) is disjoint "by
         verdict": a sibling fix (#1932 gap c) gates row 9 on a recorded
         APPROVED verdict, while row 8d requires NO recorded verdict at all —
@@ -1067,12 +1070,13 @@ def _rule_review_crashed_after_dispatch(stage_states: dict, meta: dict, context:
     last = meta.get("last_dispatched_skill") or ""
     if last != SKILL_DO_PR_REVIEW:
         return False
-    # Step aside for rows 7, 8b, and 8c's territory (see docstring).
+    # Step aside for rows 7 and 8b's territory (see docstring). Row 8c's
+    # REVIEW == in_progress territory is already excluded by the earlier
+    # (STATUS_COMPLETED, STATUS_FAILED) restriction, so no separate check
+    # is needed here.
     if _rule_pr_exists_no_review(stage_states, meta, context):
         return False
     if _rule_patch_applied_after_review(stage_states, meta, context):
-        return False
-    if stage_states.get("REVIEW") == STATUS_IN_PROGRESS:
         return False
     return True
 
