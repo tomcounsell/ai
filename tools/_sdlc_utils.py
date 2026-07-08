@@ -88,7 +88,15 @@ def _git_toplevel(cwd: Path | None = None) -> Path | None:
     return Path(top) if top else None
 
 
-def find_session_by_issue(issue_number: int):
+# Statuses excluded by default from find_session_by_issue()'s three passes.
+# A terminal session must never be returned as "the" owner of an issue unless
+# a caller explicitly opts in via include_terminal=True — see #1954/incident
+# #1915, where a terminal session was revived and picked back up as the owner
+# while a second, independent live session already believed it owned the issue.
+_TERMINAL_ISSUE_LOOKUP_STATUSES = frozenset({"failed", "completed", "killed"})
+
+
+def find_session_by_issue(issue_number: int, include_terminal: bool = False):
     """Find an eng session tracking the given issue number.
 
     Two-pass match over eng sessions:
@@ -126,8 +134,21 @@ def find_session_by_issue(issue_number: int):
     wins — this is an acceptable limitation because bridge sessions today carry
     a single originating message and multi-issue mentions are rare.
 
+    Terminal-session filtering (#1954, incident #1915): all three passes
+    exclude sessions whose ``status`` is ``failed``, ``completed``, or
+    ``killed`` by default. A terminal session is not "the" owner of an
+    issue -- reviving one and letting a second, independent live session
+    believe it also owns the issue is exactly how incident #1915 happened.
+    Pass ``include_terminal=True`` to opt into seeing terminal sessions too
+    (e.g. audit/debug/reporting tooling that legitimately wants historical
+    sessions); the default (``False``) is correct for routing/dispatch code
+    that must never resolve a dead session as the live owner.
+
     Args:
         issue_number: GitHub issue number to search for.
+        include_terminal: When ``False`` (the default), sessions with
+            ``status`` in ``{"failed", "completed", "killed"}`` are excluded
+            from all three passes. Pass ``True`` to include them.
 
     Returns:
         AgentSession or None.
@@ -145,6 +166,12 @@ def find_session_by_issue(issue_number: int):
         # <100 eng sessions). If session count grows significantly, consider adding
         # an indexed lookup by issue_url or caching issue->session mappings.
         eng_sessions = list(AgentSession.query.filter(session_type="eng"))
+        if not include_terminal:
+            eng_sessions = [
+                s
+                for s in eng_sessions
+                if getattr(s, "status", None) not in _TERMINAL_ISSUE_LOOKUP_STATUSES
+            ]
         target_suffix = f"/issues/{issue_number}"
         for s in eng_sessions:
             issue_url = getattr(s, "issue_url", None) or ""
@@ -160,6 +187,12 @@ def find_session_by_issue(issue_number: int):
             # Verify the returned record's id actually matches — a query backend
             # (or test mock) that ignores the filter must not yield a false hit.
             local = [s for s in local if getattr(s, "session_id", None) == local_id]
+            if not include_terminal:
+                local = [
+                    s
+                    for s in local
+                    if getattr(s, "status", None) not in _TERMINAL_ISSUE_LOOKUP_STATUSES
+                ]
             for s in local:
                 if getattr(s, "session_type", None) == "eng":
                     return s

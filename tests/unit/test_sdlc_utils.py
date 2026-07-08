@@ -261,6 +261,144 @@ class TestMessageTextFallback:
         assert result is url_match
 
 
+class TestTerminalSessionFiltering:
+    """#1954 (incident #1915): a terminal session must not be returned as
+    "the" owner of an issue unless include_terminal=True is explicitly
+    passed. Covers all three passes (issue_url, deterministic-id,
+    message_text)."""
+
+    def _session(self, *, status, issue_url=None, session_id=None, message_text=None):
+        s = MagicMock()
+        s.status = status
+        s.issue_url = issue_url
+        s.session_id = session_id
+        s.message_text = message_text
+        s.session_type = "eng"
+        return s
+
+    @staticmethod
+    def _make_agent_session(sessions_by_type, sessions_by_id=None):
+        """Build a mock AgentSession whose .query.filter() dispatches on kwargs
+        the same way the real Popoto ORM does for these two lookups."""
+        mock_as = MagicMock()
+
+        def _filter(**kwargs):
+            if kwargs.get("session_type") == "eng":
+                return list(sessions_by_type)
+            if "session_id" in kwargs and sessions_by_id is not None:
+                return [s for s in sessions_by_id if s.session_id == kwargs["session_id"]]
+            return []
+
+        mock_as.query.filter.side_effect = _filter
+        return mock_as
+
+    def test_terminal_session_excluded_via_issue_url_by_default(self):
+        """A terminal session matching via issue_url is excluded by default."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(
+            status="failed", issue_url="https://github.com/tomcounsell/ai/issues/1954"
+        )
+        mock_as = self._make_agent_session([dead])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954)
+
+        assert result is None
+
+    def test_terminal_session_returned_via_issue_url_with_include_terminal(self):
+        """The same terminal session IS returned when include_terminal=True."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(
+            status="failed", issue_url="https://github.com/tomcounsell/ai/issues/1954"
+        )
+        mock_as = self._make_agent_session([dead])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954, include_terminal=True)
+
+        assert result is dead
+
+    def test_live_session_returned_when_terminal_session_also_matches(self):
+        """A terminal session is excluded even when a live session also
+        matches the same issue -- the live session wins."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(
+            status="completed", issue_url="https://github.com/tomcounsell/ai/issues/1954"
+        )
+        live = self._session(
+            status="running", issue_url="https://github.com/tomcounsell/ai/issues/1954"
+        )
+        mock_as = self._make_agent_session([dead, live])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954)
+
+        assert result is live
+
+    def test_terminal_session_excluded_via_deterministic_id_by_default(self):
+        """A terminal sdlc-local-{N} record is excluded from the
+        deterministic-id pass by default."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(status="killed", session_id="sdlc-local-1954")
+        mock_as = self._make_agent_session([dead], sessions_by_id=[dead])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954)
+
+        assert result is None
+
+    def test_terminal_session_returned_via_deterministic_id_with_include_terminal(self):
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(status="killed", session_id="sdlc-local-1954")
+        mock_as = self._make_agent_session([dead], sessions_by_id=[dead])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954, include_terminal=True)
+
+        assert result is dead
+
+    def test_terminal_session_excluded_via_message_text_by_default(self):
+        """A terminal session matching only via message_text is excluded by
+        default."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(status="completed", message_text="please work on issue #1954")
+        mock_as = self._make_agent_session([dead])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954)
+
+        assert result is None
+
+    def test_terminal_session_returned_via_message_text_with_include_terminal(self):
+        from tools._sdlc_utils import find_session_by_issue
+
+        dead = self._session(status="completed", message_text="please work on issue #1954")
+        mock_as = self._make_agent_session([dead])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954, include_terminal=True)
+
+        assert result is dead
+
+    def test_no_match_at_all_returns_none_not_raise(self):
+        """find_session_by_issue(issue_number, include_terminal=False) with no
+        matching sessions at all returns None, not a raise."""
+        from tools._sdlc_utils import find_session_by_issue
+
+        mock_as = self._make_agent_session([], sessions_by_id=[])
+
+        with patch("tools._sdlc_utils.AgentSession", mock_as):
+            result = find_session_by_issue(1954, include_terminal=False)
+
+        assert result is None
+
+
 class TestFindPlanPath:
     """Tests for find_plan_path portability + tracking-URL matching (D1, D2)."""
 
