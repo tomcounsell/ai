@@ -29,7 +29,7 @@ that the router should recover automatically.
   `Blocked("no matching dispatch rule")`. A human/supervisor must notice and
   re-dispatch the review by hand (exactly what happened in the #1924 endgame).
 
-- **(b) NEEDS REVISION can route to `/do-plan` with a PR open, via two
+- **(b) NEEDS REVISION can route to `/do-plan` with a PR open, via THREE
   independent routes.**
   - **Route 1 — row 3 (`last` not plan-family):** Row 3
     (`_rule_critique_needs_revision`, line 691) has a staleness step-aside
@@ -47,6 +47,19 @@ that the router should recover automatically.
     last dispatch was `/do-plan-critique`, G1 wins and re-opens planning on
     shipped code before row 3 is ever consulted. Patching row 3 alone leaves
     this route open — the pass-5 critique BLOCKER.
+  - **Route 3 — guard G5 (warm artifact-hash cache) [found pass-6]:**
+    `guard_g5_artifact_hash_cache` (`GUARDS[4]`, line 411) reuses a prior
+    CRITIQUE verdict when the plan-file hash is unchanged. Its
+    NEEDS_REVISION / MAJOR_REWORK branch (line 471) returns
+    `Dispatch(skill=/do-plan, row_id="G5")` with **no** `pr_number` check —
+    even though the symmetric READY_TO_BUILD branch (line 483) already has a
+    `pr_number` defer. G5 runs *before* the dispatch table (it is `GUARDS[4]`,
+    `evaluate_guards` returns the first tripped guard), so whenever the
+    artifact-hash cache is warm (a cached NEEDS REVISION verdict on an unchanged
+    plan hash — the common state after any crash/retry that does not touch the
+    plan file), G5 wins and re-opens planning on shipped code, making row 3's
+    step-aside (fix b1) **dead code**. Patching row 3 and G1 alone leaves this
+    route open — the pass-6 critique BLOCKER.
 
 **Desired outcome:**
 
@@ -54,19 +67,29 @@ that the router should recover automatically.
   re-dispatches `/do-pr-review` instead of dead-ending, regardless of the exact
   stage-marker value the crash left behind.
 - (b) A NEEDS REVISION critique verdict **never routes to `/do-plan` when an open
-  PR exists for the issue**, on *either* path that can produce that route:
-  - **Guard path (`last == /do-plan-critique`):** `guard_g1_critique_loop`
+  PR exists for the issue**, on *all three* paths that can produce that route:
+  - **Guard path 1 — G1 (`last == /do-plan-critique`):** `guard_g1_critique_loop`
     (`agent/sdlc_router.py:273`) currently routes NEEDS REVISION → `/do-plan`
     with no PR check, and it runs *before* the dispatch table (and before
     `guard_g3_pr_lock`), so it wins whenever `last == /do-plan-critique`. Fix
     (b2) makes G1 step aside when a PR exists, deferring to G3 which redirects
     to the correct PR-stage skill.
-  - **Dispatch-table path (`last` not plan-family):** row 3
+  - **Guard path 2 — G5 (warm artifact-hash cache):**
+    `guard_g5_artifact_hash_cache` (`agent/sdlc_router.py:411`) currently
+    re-dispatches `/do-plan` on a cached NEEDS REVISION verdict with an
+    unchanged plan hash, with no PR check, and it too runs before the dispatch
+    table — so it wins whenever the cache is warm, regardless of `last`,
+    shadowing both row 3 and (when `last != /do-plan-critique`) G1. Fix (b3)
+    adds `if meta.get("pr_number"): return None` before G5's NEEDS_REVISION
+    branch (mirroring the `pr_number` defer its own READY_TO_BUILD branch
+    already has at line 483), deferring to G3.
+  - **Dispatch-table path — row 3 (`last` not plan-family):** row 3
     (`_rule_critique_needs_revision`) currently routes NEEDS REVISION →
     `/do-plan`. Fix (b1) makes row 3 step aside when a PR exists, so row 7 owns
     the state.
-  Both step-asides together deliver the invariant; neither alone does (see the
-  pass-5 BLOCKER analysis in Critique Results and Revision Notes).
+  All three step-asides together deliver the invariant; no two alone do (G5
+  shadows row 3 whenever the hash cache is warm; see the pass-6 BLOCKER analysis
+  in Critique Results and Revision Notes).
 
 ## Freshness Check
 
@@ -80,6 +103,9 @@ that the router should recover automatically.
 - `agent/sdlc_router.py:691` `_rule_critique_needs_revision` — claim holds. Only step-aside is `_critique_verdict_is_stale`; no `pr_number` guard.
 - `agent/sdlc_router.py:330` `guard_g3_pr_lock` — claim holds. Early-returns None unless `last`/`proposed` is in the plan family `{SKILL_DO_PLAN, SKILL_DO_PLAN_CRITIQUE}`.
 - `agent/sdlc_router.py:273` `guard_g1_critique_loop` (pass-5 BLOCKER) — verified: routes NEEDS REVISION / MAJOR REWORK + `last == /do-plan-critique` → `/do-plan` with **no** `pr_number` check. It is `GUARDS[0]` (line 626), evaluated by `evaluate_guards` (line 636) which returns the first tripped guard, so G1 fires ahead of G3 (`GUARDS[2]`) and the dispatch table on that path.
+- `agent/sdlc_router.py:411` `guard_g5_artifact_hash_cache` (pass-6 BLOCKER) — verified: the NEEDS_REVISION / MAJOR_REWORK branch (line 471) returns `Dispatch(skill=SKILL_DO_PLAN, row_id="G5")` on a cached verdict with an unchanged plan hash, with **no** `pr_number` check. The symmetric READY_TO_BUILD branch (line 483) *does* defer on `if meta.get("pr_number") or stage_states.get("BUILD") == STATUS_COMPLETED: return None`. G5 is `GUARDS[4]` (line 630), so it fires ahead of the dispatch table (row 3) whenever the artifact-hash cache is warm — confirming G5 shadows row 3's step-aside. Fix b3 adds the missing `pr_number` defer to the NEEDS_REVISION branch.
+- `agent/sdlc_router.py:411` `build_stage_snapshot` (pass-6 CONCERN 1) — verified: the snapshot embeds `stages` (non-underscore keys), so the `REVIEW` marker value is part of the snapshot equality key `compute_same_stage_count`/D5 compares. A crashed re-review that leaves a *different* terminal marker across cycles (e.g. `failed` one cycle, `completed` the next — both in 8d's band) moves the snapshot → D5 resets the streak → G4 does not accumulate. Confirms G4 bounds 8d only under a *stable* crash marker (see Risk 4 deferred-scope note).
+- `tools/sdlc_stage_query.py:260` `_lookup_pr_number` (pass-6 CONCERN 2) — verified: the `gh pr list` resolution path passes `--state open`, so a merged/closed PR is not returned — in that path `pr_number` truthiness is a correct "PR is open" proxy. The earlier `session.pr_number` / `_pr_number` meta paths (lines 352-358) are not cleared on merge/close, so they can be stale-truthy; documented as a benign limitation in Risk 6 (staleness biases toward the safe direction).
 - `agent/sdlc_router.py:1003` `_rule_review_approved_docs_not_done` (row 9, pass-5 CONCERN 1) — verified verdict-blind: predicate is only `pr_number` set + `REVIEW == STATUS_COMPLETED` + `DOCS != completed`, no verdict inspection despite the "Review APPROVED" docstring. `REVIEW_APPROVED = "APPROVED"` constant exists at line 115 (already used as a gate at line 616).
 - `agent/sdlc_router.py:1401` `compute_same_stage_count` D5 branch (pass-5 CONCERN 2) — verified: returns `(0, skill)` when the live snapshot diverges from the last recorded dispatch snapshot, so `same_stage_dispatch_count` self-clears; a G4 accumulation test must hold the snapshot **identical** across crash re-dispatches to prove the bound.
 - `Blocked("no matching dispatch rule")` sink confirmed at `agent/sdlc_router.py:1279`.
@@ -129,17 +155,17 @@ plan-family skill.
 ## Data Flow
 
 1. **Entry point:** `sdlc-tool next-skill --issue-number N` → `decide_next_dispatch(stage_states, meta, context)`.
-2. **Guards (G1–G7)** run first (`GUARDS` list, line 625); `evaluate_guards` returns the *first* tripped guard. G1 (`guard_g1_critique_loop`, index 0) routes NEEDS REVISION + `last == /do-plan-critique` → `/do-plan` with no PR check — it fires ahead of G3. G3 (`guard_g3_pr_lock`, index 2) redirects plan-stage dispatches to the PR-stage skill when a PR exists — but only if `last`/`proposed` is plan-family and G1 didn't already win.
+2. **Guards (G1–G7)** run first (`GUARDS` list, line 625); `evaluate_guards` returns the *first* tripped guard. G1 (`guard_g1_critique_loop`, index 0) routes NEEDS REVISION + `last == /do-plan-critique` → `/do-plan` with no PR check — it fires ahead of G3. G3 (`guard_g3_pr_lock`, index 2) redirects plan-stage dispatches to the PR-stage skill when a PR exists — but only if `last`/`proposed` is plan-family and G1 didn't already win. G5 (`guard_g5_artifact_hash_cache`, index 4) re-dispatches `/do-plan` on a cached NEEDS REVISION verdict + unchanged plan hash with no PR check — it fires ahead of the dispatch table regardless of `last`, so it shadows row 3 whenever the artifact-hash cache is warm.
 3. **Dispatch table** (`DISPATCH_TABLE`, ~line 1078) evaluated top-to-bottom; first matching `state_predicate` wins. Rows 2b/2c/3 own CRITIQUE recovery; rows 8/8b/8c own REVIEW recovery; row 9 owns the review-approved→docs handoff.
 4. **Output:** first matching `DispatchRule` → `Dispatch(skill, reason, row_id)`, else `Blocked("no matching dispatch rule")` (line 1279).
 
-The bugs span step 2 and step 3: fix (a) adds a REVIEW recovery predicate (row 8d) in step 3; fix (b) closes the NEEDS-REVISION→/do-plan invariant on *both* the guard path (G1, step 2, fix b2) and the dispatch-table path (row 3, step 3, fix b1); fix (c) corrects row 9's verdict-blind misroute in step 3. No state is written by the router — it is a pure decision function over `stage_states`/`meta`/`context`, which is why the reproductions are straightforward table-/guard-driven unit tests.
+The bugs span step 2 and step 3: fix (a) adds a REVIEW recovery predicate (row 8d) in step 3; fix (b) closes the NEEDS-REVISION→/do-plan invariant on *all three* routes — two guard paths (G1, fix b2; G5, fix b3 — both step 2) and the dispatch-table path (row 3, fix b1, step 3); fix (c) corrects row 9's verdict-blind misroute in step 3. No state is written by the router — it is a pure decision function over `stage_states`/`meta`/`context`, which is why the reproductions are straightforward table-/guard-driven unit tests.
 
 ## Architectural Impact
 
 - **New dependencies:** none.
-- **Interface changes:** none. The fixes are internal predicate/guard changes plus (for fix a) one new `DispatchRule` row appended to `DISPATCH_TABLE`. Fix (b1) edits row 3, fix (b2) edits `guard_g1_critique_loop`, fix (c) edits row 9 (`_rule_review_approved_docs_not_done`) — all in place. `decide_next_dispatch` signature and return types are unchanged.
-- **Coupling:** unchanged. The new row, the row-3/row-9 gates, and the G1 gate use existing helpers (`_latest_review_verdict`, `normalize_verdict`, `REVIEW_APPROVED`, `_critique_verdict_is_stale`, `meta.get("pr_number")`).
+- **Interface changes:** none. The fixes are internal predicate/guard changes plus (for fix a) one new `DispatchRule` row appended to `DISPATCH_TABLE`. Fix (b1) edits row 3, fix (b2) edits `guard_g1_critique_loop`, fix (b3) edits `guard_g5_artifact_hash_cache`, fix (c) edits row 9 (`_rule_review_approved_docs_not_done`) — all in place. `decide_next_dispatch` signature and return types are unchanged.
+- **Coupling:** unchanged. The new row, the row-3/row-9 gates, and the G1/G5 gates use existing helpers (`_latest_review_verdict`, `normalize_verdict`, `REVIEW_APPROVED`, `_critique_verdict_is_stale`, `meta.get("pr_number")`).
 - **Data ownership:** unchanged.
 - **Reversibility:** trivial — revert the predicate edits and the one new row.
 - **Parity contract:** the router's row set is mirrored in `.claude/skills/sdlc/SKILL.md`, which currently claims "16 rows." Verified against `git grep -c 'DispatchRule(' agent/sdlc_router.py` on baseline commit `8485db99`: the table actually has **17** rows today (`1,2,2b,2c,3,4a,4b,4c,5,6,7,8,8b,8c,9,10,10b`) — SKILL.md's "16 rows" claim is already off-by-one *before* this plan touches anything. Adding row 8d brings the table to **18** rows. This plan's documentation task fixes SKILL.md to state "18 rows" (the correct post-fix count), which also retires the pre-existing baseline drift rather than compounding it (i.e. it does not naively bump whatever SKILL.md currently says by one).
@@ -154,14 +180,16 @@ The bugs span step 2 and step 3: fix (a) adds a REVIEW recovery predicate (row 8
 - PM check-ins: 1-2 (confirm the marker-agnostic recovery design for fix a)
 - Review rounds: 1
 
-Four small changes in a pure decision function with an existing table-driven test
-harness (`tests/unit/test_sdlc_router.py`): one new recovery row (8d) plus three
-one-line step-aside/verdict gates (row 3, guard G1, row 9). Each is a few lines;
-the care is in the reproduction tests and the disjointness/verdict-exclusivity
-reasoning. The pass-5 revision grew the fix from two changes to four after the
-critique surfaced that the NEEDS-REVISION→/do-plan invariant needed the G1 route
-closed too (BLOCKER) and the row-9 misroute fixed at its source (CONCERN 1) —
-still Small in code, but the correctness surface is wider than the pass-4 framing.
+Five small changes in a pure decision function with an existing table-driven test
+harness (`tests/unit/test_sdlc_router.py`): one new recovery row (8d) plus four
+one-line step-aside/verdict gates (row 3, guard G1, guard G5, row 9). Each is a
+few lines; the care is in the reproduction tests and the
+disjointness/verdict-exclusivity reasoning. The pass-5 revision grew the fix from
+two changes to four (G1 route + row-9 source fix); the pass-6 revision added the
+fifth — a third open-PR step-aside on `guard_g5_artifact_hash_cache` (BLOCKER:
+G5's warm-cache route to `/do-plan` shadowed row 3's fix entirely) — still Small
+in code, but the correctness surface now spans three pre-table guard routes plus
+the dispatch table.
 
 ## Prerequisites
 
@@ -208,17 +236,19 @@ No prerequisites — this work modifies a pure in-process decision function and 
   `REVIEW == completed` + empty-verdict state with `last != /do-pr-review`
   (8d steps aside, row 9 now also steps aside), the router correctly falls
   through to `Blocked` instead of the old silent `/do-docs` misroute.
-- **Fix (b) — open-PR step-aside on BOTH NEEDS-REVISION→/do-plan routes
-  (pass-5 BLOCKER).** The invariant "NEEDS REVISION never routes to `/do-plan`
-  when a PR is open" requires closing *two* independent routes, because the
-  route taken depends on `last_dispatched_skill`:
+- **Fix (b) — open-PR step-aside on ALL THREE NEEDS-REVISION→/do-plan routes
+  (pass-6 BLOCKER).** The invariant "NEEDS REVISION never routes to `/do-plan`
+  when a PR is open" requires closing *three* independent routes, because the
+  route taken depends on `last_dispatched_skill` **and** on whether the
+  artifact-hash cache is warm:
   - **Fix (b1) — row 3 step-aside (`last` not plan-family):** Add
     `if meta.get("pr_number"): return False` to `_rule_critique_needs_revision`,
     mirroring the existing `_critique_verdict_is_stale` step-aside. Row 3 is
     only *reached* when no guard fires — i.e. `last` is not `/do-plan-critique`
-    (else G1 fires) and G3 does not trip (G3 needs `last`/`proposed` plan-family).
-    With a PR open, row 3 steps aside and the PR-stage rows (7/8/8b/8c/8d/9/10)
-    own the state.
+    (else G1 fires), G3 does not trip (G3 needs `last`/`proposed` plan-family),
+    **and G5's cache is cold or already-deferred (else G5 fires)**. With a PR
+    open, row 3 steps aside and the PR-stage rows (7/8/8b/8c/8d/9/10) own the
+    state.
   - **Fix (b2) — G1 step-aside (`last == /do-plan-critique`):** Add
     `if meta.get("pr_number"): return None` at the top of
     `guard_g1_critique_loop`. G1 is `GUARDS[0]`, evaluated before the dispatch
@@ -230,6 +260,26 @@ No prerequisites — this work modifies a pure in-process decision function and 
     the correct PR-stage skill when a PR is open) own the redirect. This is the
     minimal, targeted fix; it does not broaden G1's contract for the no-PR case
     (the normal plan↔critique convergence loop is untouched).
+  - **Fix (b3) — G5 step-aside (warm artifact-hash cache) [pass-6 BLOCKER]:**
+    Add `if meta.get("pr_number"): return None` immediately before G5's
+    NEEDS_REVISION / MAJOR_REWORK branch (`agent/sdlc_router.py:471`), i.e.
+    right after `verdict_text = normalize_verdict(_verdict_text(record))` and
+    before the `if CRITIQUE_NEEDS_REVISION in verdict_text or
+    CRITIQUE_MAJOR_REWORK in verdict_text:` check. This mirrors the `pr_number`
+    defer G5's own READY_TO_BUILD branch already carries at line 483
+    (`if meta.get("pr_number") or stage_states.get("BUILD") ==
+    STATUS_COMPLETED: return None`) — the NEEDS_REVISION branch simply lacked the
+    symmetric guard. `guard_g5_artifact_hash_cache` is `GUARDS[4]`, evaluated
+    before the dispatch table, and it fires on a cached NEEDS REVISION verdict +
+    unchanged plan hash **regardless of `last`** — so whenever the cache is warm
+    it re-dispatches `/do-plan` before row 3 is ever consulted, making fix (b1)
+    dead code. This is why row 3 + G1 together still did not deliver the
+    invariant (the pass-6 BLOCKER). After fix (b3), G5 returns `None` on the
+    open-PR path and control falls through to G3 (which redirects to the correct
+    PR-stage skill). **Scope note:** b3 gates *only* the NEEDS_REVISION /
+    MAJOR_REWORK branch. G5's READY_TO_BUILD branch already has its own
+    `pr_number` defer, and G5's cache-reuse behavior for the no-PR case (the
+    normal plan↔critique convergence) is untouched.
 - **Fix (c) — row 9 verdict-gate at the source (pass-5 CONCERN 1).** Add a
   verdict-presence gate to `_rule_review_approved_docs_not_done` so it fires
   only when the review verdict actually normalizes to `APPROVED`:
@@ -256,6 +306,8 @@ No prerequisites — this work modifies a pure in-process decision function and 
 **`sdlc-tool next-skill` (state: PR open, no review yet, non-stale NEEDS REVISION critique, `last` NOT plan-family)** → G1/G3 pass (last not plan-family) → dispatch table → row 3 sees `pr_number` → steps aside (fix b1) → **row 7 owns the PR-stage state** → `Dispatch(/do-pr-review, row_id="7")` (never `/do-plan`).
 
 **`sdlc-tool next-skill` (state: PR open, NEEDS REVISION critique, `last == /do-plan-critique`)** → **G1 sees `pr_number` → returns None (fix b2)** → G2 passes → **G3 trips** (last is plan-family + PR open) → `Dispatch(<PR-stage skill>, row_id="G3")` (never `/do-plan`). Without fix (b2), G1 would have returned `Dispatch(/do-plan, row_id="G1")` before row 3 was ever consulted.
+
+**`sdlc-tool next-skill` (state: PR open, cached NEEDS REVISION critique verdict, plan hash unchanged, `last` NOT plan-family)** → G1 passes (last not plan-family) → G2 passes → G3 passes (last not plan-family, no plan proposed) → G4 passes → **G5 sees `pr_number` → returns None (fix b3)** → … falls through remaining guards → dispatch table → row 3 sees `pr_number` → steps aside (fix b1) → **row 7 owns the PR-stage state** → `Dispatch(/do-pr-review, row_id="7")`. Without fix (b3), G5 would have returned `Dispatch(/do-plan, row_id="G5")` off the warm cache before row 3 was ever consulted — the pass-6 BLOCKER route that made fix (b1) dead code.
 
 **`sdlc-tool next-skill` (state: PR open, REVIEW completed, empty verdict, DOCS pending, `last != /do-pr-review`)** → row 9 sees no `APPROVED` verdict → steps aside (fix c) → 8d steps aside (`last != /do-pr-review`) → falls through → `Blocked` (safe human escalation, not the old silent `/do-docs` misroute).
 
@@ -315,20 +367,35 @@ No prerequisites — this work modifies a pure in-process decision function and 
   Both approaches would achieve equivalent dispatch coverage; the new-row
   approach was chosen for auditability and minimal blast radius, not because
   the widening approach is incorrect.
-- **Fix (b) is two minimal guards, one per route (pass-5 BLOCKER).** Fix (b1)
+- **Fix (b) is three minimal guards, one per route (pass-6 BLOCKER).** Fix (b1)
   is one line at the top of `_rule_critique_needs_revision`
   (`if meta.get("pr_number"): return False`), matching the shape of the row-3
   staleness step-aside so the two read as siblings. Fix (b2) is one line at the
   top of `guard_g1_critique_loop` (`if meta.get("pr_number"): return None`),
   placed *before* G1 reads the verdict/last so an open PR short-circuits the
-  guard entirely. **Why both are required:** the guards run before the dispatch
-  table and `evaluate_guards` returns the first tripped guard, so when
-  `last == /do-plan-critique`, G1 (`GUARDS[0]`) fires and returns `/do-plan`
-  before row 3 is ever evaluated — patching row 3 alone leaves the guard-path
-  route open, which is exactly the false-invariant BLOCKER the pass-5 review
-  caught. After fix (b2), G1 defers to G3 (`GUARDS[2]`, already the canonical
-  "PR open locks plan-stage → redirect to PR-stage skill" guard) on the
-  open-PR path.
+  guard entirely. Fix (b3) is one line in `guard_g5_artifact_hash_cache`
+  (`if meta.get("pr_number"): return None`), placed *before* the NEEDS_REVISION
+  branch at line 471 (right after the `verdict_text = normalize_verdict(...)`
+  assignment) so a warm cache never re-plans over an open PR. **Why all three
+  are required:** the guards run before the dispatch table and `evaluate_guards`
+  returns the first tripped guard. (i) When `last == /do-plan-critique`, G1
+  (`GUARDS[0]`) fires and returns `/do-plan` before row 3 is evaluated — the
+  pass-5 BLOCKER. (ii) Whenever the artifact-hash cache is warm (a cached NEEDS
+  REVISION verdict on an unchanged plan hash — the *common* state, since a crash
+  or retry rarely edits the plan file), G5 (`GUARDS[4]`) fires and returns
+  `/do-plan` before row 3 is evaluated, **regardless of `last`** — the pass-6
+  BLOCKER, and the reason row 3's fix (b1) is dead code until G5 is patched.
+  After fix (b2) and (b3), both guards defer to G3 (`GUARDS[2]`, already the
+  canonical "PR open locks plan-stage → redirect to PR-stage skill" guard) on
+  the open-PR path. **Ordering check:** G3 is `GUARDS[2]` and G5 is `GUARDS[4]`,
+  so on the warm-cache path G3 is evaluated *before* G5 — but G3 only trips when
+  `last`/`proposed` is plan-family, so for `last` not plan-family G3 returns None
+  and (pre-b3) G5 was the guard that fired. After b3, G5 returns None on the
+  open-PR path and control reaches the dispatch table where row 3 (b1) steps
+  aside → row 7. For `last == /do-plan-critique` on a warm cache, G1 (b2) already
+  returns None, G3 then trips → `Dispatch(row_id="G3")` before G5 is reached.
+  Net: for every `(last, cache)` combination, an open PR now routes to a
+  PR-stage skill, never `/do-plan`.
 - **Fix (c) is the source fix for the row-9 verdict-blind misroute (pass-5
   CONCERN 1).** One gate at the top of `_rule_review_approved_docs_not_done`
   requiring `REVIEW_APPROVED in normalize_verdict(_latest_review_verdict(...))`,
@@ -345,6 +412,22 @@ No prerequisites — this work modifies a pure in-process decision function and 
   guarded by *all* stages being completed including DOCS — a different, merge-gate
   state not implicated by this issue; it is explicitly out of scope, see
   No-Gos.)
+- **Fix (c) is in-scope, not scope creep (pass-6 CONCERN 3).** Fix (c) is not a
+  free-floating latent-bug cleanup: it is the *source correction of the exact
+  misroute that gap-(a)'s coverage analysis surfaced*. Gap (a) is "crashed
+  re-review leaves REVIEW in a terminal marker + empty verdict." Spike-1 proved
+  that one realization of that state — `REVIEW == completed` + empty verdict +
+  DOCS pending — is currently caught by **row 9** and silently advanced to
+  `/do-docs` for **every** `last` value, not `Blocked`. 8d alone only recovers
+  the `last == /do-pr-review` subset of gap (a); without fix (c), gap (a)'s
+  completed-marker case stays misrouted for all other `last` values, and 8d's
+  correctness would depend on winning a fragile table-position race against
+  verdict-blind row 9. Fix (c) is therefore *required to close gap (a)
+  correctly* — it is inside gap (a)'s blast radius, discovered by gap (a)'s own
+  analysis, and tightly scoped to the one rule (row 9) that the gap-(a) state
+  lands on. It is not a general review-verdict audit (row 10 and any other
+  verdict-blind rule are explicitly deferred in No-Gos). Confirmed in-scope;
+  claims not narrowed.
 - **8d's `last == /do-pr-review` check is not the same antipattern this issue
   diagnoses, and that distinction is now explicit.** The root-cause pattern
   named in "Why Previous Fixes Failed" is recovery predicates hinging on
@@ -396,16 +479,50 @@ No prerequisites — this work modifies a pure in-process decision function and 
   resets and G4 does **not** fire — proving the bound is crash-loop-specific, not
   a blanket cap. This is the 8d-specific, D5-aware regression the concern asks
   for; see Test Impact / Task 4.
+- **Known limitation — G4 does NOT bound 8d under REVIEW-marker *churn*
+  (pass-6 CONCERN 1, deferred with justification).** The pass-5 regression proves
+  G4 bounds 8d when the crashed re-review leaves a *stable* terminal marker each
+  cycle (snapshot stable → D5 does not reset → count accumulates → G4 caps).
+  Verified against source: `build_stage_snapshot` embeds `stages` (the REVIEW
+  marker value is part of the snapshot equality key), so if a crashed re-review
+  leaves a *different* terminal marker across cycles — e.g. `failed` one cycle,
+  `completed` the next, both inside 8d's `REVIEW ∈ {completed, failed}` band —
+  the snapshot *moves*, D5 resets the streak to 0, and G4 never reaches the cap.
+  In that pathological churn case 8d can re-dispatch `/do-pr-review` without a
+  hard bound. **Why this is deferred, not fixed here:** (1) The *expected* crash
+  mode is a deterministic failure at a fixed point in the review flow, which
+  leaves the *same* terminal marker each cycle — the stable case G4 does bound,
+  and the one the reproduction test pins. Alternating terminal markers require
+  the re-review to progress *differently* each attempt, which is not a
+  same-crash loop but a non-converging review; (2) each 8d dispatch is a bounded,
+  cheap recovery attempt (one `/do-pr-review` subagent), not a runaway resource
+  loop, and a human sees the repeated dispatches on the dashboard; (3) a
+  churn-robust bound (e.g. a snapshot-independent count of consecutive
+  `/do-pr-review` entries in `_sdlc_dispatches`, or adding a review-attempt
+  counter to the snapshot) is a design change to the universal G4 machinery /
+  snapshot shape that is wider than this Small-appetite fix and would affect
+  every recovery row, not just 8d. **Made visible, not hidden:** Task 4 adds a
+  *documenting* test asserting the current (unbounded-under-churn) behavior so
+  the limitation is captured as an explicit, testable fact rather than an
+  unstated gap; the follow-up is called out in No-Gos for separate tracking.
 - **Reuse existing helpers:** `_latest_review_verdict`, `meta.get("pr_number")`,
   `stage_states.get("REVIEW")`, `SKILL_DO_PATCH`, `SKILL_DO_PR_REVIEW`,
   `_rule_pr_exists_no_review`. No new helpers required.
 - **Update SKILL.md** row count (currently mislabeled "16 rows"; actual
   baseline per `grep -c 'DispatchRule(' agent/sdlc_router.py` is 17; correct
-  post-fix value is "18 rows" — only 8d is a *new* row; fixes (b2) and (c)
-  modify a guard and an existing row in place, so they do not change the count)
-  and add the 8d row description, the row-9 `APPROVED`-verdict gate, the row-3
-  open-PR step-aside, and the G1 open-PR step-aside so the router↔SKILL parity
-  holds.
+  post-fix value is "18 rows" — only 8d is a *new* row; fixes (b2), (b3), and
+  (c) modify guards and an existing row in place, so they do not change the
+  count) and add the 8d row description, the row-9 `APPROVED`-verdict gate, the
+  row-3 open-PR step-aside, the G1 open-PR step-aside, and the G5 open-PR
+  step-aside so the router↔SKILL parity holds. **Parity-check drift fix (pass-6
+  CONCERN 4):** the row count lives in exactly one SKILL.md sentence —
+  "dispatch rules (N rows)" (line 172). Verified `grep -c '[0-9]* rows'` finds
+  only that one occurrence today, but `head -1` is not drift-proof if a second
+  "N rows" phrase is ever added. Anchor both the Verification check and the doc
+  edit to the specific phrase `dispatch rules (\d+ rows)`
+  (`grep -oP 'dispatch rules \(\K\d+(?= rows)'`) rather than a bare `\d+ rows`
+  with `head -1`, so the parity assertion targets the router-row sentence
+  unambiguously.
 
 ## Spike Results
 
@@ -439,16 +556,17 @@ No prerequisites — this work modifies a pure in-process decision function and 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_critique_verdict_is_stale` already wraps its body in `except Exception: return False` (fail-safe to "not stale"). Fix (b1) adds a guard *before* that call; fix (b2) adds a guard at the very top of `guard_g1_critique_loop`; fix (c) adds a gate at the top of row 9 using `normalize_verdict`/`_latest_review_verdict` — all dict `.get`-based, no new exception surface. No `except Exception: pass` blocks are introduced by any fix.
+- [ ] `_critique_verdict_is_stale` already wraps its body in `except Exception: return False` (fail-safe to "not stale"). Fix (b1) adds a guard *before* that call; fix (b2) adds a guard at the very top of `guard_g1_critique_loop`; fix (b3) adds a guard inside `guard_g5_artifact_hash_cache` before the NEEDS_REVISION branch (a plain `meta.get("pr_number")` check, no new exception surface); fix (c) adds a gate at the top of row 9 using `normalize_verdict`/`_latest_review_verdict` — all dict `.get`-based, no new exception surface. No `except Exception: pass` blocks are introduced by any fix.
 - [ ] The router is a pure function; new predicates/guards raise nothing (dict `.get` access + `normalize_verdict` on strings only). State "No exception handlers added in scope."
 
 ### Empty/Invalid Input Handling
 - [ ] Test 8d, the row-3/G1 guards, and the row-9 gate with `meta` missing `pr_number` (→ no false recovery, guards return None/False → normal routing), missing `last_dispatched_skill` (→ `""`, predicate False), and empty `stage_states`.
 - [ ] Confirm empty `_latest_review_verdict(...)` (the crashed-no-verdict case) is what *enables* 8d and *disables* row 9 (fix c), and a *present* APPROVED verdict makes 8d step aside and row 9 fire.
 - [ ] Confirm the G1 guard with `pr_number` set returns `None` (steps aside) regardless of verdict/last, and with `pr_number` absent behaves exactly as before.
+- [ ] Confirm the G5 guard with `pr_number` set returns `None` on the NEEDS_REVISION/MAJOR_REWORK warm-cache branch (steps aside), and with `pr_number` absent still re-dispatches `/do-plan` off the warm cache (G5's cache-reuse contract unchanged); confirm the READY_TO_BUILD branch's pre-existing `pr_number` defer is untouched.
 
 ### Error State Rendering
-- [ ] Router output is machine-consumed by `sdlc-tool`, not user-facing. Assert the `Dispatch.row_id` is `"8d"` (fix a), that neither row 3 (b1) nor G1 (b2) emits `/do-plan` when a PR is open, and that row 9 does NOT emit `/do-docs` on an empty-verdict completed review (fix c) — the reproduction tests assert exact `skill`/`row_id`, so a regression surfaces as a failing assertion, not a silent misroute.
+- [ ] Router output is machine-consumed by `sdlc-tool`, not user-facing. Assert the `Dispatch.row_id` is `"8d"` (fix a), that none of row 3 (b1), G1 (b2), or G5 (b3) emits `/do-plan` when a PR is open, and that row 9 does NOT emit `/do-docs` on an empty-verdict completed review (fix c) — the reproduction tests assert exact `skill`/`row_id`, so a regression surfaces as a failing assertion, not a silent misroute.
 
 ## Test Impact
 
@@ -456,9 +574,12 @@ No prerequisites — this work modifies a pure in-process decision function and 
   - a `TestReReviewCrashRecovery` class (fix a): two parametrized pre-fix reproduction cases with DIFFERENT current behavior — `REVIEW == failed` → `Blocked`, `REVIEW == completed` → `Dispatch("/do-docs", row_id="9")` misroute; the `_rule_pr_exists_no_review == False` companion (both cases); the `_rule_review_approved_docs_not_done` companion (`True` for COMPLETED pre-fix, `False` for FAILED); post-fix flip to `Dispatch("/do-pr-review", row_id="8d")` for both; row 7/8b/8c regression checks;
   - a `TestRow3OpenPrStepAside` class (fix b1): open-PR + NEEDS REVISION + `last` not plan-family → pre-fix `Dispatch("/do-plan", row_id="3")`, post-fix `Dispatch("/do-pr-review", row_id="7")` + the separate `skill != /do-plan` invariant;
   - a `TestG1OpenPrStepAside` class (fix b2): open-PR + NEEDS REVISION + `last == /do-plan-critique` → pre-fix `Dispatch("/do-plan", row_id="G1")`, post-fix `Dispatch(row_id="G3")` (PR-stage skill) + `skill != /do-plan` invariant; plus a no-PR regression proving G1 still routes NEEDS REVISION + `last==/do-plan-critique` → `/do-plan` when no PR exists (G1's normal contract unchanged);
+  - a `TestG5OpenPrStepAside` class (fix b3, pass-6 BLOCKER): warm artifact-hash cache — `_verdicts["CRITIQUE"]` = a NEEDS REVISION record with `artifact_hash = H`, `context["current_plan_hash"] = H` (cache hit), PR open, `last` **not** plan-family → pre-fix `Dispatch("/do-plan", row_id="G5")` (proves G5 shadows row 3), post-fix `Dispatch("/do-pr-review", row_id="7")` (G5 defers → row 3 steps aside → row 7) + `skill != /do-plan` invariant; plus a second case with `last == /do-plan-critique` on a warm cache proving post-fix `Dispatch(row_id="G3")` (G1 defers, G3 trips before G5); plus a no-PR regression proving G5 still re-dispatches `/do-plan` off the warm cache when no PR exists (G5's cache-reuse contract unchanged); plus a MAJOR_REWORK-verdict variant (same branch) confirming the gate covers both verdicts;
   - a `TestRow9VerdictGate` class (fix c): `REVIEW == completed` + empty verdict + DOCS pending + `last` non-review skill → pre-fix `Dispatch("/do-docs", row_id="9")`, post-fix `Blocked` (row 9 and 8d both step aside); plus the row-9 legitimate case (`REVIEW == completed` + `APPROVED` verdict + DOCS pending) → `Dispatch("/do-docs", row_id="9")` unchanged before and after;
-  - a `TestRow8dLoopBound` class (fix a, CONCERN 2): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` identical (skill=`/do-pr-review`, snapshot=8d-crash-state) entries, assert the derived count reaches the cap (D5 does not reset — snapshot stable) and `decide_next_dispatch` → `Blocked(guard_id="G4")`; plus the contrast case (snapshot moves between dispatches → D5 resets → not `Blocked(G4)`).
+  - a `TestRow8dLoopBound` class (fix a, pass-5 CONCERN 2): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` identical (skill=`/do-pr-review`, snapshot=8d-crash-state) entries, assert the derived count reaches the cap (D5 does not reset — snapshot stable) and `decide_next_dispatch` → `Blocked(guard_id="G4")`; plus the contrast case (snapshot moves between dispatches → D5 resets → not `Blocked(G4)`);
+  - a `TestRow8dChurnLimitation` class (fix a, pass-6 CONCERN 1, **documenting test**): build a `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` `/do-pr-review` entries whose REVIEW marker *alternates* `completed`/`failed` across cycles (both in 8d's band), assert the derived `same_stage_dispatch_count` does **not** reach the cap (D5 resets on each marker change) and `decide_next_dispatch` → `Dispatch(row_id="8d")` (G4 does **not** bound this churn case). This test captures the known limitation deferred in the Technical Approach G4 bullet as an explicit, testable fact; name/comment it clearly as a documented limitation, not a bug the fix must close.
   Use the existing `_base_meta`/`_base_states`/`_dispatch_history` helpers.
+- [ ] **CLI-level smoke test (pass-6 NIT).** Add one integration-style test exercising the *agent-facing* surface, not just the pure function: invoke the `sdlc-tool next-skill` code path (the CLI wrapper over `decide_next_dispatch` in `tools/sdlc_dispatch.py`/`tools/sdlc_stage_query.py`) for the fix-(b3) warm-cache open-PR state and assert the emitted skill is a PR-stage skill, not `/do-plan`. If a full subprocess invocation is impractical (it resolves live `gh`/session state), call the CLI's in-process entry point with an injected `stage_states`/`meta`/`context` fixture so the test still proves the fix is reachable through the path the agent actually calls. One representative state suffices — exhaustive per-route coverage stays in the unit classes above.
 - [ ] **Existing row-9 tests (fix c may change behavior — audit, do not assume additive).** Grep `tests/unit/test_sdlc_router.py` for tests constructing `REVIEW == STATUS_COMPLETED` and routing to `/do-docs`/`row_id="9"`. Any that build that state **without** an `APPROVED` review verdict encode the pre-fix verdict-blind behavior; UPDATE them to include an `APPROVED` verdict (reflecting real pipeline state) so they still exercise row 9, or re-point them at the new `Blocked` expectation if the no-verdict state was the intent. This is the one place fix (c) is NOT purely additive.
 - [ ] Router↔SKILL parity check (if a parity test exists over `DISPATCH_TABLE` row count / docstrings) — UPDATE: bump expected row count to 18 (17 baseline + 8d; fixes b2/c add no rows) rather than incrementing whatever the test currently hardcodes. Grep for any test asserting `len(DISPATCH_TABLE)` or a hardcoded row-count string and update in lockstep with SKILL.md; prefer deriving the expected count from `len(DISPATCH_TABLE)` at test time over a second hardcoded literal.
 
@@ -468,8 +589,9 @@ No other test files touch the router. Justification: `decide_next_dispatch` is i
 
 - **Refactoring the whole REVIEW-recovery cluster (8/8b/8c/8d) into one predicate.** Tempting for elegance; risks perturbing the disjointness contract that the existing tests pin. Add 8d as a discrete row and stop.
 - **Trying to reconstruct the exact #1924 crash from session telemetry.** The issue notes no transcript was retained. The reproduction test defines the state; do not spelunk telemetry.
-- **Widening G3 to fire on any proposed plan-family dispatch regardless of `last`.** That would change G3's contract for every caller. Fix (b) is a local row-3 step-aside, which is narrower and safer than touching the guard.
-- **Adding a general "PR open → never plan-stage" invariant across all plan-stage rows (2/2b/2c/4b).** Out of scope. Fix (b) touches exactly the two routes that produce NEEDS-REVISION→`/do-plan` with a PR open: row 3 (b1) and `guard_g1_critique_loop` (b2). Rows 2/2b/2c/4b route to `/do-plan-critique` or other targets, not `/do-plan` on a NEEDS-REVISION verdict, and are not implicated by this issue. Broadening to all of them invites regressions in the plan-revision flow (#1871 territory).
+- **Widening G3 to fire on any proposed plan-family dispatch regardless of `last`.** That would change G3's contract for every caller. Fix (b) is three local step-asides (row 3, G1, G5) that each *defer to* G3 on the open-PR path, which is narrower and safer than broadening the guard itself.
+- **Adding a general "PR open → never plan-stage" invariant across all plan-stage rows (2/2b/2c/4b).** Out of scope. Fix (b) touches exactly the three routes that produce NEEDS-REVISION→`/do-plan` with a PR open: row 3 (b1), `guard_g1_critique_loop` (b2), and `guard_g5_artifact_hash_cache` (b3). Rows 2/2b/2c/4b route to `/do-plan-critique` or other targets, not `/do-plan` on a NEEDS-REVISION verdict, and are not implicated by this issue. Broadening to all of them invites regressions in the plan-revision flow (#1871 territory).
+- **Redesigning G4 / the snapshot shape to bound 8d under REVIEW-marker churn.** Deferred (pass-6 CONCERN 1). Making G4 bound the pathological alternating-marker case requires a snapshot-independent recovery-attempt count or a snapshot schema change affecting *every* recovery row — wider than this Small fix. Captured as a documenting test and flagged in No-Gos for separate tracking; the common stable-marker crash mode is bounded here.
 - **Verdict-gating row 10 (`_rule_ready_to_merge`) as well as row 9.** Out of scope. Row 10 is also verdict-blind, but it is guarded by *every* stage (including DOCS) being completed — a merge-gate state, not the review→docs handoff this issue's crashed-re-review scenario produces. Fix (c) corrects only the row implicated by gap (a); a broader review-verdict audit across the table is separate work.
 
 ## Risks
@@ -481,10 +603,11 @@ No other test files touch the router. Justification: `decide_next_dispatch` is i
 ### Risk 4: G4 does not actually bound row 8d re-dispatches, and a naive test masks it via D5 (pass-5 CONCERN 2)
 **Impact:** If a crashed re-review keeps crashing, row 8d could in principle re-dispatch `/do-pr-review` indefinitely. Worse, a superficial regression that merely *sets* `meta["same_stage_dispatch_count"] = MAX` would pass without proving anything, because in a real 8d loop the count is *derived* from `_sdlc_dispatches` by `compute_same_stage_count`, whose D5 branch resets the streak to 0 the moment the live snapshot diverges — so the test could go green while the actual accumulation path is broken.
 **Mitigation:** The regression builds a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries sharing `skill == /do-pr-review` **and an identical `stage_snapshot`** equal to the 8d crash state, drives it through `compute_same_stage_count`/`decide_next_dispatch` with a matching `current_snapshot`, and asserts (i) the derived count reaches the cap — D5 does **not** reset it because a repeatedly-crashing re-review leaves the same terminal marker each time (snapshot stable) — and (ii) `decide_next_dispatch` returns `Blocked(guard_id="G4")`. A contrast assertion (snapshot *moves* between dispatches → D5 resets → G4 does not fire) proves the bound is crash-loop-specific rather than a blanket cap. This proves the bound holds for 8d's specific recovery path *and* that D5's self-clearing is accounted for, rather than assuming either from G4's universality.
+**Residual limitation (pass-6 CONCERN 1, deferred):** the bound holds only when the crashed re-review leaves a *stable* terminal marker each cycle. If the marker *churns* between `completed` and `failed` (both in 8d's band), the snapshot moves, D5 resets, and G4 never caps — 8d re-dispatches without a hard bound. This is deferred with justification (see the Technical Approach G4 bullet and No-Gos): the expected deterministic-crash mode is stable-marker (bounded); each 8d dispatch is a cheap, human-visible recovery attempt; and a churn-robust bound is a wider change to universal G4/snapshot machinery. `TestRow8dChurnLimitation` documents the current unbounded-under-churn behavior as an explicit, testable fact rather than hiding it.
 
 ### Risk 2: Fix (b) strands a genuinely-needs-replan state
-**Impact:** If a PR is open but the plan legitimately needs revision, stepping row 3 aside (b1) *and* G1 aside (b2) could leave no route.
-**Mitigation:** With a PR open, on the guard path G3 (which fixes b2 defers to) redirects `last == /do-plan-critique` to the right PR-stage skill; on the dispatch-table path the PR-stage rows (7/8/8b/8c/8d/9/10) own the state. Either way the correct action on shipped code is review/patch/merge, not re-plan. Add tests for both paths: (i) open-PR + NEEDS REVISION + `last == /do-plan-critique` → `Dispatch(row_id="G3")` (not `/do-plan`, not `Blocked`); (ii) open-PR + NEEDS REVISION + `last` not plan-family → `Dispatch(row_id="7")` (not `/do-plan`).
+**Impact:** If a PR is open but the plan legitimately needs revision, stepping row 3 (b1), G1 (b2), *and* G5 (b3) aside could leave no route.
+**Mitigation:** With a PR open, all three step-asides defer to G3, which redirects plan-stage intent to the right PR-stage skill; where G3 does not apply (`last` not plan-family), the dispatch-table PR-stage rows (7/8/8b/8c/8d/9/10) own the state. Either way the correct action on shipped code is review/patch/merge, not re-plan. Add tests for all three paths: (i) open-PR + NEEDS REVISION + `last == /do-plan-critique` → `Dispatch(row_id="G3")` (not `/do-plan`, not `Blocked`); (ii) open-PR + NEEDS REVISION + `last` not plan-family → `Dispatch(row_id="7")` (not `/do-plan`); (iii) open-PR + warm-cache NEEDS REVISION + `last` not plan-family → `Dispatch(row_id="7")` (G5 defers → row 3 steps aside → row 7; not `/do-plan`).
 
 ### Risk 5: Fix (c) strands a legitimate no-verdict completed review
 **Impact:** If the normal pipeline can legitimately reach `REVIEW == completed` with DOCS pending but *without* a recorded/parseable `APPROVED` verdict, gating row 9 on `APPROVED` would step it aside and (if `last != /do-pr-review`, so 8d also steps aside) route it to `Blocked` instead of advancing to docs.
@@ -494,6 +617,10 @@ No other test files touch the router. Justification: `decide_next_dispatch` is i
 **Impact:** SKILL.md's row-count claim is *already* wrong at baseline (says "16 rows" when the table has 17) — adding row 8d without fixing both the pre-existing drift and the new increment leaves the documented contract wrong in two ways, and any parity test would either miss the baseline error or lock in a stale count.
 **Mitigation:** Update SKILL.md to state "18 rows" (17 baseline, verified via `grep -c 'DispatchRule(' agent/sdlc_router.py`, plus 8d) rather than incrementing whatever string is currently there; add the 8d description in the same PR. Prefer a Verification check that derives the count dynamically (`grep -c 'DispatchRule('`) over a hardcoded literal so this can't silently drift again.
 
+### Risk 6: `meta.pr_number` truthiness is an imperfect proxy for "PR is open" (pass-6 CONCERN 2)
+**Impact:** All four fixes (b1/b2/b3 step-asides + gap-(a) 8d) key off `meta.get("pr_number")` being truthy as a stand-in for "an open PR exists." If `pr_number` stayed truthy after a PR merged or closed, the step-asides could defer plan-stage routing on an issue that no longer has an open PR.
+**Mitigation (verified against source, mostly benign):** (1) The `gh`-lookup resolution path (`tools/sdlc_stage_query.py::_lookup_pr_number`) passes `--state open`, so a merged/closed PR is **not** returned — in that path `pr_number` truthiness is a *correct* open-PR proxy. (2) The earlier `session.pr_number` / `_pr_number` meta paths are not explicitly cleared on merge/close, so they *can* be stale-truthy. (3) Crucially, the staleness biases toward the **safe** direction for this invariant: a stale-truthy `pr_number` makes the router prefer PR-stage skills over `/do-plan` — and re-opening plan work on a *merged* PR's shipped code is exactly the outcome we never want anyway. A merged PR also terminates the pipeline via G6/merge, so the router is not normally re-invoked on a NEEDS REVISION verdict post-merge. **Conclusion:** documented as a known limitation, not a blocker; no `--state`-filtering change is added to the session/meta paths in this Small fix. If a future issue shows the session-attribute path causing a real misroute, the fix is to clear `session.pr_number` on PR close/merge (separate work, noted in No-Gos).
+
 ## Race Conditions
 
 No race conditions identified. `decide_next_dispatch` is a synchronous pure function over its three dict arguments; it holds no shared mutable state and performs no I/O. Concurrency in the surrounding pipeline (dispatch recording, marker writes) is unchanged by this plan.
@@ -501,7 +628,10 @@ No race conditions identified. `decide_next_dispatch` is a synchronous pure func
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1760] PLAN↔CRITIQUE non-convergence (notes-only revision re-stales a clean verdict) — different rules, tracked separately.
-- [SEPARATE-SLUG #1871] G5 fast-path dispatches `/do-build` while `plan_revising=true` — different guard, tracked separately.
+- [SEPARATE-SLUG #1871] G5 fast-path dispatches `/do-build` while `plan_revising=true` — different guard/branch (this plan's fix b3 touches only G5's NEEDS_REVISION branch, not the READY_TO_BUILD build fast-path #1871 concerns), tracked separately.
+- [DEFERRED, pass-6 CONCERN 1] Churn-robust bound for row 8d re-dispatches. G4 bounds 8d only when the crashed re-review leaves a *stable* terminal marker; under alternating `completed`/`failed` markers D5 resets and 8d is unbounded. A snapshot-independent recovery-attempt counter (or a snapshot-schema change) is out of scope for this Small fix — it touches universal G4/snapshot machinery affecting every recovery row. Documented by `TestRow8dChurnLimitation`; file a follow-up if the churn case is observed in practice.
+- [DEFERRED, pass-6 CONCERN 2] Clearing `session.pr_number` on PR merge/close. The session-attribute PR-number path can be stale-truthy after a PR closes (the `gh`-lookup path already filters `--state open`). Benign for this invariant (biases toward the safe PR-stage routing), so no change here; revisit only if a real post-merge misroute is observed.
+- **Verdict-gating row 10 (`_rule_ready_to_merge`).** Out of scope — merge-gated, not the review→docs handoff (see Rabbit Holes).
 
 ## Update System
 
@@ -514,13 +644,14 @@ No agent integration required — this is an internal change to the SDLC router 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `.claude/skills/sdlc/SKILL.md` — correct the router row count to "18 rows" (SKILL.md currently says "16 rows," which was already off-by-one against the actual baseline of 17 before this plan; only 8d is a new row, so 8d brings it to 18 — fix the underlying drift, not just increment the existing wrong string). Add the row 8d description (crashed re-review recovery); document row 9's new `APPROVED`-verdict gate (fix c); note the row-3 open-PR step-aside alongside its existing staleness step-aside; and note the G1 (`guard_g1_critique_loop`) open-PR step-aside in the guards description (fix b2 — G1 now defers to G3 when a PR exists).
-- [ ] Update `docs/features/` router/SDLC-pipeline doc if one enumerates the dispatch rows or guards (grep `docs/features` for "row 8b"/"8c"/"dispatch rule"/"guard_g1"/"G1"); add 8d, the row-9 gate, the row-3 guard, and the G1 step-aside. If none enumerates rows/guards, state so in the PR.
+- [ ] Update `.claude/skills/sdlc/SKILL.md` — correct the router row count to "18 rows" in the one "dispatch rules (N rows)" sentence (line 172; currently "16 rows," already off-by-one against the actual baseline of 17 before this plan; only 8d is a new row, so 8d brings it to 18 — fix the underlying drift, not just increment the existing wrong string). Add the row 8d description (crashed re-review recovery); document row 9's new `APPROVED`-verdict gate (fix c); note the row-3 open-PR step-aside alongside its existing staleness step-aside; note the G1 (`guard_g1_critique_loop`) open-PR step-aside in the guards description (fix b2 — G1 now defers to G3 when a PR exists); and note the G5 (`guard_g5_artifact_hash_cache`) open-PR step-aside on its NEEDS_REVISION branch (fix b3 — G5 now defers to G3 when a PR exists, so a warm hash cache no longer re-plans over shipped code).
+- [ ] Update `docs/features/` router/SDLC-pipeline doc if one enumerates the dispatch rows or guards (grep `docs/features` for "row 8b"/"8c"/"dispatch rule"/"guard_g1"/"guard_g5"/"G1"/"G5"); add 8d, the row-9 gate, the row-3 guard, and the G1/G5 step-asides. If none enumerates rows/guards, state so in the PR.
 
 ### Inline Documentation
 - [ ] Docstring on the new row-8d predicate explaining disjointness from rows 7/8b/8c (mirror the 8c docstring style), noting disjoint-by-verdict from row 9 (after fix c), and citing #1932.
 - [ ] One-line comment on the row-3 `pr_number` step-aside citing #1932, mirroring the #1639 staleness-step-aside comment.
 - [ ] One-line comment on the G1 `pr_number` step-aside citing #1932 (defers to G3 when a PR exists).
+- [ ] One-line comment on the G5 `pr_number` step-aside citing #1932 (defers to G3 when a PR exists; mirrors the READY_TO_BUILD branch's existing `pr_number` defer at line 483 so the NEEDS_REVISION branch is symmetric).
 - [ ] One-line comment on the row-9 `APPROVED`-verdict gate citing #1932 (closes the verdict-blind `/do-docs` misroute at the source); update row 9's docstring so the "Review APPROVED" claim now matches the code.
 
 ## Success Criteria
@@ -542,6 +673,12 @@ No agent integration required — this is an internal change to the SDLC router 
 - [ ] After fix (b2): that state → `Dispatch(row_id="G3")` (a PR-stage skill), plus the invariant `skill != "/do-plan"` asserted separately.
 - [ ] Regression: with **no** PR open, G1 still routes NEEDS REVISION + `last == /do-plan-critique` → `Dispatch("/do-plan", row_id="G1")` (G1's normal plan↔critique contract unchanged).
 
+**Fix (b3) — G5 open-PR step-aside (warm artifact-hash cache) [pass-6 BLOCKER]:**
+- [ ] Reproduction test for gap (b3) added and RED before the fix: {PR open, cached CRITIQUE verdict = NEEDS REVISION with `artifact_hash = H`, `context["current_plan_hash"] = H` (cache hit), `last` not plan-family} → currently `Dispatch("/do-plan", row_id="G5")` (proves G5 shadows row 3's step-aside whenever the hash cache is warm).
+- [ ] After fix (b3): that state → `Dispatch("/do-pr-review", row_id="7")` (G5 defers → row 3 steps aside → row 7), plus the invariant `skill != "/do-plan"` asserted separately.
+- [ ] Second case `last == /do-plan-critique` on a warm cache → post-fix `Dispatch(row_id="G3")` (G1 defers via b2, G3 trips before G5 is reached), `skill != "/do-plan"`.
+- [ ] Regression: with **no** PR open, G5 still re-dispatches `/do-plan` off the warm cache (`row_id="G5"`) — G5's cache-reuse contract unchanged; plus a MAJOR_REWORK-verdict variant confirming the gate covers both verdicts.
+
 **Fix (c) — row 9 verdict-gate at source [pass-5 CONCERN 1]:**
 - [ ] Reproduction test added and RED before the fix: {PR open, `REVIEW == completed`, empty verdict, DOCS pending, `last` non-review skill} → currently `Dispatch("/do-docs", row_id="9")` (the misroute open to any `last`, which 8d's narrow gate does not close).
 - [ ] After fix (c): that state → `Blocked` (row 9 steps aside on missing APPROVED verdict; 8d steps aside on `last != /do-pr-review`) — safe escalation, not a silent docs advance.
@@ -549,8 +686,10 @@ No agent integration required — this is an internal change to the SDLC router 
 
 **Cross-cutting:**
 - [ ] Regression: existing 7, 8b, 8c, and stale-critique (2b) states still route to their own rows after 8d/fix(c) land.
-- [ ] G4 loop-bound regression test (CONCERN 2, D5-aware): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries sharing `skill == /do-pr-review` and an **identical** `stage_snapshot` equal to the 8d crash state; assert the derived `same_stage_dispatch_count` reaches the cap (D5 does not reset it — snapshot stable) and `decide_next_dispatch` → `Blocked(guard_id="G4")`. Companion contrast: a history whose snapshot **moves** between dispatches → D5 resets → not `Blocked(G4)`.
-- [ ] `.claude/skills/sdlc/SKILL.md` row count corrected to "18 rows" (not just incremented from whatever it currently says); row-9 gate, row-3 step-aside, and G1 step-aside documented; any `len(DISPATCH_TABLE)` assertion updated in lockstep; prefer a dynamic `grep -c 'DispatchRule('`-derived check over a new hardcoded literal.
+- [ ] G4 loop-bound regression test (pass-5 CONCERN 2, D5-aware): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries sharing `skill == /do-pr-review` and an **identical** `stage_snapshot` equal to the 8d crash state; assert the derived `same_stage_dispatch_count` reaches the cap (D5 does not reset it — snapshot stable) and `decide_next_dispatch` → `Blocked(guard_id="G4")`. Companion contrast: a history whose snapshot **moves** between dispatches → D5 resets → not `Blocked(G4)`.
+- [ ] G4 churn-limitation documenting test (pass-6 CONCERN 1): a `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` `/do-pr-review` entries whose REVIEW marker *alternates* `completed`/`failed` → derived count does **not** reach the cap and `decide_next_dispatch` → `Dispatch(row_id="8d")` (G4 does not bound the churn case). Explicitly named/commented as a documented deferred limitation, not a failing requirement.
+- [ ] CLI smoke test (pass-6 NIT): the `sdlc-tool next-skill` code path returns a PR-stage skill (not `/do-plan`) for the fix-(b3) warm-cache open-PR state — proving the fix is reachable through the agent-facing surface, not only the pure function.
+- [ ] `.claude/skills/sdlc/SKILL.md` row count corrected to "18 rows" (not just incremented from whatever it currently says); row-9 gate, row-3 step-aside, and G1 + G5 step-asides documented; any `len(DISPATCH_TABLE)` assertion updated in lockstep; prefer a dynamic `grep -c 'DispatchRule('`-derived check over a new hardcoded literal, and anchor the SKILL.md side to the `dispatch rules (\d+ rows)` phrase.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -560,14 +699,14 @@ No agent integration required — this is an internal change to the SDLC router 
 
 - **Builder (router)**
   - Name: router-builder
-  - Role: Add row 8d recovery predicate (fix a); row-3 + G1 open-PR step-asides (fix b1/b2); row-9 APPROVED-verdict gate (fix c); write reproduction + regression tests (red-green), including the D5-aware G4 loop-bound test; update SKILL.md parity.
+  - Role: Add row 8d recovery predicate (fix a); row-3 + G1 + G5 open-PR step-asides (fix b1/b2/b3); row-9 APPROVED-verdict gate (fix c); write reproduction + regression tests (red-green), including the D5-aware G4 loop-bound test, the G4 churn-limitation documenting test, and the CLI smoke test; update SKILL.md parity.
   - Agent Type: builder
   - Domain: async/decision-function correctness (pure function, disjoint-predicate reasoning)
   - Resume: true
 
 - **Validator (router)**
   - Name: router-validator
-  - Role: Verify all four reproduction families (a, b1, b2, c) were RED pre-fix and GREEN post-fix; verify 7/8b/8c/2b and row-9-APPROVED regressions plus the G1 no-PR regression still pass; verify the D5-aware G4 loop-bound test; verify SKILL.md parity (18 rows).
+  - Role: Verify all five reproduction families (a, b1, b2, b3, c) were RED pre-fix and GREEN post-fix; verify 7/8b/8c/2b and row-9-APPROVED regressions plus the G1 and G5 no-PR regressions still pass; verify the D5-aware G4 loop-bound test, the churn-limitation documenting test, and the CLI smoke test; verify SKILL.md parity (18 rows, anchored grep).
   - Agent Type: validator
   - Resume: true
 
@@ -576,8 +715,8 @@ No agent integration required — this is an internal change to the SDLC router 
 ### 1. Reproduce all gaps (red tests)
 - **Task ID**: build-repro
 - **Depends On**: none
-- **Validates**: tests/unit/test_sdlc_router.py (add TestReReviewCrashRecovery, TestRow3OpenPrStepAside, TestG1OpenPrStepAside, TestRow9VerdictGate)
-- **Informed By**: spike-1 (design 8d marker-agnostic); pass-5 BLOCKER (G1) + CONCERN 1 (row 9)
+- **Validates**: tests/unit/test_sdlc_router.py (add TestReReviewCrashRecovery, TestRow3OpenPrStepAside, TestG1OpenPrStepAside, TestG5OpenPrStepAside, TestRow9VerdictGate)
+- **Informed By**: spike-1 (design 8d marker-agnostic); pass-5 BLOCKER (G1) + CONCERN 1 (row 9); pass-6 BLOCKER (G5)
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: false
@@ -587,6 +726,7 @@ No agent integration required — this is an internal change to the SDLC router 
   - Companion assertions: `_rule_pr_exists_no_review(...)` is `False` for both cases (no row-7 overlap); `_rule_review_approved_docs_not_done(...)` is `True` for the COMPLETED case (proves the row-9 misroute) and `False` for the FAILED case.
 - Add a test for gap (b1): {PR open, no review yet (`REVIEW` in `(None, "pending", "ready")`, no review verdict), non-stale NEEDS REVISION critique, `last` not plan-family, no `proposed_skill`}; assert current result is `Dispatch(skill="/do-plan", row_id="3")`.
 - Add a test for gap (b2) [pass-5 BLOCKER]: {PR open, NEEDS REVISION critique, `last_dispatched_skill = /do-plan-critique`}; assert current result is `Dispatch(skill="/do-plan", row_id="G1")` — this is the guard-path route that fires *before* row 3, so it must be reproduced independently.
+- Add a test for gap (b3) [pass-6 BLOCKER]: {PR open, `_verdicts["CRITIQUE"]` = a NEEDS REVISION record with `artifact_hash = H`, `context["current_plan_hash"] = H` (warm cache hit), `last` not plan-family}; assert current result is `Dispatch(skill="/do-plan", row_id="G5")` — the warm-cache guard route that fires *before* the dispatch table and shadows row 3, so it must be reproduced independently. (Build the cached-verdict/hash fixture via the existing `_verdicts` helpers; supply `context` with `current_plan_hash` matching the cached `artifact_hash`.)
 - Add a test for gap (c) [pass-5 CONCERN 1]: {PR open, `REVIEW == STATUS_COMPLETED`, no REVIEW verdict, DOCS pending, `last_dispatched_skill` = a non-review skill (so 8d cannot recover it)}; assert current result is `Dispatch(skill="/do-docs", row_id="9")` — the verdict-blind misroute open to any `last`.
 - Run all; confirm they capture the buggy behavior (these will be inverted after the fixes).
 
@@ -601,7 +741,7 @@ No agent integration required — this is an internal change to the SDLC router 
 - Insert a `DispatchRule(row_id="8d", ..., skill=SKILL_DO_PR_REVIEW)` immediately after 8c in `DISPATCH_TABLE` (clustered with the REVIEW-recovery rows; ordering vs. row 9 is belt-and-suspenders once fix (c) makes them verdict-disjoint).
 - Flip the gap-(a) test: assert `Dispatch(skill="/do-pr-review", row_id="8d")` for both the `STATUS_COMPLETED` and `STATUS_FAILED` cases; keep the companion `_rule_pr_exists_no_review == False` assertions passing post-fix. (Depends on fix (c), task 3b, for the row-9 disjointness to hold cleanly.)
 
-### 3. Fix (b): open-PR step-aside on BOTH NEEDS-REVISION→/do-plan routes
+### 3. Fix (b): open-PR step-aside on ALL THREE NEEDS-REVISION→/do-plan routes
 - **Task ID**: build-fix-b
 - **Depends On**: build-repro
 - **Assigned To**: router-builder
@@ -609,9 +749,11 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Parallel**: false
 - **Fix (b1) — row 3:** Add `if meta.get("pr_number"): return False` at the top of `_rule_critique_needs_revision`, with a comment citing #1932.
 - **Fix (b2) — G1 [pass-5 BLOCKER]:** Add `if meta.get("pr_number"): return None` at the very top of `guard_g1_critique_loop` (before it reads the verdict/last), with a comment citing #1932 and noting it defers to G3 (the canonical open-PR plan-stage redirect) on the open-PR path.
+- **Fix (b3) — G5 [pass-6 BLOCKER]:** Add `if meta.get("pr_number"): return None` in `guard_g5_artifact_hash_cache` immediately before the NEEDS_REVISION branch at `agent/sdlc_router.py:471` (right after `verdict_text = normalize_verdict(_verdict_text(record))`), with a comment citing #1932 and noting it mirrors the READY_TO_BUILD branch's existing `pr_number` defer at line 483 and defers to G3 on the open-PR path. Gate ONLY the NEEDS_REVISION/MAJOR_REWORK branch; leave the READY_TO_BUILD branch and the no-PR cache-reuse path untouched.
 - Flip the gap-(b1) test: PR open, no review yet → `Dispatch(skill=SKILL_DO_PR_REVIEW, row_id="7")`, plus a separate `result.skill != SKILL_DO_PLAN` invariant assertion.
 - Flip the gap-(b2) test: PR open, NEEDS REVISION, `last == /do-plan-critique` → `Dispatch(row_id="G3")` (a PR-stage skill), plus a separate `result.skill != SKILL_DO_PLAN` invariant assertion.
-- Add the no-PR regression for G1: NEEDS REVISION + `last == /do-plan-critique` + no PR → still `Dispatch(skill=SKILL_DO_PLAN, row_id="G1")` (G1's normal contract preserved).
+- Flip the gap-(b3) test: PR open, warm-cache NEEDS REVISION, `last` not plan-family → `Dispatch(skill=SKILL_DO_PR_REVIEW, row_id="7")`, plus a separate `result.skill != SKILL_DO_PLAN` invariant assertion; and the `last == /do-plan-critique` warm-cache variant → `Dispatch(row_id="G3")`.
+- Add the no-PR regressions: (G1) NEEDS REVISION + `last == /do-plan-critique` + no PR → still `Dispatch(skill=SKILL_DO_PLAN, row_id="G1")`; (G5) warm-cache NEEDS REVISION + no PR → still `Dispatch(skill=SKILL_DO_PLAN, row_id="G5")` (both guards' normal no-PR contracts preserved), plus a MAJOR_REWORK-verdict variant of the G5 gate.
 
 ### 3b. Fix (c): row 9 verdict-gate at source
 - **Task ID**: build-fix-c
@@ -632,8 +774,10 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Parallel**: false
 - Add/confirm tests that row 7 (`REVIEW in (None, "pending", "ready")`), 8b (`last=/do-patch`), 8c (`REVIEW=in_progress`), **row 9's legitimate case (`REVIEW == completed` WITH an APPROVED verdict, DOCS pending → still `Dispatch("/do-docs", row_id="9")`)**, and 2b (stale critique) states still route to their own rows unchanged after 8d and fix (c) land. The row-9 regression is critical: it proves fix (c) keeps row 9 firing on the APPROVED case while 8d/`Blocked` handle the empty-verdict case.
 - **Audit existing row-9 tests (fix c is not purely additive):** grep for tests building `REVIEW == STATUS_COMPLETED` routing to row 9 without an APPROVED verdict; UPDATE them to include an APPROVED verdict or re-point them at the new `Blocked` expectation (see Test Impact).
-- Add a **D5-aware** G4 loop-bound regression test for row 8d (CONCERN 2): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries all sharing `skill == SKILL_DO_PR_REVIEW` and an **identical** `stage_snapshot` equal to the 8d crash state (reusing existing G4 test helpers/constants), pass a matching `current_snapshot`, and assert (i) the derived count reaches the cap — proving D5 does NOT reset because the crashed re-review leaves a stable snapshot — and (ii) `decide_next_dispatch(...)` returns `Blocked(guard_id="G4")` rather than `Dispatch(row_id="8d")`. Add the contrast case: a history whose snapshot **moves** between dispatches resets the streak (D5) and does NOT block on G4. Do **not** write the naive `meta["same_stage_dispatch_count"] = MAX` shortcut — it bypasses `compute_same_stage_count` and proves nothing about the real loop.
-- Update `.claude/skills/sdlc/SKILL.md` row count to "18 rows" (correcting the pre-existing "16 rows" baseline drift, not just incrementing it) and add the 8d description + row-9 APPROVED-gate note + row-3 step-aside note + G1 step-aside note. Update any `len(DISPATCH_TABLE)` assertion, preferring a dynamically-derived check over a hardcoded literal.
+- Add a **D5-aware** G4 loop-bound regression test for row 8d (pass-5 CONCERN 2): build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries all sharing `skill == SKILL_DO_PR_REVIEW` and an **identical** `stage_snapshot` equal to the 8d crash state (reusing existing G4 test helpers/constants), pass a matching `current_snapshot`, and assert (i) the derived count reaches the cap — proving D5 does NOT reset because the crashed re-review leaves a stable snapshot — and (ii) `decide_next_dispatch(...)` returns `Blocked(guard_id="G4")` rather than `Dispatch(row_id="8d")`. Add the contrast case: a history whose snapshot **moves** between dispatches resets the streak (D5) and does NOT block on G4. Do **not** write the naive `meta["same_stage_dispatch_count"] = MAX` shortcut — it bypasses `compute_same_stage_count` and proves nothing about the real loop.
+- Add the **G4 churn-limitation documenting test** for row 8d (pass-6 CONCERN 1): a `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` `/do-pr-review` entries whose REVIEW marker *alternates* `STATUS_COMPLETED`/`STATUS_FAILED` across cycles; assert the derived `same_stage_dispatch_count` does **not** reach the cap (D5 resets on each marker change) and `decide_next_dispatch(...)` → `Dispatch(row_id="8d")` (G4 does not bound the churn case). Name/comment it explicitly as `TestRow8dChurnLimitation` documenting the deferred limitation — NOT a bug the fix must close (see Technical Approach G4 bullet + No-Gos).
+- Add the **CLI smoke test** (pass-6 NIT): drive the `sdlc-tool next-skill` code path (the `tools/sdlc_dispatch.py`/`tools/sdlc_stage_query.py` wrapper over `decide_next_dispatch`) for the fix-(b3) warm-cache open-PR state via an injected `stage_states`/`meta`/`context` fixture (avoid live `gh`/session resolution), and assert the emitted skill is a PR-stage skill, not `/do-plan` — proving the fix is reachable through the agent-facing surface.
+- Update `.claude/skills/sdlc/SKILL.md` row count to "18 rows" (correcting the pre-existing "16 rows" baseline drift, not just incrementing it) in the `dispatch rules (N rows)` sentence, and add the 8d description + row-9 APPROVED-gate note + row-3 step-aside note + G1 step-aside note + G5 step-aside note. Update any `len(DISPATCH_TABLE)` assertion, preferring a dynamically-derived check over a hardcoded literal.
 
 ### 5. Validation
 - **Task ID**: validate-all
@@ -641,8 +785,8 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Assigned To**: router-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Confirm all four reproduction families (gap a, b1, b2, c) were RED pre-fix (via git history / the red-state note) and are GREEN post-fix.
-- Confirm the companion `_rule_pr_exists_no_review == False` assertion, the row-9 `_rule_review_approved_docs_not_done` assertions, the G1 no-PR regression, and the D5-aware G4 loop-bound regression (with its snapshot-moves contrast) all pass.
+- Confirm all five reproduction families (gap a, b1, b2, b3, c) were RED pre-fix (via git history / the red-state note) and are GREEN post-fix.
+- Confirm the companion `_rule_pr_exists_no_review == False` assertion, the row-9 `_rule_review_approved_docs_not_done` assertions, the G1 and G5 no-PR regressions, the D5-aware G4 loop-bound regression (with its snapshot-moves contrast), the churn-limitation documenting test, and the CLI smoke test all pass.
 - Confirm any audited pre-existing row-9 tests still pass after being updated for fix (c).
 - Run `pytest tests/unit/test_sdlc_router.py -q`; confirm all pass including regressions.
 - Confirm SKILL.md parity (row count matches `DISPATCH_TABLE`, expect 18).
@@ -655,13 +799,15 @@ No agent integration required — this is an internal change to the SDLC router 
 | Row 8d exists | `grep -c '"8d"' agent/sdlc_router.py` | output > 0 |
 | Row 3 has PR step-aside | `grep -c 'pr_number' agent/sdlc_router.py` | output > 0 |
 | Gap-a recovery covered | `grep -rc 'row_id == "8d"\|row_id=="8d"\|"8d"' tests/unit/test_sdlc_router.py` | output > 0 |
-| SKILL parity holds | `test "$(grep -c 'DispatchRule(' agent/sdlc_router.py)" = "$(grep -oP '\d+(?= rows)' .claude/skills/sdlc/SKILL.md \| head -1)" && echo MATCH` | prints `MATCH` (derives both sides dynamically so the check can't drift out of sync again; expect `18` on each side post-fix) |
+| SKILL parity holds | `test "$(grep -c 'DispatchRule(' agent/sdlc_router.py)" = "$(grep -oP 'dispatch rules \(\K\d+(?= rows)' .claude/skills/sdlc/SKILL.md)" && echo MATCH` | prints `MATCH` (both sides derived dynamically; the SKILL.md side is anchored to the `dispatch rules (N rows)` phrase — pass-6 CONCERN 4 — so it targets the router-row sentence unambiguously and cannot latch onto a stray `N rows`; expect `18` on each side post-fix) |
 | Lint clean | `python -m ruff check agent/sdlc_router.py tests/unit/test_sdlc_router.py` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/sdlc_router.py tests/unit/test_sdlc_router.py` | exit code 0 |
 | Row 3 never plans with open PR (fix b1) | `grep -c 'if meta.get("pr_number"): return False' agent/sdlc_router.py` | output > 0 |
 | G1 steps aside with open PR (fix b2) | `grep -c 'if meta.get("pr_number"): return None' agent/sdlc_router.py` | output > 0 |
 | Row 9 gated on APPROVED verdict (fix c) | `grep -c 'REVIEW_APPROVED not in' agent/sdlc_router.py` | output >= 2 (existing gate at :616 + new row-9 gate) |
+| G5 steps aside with open PR (fix b3) | `grep -c 'if meta.get("pr_number"): return None' agent/sdlc_router.py` | output >= 3 (fix b2 in G1 + fix b3 in G5 + the pre-existing G7/READY_TO_BUILD `pr_number` defers; verify one occurrence is inside `guard_g5_artifact_hash_cache`) |
 | G1 fix precedes verdict read | `grep -n 'pr_number' agent/sdlc_router.py \| head` | a `pr_number` line inside `guard_g1_critique_loop` (lines ~273-297) before the `normalize_verdict` call |
+| G5 fix precedes NEEDS_REVISION branch (fix b3) | `grep -n 'pr_number\|CRITIQUE_NEEDS_REVISION' agent/sdlc_router.py` | inside `guard_g5_artifact_hash_cache`, a `meta.get("pr_number")` defer appears before the `if CRITIQUE_NEEDS_REVISION in verdict_text ...` line (~471) |
 
 ## Critique Results
 
@@ -677,6 +823,13 @@ No agent integration required — this is an internal change to the SDLC router 
 | BLOCKER | do-plan-critique (pass 4, 3-critic consensus) | Desired Outcome (b) and Success Criteria claimed a NEEDS REVISION verdict "never routes to `/do-plan` when an open PR exists," but the fix only patched row 3. `guard_g1_critique_loop` (`agent/sdlc_router.py:273-297`) runs BEFORE the dispatch table, has no `pr_number` check, and routes NEEDS REVISION + `last == /do-plan-critique` → `/do-plan` unconditionally; `evaluate_guards` returns the first tripped guard (G1 is `GUARDS[0]`), so row 3 is never reached on that path. The row-3-only success test constructs only the row-3 state, so it passes green while the stated invariant is false. | This revision (pass 5) | Extended the fix to G1 (Option B): added fix (b2) — `if meta.get("pr_number"): return None` at the top of `guard_g1_critique_loop`, deferring to G3 on the open-PR path. Split fix (b) into b1 (row 3) + b2 (G1) across Desired Outcome, Problem, Solution, Technical Approach, Data Flow, Flow, Risk 2, No-Gos, Test Impact, Success Criteria, Step-by-Step Tasks (task 1, 3), and Verification. Added a gap-(b2) reproduction test (`Dispatch("/do-plan", row_id="G1")` pre-fix → `Dispatch(row_id="G3")` post-fix) and a no-PR G1 regression preserving G1's normal contract. The invariant is now delivered by both step-asides together. |
 | CONCERN | do-plan-critique (pass 4) | 8d's `last == /do-pr-review` gate leaves the row-9 verdict-blind misroute (row 9 routes to `/do-docs` on `REVIEW == completed` with no verdict check, for any `last`) open for `last` values other than `/do-pr-review` — fix row 9 at the source instead of gating narrowly on 8d. | This revision (pass 5) | Added fix (c): a source-level `APPROVED`-verdict gate on `_rule_review_approved_docs_not_done`, closing the misroute for all `last` values (empty-verdict completed → `Blocked` when 8d also steps aside). Reframed the 8d↔row-9 relationship from load-bearing table-ordering to disjoint-by-verdict throughout (Solution, Technical Approach, spike-1, Risk 1). Added a `TestRow9VerdictGate` reproduction (`last` non-review → `/do-docs` pre-fix, `Blocked` post-fix) and updated Test Impact to flag that pre-existing row-9 tests must be audited (fix c is not purely additive). Row 10's similar verdict-blindness explicitly scoped out in No-Gos. |
 | CONCERN | do-plan-critique (pass 4) | The G4 loop-bound test was not 8d-specific, and D5's self-clearing behavior (`compute_same_stage_count`, `agent/sdlc_router.py:1401`, resets the streak when the snapshot diverges) defeats accumulation — a naive `same_stage_dispatch_count = MAX` test proves nothing about the real 8d loop. Needs a more targeted regression. | This revision (pass 5) | Rewrote the G4 test spec (Technical Approach G4 bullet, Risk 4, Test Impact `TestRow8dLoopBound`, Success Criteria, Task 4) to build a real `_sdlc_dispatches` history of `MAX_SAME_STAGE_DISPATCHES` entries sharing `skill == /do-pr-review` and an **identical** `stage_snapshot`, prove the derived count reaches the cap (D5 does not reset — snapshot stable across crash re-dispatches), assert `Blocked(guard_id="G4")`, and add a snapshot-moves contrast case proving D5 resets. Explicitly banned the naive count-set shortcut. |
+| BLOCKER | do-plan-critique (pass 5) | The invariant "NEEDS REVISION never routes to `/do-plan` when an open PR exists" was STILL false after pass-5's row-3 (b1) and G1 (b2) step-asides. A THIRD pre-table route exists: `guard_g5_artifact_hash_cache` (`GUARDS[4]`, `agent/sdlc_router.py:471-476`) returns `Dispatch(skill=SKILL_DO_PLAN, row_id="G5")` for a cached NEEDS REVISION/MAJOR REWORK verdict on an unchanged plan hash with NO `pr_number` check — making row 3's step-aside dead code whenever the artifact-hash cache is warm. Its own READY_TO_BUILD branch (line 483) already has the symmetric `pr_number` defer the NEEDS_REVISION branch lacked. | This revision (pass 6) | Added fix (b3): `if meta.get("pr_number"): return None` before G5's NEEDS_REVISION branch (mirroring line 483's defer), so G5 defers to G3 on the open-PR path. Updated the "two routes" claim to THREE routes (row 3 b1 + G1 b2 + G5 b3) across Problem, Desired Outcome, Data Flow, Flow, Solution/Key Elements, Technical Approach, Architectural Impact, Appetite, Risk 2, No-Gos, Rabbit Holes, Documentation, Test Impact, Success Criteria, Step-by-Step Tasks (1, 3), Verification. Added a `TestG5OpenPrStepAside` RED reproduction (`Dispatch("/do-plan", row_id="G5")` pre-fix → PR-stage skill post-fix), a no-PR G5 regression, and a MAJOR_REWORK variant. |
+| CONCERN | do-plan-critique (pass 5) | G4 cannot reliably bound the 8d recovery loop under REVIEW-marker churn — needs a more robust regression or an explicit deferred-scope note with justification. | This revision (pass 6) | Verified against `build_stage_snapshot`: the snapshot embeds `stages`, so alternating `completed`/`failed` markers move the snapshot → D5 resets → G4 does not bound. Deferred with justification (expected crash mode is stable-marker/bounded; each 8d dispatch is cheap + human-visible; a churn-robust bound touches universal G4/snapshot machinery, wider than this Small fix). Added a `TestRow8dChurnLimitation` documenting test asserting current unbounded-under-churn behavior, a Risk 4 residual-limitation note, a Technical Approach G4 known-limitation bullet, and a No-Go follow-up entry. |
+| CONCERN | do-plan-critique (pass 5) | `pr_number` truthiness is used as a proxy for "PR is open" — verify correct (does `meta.pr_number` get cleared when a PR closes/merges?) or document the limitation. | This revision (pass 6) | Verified: `tools/sdlc_stage_query.py::_lookup_pr_number` passes `--state open` (correct proxy on the gh-lookup path); the `session.pr_number` / `_pr_number` meta paths are not cleared on merge/close (can be stale-truthy). Staleness biases toward the SAFE direction (prefer PR-stage over re-planning shipped code) and a merged PR terminates via G6/merge. Documented as a benign limitation in new Risk 6 + a Freshness Check verification line + a No-Go deferred follow-up (clear `session.pr_number` on close). No code change. |
+| CONCERN | do-plan-critique (pass 5) | Fix (c) (row 9 APPROVED-verdict gate) may be an out-of-scope latent-bug fix — confirm it's still in-scope-justified or narrow the plan's claims. | This revision (pass 6) | Confirmed in-scope, claims not narrowed. Added a Technical Approach bullet establishing fix (c) is the source-correction of the exact misroute gap-(a)'s coverage analysis surfaced (the `REVIEW == completed` + empty-verdict case row 9 silently advances to `/do-docs`). 8d alone recovers only the `last == /do-pr-review` subset; fix (c) is required to close gap-(a)'s completed-marker case for all `last` values and to make 8d disjoint-by-verdict from row 9. Tightly scoped to row 9; row 10 and any broader verdict audit remain deferred in No-Gos. |
+| CONCERN | do-plan-critique (pass 5) | SKILL.md row-count parity check via `head -1` grep is not drift-proof — strengthen or drop the claim. | This revision (pass 6) | Verified SKILL.md has exactly one "N rows" phrase today (line 172, "dispatch rules (16 rows)"). Anchored both the Verification check and the doc edit to `grep -oP 'dispatch rules \(\K\d+(?= rows)'` (the specific phrase) instead of a bare `\d+ rows` with `head -1`, so the parity assertion targets the router-row sentence unambiguously and cannot latch onto a stray future match. Updated Verification, Documentation task, Technical Approach SKILL.md bullet, Success Criteria, and Risk 3. |
+| NIT | do-plan-critique (pass 5) | No `sdlc-tool next-skill` CLI-level smoke test in the test plan — consider adding one. | This revision (pass 6) | Added a CLI smoke test to Test Impact, Success Criteria, and Task 4: drive the `sdlc-tool next-skill` code path (the `tools/sdlc_dispatch.py`/`tools/sdlc_stage_query.py` wrapper over `decide_next_dispatch`) for the fix-(b3) warm-cache open-PR state via an injected fixture and assert a PR-stage skill (not `/do-plan`), proving the fix is reachable through the agent-facing surface, not only the pure function. |
+| NIT | do-plan-critique (pass 5) | Stale `revision_applied: true` frontmatter flag noted as inconsistent (coexisted with a NEEDS REVISION verdict). | This revision (pass 6) | Reconciled: this pass-6 revision edits the plan body, changing its artifact hash — so the cached pass-5 NEEDS REVISION verdict no longer hash-matches and G5's cache will not reuse it (the exact machinery fix b3 also hardens). On completion the flag legitimately re-affirms `true` (revision applied) with the `plan_revising` lock cleared, a consistent settled state. Documented in Revision Notes (pass 6). |
 
 ---
 
@@ -891,3 +1044,93 @@ Scope grew from two changes to four (one new row 8d + three in-place gates: row
 count is unchanged at 18 (only 8d is a new `DispatchRule`; b2 edits a guard and
 (c) edits an existing row). No open questions remain; plan proceeds to
 `/do-plan-critique` (pass 5) for verification.
+
+## Revision Notes (pass 6)
+
+The pass-5 `/do-plan-critique` returned `NEEDS REVISION` with 1 BLOCKER, 4
+CONCERNs, and 1 NIT, all verified against `agent/sdlc_router.py` source. Each was
+independently re-verified against current source before revising (see the
+Freshness Check additions for exact lines). All are resolved:
+
+1. **BLOCKER (RESOLVED) — the NEEDS-REVISION→/do-plan invariant was STILL false;
+   a THIRD pre-table route (`guard_g5_artifact_hash_cache`) was unpatched.** Row 3
+   (b1) and G1 (b2) closed two routes, but `guard_g5_artifact_hash_cache`
+   (`GUARDS[4]`, line 471-476) re-dispatches `/do-plan` on a cached NEEDS
+   REVISION / MAJOR REWORK verdict + unchanged plan hash with **no** `pr_number`
+   check — and it runs before the dispatch table, regardless of `last`, so it
+   fires whenever the artifact-hash cache is warm (the common post-crash/retry
+   state), making row 3's fix b1 **dead code**. Its own READY_TO_BUILD branch
+   (line 483) already carried the symmetric `pr_number` defer the NEEDS_REVISION
+   branch lacked — the fix is one line to restore symmetry. Added **fix (b3):**
+   `if meta.get("pr_number"): return None` before G5's NEEDS_REVISION branch,
+   deferring to G3 on the open-PR path. Updated the "two routes" claim to THREE
+   routes (b1 row 3 + b2 G1 + b3 G5) across Problem, Desired Outcome, Data Flow,
+   Flow, Solution/Key Elements, Technical Approach, Architectural Impact,
+   Appetite, Risk 2, Rabbit Holes, No-Gos, Documentation, Test Impact, Success
+   Criteria, Step-by-Step Tasks (1, 3), and Verification. Added a
+   `TestG5OpenPrStepAside` RED reproduction (warm-cache open-PR → `/do-plan`
+   `row_id="G5"` pre-fix → PR-stage skill post-fix), a no-PR G5 regression
+   (cache-reuse contract preserved), and a MAJOR_REWORK variant. The invariant
+   is now delivered by all three step-asides together; no two alone suffice
+   (G5 shadows row 3 whenever the hash cache is warm).
+
+2. **CONCERN 1 (RESOLVED via documented deferral) — G4 cannot bound 8d under
+   REVIEW-marker churn.** Verified against `build_stage_snapshot`: the snapshot
+   embeds `stages`, so if a crashed re-review leaves an *alternating*
+   `completed`/`failed` marker (both in 8d's band) the snapshot moves, D5 resets
+   the streak, and G4 never caps 8d. Deferred with justification (the Technical
+   Approach G4 known-limitation bullet + Risk 4 residual note + No-Go follow-up):
+   the *expected* deterministic-crash mode is a stable marker (bounded — the case
+   the pass-5 regression pins); each 8d dispatch is a cheap, human-visible
+   recovery attempt; and a churn-robust bound requires a snapshot-independent
+   attempt counter or a snapshot-schema change touching *every* recovery row,
+   wider than this Small fix. Added `TestRow8dChurnLimitation` — a documenting
+   test asserting the current unbounded-under-churn behavior as an explicit,
+   testable fact rather than a hidden gap.
+
+3. **CONCERN 2 (RESOLVED via documentation) — `pr_number` truthiness as an
+   "open PR" proxy.** Verified: `tools/sdlc_stage_query.py::_lookup_pr_number`
+   passes `--state open`, so the gh-lookup path is a correct proxy; the
+   `session.pr_number` / `_pr_number` meta paths are not cleared on merge/close
+   and can be stale-truthy. The staleness biases toward the SAFE direction (defer
+   to PR-stage rather than re-plan shipped code), and a merged PR terminates via
+   G6/merge, so the router is not normally re-invoked on NEEDS REVISION
+   post-merge. Documented as a benign limitation in new Risk 6, a Freshness Check
+   verification line, and a No-Go deferred follow-up (clear `session.pr_number`
+   on close). No code change.
+
+4. **CONCERN 3 (RESOLVED — confirmed in-scope, claims not narrowed) — fix (c)
+   scope.** Added a Technical Approach bullet establishing fix (c) is the
+   source-correction of the exact misroute gap-(a)'s coverage analysis surfaced
+   (row 9 silently advancing an empty-verdict completed review to `/do-docs`).
+   8d alone recovers only the `last == /do-pr-review` subset; fix (c) is required
+   to close gap-(a)'s completed-marker case for *all* `last` values and to make
+   8d disjoint-by-verdict from row 9. Tightly scoped to row 9; row 10 and any
+   broader verdict audit stay deferred in No-Gos.
+
+5. **CONCERN 4 (RESOLVED) — SKILL.md parity `head -1` grep not drift-proof.**
+   Verified SKILL.md has exactly one "N rows" phrase today (line 172,
+   "dispatch rules (16 rows)"). Anchored the Verification check and the doc edit
+   to `grep -oP 'dispatch rules \(\K\d+(?= rows)'` (the specific phrase) instead
+   of a bare `\d+ rows` + `head -1`, so the parity assertion targets the
+   router-row sentence unambiguously. Updated Verification, Documentation task,
+   Technical Approach SKILL.md bullet, Success Criteria, and Risk 3.
+
+6. **NIT (RESOLVED) — no CLI-level smoke test.** Added a `sdlc-tool next-skill`
+   CLI smoke test (Test Impact, Success Criteria, Task 4) driving the
+   agent-facing code path for the fix-(b3) warm-cache open-PR state and asserting
+   a PR-stage skill (not `/do-plan`).
+
+7. **Frontmatter reconciliation (`revision_applied: true`).** The pass-5 flag
+   was flagged as inconsistent because it coexisted with a NEEDS REVISION
+   verdict. This pass-6 revision edits the plan body → its artifact hash changes
+   → the cached pass-5 NEEDS REVISION verdict no longer hash-matches, so G5's
+   cache will not reuse it (the very machinery fix b3 also hardens). On
+   completion the flag legitimately re-affirms `true` (revision applied) and the
+   `plan_revising` lock is cleared — a consistent settled state, not a stale one.
+
+Scope grew from four changes to five (one new row 8d + four in-place gates: row 3,
+guard G1, guard G5, row 9) — still Small in code, now spanning three pre-table
+guard routes plus the dispatch table. Row count is unchanged at 18 (only 8d is a
+new `DispatchRule`; b2/b3 edit guards and (c) edits an existing row). No open
+questions remain; plan proceeds to `/do-plan-critique` (pass 6) for verification.
