@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
 created: 2026-07-08
 tracking: https://github.com/tomcounsell/ai/issues/1920
 last_comment_id:
+revision_applied: true
 ---
 
 # Frames-capable "watch" path for video links (YouTube + X/Twitter visual grounding)
@@ -118,7 +119,7 @@ extraction or visual video grounding. This is the first attempt.
 **Push path (default, unchanged):**
 1. **Entry**: Telegram message with a YouTube URL arrives → bridge persists record.
 2. **Worker enrichment** (`bridge/enrichment.py` step 2): `process_youtube_urls_in_text` → captions → whisper-1 → summary → injected `[YouTube video … transcript summary: …]`.
-3. **New signpost (this plan)**: if the resolved transcript is empty/very short, append `[transcript thin — run valor-video-watch <url> for visual grounding]` so the agent knows to escalate instead of guessing. No frames on this path.
+3. **New signpost (this plan)**: inside the existing `for r in youtube_results:` loop, for each result whose `transcript` field is empty/very short (`len((r.get("transcript") or "").strip()) < VIDEO_WATCH_THIN_TRANSCRIPT_CHARS`), append a per-URL `[transcript thin for <url> — run valor-video-watch <url> for visual grounding]`. Gated on `transcript` length **only** — `process_youtube_url` returns a non-empty `context` even on failure, so gating on `context` would silently never/always fire. No frames on this path.
 
 **Pull path (new "watch" tier, agent-invoked):**
 1. **Entry**: agent runs `valor-video-watch <url> ["question"]` via Bash (question optional; informs nothing beyond human-readable framing).
@@ -181,12 +182,19 @@ Run via `python scripts/check_prerequisites.py docs/plans/video-watch-visual-gro
 - **`valor-video-watch` CLI**: new `[project.scripts]` entry point
   (`tools.video_watch.cli:main`). Pull-based: the agent invokes it on demand.
   Emits frame JPEG paths (`t=MM:SS`) + transcript + optional Grok context.
-- **Thin-transcript signpost**: additive branch in `bridge/enrichment.py` that
-  appends a `[transcript thin — run valor-video-watch …]` hint when the
-  transcript is empty/short, so the agent escalates instead of answering blind.
-- **Secrets/config wiring**: `grok_api_key` field on `APISettings`,
-  `GROK_API_KEY` placeholder in `.env.example` (with the required comment line
-  above it), value already live in the vault.
+- **Thin-transcript signpost**: additive branch in `bridge/enrichment.py`,
+  **inside the existing `for r in youtube_results:` loop**, that appends a
+  per-URL `[transcript thin for <url> — run valor-video-watch <url> …]` hint
+  when `len((r.get("transcript") or "").strip()) < VIDEO_WATCH_THIN_TRANSCRIPT_CHARS`.
+  The check gates on the `transcript` field **only** — never on `context`, which
+  `process_youtube_url` populates with a non-empty string even on failure (see
+  Technical Approach for why).
+- **Secrets/config wiring**: `GROK_API_KEY` placeholder in `.env.example` (with
+  the required comment line above it), value already live in the vault. The
+  Grok client reads `os.getenv("GROK_API_KEY")` directly — **no `APISettings`
+  field**, because the sub-model's `env_nested_delimiter="__"` would bind a
+  field to `API__GROK_API_KEY`, not the plain `GROK_API_KEY` that is provisioned
+  (matching how `link_analysis` reads `OPENAI_API_KEY` directly).
 
 ### Flow
 
@@ -212,11 +220,26 @@ grounding.
   (`VIDEO_WATCH_MAX_FRAMES`, `VIDEO_WATCH_FRAME_WIDTH`, `VIDEO_WATCH_MAX_DURATION`),
   each `os.getenv(NAME, default)` with a grain-of-salt comment, mirroring
   `MAX_VIDEO_DURATION` in `link_analysis`.
-- **Transcript reuse**: import the captions→whisper helpers from
-  `tools.link_analysis` rather than reimplementing. Keep OpenAI `whisper-1` as
-  the transcription backend (Groq swap explicitly out of scope — see Rabbit Holes).
+- **Transcript reuse — the source-agnostic helper only**: reuse
+  `tools.link_analysis.transcribe_audio_file(filepath)` for the downloaded audio
+  track. Do **not** route through `process_youtube_url(url)` — that function is
+  YouTube-only (returns `{"success": False, "error": "Not a valid YouTube URL"}`
+  for any non-YouTube URL) and cannot serve X media. Keep OpenAI `whisper-1` as
+  the transcription backend (Groq swap out of scope — see No-Gos).
+- **Low reversal cost for the two PM Open Questions**: the CLI command name is
+  defined once as a module constant (`WATCH_CLI_NAME`) reused by the signpost
+  string, and the Grok X-context behavior lives behind a single guarded
+  call-site (`fetch_x_context`). If the PM reverses Open Question #1 (Grok's
+  role) or #2 (tool name), the change touches one constant / one call-site, not
+  files already built — so Tasks 1 and 2 can start without blocking on the
+  answers.
+- **The signpost `context`-trap**: `bridge/enrichment.py` applies `yt_enriched`
+  wholesale and only reads `success`/`error` per result. `process_youtube_url`
+  fills `context` with `"[YouTube video: … transcript unavailable …]"` even on
+  failure while leaving `transcript` None. The signpost MUST gate on
+  `r.get("transcript")`, never `r.get("context")`.
 - **Pull, not push**: frames are never attached on the default enrichment path.
-  The push path only gains a cheap text signpost.
+  The push path only gains a cheap per-URL text signpost.
 
 ## Failure Path Test Strategy
 
@@ -303,6 +326,14 @@ shared mutable state, no cross-process coordination, and no concurrent writers.
 The enrichment signpost is a pure string append on data already resolved
 sequentially in `enrich_message`.
 
+**Temp-dir leak on mid-run crash (resource, not a race):** if `yt-dlp`/`ffmpeg`
+is killed mid-run (OOM, session-timeout SIGKILL), an end-of-happy-path cleanup
+call would leak a multi-hundred-MB dir. Mitigation: the whole
+download→ffmpeg→transcript sequence runs inside
+`with tempfile.TemporaryDirectory() as tmpdir:` so cleanup executes on
+exception, not only on success. A test forces a `subprocess.CalledProcessError`
+mid-pipeline and asserts the temp dir is gone afterward.
+
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1951] Swap the Whisper transcription backend to Groq
@@ -368,8 +399,9 @@ sequentially in `enrich_message`.
   no frames) — no token/latency regression on the push path.
 - [ ] Thin/empty transcript on the push path appends the `valor-video-watch`
   signpost to the enriched text.
-- [ ] `GROK_API_KEY` wired: `.env.example` placeholder + `APISettings` field;
-  Grok client reads it via `os.getenv`; missing key degrades gracefully.
+- [ ] `GROK_API_KEY` wired: `.env.example` placeholder present; Grok client
+  reads it via `os.getenv("GROK_API_KEY")` (no `APISettings` field — see
+  Technical Approach); missing key degrades gracefully.
 - [ ] Frame cap / resolution / max-duration are env-overridable named constants
   with grain-of-salt comments.
 - [ ] `grep "valor-video-watch" pyproject.toml` confirms the entry point.
@@ -386,7 +418,7 @@ sequentially in `enrich_message`.
 
 - **Builder (grok-context)**
   - Name: `grok-builder`
-  - Role: `tools/video_watch/grok.py` xAI client, `grok_api_key` settings field, `.env.example` placeholder, graceful-degrade wiring.
+  - Role: `tools/video_watch/grok.py` xAI client (single guarded `fetch_x_context` call-site), `.env.example` `GROK_API_KEY` placeholder, graceful-degrade wiring. No `APISettings` field.
   - Domain: MCP-tool/API integration (see DOMAIN_FRAMING.md)
   - Agent Type: builder
   - Resume: true
@@ -423,8 +455,9 @@ into the single session worktree without commit interleaving.
 - **Assigned To**: watch-core-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/video_watch/__init__.py` with `watch_video(url, ...)`: source detection (`youtube`|`x`|`other`), yt-dlp download to temp, ffmpeg scene-change frame sampling + 16×16 grayscale dedup, env-tunable `VIDEO_WATCH_MAX_FRAMES`/`VIDEO_WATCH_FRAME_WIDTH`/`VIDEO_WATCH_MAX_DURATION` constants.
-- Reuse `tools.link_analysis` captions→whisper-1 helpers for the transcript; emit `t=MM:SS` markers.
+- Create `tools/video_watch/__init__.py` with `watch_video(url, ...)`: source detection (`youtube`|`x`|`other`), yt-dlp download + ffmpeg scene-change frame sampling + 16×16 grayscale dedup, env-tunable `VIDEO_WATCH_MAX_FRAMES`/`VIDEO_WATCH_FRAME_WIDTH`/`VIDEO_WATCH_MAX_DURATION` constants. Define `WATCH_CLI_NAME = "valor-video-watch"` as a module constant (reused by the signpost string via import) so a naming reversal touches one place.
+- Wrap the entire download→ffmpeg→transcript sequence in `with tempfile.TemporaryDirectory() as tmpdir:` so frames/audio are cleaned up on exception (crash, SIGKILL-survivable temp semantics), not only on the happy path.
+- Reuse `tools.link_analysis.transcribe_audio_file(filepath)` (the source-agnostic helper) for the audio track — NOT `process_youtube_url`, which rejects non-YouTube URLs. Emit `t=MM:SS` markers.
 - Create `tools/video_watch/cli.py` (`main`) mirroring `link_analysis/cli.py` arg/exit conventions; print frame paths + transcript (+ Grok block when present).
 - Add `valor-video-watch = "tools.video_watch.cli:main"` to `pyproject.toml [project.scripts]`.
 
@@ -437,9 +470,8 @@ into the single session worktree without commit interleaving.
 - **Agent Type**: builder
 - **Domain**: MCP-tool/API integration
 - **Parallel**: true
-- Create `tools/video_watch/grok.py`: OpenAI-compatible client to `https://api.x.ai/v1`, `os.getenv("GROK_API_KEY")`. `fetch_x_context(url)` → post text/author/thread + video description; non-fatal on error.
-- Add `grok_api_key: str | None` to `APISettings` in `config/settings.py` (+ include in the `validate_api_keys` field validator).
-- Add `GROK_API_KEY=xai-****` to `.env.example` with the required comment line above it.
+- Create `tools/video_watch/grok.py`: OpenAI-compatible client to `https://api.x.ai/v1`, `os.getenv("GROK_API_KEY")`. Single guarded `fetch_x_context(url)` call-site → post text/author/thread + video description; non-fatal on error (returns None + logs a warning when the key is absent or the call fails).
+- Add `GROK_API_KEY=xai-****` to `.env.example` with the required comment line above it. Do **NOT** add an `APISettings` field — `env_nested_delimiter="__"` would bind it to `API__GROK_API_KEY`, not the provisioned `GROK_API_KEY`; the direct `os.getenv` read is the real wiring (mirrors `link_analysis`'s `OPENAI_API_KEY` read).
 - Wire the watch pipeline to call `fetch_x_context` only for `x` source, and use it as the fallback when yt-dlp media acquisition fails.
 
 ### 3. Enrichment thin-transcript signpost
@@ -449,8 +481,8 @@ into the single session worktree without commit interleaving.
 - **Assigned To**: signpost-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `bridge/enrichment.py` step 2, after the YouTube results resolve, if the effective transcript is empty/below a small env-tunable threshold, append `[transcript thin — run valor-video-watch <url> for visual grounding]` to `enriched_text`.
-- Add a test asserting the signpost appears for a thin transcript and is absent for a healthy one (no push-path regression).
+- In `bridge/enrichment.py` step 2, **inside the existing `for r in youtube_results:` loop** (~line 174), for each result append a per-URL `[transcript thin for {r['url']} — run valor-video-watch {r['url']} for visual grounding]` to `enriched_text` when `len((r.get("transcript") or "").strip()) < VIDEO_WATCH_THIN_TRANSCRIPT_CHARS` (env-tunable, provisional). Gate on `transcript` **only**, never `context` (which is non-empty even on failure).
+- Add a test asserting: (a) the signpost fires for a result with an empty/short `transcript`; (b) it does NOT fire for a healthy transcript; (c) a result with an error `context` but None `transcript` still fires (proves it gates on `transcript`, not `context`); (d) multi-URL messages emit one signpost per thin URL.
 
 ### 4. Validation
 - **Task ID**: validate-watch
@@ -483,7 +515,8 @@ into the single session worktree without commit interleaving.
 | Entry point wired | `grep -c "valor-video-watch" pyproject.toml` | output > 0 |
 | CLI resolves | `valor-video-watch --help` | exit code 0 |
 | Grok key placeholder present | `grep -c "GROK_API_KEY" .env.example` | output > 0 |
-| Grok setting field | `grep -c "grok_api_key" config/settings.py` | output > 0 |
+| Grok read is direct os.getenv | `grep -c 'os.getenv("GROK_API_KEY")' tools/video_watch/grok.py` | output > 0 |
+| No decorative settings field | `grep -c "grok_api_key" config/settings.py` | exit code 1 |
 | Signpost string present | `grep -rc "valor-video-watch" bridge/enrichment.py` | output > 0 |
 | No key hardcoded | `grep -rn "xai-" tools/ config/ bridge/` | match count == 0 |
 | Lint clean | `python -m ruff check tools/video_watch bridge/enrichment.py config/settings.py` | exit code 0 |
@@ -492,9 +525,13 @@ into the single session worktree without commit interleaving.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + History | Thin-transcript signpost under-specified; naive `context` gate silently no-ops it | Data Flow step 3, Key Elements, Technical Approach, Task 3 all now gate on `len(r.get("transcript") or "")` inside the `for r in youtube_results:` loop, per-URL, never `context` | `process_youtube_url` returns non-empty `context` even on failure; test (c) proves gating on `transcript` |
+| CONCERN | Risk & Robustness + Scope | `APISettings.grok_api_key` binds to `API__GROK_API_KEY` not `GROK_API_KEY` — decorative | Dropped the settings field; Grok reads `os.getenv("GROK_API_KEY")` directly; Verification row replaced with a direct-read grep + an inverse "no decorative field" row | `env_nested_delimiter="__"`; mirrors link_analysis OPENAI_API_KEY read |
+| CONCERN | Scope + History | Tasks 1/2 build settled work against unresolved Open Q #1/#2 | `WATCH_CLI_NAME` module constant + single guarded `fetch_x_context` call-site make a PM reversal one-place-cheap, so builders start without blocking | Name/Grok-role reversal touches one constant / one call-site |
+| CONCERN | Risk & Robustness | Temp dir leaks on mid-run crash | `watch_video` wraps the sequence in `tempfile.TemporaryDirectory()`; Race Conditions + Failure Path test added | Cleanup on exception, not only happy path |
+| NIT | History | "Reuse whisper helpers" didn't name the source-agnostic function | Task 1 + Technical Approach name `transcribe_audio_file(filepath)` explicitly; forbid `process_youtube_url` for X | `process_youtube_url` rejects non-YouTube URLs |
 
 ---
 
