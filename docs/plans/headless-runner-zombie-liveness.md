@@ -5,13 +5,54 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-07-07
 tracking: https://github.com/tomcounsell/ai/issues/1935
-last_comment_id:
+last_comment_id: 4901789240
 revision_applied: true
 ---
 
 # Headless runner zombie wedge: toolless-but-streaming turns misclassified as no-output
 
 ## Critique Revision (2026-07-07)
+
+### Third revision — owner design directive (2026-07-07T08:35:19Z, issue comment 4901774113)
+
+Tom's directive, issued after CRITIQUE pass 2 landed: *"One authoritative liveness signal makes
+the most sense. As much as we can strengthen a single module, let's do that instead of
+manipulating the worker."* This changes **where** the derivation lives, not **what** it derives.
+
+- **Ownership moves to `agent/session_runner/`.** Element 2's `_derive_sdk_ever_output` helper —
+  previously module-level in `agent/session_health.py` (the worker file) — is relocated to a new
+  module, **`agent/session_runner/liveness.py`**, exporting `derive_sdk_ever_output(entry) -> bool`.
+  `session_health.py`'s four call sites now `import` and call it rather than defining it locally.
+  The runner package — which already owns subprocess spawn/kill (`runner.py`) — becomes the single
+  home for both the liveness **write** (Element 1's `_stamp_stdout_liveness`, still a `SessionRunner`
+  method, calling into the same new module for the timestamp save) and the liveness **read**
+  (Element 2's derivation). The worker's job shrinks to "call the one function four times," not
+  "compute the signal."
+- **Field count is unchanged, by design.** The directive is about *ownership location*, not about
+  collapsing `last_tool_use_at` / `last_turn_at` / `last_stdout_at` into one field. Sub-check A of
+  `_has_progress` still needs per-field *freshness* (not just presence) for its own, separate
+  mid-turn cadence check — the No-Gos section already forbids touching that. Merging the fields
+  would break sub-check A and expand scope well past Medium appetite. "Single authoritative signal"
+  is satisfied by a single **function**, in a single **module**, called from four **sites** — not by
+  a single **field**.
+- **Element 3 (`record_turn_boundary`) re-evaluated, unchanged in substance.** The directive asks
+  whether it's still load-bearing for liveness under the single-signal design, or telemetry-only.
+  `last_turn_at` remains one of the three OR-inputs `derive_sdk_ever_output` reads — fixing its
+  ~100%-dead id-resolution bug is still necessary for the signal to work on sessions that reach a
+  turn boundary before any tool call. It is reframed as: a co-equal regression fix that feeds the
+  now-centralized function, not an independent "third liveness field" being bolted on.
+- **Cross-reference, not scope creep: issue comment 4901789240 (08:37:03Z).** The same issue
+  thread surfaced an additive finding — `_confirm_subprocess_dead(None)` vacuously returns
+  `confirmed_dead=True` when `claude_pid` is unset, which is exactly the population the
+  never-started gate (D0) kills, so the kill-confirmation step never actually verifies anything for
+  that population. This is real, but it is **`_confirm_subprocess_dead` / recovery-transition kill
+  authority**, not the `sdk_ever_output` derivation — already tracked and actively planned under
+  **#1938** ("Session recovery/failure leaks the live claude -p subprocess..."), whose recon
+  independently confirms the same `claude_pid=None` root cause with file:line evidence
+  (`agent/session_health.py:2292-2299`/`:1533`, `agent/session_runner/runner.py:522`). #1938's
+  "owner-preferred direction" section already cites this same single-authoritative-module principle
+  for subprocess *kill* ownership. No changes made to this plan's scope; noted here so a reader of
+  either issue sees the other.
 
 ### Second revision — CRITIQUE pass 2 (1 NEW BLOCKER + 3 concerns + 1 nit)
 
@@ -74,20 +115,25 @@ never-started grace. The health machinery classifies this as `zombie_uuid_no_out
 (`kind=no_progress`), recovers/retries once, hits the identical condition, and finalizes the
 session `failed` after 2 recovery attempts. Two co-occurring instances (`sdlc-local-1933`,
 `sdlc-local-1934`) wedged this way in the first batch after the cutover, both stalled at the
-PLAN/CRITIQUE transition.
+PLAN/CRITIQUE transition. Nine sessions total were confirmed wedged this way through 2026-07-07
+14:38 UTC (dashboard sweep), spanning both bridge-originated Telegram sessions and local
+`sdlc-local-*` pipeline runs — confirming the defect is in the spawn/streaming layer, not specific
+to one session type or SDLC stage.
 
 **Root cause.** `sdk_ever_output` — the flag whose being-False drives the zombie verdict — is
 derived as `bool(last_tool_use_at or last_turn_at)` at **four** independent sites in
-`agent/session_health.py` (verified at HEAD): `:985-987` (`_never_started_past_grace`),
-`:1127-1129` (`_has_progress`), `:1310-1312` (`_tier2_reprieve_signal`), and `:2057-2059`
-(recovery-classification / `zombie_uuid_no_output` counter). On a headless turn those two fields
-are written only by tool-boundary hooks (on a tool call) and by end-of-turn `record_turn_boundary`.
-A turn that streams the `init` event and then produces assistant output *without calling a tool
-within 150s* (e.g. PM prime resolution + reasoning before its first tool) therefore has **no
-recognized progress signal even though the subprocess is demonstrably alive and streaming** — the
-persisted `claude_session_uuid` is itself proof the SDK produced output. The PTY→headless cutover
-dropped the per-stream-activity liveness write that previously covered this case:
-`SessionRunner._build_driver` (`agent/session_runner/runner.py:423-446`) never wires
+`agent/session_health.py` (re-verified at current HEAD `68c56004`, third revision): `:985-987`
+(`_never_started_past_grace`), `:1127-1129` (`_has_progress`), `:1310-1312`
+(`_tier2_reprieve_signal`), and `:2149-2151` (recovery-classification / `zombie_uuid_no_output`
+counter — drifted from `:2057` since plan baseline due to unrelated commit `a77ae27a`, which added
+~92 lines earlier in the file for interrupt-messaging work, #1937). On a headless turn those two
+fields are written only by tool-boundary hooks (on a tool call) and by end-of-turn
+`record_turn_boundary`. A turn that streams the `init` event and then produces assistant output
+*without calling a tool within 150s* (e.g. PM prime resolution + reasoning before its first tool)
+therefore has **no recognized progress signal even though the subprocess is demonstrably alive and
+streaming** — the persisted `claude_session_uuid` is itself proof the SDK produced output. The
+PTY→headless cutover dropped the per-stream-activity liveness write that previously covered this
+case: `SessionRunner._build_driver` (`agent/session_runner/runner.py:423-446`) never wires
 `on_stdout_event`, so `last_stdout_at` is never refreshed during a headless turn — and
 `last_stdout_at` was never part of the `sdk_ever_output` derivation to begin with.
 
@@ -101,23 +147,47 @@ converting only sites 1/2/4 leaves the reprieve route open (critique BLOCKER).
 
 ## Freshness Check
 
-**Baseline commit:** `8485db99` (`git rev-parse HEAD` at plan time).
+**Original baseline commit:** `8485db99` (`git rev-parse HEAD` at plan time).
 **Issue filed at:** 2026-07-07T06:14:28Z. **Cutover merged:** 2026-07-07T04:54:35Z (`e8351e4c`).
-**Disposition:** **Unchanged.**
+**Disposition (original pass):** **Unchanged.**
 
 - All cited file:line references (`session_health.py:985/1127/1310/2057`, `runner.py:423-446`,
   `role_driver.py:175/194/400`, `adapter.py:362-382`, `session_executor.py:1506-1524/1783`,
   `sdk_client.py:2936`, `liveness_writers.py:136`, `session_stall_classifier.py:53/60`) were read
-  at HEAD `8485db99` and match the issue's description. No commits have touched
-  `agent/session_runner/` since the cutover merged (`git log --oneline --since=e8351e4c -- agent/session_runner/`
-  is empty).
+  at HEAD `8485db99` and match the issue's description.
 - Cited sibling issues re-checked: #1843 CLOSED (granite Gap A/Gap B fix), #1792/#1724/#1356/#1614/#1905
   all CLOSED. #1843's Gap B substrate (`agent/granite_container/` PTY driver) was deleted by the
   cutover — its mid-turn liveness refresh has no headless equivalent, which is the carried-over gap.
-- `docs/plans/` overlap check: no active plan touches `agent/session_runner/` or the
-  `sdk_ever_output` derivation. The `granite-*` plans are all in `docs/plans/completed/`.
 - Bug still present: the code path is unchanged and the reproduction (toolless streaming turn past
   grace → zombie) is deterministic from the derivation, not environmental.
+
+### Re-verification (2026-07-08, comment-sync pass — third revision)
+
+**New baseline commit:** `68c56004`. **Disposition:** **Minor drift** — one site's line number
+moved; the derivation logic itself is untouched.
+
+- `git log --oneline --since="2026-07-07T06:14:28Z" -- agent/session_runner/ agent/session_health.py
+  agent/hooks/liveness_writers.py` returns one commit: `a77ae27a` ("Remove the
+  interrupted-will-resume announcement entirely (#1937)"). Read its diff on `session_health.py`
+  (207 lines changed): it is entirely about interrupt/cancel-reason messaging
+  (`_deliver_terminal_interrupt_notice`, `_deliver_oneshot_dedup_notice`) — it does not touch the
+  `sdk_ever_output` derivation. Net effect: site 4's line number drifted from `:2057` to `:2149`
+  (content unchanged); sites 1-3 (`:985`, `:1127`, `:1310`) are unaffected (the inserted code is
+  later in the file). Citations in this plan updated accordingly throughout.
+- `agent/session_runner/runner.py` unchanged since baseline (`_build_driver`, `_on_harness_init`
+  confirmed at the same lines cited originally; no `_stamp_stdout_liveness` exists yet, confirming
+  Element 1 is still unbuilt as the plan assumes).
+- `docs/plans/` overlap check re-run: `session-recovery-subprocess-leak.md` and
+  `recovery-subprocess-leak-worktree-race.md` (both for sibling issue #1938) touch
+  `agent/session_health.py` and `agent/session_runner/runner.py` too, but a **different** concern
+  (subprocess kill/confirm-exit ordering around recovery/failure transitions, not the
+  `sdk_ever_output` derivation). No direct file-region conflict expected — #1938's changes are in
+  `_confirm_subprocess_dead`/recovery-transition kill sequencing; this plan's are in the
+  never-started/reprieve/zombie-classification derivation sites. Flagged as coordination context in
+  the third-revision section above, not a blocker.
+- Owner comment 4901774113 (08:35:19Z) incorporated as the third revision (single-authoritative-
+  module relocation). Owner comment 4901789240 (08:37:03Z, kill-confirmation gap) cross-referenced
+  to #1938, not incorporated into this plan's scope (see third-revision section).
 
 ## Prior Art
 
@@ -137,6 +207,11 @@ converting only sites 1/2/4 leaves the reprieve route open (critique BLOCKER).
   and established that generated-settings hooks merge *additively* with repo `.claude/settings.json`.
 - **#1905 (CLOSED).** D0 never-started gate makes `no_output_budget_exceeded` unreachable — context
   for how the never-started gate short-circuits before other stall detectors.
+- **#1938 (OPEN, sibling).** "Session recovery/failure leaks the live claude -p subprocess and
+  deletes its worktree while it runs." Same incident, complementary defect: this plan stops the
+  FALSE `no_progress` triggers; #1938 stops what happens to the subprocess when a recovery/failure
+  fires (false or genuine). #1938's recon independently confirms the `claude_pid=None`
+  kill-confirmation gap raised in issue comment 4901789240.
 
 ## Research
 
@@ -164,17 +239,19 @@ Headless turn, from spawn to zombie verdict:
    reads the worker's unset `AGENT_SESSION_ID` (`liveness_writers.py:136`).
 5. The 60s heartbeat keeps `last_heartbeat_at` fresh but that is not a progress signal.
 6. At running-seconds > 150s (`NEVER_STARTED_GRACE_SECS`+`CONFIRM_MARGIN`), `_never_started_past_grace`
-   returns True (`session_health.py:985-987`, `sdk_ever_output=False`), `_has_progress` denies the
-   heartbeat fast-path, the zombie branch fires (`:2057-2066`), and the session is recovered → retried
-   → identical wedge → `failed`.
+   returns True (`session_health.py:985-987`, `sdk_ever_output=False`, via the imported
+   `agent.session_runner.liveness.derive_sdk_ever_output`), `_has_progress` denies the heartbeat
+   fast-path, the zombie branch fires (`:2149-2158`), and the session is recovered → retried →
+   identical wedge → `failed`.
 7. **Reprieve route (second path to the same wedge).** Even for a session that clears the grace
    window, `_tier2_reprieve_signal` (`:1310-1312`, `sdk_ever_output=False`) suppresses all Tier-2
    reprieves once `reprieve_count >= MAX_NO_OUTPUT_REPRIEVES` (`:1314-1317`), escalating a
-   still-streaming session to recovery. Because this site derives `sdk_ever_output` from the same
-   two-field expression, it must be converted in lockstep with the other three.
+   still-streaming session to recovery. Because this site derives `sdk_ever_output` via the same
+   imported function, it must be converted in lockstep with the other three.
 
 The fix inserts a progress write at step 4 (stream activity → `last_stdout_at`) and makes both the
-step-6 never-started derivation and the step-7 reprieve derivation recognize it.
+step-6 never-started derivation and the step-7 reprieve derivation recognize it, via one function
+owned by `agent/session_runner/liveness.py`.
 
 ## Why Previous Fixes Failed
 
@@ -195,15 +272,21 @@ The change is additive: it introduces a third, transport-native progress signal
 (`last_stdout_at`, fed by the headless stream) into an OR-derivation that already tolerates any one
 signal being present. No behavior change for sessions that already emit tool/turn boundaries.
 
+**Ownership relocation (owner directive, third revision).** The derivation itself moves from
+`agent/session_health.py` (worker-owned, inline) to a new `agent/session_runner/liveness.py`
+(runner-owned, single exported function). `session_health.py` becomes a pure consumer — it imports
+`derive_sdk_ever_output` and calls it at all four sites; it no longer defines or inlines the OR
+expression. This is the single-authoritative-module structure the directive asked for.
+
 ## Appetite
 
-**Medium.** Three focused code edits (wire `on_stdout_event` in the runner; extend the
-`sdk_ever_output` derivation across **all four** sites via one helper; fix the
-`record_turn_boundary` id resolution — a co-equal regression fix, since `last_turn_at` is a dead
-writer today) plus deterministic unit reproductions, a
-driver-seam test, and a docs update. The session-health derivation change is small but
-load-bearing and spans four sites (one of them a second wedge route via the reprieve cap), so it
-warrants careful red-first testing rather than a Small-appetite drive-by.
+**Medium.** Three focused code edits (wire `on_stdout_event` in the runner; relocate and extend the
+`sdk_ever_output` derivation into a new runner-owned module, consumed at all four
+`session_health.py` sites; fix the `record_turn_boundary` id resolution — a co-equal regression fix,
+since `last_turn_at` is a dead writer today) plus deterministic unit reproductions, a driver-seam
+test, and a docs update. The session-health derivation change is small but load-bearing and spans
+four sites (one of them a second wedge route via the reprieve cap), so it warrants careful
+red-first testing rather than a Small-appetite drive-by.
 
 ## Prerequisites
 
@@ -240,26 +323,36 @@ None. `last_stdout_at`, `last_tool_use_at`, `last_turn_at` all already exist on 
    (mirroring `session_executor.py:1506-1509`, same fail-silent + 5s-cooldown discipline). This
    restores the per-stream-activity liveness signal the PTY teardown dropped.
 
-2. **Recognize stream activity in the derivation — all FOUR sites.** Introduce a single
-   module-level helper `_derive_sdk_ever_output(entry) -> bool` returning
-   `bool(last_tool_use_at or last_turn_at or last_stdout_at)`, and replace the inline
-   two-field expression at **all four** sites: `session_health.py:985-987`
-   (`_never_started_past_grace`), `:1127-1129` (`_has_progress`), `:1310-1312`
-   (`_tier2_reprieve_signal`), and `:2057-2059` (recovery classification). The helper must be
-   defined at module scope (before `_never_started_past_grace`, since site 3 in
-   `_tier2_reprieve_signal` also calls `_never_started_past_grace`). Semantically correct:
-   `sdk_ever_output` means "has the SDK ever produced output," and the `init`/stdout stream IS
-   output. **Post-edit assertion (critique BLOCKER gate):** `grep -n "sdk_ever_output = bool("
-   agent/session_health.py` and `grep -n "_sdk_ever_output = bool(" agent/session_health.py` must
-   BOTH return zero hits — every inline derivation is replaced by the helper. **Scope guard:** this
-   broadens the "no output ever" input at all FOUR recovery-path sites and nowhere else — site 1
+2. **Recognize stream activity in the derivation — all FOUR sites, relocated to
+   `agent/session_runner/` (owner directive, third revision).** Create
+   **`agent/session_runner/liveness.py`** exporting a single function
+   `derive_sdk_ever_output(entry) -> bool` returning
+   `bool(last_tool_use_at or last_turn_at or last_stdout_at)`. `session_health.py` **imports** this
+   function and calls it at **all four** sites — it does not define or inline the expression itself:
+   `session_health.py:985-987` (`_never_started_past_grace`), `:1127-1129` (`_has_progress`),
+   `:1310-1312` (`_tier2_reprieve_signal`), and `:2149-2151` (recovery classification — line drifted
+   from `:2057` to `:2149` per the Freshness Check re-verification above; unrelated commit
+   `a77ae27a` added ~92 lines earlier in the file). The function lives at module scope in the new
+   file (no ordering constraint from `_tier2_reprieve_signal` calling `_never_started_past_grace`,
+   since both now call the same imported function rather than each other's local helper).
+   Semantically correct: `sdk_ever_output` means "has the SDK ever produced output," and the
+   `init`/stdout stream IS output. **Post-edit assertion (critique BLOCKER gate, updated for the
+   relocation):** `grep -n "sdk_ever_output = bool(" agent/session_health.py` and
+   `grep -n "_sdk_ever_output = bool(" agent/session_health.py` must BOTH return zero hits (no
+   inline derivation left in the worker file), AND
+   `grep -n "from agent.session_runner.liveness import derive_sdk_ever_output" agent/session_health.py`
+   must return exactly one hit (single import, four call sites). **Scope guard:** this broadens the
+   "no output ever" input at all FOUR recovery-path sites and nowhere else — site 1
    `_never_started_past_grace` (never-started gate), site 2 `_has_progress` sub-check B (verified a
    recovery-path consumer: its result gates `should_recover` at `session_health.py:3136`, not any
    live turn), site 3 `_tier2_reprieve_signal` (reprieve-cap guard), site 4 the
-   `zombie_uuid_no_output` recovery classifier (`:2057`). None of the four is a mid-turn cadence
+   `zombie_uuid_no_output` recovery classifier (`:2149`). None of the four is a mid-turn cadence
    detector. Detectors that legitimately need a tool/turn cadence (per-tool timeout tiers, and
    `_has_progress` **sub-check A**'s freshness comparison — which is untouched) are NOT loosened; only
-   the presence-based "has the SDK EVER produced output" input is broadened — see No-Gos.
+   the presence-based "has the SDK EVER produced output" input is broadened — see No-Gos. The
+   relocation does not change *what* is derived, only *where* — session_health.py's behavior at all
+   four sites is byte-for-byte equivalent to CRITIQUE-pass-2's version, just via an imported call
+   instead of an inlined expression.
 
 3. **Fix the `record_turn_boundary` id resolution (co-equal regression fix, NOT defense-in-depth) —
    plumb the true `AgentSession.session_id`.** `record_turn_boundary`
@@ -301,11 +394,14 @@ Post-fix: init event → `last_stdout_at` stamped (t≈few seconds) → `sdk_eve
   write rate (mirror `liveness_writers.COOLDOWN_WINDOW_SEC = 5.0`). Expose it through **two** driver
   adapters (Element 1): a 0-arg `on_stdout_event` adapter, and a 1-arg `on_init` adapter that first
   delegates to `_on_harness_init` (preserving `persist_resume_scalars`) and then stamps.
-- Introduce `agent/session_health.py::_derive_sdk_ever_output(entry) -> bool` at module scope and
-  replace the **four** inline `bool(last_tool_use_at or last_turn_at)` / `_sdk_ever_output = bool(...)`
-  expressions (`:985`, `:1127`, `:1310`, `:2057`) with a call to it, adding `last_stdout_at`. Keep
-  the docstrings' "either per-turn field" language updated to "any stream or turn signal." Confirm
-  with the two zero-hit greps in Element 2.
+- Create **`agent/session_runner/liveness.py`** exporting `derive_sdk_ever_output(entry) -> bool`
+  (owner directive, third revision — relocated from a `session_health.py`-local helper). In
+  `agent/session_health.py`, add `from agent.session_runner.liveness import derive_sdk_ever_output`
+  and replace the **four** inline `bool(last_tool_use_at or last_turn_at)` /
+  `_sdk_ever_output = bool(...)` expressions (`:985`, `:1127`, `:1310`, `:2149`) with a call to the
+  imported function, adding `last_stdout_at` to its OR. Keep the docstrings' "either per-turn field"
+  language updated to "any stream or turn signal, derived by `agent.session_runner.liveness`."
+  Confirm with the three greps in Element 2 (two zero-hit, one single-hit-import).
 - `record_turn_boundary(session_id: str | None = None)`: if `session_id` is None fall back to
   `os.environ` (preserves the in-subprocess CLI-hook call sites); the harness worker-side call site
   in `sdk_client.py:2936` passes the true `AgentSession.session_id` plumbed from the runner
@@ -345,21 +441,25 @@ Post-fix: init event → `last_stdout_at` stamped (t≈few seconds) → `sdk_eve
 
 ## Test Impact
 
+- [ ] **`tests/unit/session_runner/test_liveness.py`** (NEW) — the `derive_sdk_ever_output` unit
+      tests over all 2^3 combinations of `last_tool_use_at`/`last_turn_at`/`last_stdout_at` live
+      here, since the function now lives in `agent/session_runner/liveness.py` (owner directive).
 - [ ] `tests/unit/test_never_started_recovery.py` (never-started + `sdk_ever_output` +
       `zombie_uuid_no_output`) — UPDATE: add a case where `last_stdout_at` is fresh and assert
-      `sdk_ever_output` derives True / no zombie verdict; verify existing cases that set
-      `last_tool_use_at`/`last_turn_at` still pass through the new helper unchanged.
+      `sdk_ever_output` derives True / no zombie verdict via the imported
+      `agent.session_runner.liveness.derive_sdk_ever_output`; verify existing cases that set
+      `last_tool_use_at`/`last_turn_at` still pass through unchanged.
 - [ ] `tests/unit/test_health_check_recovery_finalization.py` and
       `tests/unit/test_session_health_inference_removed.py` (both reference `sdk_ever_output` /
-      recovery finalization) — UPDATE: point derivation assertions at `_derive_sdk_ever_output` and
-      the 3-field OR; keep recovery-finalization semantics.
+      recovery finalization) — UPDATE: point derivation assertions at the imported
+      `derive_sdk_ever_output` and the 3-field OR; keep recovery-finalization semantics.
 - [ ] **`tests/unit/test_session_health_compacting_reprieve.py`** (Concern 5 — site-4 reprieve cap:
       references `_tier2_reprieve_signal`, `reprieve_count`, `MAX_NO_OUTPUT_REPRIEVES`) — UPDATE: add
       a case where a session past the reprieve cap but with fresh `last_stdout_at` is NOT suppressed
       (reprieve still granted), and confirm the existing "no output ever → suppress at cap" cases
       still hold when all three fields are unset.
 - [ ] `tests/unit/test_session_health_trusted_clock.py` (references `sdk_ever_output`) — UPDATE:
-      re-point any inline-derivation assertions at the helper.
+      re-point any inline-derivation assertions at the imported function.
 - [ ] `tests/unit/session_runner/test_runner_liveness.py` — UPDATE: assert `on_stdout_event` is now
       wired and stamps `last_stdout_at`; assert the `on_init` adapter still persists resume scalars
       (`_on_harness_init` not shadowed).
@@ -372,7 +472,7 @@ Post-fix: init event → `last_stdout_at` stamped (t≈few seconds) → `sdk_eve
       hook firing, not liveness); confirm it still passes.
 
 No existing tests are DELETED or REPLACED — the changes are additive to the derivation (four sites,
-one helper) and the runner wiring.
+one function, relocated) and the runner wiring.
 
 ## Rabbit Holes
 
@@ -384,6 +484,9 @@ one helper) and the runner wiring.
 - **Do NOT** attempt to distinguish "streaming useful tokens" from "streaming a spinner" — the
   never-started gate only asks "did the SDK EVER produce output," and mid-turn hang detection is a
   separate concern owned by other detectors (out of scope here).
+- **Do NOT** collapse `last_tool_use_at`/`last_turn_at`/`last_stdout_at` into a single field, and do
+  NOT touch `_confirm_subprocess_dead` or any recovery-transition kill logic — that is #1938's scope
+  (owner directive, third revision).
 
 ## Risks
 
@@ -444,6 +547,9 @@ retries. No ordering dependency on `claude_session_uuid` persistence.
 - Changing the never-started grace duration or the recovery-attempt cap. The 150s grace is not the
   bug; the missing progress signal is.
 - Reviving `agent/granite_container/` or any PTY liveness field.
+- `_confirm_subprocess_dead`, recovery-transition kill sequencing, or worktree-cleanup-vs-live-process
+  ordering — that is #1938's scope, not this plan's, even though issue comment 4901789240 surfaced a
+  related finding on the same thread (owner directive, third revision).
 - [EXTERNAL] A live `/do-sdlc` re-run of #1933/#1934 as the acceptance gate — requires the live
   worker/batch environment and is inherently non-deterministic, so it cannot serve as an in-plan
   automated gate. The deterministic unit repro is the acceptance gate; the live re-run is optional
@@ -467,8 +573,11 @@ tools (`valor-session status/telemetry`, dashboard) surface `last_stdout_at` unc
 - [ ] Update `docs/features/headless-session-runner.md` — add a "Liveness signals" subsection
       documenting that the headless runner stamps `last_stdout_at` on `init`/stdout events and that
       `sdk_ever_output` (the never-started/zombie gate AND the `_tier2_reprieve_signal` reprieve-cap
-      guard) derives from `last_tool_use_at OR last_turn_at OR last_stdout_at` via the shared
-      `_derive_sdk_ever_output` helper. Cross-reference #1843 Gap B as the PTY-era predecessor.
+      guard) derives from `last_tool_use_at OR last_turn_at OR last_stdout_at` via
+      `agent.session_runner.liveness.derive_sdk_ever_output` — the single authoritative function,
+      owned by the runner package, that `session_health.py` imports rather than re-deriving inline
+      (owner directive, 2026-07-07). Cross-reference #1843 Gap B as the PTY-era predecessor, and
+      #1938 as the sibling issue covering subprocess *kill* ownership under the same principle.
 - [ ] Update `docs/features/session-lifecycle.md` (or the session-health reference it links) where
       `zombie_uuid_no_output` / never-started is described, to reflect the 3-signal derivation.
 
@@ -479,9 +588,9 @@ Primary target: `docs/features/headless-session-runner.md`.
 Not applicable.
 
 ### Inline Documentation
-Update the `sdk_ever_output` derivation docstrings in `session_health.py` (all four sites now route
-through module-level `_derive_sdk_ever_output`, including `_tier2_reprieve_signal`) and the
-`record_turn_boundary` docstring for the new `session_id` param.
+Update the `sdk_ever_output` derivation docstrings in `session_health.py` (all four sites now call
+the imported `agent.session_runner.liveness.derive_sdk_ever_output`, including
+`_tier2_reprieve_signal`) and the `record_turn_boundary` docstring for the new `session_id` param.
 
 ## Success Criteria
 
@@ -492,10 +601,13 @@ through module-level `_derive_sdk_ever_output`, including `_tier2_reprieve_signa
   but with fresh `last_stdout_at` is NOT suppressed by `_tier2_reprieve_signal` (site 4) — verified
   by a unit test; this closes the second wedge route (critique BLOCKER).**
 - `sdk_ever_output` derives True when any of `last_tool_use_at`, `last_turn_at`, or `last_stdout_at`
-  is set — verified by `_derive_sdk_ever_output` unit tests over all combinations.
-- **All four derivation sites route through the helper: `grep -n "sdk_ever_output = bool("
+  is set — verified by `agent.session_runner.liveness.derive_sdk_ever_output` unit tests over all
+  combinations, living in `tests/unit/session_runner/test_liveness.py`.
+- **All four derivation sites route through the single imported function, owned by
+  `agent/session_runner/` (owner directive): `grep -n "sdk_ever_output = bool("
   agent/session_health.py` and `grep -n "_sdk_ever_output = bool(" agent/session_health.py` both
-  return zero hits.**
+  return zero hits, and `grep -c "from agent.session_runner.liveness import derive_sdk_ever_output"
+  agent/session_health.py` returns exactly `1`.**
 - `SessionRunner._build_driver` wires `on_stdout_event` (0-arg adapter) and an `on_init` adapter that
   still persists resume scalars; a runner unit test asserts `last_stdout_at` is stamped on
   stdout/init AND that `claude_session_uuid` persistence is unaffected.
@@ -517,18 +629,20 @@ through module-level `_derive_sdk_ever_output`, including `_tier2_reprieve_signa
 ## Step by Step Tasks
 
 ### 1. Red-first repro tests
-Write failing unit tests: (a) session-health derivation returns `sdk_ever_output=False` today when
-only `last_stdout_at` is set (documents the bug) — assert it at BOTH the never-started site and the
-`_tier2_reprieve_signal` site so the reprieve route is covered; (b) a runner test asserting
-`on_stdout_event` is wired (fails today); (c) a driver-seam test asserting a toolless fake-harness
-window fires `on_stdout_event` (Concern 4, fails today). Add the Risk-1 guard test skeleton.
+Write failing unit tests: (a) the (not-yet-existing) `agent.session_runner.liveness.derive_sdk_ever_output`
+returns False today when only `last_stdout_at` is set (documents the bug) — assert it feeds BOTH the
+never-started site and the `_tier2_reprieve_signal` site so the reprieve route is covered; (b) a
+runner test asserting `on_stdout_event` is wired (fails today); (c) a driver-seam test asserting a
+toolless fake-harness window fires `on_stdout_event` (Concern 4, fails today). Add the Risk-1 guard
+test skeleton.
 
-### 2. Extract and extend the derivation — all four sites
-Add module-level `_derive_sdk_ever_output(entry)` to `session_health.py` (before
-`_never_started_past_grace`, since `_tier2_reprieve_signal` calls the latter). Replace ALL FOUR
-inline expressions (`:985`, `:1127`, `:1310`, `:2057`), adding `last_stdout_at`. Update docstrings.
-Run the two zero-hit greps (`sdk_ever_output = bool(` and `_sdk_ever_output = bool(`) as the BLOCKER
-gate. Flip test (a) green at both sites.
+### 2. Extract and relocate the derivation — all four sites, owned by `agent/session_runner/`
+Create `agent/session_runner/liveness.py` with module-level `derive_sdk_ever_output(entry)`. In
+`session_health.py`, import it and replace ALL FOUR inline expressions (`:985`, `:1127`, `:1310`,
+`:2149`) with calls to the import, adding `last_stdout_at`. Update docstrings to point at the new
+module. Run the three-grep BLOCKER gate (two zero-hit inline-expression checks, one single-hit
+import check). Flip test (a) green at both sites; add
+`tests/unit/session_runner/test_liveness.py` for the relocated function's own unit coverage.
 
 ### 3. Wire `on_stdout_event`/`on_init` liveness in the runner (two adapters)
 Add the `_stamp_stdout_liveness` helper to `SessionRunner`. Pass a 0-arg adapter as
@@ -556,16 +670,17 @@ Update `docs/features/headless-session-runner.md` and the session-lifecycle/sess
 per the Documentation section.
 
 ### N. Final Validation
-Run the named unit tests + `ruff`. Run the two BLOCKER-gate greps (both must return zero hits).
-Confirm no mid-turn stall detector was loosened: the diff in `session_health.py` must touch ONLY the
-four `sdk_ever_output` derivation sites (now routed through `_derive_sdk_ever_output`) plus the new
-helper — the reprieve *cadence* logic and the per-tool/idle-gap detectors are unchanged; only the
-"no output ever" input to the reprieve-cap guard is broadened.
+Run the named unit tests + `ruff`. Run the three BLOCKER-gate greps (two zero-hit, one single-hit
+import). Confirm no mid-turn stall detector was loosened: the diff in `session_health.py` must touch
+ONLY the four `sdk_ever_output` derivation sites (now a single-line call to the imported
+`agent.session_runner.liveness.derive_sdk_ever_output`) plus the new import — no derivation logic
+remains inline in `session_health.py`. The reprieve *cadence* logic and the per-tool/idle-gap
+detectors are unchanged; only the "no output ever" input to the reprieve-cap guard is broadened.
 
 ## Verification
 
-- Deterministic: unit tests over `_derive_sdk_ever_output`, the runner `on_stdout_event` wiring, and
-  `record_turn_boundary(session_id=...)`.
+- Deterministic: unit tests over `agent.session_runner.liveness.derive_sdk_ever_output`, the runner
+  `on_stdout_event` wiring, and `record_turn_boundary(session_id=...)`.
 - Behavioral (manual, post-merge, optional): re-run `/do-sdlc` for #1933/#1934 and confirm the PLAN/
   CRITIQUE transition no longer wedges; watch `logs/worker.log` for `last_stdout_at` freshness and
   absence of `zombie_uuid_no_output` recovery.
