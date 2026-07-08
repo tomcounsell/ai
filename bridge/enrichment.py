@@ -25,6 +25,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Provisional/tunable: transcripts shorter than this (chars, stripped) are treated as
+# "thin" — likely music-only/silent/on-screen-only — and get a watch signpost. Grain of
+# salt; tune against real usage.
+VIDEO_WATCH_THIN_TRANSCRIPT_CHARS = int(os.getenv("VIDEO_WATCH_THIN_TRANSCRIPT_CHARS", "80"))
+
 
 async def enrich_message(
     message_text: str,
@@ -176,6 +181,16 @@ async def enrich_message(
                         logger.warning(
                             f"Enrichment: YouTube processing failed for "
                             f"{r.get('video_id')}: {r.get('error')}"
+                        )
+                    # Signpost thin transcripts (music-only/silent/on-screen-only).
+                    # Gate on `transcript` only — `context` is non-empty even on
+                    # failure, so it must never be used for this decision.
+                    transcript_text = (r.get("transcript") or "").strip()
+                    if len(transcript_text) < VIDEO_WATCH_THIN_TRANSCRIPT_CHARS:
+                        url = r.get("url") or r.get("video_id") or "the video"
+                        enriched_text += (
+                            f"\n\n[transcript thin for {url} — run valor-video-watch {url} "
+                            f"for visual grounding]"
                         )
         except Exception as e:
             logger.warning(f"Enrichment: YouTube processing failed: {e}")
