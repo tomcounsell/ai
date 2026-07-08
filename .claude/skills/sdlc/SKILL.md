@@ -150,6 +150,10 @@ For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output 
 
 **G5 applies to CRITIQUE only**, not REVIEW. Review verdicts legitimately change on unchanged diffs (CI flips, new comments, linked issues). G4 handles REVIEW non-determinism instead.
 
+**G1 open-PR step-aside (#1932):** once `pr_number` is set, G1 no longer fires — it steps aside and defers to G3, the canonical open-PR plan-stage redirect. Without this, a NEEDS REVISION/MAJOR REWORK critique verdict recorded before the PR was opened could route a shipped PR back to `/do-plan`.
+
+**G5 open-PR step-aside (#1932):** on its NEEDS_REVISION/MAJOR_REWORK branch (cached critique verdict, unchanged plan hash), G5 also steps aside once `pr_number` is set and defers to G3 instead of re-dispatching `/do-plan`. The READY_TO_BUILD branch already deferred on `pr_number` or `BUILD == completed`; this closes the same gap on the revision branch.
+
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass, cleared by `/do-plan` (Phase 4, Step 2b) after pushing the revision, and self-heals when `revision_applied: true` is in the plan frontmatter. Gated on `pr_number is None` so an already-shipped PR is never blocked.
 
 Record every dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill — this preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
@@ -169,7 +173,13 @@ The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_help
 
 ## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)
 
-**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (16 rows) against live state.
+**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (18 rows) against live state.
+
+**Row 3 open-PR step-aside (#1932):** row 3 (`NEEDS REVISION` critique → `/do-plan`) already steps aside when the critique verdict is stale (plan revised since); it now also steps aside once `pr_number` is set, so a PR that already exists never gets routed back to `/do-plan` off a stale-but-not-yet-superseded NEEDS REVISION verdict — row 7 / G3 own PR-stage routing instead.
+
+**Row 8d — crashed re-review recovery (#1932):** if `/do-pr-review` was dispatched after PATCH completed but crashed before persisting a REVIEW verdict, REVIEW is left at either `failed` (dead-ends at `Blocked`) or `completed` (silently misroutes to row 9's `/do-docs`, skipping review). Row 8d matches on the *absence* of a recorded verdict plus `last_dispatched_skill == /do-pr-review` (marker-agnostic — it does not require a specific REVIEW value) and re-dispatches `/do-pr-review`. Ordered before row 9 so it intercepts both crash markers. Loop-bound by G4.
+
+**Row 9 verdict gate (#1932):** row 9 (`/do-docs`) now requires a recorded `APPROVED` review verdict, not just `REVIEW == completed`. Previously REVIEW could be marked `completed` with no verdict ever recorded (the row 8d crash state above), which silently misrouted to `/do-docs`, skipping review entirely. Row 8d now owns that no-verdict state instead — the two rows are disjoint by verdict, not by table-position luck.
 
 ```bash
 # Get the next dispatch decision

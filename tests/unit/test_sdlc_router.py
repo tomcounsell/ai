@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from agent.sdlc_router import (
     MAX_PLAN_REVISING_DISPATCHES,
+    MAX_SAME_STAGE_DISPATCHES,
     SKILL_DO_BUILD,
     SKILL_DO_DOCS,
     SKILL_DO_PLAN,
@@ -23,8 +24,11 @@ from agent.sdlc_router import (
     Dispatch,
     _rule_pr_exists_no_review,
     _rule_review_approved_docs_not_done,
+    build_stage_snapshot,
+    compute_same_stage_count,
     decide_next_dispatch,
     guard_g7_plan_revising,
+    record_dispatch,
 )
 
 # ---------------------------------------------------------------------------
@@ -744,3 +748,169 @@ class TestRow9VerdictGate:
         states = _base_states(REVIEW=STATUS_COMPLETED, DOCS="pending")
         meta = _base_meta(pr_number=9101, latest_review_verdict="APPROVED")
         assert _rule_review_approved_docs_not_done(states, meta, {}) is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #1932: G4 loop-bound coverage for row 8d. compute_same_stage_count's
+# D5 self-clearing behavior (see agent/sdlc_router.py) means G4 only latches
+# closed when the SAME stage_snapshot repeats across consecutive dispatches.
+# These tests build REAL dispatch history via record_dispatch() + derive the
+# streak via compute_same_stage_count() — never hand-set
+# meta["same_stage_dispatch_count"] directly — so the assertions actually
+# exercise the loop-detection machinery row 8d depends on.
+# ---------------------------------------------------------------------------
+
+
+def _row8d_crash_states(review_status: str = STATUS_COMPLETED, docs: str = "pending") -> dict:
+    """A stage_states dict matching row 8d's crash predicate.
+
+    PATCH completed, REVIEW terminal (completed or failed) with no recorded
+    verdict, PR open — the #1932 gap (a) crash state.
+    """
+    return _base_states(
+        PATCH=STATUS_COMPLETED,
+        REVIEW=review_status,
+        DOCS=docs,
+    )
+
+
+def _current_snapshot_for(states: dict, pr_number: int) -> dict:
+    """Build the current-turn stage_snapshot the same way the router does."""
+    view = {k: v for k, v in states.items() if k != "_sdlc_dispatches"}
+    return build_stage_snapshot(view, meta={"pr_number": pr_number})
+
+
+class TestRow8dLoopBound:
+    """D5-aware G4 loop-bound test for row 8d (#1932).
+
+    A genuinely stable crash — the review skill crashes the same way every
+    turn, leaving an identical stage_snapshot — must eventually trip G4
+    rather than looping forever on row 8d.
+    """
+
+    def test_stable_snapshot_reaches_cap_and_g4_blocks(self):
+        """Identical stage_snapshot across MAX_SAME_STAGE_DISPATCHES turns: G4 blocks.
+
+        Records MAX_SAME_STAGE_DISPATCHES - 1 history entries, then derives
+        the count for the *impending* (about-to-dispatch) turn via
+        ``current_snapshot`` — mirroring how the router computes the count
+        before making its Nth dispatch. That impending turn is the one that
+        should trip G4.
+        """
+        pr_number = 1234
+        states = _row8d_crash_states()
+        for _ in range(MAX_SAME_STAGE_DISPATCHES - 1):
+            record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=pr_number)
+
+        current_snapshot = _current_snapshot_for(states, pr_number)
+        count, skill = compute_same_stage_count(states, current_snapshot=current_snapshot)
+
+        # (i) the derived count reaches the cap — D5 does NOT reset it because
+        # the snapshot never changed across any of the recorded dispatches.
+        assert count == MAX_SAME_STAGE_DISPATCHES
+        assert skill == SKILL_DO_PR_REVIEW
+
+        meta = _base_meta(
+            pr_number=pr_number,
+            last_dispatched_skill=SKILL_DO_PR_REVIEW,
+            latest_review_verdict=None,
+            same_stage_dispatch_count=count,
+        )
+        result = decide_next_dispatch(states, meta, {})
+
+        # (ii) the router blocks on G4 rather than re-dispatching row 8d.
+        assert isinstance(result, Blocked)
+        assert result.guard_id == "G4"
+        assert not (isinstance(result, Dispatch) and result.row_id == "8d")
+
+    def test_snapshot_move_resets_streak_and_g4_does_not_block(self):
+        """Contrast case: the snapshot moves between two consecutive dispatches.
+
+        D5 resets the streak on the divergent turn, so the derived count never
+        reaches the cap and G4 stays silent — the router keeps routing to row
+        8d instead of escalating.
+        """
+        pr_number = 1234
+        states = _row8d_crash_states()
+        for _ in range(MAX_SAME_STAGE_DISPATCHES - 1):
+            record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=pr_number)
+        # Move the snapshot (an unrelated stage_states field changes) before
+        # the final recorded dispatch, breaking the identical-snapshot streak.
+        states["DOCS"] = "in_progress"
+        record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=pr_number)
+
+        current_snapshot = _current_snapshot_for(states, pr_number)
+        count, skill = compute_same_stage_count(states, current_snapshot=current_snapshot)
+
+        assert count < MAX_SAME_STAGE_DISPATCHES
+        assert skill == SKILL_DO_PR_REVIEW
+
+        meta = _base_meta(
+            pr_number=pr_number,
+            last_dispatched_skill=SKILL_DO_PR_REVIEW,
+            latest_review_verdict=None,
+            same_stage_dispatch_count=count,
+        )
+        result = decide_next_dispatch(states, meta, {})
+
+        assert not (isinstance(result, Blocked) and result.guard_id == "G4")
+        assert result == Dispatch(
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Review dispatch crashed without recording a verdict — re-run review",
+            row_id="8d",
+        )
+
+
+class TestRow8dChurnLimitation:
+    """KNOWN, DEFERRED limitation (#1932): G4 does not bound review-marker churn.
+
+    D5 resets the same-stage streak whenever the stage_snapshot changes
+    between consecutive dispatches. Row 8d's predicate accepts REVIEW in
+    either STATUS_COMPLETED or STATUS_FAILED (both are "terminal, no verdict
+    recorded" crash markers). If the crashed /do-pr-review skill happened to
+    alternate which terminal marker it left behind on each retry, the
+    snapshot would move on every turn, D5 would reset the streak every turn,
+    and G4 would never reach its cap — the router would keep re-dispatching
+    row 8d indefinitely for that specific churn pattern.
+
+    This is NOT a bug this fix (#1932) is required to close: the expected
+    real-world crash mode is a STABLE marker (the same partial-write leaves
+    the same value every time — see TestRow8dLoopBound above, which IS
+    bounded by G4). Bounding review-marker churn specifically was called out
+    as out of scope in the plan's No-Gos. This test exists to document the
+    limitation so a future change to G4/D5 does not silently reintroduce it
+    without noticing the tradeoff.
+    """
+
+    def test_alternating_review_marker_never_reaches_g4_cap(self):
+        pr_number = 5678
+        states = _base_states(PATCH=STATUS_COMPLETED, DOCS="pending")
+        review_values = [STATUS_COMPLETED, STATUS_FAILED, STATUS_COMPLETED]
+        assert len(review_values) == MAX_SAME_STAGE_DISPATCHES
+        for value in review_values:
+            states["REVIEW"] = value
+            record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=pr_number)
+
+        current_snapshot = _current_snapshot_for(states, pr_number)
+        count, skill = compute_same_stage_count(states, current_snapshot=current_snapshot)
+
+        # The streak never reaches the cap — D5 resets it on every alternation.
+        assert count < MAX_SAME_STAGE_DISPATCHES
+        assert skill == SKILL_DO_PR_REVIEW
+
+        meta = _base_meta(
+            pr_number=pr_number,
+            last_dispatched_skill=SKILL_DO_PR_REVIEW,
+            latest_review_verdict=None,
+            same_stage_dispatch_count=count,
+        )
+        result = decide_next_dispatch(states, meta, {})
+
+        # G4 does NOT bound this churn case — the router keeps re-dispatching
+        # row 8d rather than escalating. See class docstring for why this is
+        # an accepted, documented tradeoff rather than a regression.
+        assert result == Dispatch(
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Review dispatch crashed without recording a verdict — re-run review",
+            row_id="8d",
+        )
