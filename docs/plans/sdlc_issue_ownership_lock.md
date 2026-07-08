@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -338,8 +338,10 @@ Collapsed from four named agents to two (critique NIT — Scope & Value: a Mediu
 
 ---
 
-## Open Questions
+## Open Questions Resolution
 
-1. Should `ISSUE_LOCK_TTL_SECONDS` default to 300s (5x heartbeat interval), or does operational history from `claim_pending_run`'s 30s window suggest a different multiplier is safer for this longer-lived lock?
-2. When a session is blocked by `ISSUE_LOCKED`, should it also offer to *attach* (read-only status view of the owning session via `valor-session status --id <owner_session_id>`) as part of the automated response, or is surfacing the owner's session id to the human enough for v1 (with attach-mode as a possible follow-up)?
-3. Does the worker's crash-recovery revival path (`reflections/crash_recovery.py::run_crash_recovery()`) need an explicit pre-revival lock check (skip reviving a terminal session if a live peer already owns the issue), or is checking at the subsequent `ensure_session()`/`record_dispatch_for_session()` call sufficient to catch it before any real work happens?
+Three open questions were carried from initial drafting. Resolved before build using the plan's own stated defaults (all are tunable/reversible implementation details, not business decisions):
+
+1. **`ISSUE_LOCK_TTL_SECONDS` default:** Keep 300s (5x the 60s heartbeat interval) as specified in Technical Approach. It's env-overridable, so if operational experience shows it's too tight (mirroring `claim_pending_run`'s 30s window being sized for a much shorter-lived claim), it can be tuned without a code change.
+2. **Attach-mode on `ISSUE_LOCKED`:** v1 surfaces only the owner's `session_id` in the blocked response, per the plan's own suggested fallback. Read-only attach (`valor-session status --id <owner_session_id>`) is a natural follow-up but not required to close this issue's acceptance criteria.
+3. **Pre-revival lock check in `crash_recovery.py`:** Not required as a separate gate. `touch_issue_lock()` is already checked at `ensure_session()` (the cold-start path a revived session goes through) and at `record_dispatch_for_session()` (before any stage dispatch) — per the Race 1 analysis, both checkpoints fire before any real BUILD-or-later work happens, so a revived terminal session that finds the issue already owned steps aside at the same checkpoint a genuinely new session would.
