@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from agent.hooks.liveness_writers import is_in_cooldown
 from agent.session_runner.adapter import (
     RunSummary,
     SessionRunnerAdapter,
@@ -116,14 +117,6 @@ MAX_COMPLIANCE_NUDGES: int = int(os.environ.get("SESSION_RUNNER_MAX_COMPLIANCE_N
 # Provisional/tunable — override with SESSION_RUNNER_DRIVER_BACKSTOP_MARGIN_S.
 DRIVER_BACKSTOP_MARGIN_S: float = float(
     os.environ.get("SESSION_RUNNER_DRIVER_BACKSTOP_MARGIN_S", "120.0")
-)
-
-# Per-session cooldown bounding how often _stamp_stdout_liveness writes
-# last_stdout_at to Redis. Mirrors agent.hooks.liveness_writers'
-# COOLDOWN_WINDOW_SEC discipline (issue #1935). Provisional/tunable —
-# override with SESSION_RUNNER_STDOUT_LIVENESS_COOLDOWN_S.
-STDOUT_LIVENESS_COOLDOWN_S: float = float(
-    os.environ.get("SESSION_RUNNER_STDOUT_LIVENESS_COOLDOWN_S", "5.0")
 )
 
 # Per-entry cap for the turn-history mirror text (bounded observability +
@@ -372,15 +365,14 @@ class SessionRunner:
         self._dev_agent_id: str | None = None
         self._last_dev_history_text: str | None = None
         self._claude_version: str | None = None
-        # Per-session-keyed cooldown state for _stamp_stdout_liveness (issue
-        # #1935). Keyed by session_id (not a bare instance scalar) so the
-        # discipline is explicit and identical in shape to
-        # agent.hooks.liveness_writers' per-session cooldown map — even
-        # though one SessionRunner instance only ever handles one
-        # session_id, keying by it here means two concurrently running
-        # SessionRunner instances (distinct session_ids) can never suppress
-        # each other's stamp (CRITIQUE pass 3 BLOCKER fix).
-        self._stdout_liveness_cooldown: dict[str, float] = {}
+        # _stamp_stdout_liveness's cooldown state lives entirely in
+        # agent.hooks.liveness_writers' module-level bucket map (keyed by
+        # f"{session_id}:stdout"), not on this instance — no per-instance
+        # cooldown dict is needed since a SessionRunner is 1:1 with a single
+        # session_id for its lifetime and the shared bucket key already
+        # prevents two concurrently running SessionRunner instances
+        # (distinct session_ids) from suppressing each other's stamp
+        # (CRITIQUE pass 3 BLOCKER fix, preserved via bucket-keying).
 
         if steering_pop_fn is None:
             steering_pop_fn = self._default_steering_pop
@@ -503,19 +495,18 @@ class SessionRunner:
         grace window.
 
         Fail-silent (never raises — a liveness-write failure must never
-        crash or wedge the turn) with a per-session-keyed cooldown
-        (``STDOUT_LIVENESS_COOLDOWN_S``, mirroring
-        ``agent.hooks.liveness_writers.COOLDOWN_WINDOW_SEC``'s discipline)
-        bounding the Redis write rate on a chatty stdout stream (Risk 2).
+        crash or wedge the turn) with a per-session-keyed cooldown bounding
+        the Redis write rate on a chatty stdout stream (Risk 2). Reuses
+        ``agent.hooks.liveness_writers.is_in_cooldown`` (the same
+        lock-protected, ``COOLDOWN_WINDOW_SEC``-bound bucket map the CLI
+        hooks already share) under a distinct ``f"{session_id}:stdout"``
+        bucket key, instead of maintaining a second cooldown implementation.
         """
         session_id = str(getattr(self._agent_session, "session_id", "") or "")
         if not session_id:
             return
-        now_mono = time.monotonic()
-        last = self._stdout_liveness_cooldown.get(session_id)
-        if last is not None and (now_mono - last) < STDOUT_LIVENESS_COOLDOWN_S:
+        if is_in_cooldown(f"{session_id}:stdout", time.time()):
             return
-        self._stdout_liveness_cooldown[session_id] = now_mono
         try:
             if self._agent_session is not None:
                 self._agent_session.last_stdout_at = datetime.now(tz=UTC)

@@ -49,12 +49,20 @@ def _reset_cooldown_for_tests() -> None:
         _last_write_at.clear()
 
 
-def _is_in_cooldown(session_id: str, now: float) -> bool:
+def is_in_cooldown(bucket_key: str, now: float) -> bool:
+    """Check-and-arm a cooldown bucket keyed by ``bucket_key``.
+
+    Public so callers outside this module (e.g. the headless session runner's
+    stdout-liveness stamp) can share the same lock-protected, per-bucket
+    cooldown discipline instead of reimplementing it. Returns True if a prior
+    write landed within :data:`COOLDOWN_WINDOW_SEC`; otherwise arms the
+    bucket with ``now`` and returns False.
+    """
     with _lock:
-        prev = _last_write_at.get(session_id)
+        prev = _last_write_at.get(bucket_key)
         if prev is not None and (now - prev) < COOLDOWN_WINDOW_SEC:
             return True
-        _last_write_at[session_id] = now
+        _last_write_at[bucket_key] = now
     return False
 
 
@@ -112,7 +120,7 @@ def record_tool_boundary(*, tool_name: str | None, clear: bool) -> bool:
     # window and leave `current_tool_name` populated, producing false-positive
     # tool-timeout recoveries. PreToolUse (clear=False) keeps the cooldown so
     # rapid-fire tool calls don't thrash the field.
-    if not clear and _is_in_cooldown(session_id, now):
+    if not clear and is_in_cooldown(session_id, now):
         return False
 
     name_to_write: str | None = None if clear else (tool_name or None)

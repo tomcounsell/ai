@@ -229,10 +229,11 @@ async def test_driver_subprocess_exception_classified_not_raised(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _make_stdout_liveness_runner(session_id: str, *, harness_fn=None):
+def _make_stdout_liveness_runner(session_id: str, *, harness_fn=None, **runner_kwargs):
     """Build a real SessionRunner via _build_driver (no injected `driver=`),
     so the wiring under test (the runner's own on_stdout_event/on_init
-    adapters) actually runs."""
+    adapters) actually runs. Extra ``runner_kwargs`` (e.g. ``turn_timeout_s``,
+    ``term_grace_s``) pass straight through to ``SessionRunner``."""
     session = FakeSession()
     session.session_id = session_id
 
@@ -248,6 +249,7 @@ def _make_stdout_liveness_runner(session_id: str, *, harness_fn=None):
         working_dir="/tmp/wd",
         harness_fn=harness_fn,
         steering_pop_fn=lambda: [],
+        **runner_kwargs,
     )
     return runner, session
 
@@ -370,15 +372,23 @@ def test_stamp_stdout_liveness_noop_without_session_id():
 # --------------------------------------------------------------------------
 
 
-async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(tmp_path):
+async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(monkeypatch):
     """A subprocess that streams `init` (real output — last_stdout_at gets
-    stamped) and then hangs forever must NOT be caught by the never-started
-    gate (it correctly does not fire, since sdk_ever_output is now True) —
-    the actual backstop is the driver's own whole-turn deadline
-    (asyncio.wait_for -> outcome.hung=True / exit_reason=headless_turn_timeout).
+    stamped via the production SessionRunner._on_init_composed ->
+    _stamp_stdout_liveness path) and then hangs forever must NOT be caught by
+    the never-started gate (it correctly does not fire, since sdk_ever_output
+    is now True) — the actual backstop is the driver's own whole-turn
+    deadline (asyncio.wait_for -> outcome.hung=True /
+    exit_reason=headless_turn_timeout).
+
+    Built via ``_make_stdout_liveness_runner`` (like its neighbors) so this
+    exercises the real ``SessionRunner``/``_build_driver``/
+    ``_on_init_composed``/``_stamp_stdout_liveness`` wiring, not a hand-rolled
+    on_init stand-in.
     """
     from datetime import UTC, datetime, timedelta
 
+    import agent.session_runner.runner as runner_module
     from agent.session_health import _never_started_past_grace
 
     async def _init_then_hang(message, working_dir, **kwargs):
@@ -388,30 +398,29 @@ async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(
         await asyncio.sleep(30)  # never resolves within the tiny turn budget
         return "never reached"
 
-    session = FakeSession()
-    session.session_id = "sess-post-init-hang"
+    # Collapse the driver-backstop margin _build_driver adds on top of the
+    # role timeout so the tiny turn_timeout_s below actually bounds the
+    # driver's own asyncio.wait_for within this test's lifetime.
+    monkeypatch.setattr(runner_module, "DRIVER_BACKSTOP_MARGIN_S", 0.0)
 
-    def _on_init(data: dict) -> None:
-        # Mirrors what SessionRunner._on_init_composed does: stamp
-        # last_stdout_at unconditionally after the init event lands.
-        session.last_stdout_at = datetime.now(tz=UTC)
-
-    # Direct HeadlessRoleDriver construction (not via SessionRunner) so the
-    # driver's own turn_timeout_s is exactly the tiny value under test,
-    # without the runner's DRIVER_BACKSTOP_MARGIN_S padding.
-    driver = HeadlessRoleDriver(
-        role="pm",
-        session_id=session.session_id,
-        working_dir=str(tmp_path),
-        turn_timeout_s=0.05,
+    runner, session = _make_stdout_liveness_runner(
+        "sess-post-init-hang",
         harness_fn=_init_then_hang,
-        on_init=_on_init,
+        turn_timeout_s=0.05,
+        term_grace_s=0.0,
     )
+    # Resume-scalar persistence is covered by
+    # test_build_driver_on_init_composes_resume_persist_and_stamp; stub it
+    # here so this test stays focused on the liveness stamp + turn-deadline
+    # path under test.
+    monkeypatch.setattr(runner._adapter, "persist_resume_scalars", lambda **kw: None)
 
-    outcome = await driver.run_turn("go")
+    outcome = await runner._driver.run_turn("go")
 
-    # The init event's liveness stamp landed — real output was produced.
+    # The init event's liveness stamp landed via the real production path —
+    # real output was produced.
     assert session.last_stdout_at is not None
+    assert ["last_stdout_at"] in session.saved_fields
 
     # A session whose last_stdout_at is fresh must NOT be flagged by the
     # never-started gate, even though this simulated session is well past
