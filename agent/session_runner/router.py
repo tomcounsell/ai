@@ -20,7 +20,11 @@ This module also owns the exit-classification tables: which
 ``exit_reason`` values are clean, which trigger the wrap-up guard, and which
 are anomalies. Historical vocabulary (``pm_complete`` / ``pm_user`` /
 ``dev_hang`` ...) is preserved for telemetry continuity; only the PTY-only
-producers (``startup_unresolved``, plateau) have no place here.
+producers (``startup_unresolved``, plateau) have no place here. ``pm_user``
+is a real ``[/user]`` answer the PM chose to deliver; ``pm_needs_human`` is
+a runner-forwarded needs-input prompt (a ``needs_human`` hook edge firing on
+an otherwise-unroutable turn) — both are clean exits but distinguishable
+downstream.
 """
 
 from __future__ import annotations
@@ -149,6 +153,7 @@ CLEAN_EXIT_REASONS = frozenset(
     {
         "pm_complete",
         "pm_user",
+        "pm_needs_human",
         "pm_floor_delivered",
         "steer_abort",
     }
@@ -162,6 +167,7 @@ WRAPUP_ELIGIBLE_EXIT_REASONS = frozenset(
     {
         "pm_complete",
         "pm_user",
+        "pm_needs_human",
         "pm_max_turns",
         "pm_floor_delivered",
     }
