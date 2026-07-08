@@ -23,6 +23,10 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 5. **ALWAYS record the dispatch before spawning the subagent** — this preserves the G4 oscillation signal even if the subagent crashes.
 6. **ALWAYS dispatch with `run_in_background: false`, never end the turn waiting on a background child.** This skill runs in a forked context (`context: fork`) that gets exactly one turn. The Agent tool defaults to background execution — it returns immediately and notifies later. A fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork reports "running in the background, I'll continue when it completes" and then never does (issue #1915). Every stage subagent, including both halves of a `multi` dispatch, must be spawned with `run_in_background: false` so its result is in hand before the loop advances.
 
+## Worktree & Branch Ownership
+
+Slug identity always wins: each issue's fork exclusively owns `.worktrees/{slug}` and branch `session/{slug}`, derived once from the issue's slug and reused by every stage subagent for that issue. Do NOT allocate a separate `.worktrees/sdlc-{N}` lane per issue or per supervision run — that lane-allocation pattern is dropped because nothing in the pipeline reads or respects it, and it was the root cause of a cross-issue worktree/branch conflict in a prior SDLC batch (issue #1915). This is a documentation-only rule: `agent/worktree_manager.py` and `agent/agent_session_queue.py::resolve_branch_for_stage` are unchanged and remain the single source of truth for slug→worktree→branch derivation — no override seam exists or is needed.
+
 ## Stage→Model Dispatch Table
 
 Mirrors the engineer persona's table (`config/personas/engineer.md`) — the local equivalent of `valor-session create --model`.

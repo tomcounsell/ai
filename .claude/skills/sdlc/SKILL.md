@@ -236,6 +236,10 @@ Do NOT restart from scratch if prior stages are already complete.
 6. **NEVER commit to main** -- all code goes to `session/{slug}` branches
 7. **NEVER loop** -- invoke one sub-skill, then return. The PM session handles progression.
 
+## Worktree & Branch Ownership
+
+Slug identity always wins. Every issue's fork owns exactly one worktree/branch pair — `.worktrees/{slug}` and `session/{slug}` — derived once from the issue's slug and shared by every stage dispatched for that issue (see Hard Rule 6 above: all code goes to `session/{slug}`). Supervisors (`/do-sdlc`, PM sessions) must NOT allocate a separate `.worktrees/sdlc-{N}` lane per issue or per run: that pattern is dropped because nothing downstream in the pipeline reads or honors it, and it was the root cause of a cross-issue worktree/branch conflict in a prior SDLC batch (issue #1915). This is a documentation-only decision — `agent/worktree_manager.py` and `agent/agent_session_queue.py::resolve_branch_for_stage` are unchanged; the existing slug→worktree→branch derivation already is the single source of truth, and no override seam is being introduced.
+
 ## Pipeline Stages Reference
 
 Pipeline state transitions are defined in `agent/pipeline_graph.py` (state-machine bookkeeping: which stage is next-ready when one completes). Dispatch logic is defined in `agent/sdlc_router.py` (`decide_next_dispatch`). Both are accessed at runtime via `sdlc-tool`. The table below is for human readability only.
