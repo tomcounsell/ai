@@ -178,12 +178,12 @@ No agent integration required — `scripts/pr_shape_classify.py` is invoked by t
 
 ## Success Criteria
 
-- [ ] `classify()` returns `docs-only` for a diff touching only `.env.example` (new test `test_docs_only_env_example` passes).
-- [ ] A diff touching `.env.example` + any `.py` file does NOT classify as a safe shape — it returns `mixed` (new test `test_env_example_plus_py_is_mixed_not_safe` passes).
-- [ ] Consideration 2 (completeness-check coverage) is answered in this plan's Research section: the check runs only at `/update` time, is non-fatal on missing comments, and no merge-gate coverage is lost — risk accepted.
-- [ ] `DOCS_ONLY_GLOBS` contains the literal `.env.example` (not a `.env*` wildcard).
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`) — `docs/features/pr-shape-aware-merge-gates.md`.
+- [x] `classify()` returns `docs-only` for a diff touching only `.env.example` (new test `test_docs_only_env_example` passes).
+- [x] A diff touching `.env.example` + any `.py` file does NOT classify as a safe shape — it returns `mixed` (new test `test_env_example_plus_py_is_mixed_not_safe` passes).
+- [x] Consideration 2 (completeness-check coverage) is answered in this plan's Research section: the check runs only at `/update` time, is non-fatal on missing comments, and no merge-gate coverage is lost — risk accepted.
+- [x] `DOCS_ONLY_GLOBS` contains the literal `.env.example` (not a `.env*` wildcard).
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`) — `docs/features/pr-shape-aware-merge-gates.md`.
 
 ## Team Orchestration
 
