@@ -41,6 +41,39 @@ logger = logging.getLogger(__name__)
 ORPHAN_AGE_SECONDS = 600
 
 
+def _touch_lock_before_return(issue_number: int, session_id: str) -> dict | None:
+    """Touch the issue-level SDLC ownership lock before ensure_session() returns.
+
+    Called immediately before EVERY return point in ensure_session() (issue
+    #1954) so no branch -- early-return or create-and-claim -- can skip the
+    lock check. Ownership is compared by this process's holder_token, not by
+    session_id, since two independent live processes can resolve the
+    identical deterministic ``sdlc-local-{N}`` session_id for the same issue
+    (see models.session_lifecycle.touch_issue_lock module note).
+
+    Returns:
+        A blocked-shape dict (``{"blocked": True, "reason": "ISSUE_LOCKED",
+        "owner_session_id": ...}``) if a different live session holds the
+        lock. ``None`` if the lock was acquired/renewed by this process (or
+        issue_number is falsy, which fails open).
+    """
+    from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+    lock_result = touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+    if not lock_result.acquired:
+        logger.debug(
+            "sdlc_session_ensure: issue #%s lock held by a different session (%s) -- blocked",
+            issue_number,
+            lock_result.owner_session_id,
+        )
+        return {
+            "blocked": True,
+            "reason": "ISSUE_LOCKED",
+            "owner_session_id": lock_result.owner_session_id,
+        }
+    return None
+
+
 def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
     """Ensure a local AgentSession exists for the given issue number.
 
@@ -113,6 +146,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                             env_issue_url = getattr(resolved, "issue_url", None) or ""
                             if env_issue_url.endswith(f"/issues/{issue_number}"):
                                 # Legitimate bridge case — true no-op, no detour.
+                                blocked = _touch_lock_before_return(issue_number, env_session_id)
+                                if blocked is not None:
+                                    return blocked
                                 return {"session_id": env_session_id, "created": False}
                             # Env session is live but does NOT own this issue.
                             # Prefer an existing issue-scoped session if one
@@ -124,6 +160,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                             if owned is not None:
                                 owned_id = getattr(owned, "session_id", None)
                                 if owned_id:
+                                    blocked = _touch_lock_before_return(issue_number, owned_id)
+                                    if blocked is not None:
+                                        return blocked
                                     return {"session_id": owned_id, "created": False}
                             # No issue-scoped session yet — fall through to the
                             # legacy issue lookup + create path. (Do NOT return
@@ -138,6 +177,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if existing:
             session_id = getattr(existing, "session_id", None)
             if session_id:
+                blocked = _touch_lock_before_return(issue_number, session_id)
+                if blocked is not None:
+                    return blocked
                 return {"session_id": session_id, "created": False}
 
         # No existing session — create one
@@ -149,6 +191,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         try:
             existing_by_id = list(AgentSession.query.filter(session_id=local_session_id))
             if existing_by_id:
+                blocked = _touch_lock_before_return(issue_number, local_session_id)
+                if blocked is not None:
+                    return blocked
                 return {"session_id": local_session_id, "created": False}
         except Exception:
             pass
@@ -157,6 +202,12 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         kwargs = {}
         if issue_url:
             kwargs["issue_url"] = issue_url
+        # Write-once mirror field (issue #1954): issue_number is set ONLY here,
+        # at session creation. It is never re-written on the four early-return
+        # (continuing-session) branches above -- see the module note on
+        # touch_issue_lock() for why ownership itself is never compared via
+        # this field (or session_id).
+        kwargs["issue_number"] = issue_number
 
         # Fix A (issue #1741): populate the originating intent so the PM prime has a real
         # goal anchor. Without this, message_text=None propagates to the executor and the
@@ -211,6 +262,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             logger.debug(f"sdlc_session_ensure: transition_status failed: {e}")
             # Session is created but in pending state — still usable
 
+        blocked = _touch_lock_before_return(issue_number, local_session_id)
+        if blocked is not None:
+            return blocked
         return {"session_id": local_session_id, "created": True}
 
     except Exception as e:
