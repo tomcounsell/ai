@@ -1036,12 +1036,18 @@ def _rule_review_crashed_after_dispatch(stage_states: dict, meta: dict, context:
     recorded verdict plus ``last_dispatched_skill == /do-pr-review``, not on a
     specific REVIEW marker value, since the crash can leave either marker.
 
-    Disjoint from neighboring rows via explicit step-asides:
+    Disjoint from neighboring rows by construction (no defensive re-checks
+    needed — mirrors the row-8c treatment in bb4366a4):
       - Row 7 (``_rule_pr_exists_no_review``) owns REVIEW in
-        (None, pending, ready) with no verdict — step aside if it matches.
+        (None, pending, ready) with no verdict. The earlier
+        ``stage_states.get("REVIEW") not in (STATUS_COMPLETED,
+        STATUS_FAILED)`` restriction already excludes that band, so row 7's
+        territory can never reach this point.
       - Row 8b (``_rule_patch_applied_after_review``) owns the case where the
-        last dispatch was ``/do-patch`` (not ``/do-pr-review``) — step aside
-        if it matches.
+        last dispatch was ``/do-patch`` (not ``/do-pr-review``). The earlier
+        ``last != SKILL_DO_PR_REVIEW`` restriction already pins
+        ``last_dispatched_skill`` to ``/do-pr-review``, so row 8b's territory
+        can never reach this point.
       - Row 8c (``_rule_review_in_progress_no_verdict``) owns
         REVIEW == in_progress. No separate step-aside line is needed here:
         the earlier ``stage_states.get("REVIEW") not in (STATUS_COMPLETED,
@@ -1069,14 +1075,6 @@ def _rule_review_crashed_after_dispatch(stage_states: dict, meta: dict, context:
         return False
     last = meta.get("last_dispatched_skill") or ""
     if last != SKILL_DO_PR_REVIEW:
-        return False
-    # Step aside for rows 7 and 8b's territory (see docstring). Row 8c's
-    # REVIEW == in_progress territory is already excluded by the earlier
-    # (STATUS_COMPLETED, STATUS_FAILED) restriction, so no separate check
-    # is needed here.
-    if _rule_pr_exists_no_review(stage_states, meta, context):
-        return False
-    if _rule_patch_applied_after_review(stage_states, meta, context):
         return False
     return True
 
