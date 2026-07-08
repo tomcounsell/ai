@@ -358,6 +358,10 @@ class TestIsNonCleanRunnerExit:
             # Clean exits → False
             ("pm_complete", False),
             ("pm_user", False),
+            # pm_needs_human: runner-forwarded needs-input prompt (needs_human
+            # hook edge on an unroutable turn) — distinct from pm_user, still
+            # clean (issue #1922).
+            ("pm_needs_human", False),
             # pm_floor_delivered: wrap-up guard delivered PM's real (prefix-less)
             # last message — a genuine delivery, not a canned fallback (#1719).
             ("pm_floor_delivered", False),
@@ -401,6 +405,9 @@ class TestReactionGating:
             ("pm_complete", False, False),
             ("pm_complete", True, False),
             ("pm_user", False, False),
+            # pm_needs_human: runner-forwarded needs-input prompt, clean like
+            # pm_user (issue #1922).
+            ("pm_needs_human", True, False),
             ("pm_floor_delivered", True, False),
             ("pm_floor_delivered", False, False),
             # Non-clean exits → REACTION_ERROR (regardless of delivery)
@@ -502,6 +509,7 @@ class TestRunnerFinalStatus:
             (None, "turn_timeout", "failed"),
             (None, "pm_max_turns", "failed"),
             (None, "pm_complete", "completed"),
+            (None, "pm_needs_human", "completed"),
             (None, "steer_abort", "completed"),
             (None, None, "completed"),
             (RuntimeError("boom"), "pm_complete", "failed"),
