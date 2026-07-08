@@ -277,18 +277,42 @@ class TestDoBuildPositiveAssertions:
         )
 
     def test_pr_guard_checks_gh_exit_code_instead_of_failing_open(self):
-        """The `gh pr list --head` guard must check gh's own exit status (`if !
-        EXISTING_PR=$(...)`) rather than only inspecting whether the captured
-        variable is empty. A blind `EXISTING_PR=$(...)` with no exit-code check
-        fails OPEN on a gh error (auth/network/rate-limit): an empty variable
-        looks identical to 'no PR found', so the script falls through to `gh pr
-        create` and risks a duplicate PR precisely when the lookup is unreliable."""
+        """The `gh pr list --head` guard must check gh's own exit status
+        (`gh_exit=$?` captured immediately after the assignment) rather than
+        only inspecting whether the captured variable is empty. A blind
+        `EXISTING_PR=$(...)` with no exit-code check fails OPEN on a gh error
+        (auth/network/rate-limit): an empty variable looks identical to 'no PR
+        found', so the script falls through to `gh pr create` and risks a
+        duplicate PR precisely when the lookup is unreliable.
+
+        Note: `if ! EXISTING_PR=$(...); then gh_exit=$?; ...` is NOT a valid
+        form here — bash's `!` negates the compound condition's exit status,
+        so `$?` inside the `then` block reflects the negation (always 0), not
+        gh's real exit code. The guard must capture `$?` immediately after the
+        plain assignment, before any other command runs.
+        """
         text = DO_BUILD_PR_AND_CLEANUP.read_text(encoding="utf-8")
-        assert "if ! EXISTING_PR=$(gh pr list --head" in text, (
-            f"{DO_BUILD_PR_AND_CLEANUP}: expected the dedup guard to capture gh's "
-            "exit status via 'if ! EXISTING_PR=$(gh pr list --head ...)' and abort "
-            "on failure, instead of a blind assignment that fails open into "
-            "'gh pr create' on any gh error (issue #1915)."
+        assert "EXISTING_PR=$(gh pr list --head" in text, (
+            f"{DO_BUILD_PR_AND_CLEANUP}: expected the dedup guard's assignment "
+            "'EXISTING_PR=$(gh pr list --head ...)' not found (issue #1915)."
+        )
+        assign_idx = text.index("EXISTING_PR=$(gh pr list --head")
+        # gh_exit=$? must appear immediately after the assignment line (not
+        # inside a negated `if !` condition, which would always capture 0).
+        window = text[assign_idx : assign_idx + 200]
+        assert "gh_exit=$?" in window, (
+            f"{DO_BUILD_PR_AND_CLEANUP}: expected 'gh_exit=$?' captured "
+            "immediately after the EXISTING_PR assignment (not inside a "
+            "negated 'if !' condition, which always captures exit 0 regardless "
+            "of gh's real status) — not found within 200 chars of the "
+            "assignment (issue #1915)."
+        )
+        assert "if ! EXISTING_PR=$(gh pr list --head" not in text, (
+            f"{DO_BUILD_PR_AND_CLEANUP}: found the negated 'if ! EXISTING_PR="
+            "$(...)' form — bash's '!' negates the compound condition's exit "
+            "status, so a '$?' captured inside that then-block is always 0, "
+            "never gh's real exit code. Use a plain assignment followed by "
+            "'gh_exit=$?' instead (issue #1915)."
         )
 
 
