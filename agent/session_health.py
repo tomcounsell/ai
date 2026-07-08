@@ -1528,6 +1528,17 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
     both the SIGTERM→SIGKILL escalation and the ``signal 0`` liveness probes. If
     ``os.getpgid(pid)`` raises ``ProcessLookupError`` the process is already gone.
     """
+    # ``claude_pid`` is read off Popoto's generic ``IndexedField``, which returns
+    # the raw string stored in Redis rather than casting to int. Callers (e.g.
+    # ``_apply_recovery_transition``) pass that value through untouched, so this
+    # helper must tolerate a numeric string here — mirrors the same defensive
+    # cast in ``AgentSession.find_by_claude_pid``.
+    if pid is not None:
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            pid = None
+
     if pid is None or pid <= 0:
         return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
 

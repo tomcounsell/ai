@@ -62,6 +62,29 @@ class TestConfirmSubprocessDead:
         mock_killpg.assert_not_called()
         mock_getpgid.assert_not_called()
 
+    def test_string_pid_is_cast_to_int(self):
+        """``claude_pid`` off Popoto's IndexedField arrives as a string; must not
+        raise ``TypeError`` comparing ``str <= int`` (regression, issue found
+        2026-07-08 via a crashed recovery: ``pid <= 0`` on a str pid)."""
+        with (
+            patch.object(session_health.os, "getpgid", side_effect=ProcessLookupError),
+            patch.object(session_health.os, "killpg") as mock_killpg,
+        ):
+            result = session_health._confirm_subprocess_dead("1234", timeout=3.0)
+        assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_killpg.assert_not_called()
+
+    def test_non_numeric_string_pid_treated_as_none(self):
+        """A garbage/non-numeric pid string must not raise — treated as no PID."""
+        with (
+            patch.object(session_health.os, "killpg") as mock_killpg,
+            patch.object(session_health.os, "getpgid") as mock_getpgid,
+        ):
+            result = session_health._confirm_subprocess_dead("not-a-pid", timeout=3.0)
+        assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_killpg.assert_not_called()
+        mock_getpgid.assert_not_called()
+
     def test_group_leader_already_gone_returns_confirmed_no_signal(self):
         """``os.getpgid`` raises ProcessLookupError → leader gone → group gone."""
         with (
