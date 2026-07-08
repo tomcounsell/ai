@@ -276,6 +276,21 @@ class TestDoBuildPositiveAssertions:
             "run before PR creation, or it cannot prevent a duplicate PR (issue #1915)."
         )
 
+    def test_pr_guard_checks_gh_exit_code_instead_of_failing_open(self):
+        """The `gh pr list --head` guard must check gh's own exit status (`if !
+        EXISTING_PR=$(...)`) rather than only inspecting whether the captured
+        variable is empty. A blind `EXISTING_PR=$(...)` with no exit-code check
+        fails OPEN on a gh error (auth/network/rate-limit): an empty variable
+        looks identical to 'no PR found', so the script falls through to `gh pr
+        create` and risks a duplicate PR precisely when the lookup is unreliable."""
+        text = DO_BUILD_PR_AND_CLEANUP.read_text(encoding="utf-8")
+        assert "if ! EXISTING_PR=$(gh pr list --head" in text, (
+            f"{DO_BUILD_PR_AND_CLEANUP}: expected the dedup guard to capture gh's "
+            "exit status via 'if ! EXISTING_PR=$(gh pr list --head ...)' and abort "
+            "on failure, instead of a blind assignment that fails open into "
+            "'gh pr create' on any gh error (issue #1915)."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Positive assertions: do-sdlc's explicit foreground flag + Hard Rule 6
@@ -300,4 +315,78 @@ class TestDoSdlcPositiveAssertions:
         assert "Hard Rule 6" in text, (
             f"{DO_SDLC_SKILL}: expected 'Hard Rule 6' text (documenting the "
             "run_in_background: false invariant, landed by 8542ffb19) not found."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Positive assertions: slug-wins worktree/branch ownership prose (Defect 2)
+# ---------------------------------------------------------------------------
+
+
+SDLC_ROUTER_SKILL = REPO_ROOT / ".claude" / "skills" / "sdlc" / "SKILL.md"
+
+
+class TestSlugOwnershipProse:
+    """Guards Defect 2: 'slug identity always wins' must be documented in both
+    the do-sdlc supervisor skill and the sdlc router skill, so a supervisor
+    never reintroduces the dropped `.worktrees/sdlc-{N}` lane-allocation
+    pattern that caused the cross-issue worktree/branch conflict (#1915)."""
+
+    @pytest.mark.parametrize(
+        "skill_path",
+        [DO_SDLC_SKILL, SDLC_ROUTER_SKILL],
+        ids=["do-sdlc/SKILL.md", "sdlc/SKILL.md"],
+    )
+    def test_declares_worktree_branch_ownership_heading(self, skill_path: Path):
+        text = skill_path.read_text(encoding="utf-8")
+        assert "Worktree & Branch Ownership" in text, (
+            f"{skill_path}: expected a 'Worktree & Branch Ownership' section "
+            "documenting that slug identity always wins (each issue's fork "
+            "exclusively owns .worktrees/{slug} + session/{slug}) — not found. "
+            "Without this prose, a supervisor may reintroduce the dropped "
+            ".worktrees/sdlc-{N} lane pattern that caused a cross-issue "
+            "worktree/branch conflict (issue #1915, Defect 2)."
+        )
+
+    @pytest.mark.parametrize(
+        "skill_path",
+        [DO_SDLC_SKILL, SDLC_ROUTER_SKILL],
+        ids=["do-sdlc/SKILL.md", "sdlc/SKILL.md"],
+    )
+    def test_declares_slug_wins_and_no_lane_allocation(self, skill_path: Path):
+        text = skill_path.read_text(encoding="utf-8")
+        assert "slug" in text.lower() and "wins" in text.lower(), (
+            f"{skill_path}: expected 'slug ... wins' identity-ownership prose "
+            "not found (issue #1915, Defect 2)."
+        )
+        assert ".worktrees/sdlc-" in text, (
+            f"{skill_path}: expected an explicit reference to the dropped "
+            "'.worktrees/sdlc-{N}' lane-allocation pattern (naming it is how "
+            "the prose forbids supervisors from reintroducing it) — not found."
+        )
+
+
+class TestPrGuardDocumentsBranchConvergenceDependency:
+    """Guards the documentation half of Defect 3: the live-ref `gh pr list
+    --head` dedup guard is only correct because slug-wins (Defect 2) makes
+    every dispatch path for an issue converge on the same head branch. If
+    that dependency is undocumented, a future edit could break slug-wins
+    without realizing it silently reopens the duplicate-PR bug."""
+
+    def test_pr_guard_documents_slug_wins_dependency(self):
+        text = DO_BUILD_PR_AND_CLEANUP.read_text(encoding="utf-8")
+        list_idx = text.find("gh pr list --head")
+        assert list_idx != -1, (
+            f"{DO_BUILD_PR_AND_CLEANUP}: expected 'gh pr list --head' guard not found."
+        )
+        # The dependency note must appear near the guard (same fenced code block
+        # region), not merely somewhere in the file.
+        window = text[max(0, list_idx - 800) : list_idx]
+        assert "converge" in window.lower() or "convergence" in window.lower(), (
+            f"{DO_BUILD_PR_AND_CLEANUP}: expected a comment near the 'gh pr list "
+            "--head' guard documenting that it depends on fork+supervisor branch "
+            "convergence (established by the slug-wins Worktree & Branch Ownership "
+            "rule) — not found. Undocumented, a future change could break slug-wins "
+            "without anyone realizing it silently reopens the duplicate-PR bug "
+            "(issue #1915)."
         )

@@ -58,7 +58,18 @@ git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
 
 # Reuse an existing open PR for this head (live-ref, no search-index lag).
 # Cross-repo builds MUST include --repo $TARGET_GH_REPO on BOTH the list and create.
-EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number')  # add: --repo $TARGET_GH_REPO
+# Dependency: this guard only de-dupes correctly because "Worktree & Branch Ownership"
+# (slug-wins; do-sdlc/SKILL.md, sdlc/SKILL.md) guarantees every dispatch path for this
+# issue converges on the SAME head (session/{slug}). If that convergence is ever broken
+# (e.g. a lane seam reappears), this --head lookup silently stops catching duplicates
+# created on the other branch.
+if ! EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number'); then
+  # gh failed (auth/network/rate-limit) — do NOT fail open into gh pr create, which
+  # would risk a duplicate PR if a PR actually exists and the lookup merely errored.
+  gh_exit=$?
+  echo "ERROR: 'gh pr list --head session/{slug}' failed (exit $gh_exit) — aborting PR step rather than risking a duplicate create. Re-run once gh is healthy." >&2
+  exit 1
+fi
 if [ -n "$EXISTING_PR" ]; then
   echo "Reusing PR #$EXISTING_PR"
 else
