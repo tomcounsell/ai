@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-08
 tracking: https://github.com/tomcounsell/ai/issues/1938
 last_comment_id:
+revision_applied: true
 ---
 
 # Session recovery/failure leaks the live claude -p subprocess and deletes its worktree while it runs
@@ -76,11 +77,11 @@ When the worker decides a running session is stuck (`no_progress` / progress-dea
 
 ## Architectural Impact
 
-- **New dependencies:** none.
-- **Interface changes:** `_confirm_subprocess_dead` gains process-group awareness (accept/derive a pgid, or a small `SubprocessIdentity`); the runner's spawn callback additionally records the confirm-target PID (and pgid) where the safety machinery reads it. Minimal signature growth.
-- **Coupling:** slightly reduces coupling by making one field the single source of truth for "the session's live subprocess" that both the kill path and the reaper read. Removes the implicit dependency on the false "cancel kills the child" assumption.
-- **Data ownership:** the runner (`agent/session_runner/`) becomes the authoritative writer of the subprocess-identity field(s) at spawn; the health check and reaper are readers. This matches the #1935-discussion direction (runner owns subprocess lifecycle).
-- **Reversibility:** high — all changes are localized to the kill/cleanup/spawn-record paths and are guarded by tests.
+- **New dependencies:** none. **No new persisted fields, no migration** (D2 reads the existing `pm_pid`).
+- **Interface changes:** `_confirm_subprocess_dead` gains process-group awareness (`os.killpg` on the leader pid, since `pgid == pid` under `start_new_session=True`) and a zombie-safe confirm-exit (`os.waitpid(WNOHANG)`/ECHILD). `_apply_recovery_transition` resolves `pm_pid` instead of `claude_pid`. The executor `finally` gains a `pm_pid` liveness guard. Minimal signature growth.
+- **Coupling:** unchanged field model — `pm_pid` (already the runner's spawn-written, survive-terminal PID) becomes the single confirm target for both the kill path and the executor cleanup probe. `claude_pid` reaper/dashboard semantics stay exactly as-is.
+- **Data ownership:** the runner (`agent/session_runner/`) is already the authoritative writer of `pm_pid` at spawn; the health check and executor cleanup are readers. No ownership change.
+- **Reversibility:** high — all changes are localized to the kill/cleanup/harness-cancel paths (no spawn-side change under D2) and are guarded by tests.
 
 ## Appetite
 
@@ -89,8 +90,8 @@ When the worker decides a running session is stuck (`no_progress` / progress-dea
 **Team:** Solo dev, PM check-in, code reviewer (async/subprocess-lifecycle domain)
 
 **Interactions:**
-- PM check-ins: 1-2 (confirm the PID-field-unification direction and the reaper-backstop decision)
-- Review rounds: 1 (correctness of the kill ordering and process-group semantics)
+- PM check-ins: 1 (both open questions are resolved: D2 reads `pm_pid`; the reaper backstop is a no-go)
+- Review rounds: 1 (correctness of the kill ordering, process-group + self-pgrp guard, and zombie-safe confirm)
 
 ## Prerequisites
 
@@ -100,48 +101,50 @@ No prerequisites — this work has no external dependencies. All changes are int
 
 ### Key Elements
 
-- **Single subprocess-identity source of truth (spawn side):** the runner records the confirm-target PID (and process-group id) into the field(s) the safety machinery reads, at spawn, for every worker-executed session — closing the `claude_pid`-vs-`pm_pid` gap.
-- **Process-group kill (recovery/failure side):** `_confirm_subprocess_dead` signals the process **group** (the runner spawns with `start_new_session=True`, so the `claude -p` and its MCP/subagent children share one group), not a single PID, and confirms the group leader is gone.
-- **Explicit ordering guarantee:** worktree/branch cleanup is gated on OS-process-confirmed-dead, not on a DB-status timing coincidence. Cleanup only runs after `_confirm_subprocess_dead` returns `confirmed_dead=True` for the session's subprocess.
+- **Read the survive-terminal PID (no new state):** the kill path and the executor-`finally` probe both resolve the subprocess via `pm_pid` — the field the runner already writes at spawn and `finalize_session` does NOT null. This closes the `claude_pid`-is-`None`-at-cleanup gap without a new field or migration.
+- **Process-group kill (recovery/failure side):** `_confirm_subprocess_dead` signals the process **group** via `os.killpg(pm_pid, sig)` (the runner spawns with `start_new_session=True`, so `pgid == pid` and the `claude -p` + its MCP/subagent children share one group), guarded by a self-pgrp break-glass (`pid != os.getpgrp()`), and confirms the group leader is gone with a zombie-safe `os.waitpid(WNOHANG)` / ECHILD check before falling back to `os.kill(pid, 0)`.
+- **Explicit ordering guarantee:** worktree/branch cleanup is gated on OS-process-confirmed-dead resolved from `pm_pid`, not on a DB-status timing coincidence. Cleanup refuses (preserves the worktree, increments a counter) when `pm_pid` is still alive.
 - **Harness cancel cleanup (defense in depth):** `_run_harness_subprocess` terminates its `proc` on `CancelledError` in a `finally`, so a cancelled turn cannot leak the child even on a path that bypasses the confirm-dead call.
-- **Reaper backstop decision:** answer the issue's open question — either extend the reaper to match worker-parented `claude -p` whose owning session (via a survive-terminal PID field) is terminal, or record an explicit no-go with justification.
+- **Terminal-with-live-subprocess counter:** the hourly sweep emits a prod counter when a terminal session still has a live subprocess — the detection signal the original 28-minute leak lacked. The active reaper backstop is an explicit no-go (see No-Gos).
 
 ### Flow
 
-Health/deadline check flags stuck session → resolve the session's subprocess identity (PID + pgid from the runner-written field) → SIGTERM→SIGKILL the process group and confirm the leader is gone → only then: `running→pending` (requeue) OR `running→failed` + worktree/branch cleanup → reaper backstop sweeps any residual worker-parented process whose session is terminal.
+Health/deadline check flags stuck session → resolve the session's subprocess pid from `pm_pid` → SIGTERM→SIGKILL the process group (`os.killpg`, self-pgrp guarded) and confirm the leader is gone (zombie-safe waitpid/ECHILD) → only then: `running→pending` (requeue) OR `running→failed` + worktree/branch cleanup (which itself re-probes `pm_pid` liveness and refuses to delete under a live process) → hourly sweep emits the `terminal-with-live-subprocess` counter for any residual leak.
 
 ### Technical Approach
 
-**Decision D1 (recommended, flag for critique): unify on one confirm-target field the runner writes.** In `runner._on_turn_spawn` (`runner.py:495-527`), alongside `pm_pid`, populate the field the safety machinery already reads (`claude_pid`) plus a new persisted `claude_pgid` (from `os.getpgid(pid)`, already computed for the in-memory `_TurnHandle`). This makes the entire #1537 confirm-dead path and #1271 reaper work unchanged, with the lowest blast radius. Alternative D2 (health check reads `pm_pid or claude_pid`) spreads field knowledge into `session_health` and still needs pgid plumbing — D1 is cleaner. The exact field name/unification is the one open question for critique.
+**Decision D2 (adopted, per critique): read the survive-terminal `pm_pid` field the runner already writes — no new state.** The runner spawns the `claude -p` child with `start_new_session=True` (`role_driver.py:397`), so the child is its own process-group leader: **`pgid == pid`**. The runner already persists that pid to `pm_pid` at spawn (`runner._on_turn_spawn`, `runner.py:522`), and `finalize_session` NULLs only `claude_pid`, so `pm_pid` survives terminal transitions and is a live confirm target at cleanup time. The kill path and the executor-`finally` probe both resolve the subprocess via `getattr(entry_or_session, "pm_pid", None)` and signal the process group with `os.killpg(pm_pid, sig)`. This adds **zero new persisted fields**, needs **no migration**, and keeps the #1271 reaper + dashboard `claude_pid` semantics untouched (Risk 2 evaporates). D1 (repopulate `claude_pid` + new persisted `claude_pgid`) is rejected: it dragged the reaper and dashboard into scope and required a migration for state that `pm_pid` already carries. Because `pgid == pid` holds **only** under `start_new_session=True`, the code asserts that invariant in a comment at the killpg call site.
 
-- **Kill path:** upgrade `_confirm_subprocess_dead` (`session_health.py:1490`) to prefer `os.killpg(pgid, sig)` when a pgid is available, falling back to `os.kill(pid, sig)`. Confirm-exit polls the group-leader PID via `os.kill(pid, 0)`. Keep the existing SIGTERM→grace→SIGKILL escalation and the `run_in_executor` offload. `_apply_recovery_transition` (`:2292`) passes the resolved identity instead of `getattr(entry, "claude_pid", None)`.
-- **Ordering:** the queue-supervisor path already calls `_apply_recovery_transition` (which confirms death) BEFORE `exec_task.cancel()` — once confirm-dead actually kills the process, that ordering is correct. Make the guarantee explicit and defensive: in the executor `finally` synthetic-slug cleanup (`session_executor.py:2308`), before `remove_worktree`, assert the session's subprocess PID is gone (probe `os.kill(pid,0)`); if still alive, escalate a kill-and-confirm rather than deleting the worktree. `worktree_busy_check` (`worktree_manager.py:471`) additionally probes OS-process liveness for the owning session's recorded PID, not only DB status.
+- **Kill path:** upgrade `_confirm_subprocess_dead` (`session_health.py:1490`) to signal the process **group**: `if pid and pid != os.getpgrp(): os.killpg(pid, sig)` (pid doubles as pgid under `start_new_session=True`), wrapped in `try/except ProcessLookupError` (== already dead). The `pid != os.getpgrp()` self-pgrp guard is the operator break-glass so the worker can never signal its own group. Keep the existing SIGTERM→grace→SIGKILL escalation and the `run_in_executor` offload. `_apply_recovery_transition` (`session_health.py:2292`) resolves `pm_pid` (not `claude_pid`) and passes it as the kill target.
+- **Zombie-safe confirm-exit:** the subprocess is a direct child of the worker (PPID==worker), so after SIGKILL it becomes a zombie and `os.kill(pid, 0)` keeps returning success until the child is reaped — which would burn the full confirm timeout and false-escalate. In `_is_dead`, first attempt `wpid, _ = os.waitpid(pid, os.WNOHANG)` guarded for `ChildProcessError`/`OSError` with `errno.ECHILD`; return `True` on `wpid == pid` (reaped now) or `ECHILD` (asyncio's child watcher already reaped it), then fall back to the `os.kill(pid, 0)` existence probe. Document that asyncio's child watcher may own reaping of `proc`.
+- **Ordering (defect 2 fix):** the queue-supervisor path already calls `_apply_recovery_transition` (which confirms death) BEFORE `exec_task.cancel()`. Make the guarantee explicit and defensive in the executor `finally` synthetic-slug cleanup (`session_executor.py:2308`): resolve `pm_pid = getattr(entry_or_session, "pm_pid", None)` — **never `claude_pid`, which `finalize_session` has already NULLed by this point** — and guard `cleanup_after_merge` with `if pm_pid and _pid_alive(pm_pid): log + increment counter; return` (fail-safe = preserve the worktree, do not delete under a live process). Do **not** thread a pid through `worktree_busy_check` (`worktree_manager.py:419`): it serves other callers and would gain a wider signature for one caller, and the queue path already confirms death upstream — a cheap executor-side `_pid_alive` probe is sufficient.
 - **Harness cancel cleanup:** wrap the `_run_harness_subprocess` body (`sdk_client.py:2752-3083`) so a `CancelledError` (or any exit) runs `proc.terminate()` → bounded `await proc.wait()` → `proc.kill()` in a `finally`. Delete the false comment at `agent_session_queue.py:1796-1799` and replace it with the accurate invariant (per NO LEGACY CODE TOLERANCE).
-- **Reaper backstop:** `pm_pid` survives the terminal transition (unlike `claude_pid`), so a backstop keyed on "worker-parented `claude -p` whose owning session (resolved via a survive-terminal PID field) is in a terminal state, past a grace window" is feasible. Recommended: implement a bounded backstop gated on terminal-status + grace (not a blanket PPID-gate relaxation, which risks killing live worker children). If the primary fix + explicit ordering fully close the leak in tests, the backstop may be recorded as an explicit no-go instead — critique decides.
+- **Terminal-with-live-subprocess counter (monitoring, replaces the reaper backstop):** the active reaper backstop is a **no-go** (see No-Gos — the survivor is PPID==worker, invisible to the PPID==1 reaper, and relaxing that gate risks killing live worker children). In its place, emit a `{project_key}:session-health:terminal-with-live-subprocess` counter from the hourly health/reaper sweep: resolve `pm_pid`, probe `os.kill(pm_pid, 0)`, gate on terminal status + a grace window, and increment when a terminal session still has a live subprocess. This is the prod signal the original 28-minute leak lacked. The incident-regression test asserts this counter goes nonzero on the leak scenario.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] The `_run_harness_subprocess` new `finally` must not swallow the terminate/wait errors silently — assert a `logger.debug/warning` fires when `proc.wait()` times out and SIGKILL is used. Test asserts observable behavior, not `pass`.
-- [ ] `_confirm_subprocess_dead` `PermissionError`/`OSError` branches already return `confirmed_dead=False`; extend tests to the killpg variants.
+- [ ] `_confirm_subprocess_dead` `PermissionError`/`OSError` branches already return `confirmed_dead=False`; extend tests to the `killpg` variants (including `ProcessLookupError` on `killpg` == confirmed-dead, and the `ECHILD` `waitpid` branch == confirmed-dead).
 
 ### Empty/Invalid Input Handling
-- [ ] `_confirm_subprocess_dead` with `pid=None` AND `pgid=None` must still return `confirmed_dead=True` only when there is genuinely nothing to kill — but the whole point of this fix is that runner sessions now HAVE a pid, so add a regression test that a runner-shaped session (pid set, pgid set) never reaches the `None` short-circuit.
-- [ ] Worktree cleanup with a still-alive PID must NOT delete the directory — assert `remove_worktree` refuses (or kills-then-deletes) when `os.kill(pid,0)` succeeds.
+- [ ] `_confirm_subprocess_dead` with `pid=None` must still return `confirmed_dead=True` only when there is genuinely nothing to kill — but the whole point of this fix is that runner sessions now resolve `pm_pid`, so add a regression test that a runner-shaped session (`pm_pid` set) never reaches the `None` short-circuit.
+- [ ] Worktree cleanup with a still-alive `pm_pid` must NOT delete the directory — assert the executor-side guard refuses (preserves) and increments the counter when `os.kill(pm_pid, 0)` succeeds.
 
 ### Error State Rendering
 - [ ] Not user-facing. The observable "error state" is the log/counter surface: assert the `{project_key}:session-health:*` kill counters increment on the real-PID kill path (they currently never fire for runner sessions).
 
 ## Test Impact
 
-- [ ] `tests/unit/test_session_health_subprocess_kill.py::test_none_pid_returns_confirmed_no_signal` — UPDATE: keep as a unit of `_confirm_subprocess_dead` semantics, but it must no longer stand in for real-session behavior; add a sibling asserting runner sessions never hit the None path.
-- [ ] `tests/unit/test_session_health_subprocess_kill.py::test_no_pid_recorded_requeues_normally` (`:305`) — REPLACE: this test encodes the BUG (no pid → requeue without killing). Rewrite so a runner-shaped session resolves its pid/pgid, kills the group, confirms exit, then requeues.
-- [ ] `tests/unit/test_session_health_subprocess_kill.py` (`_make_entry`, `:202`) — UPDATE: the fixture builds entries with `claude_pid=` only; add `pm_pid`/`pgid` (or the unified field) so it models a runner session.
-- [ ] `tests/unit/test_session_health_subprocess_kill.py::test_subprocess_survives_escalates_to_failed` / `test_subprocess_confirmed_dead_requeues_to_pending` — UPDATE: assert process-group signalling (`os.killpg`) rather than single `os.kill`.
-- [ ] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE: recovery/finalization assertions must reflect that confirm-dead now actually signals for runner sessions.
-- [ ] `tests/unit/test_worktree_manager.py` — UPDATE: `worktree_busy_check`/`remove_worktree` tests gain an OS-process-liveness case (alive PID under the worktree → refuse/kill-first).
+- [ ] `tests/unit/test_session_health_subprocess_kill.py::test_none_pid_returns_confirmed_no_signal` — UPDATE: keep as a unit of `_confirm_subprocess_dead` semantics, but it must no longer stand in for real-session behavior; add a sibling asserting runner sessions (`pm_pid` set) never hit the None path.
+- [ ] `tests/unit/test_session_health_subprocess_kill.py::test_no_pid_recorded_requeues_normally` (`:305`) — REPLACE: this test encodes the BUG (no pid → requeue without killing). Rewrite so a runner-shaped session resolves `pm_pid`, kills the group (`os.killpg`), confirms exit, then requeues.
+- [ ] `tests/unit/test_session_health_subprocess_kill.py` (`_make_entry`, `:202`) — UPDATE: the fixture builds entries with `claude_pid=` only; add `pm_pid=` so it models a runner session (no new field — `pgid == pid`).
+- [ ] `tests/unit/test_session_health_subprocess_kill.py::test_subprocess_survives_escalates_to_failed` / `test_subprocess_confirmed_dead_requeues_to_pending` — UPDATE: assert process-group signalling (`os.killpg`, self-pgrp guarded) rather than single `os.kill`; add a zombie case (SIGKILL'd-but-unreaped child → `confirmed_dead=True` within timeout via `waitpid`/ECHILD).
+- [ ] `tests/unit/test_health_check_recovery_finalization.py` — UPDATE: recovery/finalization assertions must reflect that confirm-dead now actually signals for runner sessions via `pm_pid`.
+- [ ] `tests/unit/test_worktree_manager.py` — VERIFY unaffected: D2 does NOT widen `worktree_busy_check`; the liveness guard lives executor-side. Confirm no `worktree_busy_check` signature change is required.
 - [ ] `tests/unit/test_never_started_recovery.py`, `tests/unit/test_session_health_tool_timeout.py` — UPDATE if their entry fixtures assume `claude_pid`-only; audit during build.
-- [ ] `tests/unit/test_messenger_callbacks.py::TestMessengerArchitecturalBoundary` — VERIFY unaffected: the runner spawn-record change must keep the messenger ORM-free boundary intact (the runner writes ORM fields, not the messenger).
+- [ ] `tests/unit/test_messenger_callbacks.py::TestMessengerArchitecturalBoundary` — VERIFY unaffected: no runner spawn-record change in D2 (the runner already writes `pm_pid`); the messenger ORM-free boundary is untouched.
+- [ ] NEW: incident-regression test (executor cleanup) — session in `failed` status with `claude_pid=None` and `pm_pid=<live>` asserts `cleanup_after_merge`/`remove_worktree` does NOT delete the worktree and increments the `terminal-with-live-subprocess` counter (nonzero).
 
 ## Rabbit Holes
 
@@ -153,12 +156,11 @@ Health/deadline check flags stuck session → resolve the session's subprocess i
 ## Risks
 
 ### Risk 1: Process-group kill hits a group it shouldn't
-**Impact:** `os.killpg` on a wrong/reused pgid could signal unrelated worker children.
-**Mitigation:** derive pgid at spawn from the child's own PID (`os.getpgid(pid)` under `start_new_session=True`), persist it, and confirm the specific leader PID is gone after signalling. Same sub-second window as #1537; guarded by tests that assert the exact pgid signalled.
+**Impact:** `os.killpg` on a wrong/reused pgid could signal unrelated worker children — worst case, the worker's own group.
+**Mitigation:** the kill target is the child's own PID, which equals its pgid because the runner spawns with `start_new_session=True` (`role_driver.py:397`) — the child is its own group leader, never sharing the worker's group. The self-pgrp break-glass `if pid != os.getpgrp()` refuses to signal the worker's group even if a stale PID were somehow reused. Same sub-second PID-reuse window as #1537; guarded by tests that assert the exact pid signalled and that the self-pgrp guard blocks `os.getpgrp()`.
 
-### Risk 2: Populating `claude_pid` for runner sessions changes reaper/dashboard behavior
-**Impact:** the #1271 reaper and dashboard liveness probe start seeing a populated `claude_pid` for runner sessions.
-**Mitigation:** this is a correctness improvement (the field becomes accurate), but audit every `find_by_claude_pid` and dashboard consumer during build; add a test that a live runner session is NOT mis-reaped (heartbeat gate + non-terminal status still protects it).
+### Risk 2 (retired under D2): no `claude_pid` repopulation
+D2 reads the existing `pm_pid` and never repopulates `claude_pid` for runner sessions, so the #1271 reaper and dashboard `claude_pid` consumers see no behavior change. The original D1 risk (dragging the reaper/dashboard into scope) is eliminated by design — there is nothing to audit here.
 
 ### Risk 3: The harness `finally` terminate slows down normal turn completion
 **Impact:** an added `proc.terminate()`/`wait()` in the hot path could add latency on every turn.
@@ -173,25 +175,26 @@ Health/deadline check flags stuck session → resolve the session's subprocess i
 ### Race 1: Requeue spawns a second subprocess before the first is confirmed dead
 **Location:** `agent/session_health.py:2292-2576` (confirm-dead → transition `running→pending`), then the worker picks up the `pending` row.
 **Trigger:** recovery fires while the old subprocess is alive; if confirm-dead is a no-op, the requeue races a live process.
-**Data prerequisite:** the session's subprocess identity (pid + pgid) must be persisted by the runner BEFORE any recovery can read it (`_on_turn_spawn` writes it at spawn, before the turn await — same Race-2 ordering #1924 already established).
-**State prerequisite:** `_confirm_subprocess_dead` must return `confirmed_dead=True` only after the group leader is actually gone.
-**Mitigation:** confirm-dead (process-group SIGTERM→SIGKILL + leader-gone poll) completes before the `running→pending` transition; the requeue cannot proceed until the old group is confirmed dead. This is exactly the #1537 invariant, now pointed at the right PID.
+**Data prerequisite:** the session's `pm_pid` must be persisted by the runner BEFORE any recovery can read it (`_on_turn_spawn` writes it at spawn, before the turn await — same Race-2 ordering #1924 already established). No new field is needed; `pm_pid` already carries this.
+**State prerequisite:** `_confirm_subprocess_dead` must return `confirmed_dead=True` only after the group leader is actually gone (zombie-safe: `waitpid`/ECHILD, then `os.kill(pid,0)`).
+**Mitigation:** confirm-dead (process-group SIGTERM→SIGKILL + zombie-safe leader-gone poll) completes before the `running→pending` transition; the requeue cannot proceed until the old group is confirmed dead. This is exactly the #1537 invariant, now pointed at `pm_pid`.
 
 ### Race 2: Worktree deleted between confirm-dead and the harness's last filesystem op
 **Location:** `agent/session_executor.py:2308-2327` (cleanup) vs the live subprocess's cwd usage.
 **Trigger:** cleanup runs while the subprocess still has the worktree as cwd.
 **Data prerequisite:** subprocess confirmed exited (Race 1) before `remove_worktree` runs.
 **State prerequisite:** no process has the worktree as cwd at removal time.
-**Mitigation:** gate cleanup on confirmed-death; `remove_worktree`/`worktree_busy_check` additionally probe OS-process liveness for the owning session's PID before deleting.
+**Mitigation:** gate cleanup on confirmed-death; the executor-side cleanup guard probes `pm_pid` liveness (`os.kill(pm_pid, 0)`) before deleting and preserves the worktree if the process is alive. No change to `worktree_busy_check` (D2 keeps the probe executor-side, not threaded through the shared helper).
 
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1935] Fixing the FALSE `no_progress` classification that triggered these paths (healthy toolless-but-streaming turns misclassified as stuck). Tracked and planned separately in `docs/plans/headless-runner-zombie-liveness.md`. This plan handles what any trigger (false or genuine) does to the live process, independent of #1935.
 - Collapsing the three PID fields (`pm_pid`, `claude_pid`, `harness_pid`) into one. Only the confirm-target read is unified here; a broader field-model cleanup is not required to close the leak and would inflate blast radius.
+- **An active orphan-reaper backstop for worker-parented survivors.** Explicit no-go (per critique). The survivor is PPID==worker, so the existing PPID==1 orphan reaper (`_reap_orphan_session_processes`, #1271) structurally cannot see it, and relaxing that gate to sweep worker-parented processes risks killing live worker children. The primary fix (kill-before-requeue on the real PID + confirmed-death-gated cleanup + harness cancel `finally`) closes the leak at its source, and the incident-regression test is the ship gate. The residual detection need is met by the passive `terminal-with-live-subprocess` counter (Technical Approach), not an active killer.
 
 ## Update System
 
-No update system changes required for the core fix — it is internal worker/agent logic. **If D1 adds a new persisted AgentSession field (`claude_pgid`):** add an idempotent migration to `scripts/update/migrations.py` and register it in `MIGRATIONS` (per the Popoto Schema Migration Requirement in `docs/sdlc/do-plan.md`). The field is nullable with a `None` default, so existing rows need no backfill (the migration is a no-op index rebuild if required by Popoto). No new dependencies to propagate.
+No update system changes required — the fix is internal worker/agent logic. D2 reads the existing `pm_pid` field, so there is **no new persisted AgentSession field and no `scripts/update/migrations.py` entry** (the D1 migration is dropped). No new dependencies to propagate.
 
 ## Agent Integration
 
@@ -200,25 +203,26 @@ No agent integration required — this is a worker-internal subprocess-lifecycle
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/headless-session-runner.md` — add a "Subprocess lifecycle on recovery/failure" subsection documenting: the runner is the authoritative writer of the subprocess identity (pid + pgid); recovery/failure signals the process group and confirms exit before requeue/cleanup; worktree cleanup is gated on confirmed-death.
-- [ ] Update `docs/features/bridge-self-healing.md` (or the recovery/reaper doc) — note the reaper-backstop decision (implemented bounded backstop, or explicit no-go) and why worker-parented leaks needed a distinct path from the PPID==1 net.
+- [ ] Update `docs/features/headless-session-runner.md` — add a "Subprocess lifecycle on recovery/failure" subsection documenting: `pm_pid` is the survive-terminal confirm target the runner writes at spawn; recovery/failure signals the process group (`os.killpg`, `pgid == pid` under `start_new_session=True`, self-pgrp guarded) and confirms exit (zombie-safe `waitpid`) before requeue/cleanup; worktree cleanup re-probes `pm_pid` liveness and is gated on confirmed-death.
+- [ ] Update `docs/features/bridge-self-healing.md` (or the recovery/reaper doc) — note the reaper-backstop **no-go** (worker-parented survivors are invisible to the PPID==1 reaper; relaxing the gate risks live worker children) and the `terminal-with-live-subprocess` counter that replaces it as the passive detection signal.
 - [ ] Verify the `docs/features/README.md` index entries still describe these accurately.
 
 ### Inline Documentation
-- [ ] Replace the false comment at `agent/session_queue.py:1796-1799` with the accurate cancel/terminate invariant.
-- [ ] Docstring on `_confirm_subprocess_dead` updated for process-group semantics and the identity it now receives.
+- [ ] Replace the false comment at `agent/agent_session_queue.py:1796-1799` with the accurate cancel/terminate invariant.
+- [ ] Docstring on `_confirm_subprocess_dead` updated for process-group semantics, the `pm_pid` identity it now receives, the `pgid == pid` (`start_new_session=True`) assertion, and the zombie-safe `waitpid` confirm-exit.
 
 ## Success Criteria
 
 - [ ] After a `no_progress` recovery, exactly one `claude -p` subprocess exists for the session — the old process group is confirmed exited before respawn (test with monkeypatched `os.killpg`/`os.kill`).
-- [ ] After `running → failed`, the session's subprocess is confirmed exited before worktree/branch cleanup runs (test asserts kill-confirm precedes `remove_worktree`).
-- [ ] A regression test covering the incident: a kill decision while the subprocess is alive produces no ENOENT-wedged survivor and no ghost pipeline (worktree not removed under a live PID; requeue/fail only after confirmed death).
-- [ ] A runner-shaped session never reaches the `_confirm_subprocess_dead(None)` short-circuit — the confirm-target field is populated at spawn.
+- [ ] After `running → failed`, the session's subprocess (resolved from `pm_pid`, since `claude_pid` is already `None`) is confirmed exited before worktree/branch cleanup runs; cleanup preserves the worktree when `pm_pid` is still alive (test asserts the failed-status + `claude_pid=None` + `pm_pid=live` case leaves the worktree in place).
+- [ ] A regression test covering the incident: a kill decision while the subprocess is alive produces no ENOENT-wedged survivor and no ghost pipeline (worktree not removed under a live `pm_pid`; requeue/fail only after confirmed death; `terminal-with-live-subprocess` counter goes nonzero).
+- [ ] A runner-shaped session never reaches the `_confirm_subprocess_dead(None)` short-circuit — `_apply_recovery_transition` resolves `pm_pid`.
+- [ ] A SIGKILL'd-but-unreaped (zombie) child returns `confirmed_dead=True` within the timeout (via `waitpid(WNOHANG)`/ECHILD), not after burning the full grace window.
 - [ ] `_run_harness_subprocess` terminates its `proc` on `CancelledError` (test cancels a turn mid-stream, asserts the child is signalled).
-- [ ] Reaper-backstop question answered: either a bounded terminal-session backstop is implemented and tested, or an explicit no-go with justification is recorded.
+- [ ] The reaper backstop is recorded as an explicit no-go; the `terminal-with-live-subprocess` counter is the passive detection signal in its place.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `grep` confirms `_apply_recovery_transition` no longer reads bare `getattr(entry, "claude_pid", None)` as the sole kill target.
+- [ ] `grep` confirms `_apply_recovery_transition` reads `pm_pid`, not bare `getattr(entry, "claude_pid", None)`, as the kill target.
 - [ ] The false "harness kills its own child on cancellation" comment is removed.
 
 ## Team Orchestration
@@ -229,22 +233,16 @@ The lead agent orchestrates; it deploys builders/validators and coordinates.
 
 - **Builder (kill-path)**
   - Name: kill-path-builder
-  - Role: subprocess-identity source of truth + process-group confirm-dead + `_apply_recovery_transition` re-pointing
+  - Role: `_apply_recovery_transition` reads `pm_pid`; process-group + zombie-safe confirm-dead in `_confirm_subprocess_dead`; `terminal-with-live-subprocess` counter in the hourly sweep
   - Agent Type: builder
   - Domain: async/subprocess-lifecycle
   - Resume: true
 
 - **Builder (ordering-and-harness)**
   - Name: ordering-builder
-  - Role: worktree-cleanup confirmed-death gate + `worktree_busy_check` OS-liveness probe + `_run_harness_subprocess` cancel `finally`
+  - Role: executor-`finally` `pm_pid`-liveness cleanup guard + `_run_harness_subprocess` cancel `finally` + delete/correct the false `agent_session_queue.py` comment
   - Agent Type: builder
   - Domain: async/subprocess-lifecycle
-  - Resume: true
-
-- **Builder (reaper-backstop)**
-  - Name: reaper-builder
-  - Role: implement bounded terminal-session reaper backstop OR record the no-go (per critique decision)
-  - Agent Type: builder
   - Resume: true
 
 - **Validator**
@@ -261,7 +259,7 @@ The lead agent orchestrates; it deploys builders/validators and coordinates.
 
 ## Step by Step Tasks
 
-### 1. Subprocess-identity source of truth + process-group confirm-dead
+### 1. Kill path: read `pm_pid` + process-group + zombie-safe confirm-dead + counter
 - **Task ID**: build-kill-path
 - **Depends On**: none
 - **Validates**: tests/unit/test_session_health_subprocess_kill.py, tests/unit/test_health_check_recovery_finalization.py
@@ -269,9 +267,9 @@ The lead agent orchestrates; it deploys builders/validators and coordinates.
 - **Agent Type**: builder
 - **Domain**: async/subprocess-lifecycle
 - **Parallel**: true
-- Record the confirm-target identity (pid + pgid) at spawn in `runner._on_turn_spawn` per decision D1; persist pgid (new nullable field if needed) and register the migration.
-- Upgrade `_confirm_subprocess_dead` to prefer `os.killpg` with single-`os.kill` fallback; confirm leader PID gone.
-- Re-point `_apply_recovery_transition` to pass the resolved identity, not bare `claude_pid`.
+- Re-point `_apply_recovery_transition` (`session_health.py:2292`) to resolve `pm_pid` (not `claude_pid`) as the kill target.
+- Upgrade `_confirm_subprocess_dead`: `os.killpg(pid, sig)` guarded by `pid != os.getpgrp()` with `os.kill(pid, sig)` fallback (pgid==pid under `start_new_session=True`; assert in a comment), wrapped in `try/except ProcessLookupError`. Add the zombie-safe `os.waitpid(pid, WNOHANG)`/ECHILD confirm in `_is_dead` before the `os.kill(pid, 0)` probe.
+- Emit the `{project_key}:session-health:terminal-with-live-subprocess` counter from the hourly sweep (resolve `pm_pid`, probe `os.kill(pm_pid, 0)`, gate on terminal status + grace).
 
 ### 2. Ordering guarantee + harness cancel cleanup
 - **Task ID**: build-ordering
@@ -281,27 +279,18 @@ The lead agent orchestrates; it deploys builders/validators and coordinates.
 - **Agent Type**: builder
 - **Domain**: async/subprocess-lifecycle
 - **Parallel**: true
-- Gate synthetic-slug cleanup (`session_executor.py:2308`) on confirmed-death; add OS-liveness probe to `worktree_busy_check`/`remove_worktree`.
-- Add `try/finally` terminate to `_run_harness_subprocess`; delete and correct the false `agent_session_queue.py:1796-1799` comment.
+- Guard the synthetic-slug cleanup at `session_executor.py:2308`: resolve `pm_pid = getattr(entry_or_session, "pm_pid", None)` and `if pm_pid and _pid_alive(pm_pid): log + increment counter; return` (fail-safe = preserve). Do NOT widen `worktree_busy_check`.
+- Add `try/finally` terminate (`proc.terminate()` → bounded `wait()` → `proc.kill()`) to `_run_harness_subprocess`; delete and correct the false `agent_session_queue.py:1796-1799` comment.
 
-### 3. Reaper backstop (or no-go)
-- **Task ID**: build-reaper
-- **Depends On**: build-kill-path
-- **Validates**: tests/unit/ (reaper backstop test if implemented)
-- **Assigned To**: reaper-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Per critique decision: implement bounded terminal-session backstop keyed on a survive-terminal PID field + grace, OR record the explicit no-go with justification.
-
-### 4. Validation
+### 3. Validation
 - **Task ID**: validate-all
-- **Depends On**: build-kill-path, build-ordering, build-reaper
+- **Depends On**: build-kill-path, build-ordering
 - **Assigned To**: leak-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the full unit suite; verify every success criterion, especially the incident-regression test.
+- Run the full unit suite; verify every success criterion, especially the incident-regression test (failed status, `claude_pid=None`, `pm_pid=live` → worktree NOT removed, counter nonzero).
 
-### 5. Documentation
+### 4. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-all
 - **Assigned To**: docs-writer
@@ -309,7 +298,7 @@ The lead agent orchestrates; it deploys builders/validators and coordinates.
 - **Parallel**: false
 - Update `docs/features/headless-session-runner.md` and the self-healing doc.
 
-### 6. Final Validation
+### 5. Final Validation
 - **Task ID**: validate-final
 - **Depends On**: document-feature
 - **Assigned To**: leak-validator
@@ -327,21 +316,34 @@ The lead agent orchestrates; it deploys builders/validators and coordinates.
 | Full unit suite | `pytest tests/unit/ -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Kill path no longer keys solely on claude_pid | `grep -n "getattr(entry, \"claude_pid\", None)" agent/session_health.py` | exit code 1 |
+| Recovery kill target is pm_pid | `grep -n "pm_pid" agent/session_health.py` | output contains pm_pid in `_apply_recovery_transition` |
 | False cancel comment removed | `grep -rn "harness kills its own" agent/agent_session_queue.py` | exit code 1 |
 | Process-group kill present | `grep -n "killpg" agent/session_health.py` | output contains killpg |
+| Zombie-safe confirm present | `grep -n "waitpid" agent/session_health.py` | output contains waitpid |
+| Terminal-with-live-subprocess counter present | `grep -rn "terminal-with-live-subprocess" agent/session_health.py` | output contains the counter key |
+| No new pgid field / migration | `grep -rn "claude_pgid" agent/ models/ scripts/update/migrations.py` | exit code 1 |
 | Harness cancel finally present | `grep -n "proc.terminate\|proc.kill" agent/sdk_client.py` | output contains proc |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room) 2026-07-08. Verdict: NEEDS REVISION (1 blocker, 6 concerns, 1 nit). FULL depth. Revision applied 2026-07-08 (D2 adopted; reaper backstop → no-go) — see Addressed By column; re-armed for re-critique. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | History & Consistency (+ Scope & Value) | The executor-`finally` worktree cleanup and any kill/probe that fires post-terminal run AFTER `finalize_session` NULLs `claude_pid` (session_lifecycle.py:479). D1 unifies the confirm target on `claude_pid`, so by cleanup time it is `None`, the ordering probe is vacuous, and defect 2 (worktree deleted under a live process) survives. | ✅ RESOLVED — Technical Approach "Ordering (defect 2 fix)" + Step 2 + NEW incident-regression test | In session_executor.py:2308 cleanup, resolve `pid = getattr(entry_or_session, "pm_pid", None)` (survive-terminal) before `os.kill(pid, 0)` — never rely on `claude_pid`, which is `None` by that point. Add a regression test: session in `failed` status (claude_pid=None, pm_pid=live) asserts the worktree is NOT removed. |
+| CONCERN | Scope & Value (Simplifier) | D1's new persisted `claude_pgid` field + migration is unnecessary: under `start_new_session=True` (sdk_client.py:2752) the child is its own group leader so pgid == pid, and repopulating `claude_pid` drags the #1271 reaper + dashboard into scope (plan Risk 2). Prefer D2. | ✅ RESOLVED — D2 adopted (Technical Approach); Update System no migration; Risk 2 retired; `role_driver.py:397` `start_new_session=True` verified | In `_apply_recovery_transition` (session_health.py:2292) read `pm_pid` not `claude_pid`; `_confirm_subprocess_dead` calls `os.killpg(pid, sig)` (pgid==pid holds only because start_new_session=True — assert in a comment). No `claude_pgid` field, no MIGRATIONS entry. Wrap killpg in `try/except ProcessLookupError` = confirmed-dead. |
+| CONCERN | Risk & Robustness (Adversary) | The subprocess is a direct child of the worker (PPID=worker); after SIGKILL it is a zombie and `os.kill(pid,0)` returns success until reaped, so confirm-dead can burn the full timeout, false-escalate to `failed`, and (Risk 4 fail-safe) refuse cleanup — reproducing the wedge. | ✅ RESOLVED — Technical Approach "Zombie-safe confirm-exit" + Step 1 + zombie test case | In `_is_dead`, try `wpid,_ = os.waitpid(pid, os.WNOHANG)` guarded for `ChildProcessError`/`OSError(ECHILD)` (asyncio child-watcher may already own reaping); return True on `wpid==pid` or ECHILD. Regression test: a SIGKILL'd-but-unreaped child returns confirmed_dead=True within timeout. Document which asyncio child watcher reaps `proc`. |
+| CONCERN | Risk & Robustness (Adversary) | No `finalize_session` clear for `claude_pgid` (if D1 kept) leaves a stale pgid a backstop could `killpg` after pgid reuse, and no guard prevents signalling the worker's own group. | ✅ RESOLVED — D2 persists no pgid (half evaporates); self-pgrp guard retained (Technical Approach + Risk 1) | If any pgid is persisted, add `session.claude_pgid = None` in the same try-block that NULLs `claude_pid`. In the killpg path guard `if pgid and pgid != os.getpgrp(): os.killpg(...)` else fall back to `os.kill(pid,sig)` — the self-pgrp check is the operator break-glass. (If D2 adopted, the persisted-pgid half evaporates; keep the self-pgrp guard.) |
+| CONCERN | Scope & Value (Simplifier) | Adding a general OS-liveness probe API to `worktree_busy_check` (worktree_manager.py:419) is redundant once the kill works; the queue path already confirms death before `exec_task.cancel()`. | ✅ RESOLVED — executor-side guard only (Technical Approach "Ordering" + Step 2); `worktree_busy_check` unchanged | Guard `cleanup_after_merge` at session_executor.py:2308 with `if pm_pid and _pid_alive(pm_pid): log+increment counter; return` (fail-safe = preserve). Do NOT thread a pid through `worktree_busy_check`, which serves other callers and would gain a wider signature for one caller. |
+| CONCERN | Scope & Value (User) | The confirmed root cause is narrow (kill reads the wrong PID field), but the plan reframes it as a lifecycle overhaul (3 builders, migration, Update-System change, open reaper-backstop question). The reaper backstop adds no coverage the incident-regression test doesn't. | ✅ RESOLVED — reaper backstop → explicit No-Go; Team collapsed to 2 builders; Step by Step now 5 steps | Record the reaper backstop as an explicit no-go now: the survivor is PPID==worker so the existing PPID==1 reaper cannot see it and relaxing its gate risks killing live worker children (plan Risk). Gate the ship on the incident-regression test (no double-subprocess, no under-live-PID worktree delete). Collapse to two builders (kill-path, ordering-and-harness). |
+| CONCERN | Risk & Robustness (Operator) | All verification is monkeypatched unit tests; the reaper backstop may be a no-go. The original 28-min leak was invisible to every detector and caught by hand — no prod signal for "terminal session with a live subprocess" remains. | ✅ RESOLVED — `terminal-with-live-subprocess` counter (Technical Approach + Step 1 + Success Criteria); asserted nonzero in incident-regression test | Emit a `{project_key}:session-health:terminal-with-live-subprocess` counter from the hourly health/reaper sweep (resolve pm_pid, probe `os.kill(pm_pid,0)`, gate on terminal status + grace). Keep it even if the active backstop is a no-go; assert a nonzero value in the incident-regression test. |
+| NIT | History & Consistency | The Documentation section (line 208) cites `agent/session_queue.py:1796-1799`, which does not exist; the correct path `agent/agent_session_queue.py` is used everywhere else in the plan. | ✅ RESOLVED — Inline Documentation now cites `agent/agent_session_queue.py:1796-1799` | Path corrected. |
 
 ---
 
 ## Open Questions
 
-1. **PID-field unification direction (D1 vs D2).** Recommended D1: the runner populates `claude_pid` + new `claude_pgid` at spawn so all existing #1537/#1271 machinery works unchanged. D2 keeps the runner as-is and makes `session_health` read `pm_pid or claude_pid`. D1 reuses more, D2 is a smaller runner diff. Confirm D1?
-2. **Reaper backstop: implement or no-go?** `pm_pid` survives terminal transitions, making a bounded terminal-session backstop feasible. Is it worth the risk of relaxing the reaper's net (mitigated by terminal-status + grace gating), or does the primary fix + explicit ordering close the leak sufficiently to record it as a no-go?
-3. **Process-group vs single-PID kill.** The `claude -p` spawns MCP/subagent children in its own group (`start_new_session=True`). Confirm we should `killpg` the whole group (recommended) rather than only the leader — the leader-only kill is what leaves orphaned MCP servers.
+All three questions are resolved by the 2026-07-08 critique revision (recorded here for the re-critique's audit trail):
+
+1. **PID-field unification direction (D1 vs D2). → RESOLVED: D2.** Read the existing survive-terminal `pm_pid` — no new persisted field, no migration, and the #1271 reaper + dashboard `claude_pid` semantics stay untouched. D1's `claude_pid` repopulation + new `claude_pgid` field was rejected as unnecessary state that dragged the reaper/dashboard into scope. `pm_pid` is a live confirm target at cleanup time precisely because `finalize_session` NULLs only `claude_pid`.
+2. **Reaper backstop: implement or no-go? → RESOLVED: explicit no-go.** The survivor is PPID==worker, invisible to the PPID==1 reaper, and relaxing that gate risks killing live worker children. The primary fix closes the leak at its source; the passive `terminal-with-live-subprocess` counter (emitted from the hourly sweep) is the residual detection signal. Recorded in No-Gos.
+3. **Process-group vs single-PID kill. → RESOLVED: killpg the group.** `os.killpg(pm_pid, sig)` (pgid==pid under `start_new_session=True`), self-pgrp guarded, so orphaned MCP/subagent children in the group die with the leader.
