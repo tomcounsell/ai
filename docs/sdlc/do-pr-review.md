@@ -125,7 +125,7 @@ These are hard gates. No exceptions.
 
 On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ...` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ...` in the same block. Never record an APPROVED verdict without immediately writing the completion marker.
 
-This closes the #1642 desync: if the marker write is a separable later step and the skill exits before reaching it, the REVIEW marker stays non-`completed` while the verdict says APPROVED. Router **row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW == completed`, so a desynced state stalls `/do-docs` — the skill-layer completion-marker write is what advances REVIEW. On any non-APPROVED verdict, leave the marker at `in_progress`.
+This closes the #1642 desync: if the marker write is a separable later step and the skill exits before reaching it, the REVIEW marker stays non-`completed` while the verdict says APPROVED. Router **row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW == completed` **and** a recorded `APPROVED` verdict (issue #1932 tightened the gate — `REVIEW == completed` alone is no longer sufficient, since a crashed re-review can leave REVIEW `completed` with no verdict at all), so a desynced state stalls `/do-docs` — the skill-layer completion-marker write is what advances REVIEW. On any non-APPROVED verdict, leave the marker at `in_progress`.
 
 ## Multi-Machine Compatibility
 

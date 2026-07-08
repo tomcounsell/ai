@@ -340,20 +340,37 @@ class TestSnapshotAndCounter:
 class TestGuardOrdering:
     """Guards fire in G1..G6 order; first match wins."""
 
-    def test_g1_precedence_over_g3(self):
-        # Both G1 (critique loop) and G3 (PR lock) would fire; G1 wins.
+    def test_g3_precedence_over_g1_when_pr_open(self):
+        # #1932 gap (b2): G1 now steps aside whenever a PR is open (it must
+        # never route a NEEDS REVISION critique back to /do-plan once a PR
+        # exists), deferring to G3's PR-aware redirect.
         states = {
             "PLAN": "completed",
             "_verdicts": {"CRITIQUE": {"verdict": "NEEDS REVISION"}},
         }
         meta = {
-            "pr_number": 99,  # would trigger G3
+            "pr_number": 99,  # triggers G3
             "latest_critique_verdict": "NEEDS REVISION",
             "last_dispatched_skill": SKILL_DO_PLAN_CRITIQUE,
         }
         result = decide_next_dispatch(states, meta)
         assert isinstance(result, Dispatch)
-        # G1 routes to /do-plan; G3 would route to /do-pr-review.
+        assert result.row_id == "G3"
+        assert result.skill != SKILL_DO_PLAN
+
+    def test_g1_wins_without_open_pr(self):
+        """No-PR regression: G1 still routes to /do-plan when no PR exists."""
+        states = {
+            "PLAN": "completed",
+            "_verdicts": {"CRITIQUE": {"verdict": "NEEDS REVISION"}},
+        }
+        meta = {
+            "pr_number": None,
+            "latest_critique_verdict": "NEEDS REVISION",
+            "last_dispatched_skill": SKILL_DO_PLAN_CRITIQUE,
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
         assert result.row_id == "G1"
         assert result.skill == SKILL_DO_PLAN
 

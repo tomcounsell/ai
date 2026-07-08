@@ -302,7 +302,10 @@ class TestRow9ReviewApprovedDocsNotDone:
             "REVIEW": "completed",
             "DOCS": "pending",
         }
-        meta = {"pr_number": 7}
+        # #1932 gap (c): row 9 now requires a recorded APPROVED verdict, not
+        # just REVIEW==completed — record one so this exercises row 9's real
+        # (fixed) contract instead of the old verdict-blind misroute.
+        meta = {"pr_number": 7, "latest_review_verdict": "APPROVED"}
         result = decide_next_dispatch(states, meta)
         assert result.skill == SKILL_DO_DOCS
         assert result.row_id == "9"
