@@ -12,9 +12,11 @@ Design notes:
     ``traces_sample_rate``, and ``environment`` are preserved unchanged.
   * **``before_send`` is a parameter, not hardcoded.** The bridge passes its
     ``_sentry_before_send`` (which drops events while the *bridge* is hibernating —
-    a bridge-only concept). The worker passes ``None`` so worker Sentry events are
-    never silently dropped because the bridge happens to be hibernating. This
-    helper never imports ``bridge.hibernation``.
+    a bridge-only concept — and then delegates to :func:`drop_orphan_noise`). The
+    worker passes :func:`drop_orphan_noise` directly (issue #1835) so the Popoto
+    orphan-index diagnostic it emits in a tight poll loop never floods Sentry. The
+    worker deliberately does NOT get the bridge-hibernation filter — this helper
+    never imports ``bridge.hibernation``.
   * **Minimal test/CI guard only.** ``configure_sentry`` returns early under
     ``PYTEST_CURRENT_TEST`` or ``CI`` so a ``SENTRY_DSN``-present test run never
     mis-tags ``production``. It deliberately does NOT add a machine/platform gate
@@ -91,7 +93,8 @@ def configure_sentry(component: str, before_send=None) -> bool:
     Args:
         component: Human-readable process name, used only in log lines.
         before_send: Optional Sentry ``before_send`` hook. The bridge passes its
-            hibernation filter; the worker passes ``None``.
+            hibernation filter (which chains to :func:`drop_orphan_noise`); the
+            worker passes :func:`drop_orphan_noise` directly (issue #1835).
 
     Returns:
         ``True`` if ``sentry_sdk.init`` was invoked, ``False`` otherwise (no DSN,
