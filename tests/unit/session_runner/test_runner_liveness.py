@@ -361,3 +361,67 @@ def test_stamp_stdout_liveness_noop_without_session_id():
     runner, session = _make_stdout_liveness_runner("")
     runner._stamp_stdout_liveness()
     assert session.saved_fields == []
+
+
+# --------------------------------------------------------------------------
+# Risk 1 regression guard (issue #1935): a post-init hang is caught by the
+# whole-turn deadline, NOT by session-health's never-started gate (which
+# correctly no longer fires once init stamps last_stdout_at).
+# --------------------------------------------------------------------------
+
+
+async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(tmp_path):
+    """A subprocess that streams `init` (real output — last_stdout_at gets
+    stamped) and then hangs forever must NOT be caught by the never-started
+    gate (it correctly does not fire, since sdk_ever_output is now True) —
+    the actual backstop is the driver's own whole-turn deadline
+    (asyncio.wait_for -> outcome.hung=True / exit_reason=headless_turn_timeout).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from agent.session_health import _never_started_past_grace
+
+    async def _init_then_hang(message, working_dir, **kwargs):
+        on_init = kwargs.get("on_init")
+        if on_init is not None:
+            on_init({"type": "system", "subtype": "init", "session_id": "claude-uuid-hang"})
+        await asyncio.sleep(30)  # never resolves within the tiny turn budget
+        return "never reached"
+
+    session = FakeSession()
+    session.session_id = "sess-post-init-hang"
+
+    def _on_init(data: dict) -> None:
+        # Mirrors what SessionRunner._on_init_composed does: stamp
+        # last_stdout_at unconditionally after the init event lands.
+        session.last_stdout_at = datetime.now(tz=UTC)
+
+    # Direct HeadlessRoleDriver construction (not via SessionRunner) so the
+    # driver's own turn_timeout_s is exactly the tiny value under test,
+    # without the runner's DRIVER_BACKSTOP_MARGIN_S padding.
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id=session.session_id,
+        working_dir=str(tmp_path),
+        turn_timeout_s=0.05,
+        harness_fn=_init_then_hang,
+        on_init=_on_init,
+    )
+
+    outcome = await driver.run_turn("go")
+
+    # The init event's liveness stamp landed — real output was produced.
+    assert session.last_stdout_at is not None
+
+    # A session whose last_stdout_at is fresh must NOT be flagged by the
+    # never-started gate, even though this simulated session is well past
+    # the grace window on created_at/started_at.
+    session.created_at = datetime.now(tz=UTC) - timedelta(seconds=500)
+    session.started_at = None
+    assert _never_started_past_grace(session) is False
+
+    # The turn IS still recovered — via the whole-turn deadline, not the
+    # never-started gate.
+    assert outcome.hung is True
+    assert outcome.exit_reason == "headless_turn_timeout"
+    assert outcome.turn_ended is False
