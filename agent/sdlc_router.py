@@ -1083,6 +1083,12 @@ def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context:
         return False
     if stage_states.get("REVIEW") != STATUS_COMPLETED:
         return False
+    # #1932 gap (c): gate on a recorded APPROVED verdict at the source, rather
+    # than inferring "approved" from REVIEW==completed alone — REVIEW can be
+    # marked completed with no verdict ever recorded (crash), which silently
+    # misrouted here to /do-docs. Row 8d owns that no-verdict state instead.
+    if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
+        return False
     docs_status = stage_states.get("DOCS")
     return docs_status not in (STATUS_COMPLETED,)
 

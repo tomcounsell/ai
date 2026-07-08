@@ -484,11 +484,12 @@ class TestReReviewCrashRecovery:
         )
 
         # Companion assertions: row 7 still doesn't cover this state (REVIEW
-        # is "completed", not None/pending/ready). Row 9's predicate is still
-        # True in isolation (documenting current row-9 behavior pre-fix c) —
-        # row 8d simply wins by running first in DISPATCH_RULES order.
+        # is "completed", not None/pending/ready). Row 9's predicate is now
+        # False in isolation (post-fix c: row 9 requires a recorded APPROVED
+        # verdict, and none was recorded here) — 8d and row 9 are disjoint by
+        # verdict, not by table-position luck.
         assert _rule_pr_exists_no_review(states, meta, {}) is False
-        assert _rule_review_approved_docs_not_done(states, meta, {}) is True
+        assert _rule_review_approved_docs_not_done(states, meta, {}) is False
 
 
 # ---------------------------------------------------------------------------
@@ -692,9 +693,16 @@ class TestG5OpenPrStepAside:
 
 
 class TestRow9VerdictGate:
-    """Repro for #1932 gap (c): row 9 has no verdict gate."""
+    """Row 9 now requires a recorded APPROVED review verdict (#1932 gap c fix)."""
 
-    def test_row9_fires_without_recorded_review_verdict(self):
+    def test_row9_blocked_without_recorded_review_verdict(self):
+        """No recorded verdict: row 9 must step aside, not silently dispatch /do-docs.
+
+        Same repro state as TestReReviewCrashRecovery's COMPLETED case, but
+        with a non-review last dispatch so row 8d cannot recover it either —
+        this isolates row 9's own verdict gate. Post-fix, neither row fires
+        and the router falls through to Blocked.
+        """
         states = _base_states(
             REVIEW=STATUS_COMPLETED,
             DOCS="pending",
@@ -705,8 +713,34 @@ class TestRow9VerdictGate:
             latest_review_verdict=None,
         )
         result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Blocked)
+
+    def test_row9_fires_with_recorded_approved_verdict(self):
+        """Legitimate case: an APPROVED verdict IS recorded — row 9 still dispatches /do-docs."""
+        states = _base_states(
+            REVIEW=STATUS_COMPLETED,
+            DOCS="pending",
+        )
+        meta = _base_meta(
+            pr_number=9101,
+            last_dispatched_skill=SKILL_DO_BUILD,
+            latest_review_verdict="APPROVED",
+        )
+        result = decide_next_dispatch(states, meta, {})
         assert result == Dispatch(
             skill=SKILL_DO_DOCS,
             reason="Docs are required before merge",
             row_id="9",
         )
+
+    def test_rule_review_approved_docs_not_done_false_without_verdict(self):
+        """Direct predicate call: False when REVIEW completed but no verdict recorded (post-fix)."""
+        states = _base_states(REVIEW=STATUS_COMPLETED, DOCS="pending")
+        meta = _base_meta(pr_number=9101, latest_review_verdict=None)
+        assert _rule_review_approved_docs_not_done(states, meta, {}) is False
+
+    def test_rule_review_approved_docs_not_done_true_with_approved_verdict(self):
+        """Direct predicate call: True when REVIEW completed and an APPROVED verdict is recorded."""
+        states = _base_states(REVIEW=STATUS_COMPLETED, DOCS="pending")
+        meta = _base_meta(pr_number=9101, latest_review_verdict="APPROVED")
+        assert _rule_review_approved_docs_not_done(states, meta, {}) is True
