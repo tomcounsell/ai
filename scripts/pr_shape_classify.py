@@ -62,6 +62,7 @@ DOCS_ONLY_GLOBS: tuple[str, ...] = (
     "*.md",
     "CHANGELOG*",
     "README*",
+    ".env.example",  # doc-like: never loaded at runtime; exact filename match, not a wildcard
 )
 
 # ``lockfile-only`` is strictly the literal file ``uv.lock``. A
