@@ -65,6 +65,7 @@ Each model is processed independently -- one model failure does not abort the sw
 | `worker/__main__.py` | Worker startup using `run_cleanup()` for all-model rebuild (step 1) |
 | `scripts/popoto_index_cleanup.py` | Cleanup function (`run_cleanup()`) and model discovery (`_get_all_models()`) |
 | `config/reflections.yaml` | Reflection registry entry for `ReflectionScheduler` |
+| `monitoring/sentry_config.py` | `drop_orphan_noise()` Sentry `before_send` filter (see Sentry Orphan-Noise Filter) |
 
 ## Inline Orphan Prevention (Defensive srem)
 
@@ -76,7 +77,19 @@ The defensive `srem` is non-fatal (wrapped in try/except) and depends on three P
 
 ## Verification
 
-After the cleanup reflection runs, `grep -rn "import redis" agent/` should return zero hits, and bridge logs should show no `"one or more redis keys points to missing objects"` warnings.
+After the cleanup reflection runs, `grep -rn "import redis" agent/` should return zero hits, and bridge logs should show reduced `"one or more redis keys points to missing objects"` warnings.
+
+## Sentry Orphan-Noise Filter
+
+The cleanup infrastructure above **reduces** but cannot **eliminate** transient orphan-index entries: the orphan lifecycle is inherent to Popoto + TTL (Redis SETs have no per-member TTL, so a hash expiry always leaves a ghost SET member until the next sweep). Popoto's `Query` logger emits `"one or more redis keys points to missing objects. Debug with Model.query.keys(clean=True)"` at `error` level on **every** query that touches such a ghost — and the worker polls `AgentSession.query.all()` in a tight loop. Sentry's default `LoggingIntegration` captures each of these as an event, which accumulated **68k+ benign events** on Sentry issue `VALOR-S` (issue #1835).
+
+The churn is benign-transient: the `if redis_hash` guard in Popoto's `get_many_objects` already silently skips ghost hashes, so **no stale data is ever returned**. Three prior orphan-reduction fixes (#860, #1459, #1874) each lowered the volume but none removed the noise, because the error fires on every hit, not once per orphan. Rather than chase the last orphan, the noise is filtered at the Sentry layer:
+
+- **`drop_orphan_noise(event, hint)` in `monitoring/sentry_config.py`** is a `before_send` hook that returns `None` (drops the event) when the event's logged message contains the orphan substring. It checks `logentry.formatted`, `logentry.message`, and the top-level `message` field, and wraps the match in try/except so a filter bug can never suppress a real error.
+- **The worker** (`worker/__main__.py`) — the primary emitter — passes `before_send=drop_orphan_noise` to `configure_sentry("worker", ...)` (previously `None`).
+- **The bridge** (`bridge/telegram_bridge.py`) composes it: `_sentry_before_send` runs the hibernation check first, then delegates to `drop_orphan_noise`.
+
+This filters the **Sentry** noise only — the diagnostic still appears in bridge/worker logs (a `logging.Filter` on the `POPOTO.Query` logger was rejected because it would hide the diagnostic from logs entirely). Modifying Popoto's source to downgrade the log level was also rejected: Popoto is a pip-installed dependency, and monkey-patching would break on upgrade. The `before_send` layer intercepts after Popoto logs but before Sentry captures.
 
 ## Related: Disk-Side Embedding Orphan Cleanup
 
@@ -87,4 +100,4 @@ After the cleanup reflection runs, `grep -rn "import redis" agent/` should retur
 - **One-shot reconciliation:** `python scripts/embedding_orphan_reconcile.py --dry-run` then `--apply`. Includes a positive-assertion safety check (refuses to apply if to-delete intersects expected-keep) and a pre-flight regression guard (refuses to apply if `$Class:Memory` is empty).
 - **Required marker:** `Memory.__embedding_garbage_collect__ = True` opts the model into garbage_collect; without it Popoto's helper is a no-op (defensive default for any future model that attaches `EmbeddingField`).
 
-The B1 fix in this PR also corrected `_count_orphans` to read the canonical `model_class._meta.db_class_set_key.redis_key` (= `$Class:{Name}`) instead of the legacy `{Name}:_all` key, which is empty in production. Issue #1214; see [Subconscious Memory § Embedding-File Lifecycle](subconscious-memory.md#embedding-file-lifecycle) for the full lifecycle.
+A prior fix (issue #1214) also corrected `_count_orphans` to read the canonical `model_class._meta.db_class_set_key.redis_key` (= `$Class:{Name}`) instead of the older `{Name}:_all` key, which is empty in production. See [Subconscious Memory § Embedding-File Lifecycle](subconscious-memory.md#embedding-file-lifecycle) for the full lifecycle.
