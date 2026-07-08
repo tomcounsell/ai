@@ -142,6 +142,46 @@ def record_dispatch_for_session(
     return ok
 
 
+def _peek_issue_lock_conflict(session) -> dict | None:
+    """Read-only check for whether a dispatch write failure was issue-lock
+    contention (issue #1954 gap: the CLI ``ISSUE_LOCKED`` shape).
+
+    ``record_dispatch_for_session()`` intentionally stays a plain ``bool`` --
+    other call sites and tests already depend on that return type -- so a
+    ``False`` result is ambiguous: lock contention and unrelated write
+    failures (e.g. a Redis write conflict in ``update_stage_states``) both
+    collapse to the same ``False``. This helper disambiguates AFTER the fact
+    with a non-mutating ``peek=True`` lock check, mirroring the
+    ``session.issue_url`` -> ``_parse_issue_number_from_url`` derivation
+    ``record_dispatch_for_session()`` performs internally. It never acquires,
+    renews, or otherwise mutates the lock.
+
+    Returns:
+        ``{"reason": "ISSUE_LOCKED", "owner_session_id": "..."}`` if the lock
+        is currently held by a different live session. ``None`` if the lock
+        is free/owned by this session (failure was unrelated to the lock),
+        the session has no parseable issue number, or the peek itself
+        errors.
+    """
+    issue_number = _parse_issue_number_from_url(getattr(session, "issue_url", None))
+    if not issue_number:
+        return None
+
+    try:
+        from models.session_lifecycle import touch_issue_lock
+
+        session_id = getattr(session, "session_id", None) or ""
+        lock_result = touch_issue_lock(issue_number, session_id, peek=True)
+    except Exception as e:
+        logger.debug(f"sdlc_dispatch: issue-lock peek failed (non-fatal): {e}")
+        return None
+
+    if lock_result.acquired:
+        return None
+
+    return {"reason": "ISSUE_LOCKED", "owner_session_id": lock_result.owner_session_id}
+
+
 def get_dispatch_history(session) -> list:
     """Read the ``_sdlc_dispatches`` list from a session's stage_states.
 
@@ -191,7 +231,21 @@ def _cli_record(args) -> dict:
         pr_number=args.pr_number,
     )
     history = get_dispatch_history(session)
-    return {"ok": ok, "history_length": len(history)}
+    result = {"ok": ok, "history_length": len(history)}
+
+    # #1954 gap: record_dispatch_for_session() returning False is ambiguous
+    # (issue-lock contention vs. any other write failure). On failure, peek
+    # the lock (read-only) to see whether it was specifically lock
+    # contention, and if so surface the documented ISSUE_LOCKED shape
+    # (SKILL.md: "dispatch record/ensure_session surface the same shape at
+    # their own call sites"). Non-lock failures keep the pre-existing
+    # {"ok": False, "history_length": N} shape unchanged -- additive only.
+    if not ok:
+        lock_conflict = _peek_issue_lock_conflict(session)
+        if lock_conflict is not None:
+            result.update(lock_conflict)
+
+    return result
 
 
 def _cli_get(args) -> list:

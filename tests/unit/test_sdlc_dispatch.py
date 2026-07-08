@@ -320,3 +320,81 @@ class TestRecordDispatchIssueLock:
         with patch("tools.stage_states_helpers.update_stage_states", return_value=True):
             ok_b = record_dispatch_for_session(session_b, skill="/do-build")
         assert ok_b is False
+
+
+class TestCliRecordIssueLockedShape:
+    """Issue #1954 gap fix: `_cli_record()` disambiguates a False result from
+    ``record_dispatch_for_session()`` -- issue-lock contention vs. any other
+    write failure -- via a read-only ``touch_issue_lock(peek=True)`` check,
+    so the CLI's returned dict matches the ISSUE_LOCKED shape SKILL.md
+    already documents for `sdlc-tool dispatch record`."""
+
+    def _lock_result(self, acquired: bool, owner_session_id=None):
+        from models.session_lifecycle import IssueLockResult
+
+        return IssueLockResult(acquired=acquired, owner_session_id=owner_session_id)
+
+    def test_lock_contention_surfaces_reason_and_owner(self):
+        """record_dispatch_for_session() refuses because a different live
+        session holds the lock -- _cli_record's dict must carry
+        reason=ISSUE_LOCKED and the correct owner_session_id, alongside the
+        existing ok/history_length keys."""
+        from tools import sdlc_dispatch
+
+        session = MagicMock(name="issue_session")
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/4001"
+        session.session_id = "sdlc-local-4001"
+
+        find_mock = MagicMock(return_value=session)
+        # touch_issue_lock is called twice: once inside
+        # record_dispatch_for_session() (mutating attempt), once inside the
+        # CLI's post-failure peek. Both return the same "held elsewhere"
+        # result for this contended-issue scenario.
+        lock_mock = MagicMock(return_value=self._lock_result(False, "other-live-session"))
+
+        args = SimpleNamespace(
+            session_id=None, issue_number=4001, skill="/do-build", pr_number=None
+        )
+
+        with (
+            patch.object(sdlc_dispatch, "_find_session", find_mock),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = sdlc_dispatch._cli_record(args)
+
+        assert result["ok"] is False
+        assert result["reason"] == "ISSUE_LOCKED"
+        assert result["owner_session_id"] == "other-live-session"
+        assert lock_mock.call_count == 2
+
+    def test_non_lock_failure_keeps_old_shape(self):
+        """record_dispatch_for_session() fails for a reason unrelated to the
+        issue lock (e.g. update_stage_states write conflict) -- the lock
+        peek reports acquired=True (free/owned by us), so _cli_record's dict
+        must stay the pre-existing {"ok": False, "history_length": N} shape
+        with no spurious "reason" key."""
+        from tools import sdlc_dispatch
+
+        session = MagicMock(name="issue_session")
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/4002"
+        session.session_id = "sdlc-local-4002"
+
+        find_mock = MagicMock(return_value=session)
+        # The lock itself is free/ours (acquired=True) both times; the write
+        # fails for an unrelated reason (update_stage_states returns False).
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-4002"))
+
+        args = SimpleNamespace(
+            session_id=None, issue_number=4002, skill="/do-build", pr_number=None
+        )
+
+        with (
+            patch.object(sdlc_dispatch, "_find_session", find_mock),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("tools.stage_states_helpers.update_stage_states", return_value=False),
+        ):
+            result = sdlc_dispatch._cli_record(args)
+
+        assert result == {"ok": False, "history_length": 0}
+        assert "reason" not in result
+        assert "owner_session_id" not in result
