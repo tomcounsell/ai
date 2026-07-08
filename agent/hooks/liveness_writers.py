@@ -127,13 +127,25 @@ def record_tool_boundary(*, tool_name: str | None, clear: bool) -> bool:
         return False
 
 
-def record_turn_boundary() -> bool:
+def record_turn_boundary(session_id: str | None = None) -> bool:
     """Bump ``last_turn_at`` for the in-flight AgentSession.
 
     Called from the SDK client's ``result`` event handler. Subject to the
     same cooldown and failure-handling guarantees as ``record_tool_boundary``.
+
+    Args:
+        session_id: The true ``AgentSession.session_id`` (NOT the Claude
+            UUID, NOT the ``agent_session_id`` ``agt_xxx`` env value). When
+            provided, resolves the AgentSession directly — this is the
+            worker-process call path (``agent/sdk_client.py``'s ``result``
+            event handler), plumbed from the session runner
+            (``agent/session_runner/runner.py``), where
+            ``AGENT_SESSION_ID`` is unset. When ``None`` (default), falls
+            back to ``os.environ.get("AGENT_SESSION_ID")`` — preserving the
+            in-subprocess CLI-hook call sites unchanged.
     """
-    session_id = os.environ.get("AGENT_SESSION_ID")
+    if session_id is None:
+        session_id = os.environ.get("AGENT_SESSION_ID")
     if not session_id:
         return False
 

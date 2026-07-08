@@ -2542,6 +2542,7 @@ async def get_response_via_harness(
         on_init=on_init,
         on_exit_status=on_exit_status,
         ttft_metadata=_ttft_meta,
+        true_session_id=session_id,
     )
     # Issue #1245: accumulate counts across primary + fallback subprocess
     # invocations (image-dimension fallback, stale-UUID fallback). Each
@@ -2583,6 +2584,7 @@ async def get_response_via_harness(
                 on_stdout_event=on_stdout_event,
                 on_init=on_init,
                 on_exit_status=on_exit_status,
+                true_session_id=session_id,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2639,6 +2641,7 @@ async def get_response_via_harness(
                 on_stdout_event=on_stdout_event,
                 on_init=on_init,
                 on_exit_status=on_exit_status,
+                true_session_id=session_id,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2761,6 +2764,7 @@ async def _run_harness_subprocess(
     on_init: Callable[[dict], None] | None = None,
     on_exit_status: Callable[[int | None, bool], None] | None = None,
     ttft_metadata: dict | None = None,
+    true_session_id: str | None = None,
 ) -> tuple[
     str | None,
     str | None,
@@ -2828,6 +2832,14 @@ async def _run_harness_subprocess(
             model} that are merged into the JSONL entry written to
             ``logs/cold_start_metrics.jsonl`` on first-stdout-byte.  Omitting
             this parameter disables TTFT logging (all non-PM call sites).
+
+    Turn-boundary liveness (issue #1935):
+        true_session_id: the true ``AgentSession.session_id`` (NOT the
+            Claude UUID reported on the ``result`` event, NOT the
+            ``agent_session_id`` env value) — passed explicitly to
+            ``agent.hooks.liveness_writers.record_turn_boundary`` on each
+            ``result`` event so ``last_turn_at`` is written from the worker
+            process, where ``AGENT_SESSION_ID`` is never set.
     """
     # TTFT baseline: record spawn timestamp before exec (issue #1227).
     _spawn_ts = time.monotonic()
@@ -2930,10 +2942,14 @@ async def _run_harness_subprocess(
             # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
             # the in-flight AgentSession so the dashboard can show how
             # recently the SDK completed a turn. Best-effort, never raises.
+            # Passes the true AgentSession.session_id explicitly (issue
+            # #1935) — NOT data.get("session_id") (the Claude UUID) and NOT
+            # the env AGENT_SESSION_ID (unset in the worker process; the
+            # explicit id is what makes this write actually land).
             try:
                 from agent.hooks.liveness_writers import record_turn_boundary
 
-                record_turn_boundary()
+                record_turn_boundary(session_id=true_session_id)
             except Exception as _liveness_err:
                 logger.debug("liveness turn-boundary write failed: %s", _liveness_err)
             # Extract per-turn token + cost counts (issue #1128). These
