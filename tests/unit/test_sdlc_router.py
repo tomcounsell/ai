@@ -492,22 +492,25 @@ class TestReReviewCrashRecovery:
 
 
 # ---------------------------------------------------------------------------
-# Issue #1932 gap (b): a NEEDS REVISION critique verdict can route back to
-# /do-plan even when a PR is already open, via THREE independent pre-fix
-# routes: row 3, guard G1, guard G5. These tests capture each route's
-# CURRENT (buggy) behavior in isolation.
+# Issue #1932 gap (b): a NEEDS REVISION critique verdict must never route back
+# to /do-plan when a PR is already open. Three independent routes could each
+# produce that misroute: row 3, guard G1, guard G5. Each is fixed with an
+# open-PR step-aside that defers to G3 (guard_g3_pr_lock), the canonical
+# open-PR plan-stage redirect. These tests assert the FIXED (post-b1/b2/b3)
+# behavior, plus no-PR regressions proving each route's normal contract is
+# preserved when no PR exists.
 # ---------------------------------------------------------------------------
 
 
 class TestRow3OpenPrStepAside:
-    """Repro for #1932 gap (b1): row 3 routes to /do-plan even with an open PR.
+    """#1932 gap (b1): row 3 must step aside to row 7 when a PR is open.
 
-    Row 3 (_rule_critique_needs_revision) has no PR-awareness at all — it
-    fires purely off the critique verdict text, regardless of whether a PR
-    already exists for the plan being critiqued.
+    Row 3 (_rule_critique_needs_revision) now checks meta["pr_number"] first
+    and returns False when a PR exists, letting row 7
+    (_rule_pr_exists_no_review) own the PR-open path instead.
     """
 
-    def test_row3_dispatches_do_plan_despite_open_pr(self):
+    def test_row3_steps_aside_to_pr_review_when_pr_open(self):
         states = _base_states(
             CRITIQUE=STATUS_COMPLETED,
             REVIEW="pending",
@@ -518,24 +521,26 @@ class TestRow3OpenPrStepAside:
             last_dispatched_skill=SKILL_DO_TEST,  # non-plan-family
         )
         # No proposed_skill in context — G3 requires last OR proposed to be
-        # in the plan family to trip, and neither is here.
+        # in the plan family to trip, and neither is here, so G3 doesn't
+        # intercept; row 3 steps aside and row 7 picks it up.
         result = decide_next_dispatch(states, meta, {})
         assert result == Dispatch(
-            skill=SKILL_DO_PLAN,
-            reason="Revise plan based on critique findings",
-            row_id="3",
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Code is ready for review",
+            row_id="7",
         )
+        assert result.skill != SKILL_DO_PLAN
 
 
 class TestG1OpenPrStepAside:
-    """Repro for #1932 gap (b2): G1 routes to /do-plan even with an open PR.
+    """#1932 gap (b2): G1 must defer to G3 when a PR is open.
 
-    G1 (guard_g1_critique_loop) fires whenever the latest critique verdict is
-    NEEDS REVISION/MAJOR REWORK and the last dispatch was /do-plan-critique —
-    it never checks meta["pr_number"].
+    G1 (guard_g1_critique_loop) now checks meta["pr_number"] first and
+    returns None when a PR exists, deferring to G3 (guard_g3_pr_lock), the
+    canonical open-PR plan-stage redirect.
     """
 
-    def test_g1_dispatches_do_plan_despite_open_pr(self):
+    def test_g1_defers_to_g3_when_pr_open(self):
         states = _base_states(
             CRITIQUE=STATUS_COMPLETED,
             REVIEW="pending",
@@ -547,19 +552,35 @@ class TestG1OpenPrStepAside:
         )
         result = decide_next_dispatch(states, meta, {})
         assert isinstance(result, Dispatch)
+        assert result.row_id == "G3"
+        assert result.skill != SKILL_DO_PLAN
+
+    def test_g1_still_dispatches_do_plan_without_open_pr(self):
+        """No-PR regression: G1's normal contract is preserved without a PR."""
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            REVIEW="pending",
+        )
+        meta = _base_meta(
+            pr_number=None,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        result = decide_next_dispatch(states, meta, {})
+        assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_PLAN
         assert result.row_id == "G1"
 
 
 class TestG5OpenPrStepAside:
-    """Repro for #1932 gap (b3): G5 routes to /do-plan even with an open PR.
+    """#1932 gap (b3): G5 must defer to G3/row 7 when a PR is open.
 
-    G5 (guard_g5_artifact_hash_cache) reuses a cached NEEDS REVISION verdict
-    whenever the plan hash is unchanged — it checks pr_number for the READY
-    TO BUILD branch (D3, #1710) but NOT for the NEEDS REVISION branch.
+    G5 (guard_g5_artifact_hash_cache) now checks meta["pr_number"] in the
+    NEEDS_REVISION/MAJOR_REWORK branch (mirroring the existing pr_number
+    defer in its READY_TO_BUILD branch) and returns None when a PR exists.
     """
 
-    def test_g5_dispatches_do_plan_despite_open_pr(self):
+    def test_g5_defers_to_pr_review_when_pr_open(self):
         plan_hash = "sha256:deadbeef"
         states = _base_states(
             CRITIQUE=STATUS_COMPLETED,
@@ -573,6 +594,84 @@ class TestG5OpenPrStepAside:
         )
         meta = _base_meta(
             pr_number=6789,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_TEST,  # non-plan-family
+        )
+        context = {"current_plan_hash": plan_hash}  # cache hit
+        result = decide_next_dispatch(states, meta, context)
+        assert result == Dispatch(
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Code is ready for review",
+            row_id="7",
+        )
+        assert result.skill != SKILL_DO_PLAN
+
+    def test_g5_major_rework_defers_to_pr_review_when_pr_open(self):
+        """The gate covers MAJOR REWORK as well as NEEDS REVISION."""
+        plan_hash = "sha256:deadbeef"
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            REVIEW="pending",
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "MAJOR REWORK",
+                    "artifact_hash": plan_hash,
+                }
+            },
+        )
+        meta = _base_meta(
+            pr_number=6790,
+            latest_critique_verdict="MAJOR REWORK",
+            last_dispatched_skill=SKILL_DO_TEST,  # non-plan-family
+        )
+        context = {"current_plan_hash": plan_hash}  # cache hit
+        result = decide_next_dispatch(states, meta, context)
+        assert result == Dispatch(
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Code is ready for review",
+            row_id="7",
+        )
+        assert result.skill != SKILL_DO_PLAN
+
+    def test_g5_defers_to_g3_when_pr_open_and_last_dispatch_critique(self):
+        """G1 defers via b2, then G3 trips before G5 is reached."""
+        plan_hash = "sha256:deadbeef"
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            REVIEW="pending",
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "NEEDS REVISION",
+                    "artifact_hash": plan_hash,
+                }
+            },
+        )
+        meta = _base_meta(
+            pr_number=6791,
+            latest_critique_verdict="NEEDS REVISION",
+            last_dispatched_skill=SKILL_DO_PLAN_CRITIQUE,
+        )
+        context = {"current_plan_hash": plan_hash}  # cache hit
+        result = decide_next_dispatch(states, meta, context)
+        assert isinstance(result, Dispatch)
+        assert result.row_id == "G3"
+        assert result.skill != SKILL_DO_PLAN
+
+    def test_g5_still_dispatches_do_plan_without_open_pr(self):
+        """No-PR regression: G5's cache-reuse contract is preserved without a PR."""
+        plan_hash = "sha256:deadbeef"
+        states = _base_states(
+            CRITIQUE=STATUS_COMPLETED,
+            REVIEW="pending",
+            _verdicts={
+                "CRITIQUE": {
+                    "verdict": "NEEDS REVISION",
+                    "artifact_hash": plan_hash,
+                }
+            },
+        )
+        meta = _base_meta(
+            pr_number=None,
             latest_critique_verdict="NEEDS REVISION",
             last_dispatched_skill=SKILL_DO_TEST,  # non-plan-family
         )

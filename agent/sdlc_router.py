@@ -278,7 +278,15 @@ def guard_g1_critique_loop(
     If the latest critique verdict is ``NEEDS REVISION`` or ``MAJOR REWORK``
     AND the last dispatched skill was ``/do-plan-critique``, the router MUST
     route to ``/do-plan`` instead of re-critiquing the unchanged plan.
+
+    Open-PR step-aside (#1932 gap b2): once a PR exists, this guard defers to
+    G3 (``guard_g3_pr_lock``), the canonical open-PR plan-stage redirect —
+    routing straight to ``/do-plan`` here would bypass G3's PR-aware target
+    selection.
     """
+    if meta.get("pr_number"):
+        return None
+
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_NEEDS_REVISION not in verdict and CRITIQUE_MAJOR_REWORK not in verdict:
         return None
@@ -469,6 +477,13 @@ def guard_g5_artifact_hash_cache(
 
     verdict_text = normalize_verdict(_verdict_text(record))
     if CRITIQUE_NEEDS_REVISION in verdict_text or CRITIQUE_MAJOR_REWORK in verdict_text:
+        # Open-PR step-aside (#1932 gap b3): mirrors the READY_TO_BUILD
+        # branch's existing pr_number defer below — once a PR exists, a
+        # cached NEEDS REVISION/MAJOR REWORK verdict must not route back to
+        # /do-plan. Defer to G3 (guard_g3_pr_lock), the canonical open-PR
+        # plan-stage redirect.
+        if meta.get("pr_number"):
+            return None
         return Dispatch(
             skill=SKILL_DO_PLAN,
             reason="G5: cached CRITIQUE verdict is NEEDS REVISION on unchanged plan hash",
@@ -696,7 +711,13 @@ def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict)
     (returns False) and lets row 2b re-dispatch ``/do-plan-critique`` for a
     fresh critique. Mirrors the ``_review_verdict_is_stale`` step-aside in
     ``_rule_review_has_findings``.
+
+    Open-PR step-aside (#1932 gap b1): once a PR exists, a NEEDS REVISION
+    critique verdict must never route back to ``/do-plan`` — this row steps
+    aside and lets row 7 / G3 own PR-stage routing instead.
     """
+    if meta.get("pr_number"):
+        return False
     if _critique_verdict_is_stale(stage_states):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
