@@ -87,13 +87,15 @@ Two distinct pieces replace the marker:
   6. Stamp `response_delivered_at` on the parent and finalize to
      `"completed"` via `finalize_session`. The runner is the **sole** caller
      that transitions the parent to `"completed"` on the success path.
-  7. On `asyncio.CancelledError`, best-effort deliver a reason-aware interrupt
-     message — `INTERRUPT_RESUME` ("will resume automatically") or
-     `INTERRUPT_NO_RESUME` ("won't resume automatically"), selected via
-     `agent/cancel_reason.py::get_cancel_reason` (dedup'd by
-     `interrupted-sent:{session_id}` — 120s TTL) and re-raise to preserve
-     asyncio shutdown semantics. See
-     [Reason-Aware Interrupt Messaging and Failure Notification](#reason-aware-interrupt-messaging-and-failure-notification-issue-1877)
+  7. On `asyncio.CancelledError`, stay silent unless
+     `agent/cancel_reason.py::get_cancel_reason` reports the terminal
+     `"no_resume"` reason, in which case best-effort deliver
+     `INTERRUPT_NO_RESUME` ("won't resume automatically"), dedup'd by
+     `interrupted-sent:{session_id}` — 120s TTL, then re-raise to preserve
+     asyncio shutdown semantics. An auto-resuming interruption (the common
+     case) sends nothing — the session re-queues and its real answer arrives
+     later. See
+     [Reason-Aware Interrupt Messaging and Failure Notification](#reason-aware-interrupt-messaging-and-failure-notification-issue-1877-silent-resume-inversion)
      below.
 
 `schedule_pipeline_completion(...)` wraps the runner in a tracked
@@ -146,55 +148,94 @@ completion.
 
 `agent/messenger.py::_run_work` adds an explicit `except
 asyncio.CancelledError` branch before the generic `except Exception`.
-Behavior mirrors the runner's CancelledError handler: dedup on
-`interrupted-sent:{session_id}` (120s TTL), best-effort
+Behavior mirrors the runner's CancelledError handler: read the cancel-reason
+first and stay silent unless it is the terminal `"no_resume"`; only then
+dedup on `interrupted-sent:{session_id}` (120s TTL) and best-effort
 `asyncio.wait_for(send_callback(...), timeout=2.0)`, then re-raise. The
 redundancy is intentional — both layers may trip during shutdown; the
-Redis dedup ensures the user sees exactly one interrupted message per
-real interruption window, not N.
+Redis dedup ensures the user sees at most one interrupted message per
+real terminal interruption, and zero messages for an auto-resuming one.
 
-## Reason-Aware Interrupt Messaging and Failure Notification (issue #1877)
+## Reason-Aware Interrupt Messaging and Failure Notification (issue #1877; silent-resume inversion)
 
 `agent/notification_copy.py` is the single source of truth for the
 user-facing lifecycle copy that both this doc and `agent/messenger.py` /
-`agent/session_completion.py` reference: `INTERRUPT_RESUME`,
-`INTERRUPT_NO_RESUME`, and `FAILURE_NOTICE`. Send sites import these
-constants rather than inlining literal strings, so a copy change is a
-single-file edit.
+`agent/session_completion.py` reference: `INTERRUPT_NO_RESUME` and
+`FAILURE_NOTICE`. Send sites import these constants rather than inlining
+literal strings, so a copy change is a single-file edit. There is no longer
+a "will resume automatically" copy constant — auto-resuming interruptions
+are silent by design (issue #1937), not narrated with a mid-flight promise.
+A session finishes or fails; nothing in between speaks.
 
-### Defect #1 — reason-aware interrupt copy
+### Defect #1 — reason-aware interrupt copy (superseded by the silent-resume inversion)
 
 Before issue #1877, both interrupt send sites hardcoded "I was interrupted
 and will resume automatically" on every `CancelledError`, even when the
 killer had finalized the session to a terminal, non-resumable status. The
-fix threads a transient reason signal from the killer to the send site
-without giving the ORM-free messenger a database read:
+#1877 fix threaded a transient reason signal from the killer to the send
+site so it could choose between a resume copy and a no-resume copy without
+giving the ORM-free messenger a database read. Issue #1937 went further and
+retired the resume copy entirely — the signal is now binary (terminal or
+silent), not a choice between two announcements:
 
 - **Key:** `cancel-reason:{session_id}` in `POPOTO_REDIS_DB` (raw Redis, the
   same access pattern as the `interrupted-sent:{session_id}` dedup key).
-- **Values:** `"no_resume"` (the killer finalized the session terminal —
-  nothing will resume) or `"resume"` (a recovery path re-queued the session
-  to `pending`). Absent key (genuine worker shutdown, or a killer that
-  raced ahead of its own write) means `INTERRUPT_RESUME` — the historical
-  default.
-- **TTL:** 180 seconds, and that TTL is the *sole* cleanup mechanism —
-  neither `agent/cancel_reason.py` nor either send site ever pops or
-  deletes the key.
+- **Values:** `"no_resume"` is the only value any caller writes — the killer
+  finalized the session terminal and nothing will resume automatically.
+  Every non-terminal path (re-queue to `pending`, genuine worker shutdown,
+  or an escalation branch whose pre-cancel prediction was non-terminal)
+  writes nothing, leaving the key absent. Absent key now means **silence**
+  — not a resume-copy fallback (that constant was retired entirely by
+  issue #1937).
+- **TTL:** 180 seconds for the reason key; 120 seconds for the
+  `interrupted-sent:{session_id}` send-dedup key both send sites and the
+  escalation-branch terminal notice share. 120s is comfortably above the
+  worst-case SIGTERM→SIGKILL escalation wall-clock ceiling
+  (`SUBPROCESS_KILL_TIMEOUT = 3.0s` in `agent/session_health.py`), so the
+  dedup key cannot expire mid-escalation and reopen a double-send window.
 - **Read discipline:** `get_cancel_reason()` is read **only inside the
   branch that won the `interrupted-sent` SET-NX dedup** (i.e. only by the
   site that is actually about to send). This is load-bearing: both
   `agent/messenger.py` and `agent/session_completion.py` race that
   single-winner dedup, and a destructive read by the *losing* (non-sending)
-  site could otherwise starve the *winning* site into reading `None` and
-  emitting the wrong copy. Non-destructive reads plus read-inside-winner
-  placement close that race.
-- **Writers:** every killer that finalizes a session to a terminal,
+  site could otherwise starve the *winning* site into reading `None`.
+  Non-destructive reads plus read-inside-winner placement close that race.
+- **Writers:** only a killer that finalizes a session to a terminal,
   non-resumable status writes `"no_resume"` before it cancels the running
   task — the deadline kill in `agent/agent_session_queue.py`'s worker loop,
-  and the out-of-band kill / terminal-escalation branches inside
+  and the terminal-escalation branch inside
   `agent/session_health.py::_apply_recovery_transition` (health-check kill
-  and the post-cancel subprocess-survived escalation to `failed`). Recovery
-  paths that re-queue to `pending` write `"resume"`.
+  and the post-cancel subprocess-survived escalation to `failed`). A
+  predicted-resume path (re-queue to `pending`) writes nothing at all now,
+  where it previously wrote `"resume"`.
+- **Last-resort terminal voice for the subprocess-survived escalation
+  branch:** when the pre-cancel prediction was non-terminal (nothing
+  written), the two `CancelledError` send sites stay silent and never
+  acquire the `interrupted-sent` dedup key. If the subprocess then survives
+  cancel + SIGTERM + SIGKILL, `_apply_recovery_transition` re-stamps
+  `"no_resume"` and calls `_deliver_terminal_interrupt_notice(entry)` — a
+  dedicated helper in `agent/session_health.py` that sends
+  `INTERRUPT_NO_RESUME` against the shared `interrupted-sent` key, gated by
+  `not _has_deferred and not _degraded_sent` so it never double-messages the
+  sibling `_deliver_deferred_self_draft_fallback` /
+  `_deliver_tool_timeout_degraded_notice` deliveries. Without this last
+  resort, that branch would finalize to `failed` in complete silence — the
+  exact regression class issue #1937 exists to prevent.
+- **Shared delivery mechanics:** `_deliver_terminal_interrupt_notice` and
+  `_deliver_tool_timeout_degraded_notice` both delegate their SETNX-dedup +
+  transport-resolve + `FileOutputHandler`-fallback + send logic to a common
+  `_deliver_oneshot_dedup_notice(entry, *, dedup_key, ttl, message) -> bool`
+  helper — the terminal notice calls it with
+  `dedup_key=f"interrupted-sent:{session_id}"` / `ttl=120`, the degraded
+  notice with its own `tool_timeout:degraded_sent` key / longer TTL.
+  `_deliver_tool_timeout_degraded_notice` returns that `bool` (previously
+  `None`), and the escalation branch gates `_degraded_sent` on the actual
+  return value rather than on merely having called it — a swallowed
+  send-callback exception inside the degraded notice no longer silently
+  suppresses the terminal notice too (issue #1937 build-stage fix; regression
+  covered by
+  `test_escalation_branch_speaks_when_degraded_notice_silently_fails` in
+  `tests/unit/test_session_health_subprocess_kill.py`).
 - **Deliberately not wired:** supersede and PM-cancel finalize sessions that
   are not currently `running`, so no `CancelledError` interrupt send ever
   fires on those paths — there is nothing for a cancel-reason to influence,

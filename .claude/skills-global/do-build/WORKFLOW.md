@@ -69,9 +69,11 @@ SELF-CHECK (mandatory before marking task complete):
 2. Run \`git log --oneline main..HEAD\` and include the output
 3. If you made zero file changes, explicitly state "NO CHANGES MADE" and explain why`,
   subagent_type: "[agent type from task]",
-  run_in_background: [true if Parallel: true]
+  run_in_background: false
 })
 ```
+
+**Always `run_in_background: false`, even for `Parallel: true` tasks.** `do-build` runs in a forked context (`context: fork`) that gets exactly one turn — a background dispatch returns immediately and notifies later, but the fork has no later turn to receive that notification, so it's unrecoverable (issue #1915: forks reporting "running in the background, I'll continue when it completes" and then never continuing, leaving unpushed branches and no PR). To run tasks in parallel, make multiple foreground `Task` calls in the **same message** — the harness executes them concurrently and blocks for all results before your next turn. Never rely on background scheduling to achieve parallelism inside a fork.
 
 ## Step 3.5: Post-Task Output Verification
 
@@ -93,26 +95,14 @@ UNCOMMITTED=$(git -C $TARGET_REPO/.worktrees/{slug} status --porcelain)
 
 ## Step 4: Monitor and Coordinate
 
-- Check `TaskList({})` to see overall progress
-- Use `TaskOutput({task_id, block: false})` to check on background agents
-- When a blocker completes, dependent tasks auto-unblock
+Every Task call in Step 3 runs `run_in_background: false`, so its result is already in hand when the call returns — there is no separate polling loop. Coordination is just:
 
-**Health Monitoring for Background Agents:**
-
-After deploying background agents, actively monitor their health:
-
-1. Poll `TaskOutput({task_id, block: false, timeout: 30000})` for each background agent when checking progress
-2. Check `TaskList` to see if tasks have moved to completed status
-3. If a background agent's TaskOutput returns completion but TaskList still shows `in_progress`, use `TaskUpdate` to mark it
-4. **Warning threshold (5 min):** If an agent has produced no new output for 5+ minutes, note this as a potential issue
-5. **Failure threshold (15 min):** If an agent has been completely silent for 15+ minutes:
-   - Attempt to resume the agent using its agentId
-   - If resume fails, mark the task as failed
-   - Report the failure prominently so the user is aware
-6. **On any agent failure:** Commit whatever work exists in the worktree as a safety net:
-   ```bash
-   git -C $TARGET_REPO/.worktrees/{slug} add -A && git -C $TARGET_REPO/.worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
-   ```
+- Check `TaskList({})` to see overall progress after each batch of foreground Task calls returns
+- When a blocker's Task call returns complete, dependent tasks auto-unblock — deploy them next
+- **On any agent failure:** commit whatever work exists in the worktree as a safety net before deciding retry/skip/abort:
+  ```bash
+  git -C $TARGET_REPO/.worktrees/{slug} add -A && git -C $TARGET_REPO/.worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
+  ```
 
 ## Step 4.5: Pre-Validation Commit Check
 

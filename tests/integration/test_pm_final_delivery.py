@@ -5,8 +5,10 @@ Three end-to-end scenarios covering the plan's failure modes:
 1. Happy-path MERGE success — completion runner delivers a summary via
    send_cb within 60s.
 2. Empty harness result — runner falls back to the supplied summary context.
-3. CancelledError mid-completion-turn — runner delivers the "interrupted"
-   line (dedup'd by Redis) and re-raises for shutdown.
+3. CancelledError mid-completion-turn — an auto-resuming interruption
+   (absent/non-`no_resume` cancel-reason) is SILENT; only a terminal
+   `no_resume` cancel-reason earns a best-effort `INTERRUPT_NO_RESUME` line
+   (dedup'd by Redis), and either way the handler re-raises for shutdown.
 
 Pattern follows `tests/integration/test_session_finalization_decoupled.py`:
 we exercise the runner boundary with real asyncio tasks and patched harness/
@@ -23,7 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent import session_completion
-from agent.notification_copy import INTERRUPT_NO_RESUME, INTERRUPT_RESUME
+from agent.notification_copy import INTERRUPT_NO_RESUME
 
 # -----------------------------------------------------------------------------
 # Fixtures
@@ -214,15 +216,16 @@ class TestTwoPassFlow:
 
 
 class TestCancelledErrorInterrupted:
-    async def test_cancelled_error_delivers_interrupted_message(self, parent):
+    async def test_cancelled_error_with_absent_reason_delivers_nothing(self, parent):
+        """An auto-resuming interruption (absent cancel-reason) must be SILENT."""
         send_cb = AsyncMock(return_value=None)
 
         async def _slow_harness(**_kw):
             await asyncio.sleep(60.0)
             return "never"
 
-        # Acquire pipeline_complete_pending AND interrupted-sent on first call
-        # each. Both return True. No cancel-reason set → resume copy (default).
+        # Acquire pipeline_complete_pending on the first call. No cancel-reason
+        # set → silence (an auto-resuming interruption sends nothing).
         redis_db = MagicMock()
         redis_db.set = MagicMock(return_value=True)
         redis_db.exists = MagicMock(return_value=False)
@@ -244,14 +247,11 @@ class TestCancelledErrorInterrupted:
             except (TimeoutError, asyncio.CancelledError):
                 pass
 
-        # The runner's CancelledError handler best-effort delivers the
-        # interrupted message (resume copy) and re-raises.
-        interrupted = [c.args for c in send_cb.await_args_list if c.args[1] == INTERRUPT_RESUME]
-        assert len(interrupted) == 1
+        send_cb.assert_not_awaited()
 
     async def test_cancelled_error_no_resume_reason_delivers_no_resume_copy(self, parent):
         """A killer that finalized the session terminal writes cancel-reason=no_resume;
-        the interrupted send must use the no-resume copy, not 'will resume'."""
+        the interrupted send must use the no-resume copy."""
         send_cb = AsyncMock(return_value=None)
 
         async def _slow_harness(**_kw):
@@ -281,8 +281,6 @@ class TestCancelledErrorInterrupted:
 
         no_resume = [c.args for c in send_cb.await_args_list if c.args[1] == INTERRUPT_NO_RESUME]
         assert len(no_resume) == 1
-        # And the resume copy was NOT sent.
-        assert all(c.args[1] != INTERRUPT_RESUME for c in send_cb.await_args_list)
 
     async def test_cancelled_then_second_cancel_does_not_duplicate_interrupted(self, parent):
         """Risk 6 flap-dedup: two cancellations of two runners for the same
@@ -298,6 +296,8 @@ class TestCancelledErrorInterrupted:
         # interrupted-sent acquired first call, False (held) second call.
         redis_db.set = MagicMock(side_effect=[True, True, True, False])
         redis_db.exists = MagicMock(return_value=False)
+        # Terminal no_resume reason so the flap-dedup path is actually reached.
+        redis_db.get = MagicMock(return_value=b"no_resume")
 
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
@@ -338,11 +338,66 @@ class TestCancelledErrorInterrupted:
             except (TimeoutError, asyncio.CancelledError):
                 pass
 
-        interrupted = [
-            c.args
-            for c in send_cb.await_args_list
-            if isinstance(c.args[1], str) and "interrupted" in c.args[1].lower()
-        ]
+        interrupted = [c.args for c in send_cb.await_args_list if c.args[1] == INTERRUPT_NO_RESUME]
         assert len(interrupted) == 1, (
             f"Expected exactly one interrupted delivery, got {len(interrupted)}"
         )
+
+    async def test_interrupt_resume_delivers_real_answer_with_zero_interim_sends(self, parent):
+        """Success Criterion: silencing the interrupt copy must not swallow the
+        answer. An absent-reason interrupt delivers ZERO interim lifecycle
+        messages; the resumed session's real work-product is still delivered
+        exactly once."""
+        send_cb = AsyncMock(return_value=None)
+
+        async def _slow_harness(**_kw):
+            await asyncio.sleep(60.0)
+            return "never"
+
+        redis_db = MagicMock()
+        redis_db.set = MagicMock(return_value=True)
+        redis_db.exists = MagicMock(return_value=False)
+        # No cancel-reason set → the auto-resuming interruption is silent.
+        redis_db.get = MagicMock(return_value=None)
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
+            patch("agent.sdk_client.get_response_via_harness", new=_slow_harness),
+            patch("agent.sdk_client._get_prior_session_uuid", return_value="u"),
+        ):
+            task = session_completion.schedule_pipeline_completion(
+                parent, "ctx", send_cb, parent.chat_id, None
+            )
+            assert task is not None
+            await session_completion.drain_pending_completions(timeout=0.2)
+            try:
+                await asyncio.wait_for(task, timeout=3.0)
+            except (TimeoutError, asyncio.CancelledError):
+                pass
+
+        # Zero interim lifecycle sends across the interrupt window.
+        send_cb.assert_not_awaited()
+
+        # The session auto-resumes (a fresh completion-runner invocation for
+        # the same session_id) and delivers its real work-product.
+        summary = "I finished the work you asked about."
+
+        async def _fake_harness(**_kw):
+            await asyncio.sleep(0.01)
+            return summary
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_ok()),
+            patch("agent.sdk_client.get_response_via_harness", new=_fake_harness),
+            patch("agent.sdk_client._get_prior_session_uuid", return_value="u"),
+            patch("models.session_lifecycle.finalize_session"),
+        ):
+            resumed_task = session_completion.schedule_pipeline_completion(
+                parent, "ctx", send_cb, parent.chat_id, None
+            )
+            assert resumed_task is not None
+            await asyncio.wait_for(resumed_task, timeout=10.0)
+
+        send_cb.assert_awaited_once()
+        [args] = [c.args for c in send_cb.await_args_list]
+        assert args[1] == summary

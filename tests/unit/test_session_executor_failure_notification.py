@@ -89,19 +89,19 @@ async def test_cancel_reason_present_suppresses_failure_send():
 
 
 @pytest.mark.asyncio
-async def test_stale_resume_reason_does_not_suppress_failure_send():
-    """A stale 'resume' cancel-reason must NOT suppress the failure notice.
+async def test_non_no_resume_reason_does_not_suppress_failure_send():
+    """A non-'no_resume' cancel-reason must NOT suppress the failure notice.
 
-    A session interrupted-and-requeued (reason='resume', 180s TTL) that then
-    genuinely crashes within that window still deserves the FAILURE_NOTICE — only
+    A session that was silently auto-resumed (or requeued) and then genuinely
+    crashes within the 180s TTL window still deserves the FAILURE_NOTICE — only
     a 'no_resume' narrative (a killer that owns the exit story) suppresses it.
     """
     messenger = _messenger()
     with (
-        patch("agent.cancel_reason.get_cancel_reason", return_value="resume"),
+        patch("agent.cancel_reason.get_cancel_reason", return_value="other"),
         patch("popoto.redis_db.POPOTO_REDIS_DB", _redis_setnx(True)),
     ):
-        await _maybe_send_failure_notice(messenger, "sess-fail-resume")
+        await _maybe_send_failure_notice(messenger, "sess-fail-other")
 
     messenger._send_callback.assert_awaited_once_with(FAILURE_NOTICE)
 

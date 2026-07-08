@@ -21,6 +21,7 @@ If `docs/sdlc/do-sdlc.md` exists, read it and honor its declarations; otherwise 
 3. **NEVER continue past a `blocked` decision** — surface the reason to the human and stop. Guards block for a reason.
 4. **ALWAYS pass `model:` per the Stage→Model table** when spawning a stage subagent. Never rely on the inherited default.
 5. **ALWAYS record the dispatch before spawning the subagent** — this preserves the G4 oscillation signal even if the subagent crashes.
+6. **ALWAYS dispatch with `run_in_background: false`, never end the turn waiting on a background child.** This skill runs in a forked context (`context: fork`) that gets exactly one turn. The Agent tool defaults to background execution — it returns immediately and notifies later. A fork has no later turn to be notified on, so a background dispatch is unrecoverable: the fork reports "running in the background, I'll continue when it completes" and then never does (issue #1915). Every stage subagent, including both halves of a `multi` dispatch, must be spawned with `run_in_background: false` so its result is in hand before the loop advances.
 
 ## Stage→Model Dispatch Table
 
@@ -91,7 +92,7 @@ For a multi-dispatch, record only the FIRST skill in the list (the pair is guard
 
 ### 3c. Spawn the stage subagent
 
-Use the Agent tool (general-purpose), with `model:` from the Stage→Model table. Prompt template:
+Use the Agent tool (general-purpose), with `model:` from the Stage→Model table and **`run_in_background: false`** (Hard Rule 6 — this fork cannot be resumed by a background notification). For a `multi` dispatch, both calls go in the same message with `run_in_background: false` each; the harness runs them concurrently and blocks for both results before your next turn. Prompt template:
 
 ```
 You are executing ONE SDLC stage for issue #{issue_number} in {repo_path}.

@@ -8,7 +8,8 @@ Covers the runner's contract:
 - Harness raises → deliver fallback.
 - send_cb raises → logged, parent still finalized.
 - Missing prior UUID → call get_response_via_harness with prior_uuid=None.
-- CancelledError during harness → best-effort interrupted message + re-raise.
+- CancelledError during harness → silent unless the cancel-reason is the
+  terminal `no_resume`, in which case best-effort terminal notice + re-raise.
 - Interrupted-sent dedup lock suppresses repeat sends.
 """
 
@@ -21,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent import session_completion
-from agent.notification_copy import INTERRUPT_NO_RESUME, INTERRUPT_RESUME
+from agent.notification_copy import INTERRUPT_NO_RESUME
 
 
 @pytest.fixture
@@ -212,15 +213,15 @@ class TestDelivery:
 
 
 class TestCancelledError:
-    async def test_cancelled_sends_interrupted_and_reraises(self, parent, send_cb):
+    async def test_cancelled_with_absent_reason_sends_nothing_and_reraises(self, parent, send_cb):
         async def _cancel(**_kw):
             raise asyncio.CancelledError()
 
         redis_db = MagicMock()
-        # First lock set (pipeline_complete_pending) succeeds, second (interrupted-sent) succeeds
+        # First lock set (pipeline_complete_pending) succeeds.
         redis_db.set = MagicMock(return_value=True)
         redis_db.exists = MagicMock(return_value=False)
-        # No cancel-reason set → resume copy (historical default).
+        # No cancel-reason set → silence (an auto-resuming interruption is silent).
         redis_db.get = MagicMock(return_value=None)
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
@@ -231,11 +232,7 @@ class TestCancelledError:
                 await session_completion._deliver_pipeline_completion(
                     parent, "ctx", send_cb, parent.chat_id, None
                 )
-        # send_cb should have been called once with the shared resume constant.
-        interrupted_calls = [
-            call for call in send_cb.await_args_list if call.args[1] == INTERRUPT_RESUME
-        ]
-        assert len(interrupted_calls) == 1
+        send_cb.assert_not_awaited()
 
     async def test_cancelled_interrupted_dedup_suppresses_duplicate(self, parent, send_cb):
         async def _cancel(**_kw):
@@ -245,6 +242,8 @@ class TestCancelledError:
         # pipeline_complete_pending → acquired True, interrupted-sent → False (held)
         redis_db.set = MagicMock(side_effect=[True, False])
         redis_db.exists = MagicMock(return_value=False)
+        # Terminal no_resume reason so the dedup path is actually reached.
+        redis_db.get = MagicMock(return_value=b"no_resume")
         with (
             patch("popoto.redis_db.POPOTO_REDIS_DB", redis_db),
             patch("agent.sdk_client.get_response_via_harness", new=_cancel),
@@ -303,14 +302,13 @@ class TestReasonAwareInterrupt:
         send_cb.assert_awaited_once()
         assert send_cb.await_args.args[1] == INTERRUPT_NO_RESUME
 
-    async def test_unset_reason_sends_resume_copy(self, parent, send_cb):
+    async def test_unset_reason_sends_nothing(self, parent, send_cb):
         fake = _DualFireRedis(reason=None)
         with patch("popoto.redis_db.POPOTO_REDIS_DB", fake):
             await session_completion._send_interrupted_message(
                 send_cb, parent.chat_id, None, parent, parent.session_id
             )
-        send_cb.assert_awaited_once()
-        assert send_cb.await_args.args[1] == INTERRUPT_RESUME
+        send_cb.assert_not_awaited()
 
     async def test_dual_fire_winner_sends_no_resume_loser_silent(self, parent):
         """BLOCKER regression guard: both sites race the interrupted-sent dedup with

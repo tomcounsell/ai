@@ -297,68 +297,63 @@ class BackgroundTask:
             # Shutdown-path handler (issue #1058, failure mode #3).
             #
             # `asyncio.CancelledError` inherits from `BaseException` and therefore
-            # bypasses the plain `except Exception` below. Worker shutdown used to
-            # leave the session "running" until startup-recovery re-queued it
-            # (~5 minutes of silence on the user side). Here we best-effort
-            # deliver a user-visible "I was interrupted" line and then re-raise
-            # so asyncio shutdown semantics are preserved.
+            # bypasses the plain `except Exception` below. An interruption the
+            # worker will recover from (re-queue + auto-resume) is SILENT — the
+            # user only ever sees a Finish (the session's real answer) or a Fail
+            # (`FAILURE_NOTICE` on crash, `INTERRUPT_NO_RESUME` on a terminal,
+            # non-resumable stop). We read the cancel-reason first and only send
+            # anything at all when the reason is the terminal `"no_resume"`.
             #
-            # Flap protection (plan Risk 6): a flapping worker (deploy loop,
-            # OOM-kill cycling, health churn) would otherwise fire this handler
-            # repeatedly. We gate the send on a Redis key
-            # `interrupted-sent:{session_id}` with a 120s TTL via SET NX. Only
+            # Flap protection (plan Risk 6) applies only to that terminal send: a
+            # flapping worker (deploy loop, OOM-kill cycling, health churn) would
+            # otherwise fire this handler repeatedly. We gate the send on a Redis
+            # key `interrupted-sent:{session_id}` with a 120s TTL via SET NX. Only
             # the caller that acquires the key sends. The TTL lets genuinely
             # distinct interruptions surface a fresh message after 2 minutes.
             self._completed_at = utc_now()
             try:
-                _should_send = True
-                try:
-                    from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+                from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
 
-                    dedup_key = f"interrupted-sent:{self.messenger.session_id}"
-                    acquired = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=120)
-                    if not acquired:
-                        _should_send = False
-                        logger.info(
-                            "[%s] CancelledError interrupted-message suppressed (dedup key held)",
-                            self.messenger.session_id,
-                        )
-                except Exception as _lock_err:
-                    # Redis unavailable: fall through and send (duplicate is
-                    # preferable to silence on a genuine interruption).
-                    logger.debug(
-                        "[%s] interrupted-sent dedup lock failed: %s",
-                        self.messenger.session_id,
-                        _lock_err,
-                    )
-
-                if _should_send:
-                    # Reason-aware copy (#1877 defect #1). Read the cancel-reason
-                    # ONLY here, inside the dedup-winner branch, and never
-                    # destructively — so the losing (non-sending) site can never
-                    # starve this read. Absent/unknown reason -> resume copy
-                    # (historical default; Branch-3 worker shutdown writes nothing).
-                    from agent.cancel_reason import get_cancel_reason  # noqa: PLC0415
-                    from agent.notification_copy import (  # noqa: PLC0415
-                        INTERRUPT_NO_RESUME,
-                        INTERRUPT_RESUME,
-                    )
-
-                    _reason = get_cancel_reason(self.messenger.session_id)
-                    _interrupt_msg = (
-                        INTERRUPT_NO_RESUME if _reason == "no_resume" else INTERRUPT_RESUME
-                    )
+                _reason = get_cancel_reason(self.messenger.session_id)
+                if _reason == "no_resume":
+                    _should_send = True
                     try:
-                        await asyncio.wait_for(
-                            self.messenger._send_callback(_interrupt_msg),
-                            timeout=2.0,
-                        )
-                    except (TimeoutError, Exception) as _send_err:
-                        logger.warning(
-                            "[%s] CancelledError best-effort send failed: %s",
+                        from popoto.redis_db import POPOTO_REDIS_DB  # noqa: PLC0415
+
+                        dedup_key = f"interrupted-sent:{self.messenger.session_id}"
+                        acquired = POPOTO_REDIS_DB.set(dedup_key, "1", nx=True, ex=120)
+                        if not acquired:
+                            _should_send = False
+                            logger.info(
+                                "[%s] CancelledError interrupted-message suppressed "
+                                "(dedup key held)",
+                                self.messenger.session_id,
+                            )
+                    except Exception as _lock_err:
+                        # Redis unavailable: fall through and send (duplicate is
+                        # preferable to silence on a genuine interruption).
+                        logger.debug(
+                            "[%s] interrupted-sent dedup lock failed: %s",
                             self.messenger.session_id,
-                            _send_err,
+                            _lock_err,
                         )
+
+                    if _should_send:
+                        from agent.notification_copy import INTERRUPT_NO_RESUME  # noqa: PLC0415
+
+                        try:
+                            await asyncio.wait_for(
+                                self.messenger._send_callback(INTERRUPT_NO_RESUME),
+                                timeout=2.0,
+                            )
+                        except (TimeoutError, Exception) as _send_err:
+                            logger.warning(
+                                "[%s] CancelledError best-effort send failed: %s",
+                                self.messenger.session_id,
+                                _send_err,
+                            )
+                # Absent/any other reason: silent -- the session re-queues and
+                # resumes, delivering its real answer later.
             finally:
                 # Cancel watchdog inside the handler so shutdown proceeds even
                 # if the outer `finally` is skipped (shouldn't happen, but

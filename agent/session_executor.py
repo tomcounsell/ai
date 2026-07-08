@@ -60,6 +60,28 @@ def _is_non_clean_runner_exit(agent_session) -> bool:
     return exit_reason not in _CLEAN_RUNNER_EXIT_REASONS
 
 
+def _session_recorded_reap_failure(agent_session_id: str | None) -> bool:
+    """True when the session recorded a ``runner_reap_failed`` event (issue #1938).
+
+    The runner's ``_run_one_turn`` finally writes this durable session event when
+    its synchronous SIGKILL could not confirm the turn's process group is dead
+    (a pathological unkillable/D-state group). The synthetic-slug worktree cleanup
+    reads it to SKIP deletion — so no worktree is removed under a possibly-live
+    child. The in-scope ``session`` object may be stale, so re-read fresh from
+    Popoto. Fail-silent: a read failure returns ``False`` (proceed with cleanup)
+    rather than crashing the terminal path.
+    """
+    if not agent_session_id:
+        return False
+    try:
+        fresh = AgentSession.get_by_id(agent_session_id)
+        events = getattr(fresh, "session_events", None) or []
+        return any(isinstance(ev, dict) and ev.get("type") == "runner_reap_failed" for ev in events)
+    except Exception as e:  # noqa: BLE001 — a marker read must never crash cleanup
+        logger.debug("[synthetic-slug] reap-marker reload failed (non-fatal): %s", e)
+        return False
+
+
 def _runner_final_status(task_error, agent_session) -> str:
     """Terminal AgentSession status for a finished runner session.
 
@@ -690,8 +712,9 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
       a no-resume exit narrative it has written ``cancel-reason:{session_id}=no_resume``
       (and sent its own interrupt message); this function returns early so the user is
       not sent two competing exit stories (folded-in critique concern: cross-class dedup
-      collision). A stale ``resume`` reason does NOT suppress the notice — a session
-      that was requeued and then genuinely crashed still deserves the failure copy.
+      collision). An absent cancel-reason does NOT suppress the notice — a session that
+      was silently auto-resumed (or requeued) and then genuinely crashed still deserves
+      the failure copy.
     * **Never blocks finalization.** The send is bounded by a 2s ``wait_for`` and
       every error (including the timeout) is swallowed — this coroutine never
       raises, so the caller's finalize path always proceeds.
@@ -701,10 +724,12 @@ async def _maybe_send_failure_notice(messenger, session_id: str) -> None:
         from agent.notification_copy import FAILURE_NOTICE
 
         # Cross-class dedup collision (critique concern): a killer that already
-        # owns a *no-resume* exit narrative must not be double-messaged. We key on
-        # "no_resume" specifically (not merely "present"): a stale "resume" reason
-        # from an interrupt-and-requeue followed by a genuine crash in the same TTL
-        # window should still surface the failure notice, not be silently swallowed.
+        # owns a *no-resume* exit narrative must not be double-messaged. The
+        # post-silent-resume contract narrows the signal to two states:
+        # `"no_resume"` present -> a killer owns the terminal exit narrative,
+        # suppress this notice; absent -> no killer narrative (the interruption
+        # was silent and the session either resumed or is genuinely crashing
+        # now), so the failure notice must still surface.
         if get_cancel_reason(session_id) == "no_resume":
             logger.info(
                 "[%s] Failure notice suppressed — a killer already owns the "
@@ -2316,12 +2341,32 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                 _wd = locals().get("working_dir")
                 if _wd is not None:
-                    _repo_for_cleanup = resolve_main_repo_root(_wd)
-                    cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
-                    logger.info(
-                        f"[synthetic-slug] Cleaned up worktree+branch for "
-                        f"{_slug_for_cleanup}: {cleanup_result}"
-                    )
+                    # Reap-failed marker skip (Fix 3, issue #1938): the runner's
+                    # ``_run_one_turn`` finally SYNCHRONOUSLY reaps + confirms its
+                    # process group before this cleanup runs (finally-ordering
+                    # guarantee), so the common case is safe. The ONE residual is
+                    # a pathological unkillable/D-state group the ~1s SIGKILL
+                    # confirm could not verify dead — there the runner wrote a
+                    # durable ``runner_reap_failed`` session event. SKIP deletion
+                    # when present, so no worktree is removed under a possibly-live
+                    # child. Manual reclamation: ``git worktree prune`` + dir
+                    # removal.
+                    if _session_recorded_reap_failure(session.agent_session_id):
+                        logger.warning(
+                            "[synthetic-slug] SKIPPING worktree cleanup for %s — "
+                            "runner_reap_failed marker present (subprocess group could "
+                            "not be confirmed dead). Reclaim manually: `git worktree "
+                            "prune` + remove the worktree dir %r.",
+                            _slug_for_cleanup,
+                            _wd,
+                        )
+                    else:
+                        _repo_for_cleanup = resolve_main_repo_root(_wd)
+                        cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
+                        logger.info(
+                            f"[synthetic-slug] Cleaned up worktree+branch for "
+                            f"{_slug_for_cleanup}: {cleanup_result}"
+                        )
         except Exception as cleanup_err:
             # Cleanup failures must NEVER propagate as session failures.
             logger.warning(
