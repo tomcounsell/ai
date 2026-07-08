@@ -64,19 +64,27 @@ def parse_junitxml(xml_path: str | Path) -> dict[str, str]:
     root = tree.getroot()
     outcomes: dict[str, str] = {}
 
-    for testcase in root.iter("testcase"):
+    for index, testcase in enumerate(root.iter("testcase")):
         classname = testcase.get("classname", "")
         name = testcase.get("name", "")
-        if not name:
-            # A testcase missing `name` is structurally unusable -- hint the caller.
-            raise JunitxmlParseError(
-                f"junitxml at {xml_path} has a <testcase> with no 'name' attribute "
-                f"(classname={classname!r})"
-            )
-        node_id = _build_node_id(classname, name)
-
-        failure = testcase.find("failure")
         error = testcase.find("error")
+
+        if not name:
+            # A testcase missing `name` is a known xdist/execnet worker-crash
+            # artifact (issue #1853). Discarding the WHOLE run for one
+            # nameless element is too costly -- a 3-run refresh silently
+            # degrades to 1 usable run, which makes every transient flake
+            # look "real". Instead: best-effort classify it if it carries
+            # an <error> child (a real collection error), else skip just
+            # this one element and keep parsing the rest of the run.
+            if error is None:
+                continue
+            node_id = classname if classname else f"<unknown>::{index}"
+            outcomes[node_id] = "collection_error"
+            continue
+
+        node_id = _build_node_id(classname, name)
+        failure = testcase.find("failure")
 
         if error is not None:
             outcomes[node_id] = "collection_error"
