@@ -124,11 +124,11 @@ extraction or visual video grounding. This is the first attempt.
 **Pull path (new "watch" tier, agent-invoked):**
 1. **Entry**: agent runs `valor-video-watch <url> ["question"]` via Bash (question optional; informs nothing beyond human-readable framing).
 2. **Source detection**: classify URL → `youtube` | `x` | `other` (yt-dlp-supported).
-3. **Acquire**: `yt-dlp` download (video + audio) into a temp dir.
-4. **Frames**: ffmpeg scene-change sampling → JPEG frames at `t=MM:SS`, near-duplicate frames deduped (grayscale mean-abs-diff), capped by env-tunable frame count + resolution.
-5. **Transcript**: reuse the existing captions→whisper-1 path (`tools.link_analysis`) for the audio track; emit timestamped text.
-6. **X-native context (x source only)**: call Grok (`tools/video_watch/grok.py`, `GROK_API_KEY`) for post text/author/thread + video description. If step 3 (yt-dlp) failed to obtain media for an X URL, Grok's description is the **fallback** understanding.
-7. **Output**: print frame JPEG paths (with `t=MM:SS` markers), the timestamped transcript, and any Grok X-context block — a payload the agent `Read`s image-by-image.
+3. **Acquire**: `yt-dlp` download (video + audio) into a context-managed `work` scratch dir (auto-cleaned), with a subprocess timeout.
+4. **Frames**: ffmpeg scene-change sampling → JPEG frames written to a **separate persistent** `frames_dir` (`tempfile.mkdtemp`, NOT auto-deleted), at `t=MM:SS`, near-duplicate frames deduped (grayscale mean-abs-diff), capped by env-tunable frame count + resolution.
+5. **Transcript**: reuse `transcribe_audio_file` for the audio track; emit timestamped text.
+6. **X-native understanding (x source only)**: call Grok (`tools/video_watch/grok.py`, `GROK_API_KEY`) primarily to **describe the X video when yt-dlp could not fetch it** (the visual-grounding fallback for X); it also returns post/author/thread context in the same call. Subject to Open Question #1 (Tom's intended Grok role).
+7. **Output**: print persistent `frames_dir` JPEG paths (with `t=MM:SS` markers), the timestamped transcript, and any Grok block — a payload the agent `Read`s in a later tool call (paths must still exist then; see the two-dir discipline in Task 1).
 
 ## Architectural Impact
 
@@ -141,8 +141,10 @@ extraction or visual video grounding. This is the first attempt.
   signpost branch (additive, no signature change).
 - **Coupling**: `tools/video_watch` reuses `tools.link_analysis`'s transcript
   helpers (import, no duplication). Otherwise self-contained.
-- **Data ownership**: frames + audio land in a temp dir under the workspace temp
-  path, cleaned per invocation. No new persistent store, no Popoto model.
+- **Data ownership**: download/audio scratch is auto-cleaned per invocation;
+  emitted frame JPEGs live in a separate `video_watch_frames_*` dir that
+  deliberately outlives the process (the agent Reads them in a later tool call)
+  and is swept by an age-based reaper. No new persistent store, no Popoto model.
 - **Reversibility**: high — a new opt-in tool + one additive enrichment branch;
   removing the `[project.scripts]` entry and the signpost fully reverts.
 
@@ -209,29 +211,38 @@ grounding.
 - **Source-agnostic core, X-specific add-on.** One pipeline over yt-dlp-supported
   hosts. `youtube` and `x`/`twitter` differ only in (a) URL detection and (b)
   whether the Grok X-context step runs. Do **not** build two pipelines.
-- **Grok's role is X-native grounding + fallback, not frame vision.** Frames go
-  to the agent (Claude) via `Read` — the model-agnostic claude-video pattern.
-  Grok is used where it is genuinely differentiated: first-party X post/thread
-  context, and describing an X video when yt-dlp download fails. (This is the
-  #1 Open Question to confirm with the PM — see below.)
+- **Grok's role is the X-video-understanding fallback, not frame vision.** Frames
+  go to the agent (Claude) via `Read` — the model-agnostic claude-video pattern.
+  Grok's primary, visual-grounding-relevant job is to **describe an X video when
+  yt-dlp cannot fetch it** (protected/age-gated media) — the "seeing" fallback
+  for X. Post/author/thread text context rides along in the same call but is
+  secondary. A reviewer flagged that generic X text-context is separable from
+  "seeing"; keeping Grok scoped to the fallback (with text context as a free
+  byproduct) keeps this on the visual-grounding thesis while honoring the
+  x.ai-involvement mandate. This is Open Question #1 — the exact Grok role is a
+  Tom-intent call; the single `fetch_x_context` seam makes it cheap to re-aim.
 - **Frame extraction adopts claude-video's technique**: ffmpeg scene-change
   detection, near-duplicate dedup via 16×16 grayscale mean-abs-diff, env-tunable
-  frame cap + resolution as **provisional/tunable named constants**
-  (`VIDEO_WATCH_MAX_FRAMES`, `VIDEO_WATCH_FRAME_WIDTH`, `VIDEO_WATCH_MAX_DURATION`),
-  each `os.getenv(NAME, default)` with a grain-of-salt comment, mirroring
-  `MAX_VIDEO_DURATION` in `link_analysis`.
+  frame cap + resolution as **provisional/tunable named constants** in
+  `constants.py`, each `os.getenv(NAME, default)` with a grain-of-salt comment.
+  `VIDEO_WATCH_MAX_DURATION` defaults to ~30 min (**not** `MAX_VIDEO_DURATION`'s
+  10-hour value): OpenAI `whisper-1` caps at ~25 MB (~30 min mono 16 kHz); an
+  oversized track returns `None`, so beyond the cap the tool must emit an
+  explicit `[audio too long to transcribe — frames only]` note, never the
+  misleading "no transcript (silent)".
 - **Transcript reuse — the source-agnostic helper only**: reuse
   `tools.link_analysis.transcribe_audio_file(filepath)` for the downloaded audio
   track. Do **not** route through `process_youtube_url(url)` — that function is
   YouTube-only (returns `{"success": False, "error": "Not a valid YouTube URL"}`
   for any non-YouTube URL) and cannot serve X media. Keep OpenAI `whisper-1` as
   the transcription backend (Groq swap out of scope — see No-Gos).
-- **Low reversal cost for the two PM Open Questions**: the CLI command name is
-  defined once as a module constant (`WATCH_CLI_NAME`) reused by the signpost
-  string, and the Grok X-context behavior lives behind a single guarded
-  call-site (`fetch_x_context`). If the PM reverses Open Question #1 (Grok's
-  role) or #2 (tool name), the change touches one constant / one call-site, not
-  files already built — so Tasks 1 and 2 can start without blocking on the
+- **Low reversal cost for the two PM Open Questions**: the CLI command name
+  lives once in the dependency-free `tools/video_watch/constants.py`
+  (`WATCH_CLI_NAME`), imported by both `cli.py` and the enrichment signpost; the
+  Grok behavior lives behind a single guarded call-site (`fetch_x_context`). A
+  rename touches the constant + the Verification grep that points at the constant
+  definition; a Grok-role reversal touches one call-site. Neither touches already-
+  built pipeline files, so Tasks 1 and 2 can start without blocking on the PM
   answers.
 - **The signpost `context`-trap**: `bridge/enrichment.py` applies `yt_enriched`
   wholesale and only reads `success`/`error` per result. `process_youtube_url`
@@ -251,6 +262,10 @@ grounding.
 - [ ] X URL with yt-dlp download failure but Grok key present → assert the tool
   falls back to Grok context and reports the degraded mode (frames absent,
   context present), not a bare crash.
+- [ ] yt-dlp/ffmpeg exceeding `VIDEO_WATCH_SUBPROCESS_TIMEOUT` raises
+  `subprocess.TimeoutExpired` → assert it is caught and routed to the degrade
+  path (never propagates to an outer SIGKILL); Grok request timeout →
+  `fetch_x_context` returns None + warning.
 
 ### Empty/Invalid Input Handling
 - [ ] Non-video URL / unsupported host → clear error, exit non-zero, no traceback.
@@ -326,13 +341,17 @@ shared mutable state, no cross-process coordination, and no concurrent writers.
 The enrichment signpost is a pure string append on data already resolved
 sequentially in `enrich_message`.
 
-**Temp-dir leak on mid-run crash (resource, not a race):** if `yt-dlp`/`ffmpeg`
-is killed mid-run (OOM, session-timeout SIGKILL), an end-of-happy-path cleanup
-call would leak a multi-hundred-MB dir. Mitigation: the whole
-download→ffmpeg→transcript sequence runs inside
-`with tempfile.TemporaryDirectory() as tmpdir:` so cleanup executes on
-exception, not only on success. A test forces a `subprocess.CalledProcessError`
-mid-pipeline and asserts the temp dir is gone afterward.
+**Temp-dir lifetime (resource, not a race):** two dirs with different lifetimes.
+The download/audio **scratch** runs inside `with tempfile.TemporaryDirectory()
+as work:` so it is reclaimed on exception (OOM, `TimeoutExpired`,
+`CalledProcessError`) as well as success. The emitted **frames_dir**
+(`tempfile.mkdtemp`) must intentionally survive the process — the agent Reads
+those JPEG paths in a later, separate tool call — so it is NOT context-managed;
+an age-based reaper (run at CLI start + registered with hourly session-cleanup)
+sweeps stale `video_watch_frames_*` dirs. A subprocess timeout bounds the window
+in which a hung yt-dlp/ffmpeg could be SIGKILLed before cleanup. Tests: (a)
+printed frame paths still exist after the CLI returns; (b) `work` is gone after a
+forced mid-pipeline `CalledProcessError`; (c) the reaper removes over-age dirs.
 
 ## No-Gos (Out of Scope)
 
@@ -364,8 +383,11 @@ mid-pipeline and asserts the temp dir is gone afterward.
 - **No MCP server / `.mcp.json` change** — the tool is a Bash-invoked CLI, not an
   MCP tool.
 - **Bridge import**: the only bridge-side change is the additive thin-transcript
-  signpost in `bridge/enrichment.py` (already imported in the worker path). No
-  new bridge import of the watch module — watch is strictly agent-pull.
+  signpost in `bridge/enrichment.py`. It may import from the **dependency-free**
+  `tools/video_watch/constants.py` (for `WATCH_CLI_NAME` /
+  `VIDEO_WATCH_THIN_TRANSCRIPT_CHARS`) — that module pulls NO yt-dlp/ffmpeg/httpx.
+  The bridge must never import `tools/video_watch/__init__.py` (the heavy
+  pipeline); watch execution stays strictly agent-pull.
 - **Integration test**: assert `valor-video-watch --help` resolves via the
   installed console script (entry-point wiring), and a mocked/short-fixture run
   emits frame paths + transcript. A CLAUDE.md Quick Commands row documents the
@@ -405,6 +427,11 @@ mid-pipeline and asserts the temp dir is gone afterward.
 - [ ] Frame cap / resolution / max-duration are env-overridable named constants
   with grain-of-salt comments.
 - [ ] `grep "valor-video-watch" pyproject.toml` confirms the entry point.
+- [ ] **Visual-grounding outcome (E2E):** a slide-deck or silent-demo fixture
+  where the answer is on-screen (not in the transcript) → `valor-video-watch`
+  emits frames that let the agent answer correctly, where transcript-only fails.
+- [ ] Emitted frame paths still exist after the CLI process returns (two-dir
+  temp discipline verified).
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -455,11 +482,14 @@ into the single session worktree without commit interleaving.
 - **Assigned To**: watch-core-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/video_watch/__init__.py` with `watch_video(url, ...)`: source detection (`youtube`|`x`|`other`), yt-dlp download + ffmpeg scene-change frame sampling + 16×16 grayscale dedup, env-tunable `VIDEO_WATCH_MAX_FRAMES`/`VIDEO_WATCH_FRAME_WIDTH`/`VIDEO_WATCH_MAX_DURATION` constants. Define `WATCH_CLI_NAME = "valor-video-watch"` as a module constant (reused by the signpost string via import) so a naming reversal touches one place.
-- Wrap the entire download→ffmpeg→transcript sequence in `with tempfile.TemporaryDirectory() as tmpdir:` so frames/audio are cleaned up on exception (crash, SIGKILL-survivable temp semantics), not only on the happy path.
+- Create a **dependency-free** `tools/video_watch/constants.py` (NO yt-dlp/ffmpeg/httpx imports) holding `WATCH_CLI_NAME = "valor-video-watch"`, `VIDEO_WATCH_THIN_TRANSCRIPT_CHARS`, `VIDEO_WATCH_MAX_FRAMES`, `VIDEO_WATCH_FRAME_WIDTH`, `VIDEO_WATCH_MAX_DURATION`, `VIDEO_WATCH_SUBPROCESS_TIMEOUT`, `VIDEO_WATCH_GROK_TIMEOUT` — each `os.getenv(NAME, default)` with a grain-of-salt comment. Both `cli.py` and `bridge/enrichment.py` import from THIS module only (cheap, no heavy deps pulled into the bridge path — satisfies the Agent Integration constraint).
+- Create `tools/video_watch/__init__.py` with `watch_video(url, ...)`: source detection (`youtube`|`x`|`other`), yt-dlp download + ffmpeg scene-change frame sampling + 16×16 grayscale dedup.
+- **Two-dir temp discipline (frames must outlive the process):** context-manage only the download/audio scratch — `with tempfile.TemporaryDirectory() as work:` (auto-cleaned on exception/exit) — but emit JPEGs into a **separate, non-context-managed** `frames_dir = tempfile.mkdtemp(prefix="video_watch_frames_")` whose paths are printed for the agent to `Read` in a LATER tool call. Do NOT put frames in the auto-deleted dir (that would delete them the instant the CLI returns, before the agent Reads them). Add an age-based reaper for stale `video_watch_frames_*` dirs (standalone helper invoked at CLI start; also register with the hourly session-cleanup reflection).
+- Pass `timeout=VIDEO_WATCH_SUBPROCESS_TIMEOUT` to every yt-dlp/ffmpeg `subprocess.run` and catch `subprocess.TimeoutExpired` → fall through to the degrade path (for `x`: `fetch_x_context` fallback), never hang to the outer SIGKILL.
 - Reuse `tools.link_analysis.transcribe_audio_file(filepath)` (the source-agnostic helper) for the audio track — NOT `process_youtube_url`, which rejects non-YouTube URLs. Emit `t=MM:SS` markers.
 - Create `tools/video_watch/cli.py` (`main`) mirroring `link_analysis/cli.py` arg/exit conventions; print frame paths + transcript (+ Grok block when present).
 - Add `valor-video-watch = "tools.video_watch.cli:main"` to `pyproject.toml [project.scripts]`.
+- Tests: (a) run the CLI to completion and assert printed frame paths STILL EXIST after the process returns; (b) force a `subprocess.CalledProcessError`/`TimeoutExpired` mid-pipeline and assert the `work` scratch dir is gone; (c) assert the stale-`frames_dir` reaper removes dirs older than its threshold.
 
 ### 2. Grok X-native context client + secrets wiring
 - **Task ID**: build-grok
@@ -470,7 +500,7 @@ into the single session worktree without commit interleaving.
 - **Agent Type**: builder
 - **Domain**: MCP-tool/API integration
 - **Parallel**: true
-- Create `tools/video_watch/grok.py`: OpenAI-compatible client to `https://api.x.ai/v1`, `os.getenv("GROK_API_KEY")`. Single guarded `fetch_x_context(url)` call-site → post text/author/thread + video description; non-fatal on error (returns None + logs a warning when the key is absent or the call fails).
+- Create `tools/video_watch/grok.py`: OpenAI-compatible client to `https://api.x.ai/v1`, `os.getenv("GROK_API_KEY")`, explicit `timeout=VIDEO_WATCH_GROK_TIMEOUT` on the request. Single guarded `fetch_x_context(url)` call-site → **primarily an X-video description when yt-dlp couldn't fetch the clip** (the visual-grounding fallback), plus post/author/thread context in the same response; non-fatal on error/timeout (returns None + logs a warning when the key is absent or the call fails). Keep the seam a single function so Open Question #1's answer changes one call-site.
 - Add `GROK_API_KEY=xai-****` to `.env.example` with the required comment line above it. Do **NOT** add an `APISettings` field — `env_nested_delimiter="__"` would bind it to `API__GROK_API_KEY`, not the provisioned `GROK_API_KEY`; the direct `os.getenv` read is the real wiring (mirrors `link_analysis`'s `OPENAI_API_KEY` read).
 - Wire the watch pipeline to call `fetch_x_context` only for `x` source, and use it as the fallback when yt-dlp media acquisition fails.
 
@@ -517,7 +547,11 @@ into the single session worktree without commit interleaving.
 | Grok key placeholder present | `grep -c "GROK_API_KEY" .env.example` | output > 0 |
 | Grok read is direct os.getenv | `grep -c 'os.getenv("GROK_API_KEY")' tools/video_watch/grok.py` | output > 0 |
 | No decorative settings field | `grep -c "grok_api_key" config/settings.py` | exit code 1 |
-| Signpost string present | `grep -rc "valor-video-watch" bridge/enrichment.py` | output > 0 |
+| CLI name is a shared constant | `grep -c 'WATCH_CLI_NAME' tools/video_watch/constants.py` | output > 0 |
+| Enrichment imports constants only | `grep -c 'from tools.video_watch.constants import' bridge/enrichment.py` | output > 0 |
+| Bridge never imports heavy module | `grep -En 'from tools.video_watch import |import tools.video_watch$' bridge/enrichment.py` | exit code 1 |
+| Signpost references the CLI | `grep -rc "valor-video-watch" bridge/enrichment.py` | output > 0 |
+| Subprocess timeout wired | `grep -c 'VIDEO_WATCH_SUBPROCESS_TIMEOUT' tools/video_watch/__init__.py` | output > 0 |
 | No key hardcoded | `grep -rn "xai-" tools/ config/ bridge/` | match count == 0 |
 | Lint clean | `python -m ruff check tools/video_watch bridge/enrichment.py config/settings.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/video_watch bridge/enrichment.py config/settings.py` | exit code 0 |
@@ -532,6 +566,13 @@ into the single session worktree without commit interleaving.
 | CONCERN | Scope + History | Tasks 1/2 build settled work against unresolved Open Q #1/#2 | `WATCH_CLI_NAME` module constant + single guarded `fetch_x_context` call-site make a PM reversal one-place-cheap, so builders start without blocking | Name/Grok-role reversal touches one constant / one call-site |
 | CONCERN | Risk & Robustness | Temp dir leaks on mid-run crash | `watch_video` wraps the sequence in `tempfile.TemporaryDirectory()`; Race Conditions + Failure Path test added | Cleanup on exception, not only happy path |
 | NIT | History | "Reuse whisper helpers" didn't name the source-agnostic function | Task 1 + Technical Approach name `transcribe_audio_file(filepath)` explicitly; forbid `process_youtube_url` for X | `process_youtube_url` rejects non-YouTube URLs |
+| BLOCKER (rd2) | Risk & Robustness | Temp-dir fix deleted frames before the agent's later Read | Two-dir discipline: context-managed `work` scratch (auto-clean) + persistent `frames_dir` (mkdtemp, reaped by age); Task 1, Data Flow 7, Architectural Impact, Race Conditions + tests | Frames must outlive the CLI process |
+| BLOCKER (rd2) | Scope + History | `WATCH_CLI_NAME` "via import" contradicted the no-bridge-import No-Go | Dependency-free `tools/video_watch/constants.py` holds the name + tunables; both cli.py and enrichment import constants only; Agent Integration relaxed to constants-only; Verification greps enforce it | Heavy pipeline module never imported by bridge |
+| CONCERN (rd2) | Risk & Robustness | No subprocess/HTTP timeouts | `VIDEO_WATCH_SUBPROCESS_TIMEOUT` + `VIDEO_WATCH_GROK_TIMEOUT`; catch `TimeoutExpired` → degrade; Failure Path test + Verification row | Never hang to outer SIGKILL |
+| CONCERN (rd2) | Scope & Value | Grok text-context is separable non-visual scope | Grok re-scoped to the X-video-description fallback (visual-grounding-relevant); text-context is a byproduct; kept per Tom's x.ai mandate, flagged as Open Q #1 | Single `fetch_x_context` seam |
+| NIT (rd2) | Risk & Robustness | whisper-1 25 MB ceiling mislabels long audio as silent | `VIDEO_WATCH_MAX_DURATION` default lowered to ~30 min; over-cap emits `[audio too long to transcribe — frames only]` | ~25 MB / ~30 min whisper limit |
+| NIT (rd2) | Scope & Value | All success criteria mechanical | Added an E2E visual-grounding outcome criterion (slide-deck/silent-demo fixture) | Validates the actual "seeing" win |
+| NIT (rd2) | History | `VIDEO_WATCH_THIN_TRANSCRIPT_CHARS` location unspecified | Defined in dependency-free `constants.py`, imported by enrichment | Avoids bridge→watch heavy import |
 
 ---
 
