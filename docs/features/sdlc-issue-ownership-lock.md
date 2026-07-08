@@ -33,7 +33,7 @@ The lock is therefore keyed on a **process-unique `holder_token`**: `uuid.uuid4(
 | No existing key | `SET NX EX` claims it. `acquired=True`. |
 | Existing key, same `holder_token` (this process already owns it) | Renews via `EXPIRE`. `acquired=True`. |
 | Existing key, different `holder_token` | Another live process owns it. `acquired=False`, with the owner's `session_id` from the payload for display. |
-| Malformed/legacy (non-JSON) existing value | Treated as a foreign, non-matching holder. `acquired=False`, `owner_session_id=None`. Never raises on `json.loads`. |
+| Malformed/unparseable (non-JSON) existing value | Treated as a foreign, non-matching holder. `acquired=False`, `owner_session_id=None`. Never raises on `json.loads`. |
 | `SET NX` loses the race, but the key expires before the follow-up `GET` | Treated as free; this attempt succeeds (`acquired=True`). |
 | `issue_number` falsy (`None` or `0`) | No-op: fails open (`acquired=True`) without touching Redis. |
 | Any Redis exception | Fails **open**: `acquired=True`, logged at `warning`. Mirrors `claim_pending_run()` -- a Redis hiccup degrades to no cross-process protection rather than wedging the SDLC pipeline. |
