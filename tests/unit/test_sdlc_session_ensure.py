@@ -8,6 +8,7 @@ Tests cover:
 - Invalid input handling
 - Env-var short-circuit for bridge-initiated sessions
 - --kill-orphans zombie cleanup
+- Issue-level ownership lock wiring at all five return points (#1954)
 """
 
 from __future__ import annotations
@@ -904,3 +905,258 @@ class TestCreateLocalMessageText:
         msg = kwargs.get("message_text", "")
         assert msg and msg.strip(), "message_text must be non-empty even without issue_url"
         assert "1744" in msg
+
+
+class TestIssueLockWiring:
+    """Issue #1954: touch_issue_lock() must be called from ALL FIVE return
+    points of ensure_session() -- the 4 early-return branches (env-owns-issue,
+    env-diverges-but-issue-owned, find_session_by_issue match, idempotent
+    existing_by_id match) plus the final create-and-claim path -- via one
+    shared local helper, so no branch can skip it.
+    """
+
+    @staticmethod
+    def _lock_result(acquired: bool, owner_session_id: str | None = None):
+        from models.session_lifecycle import IssueLockResult
+
+        return IssueLockResult(acquired=acquired, owner_session_id=owner_session_id)
+
+    def test_touch_lock_on_env_owns_issue_return(self, monkeypatch):
+        """Return point 1: env session owns the issue (true no-op short-circuit)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "tg_valor_-100_691")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        bridge_session = MagicMock()
+        bridge_session.session_id = "tg_valor_-100_691"
+        bridge_session.session_type = "eng"
+        bridge_session.status = "running"
+        bridge_session.issue_url = "https://github.com/tomcounsell/ai/issues/2001"
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "tg_valor_-100_691"))
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=bridge_session),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2001)
+
+        assert result == {"session_id": "tg_valor_-100_691", "created": False}
+        lock_mock.assert_called_once()
+        args = lock_mock.call_args.args
+        assert args[0] == 2001
+        assert args[1] == "tg_valor_-100_691"
+
+    def test_touch_lock_on_env_diverges_but_issue_owned_return(self, monkeypatch):
+        """Return point 2: env session diverges; an existing issue-scoped
+        session is preferred (C1, #1671)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-other-issue")
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        env_session = MagicMock()
+        env_session.session_id = "parent-pm-other-issue"
+        env_session.session_type = "eng"
+        env_session.status = "running"
+        env_session.issue_url = "https://github.com/tomcounsell/ai/issues/9999"
+
+        issue_session = MagicMock()
+        issue_session.session_id = "sdlc-local-2002"
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2002"))
+
+        with (
+            patch("tools._sdlc_utils.find_session", return_value=env_session),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2002)
+
+        assert result == {"session_id": "sdlc-local-2002", "created": False}
+        lock_mock.assert_called_once()
+        args = lock_mock.call_args.args
+        assert args[0] == 2002
+        assert args[1] == "sdlc-local-2002"
+
+    def test_touch_lock_on_find_session_by_issue_match_return(self):
+        """Return point 3: the main issue-based lookup (no env var)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        existing = MagicMock()
+        existing.session_id = "sdlc-local-2003"
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2003"))
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=existing),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2003)
+
+        assert result == {"session_id": "sdlc-local-2003", "created": False}
+        lock_mock.assert_called_once()
+        args = lock_mock.call_args.args
+        assert args[0] == 2003
+        assert args[1] == "sdlc-local-2003"
+
+    def test_touch_lock_on_idempotent_existing_by_id_return(self):
+        """Return point 4: a session with sdlc-local-{N} already exists (no
+        find_session_by_issue hit, matched by deterministic id instead)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        existing = MagicMock()
+        existing.session_id = "sdlc-local-2004"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [existing]
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2004"))
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2004)
+
+        assert result == {"session_id": "sdlc-local-2004", "created": False}
+        lock_mock.assert_called_once()
+        args = lock_mock.call_args.args
+        assert args[0] == 2004
+        assert args[1] == "sdlc-local-2004"
+
+    def test_touch_lock_on_create_and_claim_return(self):
+        """Return point 5: the final create-and-claim path (cold start)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-2005"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2005"))
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+        ):
+            result = ensure_session(issue_number=2005)
+
+        assert result == {"session_id": "sdlc-local-2005", "created": True}
+        lock_mock.assert_called_once()
+        args = lock_mock.call_args.args
+        assert args[0] == 2005
+        assert args[1] == "sdlc-local-2005"
+        # issue_number is written ONCE, only on this creation path.
+        _, kwargs = mock_as.create_local.call_args
+        assert kwargs.get("issue_number") == 2005
+
+    def test_issue_number_not_rewritten_on_continuing_session_returns(self):
+        """The 4 early-return (continuing-session) branches must NEVER write
+        issue_number -- it is a write-once mirror field set only at creation."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        existing = MagicMock()
+        existing.session_id = "sdlc-local-2006"
+
+        mock_as = MagicMock()  # create_local must never be called on this path.
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=existing),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                return_value=self._lock_result(True, "sdlc-local-2006"),
+            ),
+        ):
+            result = ensure_session(issue_number=2006)
+
+        assert result == {"session_id": "sdlc-local-2006", "created": False}
+        mock_as.create_local.assert_not_called()
+
+    def test_blocked_shape_returned_when_lock_held_by_different_session(self):
+        """When touch_issue_lock() reports contention, ensure_session() must
+        propagate the blocked signal rather than silently returning the
+        session as if nothing happened."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-2007"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        mock_as.create_local.return_value = mock_new_session
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                return_value=self._lock_result(False, "sdlc-local-2007-other-owner"),
+            ),
+        ):
+            result = ensure_session(issue_number=2007)
+
+        assert result == {
+            "blocked": True,
+            "reason": "ISSUE_LOCKED",
+            "owner_session_id": "sdlc-local-2007-other-owner",
+        }
+
+    def test_two_processes_distinct_holder_tokens_detect_contention(self, monkeypatch):
+        """The round-2 critique regression case: two independently-resolved
+        ensure_session() calls for the SAME issue -- simulating two different
+        OS processes via distinct holder_tokens -- both resolve the identical
+        deterministic sdlc-local-{N} session_id. Ownership must be compared by
+        holder_token, not session_id, so the second call is correctly blocked
+        rather than both succeeding. Exercises the REAL touch_issue_lock()
+        against the test Redis db (no mocking of the lock itself).
+        """
+        import models.session_lifecycle as session_lifecycle
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2050
+        local_session_id = f"sdlc-local-{issue_number}"
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = local_session_id
+
+        # Simulated Process A: fresh key, must acquire.
+        monkeypatch.setattr(session_lifecycle, "_process_holder_token", lambda: "process-A-token")
+        mock_as_a = MagicMock()
+        mock_as_a.query.filter.return_value = []
+        mock_as_a.create_local.return_value = mock_new_session
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as_a),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result_a = ensure_session(issue_number=issue_number)
+
+        assert result_a == {"session_id": local_session_id, "created": True}
+
+        # Simulated Process B: distinct holder_token, same deterministic
+        # session_id -- must be blocked, not silently succeed.
+        monkeypatch.setattr(session_lifecycle, "_process_holder_token", lambda: "process-B-token")
+        mock_as_b = MagicMock()
+        mock_as_b.query.filter.return_value = []
+        mock_as_b.create_local.return_value = mock_new_session
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as_b),
+            patch("models.session_lifecycle.transition_status"),
+        ):
+            result_b = ensure_session(issue_number=issue_number)
+
+        assert result_b == {
+            "blocked": True,
+            "reason": "ISSUE_LOCKED",
+            "owner_session_id": local_session_id,
+        }
