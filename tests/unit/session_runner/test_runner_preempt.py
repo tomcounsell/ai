@@ -17,6 +17,7 @@ Covers D4 + Race 1 with a killable fake driver and injected signal functions:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import signal
 
 from agent.session_runner.adapter import SessionRunnerAdapter
@@ -343,3 +344,165 @@ async def test_empty_steer_mid_turn_is_ignored_turn_not_killed():
     assert kills == []
     assert deliveries == ["uninterrupted"]
     assert summary.exit_reason == "pm_user"
+
+
+# --------------------------------------------------------------------------
+# Cancellation-proof teardown reap (issue #1938)
+# --------------------------------------------------------------------------
+
+
+class HangingSpawnDriver:
+    """A driver that records a spawned pid, signals ``spawned``, then hangs.
+
+    Emulates a live ``claude -p`` in its own process group that the runner's
+    ``_run_one_turn`` finally must reap when the run task is torn down.
+    """
+
+    def __init__(self, pid=5555):
+        self.pid = pid
+        self.runner: SessionRunner | None = None
+        self.spawned = asyncio.Event()
+
+    def attach(self, runner: SessionRunner) -> None:
+        self.runner = runner
+
+    async def run_turn(self, message):
+        if self.runner is not None:
+            self.runner._on_turn_spawn(self.pid)
+        self.spawned.set()
+        await asyncio.sleep(3600)  # hang until externally cancelled
+        return HeadlessTurnOutcome(reply_text="[/user]\ndone", turn_ended=True)
+
+
+async def test_external_cancel_reaps_turn_process_group(monkeypatch):
+    """External cancellation of the run task SIGKILLs the turn's process group.
+
+    This is the load-bearing fix (#1938): a cancelled ``SessionHandle.task``
+    unwinds the runner coroutine, and the ``_run_one_turn`` finally must reap
+    the detached group so no live ``claude -p`` orphans to the worker.
+    """
+    # ``_on_turn_spawn`` derives the pgid via os.getpgid; give it a real value.
+    monkeypatch.setattr("agent.session_runner.runner.os.getpgid", lambda pid: pid)
+    driver = HangingSpawnDriver(pid=5555)
+    killpg_calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pgid, sig):
+        killpg_calls.append((pgid, sig))
+        if sig == 0:
+            # Group is gone after SIGKILL — confirm-poll sees it dead at once.
+            raise ProcessLookupError
+
+    runner, _, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        killpg_fn=fake_killpg,
+        kill_fn=lambda p, s: None,
+    )
+    task = asyncio.create_task(runner.run("task"))
+    await asyncio.wait_for(driver.spawned.wait(), timeout=5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    # The turn's process group was SIGKILLed in the finally (pgid == pid).
+    assert (5555, signal.SIGKILL) in killpg_calls
+    # Confirmed dead → no reap-failed marker was written.
+    assert not any(e["type"] == "runner_reap_failed" for e in (session.session_events or []))
+    # claude_pid was cleared on turn exit.
+    assert getattr(session, "claude_pid", "unset") is None
+
+
+def _reap_runner(*, killpg_fn):
+    """Build a bare runner (no turn) for direct ``_reap_turn_group`` tests."""
+    session = FakeSession()
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (lambda *a: None, None)
+    )
+    runner = SessionRunner(
+        agent_session=session,
+        adapter=adapter,
+        working_dir="/tmp/wd",
+        driver=KillableDriver(hang_first=False),
+        steering_pop_fn=lambda: [],
+        killpg_fn=killpg_fn,
+    )
+    return runner, session
+
+
+def test_reap_turn_group_no_pid_is_noop():
+    """A handle with no recorded pid has nothing to reap → confirmed dead."""
+    calls: list = []
+    runner, _ = _reap_runner(killpg_fn=lambda *a: calls.append(a))
+    confirmed, pgid = runner._reap_turn_group(_TurnHandle(generation=1, pid=None))
+    assert confirmed is True
+    assert pgid is None
+    assert calls == []
+
+
+def test_reap_turn_group_second_cancel_mid_reap_still_confirms_dead():
+    """A synchronous SIGKILL + confirm cannot be aborted by a re-delivered
+    cancel — the group stays 'alive' for one poll then dies, and the reap
+    still returns confirmed-dead (uninterruptible synchronous path)."""
+    probes = {"n": 0}
+
+    def fake_killpg(pgid, sig):
+        if sig == 0:
+            probes["n"] += 1
+            if probes["n"] >= 2:
+                raise ProcessLookupError  # dead on the second poll
+            return  # still alive on the first poll
+        # SIGKILL delivered.
+
+    runner, _ = _reap_runner(killpg_fn=fake_killpg)
+    confirmed, pgid = runner._reap_turn_group(_TurnHandle(generation=1, pid=4242, pgid=4242))
+    assert confirmed is True
+    assert pgid == 4242
+    assert probes["n"] >= 2
+
+
+def test_reap_turn_group_unkillable_group_reports_not_confirmed(monkeypatch):
+    """A group that never dies within the cap → not confirmed (drives the
+    runner_reap_failed marker + WARNING)."""
+    # Collapse the confirm cap so the test does not sleep ~1s.
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_POLL_S", 0.01)
+
+    def fake_killpg(pgid, sig):
+        # Never dies: signal 0 always reports alive (returns without raising).
+        return
+
+    runner, _ = _reap_runner(killpg_fn=fake_killpg)
+    confirmed, pgid = runner._reap_turn_group(_TurnHandle(generation=1, pid=4242, pgid=4242))
+    assert confirmed is False
+    assert pgid == 4242
+
+
+async def test_unkillable_group_records_reap_failed_event_and_warns(monkeypatch, caplog):
+    """When the teardown reap cannot confirm death, the finally emits ONE
+    durable ``runner_reap_failed`` session event AND a WARNING naming the
+    session (the operator-visibility side effect Fix 3 keys on)."""
+    monkeypatch.setattr("agent.session_runner.runner.os.getpgid", lambda pid: pid)
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_TIMEOUT_S", 0.05)
+    monkeypatch.setattr("agent.session_runner.runner.REAP_CONFIRM_POLL_S", 0.01)
+    driver = HangingSpawnDriver(pid=7777)
+
+    def fake_killpg(pgid, sig):
+        return  # never dies
+
+    runner, _, session = make_preempt_runner(
+        driver,
+        steering=lambda: [],
+        killpg_fn=fake_killpg,
+        kill_fn=lambda p, s: None,
+    )
+    task = asyncio.create_task(runner.run("task"))
+    await asyncio.wait_for(driver.spawned.wait(), timeout=5)
+    with caplog.at_level("WARNING"):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    reap_failed = [e for e in (session.session_events or []) if e["type"] == "runner_reap_failed"]
+    assert len(reap_failed) == 1
+    assert reap_failed[0]["pgid"] == 7777
+    assert any("reap" in r.message.lower() for r in caplog.records)
