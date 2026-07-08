@@ -219,4 +219,5 @@ prior substrate was retired outright rather than patched again.
 - [Bridge/Worker Architecture](bridge-worker-architecture.md) — where the runner sits in the enqueue → execute → deliver pipeline
 - [Eng Session Architecture](eng-session-architecture.md) — session-type discriminator and routing
 - [Session Steering](session-steering.md) — the turn-boundary inbox the preempt watcher consumes
+- [SDLC Fork Turn Boundary](sdlc-fork-turn-boundary.md) — the analogous no-live-background-child invariant for `context: fork` stage skills (do-build, do-sdlc, …), which run as single non-resumable turns inside this runner's execution model
 - [Granite OAuth Token Prevention](../infra/granite-oauth-token.md) — the auth credential the runner injects

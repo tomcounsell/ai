@@ -290,6 +290,11 @@ Telegram message (DM)
 
 **Cross-repo detection**: `sdk_client.py` uses `project_key != "valor"` to determine whether a session targets a cross-repo project.
 
+## See Also
+
+- [Headless Session Runner](headless-session-runner.md) — the `claude -p` subprocess execution model Eng sessions run inside
+- [SDLC Fork Turn Boundary](sdlc-fork-turn-boundary.md) — the no-live-background-child invariant for `context: fork` stage skills the Eng session's dev subagent dispatches during SDLC work (do-build, do-sdlc, …), plus slug-identity-always-wins worktree/branch ownership and the live-ref PR dedup guard
+
 **Backward compatibility**: Older sessions without `project_config` fall back to loading from `projects.json` at execution time.
 
 **Config consumers**: `bridge/message_drafter.py` and `tools/agent_session_scheduler.py` load config from `projects.json` directly via `bridge.routing.load_config()` rather than relying on a module-level registry.
