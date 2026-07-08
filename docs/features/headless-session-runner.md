@@ -74,6 +74,50 @@ message. A per-turn timeout is handled by the identical path
 partial work stays in the transcript and the session surfaces as
 needs-attention rather than silently discarding a long Dev build.
 
+## Subprocess Lifecycle & Teardown Reap (issue #1938)
+
+The runner is the single owner of its subprocess's teardown. On **any** unwind
+of `_run_one_turn` — external cancellation from the health-check recovery path,
+an exception, or a normal turn exit — the `finally` block SYNCHRONOUSLY
+SIGKILLs and confirms the turn's process group before it returns.
+
+The reap is **cancellation-proof by construction**: it issues `os.killpg(pgid,
+SIGKILL)` with no preceding `await` and confirms exit via a bounded
+`time.sleep` poll (`SESSION_RUNNER_REAP_CONFIRM_TIMEOUT_S`, default 1.0s), so a
+re-delivered `CancelledError` cannot abort it. This matters because the recovery
+path double-cancels — `handle.task.cancel()` then `wait_for(handle.task, 0.25s)`
+re-cancels on timeout — and a SIGTERM→await-grace→SIGKILL reap would be aborted
+mid-grace after only SIGTERM, orphaning a live `claude -p` parented to the
+worker. SIGKILL is uncatchable so death is near-instant; the poll cap only bounds
+a pathological unkillable/D-state group. (This fast-kill is teardown-only —
+steer/timeout preempts keep the graceful SIGTERM→grace→SIGKILL path above.)
+
+Because Python runs the inner-task `finally` to completion before `await
+task._task` (`agent/session_executor.py`) resolves in the outer coroutine that
+owns worktree cleanup, the group is provably dead before both the recovery-path
+confirm and the executor's synthetic-slug cleanup run — cleanup never mutates the
+filesystem under a live child.
+
+**Live identity.** The runner writes the live subprocess pid to
+`AgentSession.claude_pid` on spawn (alongside `pm_pid`) and clears it on turn
+exit, so the recovery path's `_confirm_subprocess_dead` targets the real process.
+The recovery path snapshots `claude_pid` **before** cancelling (the teardown
+clears it on the same unwind) and confirms/escalates against that snapshot. The
+process group is derived from the pid via `os.getpgid` at kill time (`pgid ==
+pid` under `start_new_session`) — no pgid is persisted.
+
+**Pathological unkillable group (manual reclamation).** If the ~1s SIGKILL
+confirm cannot verify the group is dead (an uninterruptible D-state child), the
+runner writes a durable `runner_reap_failed` session event and logs a WARNING
+naming the session. The executor's synthetic-slug cleanup reads that marker and
+**skips** worktree deletion, so no directory is removed under a possibly-live
+child. Reclaim the orphaned worktree manually once the child clears:
+
+```bash
+git worktree prune
+rm -rf .worktrees/dev-<8hex>   # the path named in the WARNING
+```
+
 ## Simple Resume (D3, four scalars)
 
 `AgentSession` carries exactly four flat resume fields plus a bounded
