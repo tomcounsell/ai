@@ -175,6 +175,10 @@ and logs it for manual reclamation (no auto-reaper).
   still alive, **issue `os.killpg(pgid, SIGKILL)` SYNCHRONOUSLY (before any
   `await`) and confirm exit via a synchronous bounded poll** (`os.killpg(pgid, 0)`
   with a short `time.sleep`, ~1s cap). No interruptible `await` inside the reap.
+  Order within the `finally`: run the killpg+poll reap FIRST, THEN the existing
+  `watcher_task.cancel()` / `await watcher_task` (`runner.py:733-735`, under its
+  existing `contextlib.suppress(CancelledError)`), so a re-delivered
+  `CancelledError` lands on the suppressed watcher await, not mid-reap (round-6 nit).
 - **Why SIGKILL-first-synchronous, not SIGTERM→grace (round-4 BLOCKER):** the
   recovery path double-cancels — `handle.task.cancel()` then
   `await asyncio.wait_for(handle.task, TASK_CANCEL_TIMEOUT=0.25s)`
@@ -243,6 +247,11 @@ and logs it for manual reclamation (no auto-reaper).
   so a detached group with grandchildren (MCP servers) is fully reaped; `pgid == pid`
   under `start_new_session`. Confirm via `os.killpg(pgid, 0)`. Retain the existing
   `pid is None`/`pid<=0` short-circuit unchanged.
+- **Concurrent-reap yield (round-6 Concern):** in the health-check recovery driver
+  (`_agent_session_health_check`, `session_health.py:3031`), insert an
+  `await asyncio.sleep(0)` between per-session recovery invocations so a sweep that
+  recovers N stalled sessions does not run N back-to-back ~1s reap blocks without
+  letting the heartbeat task schedule. Emit a "recoveries per pass" counter.
 - Result: the existing #1537 ordering (cancel → confirm-dead → requeue-only-if-dead
   / escalate-`failed`) now protects runner sessions, and gates the requeue so
   "old confirmed exited before respawn" holds — AC#1.
@@ -267,7 +276,7 @@ and logs it for manual reclamation (no auto-reaper).
   path where the group might still be alive at cleanup time is a pathological
   reap-failure (uninterruptible D-state child defeating the ~1s SIGKILL confirm).
   There, Fix 1 set a durable `runner_reap_failed` session event. The executor's
-  synthetic-slug cleanup block (`:2300-2327`) reads that marker (NOT nulled state —
+  synthetic-slug cleanup block (`:2308-2325`) reads that marker (NOT nulled state —
   it is a fresh, durable signal, so this gate is NOT inert) and SKIPS
   `cleanup_after_merge` when present, logging the orphaned worktree. This makes
   "no worktree deleted under a live child" a hard guarantee, not merely a
@@ -338,9 +347,9 @@ statement):
 **Impact:** `killpg` on the runner's session group could, in theory, signal a co-located sibling if group isolation were wrong.
 **Mitigation:** the runner spawns with `start_new_session=True`, so each `claude -p` is its own session/group leader (`pgid == pid`); killpg targets exactly that group. Tests assert only the target group receives the signal; the existing `_signal_turn` already uses pgid and is battle-tested by the preempt tests.
 
-### Risk 2: Confirm-dead stalls the worker event loop
-**Impact:** a hung subprocess could block the health tick or the executor finally while polling for exit.
-**Mitigation:** keep the recovery-path `_confirm_subprocess_dead` synchronous but offloaded via `run_in_executor` (already the pattern at `session_health.py:2292`); bound polling by `SUBPROCESS_KILL_TIMEOUT` (3.0s). The runner `finally`'s reap is SIGKILL-first + a synchronous bounded confirm poll (~1s cap); SIGKILL is uncatchable so death is near-instant and the block is negligible in practice.
+### Risk 2: Confirm-dead stalls the worker event loop (single reap, and N concurrent reaps)
+**Impact:** a hung subprocess could block the health tick or the executor finally while polling for exit. Worse, a health-check sweep that recovers several stalled sessions at once (post sleep/wake, network blip) would serialize into N sequential ~1s reap stalls, freezing every other session's `_heartbeat_loop` (`session_executor.py:1965`) and potentially tripping the stuck detector on healthy sessions — a compounding cascade (round-6 CONCERN).
+**Mitigation:** keep the recovery-path `_confirm_subprocess_dead` synchronous but offloaded via `run_in_executor` (already the pattern at `session_health.py:2292`); bound polling by `SUBPROCESS_KILL_TIMEOUT` (3.0s). The runner `finally`'s reap is SIGKILL-first + a synchronous bounded confirm poll (~1s cap); SIGKILL is uncatchable so death is near-instant and the block is negligible in the common case. For the N-concurrent case, insert a real loop yield (`await asyncio.sleep(0)`) between each session's recovery invocation in the `session_health.py` recovery driver (OUTSIDE the uninterruptible reap) so queued recoveries do not run back-to-back as N blocks without letting the heartbeat task schedule; emit a "recoveries per pass" metric so a spike is observable.
 
 ### Risk 3: claude_pid set-on-spawn / clear-on-exit races with recovery
 **Impact:** a recovery firing in the window between turn-exit clear and next-turn set could read a stale/None `claude_pid`.
@@ -557,6 +566,13 @@ parallel builders needed — the fixes are sequenced and share the same files
 | CONCERN | Risk & Robustness | Unconditional `:2292` cleanup could delete the worktree under a live child in the pathological reap-failed case, contradicting AC#3. | The runner sets a durable `runner_reap_failed` event; the executor synthetic-slug cleanup SKIPS deletion when it is present (a non-inert, durable-marker gate). AC#3 reworded to a confirmed-dead guarantee. | Makes "no deletion under a live child" a hard guarantee. |
 | CONCERN | Scope & Value | The `_run_harness_subprocess` backstop is separable non-runner scope; also a "two vs three" miscount. | Justified as in-scope (same orphan-on-cancel leak at all three call sites, one shared `finally`); corrected the count to three (`2534/2576/2632`). | — |
 | NIT | Scope & Value | `runner_reap_failed` "event and/or counter" under-specified. | Pinned to ONE deterministic side effect: the `runner_reap_failed` session event (asserted by the operator-visibility test). | — |
+
+**Round 6 (READY TO BUILD with concerns → folded in):**
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness | N concurrent runner-finally reaps serialize into N ~1s event-loop stalls, potentially tripping the stuck detector on healthy sessions. | Added `await asyncio.sleep(0)` yield between per-session recoveries in the health-check driver + a "recoveries per pass" counter (Fix 2, Risk 2). | Yield is OUTSIDE the uninterruptible reap. |
+| NIT | Risk & Robustness | Fix 1 didn't state reap-first-then-watcher-teardown ordering in the `finally`. | Fix 1 now states: killpg+poll reap first, then the existing `watcher_task.cancel()`/`await` under its `contextlib.suppress`. | — |
+| NIT | History & Consistency | Fix 3 cited `:2300-2327`; the block is `:2308-2325`. | Corrected to `:2308-2325`. | — |
 
 ---
 
