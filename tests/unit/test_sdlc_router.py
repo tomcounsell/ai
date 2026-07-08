@@ -417,16 +417,16 @@ class TestG5DefersAfterBuild:
 
 
 # ---------------------------------------------------------------------------
-# Issue #1932 gap (a): crashed re-review after a patch dead-ends the router,
-# or (for a spuriously-completed REVIEW marker) silently misroutes to
-# /do-docs instead of recovering. These tests capture the CURRENT (buggy)
-# behavior — they are reproduction tests, not desired-behavior tests. A later
-# task adds row 8d and flips these assertions.
+# Issue #1932 gap (a): crashed re-review after a patch used to either
+# dead-end the router, or (for a spuriously-completed REVIEW marker) silently
+# misroute to /do-docs instead of recovering. Row 8d
+# (_rule_review_crashed_after_dispatch) now recovers both cases by
+# re-dispatching /do-pr-review.
 # ---------------------------------------------------------------------------
 
 
 class TestReReviewCrashRecovery:
-    """Repro for #1932 gap (a): re-review crash after PATCH has no recovery row.
+    """Row 8d recovery for #1932 gap (a): re-review crash after PATCH.
 
     Shared repro state: PATCH completed, PR open, last dispatch was
     /do-pr-review, no recorded REVIEW verdict, DOCS still pending. The only
@@ -449,43 +449,44 @@ class TestReReviewCrashRecovery:
             latest_review_verdict=None,
         )
 
-    def test_review_failed_dead_ends_router_as_blocked(self):
-        """REVIEW=failed, no verdict recorded: router currently dead-ends to Blocked."""
+    def test_review_failed_recovers_via_row_8d(self):
+        """REVIEW=failed, no verdict recorded: row 8d recovers by re-dispatching review."""
         states = self._repro_states(STATUS_FAILED)
         meta = self._repro_meta()
         result = decide_next_dispatch(states, meta, {})
-        assert isinstance(result, Blocked)
-        assert result.reason == "no matching dispatch rule"
+        assert result == Dispatch(
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Review dispatch crashed without recording a verdict — re-run review",
+            row_id="8d",
+        )
 
-        # Companion assertions proving the repro state sits outside row 7's
-        # coverage (PR exists, no review) and outside row 9's coverage
-        # (review approved, docs pending) for the FAILED case.
+        # Companion assertion proving the repro state sits outside row 7's
+        # coverage (PR exists, no review) for the FAILED case.
         assert _rule_pr_exists_no_review(states, meta, {}) is False
-        assert _rule_review_approved_docs_not_done(states, meta, {}) is False
 
-    def test_review_completed_silently_misroutes_to_docs(self):
-        """REVIEW=completed, no verdict recorded: router misroutes to /do-docs (row 9).
+    def test_review_completed_recovers_via_row_8d(self):
+        """REVIEW=completed, no verdict recorded: row 8d recovers by re-dispatching review.
 
         This is the WORSE half of gap (a): row 9 only checks
         stage_states["REVIEW"] == "completed" — it never checks that a verdict
         was actually recorded. A crashed /do-pr-review that happened to leave
-        the marker at "completed" (e.g. a partial write) silently skips review
-        entirely and proceeds straight to docs. Asserting Blocked here would be
-        a false RED — the current code genuinely dispatches /do-docs.
+        the marker at "completed" (e.g. a partial write) used to silently skip
+        review entirely and proceed straight to docs. Row 8d now intercepts
+        this state (it is ordered before row 9) and re-dispatches review.
         """
         states = self._repro_states(STATUS_COMPLETED)
         meta = self._repro_meta()
         result = decide_next_dispatch(states, meta, {})
         assert result == Dispatch(
-            skill=SKILL_DO_DOCS,
-            reason="Docs are required before merge",
-            row_id="9",
+            skill=SKILL_DO_PR_REVIEW,
+            reason="Review dispatch crashed without recording a verdict — re-run review",
+            row_id="8d",
         )
 
         # Companion assertions: row 7 still doesn't cover this state (REVIEW
-        # is "completed", not None/pending/ready), and row 9's predicate is
-        # confirmed True — proving the misroute is real, not an artifact of
-        # some other rule matching first.
+        # is "completed", not None/pending/ready). Row 9's predicate is still
+        # True in isolation (documenting current row-9 behavior pre-fix c) —
+        # row 8d simply wins by running first in DISPATCH_RULES order.
         assert _rule_pr_exists_no_review(states, meta, {}) is False
         assert _rule_review_approved_docs_not_done(states, meta, {}) is True
 
