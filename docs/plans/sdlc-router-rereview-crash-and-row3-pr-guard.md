@@ -150,17 +150,27 @@ No prerequisites — this work modifies a pure in-process decision function and 
   `REVIEW == in_progress` with no verdict. The truly uncovered state — the
   actual gap this issue reports — is narrower than the original problem
   statement implied: `REVIEW ∈ {completed, failed}` with an empty verdict.
-  That combination is unreachable through rows 7/8/8b/8c/9/10 today because
-  9/10 require a recorded verdict, 8/8b require `PATCH == completed` +
-  specific `last`, and 7/8c require `REVIEW` in the None/pending/ready/
-  in_progress set. Preferred implementation: **add a new recovery row (8d)**
-  whose predicate is disjoint from 7, 8b, and 8c, rather than widening 8b or
-  8c (see Concern-1 resolution below for why 8d over widening 8c). The 8d
-  predicate fires when: `pr_number` set, `PATCH == completed`, no recorded
-  REVIEW verdict, `REVIEW in (STATUS_COMPLETED, STATUS_FAILED)`,
+  **The two terminal-marker values have DIFFERENT current behavior** (pass-4
+  correction — the residual coverage gap the earlier passes missed): the claim
+  that "9/10 require a recorded verdict" is **false for row 9**. Row 9
+  (`_rule_review_approved_docs_not_done`, line 1003) checks only
+  `REVIEW == STATUS_COMPLETED` + DOCS pending and never inspects the verdict.
+  So `REVIEW == failed` + empty verdict currently dead-ends at
+  `Blocked("no matching dispatch rule")`, but `REVIEW == completed` + empty
+  verdict + DOCS pending is currently caught by **row 9** and misrouted to
+  `/do-docs`, silently advancing past review on an unreviewed PR. Both are
+  wrong; 8d fixes both. Preferred implementation: **add a new recovery row
+  (8d)** whose predicate is disjoint from rows 7, 8b, and 8c, placed
+  **before row 9** so it intercepts the completed-marker misroute (see
+  Concern-1 resolution below for why 8d over widening 8c). The 8d predicate
+  fires when: `pr_number` set, `PATCH == completed`, no recorded REVIEW
+  verdict, `REVIEW in (STATUS_COMPLETED, STATUS_FAILED)`,
   `last_dispatched_skill == /do-pr-review`, and neither row 7 nor 8b nor 8c
   owns the state (explicit step-asides for all three). Dispatches
-  `/do-pr-review`.
+  `/do-pr-review`. **8d does not steal row 9's legitimate case**
+  (`REVIEW == completed` **with** a verdict): 8d's "no recorded REVIEW verdict"
+  condition makes it step aside there, so row 9 still routes that state to
+  `/do-docs` exactly as today.
 - **Fix (b) — row 3 open-PR step-aside:** Add `if meta.get("pr_number"): return
   False` to `_rule_critique_needs_revision`, mirroring the existing
   `_critique_verdict_is_stale` step-aside. With a PR open, row 3 steps aside and
@@ -181,16 +191,28 @@ No prerequisites — this work modifies a pure in-process decision function and 
   its own disjoint band** (`completed`/`failed`, mirroring how row 2c was made
   marker-agnostic). The spike (corrected below) confirms exactly which band
   rows 7/8c leave uncovered so 8d is provably reached, not shadowed.
-- **Disjointness is the correctness contract — now against three rows, not
-  two.** 8d must not overlap row 7 (`REVIEW in (None, "pending", "ready")`,
-  no verdict), row 8b (`last == /do-patch`), or row 8c
-  (`REVIEW == in_progress`, no verdict). Encode all three step-asides
-  explicitly: 8d returns False if `_rule_pr_exists_no_review(...)` is True (row
-  7 owns it), `_rule_patch_applied_after_review(...)` is True (8b owns it), or
-  `REVIEW == in_progress` (8c owns it). The 8d docstring must assert
-  disjointness from **row 7 as well as 8b/8c** (mirroring 8c's own docstring
-  style, which already documents its step-aside from 8b). Placement:
-  immediately after 8c in `DISPATCH_TABLE`.
+- **Disjointness is the correctness contract — against three step-aside rows
+  plus a load-bearing ordering constraint on row 9.** 8d must not overlap row
+  7 (`REVIEW in (None, "pending", "ready")`, no verdict), row 8b
+  (`last == /do-patch`), or row 8c (`REVIEW == in_progress`, no verdict).
+  Encode all three step-asides explicitly: 8d returns False if
+  `_rule_pr_exists_no_review(...)` is True (row 7 owns it),
+  `_rule_patch_applied_after_review(...)` is True (8b owns it), or
+  `REVIEW == in_progress` (8c owns it). **Row 9 is different — it is NOT a
+  step-aside, it is an ordering dependency.** Row 9
+  (`_rule_review_approved_docs_not_done`) matches `REVIEW == completed` + DOCS
+  pending regardless of verdict, so for the `REVIEW == completed` + empty-verdict
+  band, both 8d and row 9 would match; 8d must WIN, which it does purely by
+  table position (8d is placed immediately after 8c and therefore **before**
+  row 9). This is intentional interception, not accidental overlap: the empty-
+  verdict completed-review state *should* re-review (8d), not proceed to docs
+  (row 9). 8d must NOT capture row 9's legitimate state (`REVIEW == completed`
+  **with** a verdict) — 8d's "no recorded REVIEW verdict" condition guarantees
+  it steps aside there. The 8d docstring must assert disjointness from **rows
+  7, 8b, and 8c** (via explicit step-asides) and document the **row-9 ordering
+  dependency** (8d precedes row 9 to intercept the empty-verdict completed-marker
+  misroute; row 9 keeps the verdict-present case). Placement: immediately after
+  8c and before row 9 in `DISPATCH_TABLE`.
 - **Concern-1 resolution: new row 8d vs. relaxing row 8c's gate.** Evaluated
   widening row 8c's `REVIEW == STATUS_IN_PROGRESS` gate to
   `REVIEW in (STATUS_IN_PROGRESS, STATUS_COMPLETED, STATUS_FAILED)` as a
@@ -266,9 +288,11 @@ No prerequisites — this work modifies a pure in-process decision function and 
 ### spike-1: What stage-marker state does a crashed re-review leave, and does row 8c already cover it?
 - **Assumption (original, corrected by critique):** "A crashed re-review after a patch leaves REVIEW in a state that row 8c does NOT cover (REVIEW ≠ in_progress), so the router genuinely dead-ends."
 - **Method:** code-read (dispatch/marker-write path) + reproduction unit test against `decide_next_dispatch()`
-- **Finding (corrected):** The original framing was too broad and is **false as stated** — `REVIEW ≠ in_progress` is NOT uniformly uncovered. Row 7 (`_rule_pr_exists_no_review`, line 905) already dispatches `/do-pr-review` for `REVIEW in (None, "pending", "ready")` with no recorded verdict, and it is evaluated *before* rows 8/8b/8c/8d in `DISPATCH_TABLE`. So `REVIEW == None` (the most likely literal crash-leaves-nothing state) is already recovered by row 7, not by a dead end. Reading rows 7 and 8c together, the actual uncovered band is narrower: **`REVIEW ∈ {completed, failed}` with an empty verdict** — i.e., the re-review subagent progressed far enough to write a terminal REVIEW marker (or the marker was left from a prior real review) but crashed before persisting a verdict, and a fresh re-dispatch (`last == /do-pr-review`) is needed. That band is provably uncovered by rows 7 (requires None/pending/ready), 8 (requires a recorded verdict), 8b (requires `last == /do-patch`), and 8c (requires `REVIEW == in_progress`). This is sufficient to justify row 8d, scoped to `REVIEW ∈ {completed, failed}` — not to "any REVIEW ≠ in_progress" as originally assumed.
-- **Confidence:** high (predicate reading is deterministic; row 7's condition is read verbatim from `agent/sdlc_router.py:905-916`)
-- **Impact on plan:** Design 8d to require `REVIEW in (STATUS_COMPLETED, STATUS_FAILED)` explicitly (not "any non-in_progress value") and step aside for row 7 in addition to 8b/8c. The reproduction test must pin `REVIEW` to `STATUS_COMPLETED` (or `STATUS_FAILED`) — a `None`/`pending`/`ready` state would NOT be red, since row 7 already recovers it. A companion assertion confirms `_rule_pr_exists_no_review` returns `False` for the reproduction state, proving the reproduction doesn't accidentally land in row 7's territory.
+- **Finding (corrected twice — see pass-4 note):** The original framing was too broad and is **false as stated** — `REVIEW ≠ in_progress` is NOT uniformly uncovered. Row 7 (`_rule_pr_exists_no_review`, line 905) already dispatches `/do-pr-review` for `REVIEW in (None, "pending", "ready")` with no recorded verdict, and it is evaluated *before* rows 8/8b/8c/8d in `DISPATCH_TABLE`. So `REVIEW == None` (the most likely literal crash-leaves-nothing state) is already recovered by row 7, not by a dead end. Reading rows 7 and 8c together, the residual band is **`REVIEW ∈ {completed, failed}` with an empty verdict** — the re-review subagent progressed far enough to write a terminal REVIEW marker (or the marker was left from a prior real review) but crashed before persisting a verdict, and a fresh re-dispatch (`last == /do-pr-review`) is needed. **Critical second correction (pass 4): the two terminal-marker values do NOT share the same current behavior.** They must be split:
+  - **`REVIEW == STATUS_FAILED` + empty verdict → currently `Blocked("no matching dispatch rule")`** (a genuine dead-end). Verified: row 7 requires None/pending/ready (no), row 8 (`_rule_review_has_findings`) short-circuits `if not review_verdict: return False` *before* its `REVIEW == STATUS_FAILED` branch is reached (no), row 8b requires `last == /do-patch` (no), row 8c requires `REVIEW == in_progress` (no), row 9 (`_rule_review_approved_docs_not_done`) requires `REVIEW == STATUS_COMPLETED` (no — REVIEW is `failed`), row 10 requires REVIEW completed (no), row 10b requires empty `stage_states` (no). Falls through → Blocked.
+  - **`REVIEW == STATUS_COMPLETED` + empty verdict + DOCS pending → currently `Dispatch("/do-docs", row_id="9")` (a silent MISROUTE, NOT Blocked).** This is the error the pass-4 self-review caught: **row 9 (`_rule_review_approved_docs_not_done`, `agent/sdlc_router.py:1003`) does NOT check the review verdict** — its predicate is only `pr_number` set, `REVIEW == STATUS_COMPLETED`, and `DOCS != completed`. Its docstring *says* "Review APPROVED, zero findings" but the code never verifies the verdict. So a crashed re-review that left `REVIEW == completed` with an empty verdict is caught by row 9 and routed to `/do-docs`, advancing the pipeline past review on an unreviewed PR — arguably worse than a dead-end because it is silent. The earlier passes' claim that "9/10 require a recorded verdict" is **false for row 9** and was the residual coverage-analysis gap.
+- **Confidence:** high (row 9's predicate is read verbatim from `agent/sdlc_router.py:1003-1010`; row 8's short-circuit ordering from `agent/sdlc_router.py:919-965`)
+- **Impact on plan:** Design 8d to require `REVIEW in (STATUS_COMPLETED, STATUS_FAILED)` and step aside for rows 7, 8b, **and** 8c. Place 8d **before row 9** in `DISPATCH_TABLE` (immediately after 8c) — this ordering is now load-bearing: it lets 8d intercept the `REVIEW == completed` + empty-verdict state that row 9 would otherwise misroute to `/do-docs`. 8d must NOT steal row 9's legitimate case (`REVIEW == completed` **with** a verdict) — guaranteed by 8d's "no recorded REVIEW verdict" condition (that case makes 8d step aside, and row 9 owns it as today). The reproduction test must assert **different** current behavior per parametrized case: `STATUS_FAILED` → `Blocked`; `STATUS_COMPLETED` → `Dispatch("/do-docs", row_id="9")`. Companion assertions: `_rule_pr_exists_no_review` returns `False` for both cases (proves no row-7 overlap), and `_rule_review_approved_docs_not_done` returns `True` for the `STATUS_COMPLETED` case pre-fix (proves the row-9 misroute is real) and `False` for the `STATUS_FAILED` case.
 
 ## Failure Path Test Strategy
 
@@ -285,7 +309,7 @@ No prerequisites — this work modifies a pure in-process decision function and 
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_router.py` — UPDATE (additive): add a `TestReReviewCrashRecovery` class (fix a: reproduction pinned to `REVIEW ∈ {completed, failed}`, the `_rule_pr_exists_no_review == False` companion assertion, row 7/8b/8c regression checks, and the G4 loop-bound test) and a `TestRow3OpenPrStepAside` class (fix b) using the existing `_base_meta`/`_base_states`/`_dispatch_history` helpers. No existing test cases change behavior.
+- [ ] `tests/unit/test_sdlc_router.py` — UPDATE (additive): add a `TestReReviewCrashRecovery` class (fix a: two parametrized reproduction cases with DIFFERENT current behavior — `REVIEW == failed` → `Blocked`, `REVIEW == completed` → `Dispatch("/do-docs", row_id="9")` misroute; the `_rule_pr_exists_no_review == False` companion (both cases); the `_rule_review_approved_docs_not_done` companion (`True` for COMPLETED pre-fix, `False` for FAILED); row 7/8b/8c regression checks; the row-9 verdict-present regression check; and the G4 loop-bound test) and a `TestRow3OpenPrStepAside` class (fix b) using the existing `_base_meta`/`_base_states`/`_dispatch_history` helpers. No existing test cases change behavior.
 - [ ] Router↔SKILL parity check (if a parity test exists over `DISPATCH_TABLE` row count / docstrings) — UPDATE: bump expected row count to 18 (17 baseline + 8d) rather than incrementing whatever the test currently hardcodes. Grep for any test asserting `len(DISPATCH_TABLE)` or a hardcoded row-count string and update in lockstep with SKILL.md; prefer deriving the expected count from `len(DISPATCH_TABLE)` at test time over a second hardcoded literal.
 
 No other test files touch the router. Justification: `decide_next_dispatch` is imported only by `sdlc-tool` and `tests/unit/test_sdlc_router.py`; the change is additive (one new row + one guard line) and does not alter any existing row's output for states those tests already cover.
@@ -299,9 +323,9 @@ No other test files touch the router. Justification: `decide_next_dispatch` is i
 
 ## Risks
 
-### Risk 1: Row 8d overlaps row 7, 8b, or 8c, changing an existing happy-path dispatch
-**Impact:** A state currently routed correctly by 7/8b/8c gets stolen by 8d, breaking the PR-review or patch→re-review flow.
-**Mitigation:** 8d's predicate explicitly steps aside when `_rule_pr_exists_no_review` is True (row 7), `_rule_patch_applied_after_review` is True (8b), or `REVIEW == in_progress` (8c). Add a test asserting rows 7, 8b, and 8c states still route to their own rows after 8d is added (regression guard); add a companion assertion in the gap-(a) reproduction test that `_rule_pr_exists_no_review` is `False` for the 8d-target state.
+### Risk 1: Row 8d overlaps row 7, 8b, 8c, or 8d steals row 9's docs handoff
+**Impact:** A state currently routed correctly by 7/8b/8c gets stolen by 8d (breaks PR-review or patch→re-review flow), OR 8d intercepts row 9's legitimate `REVIEW == completed` + verdict-present state and re-reviews an already-approved PR instead of proceeding to docs.
+**Mitigation:** 8d's predicate explicitly steps aside when `_rule_pr_exists_no_review` is True (row 7), `_rule_patch_applied_after_review` is True (8b), or `REVIEW == in_progress` (8c). For row 9 the guard is 8d's **"no recorded REVIEW verdict" condition**: row 9's normal case always has an APPROVED verdict, so 8d steps aside and row 9 keeps it. 8d only wins over row 9 for the `REVIEW == completed` + **empty**-verdict state — which is the misroute this fix intentionally corrects. Tests: assert rows 7/8b/8c states still route to their own rows; assert row 9's verdict-present case still routes to `/do-docs`; add the companion assertions (`_rule_pr_exists_no_review == False` both cases; `_rule_review_approved_docs_not_done == True` for the COMPLETED empty-verdict repro, proving the pre-fix misroute).
 
 ### Risk 4: G4 does not actually bound row 8d re-dispatches (untested)
 **Impact:** If a crashed re-review keeps crashing, row 8d could in principle re-dispatch `/do-pr-review` indefinitely if the universal G4 oscillation guard were assumed but never verified against 8d's specific dispatched skill.
@@ -344,10 +368,13 @@ No agent integration required — this is an internal change to the SDLC router 
 
 ## Success Criteria
 
-- [ ] Reproduction test for gap (a) added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_COMPLETED` (also cover `STATUS_FAILED`)} → currently `Blocked("no matching dispatch rule")`.
-- [ ] Companion assertion (same test): `_rule_pr_exists_no_review(stage_states, meta, context)` returns `False` for the reproduction state — proves the repro is genuinely outside row 7's coverage, not an accidental overlap.
-- [ ] After fix (a): that state → `Dispatch(skill="/do-pr-review", row_id="8d")`.
-- [ ] Row 8d's docstring asserts disjointness from row 7 (`REVIEW in (None, "pending", "ready")`), row 8b (`last == /do-patch`), and row 8c (`REVIEW == in_progress`) — mirroring 8c's own docstring step-aside style.
+- [ ] Reproduction test for gap (a), case FAILED, added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_FAILED`, DOCS pending} → currently `Blocked("no matching dispatch rule")`.
+- [ ] Reproduction test for gap (a), case COMPLETED, added and RED before the fix: {PATCH completed, PR open, `last == /do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_COMPLETED`, DOCS pending} → currently `Dispatch(skill="/do-docs", row_id="9")` (a misroute, **not** Blocked — row 9 does not check the verdict).
+- [ ] Companion assertion (both cases): `_rule_pr_exists_no_review(stage_states, meta, context)` returns `False` — proves the repro is genuinely outside row 7's coverage.
+- [ ] Companion assertion (COMPLETED case, pre-fix): `_rule_review_approved_docs_not_done(stage_states, meta, context)` returns `True` — proves the row-9 misroute is real; and `False` for the FAILED case.
+- [ ] After fix (a): both cases → `Dispatch(skill="/do-pr-review", row_id="8d")` (8d wins over row 9 for the COMPLETED case by table position).
+- [ ] Regression: row 9's legitimate case (`REVIEW == completed` **with** an APPROVED verdict, DOCS pending) still routes to `Dispatch(skill="/do-docs", row_id="9")` after 8d is added (8d steps aside because a verdict is recorded).
+- [ ] Row 8d's docstring asserts disjointness from row 7 (`REVIEW in (None, "pending", "ready")`), row 8b (`last == /do-patch`), and row 8c (`REVIEW == in_progress`), and documents the row-9 ordering dependency (8d precedes row 9 to intercept the empty-verdict completed-marker misroute) — mirroring 8c's own docstring step-aside style.
 - [ ] Reproduction test for gap (b) added and RED before the fix: {PR open, non-stale NEEDS REVISION critique, `last` not plan-family, no review yet} → currently `Dispatch("/do-plan", row_id="3")`.
 - [ ] After fix (b): that state → `Dispatch(skill="/do-pr-review", row_id="7")` (pinned), plus the general invariant `skill != "/do-plan"` asserted separately.
 - [ ] Regression: existing 7, 8b, 8c, and stale-critique (2b) states still route to their own rows after 8d is added.
@@ -383,7 +410,10 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add a test for gap (a): build `stage_states`/`meta` via existing helpers for {PATCH completed, PR open, `last_dispatched_skill=/do-pr-review`, no REVIEW verdict, `REVIEW == STATUS_COMPLETED`} (and a second parametrized case with `REVIEW == STATUS_FAILED`); assert current result is `Blocked` with reason `"no matching dispatch rule"`. Add a companion assertion in the same test that `_rule_pr_exists_no_review(stage_states, meta, context)` is `False` for this state, proving it does not overlap row 7's `(None, "pending", "ready")` coverage.
+- Add a test for gap (a) with **two parametrized cases that assert DIFFERENT current behavior** (build `stage_states`/`meta` via existing helpers; both share {PATCH completed, PR open, `last_dispatched_skill=/do-pr-review`, no REVIEW verdict, DOCS pending}):
+  - `REVIEW == STATUS_FAILED` → assert current result is `Blocked` with reason `"no matching dispatch rule"`.
+  - `REVIEW == STATUS_COMPLETED` → assert current result is `Dispatch(skill="/do-docs", row_id="9")` (row 9 misroutes because it does not check the verdict — do NOT assert `Blocked` for this case; it would be a false RED).
+  - Companion assertions: `_rule_pr_exists_no_review(...)` is `False` for both cases (no row-7 overlap); `_rule_review_approved_docs_not_done(...)` is `True` for the COMPLETED case (proves the row-9 misroute) and `False` for the FAILED case.
 - Add a test for gap (b): {PR open, no review yet (`REVIEW` in `(None, "pending", "ready")`, no review verdict), non-stale NEEDS REVISION critique, `last` not plan-family, no `proposed_skill`}; assert current result is `Dispatch(skill="/do-plan", row_id="3")`.
 - Run both; confirm they capture the buggy behavior (these will be inverted after the fix).
 
@@ -394,9 +424,9 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `_rule_review_crashed_after_dispatch` (or similarly named) predicate: `pr_number` set, `PATCH == completed`, no recorded REVIEW verdict, `REVIEW in (STATUS_COMPLETED, STATUS_FAILED)`, `last == /do-pr-review`, and step aside if row 7 (`_rule_pr_exists_no_review`) matches, 8b matches, or `REVIEW == in_progress` (8c's territory).
-- Docstring cites disjointness from row 7, 8b, AND 8c explicitly (not just 8b/8c), and states the G4 loop-bound (mirroring 8c's docstring convention).
-- Append a `DispatchRule(row_id="8d", ..., skill=SKILL_DO_PR_REVIEW)` immediately after 8c.
-- Flip the gap-(a) test to assert `Dispatch(skill="/do-pr-review", row_id="8d")` for both the `STATUS_COMPLETED` and `STATUS_FAILED` parametrized cases; keep the companion `_rule_pr_exists_no_review == False` assertion passing post-fix.
+- Docstring cites disjointness from rows 7, 8b, AND 8c explicitly, documents the **row-9 ordering dependency** (8d must precede row 9 so it intercepts the `REVIEW == completed` + empty-verdict misroute; row 9 keeps the verdict-present case via 8d's no-verdict step-aside), and states the G4 loop-bound (mirroring 8c's docstring convention).
+- Insert a `DispatchRule(row_id="8d", ..., skill=SKILL_DO_PR_REVIEW)` immediately after 8c and **before row 9** in `DISPATCH_TABLE` (table position is load-bearing for the completed-marker case).
+- Flip the gap-(a) test: assert `Dispatch(skill="/do-pr-review", row_id="8d")` for both the `STATUS_COMPLETED` and `STATUS_FAILED` cases; keep the companion `_rule_pr_exists_no_review == False` assertions passing post-fix.
 
 ### 3. Fix (b): row 3 open-PR step-aside
 - **Task ID**: build-fix-b
@@ -417,7 +447,7 @@ No agent integration required — this is an internal change to the SDLC router 
 - **Assigned To**: router-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add/confirm tests that row 7 (`REVIEW in (None, "pending", "ready")`), 8b (`last=/do-patch`), 8c (`REVIEW=in_progress`), and 2b (stale critique) states still route to their own rows unchanged after 8d is added.
+- Add/confirm tests that row 7 (`REVIEW in (None, "pending", "ready")`), 8b (`last=/do-patch`), 8c (`REVIEW=in_progress`), **row 9's legitimate case (`REVIEW == completed` WITH an APPROVED verdict, DOCS pending → still `Dispatch("/do-docs", row_id="9")`)**, and 2b (stale critique) states still route to their own rows unchanged after 8d is added. The row-9 regression is the critical one: it proves 8d intercepts only the empty-verdict completed-review state and does not steal row 9's normal docs handoff.
 - Add a G4 loop-bound regression test for row 8d (Concern-2): starting from the gap-(a) reproduction state, set `meta["last_dispatched_skill"] = SKILL_DO_PR_REVIEW` and `meta["same_stage_dispatch_count"] = MAX_SAME_STAGE_DISPATCHES` (reusing the existing G4 test helpers/constants already in `tests/unit/test_sdlc_router.py` for other guarded rows); assert `decide_next_dispatch(...)` returns `Blocked` with `guard_id="G4"` rather than `Dispatch(row_id="8d")` — proving repeated crash-and-redispatch cycles escalate to a human instead of looping.
 - Update `.claude/skills/sdlc/SKILL.md` row count to "18 rows" (correcting the pre-existing "16 rows" baseline drift, not just incrementing it) and add the 8d description + row-3 step-aside note. Update any `len(DISPATCH_TABLE)` assertion, preferring a dynamically-derived check over a hardcoded literal.
 
@@ -454,6 +484,8 @@ No agent integration required — this is an internal change to the SDLC router 
 | BLOCKER | do-plan-critique (pass 2) | Gap-(a) reproduction state overlapped row 7; the "currently Blocked" claim was false for the natural REVIEW=None realization, since row 7 (`_rule_pr_exists_no_review`, line 905) already dispatches `/do-pr-review` for `REVIEW in (None, "pending", "ready")` and precedes rows 8/8b/8c/8d. The truly-uncovered set is only `REVIEW ∈ {completed, failed}` with verdict empty. | This revision (pass 2) | Pinned gap-(a) reproduction to `STATUS_COMPLETED`/`STATUS_FAILED` (verdict empty); corrected spike-1 to acknowledge row 7's existing coverage; added a companion assertion that `_rule_pr_exists_no_review` returns `False` for the reproduction state; row 8d's docstring/task now asserts disjointness from row 7 in addition to 8b/8c. |
 | CONCERN | do-plan-critique (pass 2) | Minimal-fix alternative not evaluated: whether relaxing row 8c's `REVIEW == in_progress` gate (a one-line edit) yields the same disjoint coverage as adding a new row 8d. | This revision (pass 2) | Added an explicit Concern-1 resolution in Technical Approach: evaluated widening 8c vs. adding 8d, decided on 8d (discrete new row) for contract preservation, minimal blast radius, and consistency with the row-2c precedent; documented the reasoning inline rather than treating it as an unexamined default. |
 | CONCERN | do-plan-critique (pass 2) | Row 8d's loop-bound (G4) was never stated or tested — risk that a repeatedly-crashing re-review could dispatch `/do-pr-review` in an unbounded loop. | This revision (pass 2) | Added a G4 docstring note on row 8d (mirroring 8c's convention), a new Risk 4 entry, a Step-by-Step Tasks addition (task 4) driving `same_stage_dispatch_count` past `MAX_SAME_STAGE_DISPATCHES` and asserting `Blocked(guard_id="G4")`, and a matching Success Criteria / Verification-adjacent checklist item. |
+| N/A | (unrecoverable, pass 3) | The pass-3 `/do-plan-critique` recorded `NEEDS REVISION` (verified: verdict `artifact_hash` `sha256:c9e33d86…` matches the current plan body exactly, so the verdict is genuine and against this plan, not stale) but the critic session was stopped mid-run (`logs/worker/sdlc-local-1932.log`: "I was stopped and won't resume automatically") before persisting findings text anywhere durable — no issue comment, no Critique Results row, no telemetry with reasoning. Only the verdict string + hash survive. This is the **fourth** consecutive lost-critique on this issue and is itself the failure family #1932 addresses. | This revision (pass 4) | As in pass 1, performed a rigorous critic-substitute self-review against the actual router source. Found a real BLOCKER-class coverage-analysis gap (row 9), the same class as the pass-2 row-7 finding, and fixed it (below). |
+| BLOCKER | pass-4 self-review | Gap-(a) coverage analysis was still incomplete: it claimed `REVIEW ∈ {completed, failed}` + empty verdict is uniformly `Blocked`, asserting "9/10 require a recorded verdict." **False for row 9.** Row 9 (`_rule_review_approved_docs_not_done`, `agent/sdlc_router.py:1003`) checks only `REVIEW == STATUS_COMPLETED` + DOCS pending and never inspects the verdict. So `REVIEW == completed` + empty verdict + DOCS pending is NOT Blocked — it is caught by row 9 and misrouted to `/do-docs`, silently advancing past review on an unreviewed PR. A reproduction test asserting `Blocked` for the completed case would be a false RED, and 8d's disjointness/ordering contract omitted row 9 entirely. | This revision (pass 4) | Split the gap-(a) reproduction into two cases with different current behavior (`failed` → `Blocked`; `completed` → `Dispatch("/do-docs", row_id="9")` misroute). Corrected spike-1, Solution, Technical Approach, Risk 1, Test Impact, Success Criteria, and Step-by-Step Tasks (tasks 1, 2, 4). Established that 8d's placement **before row 9** is load-bearing (intercepts the completed-marker misroute), that 8d must NOT steal row 9's verdict-present case (guaranteed by 8d's "no recorded REVIEW verdict" condition), and added a row-9 companion assertion (`_rule_review_approved_docs_not_done == True` pre-fix for the completed case) plus a row-9 verdict-present regression. |
 
 ---
 
@@ -556,3 +588,54 @@ non-blocking CONCERN):
 
 Both items resolved without introducing new open questions. Plan proceeds to
 `/do-plan-critique` (pass 3) for verification.
+
+## Revision Notes (pass 4)
+
+The pass-3 `/do-plan-critique` returned `NEEDS REVISION` but its findings text
+was unrecoverable — the critic session was stopped mid-run before persisting
+anything durable (no issue comment, no Critique Results row, no telemetry).
+Confirmed the verdict is genuine and against the current plan, not a stale
+cache artifact: the stored critique `artifact_hash`
+(`sha256:c9e33d868c5a…`) matches `_compute_artifact_hash('CRITIQUE', 1932)`
+against the current plan body **exactly**. This is the fourth consecutive
+lost-critique on this issue — the same failure family #1932 itself fixes.
+
+As in pass 1, the substitute was a rigorous critic-substitute self-review
+conducted **against the actual `agent/sdlc_router.py` source** (not against the
+plan's own prose). That review found one real BLOCKER-class defect — the same
+*class* the pass-2 critique caught for row 7, now recurring for row 9:
+
+1. **BLOCKER — the gap-(a) coverage analysis omitted row 9's no-verdict-check
+   semantics.** The plan claimed the `REVIEW ∈ {completed, failed}` +
+   empty-verdict band is uniformly `Blocked`, on the premise that "9/10 require
+   a recorded verdict." Reading `_rule_review_approved_docs_not_done`
+   (`agent/sdlc_router.py:1003-1010`) directly disproves that: row 9's
+   predicate is only `pr_number` set + `REVIEW == STATUS_COMPLETED` + DOCS not
+   completed — **no verdict inspection**, despite a docstring that says
+   "Review APPROVED." Consequences: (a) the `REVIEW == completed` +
+   empty-verdict + DOCS-pending state is not a dead-end but a *silent misroute*
+   to `/do-docs` (worse — it advances past review on an unreviewed PR); (b) a
+   reproduction test asserting `Blocked` for that case would be a false RED and
+   would pass trivially without exercising the bug; (c) 8d's disjointness
+   contract never mentioned row 9, so nothing pinned that 8d must be ordered
+   before row 9 to intercept the misroute, nor that 8d must avoid stealing row
+   9's legitimate verdict-present case.
+
+   **Fix:** Split the gap-(a) reproduction into two parametrized cases with
+   explicitly different current behavior — `REVIEW == failed` → `Blocked`;
+   `REVIEW == completed` → `Dispatch("/do-docs", row_id="9")` misroute.
+   Corrected spike-1, Solution/Key Elements, Technical Approach (disjointness
+   now covers rows 7/8b/8c as step-asides **plus** the row-9 ordering
+   dependency), Risk 1, Test Impact, Success Criteria, and Step-by-Step Tasks
+   (tasks 1, 2, 4). Added a row-9 companion assertion
+   (`_rule_review_approved_docs_not_done == True` pre-fix for the completed
+   case, `False` for the failed case) proving the misroute is real, and a
+   row-9 verdict-present regression proving 8d does not steal row 9's normal
+   docs handoff (8d's "no recorded REVIEW verdict" condition guarantees the
+   step-aside).
+
+Verified against current main (baseline `8485db99`): `grep -c 'DispatchRule('
+agent/sdlc_router.py` = 17; row_ids `1,2,2b,2c,3,4a,4b,4c,5,6,7,8,8b,8c,9,10,10b`;
+SKILL.md still says "16 rows" — the plan's row-count claims are unchanged and
+correct. No open questions remain; plan proceeds to `/do-plan-critique`
+(pass 4) for verification.
