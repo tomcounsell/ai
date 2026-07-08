@@ -30,6 +30,60 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+# Popoto's `Query` logger emits this exact diagnostic at ``error`` level whenever a
+# model query hits an orphaned index entry (a Redis SET member pointing at an
+# expired/deleted hash). It is captured into Sentry by the default
+# ``LoggingIntegration`` and — because the worker polls ``AgentSession.query.all()``
+# in a tight loop — floods Sentry with tens of thousands of benign-transient events
+# (see issue #1835, Sentry ``VALOR-S``). The orphan churn itself is benign: the
+# ``if redis_hash`` guard in ``get_many_objects`` already silently skips ghosts, so
+# no stale data is ever returned, and existing cleanup infrastructure
+# (``agent-session-cleanup`` reflection, ``ghost_reconcile.py``, worker-startup
+# ``clean_indexes()``) keeps the orphan count bounded. This substring is the match
+# target for ``drop_orphan_noise``.
+_ORPHAN_NOISE_SUBSTRING = "one or more redis keys points to missing objects"
+
+
+def drop_orphan_noise(event, hint):
+    """Sentry ``before_send`` hook that drops Popoto orphan-index diagnostics.
+
+    Popoto logs ``"one or more redis keys points to missing objects. Debug with
+    Model.query.keys(clean=True)"`` at ``error`` level on every query that touches a
+    transient orphan index entry. These are benign (no stale data is returned) but
+    flood Sentry, drowning out real signal (issue #1835). This filter drops any event
+    whose logged message contains :data:`_ORPHAN_NOISE_SUBSTRING`.
+
+    ``LoggingIntegration`` encodes a ``logger.error(...)`` call as a ``logentry``
+    object, so we check ``logentry.formatted`` (the interpolated string) and
+    ``logentry.message`` (the raw template), plus the top-level ``message`` key as a
+    fallback for non-``logentry`` event shapes.
+
+    Safety net: any exception in the matching logic passes the event through
+    unchanged, so a bug in this filter can never silently suppress a real error.
+
+    Args:
+        event: The Sentry event dict about to be sent.
+        hint: Sentry's ``before_send`` hint (may be ``None``); unused here.
+
+    Returns:
+        ``None`` to drop the event when the orphan substring matches, otherwise the
+        ``event`` unchanged.
+    """
+    try:
+        logentry = event.get("logentry") or {}
+        candidates = (
+            logentry.get("formatted") or "",
+            logentry.get("message") or "",
+            event.get("message") or "",
+        )
+        if any(_ORPHAN_NOISE_SUBSTRING in text for text in candidates):
+            logger.debug("Sentry event dropped: Popoto orphan-index noise")
+            return None
+    except Exception:
+        # Filter crash must never suppress real errors.
+        pass
+    return event
+
 
 def configure_sentry(component: str, before_send=None) -> bool:
     """Initialize Sentry for a process ``component`` (e.g. ``"bridge"`` / ``"worker"``).
