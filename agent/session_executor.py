@@ -754,9 +754,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
         (return, raise, ``CancelledError``).
       * A T+0 ``last_heartbeat_at`` write ensures the first health-check tick
         after session start sees a fresh heartbeat.
-      * Three messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``,
-        ``on_stdout_event``) bump per-session ORM fields; the messenger
-        itself imports nothing from ``models/``.
+      * Two messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``)
+        bump per-session ORM fields; the messenger itself imports nothing
+        from ``models/``. ``last_stdout_at`` liveness is owned by
+        ``SessionRunner._stamp_stdout_liveness`` (issue #1935) — this
+        messenger no longer duplicates that write (a prior, unlanded,
+        dead-in-production attempt at the same signal was removed here).
     """
     from agent import BackgroundTask, BossMessenger
 
@@ -1506,17 +1509,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     e,
                 )
 
-        def _on_stdout_event() -> None:
-            try:
-                session.last_stdout_at = datetime.now(tz=UTC)
-                session.save(update_fields=["last_stdout_at"])
-            except Exception as e:
-                logger.warning(
-                    "[%s] on_stdout_event save failed: %s",
-                    session.session_id,
-                    e,
-                )
-
         messenger = BossMessenger(
             _send_callback=send_to_chat,
             chat_id=session.chat_id,
@@ -1524,7 +1516,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
             on_sdk_started=_on_sdk_started,
             on_sdk_finished=_on_sdk_finished,
             on_heartbeat_tick=_on_heartbeat_tick,
-            on_stdout_event=_on_stdout_event,
         )
 
         # Deferred enrichment: process media, YouTube, links, reply chain.
