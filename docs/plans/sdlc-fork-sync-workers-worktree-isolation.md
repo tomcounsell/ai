@@ -178,9 +178,9 @@ Plan ready → `/sdlc` dispatches do-build fork → fork creates `.worktrees/{sl
 
 ## Test Impact
 
-- [ ] `tests/unit/test_sdlc_router_decision.py` — verify-only: confirm no assertion depends on the sdlc/SKILL.md PR-probe phrasing (this plan only adds a comment beside it); router decision logic is unchanged, so this is a read-through, likely no edit.
-- [ ] `tests/unit/test_worktree_manager.py` — no change expected: `worktree_manager.py` is intentionally left untouched (slug-wins reuses existing derivation). Listed to confirm the builder does NOT accidentally modify worktree signatures.
-- [ ] `tests/unit/test_agent_session_queue.py` — no change expected: `resolve_branch_for_stage` is left untouched. Listed as a guard against accidental branch-derivation changes.
+- [x] `tests/unit/test_sdlc_router_decision.py` — verify-only: confirm no assertion depends on the sdlc/SKILL.md PR-probe phrasing (this plan only adds a comment beside it); router decision logic is unchanged, so this is a read-through, likely no edit.
+- [x] `tests/unit/test_worktree_manager.py` — no change expected: `worktree_manager.py` is intentionally left untouched (slug-wins reuses existing derivation). Listed to confirm the builder does NOT accidentally modify worktree signatures.
+- [x] `tests/unit/test_agent_session_queue.py` — no change expected: `resolve_branch_for_stage` is left untouched. Listed as a guard against accidental branch-derivation changes.
 
 No existing test asserts the do-build/do-sdlc orchestration prose today, so the new `tests/unit/test_sdlc_fork_no_background.py` is additive and does not replace prior coverage.
 
@@ -244,12 +244,12 @@ No agent integration required — this changes SDLC skill-orchestration prose an
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/sdlc-fork-turn-boundary.md` documenting the fork turn-boundary invariant ("a `context: fork` skill never ends its turn with a live background child" — landed by `8542ffb19` and now guarded by `test_sdlc_fork_no_background.py`), the concurrent-foreground builder model, the slug-identity-always-wins ownership rule, and the live-ref PR dedup guard (incl. the cross-repo `--repo $TARGET_GH_REPO` requirement). Cross-link the two prior-art plans and cite commit `8542ffb19`.
-- [ ] Add an entry to `docs/features/README.md` index table.
-- [ ] Update `docs/features/headless-session-runner.md` and/or `docs/features/eng-session-architecture.md` with a pointer to the new invariant doc (these describe the fork/dev-subagent execution model).
+- [x] Create `docs/features/sdlc-fork-turn-boundary.md` documenting the fork turn-boundary invariant ("a `context: fork` skill never ends its turn with a live background child" — landed by `8542ffb19` and now guarded by `test_sdlc_fork_no_background.py`), the concurrent-foreground builder model, the slug-identity-always-wins ownership rule, and the live-ref PR dedup guard (incl. the cross-repo `--repo $TARGET_GH_REPO` requirement). Cross-link the two prior-art plans and cite commit `8542ffb19`.
+- [x] Add an entry to `docs/features/README.md` index table.
+- [x] Update `docs/features/headless-session-runner.md` and/or `docs/features/eng-session-architecture.md` with a pointer to the new invariant doc (these describe the fork/dev-subagent execution model).
 
 ### Inline Documentation
-- [ ] The enforcement test (`tests/unit/test_sdlc_fork_no_background.py`) carries a module docstring explaining which invariant each assertion guards and why (so a future failure is self-explanatory).
+- [x] The enforcement test (`tests/unit/test_sdlc_fork_no_background.py`) carries a module docstring explaining which invariant each assertion guards and why (so a future failure is self-explanatory).
 
 ## Success Criteria
 
@@ -259,13 +259,13 @@ No agent integration required — this changes SDLC skill-orchestration prose an
 - [x] do-sdlc §3c stage dispatch passes `run_in_background: false` explicitly (plus Hard Rule 6).
 
 **Delivered by this plan:**
-- [ ] do-build's PR step runs `gh pr list --head session/{slug}` (with `--repo $TARGET_GH_REPO` for cross-repo) before `gh pr create` and reuses an existing PR.
-- [ ] `sdlc/SKILL.md`'s search-based PR probe carries a live-ref `--head` cross-check note.
-- [ ] do-sdlc / sdlc docs declare slug-identity-always-wins ownership of `.worktrees/{slug}` + `session/{slug}`; no lane allocation.
-- [ ] `worktree_manager.py` and `resolve_branch_for_stage` are unchanged (confirmed by diff).
-- [ ] `tests/unit/test_sdlc_fork_no_background.py` scans **every** `context: fork` skill (incl. pthread, do-pr-review) for the background-then-exit pattern, plus the do-build PR-guard and do-sdlc positive assertions; fails loudly if any fork skill reintroduces the pattern.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] do-build's PR step runs `gh pr list --head session/{slug}` (with `--repo $TARGET_GH_REPO` for cross-repo) before `gh pr create` and reuses an existing PR.
+- [x] `sdlc/SKILL.md`'s search-based PR probe carries a live-ref `--head` cross-check note.
+- [x] do-sdlc / sdlc docs declare slug-identity-always-wins ownership of `.worktrees/{slug}` + `session/{slug}`; no lane allocation.
+- [x] `worktree_manager.py` and `resolve_branch_for_stage` are unchanged (confirmed by diff).
+- [x] `tests/unit/test_sdlc_fork_no_background.py` scans **every** `context: fork` skill (incl. pthread, do-pr-review) for the background-then-exit pattern, plus the do-build PR-guard and do-sdlc positive assertions; fails loudly if any fork skill reintroduces the pattern.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
