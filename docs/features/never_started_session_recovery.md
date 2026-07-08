@@ -10,10 +10,11 @@ never fires its first tool call or turn event. This happens when:
 - The `claude -p` subprocess exits immediately with no output
 - The subprocess hangs before the first turn is processed
 
-These sessions have `sdk_ever_output=False` — neither `last_tool_use_at` nor
-`last_turn_at` is ever written. Without detection, the session holds a
-heartbeat-alive lock indefinitely: the queue-layer `last_heartbeat_at` keeps
-sub-check B in `_has_progress` returning True, preventing recovery.
+These sessions have `sdk_ever_output=False` — none of `last_tool_use_at`,
+`last_turn_at`, or `last_stdout_at` is ever written. Without detection, the
+session holds a heartbeat-alive lock indefinitely: the queue-layer
+`last_heartbeat_at` keeps sub-check B in `_has_progress` returning True,
+preventing recovery.
 
 ## Solution: D0 Never-Started Gate
 
@@ -30,7 +31,15 @@ D0: _never_started_past_grace(entry) → True
 ```
 
 The predicate `_never_started_past_grace` returns True when:
-1. `sdk_ever_output=False` (neither `last_tool_use_at` nor `last_turn_at` is set)
+1. `sdk_ever_output=False` — none of `last_tool_use_at`, `last_turn_at`, or
+   `last_stdout_at` is set, per the single authoritative derivation
+   `agent.session_runner.liveness.derive_sdk_ever_output` (issue #1935; see
+   the "Liveness signals" subsection of
+   [headless-session-runner.md](headless-session-runner.md)).
+   `last_stdout_at` closes the toolless-streaming zombie wedge: a headless
+   turn that streams the `init` event and produces assistant output with no
+   tool call within the grace window is real, demonstrated output — it must
+   not be misclassified as never-started.
 2. `running_seconds > NEVER_STARTED_GRACE_SECS + NEVER_STARTED_CONFIRM_MARGIN_SECS`
 
 Default threshold: 120s + 30s = 150 seconds.
@@ -69,6 +78,15 @@ interactive TUI:
 
 The four PTY-liveness `AgentSession` fields these mechanisms used were
 removed in the same cutover.
+
+`last_pty_read_loop_at` itself was a per-stream-read liveness signal with no
+headless equivalent when the cutover shipped (#1843 Gap B) — that gap is what
+let a toolless-streaming headless turn go undetected as "producing output"
+for its first ~150s, misclassifying it `zombie_uuid_no_output` (issue #1935).
+`last_stdout_at`, stamped by `SessionRunner._stamp_stdout_liveness` on every
+`init`/stdout event, is the headless replacement; see
+[headless-session-runner.md](headless-session-runner.md#liveness) for the
+write side.
 
 ## Env-Tunable Constants
 
