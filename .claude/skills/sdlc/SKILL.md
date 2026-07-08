@@ -152,6 +152,8 @@ For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output 
 
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass, cleared by `/do-plan` (Phase 4, Step 2b) after pushing the revision, and self-heals when `revision_applied: true` is in the plan frontmatter. Gated on `pr_number is None` so an already-shipped PR is never blocked.
 
+**Known gap — stale REVIEW verdict after PATCH (issue #1932 / PR #1941):** G3 and G6 above key off `_verdicts["REVIEW"]` containing `APPROVED`, not off whether that verdict was recorded *after* the most recent PATCH commit. Before PR #1941's router fix (and for any similar gap not yet caught), `next-skill` can propose `/do-merge` on a stale pre-patch `APPROVED`/`CHANGES REQUESTED` verdict because nothing forces a fresh `/do-pr-review` after `/do-patch` resolves REVIEW findings. Before trusting a router-proposed `/do-merge`, verify with `sdlc-tool verdict get --stage REVIEW --issue-number {N}` that the recorded verdict is `APPROVED` and postdates the patch commit; if not, manually dispatch `/do-pr-review` first.
+
 Record every dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill — this preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
 
 ```bash
