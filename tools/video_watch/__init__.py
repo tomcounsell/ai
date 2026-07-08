@@ -160,8 +160,11 @@ def _extract_scene_frames(video_path: Path, tmpdir: Path) -> list[tuple[Path, fl
     frames_dir.mkdir(exist_ok=True)
     meta_path = tmpdir / "frames_meta.txt"
 
+    # `eq(n,0)+gt(scene,THRESH)`: `+` is OR in ffmpeg expressions, so the opening
+    # frame is ALWAYS kept (scene detection never scores frame 0) plus every
+    # scene-change frame. Guarantees >=1 frame even for a static/very-short clip.
     vf = (
-        f"select='gt(scene,{VIDEO_WATCH_SCENE_THRESHOLD})',"
+        f"select='eq(n\\,0)+gt(scene,{VIDEO_WATCH_SCENE_THRESHOLD})',"
         f"metadata=print:file={meta_path},"
         f"scale={VIDEO_WATCH_FRAME_WIDTH}:-2"
     )
