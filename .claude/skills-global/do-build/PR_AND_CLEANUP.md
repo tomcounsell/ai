@@ -63,7 +63,7 @@ git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
 # issue converges on the SAME head (session/{slug}). If that convergence is ever broken
 # (e.g. a lane seam reappears), this --head lookup silently stops catching duplicates
 # created on the other branch.
-EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number')
+EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number')  # add: --repo $TARGET_GH_REPO
 gh_exit=$?
 if [ "$gh_exit" -ne 0 ]; then
   # gh failed (auth/network/rate-limit) — do NOT fail open into gh pr create, which
