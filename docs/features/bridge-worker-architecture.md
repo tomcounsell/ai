@@ -514,7 +514,7 @@ A session whose `session_id` starts with `local` was spawned from a local Claude
 
 ### Own-progress fields are heartbeat-gated (#1614)
 
-The no-progress detector in `_has_progress` (`agent/session_health.py`) includes a set of "own-progress" fields — `turn_count`, `log_path`, and `claude_session_uuid` — that serve as evidence that a session authenticated with the SDK and began work. These fields are sticky once set and are only evaluated when `sdk_ever_output` is False (the per-turn fields `last_tool_use_at` / `last_turn_at` have never been written).
+The no-progress detector in `_has_progress` (`agent/session_health.py`) includes a set of "own-progress" fields — `turn_count`, `log_path`, and `claude_session_uuid` — that serve as evidence that a session authenticated with the SDK and began work. These fields are sticky once set and are only evaluated when `sdk_ever_output` is False, i.e. `agent.session_runner.liveness.derive_sdk_ever_output` returns False because none of `last_tool_use_at`, `last_turn_at`, or `last_stdout_at` has ever been written (issue #1935 added `last_stdout_at` as the third OR-input, closing the toolless-streaming false-positive window — see [Headless Session Runner § Liveness signals](headless-session-runner.md#liveness-signals-sdk_ever_output-issue-1935)).
 
 **Confirmed Branch 2 failure mode (#1614):** The worker process remained alive (`worker_alive=True` on every health tick). The harness subprocess had exited or hung without producing SDK output, and the executor's heartbeat loop had silently stopped. But `claude_session_uuid` — written at SDK authentication time — was set. Because the own-progress check was ungated, it returned `True` unconditionally, blocking the branch-2 recovery path indefinitely.
 
@@ -580,16 +580,19 @@ for the full two-tier detector design.
 
 ## Messenger callbacks (ORM-free)
 
-`use correct syntax (`.BossMessenger` not `::`)` exposes three optional liveness callbacks:
+`BossMessenger` exposes three optional liveness callbacks, but only two are
+wired at its construction site in `session_executor.py` (`agent/messenger.py`
+still defines all three for contract-test purposes):
 
 | Kwarg | Called from | Purpose |
 |-------|-------------|---------|
 | `on_sdk_started(pid)` | `_run_harness_subprocess` once the subprocess is spawned | Populate `SessionHandle.pid`; bump `last_sdk_heartbeat_at` |
 | `on_heartbeat_tick()` | `BackgroundTask._watchdog` every 60s | Bump `last_sdk_heartbeat_at` |
-| `on_stdout_event()` | `_run_harness_subprocess` on each stdout line | Bump `last_stdout_at` |
+| `on_stdout_event()` *(unwired, issue #1935)* | not called — `BossMessenger(...)` no longer passes this kwarg | N/A — `last_stdout_at` is written by `SessionRunner._stamp_stdout_liveness` in `agent/session_runner/runner.py` instead, wired directly into the headless driver's `on_stdout_event`/`on_init` adapters. See [Headless Session Runner § Liveness signals](headless-session-runner.md#liveness-signals-sdk_ever_output-issue-1935). |
 
-All three are plumbed through `notify_*` wrappers that catch callback
-exceptions and log at WARNING — the messenger is resilient to ORM failures.
+All three callback slots are plumbed through `notify_*` wrappers that catch
+callback exceptions and log at WARNING — the messenger is resilient to ORM
+failures — but only the two wired kwargs above are exercised in production.
 The messenger module imports nothing from `models/`; the queue layer
 (`_execute_agent_session`) provides closures that do the ORM writes.
 

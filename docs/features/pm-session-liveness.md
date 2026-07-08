@@ -69,6 +69,15 @@ Issue #1172 retires every inference path. Evidence-only signals stay:
 | **B: startup-window executor-alive** | `last_heartbeat_at` | `_heartbeat_loop` in `session_executor.py` | `HEARTBEAT_FRESHNESS_WINDOW` (90s) | Only when `sdk_ever_output=False` AND (`started_ref` is None OR `running_seconds < STARTUP_GRACE_SECONDS`); gated by the D0 never-started gate — see below (#1724) |
 | **Watchdog-alive (not Tier 1)** | `last_sdk_heartbeat_at` | `BackgroundTask._watchdog` every 60s | N/A — not a progress signal | Dashboard `last_evidence_at` only |
 
+`sdk_ever_output` throughout this table is `agent.session_runner.liveness.derive_sdk_ever_output(entry)`
+— as of issue #1935 a **third** OR-input, `last_stdout_at` (written by
+`SessionRunner._stamp_stdout_liveness` on the headless stream's `init`/stdout
+events), joins `last_tool_use_at`/`last_turn_at`. This narrows sub-check B's
+active window and the Tier-2 reprieve escalation guard below to genuinely
+toolless-AND-non-streaming sessions — a session that streamed at least
+`init` now counts as `sdk_ever_output=True` even with zero tool calls. See
+[Headless Session Runner § Liveness signals](headless-session-runner.md#liveness-signals-sdk_ever_output-issue-1935).
+
 Sub-check B preserves backward compatibility for sessions in their startup
 window and for those started before PR #1177 (whose hooks did not write the
 per-turn fields). Issue #1724 bounds the previously-unbounded fresh-heartbeat
