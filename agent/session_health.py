@@ -1519,20 +1519,42 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
     path and this matches the existing PPID==1 reaper's assumptions (issue #1537
     Race Condition Analysis); we accept the residual risk rather than tracking PID
     generations.
+
+    Process-GROUP aware (issue #1938): the headless runner spawns ``claude -p``
+    with ``start_new_session=True`` (its own session/group leader, ``pgid == pid``)
+    and that subprocess spawns grandchildren (MCP servers). Signalling only the
+    bare PID would leave the grandchildren alive, so this helper derives the group
+    from the pid via ``os.getpgid`` and signals the GROUP with ``os.killpg`` for
+    both the SIGTERM→SIGKILL escalation and the ``signal 0`` liveness probes. If
+    ``os.getpgid(pid)`` raises ``ProcessLookupError`` the process is already gone.
     """
     if pid is None or pid <= 0:
         return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
 
+    # Derive the process group (issue #1938). ``pgid == pid`` under
+    # start_new_session; deriving it here means a detached group with
+    # grandchildren (MCP servers) is fully reaped, not just the group leader.
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        # The leader is already gone → the group is gone. No signal sent.
+        return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+    except (PermissionError, OSError):
+        # Cannot resolve the group but the pid still exists in some form —
+        # fall back to the own-group assumption (pgid == pid under
+        # start_new_session) rather than giving up.
+        pgid = pid
+
     deadline = time.monotonic() + max(timeout, 0.0)
 
     def _is_dead() -> bool:
-        """``True`` iff signal 0 reports the PID is gone."""
+        """``True`` iff signal 0 reports the process GROUP is gone."""
         try:
-            os.kill(pid, 0)
+            os.killpg(pgid, 0)
         except ProcessLookupError:
             return True
         except PermissionError:
-            # Process exists but is owned by another user — cannot confirm death.
+            # Group exists but is owned by another user — cannot confirm death.
             return False
         except OSError:
             return False
@@ -1540,7 +1562,7 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
 
     # Already gone (e.g. task.cancel() did terminate it)? No signal was sent.
     try:
-        os.kill(pid, 0)
+        os.killpg(pgid, 0)
     except ProcessLookupError:
         return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
     except PermissionError:
@@ -1555,15 +1577,16 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
             time.sleep(_SUBPROCESS_KILL_POLL_INTERVAL)
         return _is_dead()
 
-    # Escalation step 1: SIGTERM, then poll for graceful exit. From here on a
-    # signal has been delivered, so signal_sent is True regardless of the outcome.
+    # Escalation step 1: SIGTERM the group, then poll for graceful exit. From
+    # here on a signal has been delivered, so signal_sent is True regardless of
+    # the outcome.
     try:
-        os.kill(pid, signal.SIGTERM)
+        os.killpg(pgid, signal.SIGTERM)
     except ProcessLookupError:
         # Raced to exit between the probe and SIGTERM — no signal landed.
         return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
     except (PermissionError, OSError) as e:
-        logger.debug("[session-health] SIGTERM failed for recovery pid=%s: %s", pid, e)
+        logger.debug("[session-health] SIGTERM failed for recovery pgid=%s: %s", pgid, e)
         return SubprocessKillResult(confirmed_dead=_is_dead(), signal_sent=False)
 
     if _poll_until_dead():
@@ -1571,11 +1594,11 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
 
     # Escalation step 2: SIGKILL only when SIGTERM failed to terminate it.
     try:
-        os.kill(pid, signal.SIGKILL)
+        os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         return SubprocessKillResult(confirmed_dead=True, signal_sent=True)
     except (PermissionError, OSError) as e:
-        logger.debug("[session-health] SIGKILL failed for recovery pid=%s: %s", pid, e)
+        logger.debug("[session-health] SIGKILL failed for recovery pgid=%s: %s", pgid, e)
         return SubprocessKillResult(confirmed_dead=_is_dead(), signal_sent=True)
 
     return SubprocessKillResult(confirmed_dead=_poll_until_dead(), signal_sent=True)
@@ -2257,6 +2280,16 @@ async def _apply_recovery_transition(
         if _predicted_terminal:
             set_cancel_reason(entry.session_id, "no_resume")
 
+    # Snapshot the live subprocess pid BEFORE cancelling (issue #1938). The
+    # runner surfaces the live ``claude -p`` pid on ``claude_pid`` (Fix 2) and
+    # CLEARS it on the same teardown unwind that ``handle.task.cancel()`` below
+    # triggers. A post-cancel re-read would therefore degenerate to
+    # ``_confirm_subprocess_dead(None)`` — a false "confirmed dead." The snapshot
+    # keeps the confirm/escalate meaningful: it verifies the group the runner's
+    # ``finally`` should have reaped is actually gone; if not, escalate to
+    # ``failed`` (the #1537 branch).
+    pid_snapshot = getattr(entry, "claude_pid", None)
+
     # Cancel the in-flight session task if we have a handle and the task
     # reference has been populated. Cancelling the populated task terminates
     # the SDK subprocess via CancelledError propagation, preventing orphan
@@ -2293,7 +2326,7 @@ async def _apply_recovery_transition(
         None,
         functools.partial(
             _confirm_subprocess_dead,
-            getattr(entry, "claude_pid", None),
+            pid_snapshot,
             timeout=SUBPROCESS_KILL_TIMEOUT,
         ),
     )
@@ -2349,7 +2382,7 @@ async def _apply_recovery_transition(
                 "kill": {
                     "confirmed_dead": _kill_result.confirmed_dead if _kill_result else False,
                     "signal_sent": _kill_result.signal_sent if _kill_result else False,
-                    "pid": getattr(entry, "claude_pid", None),
+                    "pid": pid_snapshot,
                 },
             },
         )
@@ -3274,6 +3307,22 @@ async def _agent_session_health_check() -> None:
                     worker_key=worker_key,
                 ):
                     recovered += 1
+                    # Recoveries-per-pass counter (issue #1938): a spike (post
+                    # sleep/wake, network blip) that recovers many stalled
+                    # sessions at once serializes into N runner-finally reap
+                    # blocks — make it observable. Project-scoped, fail-silent.
+                    try:
+                        from popoto.redis_db import POPOTO_REDIS_DB as _RR
+
+                        _RR.incr(f"{entry.project_key}:session-health:recovery_reaps")
+                    except Exception as _rr_err:
+                        logger.debug("[session-health] recovery_reaps counter failed: %s", _rr_err)
+                    # Concurrent-reap yield (issue #1938): let the heartbeat task
+                    # (and every other session's coroutine) schedule between
+                    # per-session recoveries so N back-to-back ~1s reap blocks do
+                    # not freeze the loop and trip the stuck detector on healthy
+                    # sessions. OUTSIDE the uninterruptible reap.
+                    await asyncio.sleep(0)
         except Exception:
             logger.exception(
                 "[session-health] Error processing session %s",
