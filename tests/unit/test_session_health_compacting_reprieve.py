@@ -15,6 +15,7 @@ ORM teardown (NEVER raw Redis — enforced by
 """
 
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -69,6 +70,35 @@ def test_no_compaction_falls_through(clean_sessions):
     """last_compaction_ts is None → compacting gate skipped, falls through."""
     s = _make_session(clean_sessions, None)
     assert _tier2_reprieve_signal(handle=None, entry=s) is None
+
+
+def test_reprieve_cap_not_suppressed_with_fresh_stdout(clean_sessions):
+    """Second wedge route (critique BLOCKER): a session past
+    MAX_NO_OUTPUT_REPRIEVES but with fresh ``last_stdout_at`` must NOT be
+    suppressed by the reprieve-cap escalation guard — sdk_ever_output
+    derives True via last_stdout_at alone (agent.session_runner.liveness),
+    so the toolless-streaming session keeps getting Tier 2 reprieves instead
+    of being force-escalated to recovery."""
+    from datetime import UTC, datetime
+
+    from agent.session_health import MAX_NO_OUTPUT_REPRIEVES
+
+    s = _make_session(clean_sessions, None)
+    s.reprieve_count = MAX_NO_OUTPUT_REPRIEVES
+    s.last_stdout_at = datetime.now(tz=UTC)
+    s.save()
+
+    with patch("psutil.Process") as mock_proc:
+        proc_instance = MagicMock()
+        proc_instance.status.return_value = "running"
+        proc_instance.children.return_value = []
+        mock_proc.return_value = proc_instance
+
+        handle = MagicMock()
+        handle.pid = 12345
+
+        result = _tier2_reprieve_signal(handle=handle, entry=s)
+        assert result is not None  # NOT bypassed by the reprieve cap
 
 
 def test_compact_reprieve_window_constant_still_exists():
