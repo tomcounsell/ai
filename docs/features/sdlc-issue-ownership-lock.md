@@ -67,7 +67,7 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 | Call site | File | Trigger | Notes |
 |---|---|---|---|
 | `ensure_session()` -- all 5 return points | `tools/sdlc_session_ensure.py` | Every session resolution for an issue (cold-start create, or any of 4 early-return branches) | Wired via one shared helper (`_touch_lock_before_return`) invoked immediately before *each* `return` statement, so no branch can silently skip it. This was a round-2 critique BLOCKER: a lock-touch wired only into the bottom-of-function create path never fires for the overwhelmingly common case -- a continuing pipeline resolving via an early return. |
-| `record_dispatch_for_session()` -- direct call | `tools/sdlc_dispatch.py` | Before writing every dispatch event (i.e. before every sub-skill invocation) | Calls `touch_issue_lock()` **directly**, not via `ensure_session()` -- `tools._sdlc_utils.find_session(ensure=True)`'s Step-2 short-circuit skips `ensure_session()` entirely for continuing sessions, so a call site downstream of `ensure_session()` alone would miss this path. `issue_number` is derived by parsing `session.issue_url`, not from the `issue_number` mirror field (a continuing session created before this feature shipped may not have one). Returns `False` when the lock is held elsewhere -- see "Divergence from the plan" below for what that produces at the CLI surface. |
+| `record_dispatch_for_session()` -- direct call | `tools/sdlc_dispatch.py` | Before writing every dispatch event (i.e. before every sub-skill invocation) | Calls `touch_issue_lock()` **directly**, not via `ensure_session()` -- `tools._sdlc_utils.find_session(ensure=True)`'s Step-2 short-circuit skips `ensure_session()` entirely for continuing sessions, so a call site downstream of `ensure_session()` alone would miss this path. `issue_number` is derived by parsing `session.issue_url`, not from the `issue_number` mirror field (a continuing session created before this feature shipped may not have one). Returns `False` when the lock is held elsewhere -- see "`dispatch record` merges the reason into its existing `ok: false` shape" below for what that produces at the CLI surface. |
 | `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before `_resolve_enriched`/`decide_next_dispatch` run | `peek=True` -- read-only, never acquires or renews. Short-circuits to the `ISSUE_LOCKED` blocked shape ahead of all G1-G7 guard evaluation. |
 | Heartbeat tier-1 (60s) block | `agent/session_executor.py::_tick_issue_lock_renewal` | Every 60s heartbeat tick, for a worker-driven session | Guarded on `agent_session.session_type == "eng"` and a resolved (truthy) `agent_session.issue_number`. Deliberately placed in the tier-1 (60s) block, not the 25-minute calendar block -- that slower cadence would blow straight past the 300s TTL. |
 | `sdlc-tool stage-marker` write | `tools/sdlc_stage_marker.py` (via `tools/_sdlc_utils.py::renew_issue_lock_for_session()`) | Every stage-marker write (BUILD/TEST/REVIEW stage transitions) | Fires after the ownership guard and before the state-machine write; best-effort, never blocks or alters the write outcome on failure. |
@@ -84,16 +84,26 @@ When a lock check finds the issue owned by a different live session, the caller 
 
 ### Where the literal JSON shape is actually emitted
 
-Two call sites emit the full structured shape:
+Two call sites emit the full `{"blocked": true, ...}` shape:
 
 - **`tools/sdlc_session_ensure.py::ensure_session()`** -- any of its five return points returns `{"blocked": True, "reason": "ISSUE_LOCKED", "owner_session_id": ...}` in place of the normal `{"session_id": ..., "created": ...}` payload when `touch_issue_lock()` reports contention.
 - **`tools/sdlc_next_skill.py::decide()`** -- the peek pre-check returns `{"blocked": True, "reason": "ISSUE_LOCKED", "guard_id": "ISSUE_LOCK", "owner_session_id": ...}` before any G1-G7 guard runs.
 
-### Divergence from the plan: `dispatch record` does not emit the structured shape
+`dispatch record` surfaces the same lock information through a different shape, described next -- it never returns `blocked: true`.
 
-The plan's Technical Approach describes a "new `blocked` shape from `next-skill`/`dispatch record`." The actual implementation only wires the literal `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` JSON through `ensure_session()` and `next-skill`. `record_dispatch_for_session()` (`tools/sdlc_dispatch.py`) returns a plain `bool` -- `False` on contention -- and its CLI wrapper (`sdlc-tool dispatch record`) surfaces that as `{"ok": false, "history_length": N}`, with no `reason` or `owner_session_id` field. The refusal is only visible in DEBUG-level logs at that call site.
+### `dispatch record` merges the reason into its existing `ok: false` shape (does not use `blocked`)
 
-In practice this is a narrow gap: `ensure_session()` and `next-skill`'s peek both run ahead of every `dispatch record` call in the normal `/sdlc` flow (Step 3.5 records dispatch only after `next-skill` already returned a non-blocked decision), so contention is very likely caught upstream before `dispatch record` is ever reached. But a caller that invokes `dispatch record` directly without a preceding `next-skill` check would see a silent `ok: false` rather than a self-explanatory `ISSUE_LOCKED` reason. This is worth closing in a follow-up if that call pattern is ever observed in practice.
+`record_dispatch_for_session()` (`tools/sdlc_dispatch.py`) intentionally stays a plain `bool` -- other call sites and existing tests already depend on that return-type contract -- so a `False` result alone is ambiguous: issue-lock contention and any other write failure (e.g. a Redis write conflict inside `update_stage_states`) both collapse to the same `False`.
+
+The CLI wrapper (`sdlc-tool dispatch record`, implemented by `_cli_record()`) disambiguates this after the fact: on a failed write (`ok: false`), it calls `_peek_issue_lock_conflict()` -- a read-only, non-mutating `touch_issue_lock(peek=True)` check that re-derives the issue number from `session.issue_url` the same way `record_dispatch_for_session()` does internally. If the peek shows the lock held by a different live session, `reason` and `owner_session_id` are merged into the result dict alongside the pre-existing keys:
+
+```json
+{"ok": false, "history_length": 3, "reason": "ISSUE_LOCKED", "owner_session_id": "sdlc-local-1954"}
+```
+
+A write failure unrelated to the lock (or a session with no parseable issue number) keeps the original `{"ok": false, "history_length": N}` shape unchanged -- this is purely additive, not a new top-level contract. A successful write (`ok: true`) never triggers the peek at all.
+
+`/sdlc` and `/do-sdlc` treat either shape (`blocked: true` from `ensure_session()`/`next-skill`, or `ok: false` + `reason: "ISSUE_LOCKED"` from `dispatch record`) identically: surface `reason` and `owner_session_id` to the human, do not loop, do not attempt to route around it by guessing an alternative skill.
 
 ## Interaction with Crash Recovery
 
@@ -107,7 +117,7 @@ A revived terminal session (via `reflections/crash_recovery.py`'s auto-resume or
 | `models/agent_session.py` | `issue_number` mirror field |
 | `tools/_sdlc_utils.py` | `find_session_by_issue(include_terminal=...)`, `renew_issue_lock_for_session()` |
 | `tools/sdlc_session_ensure.py` | `ensure_session()`'s 5 return-point wiring |
-| `tools/sdlc_dispatch.py` | `record_dispatch_for_session()`'s direct lock call |
+| `tools/sdlc_dispatch.py` | `record_dispatch_for_session()`'s direct lock call; `_peek_issue_lock_conflict()` + `_cli_record()`'s post-failure disambiguation |
 | `tools/sdlc_next_skill.py` | `decide()`'s peek pre-check |
 | `agent/session_executor.py` | `_tick_issue_lock_renewal()` (tier-1 heartbeat) |
 | `tools/sdlc_stage_marker.py` | `write_marker()`'s renewal call |
