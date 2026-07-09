@@ -1,5 +1,6 @@
 ---
-status: Planning
+status: Ready
+revision_applied: true
 type: bug
 appetite: Small
 owner: Valor Engels
