@@ -158,6 +158,40 @@ Stale or invalid scalars (missing `runner_cwd`, unknown `claude_session_uuid`)
 discard cleanly to a cold start with a full first-turn prime — there is no
 crash on a bad resume pointer.
 
+### Stale-UUID fallback vs. the result-event completion signal (issue #1980)
+
+A resumed (`--resume`) turn whose subprocess exits **non-zero** may need one
+fresh-session retry — a genuinely stale/invalid UUID makes `claude --resume`
+error out before producing any output. `get_response_via_harness`
+(`agent/sdk_client.py`) runs exactly that retry once, without `--resume`, using
+the caller's `full_context_message`.
+
+That retry is **gated on whether the primary invocation emitted a `result`
+event**, not on whether it exited zero. The invariant: *a `result` event is the
+protocol's completion signal.* If the resumed subprocess emitted a `result`
+event (`stop_reason: end_turn`) and only *then* exited non-zero — a post-turn or
+cleanup artifact — the captured completion is authoritative and the fallback is
+**skipped**, keeping the real answer. This mirrors, one layer down, the role
+driver's residual-#1916 rule (`role_driver.py`: "a nonzero exit AFTER a result
+event keeps the result").
+
+The gate keys off the true `result_event_fired` boolean, captured from the
+primary invocation's `on_exit_status(returncode, result_event_fired)` callback —
+**not** off the returned `result_text`. `result_text` is a non-empty string in
+two distinct cases (a fired result event, or accumulated partial text with *no*
+result event from a crashed subprocess), so `result_text is None` cannot
+distinguish "resume succeeded" from "crashed with partial text." The fallback
+therefore still fires whenever no result event fired (partial text or a genuine
+stale UUID), preserving all recovery.
+
+Before this gate existed, a valid completion followed by a non-zero exit
+triggered the retry, whose empty output overwrote the good `result_text`;
+`get_response_via_harness` returned `""`, `HeadlessRoleDriver.run_turn`'s
+`if not reply:` guard set `exit_reason="empty_output"`, and the wrap-up guard
+delivered the canned `OPERATOR_TERMINAL_MESSAGE` instead of the real answer.
+`OPERATOR_TERMINAL_MESSAGE` is now reserved for a genuinely empty PM turn (no
+result event and no recoverable text).
+
 ## Auth
 
 The runner sets `CLAUDE_CODE_OAUTH_TOKEN` and strips `ANTHROPIC_API_KEY` in
