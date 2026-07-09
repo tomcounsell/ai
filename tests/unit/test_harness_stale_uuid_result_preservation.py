@@ -247,3 +247,54 @@ class TestRunTurnPropagatesCompletion:
         assert outcome.reply_text == COMPLETION_TEXT, "real completion must reach run_turn's return"
         assert outcome.exit_reason != "empty_output", "must NOT hit the empty-output guard"
         assert fake.state["calls"] == 1, "fallback must not have clobbered the completion"
+
+    @pytest.mark.asyncio
+    async def test_floor_triggered_resume_preserves_completion_for_attribution(self, tmp_path):
+        """C7 (#1917): the crash-recovery deterministic floor drives ``--resume``
+        against sessions that just died mid-tool-call — exactly the conditions
+        that produce a resumed wrap-up turn emitting a valid result event and
+        then exiting non-zero (#1980/#1985). The floor triggers ``resume_session``,
+        which the worker services as a ``--resume`` turn; that resumed turn must
+        return the valid completion so Phase-1 outcome attribution records
+        ``recovered`` rather than mis-recording a crash and re-crash.
+
+        This reuses the branch-A fixtures (result event fired + non-zero exit)
+        via the real run_turn path with a seeded resume UUID — the harness code
+        is trigger-agnostic, so the floor-resume path inherits the #1980 gate.
+        """
+        from agent.session_runner.role_driver import HeadlessRoleDriver
+
+        fake = _make_fake_run(
+            [
+                # Resumed wrap-up turn: valid completion, then a post-turn
+                # non-zero exit (the mid-tool-wedge death shape the floor rescues).
+                {
+                    "result_text": COMPLETION_TEXT,
+                    "returncode": 1,
+                    "fired": True,
+                    "session_id": VALID_UUID,
+                },
+                # A destructive fresh retry would clobber the completion — it must
+                # never be reached.
+                {"result_text": "SHOULD-NOT-APPEAR", "returncode": 0, "fired": False},
+            ]
+        )
+        driver = HeadlessRoleDriver(
+            role="eng",
+            session_id="test-1917-floor-resume",
+            working_dir=str(tmp_path),
+            project_root=str(tmp_path),
+            full_context_message="full context for a cold retry",
+        )
+        # The floor's resume_session drives --resume on the persisted UUID.
+        driver.seed_resume(VALID_UUID)
+
+        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+            outcome = await driver.run_turn("continue")
+
+        assert outcome.reply_text == COMPLETION_TEXT, (
+            "floor-triggered --resume must preserve the valid completion so "
+            "outcome attribution records 'recovered', not a crash"
+        )
+        assert outcome.exit_reason != "empty_output"
+        assert fake.state["calls"] == 1, "the completion must not be clobbered by a fresh retry"
