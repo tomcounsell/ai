@@ -38,7 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 # A high throwaway issue number unlikely to collide with any real PM session.
 # The random suffix ensures uniqueness across concurrent test invocations
 # (parallel xdist workers) so they don't fight over the same Redis sentinel.
-ISSUE_NUMBER = 999137 + random.randint(0, 999)
+ISSUE_NUMBER = 1_000_000 + random.randint(0, 999)
 LOCAL_SESSION_ID = f"sdlc-local-{ISSUE_NUMBER}"
 
 SDLC_TOOL = shutil.which("sdlc-tool")
