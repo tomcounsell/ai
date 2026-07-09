@@ -85,7 +85,8 @@ SUITE_LOCK_TIMEOUT = 1800
 
 # Lock dir shared with ``scripts/pytest-clean.sh`` and ``suite_lock.py``.
 # Must match ``data/full-suite-running.lock`` (the canonical default).
-SUITE_LOCK_DIR = Path("data/full-suite-running.lock")
+# Absolute (via PROJECT_DIR) so the lock coordinates regardless of cwd.
+SUITE_LOCK_DIR = PROJECT_DIR / "data" / "full-suite-running.lock"
 
 
 def classify(

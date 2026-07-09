@@ -3,13 +3,15 @@
 Posts a comment to a real GitHub issue, fetches it back, and verifies
 the format is correct. Uses the actual `gh` CLI.
 
-Every test posts to (and reads from) the SAME real GitHub issue, so the
-file relies on ``--dist=loadfile`` (set in ``pyproject.toml``) to pin all
-tests in the module to one xdist worker — concurrent posts otherwise race
-on the shared remote state.
+Every test posts to (and reads from) the SAME real GitHub issue (#520 on
+``tomcounsell/ai``, a closed issue titled "SDLC stage handoff via GitHub
+issue comments"). Concurrency safety comes from two mechanisms: the
+full-suite coordination lock (``scripts/suite_lock.py``, serialized across
+processes via ``data/full-suite-running.lock``) prevents two concurrent
+full-suite pytest runs from racing on the same issue, and
+``--dist=loadfile`` (set in ``pyproject.toml``) pins all tests in this
+module to one xdist worker within a single run.
 """
-
-import random
 
 import pytest
 
@@ -21,11 +23,11 @@ from utils.issue_comments import (
     post_stage_comment,
 )
 
-# Use a high random issue number unlikely to collide with any real GitHub
-# issue.  The random value ensures uniqueness across concurrent test
-# invocations (parallel xdist workers) so they don't race on shared remote
-# state.  Set once per process at module import time.
-TEST_ISSUE_NUMBER = random.randint(900000, 999999)
+# Fixed real issue that exists on tomcounsell/ai (closed; used as a stable
+# comment sink for integration tests).  Concurrency safety is provided by
+# the full-suite coordination lock + --dist=loadfile, NOT by randomization
+# here — a random non-existent issue number causes `gh` to return rc=1.
+TEST_ISSUE_NUMBER = 520
 TEST_REPO = "tomcounsell/ai"
 
 
