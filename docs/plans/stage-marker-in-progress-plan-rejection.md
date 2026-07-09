@@ -487,16 +487,16 @@ behavior only; no new MCP surface, `.mcp.json`, or bridge import is involved.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pipeline-state-machine.md` to document the
+- [x] Update `docs/features/pipeline-state-machine.md` to document the
   `backfill_predecessors` parameter on `start_stage` and the marker-vs-router
   semantics distinction (marker records reality; router enforces ordering).
-- [ ] Update `docs/features/sdlc-stage-tracking.md` to note that a fresh pipeline
+- [x] Update `docs/features/sdlc-stage-tracking.md` to note that a fresh pipeline
   entering at PLAN backfills ISSUE to completed on the first `in_progress` write.
 
 ### Inline Documentation
-- [ ] Docstring on `start_stage` explaining `backfill_predecessors` and the
+- [x] Docstring on `start_stage` explaining `backfill_predecessors` and the
   never-backfill-over-`failed` guard.
-- [ ] Update the D7 degradation-contract docstring in `sdlc_stage_marker.py` to
+- [x] Update the D7 degradation-contract docstring in `sdlc_stage_marker.py` to
   reflect that first-write-at-a-forward-stage now persists rather than failing.
 
 ## Success Criteria

@@ -38,6 +38,17 @@ Degradation contract (D7 — loud failure, quiet absence):
       Loud is reserved ONLY for this case. The idempotent already-completed
       path stays exit 0.
 
+Predecessor backfill (issue #1916): both the `in_progress` and `completed`
+write paths opt into `PipelineStateMachine`'s predecessor backfill
+(`start_stage(..., backfill_predecessors=True)` / `_backfill_predecessors()`)
+because a marker write records reality, not an ordering decision — reaching a
+stage implies its ISSUE-rooted spine of predecessors was reached too, even if
+nothing ever wrote their markers. A fresh pipeline's first write (e.g. PLAN
+`in_progress` while ISSUE is still `ready`) now persists instead of hitting
+PRESENT_WRITE_FAILED. PRESENT_WRITE_FAILED still fires for a genuine misorder
+or a `failed` predecessor — backfill never promotes over a `failed` state.
+See "Predecessor Backfill (Opt-In)" in `docs/features/pipeline-state-machine.md`.
+
 Ownership gate (issue #1735): when ``--issue-number N`` is explicitly provided,
 the resolved session is verified to own issue N via ``session_owns_issue()`` in
 ``tools._sdlc_utils``. If the check fails (the resolved session belongs to a
