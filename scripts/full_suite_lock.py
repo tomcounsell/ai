@@ -336,7 +336,19 @@ def _cli() -> int:
         return 1
 
     if args.command == "release":
-        release(lock_path=args.lock_path)
+        # CLI release is an explicit operator/shell request to clear the
+        # lock. Force-remove the file directly — the in-process release()
+        # keeps the PID guard for programmatic callers, but the CLI is
+        # invoked as a separate process whose PID never matches the PID
+        # stored by the acquire subprocess. The caller (e.g.
+        # pytest-clean.sh) tracks whether it acquired the lock and only
+        # calls release when it did, so force-removal is safe here.
+        try:
+            os.unlink(args.lock_path)
+        except FileNotFoundError:
+            pass  # already gone — safe
+        except OSError as e:
+            logger.warning("Could not remove lock %s: %s", args.lock_path, e)
         return 0
 
     return 2
