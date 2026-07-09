@@ -210,7 +210,15 @@ exercises the extracted snippet against the real JSON shapes below).
 swallowed; only stdout is parsed for the status.
 
 ```bash
-SLUG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^session/||')
+# Derive the slug from the PR's head ref (authoritative on every path), NOT the
+# current branch — a raw `gh pr merge`/cross-machine operator commonly runs from
+# `main` or a detached HEAD, where `git rev-parse --abbrev-ref HEAD` yields
+# `main`/`HEAD` and would false-FAIL a `docs/features/main.md` lookup. Fall back to
+# the current branch only if the PR head-ref lookup is unavailable, and treat
+# main/master/HEAD/empty as "no usable slug".
+SLUG=$(gh pr view {PR} --json headRefName -q .headRefName 2>/dev/null | sed 's|^session/||')
+[ -z "$SLUG" ] && SLUG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^session/||')
+case "$SLUG" in main|master|HEAD|"") SLUG="" ;; esac
 DOCS_STATUS=$(sdlc-tool stage-query --issue-number {issue_number} \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('stages',{}).get('DOCS',''))")
 case "$DOCS_STATUS" in
@@ -240,6 +248,15 @@ case "$DOCS_STATUS" in
 esac
 ```
 
+- **Why the slug comes from the PR head-ref, not the current branch (resolves re-critique concern 1):**
+  the degraded fallback needs the slug to locate `docs/features/{slug}.md`, but the
+  bypass paths this plan hardens (raw `gh pr merge`, cross-machine) commonly run
+  from `main` or a detached HEAD, where `git rev-parse --abbrev-ref HEAD` yields
+  `main`/`HEAD` — a non-empty but wrong value that would test the always-absent
+  `docs/features/main.md` and false-FAIL a legitimate merge. `gh pr view {PR}
+  --json headRefName` is authoritative on every path; the current-branch read is a
+  fallback only, and `main`/`master`/`HEAD`/empty normalize to "no usable slug"
+  (fail-closed with a `<no-slug>` message, never a bogus file lookup).
 - **Why `.get('stages',{}).get('DOCS','')` and not the issue's sketch:** the
   enriched query returns bare status strings under `stages`, not
   `{"DOCS": {"status": ...}}`. Verified live and in `query_enriched` (spike-2).
@@ -311,6 +328,7 @@ esac
 - [ ] `DOCS_STATUS == pending` (never-started, indistinguishable from a skip) **with** `docs/features/{slug}.md` present → gate PASSES degraded. Test feeds `{"stages": {"DOCS": "pending"}}` on a branch whose slug's feature doc exists, asserts `PASS (degraded)` and NO `GATES_FAILED`. **without** the feature doc → gate FAILS (`GATES_FAILED`).
 - [ ] `DOCS_STATUS == ""` (empty `stages`, session reaped) **with** `docs/features/{slug}.md` present → gate PASSES degraded. Test feeds `{"stages": {}}` on a branch whose slug's feature doc exists, asserts `PASS (degraded)` and NO `GATES_FAILED`.
 - [ ] `DOCS_STATUS == ""` **without** the feature doc → gate FAILS. Test feeds `{"stages": {}}` with no matching feature doc, asserts `GATES_FAILED`.
+- [ ] **No usable slug** (invoked from `main`/detached HEAD, PR head-ref also resolves to `main`) with `DOCS_STATUS == pending`/`""` → gate FAILS with a `<no-slug>` message, NOT a `docs/features/main.md` lookup. Test stubs `gh pr view` to return `main` (or unavailable) and asserts the FAIL names `<no-slug>`, confirming no bogus file lookup.
 - [ ] The malformed-JSON case is **intentionally not tested:** `sdlc-tool stage-query` is contractually guaranteed to emit valid JSON — every error path in `sdlc_stage_query.py::main` prints `{"stages": {}, "_meta": {...}}` (never non-JSON). A malformed-stdin test would exercise an input the substrate cannot produce; and even if it could, an empty `DOCS_STATUS` now routes to the file-existence fallback, not a distinct branch. State "no reachable malformed-JSON path" rather than testing a synthetic one.
 
 ### Error State Rendering
@@ -318,7 +336,7 @@ esac
 
 ## Test Impact
 
-- [ ] `tests/unit/test_do_merge_docs_gate.py` — CREATE: new test file mirroring `test_do_merge_review_filter.py`; extracts the Step 2b snippet from `docs/sdlc/do-merge.md` and asserts the decision across `completed` (PASS), `in_progress` (hard FAIL), skip-as-`completed` (PASS), `pending`-with-feature-doc (PASS degraded), `pending`-without-feature-doc (FAIL), empty-stages-with-feature-doc (PASS degraded), and empty-stages-without-feature-doc (FAIL). The `pending`/empty-stages cases set up a temp branch/slug + `docs/features/{slug}.md` fixture so the `test -f` fallback is exercised.
+- [ ] `tests/unit/test_do_merge_docs_gate.py` — CREATE: new test file mirroring `test_do_merge_review_filter.py`; extracts the Step 2b snippet from `docs/sdlc/do-merge.md` and asserts the decision across `completed` (PASS), `in_progress` (hard FAIL), skip-as-`completed` (PASS), `pending`-with-feature-doc (PASS degraded), `pending`-without-feature-doc (FAIL), empty-stages-with-feature-doc (PASS degraded), empty-stages-without-feature-doc (FAIL), and **no-usable-slug** (invoked from `main`, `pending`/empty status → FAIL with `<no-slug>`, no `docs/features/main.md` lookup). The snippet calls `gh pr view {PR}` and `sdlc-tool stage-query` — the test stubs both (e.g. a temp `PATH` shim or command substitution) so it controls the head-ref (slug) and the `stages.DOCS` value without a live PR. The `pending`/empty-stages cases set up a temp slug + `docs/features/{slug}.md` fixture so the `test -f` fallback is exercised.
 - [ ] `tests/unit/test_do_merge_baseline.py` — UPDATE (only if it asserts the exact set of gate sections/steps): add the Step 2b / extended Documentation Gate to any section-presence assertion. Verify before editing; leave untouched if it does not enumerate steps.
 - [ ] `tests/unit/test_do_merge_review_filter.py` — no change expected (independent snippet); confirm it still passes after the `docs/sdlc/do-merge.md` edit.
 
@@ -342,9 +360,9 @@ No other existing tests are affected — the change adds one gate step to a mark
 **Impact:** doc-free trivial PRs can't merge — a regression the acceptance criteria forbid.
 **Mitigation:** the gate passes on `completed`; #1799 records a skip *as* `completed`. A dedicated test case ("DOCS recorded completed via skip") asserts PASS. If #1799 ever changes its recorded value, the test is where that contract is caught.
 
-### Risk 3: Degraded substrate blocks an otherwise-valid merge
-**Impact:** a transient Redis outage at merge time fails the DOCS gate, stalling a good PR.
-**Mitigation:** fail-closed is the intended posture (mirrors Step 2 REVIEW). The refusal names the substrate fault explicitly so the operator can retry once the substrate recovers. This is a deliberate safety tradeoff, documented in the gate text.
+### Risk 3: A degraded/unreadable substrate read mis-gates a merge
+**Impact:** a transient Redis outage or reaped session at merge time returns `{"stages": {}}` (`tools/sdlc_stage_query.py:488-489`), so the gate cannot read `stages.DOCS`.
+**Mitigation:** the empty read routes to the `*)` degraded branch — file-existence PASS when `docs/features/{slug}.md` is present, FAIL only when it is absent. This is NOT a blanket fail-closed: `in_progress` is the sole hard fail and it only fires when `stages` is readable. So a substrate outage on a PR whose feature doc is already on disk still merges (degraded PASS, advisory logged); only a truly missing feature doc blocks. The advisory line names the degraded read so the operator can re-run `stage-query` once the substrate recovers if a stricter check is wanted. This is the deliberate monotonic-improvement tradeoff (never worse than today's file-existence gate), documented in the gate text.
 
 ## Race Conditions
 
@@ -460,7 +478,7 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tests/unit/test_do_merge_docs_gate.py` mirroring `test_do_merge_review_filter.py`: extract the Step 2b snippet from `docs/sdlc/do-merge.md`, run against synthetic `{"stages": {"DOCS": ...}}` JSON. Assert: PASS for `completed`, PASS for skip-as-`completed`, hard FAIL (`GATES_FAILED`) for `in_progress` only, PASS (degraded) for `pending`-with-feature-doc-fixture, FAIL for `pending`-without-doc, PASS (degraded) for empty-stages-with-feature-doc-fixture, FAIL for empty-stages-without-doc. Do NOT add a malformed-JSON case (unreachable — see Failure Path Test Strategy).
+- Create `tests/unit/test_do_merge_docs_gate.py` mirroring `test_do_merge_review_filter.py`: extract the Step 2b snippet from `docs/sdlc/do-merge.md`, run against synthetic `{"stages": {"DOCS": ...}}` JSON. Stub `gh pr view` and `sdlc-tool stage-query` (PATH shim) so the test controls both the head-ref slug and the DOCS status. Assert: PASS for `completed`, PASS for skip-as-`completed`, hard FAIL (`GATES_FAILED`) for `in_progress` only, PASS (degraded) for `pending`-with-feature-doc-fixture, FAIL for `pending`-without-doc, PASS (degraded) for empty-stages-with-feature-doc-fixture, FAIL for empty-stages-without-doc, and FAIL-with-`<no-slug>` for the no-usable-slug case (head-ref resolves to `main`). Do NOT add a malformed-JSON case (unreachable — see Failure Path Test Strategy).
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -492,6 +510,7 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 | Step 2b present | `grep -c "Step 2b" docs/sdlc/do-merge.md` | output > 0 |
 | Correct extraction shape | `grep -c "get('stages'" docs/sdlc/do-merge.md` | output > 0 |
 | No wrong extraction shape | `grep -c "get('DOCS',{}).get('status'" docs/sdlc/do-merge.md` | match count == 0 |
+| Slug from PR head-ref | `grep -c "gh pr view.*headRefName" docs/sdlc/do-merge.md` | output > 0 |
 | Announced skip in global skill | `grep -c "NOT ENFORCED" .claude/skills-global/do-merge/SKILL.md` | output > 0 |
 | Router untouched (anti-criterion) | `git diff --name-only origin/main -- agent/sdlc_router.py \| wc -l` | match count == 0 |
 
@@ -502,14 +521,20 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 |----------|--------|---------|--------------|---------------------|
 | BLOCKER | Risk & Robustness | Step 2b `case` groups bare `pending` with `in_progress` and hard-fails it, but `pending` is the default unrun status (indistinguishable from stalled). On a live-session trivial docs-free PR reaching the gate via a bypass path (target scope), DOCS reads `pending` because #1799 (skip→`completed`) is unshipped, so the gate hard-refuses a legitimate merge — contradicting Risk 2's own "regression the acceptance criteria forbid." | Technical Approach (line 207), Data Flow step 4, Failure Path Test Strategy, Test Impact | Split `in_progress\|pending)` into two branches: `in_progress)` keeps the hard `GATES_FAILED` (only reachable via an actual `start_stage` call = genuine stalled signal); `pending)` falls through to the same file-existence fallback as the `*)` empty-stages branch. Update `test_do_merge_docs_gate.py` so the `pending` fixture asserts degraded PASS/FAIL by feature-doc presence, not unconditional hard FAIL; adjust the `in_progress\|pending` grouping wording in Failure Path Test Strategy and Test Impact. |
 | CONCERN | Scope & Value + History & Consistency | The Problem "Scope of the fix" subsection overstates the substrate-repo win in two ways that bias the Open Question 1 ratification: (a) the unsupported frequency claim "the far more common case, since this repo is a substrate repo" (no incident/volume data), and (b) the determinism claim that the bypass path "*is* now caught by the new Step 2b check," which spike-2 undercuts because the session is likely reaped on exactly those bypass paths, degrading to the file-existence check the Problem elsewhere calls insufficient. | Problem > "Scope of the fix: substrate repos" | Pure prose edit, no code/test/task change. (a) Replace "the far more common case, since this repo is a substrate repo" with an explicitly-flagged, unmeasured assumption or drop the frequency claim. (b) Qualify "is now caught" to "is now caught when the substrate session is still live; when it has been reaped the gate degrades to today's file-existence check, per spike-2." No other artifact depends on this wording. |
+| CONCERN (re-critique) | Risk & Robustness | Verdict READY TO BUILD. `SLUG=$(git rev-parse --abbrev-ref HEAD)` is brittle on the bypass paths the plan targets: a raw `gh pr merge`/cross-machine operator runs from `main`/detached HEAD, yielding `SLUG=main` (non-empty), so the degraded fallback tests always-absent `docs/features/main.md` → false FAIL of a legitimate merge. | Technical Approach (SLUG derivation), Failure Path, Test Impact, Step 3 | RESOLVED: derive slug from `gh pr view {PR} --json headRefName` (authoritative on every path), current-branch read as fallback only, normalize `main`/`master`/`HEAD`/empty to "no usable slug" (fail-closed with `<no-slug>` message, never a bogus file lookup). Added on-`main` test fixture + `gh pr view` stub guidance. |
+| CONCERN (re-critique) | Risk & Robustness | Risk 3 still described the pre-revision fail-closed posture ("substrate outage fails the gate, stalling a good PR"), contradicting the revised degraded behavior (empty read → file-existence PASS when doc present). | Risks > Risk 3 | RESOLVED: rewrote Risk 3 to describe the actual monotonic-improvement posture — empty/degraded read degrades to file-existence PASS, `in_progress` is the only hard fail and only when `stages` is readable. |
+| CONCERN (re-critique) | Scope & Value + History & Consistency | Open Questions #1 and #2 retained the unqualified determinism overclaim the revision removed from the Problem body ("closes the substrate-repo bypass paths deterministically"). | Open Questions #1, #2 | RESOLVED: propagated the live-session qualifier into OQ#1 and OQ#2 (deterministic only when the substrate session is live at merge time; reaped session degrades to file-existence, per spike-2). |
 
 ---
 
 ## Open Questions
 
 1. **Ratify the reclassified scope + generic-path decision.** After critique, the
-   deterministic DOCS gate is scoped to **substrate repos** (where a stage marker
-   exists to read), which is where this repo's real bypass paths live; the
+   deterministic DOCS gate is scoped to **substrate repos with a live session at
+   merge time** (where a readable stage marker exists) — it hard-blocks an
+   `in_progress` DOCS there; when the substrate session has been reaped (likely on
+   precisely these bypass paths, per spike-2) it degrades to today's file-existence
+   check, not a deterministic block. The
    no-substrate path emits an *announced non-gate* advisory rather than pretending
    to gate DOCS deterministically (that path's real fix is the now-CLOSED #1915 +
    supervisor sequencing). Confirm this reclassification is acceptable — i.e. that
@@ -523,6 +548,8 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
    migration into `docs/plans/completed/` — not DOCS-stage completion. **No existing
    reflection covers DOCS completion on bypass paths.** A DOCS-completion reflection
    would therefore be genuinely new work, not an extension of the migration
-   backstop. It is separable from this gate (which already closes the substrate-repo
-   bypass paths deterministically) and, if wanted, should be filed as its own issue.
+   backstop. It is separable from this gate (which closes the substrate-repo bypass
+   paths deterministically **only when the substrate session is live at merge time;
+   a reaped session degrades to the file-existence check, per spike-2**) and, if
+   wanted, should be filed as its own issue.
    Confirm OUT-of-scope, or file the separate issue.
