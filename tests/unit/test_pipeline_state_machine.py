@@ -235,6 +235,174 @@ class TestStartStage:
         assert sm.states["PLAN"] == "in_progress"
 
 
+class TestStartStageBackfill:
+    """Test PipelineStateMachine.start_stage(backfill_predecessors=True)."""
+
+    def test_strict_default_unchanged(self):
+        """Default (no kwarg) still raises on a fresh session — no behavior shift
+        for existing strict callers (router, pre_tool_use hook)."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        with pytest.raises(ValueError, match="Cannot start PLAN"):
+            sm.start_stage("PLAN")
+
+    def test_explicit_false_unchanged(self):
+        """backfill_predecessors=False behaves identically to the default."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        with pytest.raises(ValueError, match="Cannot start PLAN"):
+            sm.start_stage("PLAN", backfill_predecessors=False)
+
+    def test_backfill_true_activates_plan_on_fresh_session(self):
+        """First-write-at-PLAN acceptance: a fresh session (ISSUE=ready) backfills
+        ISSUE to completed and activates PLAN instead of raising."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        sm.start_stage("PLAN", backfill_predecessors=True)
+        assert sm.states["ISSUE"] == "completed"
+        assert sm.states["PLAN"] == "in_progress"
+
+    def test_backfill_true_raises_on_failed_predecessor(self):
+        """A failed predecessor is never silently backfilled — still raises."""
+        states = {"ISSUE": "failed"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        with pytest.raises(ValueError, match="failed"):
+            sm.start_stage("PLAN", backfill_predecessors=True)
+        assert sm.states["PLAN"] == "pending"
+
+
+class TestReachesIssue:
+    """Test PipelineStateMachine._reaches_issue()."""
+
+    @pytest.mark.parametrize(
+        "stage,expected",
+        [
+            ("ISSUE", True),
+            ("PLAN", True),
+            ("CRITIQUE", True),
+            ("BUILD", True),
+            ("TEST", True),
+            ("REVIEW", True),
+            ("DOCS", True),
+            ("MERGE", True),
+            ("PATCH", False),
+        ],
+    )
+    def test_reaches_issue_truth_table(self, stage, expected):
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        assert sm._reaches_issue(stage) is expected
+
+
+class TestBackfillPredecessors:
+    """Test PipelineStateMachine._backfill_predecessors()."""
+
+    def test_backfills_fresh_chain_to_plan(self):
+        """Fresh session: backfilling PLAN's predecessors completes ISSUE only."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        promoted = sm._backfill_predecessors("PLAN")
+        assert promoted == ["ISSUE"]
+        assert sm.states["ISSUE"] == "completed"
+
+    def test_backfills_deep_chain_to_build(self):
+        """A backfill at BUILD promotes ISSUE, PLAN, CRITIQUE."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        promoted = sm._backfill_predecessors("BUILD")
+        assert set(promoted) == {"ISSUE", "PLAN", "CRITIQUE"}
+        assert sm.states["ISSUE"] == "completed"
+        assert sm.states["PLAN"] == "completed"
+        assert sm.states["CRITIQUE"] == "completed"
+
+    def test_no_promotion_when_already_completed(self):
+        """Nothing to promote when the whole chain is already completed."""
+        states = {"ISSUE": "completed"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        promoted = sm._backfill_predecessors("PLAN")
+        assert promoted == []
+
+    def test_partial_state_guard_raises_before_mutating(self):
+        """CONCERN 1: a deeper `failed` predecessor with a nearer `pending` one
+        raises ValueError AND leaves state unmutated (scan-then-mutate ordering)."""
+        states = {"ISSUE": "failed", "PLAN": "pending", "CRITIQUE": "pending"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        with pytest.raises(ValueError, match="ISSUE is failed"):
+            sm._backfill_predecessors("BUILD")
+        # No partial state was persisted — nearer predecessor unchanged.
+        assert sm.states["PLAN"] == "pending"
+        assert sm.states["ISSUE"] == "failed"
+        session.save.assert_not_called()
+
+    def test_single_save_regardless_of_chain_length(self):
+        """_save() (and therefore session.save()) is invoked at most once per
+        _backfill_predecessors call, regardless of chain length."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        sm._backfill_predecessors("BUILD")
+        assert session.save.call_count == 1
+
+    def test_no_save_when_nothing_to_promote(self):
+        states = {"ISSUE": "completed"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        sm._backfill_predecessors("PLAN")
+        session.save.assert_not_called()
+
+    def test_distinct_metric_emitted_per_promotion(self):
+        """CONCERN 2: _record_stage_metric is called with sdlc.stage_backfilled
+        (not sdlc.stage_started) once per promoted predecessor."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        with patch("agent.pipeline_state._record_stage_metric") as mock_metric:
+            sm._backfill_predecessors("BUILD")
+        calls = [c.args for c in mock_metric.call_args_list]
+        assert ("sdlc.stage_backfilled", "ISSUE") in calls
+        assert ("sdlc.stage_backfilled", "PLAN") in calls
+        assert ("sdlc.stage_backfilled", "CRITIQUE") in calls
+        assert all(c[0] == "sdlc.stage_backfilled" for c in calls)
+
+    def test_no_metric_when_already_completed(self):
+        states = {"ISSUE": "completed"}
+        session = _make_session(stage_states=json.dumps(states))
+        sm = PipelineStateMachine(session)
+        with patch("agent.pipeline_state._record_stage_metric") as mock_metric:
+            sm._backfill_predecessors("PLAN")
+        mock_metric.assert_not_called()
+
+    def test_patch_not_backfilled_at_test(self):
+        """Round-2 BLOCKER regression: backfilling TEST's predecessors
+        ([BUILD, PATCH]) promotes only the ISSUE spine and leaves PATCH pending
+        with patch_cycle_count unchanged at 0."""
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        promoted = sm._backfill_predecessors("TEST")
+        assert "PATCH" not in promoted
+        assert set(promoted) == {"ISSUE", "PLAN", "CRITIQUE", "BUILD"}
+        assert sm.states["PATCH"] == "pending"
+        assert sm.patch_cycle_count == 0
+
+    def test_patch_not_backfilled_at_review(self):
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        promoted = sm._backfill_predecessors("REVIEW")
+        assert "PATCH" not in promoted
+        assert sm.states["PATCH"] == "pending"
+        assert sm.patch_cycle_count == 0
+
+    def test_patch_not_backfilled_at_merge(self):
+        session = _make_session()
+        sm = PipelineStateMachine(session)
+        promoted = sm._backfill_predecessors("MERGE")
+        assert "PATCH" not in promoted
+        assert set(promoted) == {"ISSUE", "PLAN", "CRITIQUE", "BUILD", "TEST", "REVIEW", "DOCS"}
+        assert sm.states["PATCH"] == "pending"
+        assert sm.patch_cycle_count == 0
+
+
 class TestCompleteStage:
     """Test PipelineStateMachine.complete_stage()."""
 
