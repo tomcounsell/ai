@@ -84,11 +84,52 @@ reap_workers() {
     done
 }
 
+# ── Full-suite advisory lock (issue #1967) ──────────────────────────
+# Concurrent full-suite `-n auto` runs oversubscribe CPU cores: two runs
+# on a 10-core box spawn ~20 workers and every worker starves (load avg
+# 79-82 was observed during PR #1956). This lock serializes full-suite
+# runs — a second full-suite invocation waits for the first rather than
+# piling on. It is advisory and narrowly scoped:
+#   * A lone run acquires instantly; single-run behavior is unchanged.
+#   * Targeted / serial runs (a path below tests/, or -n0) are NOT
+#     full-suite and never touch the lock — quick focused runs keep
+#     their unchanged parallelism.
+#   * scripts/suite_lock.py decides full-suite-ness from the pytest args.
+# Opt out entirely with PYTEST_SUITE_LOCK=0 (e.g. nested runs).
+SUITE_LOCK_HELD=0
+SUITE_LOCK_PY="$REPO_ROOT/scripts/suite_lock.py"
+SUITE_LOCK_DIR="$REPO_ROOT/data/full-suite-running.lock"
+SUITE_LOCK_TIMEOUT="${PYTEST_SUITE_LOCK_TIMEOUT:-1800}"
+
+if [ "${PYTEST_SUITE_LOCK:-1}" != "0" ] && [ -f "$SUITE_LOCK_PY" ]; then
+    LOCK_STATUS=$(python3 "$SUITE_LOCK_PY" acquire \
+        --owner-pid "$$" \
+        --timeout "$SUITE_LOCK_TIMEOUT" \
+        --lock-dir "$SUITE_LOCK_DIR" \
+        -- "$@" 2>/dev/null | tail -n1)
+    if [ "$LOCK_STATUS" = "ACQUIRED" ]; then
+        SUITE_LOCK_HELD=1
+    fi
+fi
+
+release_suite_lock() {
+    [ "$SUITE_LOCK_HELD" = "1" ] || return 0
+    SUITE_LOCK_HELD=0  # idempotent: run at most once
+    python3 "$SUITE_LOCK_PY" release --owner-pid "$$" --lock-dir "$SUITE_LOCK_DIR" \
+        2>/dev/null || true
+}
+
+# Combined cleanup: reap orphan workers AND release the suite lock.
+cleanup() {
+    reap_workers
+    release_suite_lock
+}
+
 # Trap every interesting signal. The leading "-" on the action tells
 # bash to ignore the signal's own failure if the trap fires during
 # shutdown; without it, a final SIGTERM to the wrapper can race with
 # the reap and abort the cleanup.
-trap reap_workers EXIT INT TERM HUP PIPE
+trap cleanup EXIT INT TERM HUP PIPE
 
 # Reap pre-existing orphans first. A prior crash may have left
 # workers behind; pytest would spawn its own fresh set on top and
