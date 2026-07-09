@@ -134,7 +134,7 @@ Renders violations as a `⚠️` note for the review-gate presentation shown to 
 
 ### `_detect_empty_promise(text_lower) -> bool`
 
-Detects if the agent acknowledged feedback without concrete evidence. Backwards-compat shim — delegates to `bridge.promise_gate._detect_empty_promise`, which covers both legacy behavioral-change patterns ("got it / will do") and forward-deferral patterns ("I'll follow up / stay tuned / more soon").
+Detects if the agent acknowledged feedback without concrete evidence. Backwards-compat shim — delegates to `bridge.promise_gate._detect_empty_promise`, which covers both the original behavioral-change patterns ("got it / will do") and forward-deferral patterns ("I'll follow up / stay tuned / more soon").
 
 ## Steering-first flag handling
 
@@ -235,7 +235,7 @@ Non-SDLC chats get a simpler emoji + bullets layout. Teammate persona bypasses a
 
 ## Five-outcome delivery (planned)
 
-The stop-hook review gate currently uses a `SEND/EDIT:/REACT:/SILENT/CONTINUE` string menu that regex-parses the agent's response. This will be replaced by **prepopulated `send_message` tool calls** — the agent invokes, edits-and-invokes, swaps for `react_with_emoji`, or stops silent. Clearing is implicit via transcript inspection (five outcomes: send, edit+send, react, silent, continue).
+The stop-hook review gate currently uses a `SEND/EDIT:/REACT:/SILENT/CONTINUE` string menu that regex-parses the agent's response. A planned follow-up swaps this for **prepopulated `send_message` tool calls** — the agent invokes, edits-and-invokes, swaps for `react_with_emoji`, or stops silent. Clearing is implicit via transcript inspection (five outcomes: send, edit+send, react, silent, continue).
 
 This work is staged in follow-up tasks (9 and 11 in the plan).
 
@@ -243,14 +243,14 @@ This work is staged in follow-up tasks (9 and 11 in the plan).
 
 The agent delivers user-visible messages and reactions via two CLI tools invoked through the `Bash` tool, not through a dedicated MCP server:
 
-- `tools/send_message.py '<text>'` — primary delivery tool. Reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send` for both telegram and email transports, so the drafter / redundancy filter / read-the-room gate run identically on the tool-call path and the silent-worker path. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments. Fail-closed on missing session; `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a diagnostic-only legacy raw rpush.
+- `tools/send_message.py '<text>'` — primary delivery tool. Reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send` for both telegram and email transports, so the drafter / redundancy filter / read-the-room gate run identically on the tool-call path and the silent-worker path. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments. Fail-closed on missing session; `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a diagnostic-only raw-rpush fallback path.
 - `tools/react_with_emoji.py '<emoji>'` — posts a reaction emoji on the triggering message. Used for lightweight acknowledgements ("thumbs up, done") when a full text response would be noise.
 
 The stop hook classifies each turn's outcome by scanning `tool_use` blocks for these exact script paths (`agent/hooks/stop.py::classify_delivery_outcome`). Matches produce one of the five outcomes (send, edit+send, react, silent, continue).
 
 **Why CLI tools over a bespoke MCP server:** a dedicated MCP server would require a root `.mcp.json` registration and add 300–500 lines of infrastructure for a surface that already works. The CLI tools route through the same outbox + relay as every other delivery path, the stop hook already recognizes them, and they are transparent to `gh pr comment` or any other bridge path that bypasses the drafter. Transcript readability (tool calls appearing as `Bash` invocations rather than semantic `send_message` tool_use blocks) is the only real trade-off, and the stop hook compensates by attaching semantic classification after the fact.
 
-**Reversibility:** the CLI-tool surface can be wrapped in an MCP server in a future chore if transcript readability becomes a pain point. The stop-hook classification logic would gain a pattern match on the new tool name and keep the existing Bash-pattern match as a fallback for legacy turns.
+**Reversibility:** the CLI-tool surface can be wrapped in an MCP server in a future chore if transcript readability becomes a pain point. The stop-hook classification logic would gain a pattern match on the new tool name and keep the existing Bash-pattern match as a fallback for older-format turns.
 
 Recorded as **Resolved Decision RD-1** in `docs/plans/message-drafter-followup.md` (2026-04-20 follow-up).
 
@@ -270,7 +270,7 @@ Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.
 - `bridge/telegram_relay.py::_send_queued_message` — belt-and-suspenders length guard.
-- `bridge/response.py` — slim reactions + helpers module. Contains `set_reaction`, `VALIDATED_REACTIONS`, `filter_tool_logs`, `extract_files_from_response`, `clean_message`. The pre-#1074 `send_response_with_files` delivery function was removed in the follow-up (see `docs/plans/message-drafter-followup.md` Part C).
+- `bridge/response.py` — slim reactions + helpers module. Contains `set_reaction`, `VALIDATED_REACTIONS`, `filter_tool_logs`, `extract_files_from_response`, `clean_message`. The pre-#1074 `send_response_with_files` delivery function was deleted as part of the follow-up (see `docs/plans/message-drafter-followup.md` Part C).
 - `agent/hooks/stop.py` — stop-hook review gate that drafts the final reply and classifies delivery outcomes by matching `tool_use` blocks for the CLI delivery tools. **Dead code for `session_type=eng` / `session_runner` sessions** — `agent/session_runner/hook_edge.py::generate_hook_settings` wires the Stop hook only to `hook_forwarder.py`, never to this file (confirmed twice independently: issue #1955 and the `consolidate_delivery_paths` freshness re-check). It is not a live violation-surfacing mechanism for those sessions; see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy).
 - `agent/steering.py` — `SELF_DRAFT_MAX_ATTEMPTS`, `bump_self_draft_attempts`, `reset_self_draft_attempts` — Redis counter for the sequential self-draft loop bound.
 - `tools/send_message.py`, `tools/react_with_emoji.py` — the agent-facing CLI delivery surface (see "Delivery Tool Surface" above).
