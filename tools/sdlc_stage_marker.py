@@ -185,7 +185,7 @@ def write_marker(
 
         if status == "in_progress":
             try:
-                sm.start_stage(stage)
+                sm.start_stage(stage, backfill_predecessors=True)
             except ValueError as e:
                 # Predecessor not completed — inconsistent pipeline state, not a
                 # substrate failure. Loud so the operator notices the misorder.
@@ -198,7 +198,13 @@ def write_marker(
                 # Already completed — idempotent no-op (exit 0)
                 return {"stage": stage, "status": status}, 0
             if current not in ("in_progress", "ready"):
-                # Force to in_progress first so complete_stage() accepts it
+                # Reaching this stage implies the ISSUE-rooted spine of
+                # predecessors was reached too — backfill them directly
+                # (NOT via start_stage, whose `current == "in_progress"`
+                # no-op would otherwise skip backfill once we pre-set the
+                # target stage) before forcing the target to in_progress so
+                # complete_stage() accepts it.
+                sm._backfill_predecessors(stage)
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
 
