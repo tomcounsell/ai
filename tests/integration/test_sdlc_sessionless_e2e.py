@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import shutil
 import subprocess
 from pathlib import Path
@@ -35,7 +36,9 @@ pytestmark = pytest.mark.sdlc
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # A high throwaway issue number unlikely to collide with any real PM session.
-ISSUE_NUMBER = 999137
+# The random suffix ensures uniqueness across concurrent test invocations
+# (parallel xdist workers) so they don't fight over the same Redis sentinel.
+ISSUE_NUMBER = 999137 + random.randint(0, 999)
 LOCAL_SESSION_ID = f"sdlc-local-{ISSUE_NUMBER}"
 
 SDLC_TOOL = shutil.which("sdlc-tool")

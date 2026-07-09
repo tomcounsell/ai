@@ -9,6 +9,8 @@ tests in the module to one xdist worker — concurrent posts otherwise race
 on the shared remote state.
 """
 
+import random
+
 import pytest
 
 from utils.issue_comments import (
@@ -19,8 +21,11 @@ from utils.issue_comments import (
     post_stage_comment,
 )
 
-# Use the tracking issue for this feature as the test target
-TEST_ISSUE_NUMBER = 520
+# Use a high random issue number unlikely to collide with any real GitHub
+# issue.  The random value ensures uniqueness across concurrent test
+# invocations (parallel xdist workers) so they don't race on shared remote
+# state.  Set once per process at module import time.
+TEST_ISSUE_NUMBER = random.randint(900000, 999999)
 TEST_REPO = "tomcounsell/ai"
 
 
