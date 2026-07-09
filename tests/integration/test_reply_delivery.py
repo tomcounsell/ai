@@ -178,7 +178,11 @@ class TestReactionEmojiSelection:
             str(REACTION_COMPLETE),  # EmojiResult -> str via __str__
             str(REACTION_ERROR),  # EmojiResult -> str via __str__
         ]
-        assert len(set(all_reaction_strs)) == len(all_reaction_strs)
+        duplicates = [e for e in set(all_reaction_strs) if all_reaction_strs.count(e) > 1]
+        assert len(set(all_reaction_strs)) == len(all_reaction_strs), (
+            f"Reply-delivery reaction constants must be pairwise distinct; "
+            f"duplicated emoji: {duplicates} in {all_reaction_strs}"
+        )
 
     def test_no_validated_reaction_in_invalid_list(self):
         """No emoji should be in both VALIDATED_REACTIONS and INVALID_REACTIONS."""
