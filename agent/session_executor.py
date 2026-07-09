@@ -2180,6 +2180,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         or "This continues a previously completed session."
                     )
                     augmented = f"[Prior session context: {_summary}]\n\n{combined_text}"
+                    # Reuse the slug already checked out in working_dir (if it's a
+                    # worktree) so the continuation's synthetic-slug fallback
+                    # (session_executor.py's `is_synthetic_slug` branch) doesn't
+                    # mint a fresh slug from the *new* agent_session_id — that
+                    # mismatches the branch already checked out here and trips
+                    # the worktree-branch-guard (issue #1377), killing the
+                    # continuation instantly instead of resuming it.
+                    continuation_slug = (
+                        working_dir.name if WORKTREES_DIR in str(working_dir) else None
+                    )
                     await enqueue_agent_session(
                         project_key=session.project_key,
                         session_id=session.session_id,
@@ -2193,6 +2203,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         sender_id=session.sender_id,
                         session_type=session.session_type or "eng",
                         project_config=getattr(session, "project_config", None),
+                        slug=continuation_slug,
                     )
                     logger.info(
                         f"[{session.project_key}] Re-enqueued {len(leftover)} steering "
