@@ -83,7 +83,8 @@ class AffectedDoc(BaseModel):
 
 - **No API key**: `find_affected_docs()` returns empty list, logs a warning. The `/do-docs` cascade continues with Agents A and B.
 - **No index file**: `find_affected_docs()` warns "Doc index is empty" and returns empty list.
-- **API call failure**: Logs the exception and returns empty list (or falls back to embedding-only results if only Haiku reranking fails).
+- **Anthropic client cannot be constructed**: falls back to embedding-only results (Stage 1 candidates above `MIN_SIMILARITY_THRESHOLD`).
+- **Every Haiku rerank request fails**: when a transport/API error hits *every* Stage 2 candidate (e.g. a misconfigured `ANTHROPIC_BASE_URL` that 404s on the Haiku model id), `find_affected()` falls back to embedding-only results and logs `All N Haiku rerank requests failed (check ANTHROPIC_BASE_URL / model id); falling back to embedding-only candidates.` This is an all-or-nothing gate by design: a partial failure where at least one candidate still reranks is trusted as-is, and a clean run where nothing scores >= 5 legitimately returns `[]` (never a false-positive fallback dump). Grep for that warning when a run returns fewer docs than expected. (issue #1950)
 
 ### Doc Locations Indexed
 

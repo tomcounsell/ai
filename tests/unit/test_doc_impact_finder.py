@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -413,3 +414,119 @@ class TestFullPipelineIntegration:
         for r in results:
             assert r.relevance == 1.0
             assert "embedding similarity" in r.reason.lower()
+
+
+class TestRerankEndpointFailureFallback:
+    """Regression tests for issue #1950.
+
+    Distinguish "the rerank endpoint could not run at all" (every request raises
+    a transport/API error -> embedding-only fallback) from "the reranker ran and
+    nothing scored >= 5" (-> empty result, no fallback). A misconfigured
+    ``ANTHROPIC_BASE_URL`` that 404s on the Haiku model must degrade to
+    embedding-only results, never a silent empty list.
+    """
+
+    @staticmethod
+    def _index_two_section_doc(tmp_path):
+        """Index a doc with two ## sections; returns a fake_embed for reuse.
+
+        Every chunk embeds identically to the query (cosine sim 1.0), so both
+        sections survive Stage 1 recall as candidates.
+        """
+        from tools.doc_impact_finder import index_docs
+
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "test.md").write_text(
+            "# Test\n\n## Alpha\n\nContent A here.\n\n## Beta\n\nContent B here.\n"
+        )
+
+        def fake_embed(texts):
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+                index_docs(repo_root=tmp_path)
+
+        return fake_embed
+
+    def test_all_rerank_requests_fail_uses_fallback(self, tmp_path, caplog):
+        """Every rerank request raises a transport error -> embedding-only fallback."""
+        fake_embed = self._index_two_section_doc(tmp_path)
+
+        def failing_rerank(client, prompt, chunk):
+            raise RuntimeError("404 Not Found: model claude-haiku-4-5 not found")
+
+        with caplog.at_level(logging.WARNING, logger="tools.impact_finder_core"):
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+                with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+                    with patch(
+                        "tools.impact_finder_core._rerank_single_candidate",
+                        side_effect=failing_rerank,
+                    ):
+                        results = find_affected_docs("Some change", repo_root=tmp_path)
+
+        # Fallback produced embedding-only results instead of []
+        assert isinstance(results, list)
+        assert len(results) > 0
+        for r in results:
+            assert "embedding similarity" in r.reason.lower()
+
+        # Warning naming the likely cause fires exactly once (aggregate, not per
+        # candidate).
+        fallback_warnings = [
+            rec
+            for rec in caplog.records
+            if "rerank requests failed" in rec.getMessage()
+            and "ANTHROPIC_BASE_URL" in rec.getMessage()
+        ]
+        assert len(fallback_warnings) == 1
+
+    def test_rerank_ran_all_below_threshold_returns_empty_no_fallback(self, tmp_path, caplog):
+        """Reranker runs, nothing scores >= 5 -> [] with no fallback dump."""
+        fake_embed = self._index_two_section_doc(tmp_path)
+
+        # Below-threshold scores surface as None from _rerank_single_candidate.
+        def below_threshold_rerank(client, prompt, chunk):
+            return None
+
+        with caplog.at_level(logging.WARNING, logger="tools.impact_finder_core"):
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+                with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+                    with patch(
+                        "tools.impact_finder_core._rerank_single_candidate",
+                        side_effect=below_threshold_rerank,
+                    ):
+                        results = find_affected_docs("Some change", repo_root=tmp_path)
+
+        assert results == []
+        # No false-positive fallback warning.
+        assert not [rec for rec in caplog.records if "rerank requests failed" in rec.getMessage()]
+
+    def test_mixed_failure_and_success_no_fallback(self, tmp_path, caplog):
+        """Some requests fail but at least one scores -> real results, no fallback."""
+        fake_embed = self._index_two_section_doc(tmp_path)
+
+        def mixed_rerank(client, prompt, chunk):
+            if chunk.get("section") == "## Alpha":
+                return (8.0, "Alpha is relevant", chunk)
+            raise RuntimeError("404 Not Found")
+
+        with caplog.at_level(logging.WARNING, logger="tools.impact_finder_core"):
+            with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+                with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+                    with patch(
+                        "tools.impact_finder_core._rerank_single_candidate",
+                        side_effect=mixed_rerank,
+                    ):
+                        results = find_affected_docs("Some change", repo_root=tmp_path)
+
+        # The surviving Haiku result is returned (relevance 0.8 from score/10),
+        # not the embedding-only fallback text.
+        assert len(results) == 1
+        assert results[0].relevance == 0.8
+        assert "embedding similarity" not in results[0].reason.lower()
+        assert "Alpha is relevant" in results[0].reason
+
+        # Partial failure must NOT trigger the fallback warning.
+        assert not [rec for rec in caplog.records if "rerank requests failed" in rec.getMessage()]
