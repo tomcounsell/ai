@@ -179,13 +179,13 @@ in `docs/features/eng-session-architecture.md`.
 
 ## Success Criteria
 
-- [ ] All 24 `create_pm` call sites across the 5 files replaced with `create_eng`.
-- [ ] `is_pm` assertions in `test_session_lifecycle.py` replaced with `is_eng`.
-- [ ] `session_type == "pm"` filter in `test_sdlc_session_ensure_integration.py` replaced with `"eng"`.
-- [ ] The 18 previously-failing tests pass.
-- [ ] `tests/unit/test_pm_session_factory.py::test_create_pm_does_not_exist` still passes (guard intact).
-- [ ] Tests pass (`/do-test`).
-- [ ] Format clean (`python -m ruff format`).
+- [x] All 24 `create_pm` call sites across the 5 files replaced with `create_eng`.
+- [x] `is_pm` assertions in `test_session_lifecycle.py` replaced with `is_eng`.
+- [x] `session_type == "pm"` filter in `test_sdlc_session_ensure_integration.py` replaced with `"eng"`.
+- [x] The 18 previously-failing tests pass.
+- [x] `tests/unit/test_pm_session_factory.py::test_create_pm_does_not_exist` still passes (guard intact).
+- [x] Tests pass (`/do-test`).
+- [x] Format clean (`python -m ruff format`).
 
 ## Team Orchestration
 
