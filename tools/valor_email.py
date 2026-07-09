@@ -353,6 +353,22 @@ def _build_session_id() -> str:
     return f"{_SESSION_ID_PREFIX}-{int(time.time())}-{os.getpid()}-{secrets.token_hex(4)}"
 
 
+def _normalize_file_args(raw: object) -> list[str]:
+    """Normalize the ``--file`` argument into a list of path strings.
+
+    argparse ``action="append"`` yields ``None`` (flag absent) or ``list[str]``,
+    but a bare string (e.g. from a programmatic caller or test Namespace) must be
+    treated as a single path, not iterated character-by-character. Without this,
+    ``for file_path in "/abs/path"`` walks individual characters and the first
+    one (``/``) fails the existence check with "File not found: /".
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    return list(raw)
+
+
 def _validate_attachment_files(
     files: list[str], *, read_bytes: bool = False
 ) -> list[str] | dict[str, bytes] | None:
@@ -403,7 +419,8 @@ def cmd_send(args: argparse.Namespace) -> int:
     body = args.message or ""
     # ``--file`` uses argparse ``action="append"`` — the runtime shape is
     # ``None`` (flag absent) or ``list[str]`` (one entry per ``--file``).
-    files = args.file or []
+    # Normalize so a bare string is a single path, never iterated per-character.
+    files = _normalize_file_args(args.file)
 
     if not body and not files:
         print("Error: Must provide a message or --file", file=sys.stderr)
@@ -515,7 +532,7 @@ def cmd_draft(args: argparse.Namespace) -> int:
     from bridge.email_bridge import _build_reply_mime
 
     body = args.message or ""
-    files = args.file or []
+    files = _normalize_file_args(args.file)
 
     if not body and not files:
         print("Error: Must provide a message or --file", file=sys.stderr)
