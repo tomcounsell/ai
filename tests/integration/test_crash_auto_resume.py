@@ -593,6 +593,16 @@ class TestCrashAutoResume:
                     crash_autoresume_min_occurrences=3,
                     crash_autoresume_min_success_ratio=0.7,
                 ),
+                # Machine-ownership gate (Gap 3b, added in this feature): the
+                # reflection only resumes when THIS machine owns the session's
+                # project. _TEST_PROJECT is not a real projects.json entry (and a
+                # worktree may lack the gitignored projects.json symlink), so the
+                # gate would otherwise fall to propose-only. Patch it True to
+                # exercise the resume path this test asserts.
+                patch(
+                    "reflections.crash_recovery._machine_owns_project",
+                    return_value=True,
+                ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
             ):
                 from reflections.crash_recovery import run_crash_recovery
@@ -675,6 +685,12 @@ class TestCrashAutoResume:
                     crash_autoresume_enabled=True,
                     crash_autoresume_min_occurrences=3,
                     crash_autoresume_min_success_ratio=0.7,
+                ),
+                # Machine-ownership gate (Gap 3b): patch True so the bootstrap
+                # resume path runs (see the eligible-session test above).
+                patch(
+                    "reflections.crash_recovery._machine_owns_project",
+                    return_value=True,
                 ),
                 patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
             ):
