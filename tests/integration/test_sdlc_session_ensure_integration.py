@@ -59,7 +59,7 @@ def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_se
     bridge_session_id = "tg_valor_test_9999"
 
     # Create a bridge-style PM session the way the Telegram bridge would.
-    bridge_session = AgentSession.create_pm(
+    bridge_session = AgentSession.create_eng(
         session_id=bridge_session_id,
         project_key=TEST_PROJECT_KEY,
         working_dir="/tmp",
