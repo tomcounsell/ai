@@ -282,10 +282,10 @@ change how staleness is enforced:
   reflection running on a live worker machine would reintroduce the
   Redis-collision / memory-thrash hazard that parallel full-suite runs are
   already known to cause on this project. Rejected as a fix. The
-  [Test Concurrency Coordination](test-concurrency-coordination.md) lock
-  (`scripts/full_suite_lock.py`, shipped in #1984) now mitigates the
-  CPU-oversubscription and Redis-collision dimensions by serializing
-  concurrent full-suite runs, but a scheduled regeneration would still
+  [Full-suite pytest advisory lock](full-suite-pytest-lock.md)
+  (`scripts/suite_lock.py`, shipped in #1981) now mitigates the
+  CPU-oversubscription dimension by serializing concurrent full-suite runs,
+  but a scheduled regeneration would still
   hold the lock for 3+ minutes and block developer-initiated runs (or wait
   behind one), so the rejection stands for now.
 - **New: a cheap age-only detector reflection.** `reflections/housekeeping/test_baseline_refresh_check.py`

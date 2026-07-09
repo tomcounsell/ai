@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,7 +46,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from scripts import full_suite_lock  # noqa: E402 -- sys.path must be set first
+from scripts import suite_lock  # noqa: E402 -- sys.path must be set first
 from scripts._baseline_common import (  # noqa: E402 -- sys.path must be set first
     CATEGORY_FLAKY,
     CATEGORY_HUNG,
@@ -81,6 +82,10 @@ MIN_USABLE_RUNS_FOR_FLAKY_DETECTION = 2
 # sequential pytest pass to prevent concurrent full-suite runs from
 # oversubscribing CPU and causing cross-run contention. Provisional/tunable.
 SUITE_LOCK_TIMEOUT = 1800
+
+# Lock dir shared with ``scripts/pytest-clean.sh`` and ``suite_lock.py``.
+# Must match ``data/full-suite-running.lock`` (the canonical default).
+SUITE_LOCK_DIR = Path("data/full-suite-running.lock")
 
 
 def classify(
@@ -500,7 +505,11 @@ def main(argv: list[str] | None = None) -> int:
             # runs.
             use_lock = not args.dry_run
             if use_lock:
-                full_suite_lock.acquire(timeout=SUITE_LOCK_TIMEOUT)
+                suite_lock.acquire(
+                    lock_dir=SUITE_LOCK_DIR,
+                    owner_pid=os.getpid(),
+                    timeout=SUITE_LOCK_TIMEOUT,
+                )
             try:
                 completed = run_pytest_once(
                     run_index=run_index,
@@ -512,7 +521,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             finally:
                 if use_lock:
-                    full_suite_lock.release()
+                    suite_lock.release(
+                        lock_dir=SUITE_LOCK_DIR,
+                        owner_pid=os.getpid(),
+                    )
 
             if not completed:
                 failed_runs += 1

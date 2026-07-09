@@ -27,7 +27,7 @@ Coverage (`--cov=. --cov-report=term-missing`) only when explicitly requested.
 
 ## Full-Suite Coordination Lock
 
-Full-suite runs (`tests/` or no positional args) acquire a file-based coordination lock at `data/full-suite-running.lock` before invoking pytest, and release it via an exit trap. This serializes concurrent full-suite invocations so they don't oversubscribe CPU (load avg 79-82 on 10-core machines when two run at once) or collide on shared Redis sentinel IDs. Targeted runs (a specific file or subdirectory) skip the lock and are never blocked by a concurrent full suite. The default wait timeout is 30 minutes; on timeout the run proceeds with a load-aware reduced worker count via `recommended_workers()` instead of failing. See [Test Concurrency Coordination](../features/test-concurrency-coordination.md) for the full design.
+Full-suite runs (`tests/` or no positional args) acquire an advisory coordination lock at `data/full-suite-running.lock` before invoking pytest, and release it via an exit trap. This serializes concurrent full-suite invocations so they don't oversubscribe CPU (load avg 79-82 on 10-core machines when two run at once). Targeted runs (a specific file or subdirectory) skip the lock and are never blocked by a concurrent full suite. The default wait timeout is 30 minutes; on timeout the run proceeds unlocked with a warning rather than deadlocking. See [Full-suite pytest advisory lock](../features/full-suite-pytest-lock.md) for the full design and [Test Concurrency Coordination](../features/test-concurrency-coordination.md) for the `refresh_test_baseline.py` integration and sentinel-ID namespacing.
 
 ## Changed-File Source-to-Test Mappings (`--changed`)
 
