@@ -773,13 +773,19 @@ async def draft_message(
     4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
        proceeds — text is NOT emptied for over-length responses)
     5. If _detect_empty_promise fires (empty promise: agent acknowledged feedback
-       without substance — "will do", "going forward" etc.):
+       without substance — "will do", "going forward" etc.) OR _validate_for_medium
+       returns any non-empty violations list (markdown table, local file-path
+       reference, etc.):
        return MessageDraft(text="", needs_self_draft=True, violations=[...])
        — caller injects a self-draft steering nudge back to the agent
-       (PRIMARY flag-handling path, not a failure fallback).
-       Wire-format violations (markdown table in Telegram, etc.) are collected
-       in violations but do NOT trigger needs_self_draft — they surface via
-       the stop-hook review gate (agent/hooks/stop.py).
+       (PRIMARY flag-handling path, not a failure fallback). This promotion
+       happens on BOTH return paths that can carry a violations list: the
+       short-output early return and this main-path return. All promoted
+       drafts route through the self-draft steering path
+       (agent/output_handler.py:429-441), where a local_file_path_reference
+       violation adds an attach-via-`--file` instruction telling the agent to
+       use `tools/send_message.py "<caption>" --file <path>` instead of
+       re-pasting a dead local path.
     6. Populate context_summary from _derive_context_summary(stripped_raw_text)
     7. Populate expectations from _extract_open_questions(raw_response)
        (None when no questions found, never "")
@@ -826,10 +832,23 @@ async def draft_message(
         and "?" not in raw_response
         and "```" not in raw_response
     ):
+        short_violations = _validate_for_medium(raw_response, medium)
+        if short_violations:
+            logger.info(
+                "Wire-format violation(s) detected in short-output reply — "
+                "requesting self-draft via steering: %s",
+                [v.rule for v in short_violations],
+            )
+            return MessageDraft(
+                text="",
+                needs_self_draft=True,
+                artifacts=artifacts,
+                violations=short_violations,
+            )
         return MessageDraft(
             text=raw_response,
             artifacts=artifacts,
-            violations=_validate_for_medium(raw_response, medium),
+            violations=short_violations,
         )
 
     # Strip process narration before composition
@@ -849,9 +868,20 @@ async def draft_message(
     # Run the per-medium validator on the composed text
     violations = _validate_for_medium(composed_text, medium)
 
-    # Detect empty promises — agent acknowledged feedback without evidence
-    if _detect_empty_promise(stripped_text.lower()):
-        logger.info("Empty promise detected — requesting self-draft via steering")
+    # Detect empty promises — agent acknowledged feedback without evidence —
+    # or a wire-format violation (markdown table, local file-path reference,
+    # etc.) was flagged by the validator. Either condition promotes to
+    # needs_self_draft=True so the agent rewrites via the self-draft
+    # steering path instead of a violation shipping verbatim.
+    is_empty_promise = _detect_empty_promise(stripped_text.lower())
+    if is_empty_promise or violations:
+        if is_empty_promise:
+            logger.info("Empty promise detected — requesting self-draft via steering")
+        else:
+            logger.info(
+                "Wire-format violation(s) detected — requesting self-draft via steering: %s",
+                [v.rule for v in violations],
+            )
         return MessageDraft(
             text="",
             full_output_file=full_output_file,
