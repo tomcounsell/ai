@@ -474,7 +474,7 @@ Tier 1 — Core: `builder`, `validator`, `code-reviewer`, `test-engineer`,
 | Tests pass | `pytest tests/unit/test_doc_impact_finder.py tests/unit/test_code_impact_finder.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/impact_finder_core.py tests/unit/test_doc_impact_finder.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/impact_finder_core.py tests/unit/test_doc_impact_finder.py` | exit code 0 |
-| No silent exception swallowing remains | `grep -n "except Exception:" tools/impact_finder_core.py \| grep -v "re-raise\|raise$"` | match count == 0 |
+| Transport-error branch re-raises (no silent swallow) | `grep -c "^        raise$" tools/impact_finder_core.py` | >= 1 (the `_rerank_single_candidate` transport branch re-raises) |
 | Fallback path is reachable from all-failure case | `grep -n "fallback_builder(candidates)" tools/impact_finder_core.py` | output > 1 |
 
 ## Critique Results

@@ -530,3 +530,77 @@ class TestRerankEndpointFailureFallback:
 
         # Partial failure must NOT trigger the fallback warning.
         assert not [rec for rec in caplog.records if "rerank requests failed" in rec.getMessage()]
+
+
+class TestRerankSingleCandidateExceptionSplit:
+    """Directly exercise the three-way except split in _rerank_single_candidate.
+
+    The integration tests above patch _rerank_single_candidate out wholesale, so
+    they never touch the actual except branches that are the #1950 fix. These
+    tests hit the real function with a mocked Anthropic client so a regression
+    that reverts the transport branch to `return None` (the original bug) is
+    caught.
+    """
+
+    @staticmethod
+    def _client_returning(text):
+        """Build a mock Anthropic client whose messages.create returns `text`."""
+        client = MagicMock()
+        response = MagicMock()
+        response.content = [MagicMock(text=text)]
+        client.messages.create.return_value = response
+        return client
+
+    def test_transport_error_reraises(self):
+        """A transport/API error from client.messages.create is re-raised, not swallowed."""
+        import pytest
+
+        from tools.impact_finder_core import _rerank_single_candidate
+
+        client = MagicMock()
+        client.messages.create.side_effect = RuntimeError("404 Not Found: model missing")
+        chunk = {"path": "docs/x.md", "section": "## S"}
+
+        with pytest.raises(RuntimeError, match="404"):
+            _rerank_single_candidate(client, "prompt", chunk)
+
+    def test_malformed_json_returns_none(self):
+        """Unparseable JSON is 'ran but did not qualify' -> None, never a hard failure."""
+        from tools.impact_finder_core import _rerank_single_candidate
+
+        client = self._client_returning("this is not json")
+        chunk = {"path": "docs/x.md", "section": "## S"}
+
+        assert _rerank_single_candidate(client, "prompt", chunk) is None
+
+    def test_non_numeric_score_returns_none(self):
+        """A malformed (non-numeric) score raises ValueError internally -> None, not re-raised."""
+        from tools.impact_finder_core import _rerank_single_candidate
+
+        client = self._client_returning('{"score": "n/a", "reason": "unsure"}')
+        chunk = {"path": "docs/x.md", "section": "## S"}
+
+        assert _rerank_single_candidate(client, "prompt", chunk) is None
+
+    def test_below_threshold_returns_none(self):
+        """A clean score below 5 returns None (unchanged behavior)."""
+        from tools.impact_finder_core import _rerank_single_candidate
+
+        client = self._client_returning('{"score": 3, "reason": "weak match"}')
+        chunk = {"path": "docs/x.md", "section": "## S"}
+
+        assert _rerank_single_candidate(client, "prompt", chunk) is None
+
+    def test_score_at_or_above_threshold_returns_tuple(self):
+        """A score >= 5 returns the (score, reason, chunk) tuple (unchanged behavior)."""
+        from tools.impact_finder_core import _rerank_single_candidate
+
+        client = self._client_returning('{"score": 8, "reason": "strong match"}')
+        chunk = {"path": "docs/x.md", "section": "## S"}
+
+        result = _rerank_single_candidate(client, "prompt", chunk)
+        assert result is not None
+        score, reason, returned_chunk = result
+        assert score == 8.0
+        assert reason == "strong match"
+        assert returned_chunk["path"] == "docs/x.md"
