@@ -110,6 +110,17 @@ class TestRecordVerdict:
         got = get_verdict(session, "CRITIQUE")
         assert got["verdict"] == "READY TO BUILD"
 
+    def test_record_verdict_does_not_touch_issue_lock(self, fake_session_reload_patched):
+        """Issue #1954 scope-narrowing: verdict record fires during PLAN/CRITIQUE
+        bookkeeping with no established recurrence path through an in-progress
+        BUILD/TEST/REVIEW stage, so it must NOT renew the issue-level SDLC
+        ownership lock. touch_issue_lock() must never be called from this path."""
+        session = fake_session_reload_patched
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            record_verdict(session, "CRITIQUE", "NEEDS REVISION")
+
+        mock_touch.assert_not_called()
+
 
 class TestComputePlanHash:
     def test_returns_sha256_prefixed_hex(self, tmp_path):

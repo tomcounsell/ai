@@ -135,7 +135,11 @@ async def test_subprocess_death_classifies_error_never_completed():
     summary = await runner.run("do the thing")
 
     assert summary.exit_reason == "error", "a dead subprocess must classify as error"
-    assert summary.exit_reason not in ("pm_complete", "pm_user"), "never a clean completion"
+    assert summary.exit_reason not in (
+        "pm_complete",
+        "pm_user",
+        "pm_needs_human",
+    ), "never a clean completion"
     # Persona-safe delivery: the canned message, never the raw exit string.
     assert deliveries == [RUNNER_ERROR_USER_MESSAGE]
     assert all("broken pipe" not in d for d in deliveries), (

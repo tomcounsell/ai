@@ -24,7 +24,7 @@ process pool, no idle-scraping startup phase.
 |--------|------|
 | `runner.py` | The single-session turn loop for every session type: spawn one `claude -p` per turn, route the PM's output, run the steer-preempt watcher, own resume-scalar persistence timing. |
 | `role_driver.py` | `HeadlessRoleDriver` — builds the subprocess invocation (prime slash command vs. resume), parses stream-json, reconciles the hook-edge snapshot against the turn's own edges. |
-| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the exit-classification vocabulary (`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS`). |
+| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the exit-classification vocabulary (`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS`). `pm_user` (a real `[/user]` answer the PM chose to deliver) and `pm_needs_human` (a runner-forwarded needs-input prompt, from a `needs_human` hook edge firing on an otherwise-unroutable turn) are both clean, wrap-up-eligible exits — kept distinct so the dashboard and reaction gate can tell "the PM answered" from "the PM paused, waiting on the human" (issue #1922). |
 | `hook_edge.py` / `hook_forwarder.py` | The turn-end/needs-human signal path: a fail-silent NDJSON forwarder writes each hook event to a per-session file; the consumer tails it with a durable `(event_cursor, byte_offset, fingerprint)` cursor. |
 | `transcript_tailer.py` | Incremental JSONL transcript reads for dashboard telemetry (byte-offset cadence, unchanged from the prior implementation). |
 | `adapter.py` | Executor-facing construction: delivery callbacks, the four-scalar resume persistence, exit-summary publication. |
@@ -34,6 +34,12 @@ process pool, no idle-scraping startup phase.
 former Dev prime command plus the shared WORKER rails, with the
 steering/continuation contract baked in at authoring time (a subagent cannot
 be handed a continuation protocol after the fact).
+
+`dev` itself is resumable, but the leaf `context: fork` skills it calls
+(`/do-build`, `/do-plan-critique`, `/do-pr-review`) are not: each gets one
+non-resumable turn and must reach terminal state before returning. See
+[SDLC Fork Turn-Boundary Invariant](sdlc-fork-turn-boundary.md) for that
+invariant and the test that guards it.
 
 ## Turn Loop
 
@@ -74,6 +80,50 @@ message. A per-turn timeout is handled by the identical path
 (`turn_end_source="timeout"`) — expiry is a graceful preempt, not an error;
 partial work stays in the transcript and the session surfaces as
 needs-attention rather than silently discarding a long Dev build.
+
+## Subprocess Lifecycle & Teardown Reap (issue #1938)
+
+The runner is the single owner of its subprocess's teardown. On **any** unwind
+of `_run_one_turn` — external cancellation from the health-check recovery path,
+an exception, or a normal turn exit — the `finally` block SYNCHRONOUSLY
+SIGKILLs and confirms the turn's process group before it returns.
+
+The reap is **cancellation-proof by construction**: it issues `os.killpg(pgid,
+SIGKILL)` with no preceding `await` and confirms exit via a bounded
+`time.sleep` poll (`SESSION_RUNNER_REAP_CONFIRM_TIMEOUT_S`, default 1.0s), so a
+re-delivered `CancelledError` cannot abort it. This matters because the recovery
+path double-cancels — `handle.task.cancel()` then `wait_for(handle.task, 0.25s)`
+re-cancels on timeout — and a SIGTERM→await-grace→SIGKILL reap would be aborted
+mid-grace after only SIGTERM, orphaning a live `claude -p` parented to the
+worker. SIGKILL is uncatchable so death is near-instant; the poll cap only bounds
+a pathological unkillable/D-state group. (This fast-kill is teardown-only —
+steer/timeout preempts keep the graceful SIGTERM→grace→SIGKILL path above.)
+
+Because Python runs the inner-task `finally` to completion before `await
+task._task` (`agent/session_executor.py`) resolves in the outer coroutine that
+owns worktree cleanup, the group is provably dead before both the recovery-path
+confirm and the executor's synthetic-slug cleanup run — cleanup never mutates the
+filesystem under a live child.
+
+**Live identity.** The runner writes the live subprocess pid to
+`AgentSession.claude_pid` on spawn (alongside `pm_pid`) and clears it on turn
+exit, so the recovery path's `_confirm_subprocess_dead` targets the real process.
+The recovery path snapshots `claude_pid` **before** cancelling (the teardown
+clears it on the same unwind) and confirms/escalates against that snapshot. The
+process group is derived from the pid via `os.getpgid` at kill time (`pgid ==
+pid` under `start_new_session`) — no pgid is persisted.
+
+**Pathological unkillable group (manual reclamation).** If the ~1s SIGKILL
+confirm cannot verify the group is dead (an uninterruptible D-state child), the
+runner writes a durable `runner_reap_failed` session event and logs a WARNING
+naming the session. The executor's synthetic-slug cleanup reads that marker and
+**skips** worktree deletion, so no directory is removed under a possibly-live
+child. Reclaim the orphaned worktree manually once the child clears:
+
+```bash
+git worktree prune
+rm -rf .worktrees/dev-<8hex>   # the path named in the WARNING
+```
 
 ## Simple Resume (D3, four scalars)
 
@@ -146,6 +196,14 @@ even when partial streamed text accumulated; any non-clean `exit_reason`
 finalizes the `AgentSession` as `failed` with a persona-safe user message —
 never a false `completed` (closing the class of failure documented in the
 [PTY-fragility postmortem](../postmortems/2026-07-06-granite-pty-fragility.md)).
+
+`exit_reason=pm_needs_human` (added in issue #1922) is a clean exit, not a
+liveness failure: it fires when a `needs_human` hook edge accompanies an
+otherwise-unroutable turn, and the runner delivers the PM's text as a genuine
+question to the human. `session_executor.py` recognizes it via the single
+imported `CLEAN_EXIT_REASONS` set (no separate literal to drift out of sync),
+so it never falls into the `failed`/error-reaction path that a genuinely
+non-clean `exit_reason` would.
 
 ### Liveness signals (`sdk_ever_output`, issue #1935)
 

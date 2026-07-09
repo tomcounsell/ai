@@ -16,7 +16,7 @@ Tracks issue [#1283](https://github.com/tomcounsell/ai/issues/1283).
 
 | Shape           | Allowlist                                        | Lockfile Sync | Full Suite               | Stale-Review Filter             |
 |-----------------|--------------------------------------------------|---------------|--------------------------|---------------------------------|
-| `docs-only`     | `docs/**`, `**/*.md`, `CHANGELOG*`, `README*`    | SKIP          | SKIP                     | Safe-shape exempt               |
+| `docs-only`     | `docs/**`, `**/*.md`, `CHANGELOG*`, `README*`, literal `.env.example` | SKIP          | SKIP                     | Safe-shape exempt               |
 | `lockfile-only` | strictly the literal file `uv.lock`              | RUN           | RUN (full)               | Safe-shape exempt               |
 | `small-patch`   | <=20 net lines, no new/deleted files, every touched `*.py` maps to >=1 existing test | RUN | RUN (targeted: touched-file -> `tests/**/test_{stem}.py`) | Safe-shape exempt |
 | `mixed`         | claimed safe shape with disqualifiers (>=50% match + >=1 violation) | RUN | RUN (full)               | NOT exempt                      |
@@ -24,6 +24,21 @@ Tracks issue [#1283](https://github.com/tomcounsell/ai/issues/1283).
 
 **Always-on cheap gates** (ruff lint, ruff format, syntax checks) run on
 every PR regardless of shape. The shape only affects expensive gates.
+
+### `.env.example` in the docs-only allowlist
+
+`DOCS_ONLY_GLOBS` includes the literal filename `.env.example` (not a
+`.env*` glob -- real secrets files must never match). It's doc-like
+because it is never loaded at runtime; only the real `.env` (a symlink to
+the iCloud vault) is read by the app. A PR that touches only
+`.env.example` classifies as `docs-only` and skips Lockfile Sync and the
+full suite.
+
+This does **not** admit mixed diffs. If a PR touches `.env.example`
+alongside real code (e.g. `config/settings.py`, any `.py`/`.toml`/`.lock`
+file), the diff still classifies as `mixed` (or `feature`) and runs the
+normal full gate stack -- the allowlist only covers the file itself, not
+whatever else rides along in the same PR.
 
 ## Defect Detection Contract
 

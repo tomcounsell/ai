@@ -190,6 +190,16 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Issue-level SDLC ownership lock visibility mirror (issue #1954) ===
+    # Read-side only: written ONCE at session creation to record which GitHub
+    # issue this session's SDLC pipeline work is driving, never re-written on
+    # lock renewal. Nullable additive field -- no backfill needed, and no
+    # ``_INT_FIELDS_BACKCOMPAT`` entry required since Popoto's lazy-load
+    # descriptor healing covers nullable fields generically. See
+    # models/session_lifecycle.py::touch_issue_lock() for the Redis-backed
+    # lock this field mirrors for human-readable dashboard/CLI display.
+    issue_number = IntField(null=True)
+
     # === Claude Code identity mapping ===
     # IndexedField so the PreCompact hook's 3-per-fire lookups
     # (`AgentSession.query.filter(claude_session_uuid=...)` in

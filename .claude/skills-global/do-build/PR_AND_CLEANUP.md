@@ -55,8 +55,21 @@ After documentation gate passes and pre-PR verification succeeds, advance to the
 
 ```bash
 git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
-# For cross-repo builds, add: --repo $TARGET_GH_REPO
-gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
+
+# Deterministic PR reuse: query the LIVE ref (not the lagging search index) for an
+# existing open PR on this head before creating one. Cross-repo builds MUST add
+# --repo $TARGET_GH_REPO to BOTH the list and the create, or the guard queries the
+# wrong repo, always sees "no PR", and creates a duplicate.
+EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number')  # cross-repo: add --repo $TARGET_GH_REPO
+if [ -n "$EXISTING_PR" ]; then
+  echo "Reusing existing PR #$EXISTING_PR on session/{slug} (skipping create)"
+else
+  # Slug-wins means exactly one head per plan, so GitHub's one-open-PR-per-head rule
+  # makes `gh pr create` itself the atomic guard. If a truly-simultaneous second
+  # creator won the race between our list and our create, `gh pr create` fails on the
+  # collision — recover by re-querying the live ref and ADOPTING the existing PR
+  # rather than dead-ending.
+  if ! gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Summary
 [Brief description of what was built]
 
@@ -83,7 +96,17 @@ gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 
 Closes #[issue-number]
 EOF
-)"
+)"; then
+    # Create failed — most likely a collision on an already-open head. Adopt it.
+    EXISTING_PR=$(gh pr list --head session/{slug} --state open --json number -q '.[0].number')  # cross-repo: add --repo $TARGET_GH_REPO
+    if [ -n "$EXISTING_PR" ]; then
+      echo "Adopted existing PR #$EXISTING_PR after create collision on session/{slug}"
+    else
+      echo "ERROR: gh pr create failed and no existing open PR was found for session/{slug}" >&2
+      exit 1
+    fi
+  fi
+fi
 ```
 
 **Important**: The PR creation step is handled by the BUILD ORCHESTRATOR (this skill), NOT by individual builder agents. Builder agents focus on their assigned tasks, while the orchestrator creates the final PR after all tasks complete and gates pass.

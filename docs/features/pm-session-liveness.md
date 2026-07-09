@@ -273,9 +273,44 @@ Disable the whole reflection by setting `enabled: false` on the `sdlc-progress-c
 - **Not a replacement for the Tier 1/Tier 2 detectors above.** The process-layer detectors run every 5 minutes and watch live sessions. The state-layer reflection runs every 30 minutes and watches dead pipelines.
 - **Not draft-PR or non-SDLC-branch aware.** Drafts and ad-hoc branches (`session/<other-slug>`) are intentionally excluded — they have different lifecycles.
 
+## Confirm subprocess dead before requeue AND before worktree cleanup (issue #1938)
+
+When the health check recovers a headless-runner session (`running → pending`,
+or `failed` after `MAX_RECOVERY_ATTEMPTS`), the session's detached `claude -p`
+process group must be **confirmed dead** before the record is requeued and before
+its synthetic-slug worktree is deleted. Two guarantees enforce this:
+
+1. **Requeue gate.** `_apply_recovery_transition` snapshots `AgentSession.claude_pid`
+   **before** cancelling `SessionHandle.task` (the runner teardown clears
+   `claude_pid` on the same unwind, so a post-cancel re-read would falsely confirm
+   `None`). It then runs `_confirm_subprocess_dead(pid_snapshot)` — now
+   **process-group aware**: it derives the group via `os.getpgid` and signals the
+   GROUP with `os.killpg` (SIGTERM→SIGKILL + liveness probes), so a detached group
+   with grandchildren (MCP servers) is fully reaped. A group that will not die
+   escalates the session to `failed` instead of parking an invisible orphan at
+   `pending`.
+2. **Cleanup ordering (structural, no new gate).** The runner's `_run_one_turn`
+   `finally` SYNCHRONOUSLY reaps + confirms its group before `await task._task`
+   resolves in the outer executor coroutine, so the executor's synthetic-slug
+   cleanup runs strictly after the group is dead. The one residual — a
+   pathological unkillable group — leaves a durable `runner_reap_failed` marker
+   that the cleanup reads to **skip** deletion (see
+   [headless-session-runner.md](headless-session-runner.md#subprocess-lifecycle--teardown-reap-issue-1938)).
+
+**Deliberate no-go: no worker-parented reaper leg.** The orphan reaper's PPID==1
+gate is left unchanged. A worker-parented backstop was examined and rejected:
+keying it on `claude_pid` is impossible (cleared on terminal transitions), and
+keying it on the never-cleared `pm_pid` reintroduces an OS PID-reuse hazard — a
+dead session's stale `pm_pid` can equal a live session's recycled PID, so the leg
+could SIGKILL a healthy session. The primary fixes make a terminal-but-live
+process unreachable at its creation sites, so a reaper leg here would be a cleanup
+path that should never fire while carrying a live-kill risk. The existing PPID==1
+reaper still covers genuinely-orphaned (worker-dead) processes.
+
 ## See Also
 
 - [`docs/features/agent-session-health-monitor.md`](agent-session-health-monitor.md) — the simplified `_has_progress` + `_tier2_reprieve_signal` detector.
+- [`docs/features/headless-session-runner.md`](headless-session-runner.md) — the runner's subprocess-lifecycle contract and teardown reap.
 - [`docs/features/bridge-self-healing.md`](bridge-self-healing.md) — the broader recovery model. Inference kills retired in #1172.
 - [`docs/features/session-recovery-mechanisms.md`](session-recovery-mechanisms.md) — recovery counters and reprieve telemetry.
 - [`docs/features/dashboard.md`](dashboard.md) — the full set of fields exposed on `/dashboard.json`.

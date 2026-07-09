@@ -10,6 +10,10 @@ This skill is a **router**, not an orchestrator. It assesses where work stands, 
 
 You MUST NOT write code, run tests, or create plans directly -- delegate everything to sub-skills.
 
+## Worktree & branch ownership
+
+**Slug identity always wins.** Each issue's build fork exclusively owns `.worktrees/{slug}` and `session/{slug}`, derived from the plan slug — this is the single source of truth (`worktree_manager.py` + `resolve_branch_for_stage`). Do NOT pre-allocate per-supervisor `.worktrees/sdlc-{N}` lanes: nothing reads a lane override, so lane instructions are silently dropped and every issue's builders land in `.worktrees/{slug}` regardless. Converging fork + supervisor onto one branch per plan is deliberate — it structurally collapses duplicate PRs, since GitHub permits only one open PR per head branch. Concurrent builders inside the one slug worktree must write disjoint file sets (do-build's `Parallel: true` convention: no shared-file writes).
+
 ## Cross-Repo Resolution
 
 For cross-project SDLC work, three resolution mechanisms cover the three different operations the pipeline runs:
@@ -89,6 +93,8 @@ git -C "$SDLC_TARGET_REPO" branch -a
 ```bash
 # 2c. Check if a PR already exists
 gh pr list --search "#{issue_number}" --state open
+# Cross-check with live refs — the --search index lags GitHub; --head queries live refs:
+#   gh pr list --head session/{slug} --state open   (reuse if present; keyed by head branch, not issue #)
 ```
 
 If a PR exists, fetch its full state for assessment:
@@ -150,7 +156,15 @@ For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output 
 
 **G5 applies to CRITIQUE only**, not REVIEW. Review verdicts legitimately change on unchanged diffs (CI flips, new comments, linked issues). G4 handles REVIEW non-determinism instead.
 
+**G1 open-PR step-aside (#1932):** once `pr_number` is set, G1 no longer fires — it steps aside and defers to G3, the canonical open-PR plan-stage redirect. Without this, a NEEDS REVISION/MAJOR REWORK critique verdict recorded before the PR was opened could route a shipped PR back to `/do-plan`.
+
+**G5 open-PR step-aside (#1932):** on its NEEDS_REVISION/MAJOR_REWORK branch (cached critique verdict, unchanged plan hash), G5 also steps aside once `pr_number` is set and defers to G3 instead of re-dispatching `/do-plan`. The READY_TO_BUILD branch already deferred on `pr_number` or `BUILD == completed`; this closes the same gap on the revision branch.
+
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass, cleared by `/do-plan` (Phase 4, Step 2b) after pushing the revision, and self-heals when `revision_applied: true` is in the plan frontmatter. Gated on `pr_number is None` so an already-shipped PR is never blocked.
+
+**ISSUE_LOCKED (not a G-guard, issue #1954):** `sdlc-tool next-skill` checks the issue-level ownership lock *before* evaluating G1-G7, and short-circuits to `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_session_id": ...}` if a different live session already holds the lock for this issue. `ensure_session` surfaces the same `{"blocked": true, ...}` shape at its own call site. `dispatch record`'s CLI wrapper surfaces the lock differently: on a failed write it peeks the lock and, if contention caused the failure, merges `reason`/`owner_session_id` into its existing `{"ok": false, "history_length": N}` result (never `blocked`) — see `_cli_record()` in `tools/sdlc_dispatch.py`. Treat either shape exactly like a G1-G7 block: surface the `reason` and `owner_session_id` to the human, do not loop, and do not attempt to route around it by guessing an alternative skill.
+
+**Known gap — stale REVIEW verdict after PATCH (issue #1932 / PR #1941):** G3 and G6 above key off `_verdicts["REVIEW"]` containing `APPROVED`, not off whether that verdict was recorded *after* the most recent PATCH commit. Before PR #1941's router fix (and for any similar gap not yet caught), `next-skill` can propose `/do-merge` on a stale pre-patch `APPROVED`/`CHANGES REQUESTED` verdict because nothing forces a fresh `/do-pr-review` after `/do-patch` resolves REVIEW findings. Before trusting a router-proposed `/do-merge`, verify with `sdlc-tool verdict get --stage REVIEW --issue-number {N}` that the recorded verdict is `APPROVED` and postdates the patch commit; if not, manually dispatch `/do-pr-review` first.
 
 Record every dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill — this preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
 
@@ -169,7 +183,13 @@ The CLI wraps `agent.sdlc_router.record_dispatch()` and `tools.stage_states_help
 
 ## Step 4: Dispatch ONE Sub-Skill (or a Parallel-Safe Pair)
 
-**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (16 rows) against live state.
+**Do not pattern-match against a hand-edited table.** Instead, call the routing tool and dispatch whatever skill it returns. The tool evaluates all guards (G1–G7) and dispatch rules (18 rows) against live state.
+
+**Row 3 open-PR step-aside (#1932):** row 3 (`NEEDS REVISION` critique → `/do-plan`) already steps aside when the critique verdict is stale (plan revised since); it now also steps aside once `pr_number` is set, so a PR that already exists never gets routed back to `/do-plan` off a stale-but-not-yet-superseded NEEDS REVISION verdict — row 7 / G3 own PR-stage routing instead.
+
+**Row 8d — crashed re-review recovery (#1932):** if `/do-pr-review` was dispatched after PATCH completed but crashed before persisting a REVIEW verdict, REVIEW is left at either `failed` (dead-ends at `Blocked`) or `completed` (silently misroutes to row 9's `/do-docs`, skipping review). Row 8d matches on the *absence* of a recorded verdict plus `last_dispatched_skill == /do-pr-review` (marker-agnostic — it does not require a specific REVIEW value) and re-dispatches `/do-pr-review`. Ordered before row 9 so it intercepts both crash markers. Loop-bound by G4.
+
+**Row 9 verdict gate (#1932):** row 9 (`/do-docs`) now requires a recorded `APPROVED` review verdict, not just `REVIEW == completed`. Previously REVIEW could be marked `completed` with no verdict ever recorded (the row 8d crash state above), which silently misrouted to `/do-docs`, skipping review entirely. Row 8d now owns that no-verdict state instead — the two rows are disjoint by verdict, not by table-position luck.
 
 ```bash
 # Get the next dispatch decision
@@ -199,10 +219,15 @@ Blocked:
 {"blocked": true, "reason": "G4: stage oscillation ...", "guard_id": "G4"}
 ```
 
+Blocked (issue-level ownership lock -- not a G-guard, see Step 3.5):
+```json
+{"blocked": true, "reason": "ISSUE_LOCKED", "owner_session_id": "..."}
+```
+
 **How to use the output:**
 1. If `multi` is `true`: invoke the `pthread` skill to run all listed `skills` as parallel sub-agents. Record dispatch for the *first* skill in the list (the multi-dispatch is gated by guards as one decision -- a guard fire on the first dispatch replaces the whole pair). After both sub-agents complete, re-invoke `/sdlc` to re-dispatch based on the new pipeline state.
 2. If `dispatched` is `true` (single): record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
-3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
+3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill. This applies identically whether the block came from a G1-G7 guard or from `reason: "ISSUE_LOCKED"` (another live session already owns this issue) -- report `owner_session_id` to the human, do not loop, do not attempt to route around it.
 4. If neither key is present (error): log the `error` field and escalate to the human.
 
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):

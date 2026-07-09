@@ -28,6 +28,12 @@ from agent import session_health
 class TestConfirmSubprocessDead:
     """Direct tests of the SIGTERM->SIGKILL escalation helper.
 
+    Process-GROUP aware (issue #1938): the helper derives the group from the pid
+    via ``os.getpgid`` and signals the GROUP with ``os.killpg`` (``pgid == pid``
+    under ``start_new_session``) so a detached group with grandchildren (MCP
+    servers) is fully reaped, not just the group leader. The tests patch
+    ``os.getpgid`` (returns the pid) and ``os.killpg``.
+
     The helper returns a :class:`session_health.SubprocessKillResult`
     ``(confirmed_dead, signal_sent)``. ``signal_sent`` distinguishes the
     already-dead path (cancel sufficed, no signal) from a genuine SIGTERM/SIGKILL
@@ -36,50 +42,99 @@ class TestConfirmSubprocessDead:
 
     def test_none_pid_returns_confirmed_no_signal(self):
         """No PID recorded → nothing to kill → confirmed dead, no signal sent."""
-        with patch.object(session_health.os, "kill") as mock_kill:
+        with (
+            patch.object(session_health.os, "killpg") as mock_killpg,
+            patch.object(session_health.os, "getpgid") as mock_getpgid,
+        ):
             result = session_health._confirm_subprocess_dead(None, timeout=3.0)
         assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
-        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        mock_getpgid.assert_not_called()
 
     def test_nonpositive_pid_returns_confirmed_no_signal(self):
         """pid <= 0 is not a real process → confirmed dead, no signals."""
-        with patch.object(session_health.os, "kill") as mock_kill:
+        with (
+            patch.object(session_health.os, "killpg") as mock_killpg,
+            patch.object(session_health.os, "getpgid") as mock_getpgid,
+        ):
             assert session_health._confirm_subprocess_dead(0, timeout=3.0) == (True, False)
             assert session_health._confirm_subprocess_dead(-1, timeout=3.0) == (True, False)
-        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        mock_getpgid.assert_not_called()
 
-    def test_already_dead_returns_confirmed_without_signals(self):
-        """First liveness probe (signal 0) raises ProcessLookupError → already gone.
+    def test_string_pid_is_cast_to_int(self):
+        """``claude_pid`` off Popoto's IndexedField arrives as a string; must not
+        raise ``TypeError`` comparing ``str <= int`` (regression, issue found
+        2026-07-08 via a crashed recovery: ``pid <= 0`` on a str pid)."""
+        with (
+            patch.object(session_health.os, "getpgid", side_effect=ProcessLookupError),
+            patch.object(session_health.os, "killpg") as mock_killpg,
+        ):
+            result = session_health._confirm_subprocess_dead("1234", timeout=3.0)
+        assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_killpg.assert_not_called()
+
+    def test_non_numeric_string_pid_treated_as_none(self):
+        """A garbage/non-numeric pid string must not raise — treated as no PID."""
+        with (
+            patch.object(session_health.os, "killpg") as mock_killpg,
+            patch.object(session_health.os, "getpgid") as mock_getpgid,
+        ):
+            result = session_health._confirm_subprocess_dead("not-a-pid", timeout=3.0)
+        assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_killpg.assert_not_called()
+        mock_getpgid.assert_not_called()
+
+    def test_group_leader_already_gone_returns_confirmed_no_signal(self):
+        """``os.getpgid`` raises ProcessLookupError → leader gone → group gone."""
+        with (
+            patch.object(session_health.os, "getpgid", side_effect=ProcessLookupError),
+            patch.object(session_health.os, "killpg") as mock_killpg,
+        ):
+            result = session_health._confirm_subprocess_dead(1234, timeout=3.0)
+        assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+        mock_killpg.assert_not_called()
+
+    def test_already_dead_group_probe_returns_confirmed_without_signals(self):
+        """First liveness probe (killpg signal 0) raises ProcessLookupError → gone.
 
         cancel() sufficed: confirmed_dead=True but signal_sent=False, so the caller
         must NOT count this as a kill escalation.
         """
-        with patch.object(session_health.os, "kill", side_effect=ProcessLookupError) as mock_kill:
+        with (
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(
+                session_health.os, "killpg", side_effect=ProcessLookupError
+            ) as mock_killpg,
+        ):
             result = session_health._confirm_subprocess_dead(1234, timeout=3.0)
         assert result.confirmed_dead is True
         assert result.signal_sent is False
-        # Only the initial signal-0 probe; no SIGTERM/SIGKILL.
-        assert mock_kill.call_count == 1
-        assert mock_kill.call_args_list[0].args == (1234, 0)
+        # Only the initial signal-0 group probe; no SIGTERM/SIGKILL.
+        assert mock_killpg.call_count == 1
+        assert mock_killpg.call_args_list[0].args == (1234, 0)
 
     def test_sigterm_suffices_reports_signal_sent(self):
-        """PID alive at probe, dies after SIGTERM → SIGKILL never sent, signal_sent True."""
-        # Sequence of os.kill behaviors:
+        """Group alive at probe, dies after SIGTERM → SIGKILL never sent, signal_sent True."""
+        # Sequence of os.killpg behaviors:
         #   probe(0) -> alive (returns)
         #   SIGTERM  -> returns (signal delivered)
         #   poll probe(0) -> ProcessLookupError (now dead)
         calls = []
 
-        def fake_kill(pid, sig):
+        def fake_killpg(pgid, sig):
             calls.append(sig)
             if sig == 0 and len(calls) == 1:
                 return  # initial probe: alive
             if sig == session_health.signal.SIGTERM:
                 return  # SIGTERM delivered
-            # Any subsequent signal-0 poll: process has exited.
+            # Any subsequent signal-0 poll: group has exited.
             raise ProcessLookupError
 
-        with patch.object(session_health.os, "kill", side_effect=fake_kill):
+        with (
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(session_health.os, "killpg", side_effect=fake_killpg),
+        ):
             result = session_health._confirm_subprocess_dead(1234, timeout=3.0)
 
         assert result == session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=True)
@@ -87,10 +142,10 @@ class TestConfirmSubprocessDead:
         assert session_health.signal.SIGKILL not in calls
 
     def test_sigkill_sent_only_when_sigterm_insufficient(self):
-        """PID survives SIGTERM grace → SIGKILL is escalated, then dies; signal_sent True."""
+        """Group survives SIGTERM grace → SIGKILL escalated, then dies; signal_sent True."""
         sent_signals = []
 
-        def fake_kill(pid, sig):
+        def fake_killpg(pgid, sig):
             sent_signals.append(sig)
             if sig == session_health.signal.SIGKILL:
                 return  # SIGKILL delivered; subsequent probe will report dead
@@ -105,7 +160,8 @@ class TestConfirmSubprocessDead:
         # Force the SIGTERM grace poll to expire immediately so the test does not
         # actually sleep for SUBPROCESS_KILL_TIMEOUT seconds.
         with (
-            patch.object(session_health.os, "kill", side_effect=fake_kill),
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(session_health.os, "killpg", side_effect=fake_killpg),
             patch.object(session_health.time, "sleep"),
             patch.object(
                 session_health.time,
@@ -120,14 +176,15 @@ class TestConfirmSubprocessDead:
         assert session_health.signal.SIGKILL in sent_signals
 
     def test_survives_sigterm_and_sigkill_reports_not_confirmed_signal_sent(self):
-        """PID stays alive through SIGTERM and SIGKILL → not confirmed, but signal_sent True."""
+        """Group stays alive through SIGTERM and SIGKILL → not confirmed, signal_sent True."""
 
-        def fake_kill(pid, sig):
-            # Process never dies: signal 0 always returns (alive), signals deliver.
+        def fake_killpg(pgid, sig):
+            # Group never dies: signal 0 always returns (alive), signals deliver.
             return
 
         with (
-            patch.object(session_health.os, "kill", side_effect=fake_kill),
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(session_health.os, "killpg", side_effect=fake_killpg),
             patch.object(session_health.time, "sleep"),
             patch.object(
                 session_health.time,
@@ -141,8 +198,11 @@ class TestConfirmSubprocessDead:
         assert result == session_health.SubprocessKillResult(confirmed_dead=False, signal_sent=True)
 
     def test_permission_error_on_probe_returns_not_confirmed_no_signal(self):
-        """PermissionError on the initial liveness probe → not confirmed, no signal."""
-        with patch.object(session_health.os, "kill", side_effect=PermissionError):
+        """PermissionError on the initial group liveness probe → not confirmed, no signal."""
+        with (
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(session_health.os, "killpg", side_effect=PermissionError),
+        ):
             result = session_health._confirm_subprocess_dead(1234, timeout=3.0)
         assert result == session_health.SubprocessKillResult(
             confirmed_dead=False, signal_sent=False
@@ -151,12 +211,15 @@ class TestConfirmSubprocessDead:
     def test_permission_error_on_sigterm_returns_not_confirmed_no_signal(self):
         """Probe says alive, SIGTERM raises PermissionError → not confirmed, no signal landed."""
 
-        def fake_kill(pid, sig):
+        def fake_killpg(pgid, sig):
             if sig == 0:
                 return  # alive
             raise PermissionError
 
-        with patch.object(session_health.os, "kill", side_effect=fake_kill):
+        with (
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(session_health.os, "killpg", side_effect=fake_killpg),
+        ):
             result = session_health._confirm_subprocess_dead(1234, timeout=3.0)
         # SIGTERM was rejected, so no signal actually landed.
         assert result == session_health.SubprocessKillResult(
@@ -303,14 +366,94 @@ class TestRecoveryBranching:
             assert call.args[1] != "failed"
 
     def test_no_pid_recorded_requeues_normally(self, recovery_patches):
-        """entry.claude_pid is None → _confirm_subprocess_dead True → requeue."""
+        """Genuinely-absent pid (claude_pid is None) → real None short-circuit → requeue.
+
+        Re-scoped for #1938: runner sessions now SET ``claude_pid`` on spawn, so
+        the "no pid" case is a session with no live subprocess at recovery time
+        (between turns / never spawned). No signal of any kind is delivered.
+        """
         entry = _make_entry(claude_pid=None)
         # Do not mock _confirm_subprocess_dead: exercise the real None short-circuit.
-        with patch.object(session_health.os, "kill") as mock_kill:
+        with (
+            patch.object(session_health.os, "killpg") as mock_killpg,
+            patch.object(session_health.os, "getpgid") as mock_getpgid,
+        ):
             assert _run_recovery(entry) is True
-        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        mock_getpgid.assert_not_called()
         recovery_patches["transition"].assert_called_once()
         assert recovery_patches["transition"].call_args.args[1] == "pending"
+
+    def test_runner_session_group_survives_escalates_to_failed(self, recovery_patches):
+        """A runner session whose process GROUP will not die → failed, not requeue (#1938).
+
+        Exercises the real ``_confirm_subprocess_dead`` group path end-to-end: a
+        live pid whose group never exits under SIGTERM/SIGKILL must NOT be parked
+        at ``pending`` as an invisible orphan.
+        """
+        entry = _make_entry(claude_pid=8080)
+
+        def fake_killpg(pgid, sig):
+            return  # group never dies (signal 0 always reports alive)
+
+        # timeout=0 makes the confirm poll return immediately without sleeping
+        # or patching ``time`` (patching ``session_health.time.monotonic`` would
+        # leak into the event loop's own clock — StopIteration).
+        with (
+            patch.object(session_health.os, "getpgid", lambda pid: pid),
+            patch.object(session_health.os, "killpg", side_effect=fake_killpg),
+            patch.object(session_health, "SUBPROCESS_KILL_TIMEOUT", 0.0),
+        ):
+            assert _run_recovery(entry) is True
+
+        recovery_patches["finalize"].assert_called_once()
+        assert recovery_patches["finalize"].call_args.args[1] == "failed"
+        recovery_patches["transition"].assert_not_called()
+
+    def test_recovery_snapshots_pid_before_teardown_clears_it(self, recovery_patches):
+        """Pre-cancel snapshot keeps the confirm targeting the real pid (#1938).
+
+        The runner teardown clears ``claude_pid`` on the SAME unwind that
+        ``handle.task.cancel()`` triggers. If the recovery path re-read
+        ``claude_pid`` AFTER cancelling it would see ``None`` (a false
+        "confirmed dead"). Assert the snapshot taken before the cancel is what
+        reaches ``_confirm_subprocess_dead``.
+        """
+        entry = _make_entry(claude_pid=9090)
+        seen = {}
+
+        async def _drive():
+            async def _hang():
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    # Mirror the runner clearing claude_pid on teardown.
+                    entry.claude_pid = None
+                    raise
+
+            task = asyncio.ensure_future(_hang())
+            await asyncio.sleep(0)  # let the task start
+            handle = SimpleNamespace(task=task)
+
+            def _capture(pid, *, timeout):
+                seen["pid"] = pid
+                return session_health.SubprocessKillResult(confirmed_dead=True, signal_sent=False)
+
+            with (
+                patch.object(session_health, "_confirm_subprocess_dead", side_effect=_capture),
+                patch.object(session_health, "_should_kill_no_progress", return_value=True),
+            ):
+                await session_health._apply_recovery_transition(
+                    entry,
+                    reason="no progress",
+                    reason_kind="no_progress",
+                    handle=handle,
+                    worker_key="worker-1",
+                )
+
+        asyncio.run(_drive())
+        # The confirm saw the pre-cancel snapshot, not the cleared None.
+        assert seen["pid"] == 9090
 
     def test_escalated_counter_increments_when_signal_was_sent(self, recovery_patches):
         """Confirmed-dead because a SIGTERM/SIGKILL landed → escalated counter increments."""

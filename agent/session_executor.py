@@ -17,6 +17,7 @@ from agent.session_completion import (
 from agent.session_health import HEARTBEAT_WRITE_INTERVAL
 from agent.session_logs import save_session_snapshot
 from agent.session_revival import _session_branch_name
+from agent.session_runner.router import CLEAN_EXIT_REASONS as _CLEAN_RUNNER_EXIT_REASONS
 from agent.session_state import (
     SessionHandle,
     _active_sessions,
@@ -32,16 +33,14 @@ from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-_CLEAN_RUNNER_EXIT_REASONS = frozenset(
-    {"pm_complete", "pm_user", "pm_floor_delivered", "steer_abort"}
-)
-
 
 def _is_non_clean_runner_exit(agent_session) -> bool:
     """Return True when the session has a runner exit_reason that signals a real failure.
 
     None exit_reason = not yet set = clean (default behavior).
-    Clean runner exits: pm_complete (normal end), pm_user (user message sent),
+    Clean runner exits: pm_complete (normal end), pm_user (real ``[/user]`` answer
+    the PM chose to deliver), pm_needs_human (runner-forwarded needs-input prompt
+    from a ``needs_human`` hook edge on an unroutable turn — distinct from pm_user),
     pm_floor_delivered (wrap-up guard delivered PM's last assistant message directly
     when the PM produced a real but prefix-less response — issue #1719),
     steer_abort (operator-requested abort via a steering message; the user-facing
@@ -58,6 +57,28 @@ def _is_non_clean_runner_exit(agent_session) -> bool:
     if exit_reason is None:
         return False
     return exit_reason not in _CLEAN_RUNNER_EXIT_REASONS
+
+
+def _session_recorded_reap_failure(agent_session_id: str | None) -> bool:
+    """True when the session recorded a ``runner_reap_failed`` event (issue #1938).
+
+    The runner's ``_run_one_turn`` finally writes this durable session event when
+    its synchronous SIGKILL could not confirm the turn's process group is dead
+    (a pathological unkillable/D-state group). The synthetic-slug worktree cleanup
+    reads it to SKIP deletion — so no worktree is removed under a possibly-live
+    child. The in-scope ``session`` object may be stale, so re-read fresh from
+    Popoto. Fail-silent: a read failure returns ``False`` (proceed with cleanup)
+    rather than crashing the terminal path.
+    """
+    if not agent_session_id:
+        return False
+    try:
+        fresh = AgentSession.get_by_id(agent_session_id)
+        events = getattr(fresh, "session_events", None) or []
+        return any(isinstance(ev, dict) and ev.get("type") == "runner_reap_failed" for ev in events)
+    except Exception as e:  # noqa: BLE001 — a marker read must never crash cleanup
+        logger.debug("[synthetic-slug] reap-marker reload failed (non-fatal): %s", e)
+        return False
 
 
 def _runner_final_status(task_error, agent_session) -> str:
@@ -169,6 +190,49 @@ def _tick_backstop_check_compaction(
     except Exception as exc:  # noqa: BLE001 - outer guard for any unexpected failure
         logger.warning(
             "pre_compact backstop: unexpected failure for %s: %s",
+            getattr(session, "session_id", "<unknown>"),
+            exc,
+        )
+
+
+def _tick_issue_lock_renewal(
+    session: AgentSession,
+    agent_session: AgentSession | None,
+) -> None:
+    """Renew the per-issue SDLC ownership lock on the tier-1 (60s) heartbeat tick.
+
+    Issue #1954: an in-progress eng session working an issue must keep the
+    per-issue ``touch_issue_lock()`` lock alive for as long as it is ticking,
+    or the lock's ``ISSUE_LOCK_TTL_SECONDS`` (300s) will expire mid-session
+    and let a second independent process claim the same issue (the #1915
+    duplicate-PR root cause). This is deliberately called from the tier-1
+    (60s) heartbeat block, NOT the 25-minute calendar block elsewhere in
+    ``_heartbeat_loop`` -- that slower cadence would blow straight past the
+    300s TTL and defeat the purpose of renewal.
+
+    Guarded on ``agent_session.session_type == "eng"`` and a resolved
+    (truthy) ``agent_session.issue_number`` -- non-eng sessions and eng
+    sessions with no associated issue never touch the lock.
+
+    Best-effort and side-effect-only: never raises, returns nothing. A
+    Redis hiccup or missing field never blocks the heartbeat loop.
+    """
+    if agent_session is None:
+        return
+    if getattr(agent_session, "session_type", None) != "eng":
+        return
+    issue_number = getattr(agent_session, "issue_number", None)
+    if not issue_number:
+        return
+
+    try:
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        session_id = getattr(session, "session_id", None) or ""
+        touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - renewal must never crash the heartbeat loop
+        logger.debug(
+            "[%s] issue-lock renewal failed (non-fatal): %s",
             getattr(session, "session_id", "<unknown>"),
             exc,
         )
@@ -1931,6 +1995,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         hb_err,
                     )
 
+                # Issue-lock renewal (issue #1954): tier-1 (60s) block, NOT the
+                # 25-min calendar block below -- see _tick_issue_lock_renewal
+                # docstring for why that cadence would blow past
+                # ISSUE_LOCK_TTL_SECONDS (300s) and let the lock expire mid-cycle.
+                _tick_issue_lock_renewal(session, agent_session)
+
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
                 if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
                     elapsed = 0
@@ -2150,6 +2220,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         or "This continues a previously completed session."
                     )
                     augmented = f"[Prior session context: {_summary}]\n\n{combined_text}"
+                    # Reuse the slug already checked out in working_dir (if it's a
+                    # worktree) so the continuation's synthetic-slug fallback
+                    # (session_executor.py's `is_synthetic_slug` branch) doesn't
+                    # mint a fresh slug from the *new* agent_session_id — that
+                    # mismatches the branch already checked out here and trips
+                    # the worktree-branch-guard (issue #1377), killing the
+                    # continuation instantly instead of resuming it.
+                    continuation_slug = (
+                        working_dir.name if WORKTREES_DIR in str(working_dir) else None
+                    )
                     await enqueue_agent_session(
                         project_key=session.project_key,
                         session_id=session.session_id,
@@ -2163,6 +2243,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         sender_id=session.sender_id,
                         session_type=session.session_type or "eng",
                         project_config=getattr(session, "project_config", None),
+                        slug=continuation_slug,
                     )
                     logger.info(
                         f"[{session.project_key}] Re-enqueued {len(leftover)} steering "
@@ -2310,12 +2391,32 @@ async def _execute_agent_session(session: AgentSession) -> None:
 
                 _wd = locals().get("working_dir")
                 if _wd is not None:
-                    _repo_for_cleanup = resolve_main_repo_root(_wd)
-                    cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
-                    logger.info(
-                        f"[synthetic-slug] Cleaned up worktree+branch for "
-                        f"{_slug_for_cleanup}: {cleanup_result}"
-                    )
+                    # Reap-failed marker skip (Fix 3, issue #1938): the runner's
+                    # ``_run_one_turn`` finally SYNCHRONOUSLY reaps + confirms its
+                    # process group before this cleanup runs (finally-ordering
+                    # guarantee), so the common case is safe. The ONE residual is
+                    # a pathological unkillable/D-state group the ~1s SIGKILL
+                    # confirm could not verify dead — there the runner wrote a
+                    # durable ``runner_reap_failed`` session event. SKIP deletion
+                    # when present, so no worktree is removed under a possibly-live
+                    # child. Manual reclamation: ``git worktree prune`` + dir
+                    # removal.
+                    if _session_recorded_reap_failure(session.agent_session_id):
+                        logger.warning(
+                            "[synthetic-slug] SKIPPING worktree cleanup for %s — "
+                            "runner_reap_failed marker present (subprocess group could "
+                            "not be confirmed dead). Reclaim manually: `git worktree "
+                            "prune` + remove the worktree dir %r.",
+                            _slug_for_cleanup,
+                            _wd,
+                        )
+                    else:
+                        _repo_for_cleanup = resolve_main_repo_root(_wd)
+                        cleanup_result = cleanup_after_merge(_repo_for_cleanup, _slug_for_cleanup)
+                        logger.info(
+                            f"[synthetic-slug] Cleaned up worktree+branch for "
+                            f"{_slug_for_cleanup}: {cleanup_result}"
+                        )
         except Exception as cleanup_err:
             # Cleanup failures must NEVER propagate as session failures.
             logger.warning(

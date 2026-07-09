@@ -13,6 +13,8 @@ Routing is the simplified regex table (:mod:`agent.session_runner.router`):
 - ``[/user]``      → deliver via the adapter's user callback, exit ``pm_user``
 - ``[/complete]``  → deliver the summary, exit ``pm_complete`` (wrap-up guard
   backstops an empty delivery)
+- needs_human edge on an unroutable turn → deliver the PM's text, exit
+  ``pm_needs_human`` (distinct from a real ``[/user]`` answer, see below)
 - anything else    → continue (bounded compliance nudge, then the wrap-up
   guard — never an infinite loop)
 
@@ -105,6 +107,19 @@ PREEMPT_TERM_GRACE_S: float = float(os.environ.get("SESSION_RUNNER_PREEMPT_TERM_
 # Poll cadence while waiting out the SIGTERM grace window.
 # Provisional/tunable — override with SESSION_RUNNER_KILL_POLL_INTERVAL_S.
 KILL_POLL_INTERVAL_S: float = float(os.environ.get("SESSION_RUNNER_KILL_POLL_INTERVAL_S", "0.2"))
+
+# Teardown reap confirm (issue #1938): after a SYNCHRONOUS SIGKILL of the turn's
+# process group in ``_run_one_turn``'s ``finally``, poll for the group's exit for
+# at most this many seconds. SIGKILL is uncatchable so death is near-instant in
+# the common case; the cap only bounds the pathological unkillable/D-state group.
+# The poll uses ``time.sleep`` (NOT ``await``) so a re-delivered ``CancelledError``
+# — the recovery path double-cancels (#1938) — cannot abort the confirm.
+# Provisional/tunable — override with SESSION_RUNNER_REAP_CONFIRM_TIMEOUT_S /
+# SESSION_RUNNER_REAP_CONFIRM_POLL_S.
+REAP_CONFIRM_TIMEOUT_S: float = float(
+    os.environ.get("SESSION_RUNNER_REAP_CONFIRM_TIMEOUT_S", "1.0")
+)
+REAP_CONFIRM_POLL_S: float = float(os.environ.get("SESSION_RUNNER_REAP_CONFIRM_POLL_S", "0.02"))
 
 # How many compliance nudges a non-routing PM gets before the loop hands off
 # to the wrap-up guard. Provisional/tunable — override with
@@ -592,11 +607,18 @@ class SessionRunner:
         try:
             if self._agent_session is not None:
                 self._agent_session.pm_pid = pid
+                # Also surface the LIVE subprocess identity to the recovery path
+                # (Fix 2, issue #1938): #1537's ``_confirm_subprocess_dead`` keys
+                # on ``claude_pid``, which the headless-runner cutover left unset
+                # — so the confirm no-op'd on ``None`` (a false "confirmed dead").
+                # Set it here on spawn; ``_clear_claude_pid`` nulls it on turn
+                # exit. Same-object write, no cross-module reach.
+                self._agent_session.claude_pid = pid
                 save = getattr(self._agent_session, "save", None)
                 if callable(save):
-                    save(update_fields=["pm_pid"])
+                    save(update_fields=["pm_pid", "claude_pid"])
         except Exception as e:  # noqa: BLE001
-            logger.debug("[runner] pm_pid persist failed: %s", e)
+            logger.debug("[runner] pm_pid/claude_pid persist failed: %s", e)
 
     def _on_harness_init(self, data: dict) -> None:
         """Capture-at-init (Race 5): persist the new turn's resume scalars.
@@ -802,11 +824,150 @@ class SessionRunner:
                 else:
                     raise
         finally:
+            # -- Cancellation-proof teardown reap (issue #1938) ---------------
+            # THE load-bearing gate for both defects. On ANY teardown of this
+            # coroutine (external cancel from the recovery path, exception, or
+            # normal exit) the turn's detached ``claude -p`` process group must
+            # be positively reaped — a cancelled ``SessionHandle.task`` alone
+            # unwinds the coroutine but never kills the group, orphaning a live
+            # subprocess parented to the worker.
+            #
+            # Ordering guarantee: this reap is SYNCHRONOUS (SIGKILL + a bounded
+            # ``time.sleep`` poll, no interruptible ``await``). The recovery path
+            # double-cancels — ``handle.task.cancel()`` then
+            # ``wait_for(handle.task, 0.25s)`` re-cancels on timeout — so a
+            # SIGTERM→await-grace reap would be aborted mid-grace. A synchronous
+            # SIGKILL cannot be interrupted. Because this inner-task ``finally``
+            # runs to completion before ``await task._task``
+            # (session_executor.py:1967) resolves in the OUTER coroutine, the
+            # group is provably dead before both the recovery-path confirm and
+            # the executor's worktree cleanup ``finally`` — the AC#2 ordering.
+            #
+            # The reap runs FIRST, then the existing watcher teardown, so a
+            # re-delivered ``CancelledError`` lands on the suppressed watcher
+            # await (below), never mid-reap.
+            if not turn_task.done():
+                turn_task.cancel()
+            try:
+                confirmed_dead, reap_pgid = self._reap_turn_group(handle)
+                if not confirmed_dead:
+                    # Pathological unkillable/D-state group: emit ONE durable,
+                    # operator-visible side effect. Fix 3's executor cleanup
+                    # reads this marker and SKIPS worktree deletion, so no
+                    # filesystem is mutated under a possibly-live child.
+                    self._record_reap_failed(handle, reap_pgid)
+            except Exception as e:  # noqa: BLE001 — the reap must never raise
+                logger.warning(
+                    "[runner] teardown reap raised (generation=%d pid=%s): %s",
+                    handle.generation,
+                    handle.pid,
+                    e,
+                )
             watcher_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher_task
+            # Clear the live subprocess identity (Fix 2): between turns there is
+            # no live ``claude -p``, so a ``None`` read by the recovery path is
+            # correct (nothing to kill). Fail-silent.
+            self._clear_claude_pid()
             self._current_handle = None
         return outcome, handle
+
+    def _reap_turn_group(self, handle: _TurnHandle) -> tuple[bool, int | None]:
+        """SYNCHRONOUSLY SIGKILL + confirm the turn's process group (issue #1938).
+
+        Cancellation-proof by construction: no interruptible ``await`` anywhere.
+        The recovery path double-cancels this coroutine, so a re-delivered
+        ``CancelledError`` must not be able to abort the kill or the confirm —
+        SIGKILL is uncatchable and issued with no preceding ``await``, and the
+        confirm poll uses ``time.sleep`` rather than ``asyncio.sleep``.
+
+        Returns ``(confirmed_dead, pgid)``. Signals go through the injected
+        ``self._killpg`` seam (both the SIGKILL and the ``signal 0`` liveness
+        probe) so unit tests can drive the outcome with a fake. Never raises.
+        """
+        pid = handle.pid
+        if pid is None:
+            # No subprocess was ever spawned — nothing to reap.
+            return True, None
+        pgid = handle.pgid
+        if pgid is None:
+            try:
+                pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                # The leader is already gone → the group is gone.
+                return True, None
+            except Exception:  # noqa: BLE001 — fake pids in tests, races in prod
+                # Own session/group under start_new_session (pgid == pid).
+                pgid = pid
+        # SIGKILL the whole group (no ``await`` — uninterruptible).
+        try:
+            self._killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True, pgid  # group already gone → confirmed dead
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[runner] reap SIGKILL failed pgid=%s: %s", pgid, e)
+
+        # Confirm exit via a SYNCHRONOUS bounded poll (no ``await``). SIGKILL
+        # death is near-instant, so the first probe returns dead in the common
+        # case; the cap only bounds an unkillable/D-state group.
+        deadline = time.monotonic() + REAP_CONFIRM_TIMEOUT_S
+        while True:
+            try:
+                self._killpg(pgid, 0)
+            except ProcessLookupError:
+                return True, pgid  # group gone → confirmed dead
+            except Exception:  # noqa: BLE001 — cannot probe; keep polling to the cap
+                pass
+            if time.monotonic() >= deadline:
+                return False, pgid
+            time.sleep(REAP_CONFIRM_POLL_S)
+
+    def _record_reap_failed(self, handle: _TurnHandle, pgid: int | None) -> None:
+        """Emit the durable ``runner_reap_failed`` marker + a WARNING (issue #1938).
+
+        The ONE deterministic side effect for a reap that could not confirm the
+        group's death. The session event is durable (survives the process), so
+        Fix 3's executor synthetic-slug cleanup can read it and skip deleting a
+        worktree out from under a possibly-live child. Fail-silent.
+        """
+        session_ref = getattr(self._agent_session, "agent_session_id", None) or getattr(
+            self._agent_session, "session_id", "unknown"
+        )
+        logger.warning(
+            "[runner] teardown reap could NOT confirm group death for session %s "
+            "(generation=%d pid=%s pgid=%s) — worktree cleanup will be skipped",
+            session_ref,
+            handle.generation,
+            handle.pid,
+            pgid,
+        )
+        _append_session_event(
+            self._agent_session,
+            {
+                "type": "runner_reap_failed",
+                "generation": handle.generation,
+                "pid": handle.pid,
+                "pgid": pgid,
+                "ts": _now_iso(),
+            },
+        )
+
+    def _clear_claude_pid(self) -> None:
+        """Clear the live subprocess identity on turn exit (Fix 2, issue #1938).
+
+        Set on spawn by :meth:`_on_turn_spawn`; cleared here so the recovery
+        path reads ``None`` between turns (no live subprocess to kill). Same-
+        object write, fail-silent — persistence must never crash the run.
+        """
+        try:
+            if self._agent_session is not None:
+                self._agent_session.claude_pid = None
+                save = getattr(self._agent_session, "save", None)
+                if callable(save):
+                    save(update_fields=["claude_pid"])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[runner] claude_pid clear failed: %s", e)
 
     # -- Preempt watcher (D4, Race 1) ----------------------------------------
 
@@ -968,10 +1129,14 @@ class SessionRunner:
 
         # A substantive needs-human edge alongside an unroutable turn: the
         # hook already filtered boilerplate (#1919), so this message is a
-        # genuine question for the human — deliver the PM's text.
+        # genuine question for the human — deliver the PM's text. Tagged
+        # ``pm_needs_human`` (not ``pm_user``) since this is a runner-forwarded
+        # needs-input prompt, not a real ``[/user]`` answer the PM chose to send.
         if outcome.needs_human is not None and text.strip():
             self._adapter.on_user_payload(text.strip())
-            return _RouteDecision(should_break=True, exit_reason="pm_user", compliance_miss=miss)
+            return _RouteDecision(
+                should_break=True, exit_reason="pm_needs_human", compliance_miss=miss
+            )
 
         # Anything else — legacy [/dev], unknown prefix, empty payload —
         # continues the loop with a bounded compliance nudge.

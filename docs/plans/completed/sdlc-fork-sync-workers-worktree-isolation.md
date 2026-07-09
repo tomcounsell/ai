@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -21,7 +21,7 @@ A supervised 6-issue parallel SDLC batch (#1898 #1899 #1901 #1902 #1904 #1905) s
 
 1. **Phantom-wait (Defect 1) — FIXED on main by `8542ffb19`.** Stage skills declare `context: fork` — a single, isolated, non-resumable subagent turn. Before the fix, do-build spawned builders with `run_in_background: [true if Parallel: true]` then polled/resumed for 15 min, and do-sdlc omitted the flag entirely (inheriting the tool's background default); a fork that ends its turn cannot be re-entered when a background child finishes, so builds were left uncommitted (#1904, #1901, #1902, #1898). `8542ffb19` closed this: builder dispatch is now `run_in_background: false` (`do-build/WORKFLOW.md:72`), the Step 4 polling block is rewritten as an in-turn verification (`WORKFLOW.md:98-104`), and do-sdlc carries Hard Rule 6 (`do-sdlc/SKILL.md:24`) + explicit `run_in_background: false` in §3c (`do-sdlc/SKILL.md:95`). **No remaining code change for Defect 1 — only a regression-guard test (Task 3).**
 
-2. **Shared slug worktree, no lane seam (Defect 2) — STILL LIVE.** `worktree_manager.py:883-884` templates BOTH the worktree dir (`.worktrees/{slug}`) and branch (`session/{slug}`) off one `slug`; there is no override. Supervisor `.worktrees/sdlc-{N}` lane instructions are silently dropped because nothing reads them — the cross-issue lane-drop the batch actually hit (#1904, #1899, #1898). Note: `8542ffb19` made builders foreground but **concurrent** (multiple foreground Task calls in one message run simultaneously), so it did NOT serialize within-issue builders — the shared-index risk for `Parallel: true` tasks is reduced only by do-build's existing convention (mark `Parallel: true` only for tasks that write no shared files).
+2. **Shared slug worktree, no lane seam (Defect 2) — STILL LIVE, and now the higher-traffic path.** `worktree_manager.py:883-884` templates BOTH the worktree dir (`.worktrees/{slug}`) and branch (`session/{slug}`) off one `slug`; there is no override. This is architecture-independent code the refactor did not touch, and the 5-day refactor *raised* its relevance: the production `dev` subagent operates in the session's single `.worktrees/{slug}/` and fans builders out into that one index ("one builder per worktree" — `dev.md:27` — with only one slug worktree available), so the shared-index exposure is now a production `dev`-fanout path, not only a local-supervisor concern. On the local-supervisor side, `.worktrees/sdlc-{N}` lane instructions are silently dropped because nothing reads them — the cross-issue lane-drop the batch actually hit (#1904, #1899, #1898). Note: `8542ffb19` made builders foreground but **concurrent** (multiple foreground Task calls in one message run simultaneously), so it did NOT serialize within-issue builders — the shared-index risk for `Parallel: true` tasks is reduced only by do-build's existing convention (mark `Parallel: true` only for tasks that write no shared files).
 
 3. **Duplicate PRs (Defect 3) — STILL LIVE.** A fork branch and a supervisor branch produced two byte-identical PRs per issue (#1908/#1910, #1911/#1912). do-build's `gh pr create --head session/{slug}` (`PR_AND_CLEANUP.md:59`) has **no** pre-create existence check; the pipeline's only dedup probe is search-based (`gh pr list --search "#{issue}"`, `sdlc/SKILL.md:91`), which lags GitHub's search index. No `gh pr list --head` (live-ref) lookup exists anywhere.
 
@@ -53,7 +53,12 @@ A supervised 6-issue parallel SDLC batch (#1898 #1899 #1901 #1902 #1904 #1905) s
 
 **Commits on main since issue was filed (touching referenced files):**
 - `8542ffb19` — "Fix do-sdlc/do-build fork phantom-wait: force `run_in_background: false`" (2026-07-07) — **landed the complete Defect-1 fix.** Touched `do-build/SKILL.md`, `do-build/WORKFLOW.md`, `do-sdlc/SKILL.md` exactly as this plan originally proposed for Defect 1. Did NOT touch `PR_AND_CLEANUP.md`, `sdlc/SKILL.md`'s dedup probe, `worktree_manager.py`, or add any slug-ownership prose — Defects 2 and 3 are untouched.
-- `e8351e4ca` — "Granite PTY teardown: headless `claude -p` session runner cutover (#1930)" — added `agent/session_runner/` and reworked `agent_session_queue.py`. Did not touch the fork stage skills or the PR-create sites. The `context: fork` = one non-resumable turn model is unchanged.
+- `e8351e4ca` — "Granite PTY teardown: headless `claude -p` session runner cutover (#1930)", plus its 5-day follow-ons (`#1935` zombie liveness, `#1937` interrupt-resume announcement removal, `#1938` subprocess-leak reap) — added `agent/session_runner/` and reworked `agent_session_queue.py`. Did not touch the fork stage skills' *code* or the PR-create sites, so every file:line reference below still holds. **But the refactor changed WHO orchestrates production SDLC, which reframes all three defects (see the architectural-reframe note directly below).**
+
+**Architectural reframe (5-day session-runner refactor — governs how these defects are read):** Production SDLC no longer runs through a `context: fork` orchestrator. The PM session (headless `claude -p`) spawns a **resumable `dev` subagent** (`.claude/agents/dev.md`) that owns and drives the whole pipeline across turns and process restarts. `dev` is continuable by construction — it is NOT a fork, and it never invokes `/do-sdlc`; it calls the leaf `/do-*` skills (`/do-build`, `/do-plan-critique`, `/do-pr-review`, `/do-merge`) directly. This shifts each defect:
+- **Defect 1 (phantom-wait):** obsolete at the *orchestrator* level — the resumable `dev` CAN receive the later turn a fork never could, so an orchestrator that "ends its turn waiting on children" is no longer a production failure mode. The residual exposure is narrow: `dev` still calls the leaf `context: fork` skill `/do-build`, which still gets one non-resumable turn and can still phantom-wait on *its own* builders. `8542ffb19` fixed exactly that leaf. Task 3's regression test guards the leaf forks, which is the right and still-live scope.
+- **Defect 2 (shared slug worktree):** MORE relevant, not less. The `dev` subagent operates in the session's single `.worktrees/{slug}/` and fans builders out into it ("Fan out … one builder per worktree" — `dev.md:27`, while the session has exactly one slug worktree). So the shared-index exposure is now a first-class production `dev`-fanout path, not just a local-supervisor lane concern. See re-anchored Defect 2 / Risk 1.
+- **Defect 3 (duplicate PRs):** root cause largely dissolved in production. The two-orchestrator duplication ("fork branch vs supervisor branch") required two concurrent orchestrators; production now has ONE `dev` per session on one `session/{slug}` head ("never spawn a second dev" — `dev.md` description). The remaining exposure is the local human-supervisor path (where the #1915 batch originated) and two humans/sessions colliding on one issue — a class demonstrably still live (`8351947d`, "Remove duplicate SDLC plan left by supervisor collision on #1938"). The `gh pr list --head` guard still earns its place, now for that narrower human-collision scenario.
 
 **Cited sibling issues/PRs re-checked:**
 - #1871 — OPEN — "SDLC router G5 fast-path dispatches /do-build while plan_revising=true" — explicitly a separate follow-up (out of scope here).
@@ -90,7 +95,7 @@ The identical background-then-await bug has now been fixed twice by point patche
 
 ## Data Flow
 
-1. **Entry point:** PM session (headless `claude -p` turn) routes work and invokes `/sdlc`, which dispatches ONE stage skill as a `context: fork` subagent (or `/do-sdlc` supervises a full run locally).
+1. **Entry point (production):** the PM session (headless `claude -p`) spawns a resumable `dev` subagent that drives the pipeline and calls the leaf `/do-*` skills (`/do-build`, etc.) directly — each leaf runs as a `context: fork` subagent turn. **Local-supervisor path:** a human runs `/do-sdlc` (itself `context: fork`) to supervise a full run, or `/sdlc` to dispatch ONE stage. The three defects below live in the leaf fork skills and the shared worktree, so they surface on BOTH paths; the fixes are path-agnostic.
 2. **do-build fork:** derives `{slug}` from the plan filename → creates `.worktrees/{slug}` on `session/{slug}` (`worktree_manager` / `git worktree add`) → deploys builder Task subagents pointed at that worktree.
 3. **Defect 1 — FIXED on main (`8542ffb19`):** builders now dispatch `run_in_background: false`; their results are in hand when the Task call returns; the fork proceeds to commit/push/PR in the same turn. The regression risk is a future edit reverting this — which Task 3's test guards.
 4. **Current failure — Defect 2 (still live):** supervisor `.worktrees/sdlc-{N}` lane instructions are silently dropped (nothing reads them); each issue's builders land in `.worktrees/{slug}`. Concurrent `Parallel: true` foreground builders can still interleave in that shared index — mitigated by do-build's convention (mark `Parallel: true` only for non-shared-file tasks).
@@ -99,6 +104,7 @@ The identical background-then-await bug has now been fixed twice by point patche
 
 ## Architectural Impact
 
+- **Execution model (post 5-day refactor):** Production SDLC runs via the resumable `dev` subagent (PM-spawned, continuable across turns and restarts), not a `context: fork` orchestrator. `dev` calls the leaf `context: fork` skills (`/do-build`, `/do-plan-critique`, `/do-pr-review`, `/do-merge`) directly. The `/do-sdlc` fork orchestrator survives only as the *local-supervisor* entry point. These fixes therefore protect (a) the leaf `/do-build` fork calls made by both `dev` and local supervisors, and (b) the local `/do-sdlc` path — not a production fork orchestrator, which no longer exists. The plan deliberately does NOT re-architect resumption (see Rabbit Holes).
 - **New dependencies:** None.
 - **Interface changes:** None to Python signatures. `worktree_manager.create_worktree` / `get_or_create_worktree` and `resolve_branch_for_stage` are **left unchanged** — the "slug identity always wins" decision uses the existing slug→worktree→branch derivation as the single source of truth rather than adding an override seam.
 - **Coupling:** Decreases. Removes the implicit (broken) coupling between forks and a nonexistent cross-turn resumption path. Removes the supervisor's dropped-on-the-floor lane-assignment coupling by declaring slug the sole identity.
@@ -183,14 +189,14 @@ No existing test asserts the do-build/do-sdlc orchestration prose today, so the 
 - **Adding a worktree/branch override seam** (threading `worktree_name`/`branch_name` through `create_worktree`, `get_or_create_worktree`, `resolve_branch_for_stage`, and do-build). Tempting to "do it properly," but it re-introduces the lane-allocation complexity the slug-wins decision deliberately removes, and every seam is a new corruption surface. Slug-wins is simpler. Only pursue the seam if PM explicitly wants true per-builder parallelism (Resolved Question 1 — declined).
 - **Per-builder worktrees with branch-merge-back.** Real parallelism means N worktrees + N branches + a merge/rebase step back onto `session/{slug}` — a whole coordination protocol. Out of scope; rely on the concurrent-foreground model `8542ffb19` landed + do-build's disjoint-file convention.
 - **Re-editing the already-fixed Defect-1 sites.** `8542ffb19` landed `run_in_background: false` in do-build/WORKFLOW.md, the Step 4 rewrite, do-build/SKILL.md's orchestrator rule, and do-sdlc Hard Rule 6 + §3c. Applying the original plan's Defect-1 edits would fail Edit exact-string-match against fixed code. Only add the regression test (Task 3).
-- **Rewriting the whole fork execution model / making forks resumable.** The headless session runner (#1930) is fresh; do not re-architect resumption. The invariant (no live children at turn end) works within the current model.
+- **Rewriting the whole fork execution model / making forks resumable.** The 5-day headless session-runner refactor (#1930 + #1935/#1937/#1938) already moved production orchestration to the resumable `dev` subagent; do not re-architect resumption on top of that. The leaf-fork invariant (no live children at turn end) works within the current model and is all this plan guards.
 - **Fixing the 5 "also observed" batch follow-ups** (TEST marker, plan-artifacts-on-main, do-test WARN regex, meta-set `revision_applied`, recon-gate-on-reflection-issues). Each is a separate concern; see No-Gos.
 
 ## Risks
 
-### Risk 1: Concurrent-foreground builders can still interleave the shared slug index
-**Impact:** `8542ffb19` made builders foreground but concurrent (multiple foreground Task calls in one message). Two `Parallel: true` builders that both `git add`/`commit` in `.worktrees/{slug}` can still interleave staging — the within-issue half of the original Defect 2. This plan does NOT serialize them (that would fight the just-landed concurrent-foreground decision).
-**Mitigation:** do-build's existing convention already gates this: `Parallel: true` is only valid for tasks that write no shared files (pthread's own rule: "if two subtasks would write to the same working tree, serialize them or give each isolation"). Slug-wins removes the cross-issue lane-drop that the batch actually hit. If within-issue concurrent-index corruption is later observed in practice, true per-builder-worktree isolation is the escape hatch — filed as its own plan (see No-Gos), not bundled here. Keeping scope Small.
+### Risk 1: Concurrent builders (dev fanout or supervisor) can still interleave the shared slug index
+**Impact:** The 5-day refactor makes this the higher-traffic exposure. The production `dev` subagent fans builders into the session's single `.worktrees/{slug}/` ("one builder per worktree" while only one slug worktree exists — `dev.md:27,35`); likewise `8542ffb19` made do-build's builders foreground but concurrent (multiple foreground Task calls in one message). In either case two `Parallel: true` builders that both `git add`/`commit` in `.worktrees/{slug}` can interleave staging — the within-issue half of the original Defect 2. This plan does NOT serialize them or add per-builder worktrees (that would fight the just-landed concurrent-foreground decision and re-introduce the lane-allocation complexity slug-wins removes).
+**Mitigation:** do-build's existing convention already gates this: `Parallel: true` is only valid for tasks that write no shared files (pthread's own rule: "if two subtasks would write to the same working tree, serialize them or give each isolation"). Slug-wins removes the cross-issue lane-drop that the batch actually hit. If within-issue concurrent-index corruption is later observed in practice — now more likely to surface via the `dev`-fanout path than the retired supervisor-lane path — true per-builder-worktree isolation is the escape hatch, filed as its own plan (see No-Gos), not bundled here. Keeping scope Small.
 
 ### Risk 2: Prose invariants are advisory; the model may still background
 **Impact:** A skill instruction saying "never background" can be ignored by the executing model under load.
@@ -253,13 +259,13 @@ No agent integration required — this changes SDLC skill-orchestration prose an
 - [x] do-sdlc §3c stage dispatch passes `run_in_background: false` explicitly (plus Hard Rule 6).
 
 **Delivered by this plan:**
-- [ ] do-build's PR step runs `gh pr list --head session/{slug}` (with `--repo $TARGET_GH_REPO` for cross-repo) before `gh pr create` and reuses an existing PR.
-- [ ] `sdlc/SKILL.md`'s search-based PR probe carries a live-ref `--head` cross-check note.
-- [ ] do-sdlc / sdlc docs declare slug-identity-always-wins ownership of `.worktrees/{slug}` + `session/{slug}`; no lane allocation.
-- [ ] `worktree_manager.py` and `resolve_branch_for_stage` are unchanged (confirmed by diff).
-- [ ] `tests/unit/test_sdlc_fork_no_background.py` scans **every** `context: fork` skill (incl. pthread, do-pr-review) for the background-then-exit pattern, plus the do-build PR-guard and do-sdlc positive assertions; fails loudly if any fork skill reintroduces the pattern.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] do-build's PR step runs `gh pr list --head session/{slug}` (with `--repo $TARGET_GH_REPO` for cross-repo) before `gh pr create` and reuses an existing PR.
+- [x] `sdlc/SKILL.md`'s search-based PR probe carries a live-ref `--head` cross-check note.
+- [x] do-sdlc / sdlc docs declare slug-identity-always-wins ownership of `.worktrees/{slug}` + `session/{slug}`; no lane allocation.
+- [x] `worktree_manager.py` and `resolve_branch_for_stage` are unchanged (confirmed by diff).
+- [x] `tests/unit/test_sdlc_fork_no_background.py` scans **every** `context: fork` skill (incl. pthread, do-pr-review) for the background-then-exit pattern, plus the do-build PR-guard and do-sdlc positive assertions; fails loudly if any fork skill reintroduces the pattern.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -391,6 +397,7 @@ Tier 1 core agents (`builder`, `validator`, `test-engineer`, `documentarian`) co
 | CONCERN 2 | coverage | Enforcement test claimed to cover "every context:fork skill" but only guarded do-build/do-sdlc; pthread unguarded; Open Question 3 unresolved | Test rescoped to discover ALL `context: fork` skills by frontmatter (incl. pthread, do-pr-review); Open Question 3 resolved | Prose mentions of `run_in_background: true` excluded to avoid false positives |
 | CONCERN 3 | attribution | Commit `8542ffb19` uncredited in Prior Art; Task 3 framed as re-fixing Defect 1 from scratch | Prior Art + Why-Previous-Fixes-Failed now credit `8542ffb19`; Task 3 reframed as "lock in `8542ffb19` with a regression test" | — |
 | NIT | sizing | Appetite mis-sized as Large; ~3 of 7 Success Criteria already satisfied on main | Appetite → **Small** with downsizing rationale; 3 criteria marked `[x]` (satisfied by `8542ffb19`) | — |
+| FRAMING (owner review) | architecture | Plan read as if a `context: fork` orchestrator drives production; the 5-day session-runner refactor moved production SDLC to the resumable `dev` subagent, which reframes all three defects (Defect 1 obsolete at orchestrator level / live at leaf; Defect 2 now a `dev`-fanout path; Defect 3 root cause dissolved in production, remains for human-collision) | Freshness Check gained an "Architectural reframe" note; Architectural Impact gained an execution-model bullet; Data Flow entry point, Defect 2, and Risk 1 re-anchored on the `dev`-subagent model | No scope change — the three deliverables (regression test, slug-wins prose, live-ref `--head` guard) are unchanged; only the narrative was corrected |
 
 ---
 

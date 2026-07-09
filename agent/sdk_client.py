@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -2889,144 +2890,173 @@ async def _run_harness_subprocess(
     num_turns: int = 0
     tool_call_count: int = 0
 
-    async for raw_line in proc.stdout:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
+    # Generic-harness cancellation backstop (issue #1938): if the awaiting
+    # coroutine is torn down (CancelledError) mid-stream or mid-communicate, the
+    # subprocess would otherwise survive parented to the worker. The ``finally``
+    # SIGKILLs it. This covers the three non-runner call sites (2534/2576/2632)
+    # uniformly; the runner path has its own dedicated reap in
+    # ``SessionRunner._run_one_turn``. CancelledError is NOT swallowed — a plain
+    # try/finally re-raises it after signalling, preserving cancellation
+    # semantics.
+    try:
+        async for raw_line in proc.stdout:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
 
-        # TTFT measurement: log first-stdout-byte elapsed time (issue #1227).
-        # Best-effort — any write failure is silently swallowed so that a
-        # permissions error on logs/ never blocks PM session output.
-        if not _first_stdout_seen and ttft_metadata is not None:
-            _first_stdout_seen = True
-            _ttft_seconds = time.monotonic() - _spawn_ts
-            try:
-                from agent.cold_start_metrics import record_ttft
-
-                record_ttft(ttft_seconds=_ttft_seconds, **ttft_metadata)
-            except Exception as _ttft_err:
-                logger.warning("[TTFT] metric write failed (non-fatal): %s", _ttft_err)
-
-        # Fire stdout-event callback for liveness tracking (#1036). Do NOT
-        # block the harness loop if the callback raises.
-        if on_stdout_event is not None:
-            try:
-                on_stdout_event()
-            except Exception as _cb_err:
-                logger.warning("on_stdout_event callback raised: %s", _cb_err)
-
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            logger.debug(f"Harness: skipping malformed JSON line: {line[:120]}")
-            continue
-
-        event_type = data.get("type")
-
-        # Capture-at-init (plan #1924, Race 5): the `system/init` event names
-        # the NEW invocation's session_id before any work happens. Callers
-        # (session runner) persist it immediately so a preempted/killed turn's
-        # partial transcript remains the resume target — never the stale
-        # pre-turn uuid. Callback exceptions are caught + logged.
-        if event_type == "system" and data.get("subtype") == "init":
-            if on_init is not None:
+            # TTFT measurement: log first-stdout-byte elapsed time (issue #1227).
+            # Best-effort — any write failure is silently swallowed so that a
+            # permissions error on logs/ never blocks PM session output.
+            if not _first_stdout_seen and ttft_metadata is not None:
+                _first_stdout_seen = True
+                _ttft_seconds = time.monotonic() - _spawn_ts
                 try:
-                    on_init(data)
+                    from agent.cold_start_metrics import record_ttft
+
+                    record_ttft(ttft_seconds=_ttft_seconds, **ttft_metadata)
+                except Exception as _ttft_err:
+                    logger.warning("[TTFT] metric write failed (non-fatal): %s", _ttft_err)
+
+            # Fire stdout-event callback for liveness tracking (#1036). Do NOT
+            # block the harness loop if the callback raises.
+            if on_stdout_event is not None:
+                try:
+                    on_stdout_event()
                 except Exception as _cb_err:
-                    logger.warning("on_init callback raised: %s", _cb_err)
-            continue
+                    logger.warning("on_stdout_event callback raised: %s", _cb_err)
 
-        if event_type == "result":
-            result_text = data.get("result", "")
-            session_id_from_harness = data.get("session_id")
-            # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
-            # the in-flight AgentSession so the dashboard can show how
-            # recently the SDK completed a turn. Best-effort, never raises.
-            # Passes the true AgentSession.session_id explicitly (issue
-            # #1935) — NOT data.get("session_id") (the Claude UUID) and NOT
-            # the env AGENT_SESSION_ID (unset in the worker process; the
-            # explicit id is what makes this write actually land).
             try:
-                from agent.hooks.liveness_writers import record_turn_boundary
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug(f"Harness: skipping malformed JSON line: {line[:120]}")
+                continue
 
-                record_turn_boundary(session_id=true_session_id)
-            except Exception as _liveness_err:
-                logger.debug("liveness turn-boundary write failed: %s", _liveness_err)
-            # Extract per-turn token + cost counts (issue #1128). These
-            # are the harness-side counterpart of `ResultMessage.usage`
-            # and `ResultMessage.total_cost_usd` from the SDK path. The
-            # `claude -p stream-json` protocol emits them on the same
-            # `result` event. `usage` is a dict; missing fields default
-            # to 0 inside `accumulate_session_tokens`. `total_cost_usd`
-            # is taken verbatim so it tracks upstream Anthropic pricing
-            # without a local price table.
-            raw_usage = data.get("usage")
-            if isinstance(raw_usage, dict):
-                usage = raw_usage
-            raw_cost = data.get("total_cost_usd")
-            if isinstance(raw_cost, (int, float)):
-                cost_usd = float(raw_cost)
-            # Issue #1245: extract per-call turn count off the result event.
-            # The `claude -p stream-json` protocol emits num_turns alongside
-            # cost/usage. Caller accumulates this onto AgentSession.turn_count
-            # so primary + fallback subprocess invocations sum correctly.
-            raw_turns = data.get("num_turns")
-            if raw_turns is None:
-                # Spike (issue #1245) confirmed num_turns is always present on the
-                # result event in real harness runs. If it's ever missing, log once
-                # at debug — the test fixture covers this path explicitly.
-                logger.debug("[harness] result event missing num_turns")
-            else:
+            event_type = data.get("type")
+
+            # Capture-at-init (plan #1924, Race 5): the `system/init` event names
+            # the NEW invocation's session_id before any work happens. Callers
+            # (session runner) persist it immediately so a preempted/killed turn's
+            # partial transcript remains the resume target — never the stale
+            # pre-turn uuid. Callback exceptions are caught + logged.
+            if event_type == "system" and data.get("subtype") == "init":
+                if on_init is not None:
+                    try:
+                        on_init(data)
+                    except Exception as _cb_err:
+                        logger.warning("on_init callback raised: %s", _cb_err)
+                continue
+
+            if event_type == "result":
+                result_text = data.get("result", "")
+                session_id_from_harness = data.get("session_id")
+                # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
+                # the in-flight AgentSession so the dashboard can show how
+                # recently the SDK completed a turn. Best-effort, never raises.
+                # Passes the true AgentSession.session_id explicitly (issue
+                # #1935) — NOT data.get("session_id") (the Claude UUID) and NOT
+                # the env AGENT_SESSION_ID (unset in the worker process; the
+                # explicit id is what makes this write actually land).
                 try:
-                    num_turns = int(raw_turns)
-                except (TypeError, ValueError):
-                    logger.warning("[harness] result event num_turns not int: %r", raw_turns)
-            if session_id_from_harness:
-                logger.debug(f"Harness session_id for resume: {session_id_from_harness}")
-            break
+                    from agent.hooks.liveness_writers import record_turn_boundary
 
-        if event_type == "assistant":
-            # Issue #1245: count tool_use blocks from assistant messages.
-            # Each tool invocation appears as a content block with
-            # type=="tool_use" inside data["message"]["content"]. The shape
-            # is the real `claude -p stream-json` protocol — top-level
-            # event.type=="tool_use" does NOT fire.
-            message = data.get("message", {}) or {}
-            content_blocks = message.get("content", []) or []
-            tool_use_blocks = [
-                b for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
-            ]
-            tool_call_count += len(tool_use_blocks)
-            continue
+                    record_turn_boundary(session_id=true_session_id)
+                except Exception as _liveness_err:
+                    logger.debug("liveness turn-boundary write failed: %s", _liveness_err)
+                # Extract per-turn token + cost counts (issue #1128). These
+                # are the harness-side counterpart of `ResultMessage.usage`
+                # and `ResultMessage.total_cost_usd` from the SDK path. The
+                # `claude -p stream-json` protocol emits them on the same
+                # `result` event. `usage` is a dict; missing fields default
+                # to 0 inside `accumulate_session_tokens`. `total_cost_usd`
+                # is taken verbatim so it tracks upstream Anthropic pricing
+                # without a local price table.
+                raw_usage = data.get("usage")
+                if isinstance(raw_usage, dict):
+                    usage = raw_usage
+                raw_cost = data.get("total_cost_usd")
+                if isinstance(raw_cost, (int, float)):
+                    cost_usd = float(raw_cost)
+                # Issue #1245: extract per-call turn count off the result event.
+                # The `claude -p stream-json` protocol emits num_turns alongside
+                # cost/usage. Caller accumulates this onto AgentSession.turn_count
+                # so primary + fallback subprocess invocations sum correctly.
+                raw_turns = data.get("num_turns")
+                if raw_turns is None:
+                    # Spike (issue #1245) confirmed num_turns is always present on the
+                    # result event in real harness runs. If it's ever missing, log once
+                    # at debug — the test fixture covers this path explicitly.
+                    logger.debug("[harness] result event missing num_turns")
+                else:
+                    try:
+                        num_turns = int(raw_turns)
+                    except (TypeError, ValueError):
+                        logger.warning("[harness] result event num_turns not int: %r", raw_turns)
+                if session_id_from_harness:
+                    logger.debug(f"Harness session_id for resume: {session_id_from_harness}")
+                break
 
-        if event_type == "stream_event":
-            event = data.get("event", {})
-            if event.get("type") == "content_block_start":
-                full_text = ""
-            elif event.get("type") == "content_block_delta":
-                delta = event.get("delta", {}) or {}
-                delta_type = delta.get("type")
-                if delta_type == "text_delta":
-                    chunk = delta.get("text", "")
-                    if chunk:
-                        full_text += chunk
-                elif delta_type == "thinking_delta":
-                    # Pillar A (issue #1172): bubble extended-thinking content
-                    # to the dashboard so operators can see what the agent is
-                    # mulling. Best-effort; throttled in liveness_writers.
-                    chunk = delta.get("thinking", "") or delta.get("text", "")
-                    if chunk:
-                        try:
-                            from agent.hooks.liveness_writers import (
-                                record_thinking_excerpt,
-                            )
+            if event_type == "assistant":
+                # Issue #1245: count tool_use blocks from assistant messages.
+                # Each tool invocation appears as a content block with
+                # type=="tool_use" inside data["message"]["content"]. The shape
+                # is the real `claude -p stream-json` protocol — top-level
+                # event.type=="tool_use" does NOT fire.
+                message = data.get("message", {}) or {}
+                content_blocks = message.get("content", []) or []
+                tool_use_blocks = [
+                    b for b in content_blocks if isinstance(b, dict) and b.get("type") == "tool_use"
+                ]
+                tool_call_count += len(tool_use_blocks)
+                continue
 
-                            record_thinking_excerpt(chunk)
-                        except Exception as _liveness_err:
-                            logger.debug("liveness thinking-delta write failed: %s", _liveness_err)
+            if event_type == "stream_event":
+                event = data.get("event", {})
+                if event.get("type") == "content_block_start":
+                    full_text = ""
+                elif event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {}) or {}
+                    delta_type = delta.get("type")
+                    if delta_type == "text_delta":
+                        chunk = delta.get("text", "")
+                        if chunk:
+                            full_text += chunk
+                    elif delta_type == "thinking_delta":
+                        # Pillar A (issue #1172): bubble extended-thinking content
+                        # to the dashboard so operators can see what the agent is
+                        # mulling. Best-effort; throttled in liveness_writers.
+                        chunk = delta.get("thinking", "") or delta.get("text", "")
+                        if chunk:
+                            try:
+                                from agent.hooks.liveness_writers import (
+                                    record_thinking_excerpt,
+                                )
 
-    _, stderr_data = await proc.communicate()
-    returncode = proc.returncode if proc.returncode is not None else 0
+                                record_thinking_excerpt(chunk)
+                            except Exception as _liveness_err:
+                                logger.debug(
+                                    "liveness thinking-delta write failed: %s", _liveness_err
+                                )
+
+        _, stderr_data = await proc.communicate()
+        returncode = proc.returncode if proc.returncode is not None else 0
+    finally:
+        # Kill the subprocess if it is still alive because the awaiting
+        # coroutine is being torn down (e.g. CancelledError). SAFETY: only
+        # ``killpg`` when ``start_new_session`` is True — the subprocess then
+        # owns its own group (pgid == pid). When it is False, ``os.getpgid``
+        # returns the WORKER's group and ``killpg`` would kill the worker, so
+        # fall back to a single-pid ``proc.kill()``. ``ProcessLookupError`` is
+        # swallowed (group/pid already gone). CancelledError re-raises naturally.
+        if proc.returncode is None:
+            try:
+                if start_new_session:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
+            except Exception as _reap_err:  # noqa: BLE001
+                logger.warning("[harness] cancellation reap failed (non-fatal): %s", _reap_err)
 
     # Fire SDK-finished callback once the subprocess has exited (#1269).
     # Paired with on_sdk_started — together they bracket the subprocess

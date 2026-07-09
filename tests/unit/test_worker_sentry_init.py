@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from monitoring.sentry_config import configure_sentry
+from monitoring.sentry_config import configure_sentry, drop_orphan_noise
 
 
 def test_configure_sentry_inits_when_dsn_set_and_no_guard(monkeypatch):
@@ -87,3 +87,25 @@ def test_configure_sentry_passes_before_send_for_bridge(monkeypatch):
     assert result is True
     _, kwargs = fake_sentry.init.call_args
     assert kwargs["before_send"] is _before_send
+
+
+def test_configure_sentry_passes_before_send_for_worker(monkeypatch):
+    """The worker's real Sentry init threads drop_orphan_noise as before_send."""
+    monkeypatch.setenv("SENTRY_DSN", "https://example@sentry.io/123")
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+
+    fake_sentry = MagicMock()
+    with (
+        patch.dict("sys.modules", {"sentry_sdk": fake_sentry}),
+        patch(
+            "monitoring.sentry_config.subprocess.check_output",
+            return_value="abc123\n",
+        ),
+    ):
+        result = configure_sentry("worker", before_send=drop_orphan_noise)
+
+    assert result is True
+    fake_sentry.init.assert_called_once()
+    _, kwargs = fake_sentry.init.call_args
+    assert kwargs["before_send"] is drop_orphan_noise

@@ -516,3 +516,221 @@ class TestGenericCasStillGovernsWaitingForChildren:
             "C1's parent transition must still call the shared transition_status() "
             "helper so the generic CAS applies to it"
         )
+
+
+# ===================================================================
+# touch_issue_lock — issue-level SDLC ownership lock (issue #1954)
+# ===================================================================
+
+
+class TestTouchIssueLock:
+    """Tests for touch_issue_lock() and the per-process holder_token.
+
+    Unlike claim_pending_run's real-Redis tests, these mock Redis SET/GET/
+    EXPIRE directly: the tests need to control the exact stored JSON payload
+    to simulate a foreign holder_token cheaply, including the critical
+    round-2 regression case (identical session_id, different holder_token)
+    that a real second Redis client couldn't easily reproduce in-process.
+    """
+
+    def setup_method(self):
+        import models.session_lifecycle as lifecycle_module
+
+        # Reset the per-process holder-token cache so every test controls
+        # its own token value deterministically via _process_holder_token().
+        lifecycle_module._holder_token = None
+
+    def test_acquire_when_key_does_not_exist(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = True
+            result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is True
+        assert result.owner_session_id == "sdlc-local-1954"
+        mock_redis.set.assert_called_once()
+        _args, kwargs = mock_redis.set.call_args
+        assert _args[0] == "session:issuelock:1954"
+        assert kwargs.get("nx") is True
+
+    def test_renew_by_same_process_owner(self):
+        """Same process calling again (same holder_token) renews via EXPIRE."""
+        import json
+
+        from models.session_lifecycle import _process_holder_token, touch_issue_lock
+
+        token = _process_holder_token()
+        stored = json.dumps(
+            {"holder_token": token, "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False  # NX fails -- key already exists
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is True
+        assert result.owner_session_id == "sdlc-local-1954"
+        mock_redis.expire.assert_called_once()
+
+    def test_reject_by_different_process_same_session_id(self):
+        """Critical round-2 regression: SAME session_id string, DIFFERENT
+        holder_token. Both a local CLI session and the worker resolve the
+        identical deterministic session_id for the same issue -- comparing
+        by session_id would make the lock a no-op. Ownership must be
+        decided by holder_token alone."""
+        import json
+
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "holder_token": "foreign-token-abc",
+                "session_id": "sdlc-local-1954",
+                "pid": 999,
+                "hostname": "other-host",
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is False
+        assert result.owner_session_id == "sdlc-local-1954"
+        mock_redis.expire.assert_not_called()
+
+    def test_reject_by_non_owner_different_session_and_token(self):
+        import json
+
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "holder_token": "foreign-token",
+                "session_id": "worker-session-1954",
+                "pid": 42,
+                "hostname": "worker-host",
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is False
+        assert result.owner_session_id == "worker-session-1954"
+
+    def test_fail_open_on_redis_exception(self, caplog):
+        import logging
+
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.side_effect = RuntimeError("redis down")
+            with caplog.at_level(logging.WARNING):
+                result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is True
+        assert any("failing open" in r.message for r in caplog.records)
+
+    def test_malformed_legacy_value_treated_as_foreign(self):
+        """A non-JSON stored value (malformed or legacy) must never raise --
+        it fails toward 'not acquired', treated as a foreign holder."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = "not-json-legacy-value"
+            result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is False
+
+    def test_ttl_expiry_race_reclaim_succeeds(self):
+        """SET NX fails (key existed at that instant), but the key has since
+        expired by the time of the follow-up GET -- treated as free."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = None
+            result = touch_issue_lock(1954, "sdlc-local-1954")
+
+        assert result.acquired is True
+
+    def test_peek_has_no_side_effect_on_free_lock(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = None
+            result = touch_issue_lock(1954, "sdlc-local-1954", peek=True)
+
+        assert result.acquired is True
+        assert result.owner_session_id is None
+        mock_redis.set.assert_not_called()
+        mock_redis.expire.assert_not_called()
+
+    def test_peek_reports_foreign_holder_without_mutating(self):
+        import json
+
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "holder_token": "foreign-token",
+                "session_id": "worker-session-1954",
+                "pid": 42,
+                "hostname": "worker-host",
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.owner_session_id == "worker-session-1954"
+        mock_redis.set.assert_not_called()
+        mock_redis.expire.assert_not_called()
+
+    def test_guard_falsy_issue_number_is_noop_fail_open(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            result_none = touch_issue_lock(None, "sdlc-local-x")
+            result_zero = touch_issue_lock(0, "sdlc-local-x")
+
+        assert result_none.acquired is True
+        assert result_zero.acquired is True
+        mock_redis.set.assert_not_called()
+        mock_redis.get.assert_not_called()
+
+    def test_default_ttl_is_issue_lock_ttl_seconds(self):
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = True
+            touch_issue_lock(1954, "sdlc-local-1954")
+
+        _args, kwargs = mock_redis.set.call_args
+        assert kwargs.get("ex") == ISSUE_LOCK_TTL_SECONDS
+
+
+class TestProcessHolderToken:
+    """Tests for _process_holder_token() -- the per-process lock identity."""
+
+    def setup_method(self):
+        import models.session_lifecycle as lifecycle_module
+
+        lifecycle_module._holder_token = None
+
+    def test_stable_across_calls_within_process(self):
+        from models.session_lifecycle import _process_holder_token
+
+        first = _process_holder_token()
+        second = _process_holder_token()
+        assert first == second
+        assert isinstance(first, str) and len(first) > 0

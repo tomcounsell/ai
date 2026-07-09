@@ -92,6 +92,9 @@ def make_runner(script, *, session=None, steering=None, **kwargs):
 
 
 async def test_user_route_delivers_and_exits():
+    # A real [/user] answer stays "pm_user" — distinct from the needs_human-edge
+    # fallback (test_needs_human_edge_with_unroutable_text_delivers below), which
+    # now exits "pm_needs_human". This assertion pins the real-answer branch.
     runner, deliveries, session, driver = make_runner(["[/user]\nhello human"])
     summary = await runner.run("do the thing")
     assert deliveries == ["hello human"]
@@ -190,7 +193,8 @@ async def test_needs_human_edge_with_unroutable_text_delivers():
     runner, deliveries, _, _ = make_runner([outcome])
     summary = await runner.run("go")
     assert deliveries == ["Which environment should I target?"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason == "pm_needs_human"
+    assert summary.user_facing_routed is True
 
 
 # --------------------------------------------------------------------------

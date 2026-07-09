@@ -25,11 +25,13 @@ from scripts._baseline_common import (
     parse_junitxml,
 )
 from scripts.refresh_test_baseline import (
+    MIN_USABLE_RUNS_FOR_FLAKY_DETECTION,
     aggregate_outcomes,
     build_baseline,
     capture_commit,
     classify,
     load_existing_notes,
+    main,
     resolve_output_path,
     run_pytest_once,
 )
@@ -119,7 +121,82 @@ def test_missing_junitxml_raises_parse_error(tmp_path: Path) -> None:
         parse_junitxml(tmp_path / "does-not-exist.xml")
 
 
-def test_testcase_with_no_name_is_flagged(tmp_path: Path) -> None:
+def test_testcase_with_no_name_and_no_error_is_skipped_not_discarded(tmp_path: Path) -> None:
+    """Issue #1853: a nameless <testcase> with no <error> child must be skipped,
+    not raise and discard the whole run. Other testcases in the same run must
+    still be parsed normally.
+    """
+    xml = textwrap.dedent(
+        """\
+        <?xml version="1.0" encoding="utf-8"?>
+        <testsuites>
+          <testsuite name="pytest">
+            <testcase classname="tests.unit.test_foo"/>
+            <testcase classname="tests.unit.test_foo" name="test_ok"/>
+          </testsuite>
+        </testsuites>
+        """
+    )
+    path = _write_xml(tmp_path, xml)
+    outcomes = parse_junitxml(path)
+    assert outcomes == {"tests/unit/test_foo.py::test_ok": "pass"}
+
+
+def test_testcase_with_no_name_but_with_error_is_classified(tmp_path: Path) -> None:
+    """Issue #1853: a nameless <testcase> WITH an <error> child is a genuine
+    collection error -- classify it under a best-effort node id instead of
+    discarding the whole run.
+    """
+    xml = textwrap.dedent(
+        """\
+        <?xml version="1.0" encoding="utf-8"?>
+        <testsuites>
+          <testsuite name="pytest">
+            <testcase classname="tests.unit.test_broken">
+              <error message="collection error, worker crash"/>
+            </testcase>
+            <testcase classname="tests.unit.test_foo" name="test_ok"/>
+          </testsuite>
+        </testsuites>
+        """
+    )
+    path = _write_xml(tmp_path, xml)
+    outcomes = parse_junitxml(path)
+    assert outcomes["tests.unit.test_broken"] == "collection_error"
+    assert outcomes["tests/unit/test_foo.py::test_ok"] == "pass"
+
+
+def test_testcase_with_no_name_no_classname_and_error_gets_synthetic_id(
+    tmp_path: Path,
+) -> None:
+    """A nameless, classname-less <testcase> with an <error> child still gets
+    a best-effort synthetic node id instead of raising.
+    """
+    xml = textwrap.dedent(
+        """\
+        <?xml version="1.0" encoding="utf-8"?>
+        <testsuites>
+          <testsuite name="pytest">
+            <testcase>
+              <error message="worker crashed before reporting a node id"/>
+            </testcase>
+          </testsuite>
+        </testsuites>
+        """
+    )
+    path = _write_xml(tmp_path, xml)
+    outcomes = parse_junitxml(path)
+    assert len(outcomes) == 1
+    (node_id, outcome) = next(iter(outcomes.items()))
+    assert node_id.startswith("<unknown>::")
+    assert outcome == "collection_error"
+
+
+def test_junitxml_with_only_a_nameless_testcase_does_not_raise(tmp_path: Path) -> None:
+    """A junitxml containing ONLY a nameless, error-less testcase returns an
+    empty dict rather than raising -- the run is still usable (0 failures
+    observed), not discarded.
+    """
     xml = textwrap.dedent(
         """\
         <?xml version="1.0" encoding="utf-8"?>
@@ -131,8 +208,8 @@ def test_testcase_with_no_name_is_flagged(tmp_path: Path) -> None:
         """
     )
     path = _write_xml(tmp_path, xml)
-    with pytest.raises(JunitxmlParseError):
-        parse_junitxml(path)
+    outcomes = parse_junitxml(path)
+    assert outcomes == {}
 
 
 # ---------------------------------------------------------------------------
@@ -516,3 +593,88 @@ def test_run_pytest_once_logs_stderr_tail_on_startup_crash(
         "what caused the crash -- otherwise the signal is just 'all N runs "
         "failed' again."
     )
+
+
+# ---------------------------------------------------------------------------
+# main(): degraded (<2 usable runs) loud-failure path
+#
+# Issue #1853: a refresh that ends up with fewer than
+# MIN_USABLE_RUNS_FOR_FLAKY_DETECTION surviving runs must never write a
+# baseline silently -- with 0 or 1 usable runs there's no majority to compare
+# against, so every transient flake would be misclassified "real". These
+# tests drive main() end-to-end via mocked run_pytest_once/parse_junitxml so
+# no real multi-minute pytest suite is ever invoked.
+# ---------------------------------------------------------------------------
+
+
+def test_min_usable_runs_constant_is_two() -> None:
+    assert MIN_USABLE_RUNS_FOR_FLAKY_DETECTION == 2
+
+
+def test_main_emits_warning_and_exits_nonzero_with_one_usable_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "baseline.json"
+
+    with (
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=True),
+        patch(
+            "scripts.refresh_test_baseline.parse_junitxml",
+            side_effect=[
+                {"tests/unit/test_a.py::test_ok": "pass"},
+                JunitxmlParseError("simulated discard"),
+                JunitxmlParseError("simulated discard"),
+            ],
+        ),
+    ):
+        exit_code = main(["--runs", "3", "--output", str(output_path)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "WARNING: only 1 usable run(s)" in captured.out
+    # A degraded baseline is still written (there was 1 usable run to build
+    # from) -- the loudness is the exit code + warning text, not withholding
+    # the file.
+    assert output_path.exists()
+
+
+def test_main_succeeds_silently_with_two_usable_runs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "baseline.json"
+
+    with (
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=True),
+        patch(
+            "scripts.refresh_test_baseline.parse_junitxml",
+            side_effect=[
+                {"tests/unit/test_a.py::test_ok": "pass"},
+                {"tests/unit/test_a.py::test_ok": "pass"},
+            ],
+        ),
+    ):
+        exit_code = main(["--runs", "2", "--output", str(output_path)])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.out
+    assert output_path.exists()
+
+
+def test_main_dry_run_emits_warning_and_exits_nonzero_when_degraded(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with (
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=True),
+        patch(
+            "scripts.refresh_test_baseline.parse_junitxml",
+            side_effect=[{"tests/unit/test_a.py::test_ok": "pass"}],
+        ),
+    ):
+        exit_code = main(["--runs", "1", "--dry-run"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "WARNING: only 1 usable run(s)" in captured.err

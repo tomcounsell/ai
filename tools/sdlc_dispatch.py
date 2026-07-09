@@ -34,12 +34,34 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from datetime import UTC, datetime
 
 from tools._sdlc_utils import find_session as _find_session
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_issue_number_from_url(issue_url: str | None) -> int | None:
+    """Extract the GitHub issue number from an ``issue_url``.
+
+    Mirrors the ``/issues/{N}`` suffix convention used throughout
+    ``tools/_sdlc_utils.py::find_session_by_issue`` (its ``target_suffix``
+    logic checks ``issue_url.endswith(f"/issues/{issue_number}")``) — this is
+    the reverse direction: extracting the number FROM the url. Returns
+    ``None`` if ``issue_url`` is falsy or does not contain an ``issues/N``
+    segment. Never raises.
+    """
+    if not issue_url:
+        return None
+    match = re.search(r"issues/(\d+)", issue_url)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def record_dispatch_for_session(
@@ -53,6 +75,17 @@ def record_dispatch_for_session(
     Wraps ``agent.sdlc_router.record_dispatch`` with the optimistic-retry
     safe write helper from ``tools.stage_states_helpers``.
 
+    Issue-lock enforcement (issue #1954): before writing, this calls
+    ``touch_issue_lock()`` DIRECTLY -- it must NOT assume ``ensure_session()``
+    ran first, since ``tools._sdlc_utils.find_session(ensure=True)``'s Step-2
+    short-circuit (matching an existing session via ``find_session_by_issue``)
+    skips ``ensure_session()`` entirely for continuing sessions. The issue
+    number is derived by parsing ``session.issue_url`` (see
+    ``_parse_issue_number_from_url``), NOT from a mirrored ``issue_number``
+    field, since a continuing session created before this feature shipped may
+    not have one. If the lock is held by a different live session, the write
+    is refused and this returns ``False``.
+
     Args:
         session: AgentSession to write to.
         skill: The sub-skill being dispatched (e.g. ``"/do-build"``).
@@ -61,11 +94,30 @@ def record_dispatch_for_session(
         now: Optional timestamp override for testability.
 
     Returns:
-        ``True`` if the write succeeded, ``False`` otherwise.
+        ``True`` if the write succeeded, ``False`` otherwise (including when
+        the issue lock is held by a different session).
     """
     if session is None:
         logger.debug("sdlc_dispatch: session is None — skipping record")
         return False
+
+    issue_number = _parse_issue_number_from_url(getattr(session, "issue_url", None))
+    if issue_number:
+        try:
+            from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+            session_id = getattr(session, "session_id", None) or ""
+            lock_result = touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+            if not lock_result.acquired:
+                logger.debug(
+                    "sdlc_dispatch: issue #%s lock held by a different session (%s) -- "
+                    "refusing to record dispatch",
+                    issue_number,
+                    lock_result.owner_session_id,
+                )
+                return False
+        except Exception as e:
+            logger.debug(f"sdlc_dispatch: touch_issue_lock failed (non-fatal): {e}")
 
     try:
         from agent.sdlc_router import record_dispatch
@@ -88,6 +140,46 @@ def record_dispatch_for_session(
     if not ok:
         logger.debug(f"sdlc_dispatch: write not confirmed for skill={skill!r}")
     return ok
+
+
+def _peek_issue_lock_conflict(session) -> dict | None:
+    """Read-only check for whether a dispatch write failure was issue-lock
+    contention (issue #1954 gap: the CLI ``ISSUE_LOCKED`` shape).
+
+    ``record_dispatch_for_session()`` intentionally stays a plain ``bool`` --
+    other call sites and tests already depend on that return type -- so a
+    ``False`` result is ambiguous: lock contention and unrelated write
+    failures (e.g. a Redis write conflict in ``update_stage_states``) both
+    collapse to the same ``False``. This helper disambiguates AFTER the fact
+    with a non-mutating ``peek=True`` lock check, mirroring the
+    ``session.issue_url`` -> ``_parse_issue_number_from_url`` derivation
+    ``record_dispatch_for_session()`` performs internally. It never acquires,
+    renews, or otherwise mutates the lock.
+
+    Returns:
+        ``{"reason": "ISSUE_LOCKED", "owner_session_id": "..."}`` if the lock
+        is currently held by a different live session. ``None`` if the lock
+        is free/owned by this session (failure was unrelated to the lock),
+        the session has no parseable issue number, or the peek itself
+        errors.
+    """
+    issue_number = _parse_issue_number_from_url(getattr(session, "issue_url", None))
+    if not issue_number:
+        return None
+
+    try:
+        from models.session_lifecycle import touch_issue_lock
+
+        session_id = getattr(session, "session_id", None) or ""
+        lock_result = touch_issue_lock(issue_number, session_id, peek=True)
+    except Exception as e:
+        logger.debug(f"sdlc_dispatch: issue-lock peek failed (non-fatal): {e}")
+        return None
+
+    if lock_result.acquired:
+        return None
+
+    return {"reason": "ISSUE_LOCKED", "owner_session_id": lock_result.owner_session_id}
 
 
 def get_dispatch_history(session) -> list:
@@ -139,7 +231,21 @@ def _cli_record(args) -> dict:
         pr_number=args.pr_number,
     )
     history = get_dispatch_history(session)
-    return {"ok": ok, "history_length": len(history)}
+    result = {"ok": ok, "history_length": len(history)}
+
+    # #1954 gap: record_dispatch_for_session() returning False is ambiguous
+    # (issue-lock contention vs. any other write failure). On failure, peek
+    # the lock (read-only) to see whether it was specifically lock
+    # contention, and if so surface the documented ISSUE_LOCKED shape
+    # (SKILL.md: "dispatch record/ensure_session surface the same shape at
+    # their own call sites"). Non-lock failures keep the pre-existing
+    # {"ok": False, "history_length": N} shape unchanged -- additive only.
+    if not ok:
+        lock_conflict = _peek_issue_lock_conflict(session)
+        if lock_conflict is not None:
+            result.update(lock_conflict)
+
+    return result
 
 
 def _cli_get(args) -> list:

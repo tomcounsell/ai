@@ -24,8 +24,8 @@ The algorithm:
     3. If no rule matches, return ``Blocked(reason="no matching rule")``.
 
 The ``DISPATCH_RULES`` ordering mirrors the documented row numbers
-(1, 2, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 9, 10, 10b). Each rule carries a
-``row_id`` string for traceability in parity tests.
+(1, 2, 2b, 2c, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 8c, 8d, 9, 10, 10b). Each rule
+carries a ``row_id`` string for traceability in parity tests.
 """
 
 from __future__ import annotations
@@ -278,7 +278,15 @@ def guard_g1_critique_loop(
     If the latest critique verdict is ``NEEDS REVISION`` or ``MAJOR REWORK``
     AND the last dispatched skill was ``/do-plan-critique``, the router MUST
     route to ``/do-plan`` instead of re-critiquing the unchanged plan.
+
+    Open-PR step-aside (#1932 gap b2): once a PR exists, this guard defers to
+    G3 (``guard_g3_pr_lock``), the canonical open-PR plan-stage redirect —
+    routing straight to ``/do-plan`` here would bypass G3's PR-aware target
+    selection.
     """
+    if meta.get("pr_number"):
+        return None
+
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     if CRITIQUE_NEEDS_REVISION not in verdict and CRITIQUE_MAJOR_REWORK not in verdict:
         return None
@@ -469,6 +477,13 @@ def guard_g5_artifact_hash_cache(
 
     verdict_text = normalize_verdict(_verdict_text(record))
     if CRITIQUE_NEEDS_REVISION in verdict_text or CRITIQUE_MAJOR_REWORK in verdict_text:
+        # Open-PR step-aside (#1932 gap b3): mirrors the READY_TO_BUILD
+        # branch's existing pr_number defer below — once a PR exists, a
+        # cached NEEDS REVISION/MAJOR REWORK verdict must not route back to
+        # /do-plan. Defer to G3 (guard_g3_pr_lock), the canonical open-PR
+        # plan-stage redirect.
+        if meta.get("pr_number"):
+            return None
         return Dispatch(
             skill=SKILL_DO_PLAN,
             reason="G5: cached CRITIQUE verdict is NEEDS REVISION on unchanged plan hash",
@@ -696,7 +711,13 @@ def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict)
     (returns False) and lets row 2b re-dispatch ``/do-plan-critique`` for a
     fresh critique. Mirrors the ``_review_verdict_is_stale`` step-aside in
     ``_rule_review_has_findings``.
+
+    Open-PR step-aside (#1932 gap b1): once a PR exists, a NEEDS REVISION
+    critique verdict must never route back to ``/do-plan`` — this row steps
+    aside and lets row 7 / G3 own PR-stage routing instead.
     """
+    if meta.get("pr_number"):
+        return False
     if _critique_verdict_is_stale(stage_states):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
@@ -1000,11 +1021,75 @@ def _rule_review_in_progress_no_verdict(stage_states: dict, meta: dict, context:
     return True
 
 
+def _rule_review_crashed_after_dispatch(stage_states: dict, meta: dict, context: dict) -> bool:
+    """PATCH completed, /do-pr-review was dispatched, but no verdict was ever recorded.
+
+    The #1932 gap (a) crash: /do-pr-review is dispatched after PATCH completes,
+    but the skill crashes (or partially writes) before persisting a REVIEW
+    verdict. Depending on exactly where the crash lands, REVIEW is left marked
+    either ``failed`` (dead-ends the router at ``Blocked('no matching dispatch
+    rule')``) or ``completed`` (silently misroutes to row 9's ``/do-docs``,
+    skipping review entirely). Both are recovered the same way: re-dispatch
+    ``/do-pr-review``.
+
+    Marker-agnostic by design (mirrors row 2c/8c): matches on the ABSENCE of a
+    recorded verdict plus ``last_dispatched_skill == /do-pr-review``, not on a
+    specific REVIEW marker value, since the crash can leave either marker.
+
+    Disjoint from neighboring rows by construction (no defensive re-checks
+    needed — mirrors the row-8c treatment in bb4366a4):
+      - Row 7 (``_rule_pr_exists_no_review``) owns REVIEW in
+        (None, pending, ready) with no verdict. The earlier
+        ``stage_states.get("REVIEW") not in (STATUS_COMPLETED,
+        STATUS_FAILED)`` restriction already excludes that band, so row 7's
+        territory can never reach this point.
+      - Row 8b (``_rule_patch_applied_after_review``) owns the case where the
+        last dispatch was ``/do-patch`` (not ``/do-pr-review``). The earlier
+        ``last != SKILL_DO_PR_REVIEW`` restriction already pins
+        ``last_dispatched_skill`` to ``/do-pr-review``, so row 8b's territory
+        can never reach this point.
+      - Row 8c (``_rule_review_in_progress_no_verdict``) owns
+        REVIEW == in_progress. No separate step-aside line is needed here:
+        the earlier ``stage_states.get("REVIEW") not in (STATUS_COMPLETED,
+        STATUS_FAILED)`` restriction already excludes the in_progress band
+        by construction.
+      - Row 9 (``_rule_review_approved_docs_not_done``) is disjoint "by
+        verdict": a sibling fix (#1932 gap c) gates row 9 on a recorded
+        APPROVED verdict, while row 8d requires NO recorded verdict at all —
+        the two predicates can never both match the same state.
+
+    Loop-bound by G4 (``guard_g4_oscillation`` via ``same_stage_dispatch_count``):
+    repeated re-dispatch of ``/do-pr-review`` without a state change escalates
+    to Blocked after ``MAX_SAME_STAGE_DISPATCHES`` turns, same as rows 2c/8c.
+
+    See #1932.
+    """
+    if not meta.get("pr_number"):
+        return False
+    if stage_states.get("PATCH") != STATUS_COMPLETED:
+        return False
+    if stage_states.get("REVIEW") not in (STATUS_COMPLETED, STATUS_FAILED):
+        return False
+    # A recorded verdict means another row owns this state.
+    if _latest_review_verdict(stage_states, meta).strip():
+        return False
+    last = meta.get("last_dispatched_skill") or ""
+    if last != SKILL_DO_PR_REVIEW:
+        return False
+    return True
+
+
 def _rule_review_approved_docs_not_done(stage_states: dict, meta: dict, context: dict) -> bool:
     """Review APPROVED, zero findings, docs NOT done."""
     if not meta.get("pr_number"):
         return False
     if stage_states.get("REVIEW") != STATUS_COMPLETED:
+        return False
+    # #1932 gap (c): gate on a recorded APPROVED verdict at the source, rather
+    # than inferring "approved" from REVIEW==completed alone — REVIEW can be
+    # marked completed with no verdict ever recorded (crash), which silently
+    # misrouted here to /do-docs. Row 8d owns that no-verdict state instead.
+    if REVIEW_APPROVED not in normalize_verdict(_latest_review_verdict(stage_states, meta)):
         return False
     docs_status = stage_states.get("DOCS")
     return docs_status not in (STATUS_COMPLETED,)
@@ -1051,6 +1136,9 @@ _rule_review_has_findings.__doc__ = "PR review has findings (blockers, nits, OR 
 _rule_patch_applied_after_review.__doc__ = "Patch applied after review findings"
 _rule_review_in_progress_no_verdict.__doc__ = (
     "Review in_progress, no verdict recorded (stalled) — re-review"
+)
+_rule_review_crashed_after_dispatch.__doc__ = (
+    "PATCH completed, /do-pr-review dispatched, no verdict recorded (crashed) — re-run review"
 )
 _rule_review_approved_docs_not_done.__doc__ = (
     "Review APPROVED with zero findings, docs NOT done (see Step 3)"
@@ -1167,6 +1255,20 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_review_in_progress_no_verdict,
         skill=SKILL_DO_PR_REVIEW,
         reason="Review stalled with no recorded verdict — re-run review",
+    ),
+    # Row 8d (#1932 gap a): PATCH completed, /do-pr-review was dispatched, but
+    # no verdict was ever recorded — the review skill crashed before
+    # persisting a verdict, leaving REVIEW at either "failed" (dead-ends the
+    # router at Blocked) or "completed" (silently misroutes to row 9). Both
+    # are recovered by re-dispatching /do-pr-review. Disjoint from rows
+    # 7/8b/8c via explicit step-asides in the predicate, and disjoint from
+    # row 9 "by verdict" (row 9 will require a recorded APPROVED verdict; 8d
+    # requires NO recorded verdict). Loop-bound by G4.
+    DispatchRule(
+        row_id="8d",
+        state_predicate=_rule_review_crashed_after_dispatch,
+        skill=SKILL_DO_PR_REVIEW,
+        reason="Review dispatch crashed without recording a verdict — re-run review",
     ),
     DispatchRule(
         row_id="9",
