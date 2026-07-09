@@ -973,6 +973,11 @@ def _never_started_past_grace(
 
     Returns False (safe default) when:
       - ``sdk_ever_output`` is True (session has produced output).
+      - Own-progress sticky evidence is present (issue #1962):
+        ``turn_count > 0``, non-empty ``log_path``, or ``claude_session_uuid``
+        set. Any one proves the session STARTED, so it can never be "never
+        started" — even a bridge-originated remote session that lacks the
+        ``*_at`` liveness fields.
       - ``started_at`` and ``created_at`` are both None (legacy / phantom
         record) — no running_seconds to compute.
       - ``running_seconds`` is below the combined threshold.
@@ -986,6 +991,26 @@ def _never_started_past_grace(
         # agent.session_runner.liveness.
         sdk_ever_output = derive_sdk_ever_output(entry)
         if sdk_ever_output:
+            return False
+
+        # Own-progress sticky evidence (#944/#963, issue #1962): a session
+        # carrying any of ``turn_count > 0`` / ``log_path`` / ``claude_session_uuid``
+        # has demonstrably STARTED — a turn boundary was observed, a log file
+        # was opened, or the SDK authenticated. These sticky fields cannot
+        # prove *current* liveness (that is the fresh-heartbeat / sdk_ever_output
+        # concern, gated elsewhere), but "never started" is a strictly weaker
+        # claim: a started-then-stuck session is NOT a never-started one.
+        # Without this guard, a bridge-originated remote session (turn_count>0
+        # but no local log_path/uuid or ``*_at`` liveness fields) is
+        # misclassified as never-started once past the grace window, and the
+        # D0 gate in ``_has_progress`` sub-check B short-circuits the whole
+        # function to False — causing the #944 orphan net to recover a session
+        # that is actively heartbeating (issue #1962).
+        if (getattr(entry, "turn_count", 0) or 0) > 0:
+            return False
+        if (getattr(entry, "log_path", None) or "").strip():
+            return False
+        if getattr(entry, "claude_session_uuid", None):
             return False
 
         if now is None:

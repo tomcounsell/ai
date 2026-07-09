@@ -119,6 +119,91 @@ class TestNeverStartedPastGrace:
         # 200s > threshold using started_at
         assert _never_started_past_grace(session) is True
 
+    def test_returns_false_for_started_session_via_turn_count(self):
+        """Issue #1962: turn_count>0 proves the session STARTED — never flag it.
+
+        A bridge-originated remote session accrues turn_count without ever
+        writing local log_path/claude_session_uuid or the ``*_at`` liveness
+        fields, so ``sdk_ever_output`` stays False. Age past grace must NOT
+        classify it as never-started.
+        """
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=14400),  # 4h, far past grace
+            turn_count=12,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_returns_false_for_started_session_via_log_path(self):
+        """Issue #1962: a non-empty log_path proves the session STARTED."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=14400),
+            log_path="/tmp/logs/session.log",
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_returns_false_for_started_session_via_claude_uuid(self):
+        """Issue #1962: a claude_session_uuid proves the SDK authenticated."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=14400),
+            claude_session_uuid="abc-123",
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_still_flags_genuinely_never_started_session(self):
+        """Issue #1962 guard: a session with NO own-progress evidence, past
+        grace, and no SDK output IS still flagged (regression protection)."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            turn_count=0,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _never_started_past_grace(session) is True
+
+
+class TestFreshHeartbeatStartedSessionSurvives:
+    """Issue #1962: a running session with a fresh heartbeat that has already
+    STARTED (turn_count>0) must report progress, so the #944 orphan net leaves
+    it alone — regardless of wall-clock age or missing local handle fields."""
+
+    def test_fresh_heartbeat_started_session_has_progress(self):
+        """The exact fixture from the failing integration test: 4h old,
+        turn_count=12, fresh heartbeat, no log_path/uuid → _has_progress True."""
+        from agent.session_health import _has_progress
+
+        session = _make_session(
+            started_at=datetime.now(UTC) - timedelta(hours=4),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=30),
+            turn_count=12,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _has_progress(session) is True
+
+    def test_stale_heartbeat_started_session_no_progress(self):
+        """Counterpart: a started session whose heartbeat has gone stale past
+        the no-output budget reports NO progress, so recovery still applies."""
+        from agent.session_health import _has_progress
+
+        session = _make_session(
+            started_at=datetime.now(UTC) - timedelta(hours=4),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=3600),  # >1800s budget
+            turn_count=12,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _has_progress(session) is False
+
 
 class TestSubCheckBDeniedPastGrace:
     """Test that sub-check B is denied for never-started past grace (D0 gate)."""
