@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -69,6 +69,11 @@ local-path reference in the message.
 **Active plans in `docs/plans/` overlapping this area:** #1370 (`consolidate_delivery_paths.md`), addressed above — coordinate, not merge or block.
 
 **Notes:** No drift requiring plan-scope changes. The issue's Recon Summary (in the GitHub issue body) is the primary source for this plan's Solution; this Freshness Check re-confirms nothing has moved since.
+
+**Re-verification at plan-finalize time (2026-07-09, HEAD `2fb1f8ef`):** Two commits landed on `main` between the original baseline (`99ad930e`) and finalize. Neither affects this plan's scope. Disposition: **Minor drift (evidence-only)**.
+- `bec97694` ("Fix headless runner zombie wedge") touched `agent/session_runner/` internals only — none of this plan's cited files (`bridge/message_drafter.py`, `agent/output_handler.py`, `.claude/skills-global/weekly-review/SKILL.md`). Irrelevant to scope.
+- `0f33567e` ("SDLC issue ownership lock") added 10 lines to `models/agent_session.py`. This plan cites `models/agent_session.py:260` / `:1773-1819` (`recent_sent_drafts` / `record_recent_sent_draft`) as **evidence only** (not modified). Line numbers may have shifted by a few lines but the claim (the incident's sent text was produced by `draft_message()`) still holds. No plan-scope change.
+- Core modification targets re-confirmed live at HEAD: `draft_message()` @ `message_drafter.py:702`, `_validate_for_medium` @ `:323`, `validate_telegram` @ `:244`, `validate_email` @ `:284`, stale docstring still present @ `:729-730`, empty-promise `needs_self_draft` trigger @ `:801-806`, self-draft steering branch @ `output_handler.py:434`, `open -a TextEdit` still at `weekly-review/SKILL.md:104`. `detect_local_file_reference` confirmed absent (work still needed).
 
 ## Prior Art
 
@@ -312,7 +317,7 @@ No agent integration changes required beyond the skill-doc edit already covered 
 | Format clean | `python -m ruff format --check bridge/message_drafter.py` | exit code 0 |
 | New validator exists | `grep -c "def detect_local_file_reference" bridge/message_drafter.py` | output > 0 |
 | Promotion logic wired | `grep -c "needs_self_draft=True" bridge/message_drafter.py` | output > 0 |
-| Stale docstring gone | `grep -c "surface via the stop-hook review gate" bridge/message_drafter.py` | match count == 0 |
+| Stale docstring gone | `grep -c "stop-hook review gate" bridge/message_drafter.py` | match count == 0 |
 | Skill fixed | `grep -c "open -a TextEdit" .claude/skills-global/weekly-review/SKILL.md` | match count == 0 |
 
 ## Critique Results
@@ -323,7 +328,9 @@ No agent integration changes required beyond the skill-doc edit already covered 
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Should the `open -a TextEdit` removal in weekly-review's SKILL.md also add explicit `--file` attachment guidance**, or is it sufficient to just remove the bad instruction and rely on the new drafter-level check to catch any remaining local-path mention generically? Default in this plan: just remove the bad instruction (the drafter check is the generalized safety net; teaching every skill explicit attachment syntax individually doesn't scale and isn't this issue's scope). Confirm.
-2. **Pattern tuning for `detect_local_file_reference`**: are there other local-path idioms worth covering in the first pass (e.g., Windows-style paths, `file://` URIs), or is the four-pattern set (`/tmp/`, `/Users/`, `/home/`, `~/`, `open -a`) sufficient for a v1 given this repo runs exclusively on macOS/Linux dev machines? Default: ship the four-pattern set; expand only if a future incident surfaces a gap.
+The two open questions were resolved by adopting the plan's own documented defaults (both are low-risk tuning choices with graceful-degradation safety nets):
+
+1. **weekly-review SKILL.md `open -a TextEdit` removal — no explicit `--file` guidance added.** Just remove the bad instruction; the new drafter-level `detect_local_file_reference` check is the generalized safety net. Teaching every skill explicit attachment syntax individually doesn't scale and is outside this issue's scope.
+2. **`detect_local_file_reference` pattern set — ship the four-pattern v1** (`/tmp/`, `/Users/`, `/home/`, `~/`, `open -a`). This repo runs exclusively on macOS/Linux dev machines, so Windows-style paths and `file://` URIs are deferred; expand only if a future incident surfaces a gap. The self-draft steering path degrades gracefully (worst case: one extra rewrite round-trip), so an incomplete pattern set never breaks delivery.
