@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-09
 tracking: https://github.com/tomcounsell/ai/issues/1944
 last_comment_id:
+revision_applied: true
 ---
 
 # do-merge: gate on DOCS-stage completion, not just docs-file existence
@@ -18,9 +19,9 @@ every merge path funnels through (the merge-guard hook enforces it). It verifies
 squash-merging. It does NOT verify that the DOCS stage completed. Router row 9
 (`_rule_review_approved_docs_not_done`) enforces DOCS-before-MERGE *inside the
 router*, but nothing enforces it *at the gate*. When merge is reached by a path
-that bypasses the router — a forked `/do-sdlc` run, a raw-terminal `gh pr merge`
-through the merge-guard, or a foreign-repo run with no substrate — a PR merges
-with its DOCS stage still `in_progress`, killed, or never started.
+that bypasses the router — a forked `/do-sdlc` run or a raw-terminal `gh pr
+merge` through the merge-guard, **in a substrate repo** — a PR can merge with its
+DOCS stage still `in_progress`, killed, or never started.
 
 The existing "Documentation Gate" (`docs/sdlc/do-merge.md:43-45`) checks only
 that `docs/features/{slug}.md` *exists* — not that the `/do-docs` cascade *ran*.
@@ -28,14 +29,38 @@ Stale route maps, index tables, and cross-references in already-existing docs
 sail straight through.
 
 **Current behavior:** the merge gate has no notion of DOCS-stage completion. An
-incomplete or absent DOCS stage does not block a merge. Real incident: cuttlefish
-PR #577 merged with its DOCS stage still running (later killed), leaving a
-canonical route-map doc stale; it had to be patched in a separate manual PR after the fact.
+incomplete or absent DOCS stage does not block a merge.
 
-**Desired outcome:** `/do-merge` treats DOCS-stage completion as a first-class
-precondition, analogous to the Step 2 REVIEW-verdict gate, and **fails closed**
-when DOCS is required but not `completed` — without creating the
-merge-authorization file. A legitimate DOCS-skip PR (#1799) still merges.
+### Scope of the fix: substrate repos (reclassified after critique)
+
+A **substrate repo** ships `docs/sdlc/do-merge.md` and persists per-stage markers
+via `sdlc-tool` (this repo, and any repo that adopts the addendum). There, the
+DOCS stage records `sdlc-tool stage-marker --stage DOCS --status completed`, which
+`sdlc-tool stage-query` can read — so the gate can **deterministically** verify
+DOCS completion. This plan hardens exactly those router-bypass paths (forked
+`/do-sdlc`, raw `gh pr merge`) in substrate repos.
+
+A **no-substrate / foreign repo** (e.g. `cuttlefish`) persists no stage marker at
+all — there is no record of whether the DOCS cascade ran, so the gate **cannot
+deterministically verify DOCS by construction**. The original motivating incident
+(cuttlefish PR #577: a forked `/do-sdlc` returned control with DOCS still running
+as a background strand; the supervisor advanced to MERGE; the generic gate found
+`OPEN/MERGEABLE/CLEAN/APPROVED` and merged; DOCS was later killed, leaving a route
+map stale) occurred on precisely this no-substrate path. This plan does **not**
+claim to deterministically prevent that class on the no-substrate path — the
+deterministic prevention for it is the now-CLOSED **#1915** fork-strand fix plus
+supervisor sequencing. What this plan adds for the no-substrate path is an
+**announced non-gate** (an auditable advisory line in the merge log, not a silent
+pass). The same forked-`/do-sdlc`/raw-merge bypass occurring **in a substrate
+repo** — the far more common case, since this repo is a substrate repo — *is* now
+caught by the new Step 2b check.
+
+**Desired outcome:** in a substrate repo, `/do-merge` treats DOCS-stage
+completion as a first-class precondition, analogous to the Step 2 REVIEW-verdict
+gate, and **fails closed** when DOCS is required but not `completed` — without
+creating the merge-authorization file. A legitimate DOCS-skip PR (#1799) still
+merges. In a no-substrate repo, the gate emits an explicit advisory that DOCS
+cannot be deterministically verified (not a silent pass).
 
 ## Freshness Check
 
@@ -75,12 +100,35 @@ repo's output shape and is corrected in Technical Approach to
 - **enforce-review-docs-stages.md (#418 / PR #421)** — Established mandatory REVIEW+DOCS enforcement via the pipeline state machine and `/do-docs` writing `status: docs_complete` to the plan. This gate is the merge-checkpoint complement.
 - **`tests/unit/test_do_merge_review_filter.py`** — The reusable test pattern: extract an embedded shell snippet from `docs/sdlc/do-merge.md` and run it against synthetic input, asserting the gate decision without a live PR. The DOCS gate test mirrors this exactly.
 
+## Spike Results
+
+Two code-read spikes resolve the critique's blocker-1 assumptions. A live
+end-to-end `/do-docs` run is deferred to the build/test stage (the gate test
+exercises the extracted snippet against the real JSON shapes below).
+
+### spike-1: Is `stages.DOCS == "completed"` written by a real `/do-docs` run, or only `status: docs_complete` on the plan file?
+- **Assumption (critique):** "`/do-docs` may write `status: docs_complete` to the plan FILE rather than calling the stage marker `stage-query` reads."
+- **Method:** code-read (`.claude/skill-context/do-docs.md`, `.claude/skills-global/do-docs/SKILL.md`).
+- **Result:** `/do-docs` in this repo writes **both**. The skill-context file's "Stage marker (wraps the whole skill)" section writes `sdlc-tool stage-marker --stage DOCS --status in_progress` at the start and `--status completed` after Step 4 commit. Separately, "Mark the plan docs-complete (Step 4)" writes `status: docs_complete` to plan frontmatter — that write feeds **plan migration at merge**, not the gate. So `stages.DOCS` IS set to `completed` by a real DOCS run and is authoritative **when readable**.
+- **Confidence:** high.
+- **Impact if false:** would have to gate on the plan-file frontmatter instead — not the case.
+
+### spike-2: When does `sdlc-tool stage-query` return empty `stages`?
+- **Assumption (critique):** "`sdlc_stage_query.py` can return `{\"stages\": {}}` when a session is reaped/orphan-cleaned — on the exact bypass paths this plan targets — so a bare `== completed` check fails CLOSED and refuses merges whose DOCS truly completed."
+- **Method:** code-read (`tools/sdlc_stage_query.py::query_enriched`).
+- **Result:** **Confirmed.** `query_enriched` returns `{"stages": {}, "_meta": _default_meta()}` when `_find_session_by_issue()` returns `None` (lines 488-489) — i.e. the PM/eng session was reaped or orphan-cleaned. On the router-driven path the session is live at merge time so `stages` is populated; on the router-**bypass** paths this plan targets (forked `/do-sdlc`, cross-machine/raw merge) the session may be gone, yielding empty `stages`. A bare `DOCS_STATUS == "completed"` gate would then false-refuse a merge whose DOCS genuinely completed. There is also a *transient* empty window: `_find_session_by_id` retries a bounded 5×200ms because popoto's `rebuild_indexes()` transiently empties the class set (issue #1720).
+- **Confidence:** high.
+- **Impact if false:** the file-existence fallback (Technical Approach, degraded branch) would be unnecessary — but the code path is confirmed present, so the fallback is required. This retracts the plan's earlier "No race conditions identified" claim (see Race Conditions).
+
 ## Data Flow
 
 1. **Entry point:** `/do-merge` invoked with a PR number (via `/sdlc` MERGE dispatch, a forked `/do-sdlc`, or manually).
 2. **Repo Context Probe:** the skill reads `docs/sdlc/do-merge.md` (substrate present in this repo).
 3. **Step 1-2:** verify PR state + recorded REVIEW verdict via `sdlc-tool`.
-4. **Step 2b (NEW):** `sdlc-tool stage-query --issue-number N` → parse `stages.DOCS` → PASS if `completed`, FAIL (route to `/do-docs`) if `in_progress`/`pending`/`""`.
+4. **Step 2b (NEW):** `sdlc-tool stage-query --issue-number N` → parse `stages.DOCS`.
+   - `completed` → PASS.
+   - `in_progress` / `pending` (affirmative "DOCS unfinished" signal) → FAIL closed, route to `/do-docs`.
+   - `""` / empty `stages` (session reaped — can't read the marker, spike-2) → **degraded fallback** to the pre-existing file-existence check `test -f docs/features/{slug}.md`: present ⇒ PASS (degraded, advisory logged); absent ⇒ FAIL.
 5. **Step 4:** only on all-pass, `touch data/merge_authorized_{PR}` → `gh pr merge` → `rm`.
 6. **Output:** merged PR, or a gate refusal naming the DOCS blocker; no auth file created on refusal.
 
@@ -115,63 +163,112 @@ repo's output shape and is corrected in Technical Approach to
 
 - **Step 2b — Verify DOCS Stage Completed** (`docs/sdlc/do-merge.md`): a new
   substrate-mapping step placed immediately after the Step 2 REVIEW-verdict
-  mapping. Reads `stages.DOCS` from `sdlc-tool stage-query`; PASS on `completed`,
-  FAIL closed otherwise, route back to `/do-docs`.
+  mapping. Reads `stages.DOCS` from `sdlc-tool stage-query`; PASS on `completed`;
+  FAIL closed on `in_progress`/`pending` (affirmative "DOCS unfinished") and route
+  back to `/do-docs`; on empty `stages` (session reaped) **degrade to the
+  file-existence check** — PASS if `docs/features/{slug}.md` exists, else FAIL.
 - **Extended "Documentation Gate"** (`docs/sdlc/do-merge.md`): now checks DOCS
-  *stage completion* (via Step 2b), not merely `docs/features/{slug}.md` file
-  existence. File existence stays as an additional check; stage completion is the
-  new authoritative one.
+  *stage completion* (via Step 2b) as the authoritative signal, with the existing
+  `docs/features/{slug}.md` existence check retained as the degraded fallback for
+  the unreadable-marker case (not a separate, weaker check).
 - **Generic-path precondition text** (`.claude/skills-global/do-merge/SKILL.md`):
-  a Step-2-adjacent paragraph naming "DOCS-stage completion" as a precondition
-  the repo addendum supplies (parallel to how REVIEW verdict is deferred to the
-  substrate), with an explicit **announced-skip** for the no-substrate case.
+  a minimal Step-2-adjacent note naming "DOCS-stage completion" as a
+  substrate-supplied precondition (mirroring the REVIEW-verdict deferral already
+  present), plus an explicit **announced non-gate** advisory for the no-substrate
+  case. The deterministic gate lives in the substrate addendum, not the global skill.
 - **Gate test** (`tests/unit/test_do_merge_docs_gate.py`): extracts the Step 2b
-  extraction/decision snippet from `docs/sdlc/do-merge.md` and asserts the
-  decision across `completed` / `in_progress` / `pending` / missing / skip inputs.
+  snippet from `docs/sdlc/do-merge.md` and asserts the decision across
+  `completed` (PASS), `in_progress`/`pending` (hard FAIL), skip-as-`completed`
+  (PASS), empty-stages-with-doc (PASS degraded), and empty-stages-without-doc (FAIL).
 
 ### Flow
 
 `/do-merge {PR}` → Step 1 PR-state PASS → Step 2 REVIEW verdict APPROVED →
 **Step 2b query `stages.DOCS`** → `completed` ⇒ continue to Step 4 merge;
-`in_progress`/`pending`/`""` ⇒ **refuse, no auth file, route to `/do-docs`**.
+`in_progress`/`pending` ⇒ **refuse, no auth file, route to `/do-docs`**;
+`""` (empty stages, session reaped) ⇒ fall back to `docs/features/{slug}.md`
+existence: present ⇒ continue; absent ⇒ **refuse, no auth file**.
 
 ### Technical Approach
 
-**Step 2b extraction (correct for this repo's output shape):**
+**Step 2b extraction + decision (correct for this repo's output shape):**
+
+`2>/dev/null` is deliberately **omitted** — a `sdlc-tool` stderr diagnostic
+(substrate fault, bad issue number) must surface in the merge log rather than be
+swallowed; only stdout is parsed for the status.
 
 ```bash
-DOCS_STATUS=$(sdlc-tool stage-query --issue-number {issue_number} 2>/dev/null \
+SLUG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^session/||')
+DOCS_STATUS=$(sdlc-tool stage-query --issue-number {issue_number} \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('stages',{}).get('DOCS',''))")
 case "$DOCS_STATUS" in
-  completed) echo "DOCS_GATE: PASS — DOCS stage completed" ;;
-  *)         echo "DOCS_GATE: FAIL — DOCS stage is '${DOCS_STATUS:-<missing>}', not completed"
-             echo "GATES_FAILED" ;;   # route back to /do-docs; do NOT create the auth file
+  completed)
+    echo "DOCS_GATE: PASS — DOCS stage completed" ;;
+  in_progress|pending)
+    # Affirmative "DOCS unfinished" signal — the incident case. Fail closed.
+    echo "DOCS_GATE: FAIL — DOCS stage is '$DOCS_STATUS', not completed"
+    echo "GATES_FAILED" ;;   # route back to /do-docs; do NOT create the auth file
+  *)
+    # Empty stages: the session was reaped/orphan-cleaned (spike-2), so the
+    # marker is unreadable — we cannot AFFIRM 'unfinished'. Degrade to the
+    # pre-existing file-existence Documentation Gate rather than false-refuse a
+    # merge whose DOCS truly completed.
+    if [ -n "$SLUG" ] && [ -f "docs/features/${SLUG}.md" ]; then
+      echo "DOCS_GATE: PASS (degraded) — DOCS marker unreadable (empty stages); docs/features/${SLUG}.md present"
+    else
+      echo "DOCS_GATE: FAIL — DOCS marker unreadable AND docs/features/${SLUG:-<no-slug>}.md absent"
+      echo "GATES_FAILED"
+    fi ;;
 esac
 ```
 
 - **Why `.get('stages',{}).get('DOCS','')` and not the issue's sketch:** the
   enriched query returns bare status strings under `stages`, not
-  `{"DOCS": {"status": ...}}`. Verified live.
+  `{"DOCS": {"status": ...}}`. Verified live and in `query_enriched` (spike-2).
 - **Why no explicit skip-branch (resolves open question #2):**
   `sdlc-tool stage-marker` can only write `in_progress` or `completed`
   (`_VALID_STATUSES`, `tools/sdlc_stage_marker.py:78`). #1799's DOCS-skip records
   DOCS as `completed` (the "skipped" nuance lives in the router `reason` string,
   not the status). So a single `== completed` check admits both a real completion
   and a legitimate skip. The gate never needs to distinguish them.
-- **Fail closed on degraded substrate:** if `sdlc-tool` returns empty `stages`
-  (Redis down, session gone), `DOCS_STATUS` is `""` → FAIL. This mirrors the
-  Step 2 REVIEW-verdict rule ("if approval cannot be confirmed, FAIL closed").
-  At merge time the PM session is live, so `stages` is populated; an empty result
-  is a genuine substrate fault, correctly treated as a refusal.
+- **Why empty-`stages` degrades instead of failing closed (resolves blocker 1):**
+  `query_enriched` returns `{"stages": {}}` whenever the session is gone
+  (spike-2), which is precisely the router-bypass path this plan hardens. A blanket
+  fail-closed there would REFUSE merges whose DOCS genuinely completed — a false
+  block the critique flagged. Instead the empty case degrades to the **status-quo
+  Documentation Gate** (`test -f docs/features/{slug}.md`). This makes Step 2b a
+  strict, monotonic improvement: when the marker is readable it is authoritative
+  (and can affirmatively *block* an `in_progress` DOCS); when it is not, behavior
+  is exactly today's file-existence gate. An explicit `in_progress`/`pending`
+  status is the ONLY affirmative-unfinished signal and is the only hard fail.
+  - **Residual (accepted):** a docs-free trivial PR whose session was ALSO reaped
+    (double degradation: empty stages AND no feature doc) falls to FAIL. This is
+    the same fail-closed posture the status-quo gate takes when a plan-declared doc
+    is missing; it is rare (requires both a bypass path and a reaped session) and
+    recoverable (re-run `/do-docs` or re-authorize). Chosen over admitting an
+    unverifiable merge.
 
-**Generic/no-substrate path (resolves open question #1 — decision: option c, announced not silent):**
-- The global `SKILL.md` gains a Step-2-adjacent paragraph: DOCS-stage completion
-  is a precondition the repo addendum supplies via its substrate; when no
-  substrate exists, the gate **cannot deterministically verify DOCS** and MUST
-  emit a visible advisory line —
-  `"DOCS-completion gate: NOT ENFORCED — no substrate; foreign-repo merges rely on supervisor sequencing (see #1915)."`
+**Generic/no-substrate path (resolves open question #1; aligned with the blocker-2 reclassification):**
+- Per the Problem reclassification, the no-substrate path is **out of deterministic
+  reach by construction** — no marker exists to read. Its deterministic prevention
+  is the now-CLOSED #1915 fork-strand fix plus supervisor sequencing.
+- The global `SKILL.md` edit is intentionally **minimal and parallel to an existing
+  convention.** The global skill already defers the REVIEW verdict to the substrate
+  ("a repo addendum may supply a recorded-verdict substrate; approval that cannot be
+  confirmed FAILS closed"). Step 2b's global-skill text mirrors that exact shape for
+  DOCS: one sentence naming DOCS-stage completion as a substrate-supplied
+  precondition, plus one advisory line for the no-substrate case —
+  `"DOCS-completion gate: NOT ENFORCED — no substrate; DOCS completion cannot be verified here, merge relies on supervisor sequencing (see #1915)."`
   This is an *announced* non-gate, not a silent pass, satisfying the acceptance
-  criterion "explicitly specified and documented (not a silent pass)."
+  criterion.
+- **Proportionality of the fleet-wide edit (addresses the critique's minor concern):**
+  the edit propagates to every machine via `sync_claude_dirs`, but it is (a) two
+  lines, (b) structurally identical to the REVIEW-verdict deferral text already in
+  the global skill, and (c) the only place a foreign-repo agent actually reads the
+  merge procedure — so the advisory is seen where it matters. It introduces no new
+  fleet-wide machinery; it extends an existing deferral pattern. That is
+  proportionate to documenting a determinism limit that the acceptance criteria
+  explicitly require be surfaced.
 - **Justification for rejecting (a) and (b):**
   - (a) require an explicit `docs-verified` signal from the caller — pushes a new
     required argument into a *portable* skill; a caller that forgets it either
@@ -180,8 +277,8 @@ esac
   - (b) classify PR shape and auto-pass trivial shapes — depends on
     `scripts/pr_shape_classify.py`, which is *this repo's* tool and does not exist
     in foreign repos. It cannot be the generic answer.
-  - (c) honest determinism limit + announced skip — pairs with the now-CLOSED
-    #1915 root-cause fix and makes the gap auditable in the merge log. Chosen.
+  - Chosen: honest determinism limit + announced advisory for no-substrate, with
+    the real deterministic gate scoped to substrate repos (where it has teeth).
 
 ## Failure Path Test Strategy
 
@@ -189,15 +286,17 @@ esac
 - [ ] No new `except Exception: pass` blocks — the change is shell-in-markdown plus a test. State "No exception handlers in scope" for the gate snippet; the test itself asserts observable decision strings.
 
 ### Empty/Invalid Input Handling
-- [ ] `DOCS_STATUS == ""` (empty `stages`, missing DOCS key) → gate FAILS closed. Covered by a test case feeding `{"stages": {}, "_meta": {}}` and asserting `GATES_FAILED`.
-- [ ] Malformed JSON from `sdlc-tool` (non-JSON stdout) → `python3 -c` raises, non-zero exit, `DOCS_STATUS` empty → FAIL. Test feeds non-JSON and asserts non-pass.
+- [ ] `DOCS_STATUS in {in_progress, pending}` → gate FAILS closed (affirmative "DOCS unfinished"). Test feeds `{"stages": {"DOCS": "in_progress"}}` and asserts `GATES_FAILED`.
+- [ ] `DOCS_STATUS == ""` (empty `stages`, session reaped) **with** `docs/features/{slug}.md` present → gate PASSES degraded. Test feeds `{"stages": {}}` on a branch whose slug's feature doc exists, asserts `PASS (degraded)` and NO `GATES_FAILED`.
+- [ ] `DOCS_STATUS == ""` **without** the feature doc → gate FAILS. Test feeds `{"stages": {}}` with no matching feature doc, asserts `GATES_FAILED`.
+- [ ] The malformed-JSON case is **intentionally not tested:** `sdlc-tool stage-query` is contractually guaranteed to emit valid JSON — every error path in `sdlc_stage_query.py::main` prints `{"stages": {}, "_meta": {...}}` (never non-JSON). A malformed-stdin test would exercise an input the substrate cannot produce; and even if it could, an empty `DOCS_STATUS` now routes to the file-existence fallback, not a distinct branch. State "no reachable malformed-JSON path" rather than testing a synthetic one.
 
 ### Error State Rendering
-- [ ] The refusal path prints `DOCS_GATE: FAIL — ...` and `GATES_FAILED`; the merge report surfaces the specific DOCS blocker. Test asserts the FAIL message names the observed status.
+- [ ] The hard-fail path prints `DOCS_GATE: FAIL — DOCS stage is '<status>', not completed` and `GATES_FAILED`; the degraded-fail path prints `DOCS_GATE: FAIL — DOCS marker unreadable AND docs/features/<slug>.md absent`. The merge report surfaces the specific blocker. Test asserts the FAIL message names the observed condition.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_do_merge_docs_gate.py` — REPLACE/CREATE: new test file mirroring `test_do_merge_review_filter.py`; extracts the Step 2b snippet from `docs/sdlc/do-merge.md` and asserts the decision across `completed`/`in_progress`/`pending`/missing/skip inputs.
+- [ ] `tests/unit/test_do_merge_docs_gate.py` — CREATE: new test file mirroring `test_do_merge_review_filter.py`; extracts the Step 2b snippet from `docs/sdlc/do-merge.md` and asserts the decision across `completed` (PASS), `in_progress`/`pending` (hard FAIL), skip-as-`completed` (PASS), empty-stages-with-feature-doc (PASS degraded), and empty-stages-without-feature-doc (FAIL). The empty-stages cases set up a temp branch/slug + `docs/features/{slug}.md` fixture so the `test -f` fallback is exercised.
 - [ ] `tests/unit/test_do_merge_baseline.py` — UPDATE (only if it asserts the exact set of gate sections/steps): add the Step 2b / extended Documentation Gate to any section-presence assertion. Verify before editing; leave untouched if it does not enumerate steps.
 - [ ] `tests/unit/test_do_merge_review_filter.py` — no change expected (independent snippet); confirm it still passes after the `docs/sdlc/do-merge.md` edit.
 
@@ -227,19 +326,36 @@ No other existing tests are affected — the change adds one gate step to a mark
 
 ## Race Conditions
 
-No race conditions identified. The gate is a synchronous, single-process sequence
-of `sdlc-tool` / `gh` reads executed by one `/do-merge` invocation; there is no
-shared mutable state or concurrent access introduced. The DOCS status it reads is
-written earlier by the DOCS stage and is a settled value by merge time (row 9
-already withholds router-driven MERGE dispatch until DOCS is `completed`; the gate
-hardens the bypass paths, which are likewise sequential).
+**One timing hazard, mitigated** (retracts the plan's earlier "no race conditions"
+claim, which the critique correctly flagged as false). The gate itself is a
+synchronous, single-process sequence of `sdlc-tool` / `gh` reads with no shared
+mutable state. But the value it reads — `stages.DOCS` — can transiently read
+**empty** even for a live session:
+
+- **Transient empty read (issue #1720):** popoto's `rebuild_indexes()` briefly
+  empties the class set `$Class:AgentSession`; a concurrent
+  `query.filter(session_id=...)` returns empty during that window (measured p99
+  ≈ 651ms). `sdlc_stage_query.py` already mitigates this with a bounded
+  5×200ms = 1000ms retry (`_CLASS_SET_RETRY_ATTEMPTS`) in `_find_session_by_id`,
+  covering the measured window before returning `None`.
+- **Persistent empty read:** a genuinely reaped/orphan-cleaned session returns
+  `{"stages": {}}` for good (spike-2).
+
+The gate cannot distinguish a transient empty read from a persistent one, so it
+does not fail closed on empty. Instead, an empty read degrades to the
+file-existence fallback (Technical Approach). This means: (a) the stage-query
+retry usually resolves the transient case before the gate ever sees empty; and
+(b) if it doesn't, the fallback still admits a truly-completed merge (its feature
+doc is on disk) rather than false-refusing on a millisecond-scale index rebuild.
+The settled, populated-`stages` path (the common router-driven case, where row 9
+already withheld MERGE until DOCS `completed`) is unaffected.
 
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #1799] Router-level DOCS-skip implementation — the gate must *respect* a skip (which resolves to `completed`), but shipping the router skip itself is #1799's work.
 - [SEPARATE-SLUG #1915] Fork background-strand root-cause fix — already CLOSED; this gate is defense-in-depth, not that fix.
 - Router changes to `agent/sdlc_router.py` (row 9 / G6) — the router already sequences DOCS-before-MERGE; this plan hardens only the gate. (Anti-criterion below asserts no router edit.)
-- Adding a daily-reflection backstop for merges that bypass `/do-merge` entirely (issue's open question #3) — the `merged-branch-cleanup` reflection already backstops plan migration on bypass paths; a DOCS-specific reflection is a separable enhancement, not required to close this issue.
+- Adding a daily-reflection backstop for merges that bypass `/do-merge` entirely (issue's open question #3) — no existing reflection covers DOCS-stage completion (the `merged-branch-cleanup` reflection backstops the *separate* plan-file-migration invariant, not DOCS). A DOCS-completion reflection is genuinely new, separable work, not required to close this issue.
 
 ## Update System
 
@@ -269,10 +385,11 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 
 ## Success Criteria
 
-- [ ] `/do-merge` fails closed (prints `GATES_FAILED`, creates no `data/merge_authorized_{PR}` file) when `stages.DOCS` is `in_progress`, `pending`, or missing.
+- [ ] `/do-merge` fails closed (prints `GATES_FAILED`, creates no `data/merge_authorized_{PR}` file) when `stages.DOCS` is `in_progress` or `pending`.
+- [ ] On empty `stages` (session reaped), the gate degrades to `docs/features/{slug}.md` existence: PASS when the doc is present, FAIL when absent — it does NOT blanket-refuse a truly-completed merge.
 - [ ] A DOCS-skip PR whose DOCS status is `completed` still passes the gate (test asserts PASS).
-- [ ] The "Documentation Gate" section verifies DOCS *stage completion*, not only `docs/features/{slug}.md` file existence.
-- [ ] The generic/no-substrate path emits an explicit announced-skip advisory line (not a silent pass); documented in the global SKILL.md.
+- [ ] The "Documentation Gate" section verifies DOCS *stage completion* as authoritative, with file existence retained as the degraded fallback.
+- [ ] The generic/no-substrate path emits an explicit announced non-gate advisory line (not a silent pass); documented in the global SKILL.md and scoped as out of deterministic reach.
 - [ ] Reproducible-then-prevented: a fixture with `stages.DOCS == "in_progress"` is refused by the extracted gate snippet in `test_do_merge_docs_gate.py`.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
@@ -303,8 +420,8 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `docs/sdlc/do-merge.md`, add a "Step 2b: Verify DOCS Stage Completed" mapping in the Stage/Verdict Substrate section, immediately after the Step 2 REVIEW-verdict bullet, using the `.get('stages',{}).get('DOCS','')` extraction and fail-closed decision from Technical Approach.
-- Extend the "Documentation Gate" section so it states the authoritative check is DOCS *stage completion* (Step 2b), with `docs/features/{slug}.md` existence kept as a secondary check.
+- In `docs/sdlc/do-merge.md`, add a "Step 2b: Verify DOCS Stage Completed" mapping in the Stage/Verdict Substrate section, immediately after the Step 2 REVIEW-verdict bullet, using the exact extraction + `case` decision from Technical Approach: PASS on `completed`; hard FAIL on `in_progress`/`pending`; empty-stages ⇒ file-existence fallback (`docs/features/${SLUG}.md`). Do NOT re-add `2>/dev/null` to the `sdlc-tool stage-query` call.
+- Extend the "Documentation Gate" section so it states the authoritative check is DOCS *stage completion* (Step 2b), with `docs/features/{slug}.md` existence retained as the degraded fallback for the unreadable-marker case.
 
 ### 2. Add generic-path precondition + announced skip to the global skill
 - **Task ID**: build-global
@@ -321,7 +438,7 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 - **Assigned To**: gate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Create `tests/unit/test_do_merge_docs_gate.py` mirroring `test_do_merge_review_filter.py`: extract the Step 2b snippet from `docs/sdlc/do-merge.md`, run against synthetic `{"stages": {"DOCS": ...}}` JSON, assert PASS for `completed`, FAIL for `in_progress`/`pending`/missing/malformed, PASS for skip-as-`completed`.
+- Create `tests/unit/test_do_merge_docs_gate.py` mirroring `test_do_merge_review_filter.py`: extract the Step 2b snippet from `docs/sdlc/do-merge.md`, run against synthetic `{"stages": {"DOCS": ...}}` JSON. Assert: PASS for `completed`, PASS for skip-as-`completed`, hard FAIL (`GATES_FAILED`) for `in_progress`/`pending`, PASS (degraded) for empty-stages-with-feature-doc-fixture, FAIL for empty-stages-without-doc. Do NOT add a malformed-JSON case (unreachable — see Failure Path Test Strategy).
 
 ### 4. Documentation
 - **Task ID**: document-feature
@@ -366,14 +483,22 @@ the agent already invokes at the MERGE stage. No new CLI entry point, no
 
 ## Open Questions
 
-1. **Ratify the generic-path decision (option c).** The plan picks option (c) —
-   the no-substrate path emits an *announced-skip* advisory line rather than
-   deterministically gating DOCS, pairing with the now-CLOSED #1915. Confirm this
-   is acceptable versus option (a) requiring a caller-supplied `docs-verified`
-   signal. (The plan argues (b) is infeasible generically since it needs this
-   repo's `pr_shape_classify.py`.)
+1. **Ratify the reclassified scope + generic-path decision.** After critique, the
+   deterministic DOCS gate is scoped to **substrate repos** (where a stage marker
+   exists to read), which is where this repo's real bypass paths live; the
+   no-substrate path emits an *announced non-gate* advisory rather than pretending
+   to gate DOCS deterministically (that path's real fix is the now-CLOSED #1915 +
+   supervisor sequencing). Confirm this reclassification is acceptable — i.e. that
+   dropping the deterministic claim for the no-substrate cuttlefish path (in favor
+   of substrate-repo hardening + an honest advisory) is the right call, versus
+   option (a) requiring a caller-supplied `docs-verified` signal. (Option (b) is
+   infeasible generically — it needs this repo's `pr_shape_classify.py`.)
 2. **Issue open-question #3 (daily-reflection backstop).** The plan scopes this
-   OUT (the existing `merged-branch-cleanup` reflection already backstops the
-   plan-migration invariant on bypass paths; a DOCS-specific reflection is
-   separable). Confirm this is acceptable, or whether a DOCS-completion reflection
-   backstop should be filed as its own issue.
+   OUT. Note the category distinction (a critique correction): the existing
+   `merged-branch-cleanup` reflection backstops a *different* invariant — plan-file
+   migration into `docs/plans/completed/` — not DOCS-stage completion. **No existing
+   reflection covers DOCS completion on bypass paths.** A DOCS-completion reflection
+   would therefore be genuinely new work, not an extension of the migration
+   backstop. It is separable from this gate (which already closes the substrate-repo
+   bypass paths deterministically) and, if wanted, should be filed as its own issue.
+   Confirm OUT-of-scope, or file the separate issue.
