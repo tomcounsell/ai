@@ -153,6 +153,8 @@ def decide(
         On ``Dispatch``: ``{"skill": "/do-X", "reason": "...", "row_id": "...",
         "dispatched": True}``
         On ``Blocked``: ``{"blocked": True, "reason": "...", "guard_id": "..."}``
+        On issue-lock contention: ``{"blocked": True, "reason": "ISSUE_LOCKED",
+        "guard_id": "ISSUE_LOCK", "owner_session_id": "..."}``
         On error: ``{"error": "...", "dispatched": False}``
     """
     try:
@@ -161,6 +163,25 @@ def decide(
             Dispatch,
             decide_next_dispatch,
         )
+
+        # Issue-lock pre-check (issue #1954): peek-only -- a next-skill call
+        # must never itself claim or extend the lock, only mutation
+        # subcommands (ensure_session, dispatch record, stage-marker) do
+        # that. Runs BEFORE _resolve_enriched/decide_next_dispatch so a
+        # contended issue short-circuits ahead of any guard evaluation.
+        # decide_next_dispatch() itself is untouched -- no changes to the
+        # G1-G7 guard table.
+        if issue_number:
+            from models.session_lifecycle import touch_issue_lock
+
+            lock_result = touch_issue_lock(issue_number, session_id or "", peek=True)
+            if not lock_result.acquired:
+                return {
+                    "blocked": True,
+                    "reason": "ISSUE_LOCKED",
+                    "guard_id": "ISSUE_LOCK",
+                    "owner_session_id": lock_result.owner_session_id,
+                }
 
         enriched = _resolve_enriched(issue_number, session_id)
         stage_states = enriched.get("stages") or {}

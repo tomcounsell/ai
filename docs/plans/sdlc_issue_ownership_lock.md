@@ -188,15 +188,15 @@ No new MCP server or `.mcp.json` changes required. The `sdlc-tool` CLI (already 
 
 ## Success Criteria
 
-- [ ] Two independently-resolved sessions (simulated: one via `ensure_session()` direct call, one via a second `ensure_session()` call for the same issue number, **each with its own `holder_token`** — the realistic two-process scenario, since both resolve the identical `sdlc-local-{N}` session_id) — only one acquires the issue lock; the second receives a blocked signal with the first's session id.
-- [ ] Calling `ensure_session()` a second time *from the same process* for the same issue (same `holder_token`) is treated as a renewal, not contention — confirms the fix doesn't lock out a session's own subsequent calls.
-- [ ] `find_session_by_issue(N)` no longer returns a `failed`/`completed`/`killed` session by default; `find_session_by_issue(N, include_terminal=True)` still does.
-- [ ] `record_dispatch_for_session()` refuses to dispatch when the issue lock is held by a different live session.
-- [ ] A session whose lock has expired (simulated via a short TTL in test) no longer blocks a second session from claiming the issue.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-- [ ] `grep -rn "touch_issue_lock" tools/ agent/ models/` confirms all call sites are wired: `ensure_session()`, `record_dispatch_for_session()` (direct call, not via `ensure_session()`), `tools/sdlc_next_skill.py::decide()` (peek), the heartbeat loop's tier-1 block, and the `stage-marker`/`dispatch record` CLI subcommands.
-- [ ] `sdlc-tool next-skill --issue-number N` returns `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` when a second session holds the lock — confirming the peek pre-check in `decide()` actually short-circuits (this is the concrete fix for critique BLOCKER 1; without it there is no code path producing this shape).
+- [x] Two independently-resolved sessions (simulated: one via `ensure_session()` direct call, one via a second `ensure_session()` call for the same issue number, **each with its own `holder_token`** — the realistic two-process scenario, since both resolve the identical `sdlc-local-{N}` session_id) — only one acquires the issue lock; the second receives a blocked signal with the first's session id.
+- [x] Calling `ensure_session()` a second time *from the same process* for the same issue (same `holder_token`) is treated as a renewal, not contention — confirms the fix doesn't lock out a session's own subsequent calls.
+- [x] `find_session_by_issue(N)` no longer returns a `failed`/`completed`/`killed` session by default; `find_session_by_issue(N, include_terminal=True)` still does.
+- [x] `record_dispatch_for_session()` refuses to dispatch when the issue lock is held by a different live session.
+- [x] A session whose lock has expired (simulated via a short TTL in test) no longer blocks a second session from claiming the issue.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
+- [x] `grep -rn "touch_issue_lock" tools/ agent/ models/` confirms all call sites are wired: `ensure_session()`, `record_dispatch_for_session()` (direct call, not via `ensure_session()`), `tools/sdlc_next_skill.py::decide()` (peek), the heartbeat loop's tier-1 block, and the `stage-marker`/`dispatch record` CLI subcommands.
+- [x] `sdlc-tool next-skill --issue-number N` returns `{"blocked": true, "reason": "ISSUE_LOCKED", ...}` when a second session holds the lock — confirming the peek pre-check in `decide()` actually short-circuits (this is the concrete fix for critique BLOCKER 1; without it there is no code path producing this shape).
 
 ## Team Orchestration
 
