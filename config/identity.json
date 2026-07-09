@@ -4,5 +4,11 @@
   "email": "valor@yuda.me",
   "timezone": "UTC+7 (Asia/Bangkok)",
   "google_workspace": "valor@yuda.me",
-  "organization": "yudame"
+  "organization": "yudame",
+  "handles": {
+    "telegram": "@valorengels",
+    "github": "@valorengels",
+    "twitter": "@valorengels",
+    "linkedin": "@valorengels"
+  }
 }
