@@ -734,3 +734,32 @@ class TestProcessHolderToken:
         second = _process_holder_token()
         assert first == second
         assert isinstance(first, str) and len(first) > 0
+
+    def test_env_seam_shares_token_across_processes(self, monkeypatch):
+        """SDLC_HOLDER_TOKEN (issue #1971): when set, it IS the token, so
+        every `sdlc-tool` subprocess a /do-sdlc run spawns presents one
+        consistent owner instead of self-blocking on the #1954 lock."""
+        from models.session_lifecycle import _process_holder_token
+
+        monkeypatch.setenv("SDLC_HOLDER_TOKEN", "shared-run-token-xyz")
+        assert _process_holder_token() == "shared-run-token-xyz"
+
+    def test_env_seam_absent_falls_back_to_random_token(self, monkeypatch):
+        """Worker parity: with no env var the token is a random uuid, so the
+        standalone worker keeps its per-process identity and the real
+        worker-vs-local guard stays intact."""
+        from models.session_lifecycle import _process_holder_token
+
+        monkeypatch.delenv("SDLC_HOLDER_TOKEN", raising=False)
+        token = _process_holder_token()
+        assert isinstance(token, str) and len(token) == 32  # uuid4().hex
+
+    def test_env_seam_empty_value_ignored(self, monkeypatch):
+        """An empty SDLC_HOLDER_TOKEN must not become an empty owner token --
+        it falls through to a random uuid."""
+        from models.session_lifecycle import _process_holder_token
+
+        monkeypatch.setenv("SDLC_HOLDER_TOKEN", "")
+        token = _process_holder_token()
+        assert token  # non-empty
+        assert len(token) == 32

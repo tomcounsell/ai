@@ -26,6 +26,12 @@ Both entry points resolve the *identical* deterministic `session_id` for a given
 
 The lock is therefore keyed on a **process-unique `holder_token`**: `uuid.uuid4().hex`, generated once per OS process and cached in a module-level variable (`_process_holder_token()`), stable for the life of that process. Two processes handling the same `session_id` -- on the same or different machines -- get distinct tokens; the same process calling repeatedly (dispatch -> heartbeat -> dispatch) reuses its own token and renews cleanly. `session_id`/`pid`/`hostname` ride along in the payload purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership.
 
+### The `SDLC_HOLDER_TOKEN` env seam (issue #1971)
+
+Per-process tokens have one failure mode: an SDLC entry point that fans out to **multiple short-lived subprocesses** blocks itself. The standalone worker calls `touch_issue_lock()` in-process (`agent/session_executor.py`), so it always holds one stable token. But a local `/do-sdlc` supervisor drives the router through separate `sdlc-tool` CLI subprocesses (`session-ensure`, then `next-skill`, then `dispatch record`), each a fresh OS process with its own random token. Process A (`session-ensure`) acquires the lock; process B (`next-skill`) peeks, sees A's token as foreign, and short-circuits to `ISSUE_LOCKED` -- the run blocks against itself before dispatching a single stage.
+
+`_process_holder_token()` resolves `SDLC_HOLDER_TOKEN` from the environment first, falling back to the random uuid when it is unset or empty. The `/do-sdlc` skill mints one token per supervision run, persists it to a gitignored run file (`data/.sdlc_run/holder_{issue}`), and re-exports it before every state-mutating `sdlc-tool` call, so all of that run's subprocesses present one consistent owner. The worker never sets the var, so it keeps its random per-process token and the worker-vs-local guard (the #1915 case) is unchanged. Concurrent local supervisors on the *same* issue is out of scope for this seam (the later run overwrites the run file); the primary duplicate-PR guard is worker-vs-local, which stays intact.
+
 ### Behavior
 
 | Scenario | Result |
@@ -122,3 +128,4 @@ A revived terminal session (via `reflections/crash_recovery.py`'s auto-resume or
 | `agent/session_executor.py` | `_tick_issue_lock_renewal()` (tier-1 heartbeat) |
 | `tools/sdlc_stage_marker.py` | `write_marker()`'s renewal call |
 | `.claude/skills/sdlc/SKILL.md` | `ISSUE_LOCKED` guard interpretation contract for `/sdlc`/`/do-sdlc` |
+| `.claude/skills-global/do-sdlc/SKILL.md` | Mints + threads the `SDLC_HOLDER_TOKEN` run token across the supervisor's `sdlc-tool` subprocesses (issue #1971) |
