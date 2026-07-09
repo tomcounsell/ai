@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-09
 tracking: https://github.com/tomcounsell/ai/issues/1916
 last_comment_id:
+revision_applied: true
 ---
 
 # stage-marker in_progress rejected at PLAN on a fresh pipeline
@@ -136,9 +137,32 @@ strictness it should not have.
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 0-1 (root cause and fix shape are settled; the one open question
-  is scope of the `completed`-path consistency fix)
+- PM check-ins: 0 (root cause, fix shape, and scope are all settled; the
+  completed-path consistency fix is confirmed in scope — see Scope Decision below)
 - Review rounds: 1
+
+### Scope Decision: completed-path backfill is IN scope
+
+The bug statement (Problem section) names two symptoms of one defect: (a) the
+`in_progress` write is rejected, and (b) the pipeline's `ISSUE` stage "is left
+stuck at `ready` forever" behind a later `completed` stage. Symptom (b) is
+produced by the `completed`-path force-set (`sdlc_stage_marker.py:200-202`), which
+completes PLAN without ever completing ISSUE. Fixing only the `in_progress` path
+would ship half the described defect: the very next run that reaches PLAN via a
+`completed` write (e.g. the `--status completed` marker at end of Phase 4) would
+still strand ISSUE at `ready`.
+
+**Alternative rejected — loud-rejection-only.** We considered making the
+`completed` path *reject* (exit 1) when predecessors are incomplete instead of
+backfilling. Rejected because: (1) the marker is documented as a best-effort
+"record of where the pipeline reached", so a completion write legitimately implies
+prior stages were reached — rejecting it would turn a routine end-of-stage marker
+into a hard failure on every fresh pipeline; and (2) it would leave the pipeline
+*more* inconsistent (PLAN completed, ISSUE ready, and now a loud error too),
+solving nothing the operator can act on. Backfilling with the never-over-`failed`
+guard leaves the pipeline internally consistent while still surfacing genuine
+failures loudly. Both paths therefore use the same `_backfill_predecessors`
+mechanism.
 
 ## Prerequisites
 
@@ -150,18 +174,31 @@ for the standard test environment.)
 
 ### Key Elements
 
+- **New standalone helper `PipelineStateMachine._backfill_predecessors(stage)`**:
+  the single source of truth for synthetic predecessor promotion, reachable
+  independently of `start_stage`'s early no-op. Walks the success-edge
+  predecessor chain back toward ISSUE using **scan-then-mutate**: first scan the
+  whole transitive chain and, if *any* member is `failed`, raise `ValueError`
+  **before mutating anything** (a failed predecessor is a genuine inconsistency
+  worth surfacing loudly, and no partial state is persisted). Only after a clean
+  scan does it promote every chain member in `{pending, ready, in_progress}` to
+  `completed` in one pass, persist with a **single `_save()`**, and emit a
+  distinct `sdlc.stage_backfilled` analytics metric per synthetic promotion so
+  the backfills are observable (they no longer masquerade as ordinary
+  `sdlc.stage_started` events).
 - **`PipelineStateMachine.start_stage(stage, backfill_predecessors=False)`**:
-  opt-in mode. When `True` and the linear predecessor check would fail, walk the
-  success-edge predecessor chain back toward ISSUE and promote any predecessor in
-  `pending`/`ready`/`in_progress` to `completed`, then activate the target. If any
-  predecessor is `failed`, do NOT backfill — raise as before (a failed
-  predecessor is a genuine inconsistency worth surfacing loudly). Default stays
-  strict, so the router (`sdlc_router`) and bridge hook (`pre_tool_use`) keep
-  today's ordering enforcement unchanged.
+  opt-in mode. When `True` and the linear predecessor check at the tail of
+  `start_stage` would fail, call `_backfill_predecessors(stage)` then
+  `_activate_stage(stage)`. Default stays strict, so the router (`sdlc_router`)
+  and bridge hook (`pre_tool_use`) keep today's ordering enforcement unchanged.
 - **`tools/sdlc_stage_marker.py::write_marker`**: the best-effort marker opts in
-  (`backfill_predecessors=True`) on the `in_progress` path, and applies the same
-  predecessor backfill on the `completed` path so a forced completion no longer
-  leaves ISSUE stuck at `ready`.
+  (`backfill_predecessors=True`) on the `in_progress` path. On the `completed`
+  path it calls `_backfill_predecessors(stage)` **directly, before** touching the
+  target stage — it must NOT pre-set `states[stage] = "in_progress"` first,
+  because routing the completed-path backfill through `start_stage` would hit the
+  `if current == "in_progress": return` early no-op (`pipeline_state.py:453-455`)
+  and skip backfill entirely, leaving ISSUE stuck at `ready` — reproducing the
+  very bug this plan fixes. Calling the standalone helper sidesteps that no-op.
 - **Documentation**: record that the marker records "reality" (reaching a stage
   implies prior stages were reached) while the router enforces ordering — the two
   callers deliberately differ.
@@ -174,23 +211,92 @@ detection observe the transition.
 
 ### Technical Approach
 
-- Add `backfill_predecessors: bool = False` to `start_stage`. On the predecessor
-  loop's failure branch (currently `pipeline_state.py:499-502`), if
-  `backfill_predecessors` and no predecessor is `failed`: recursively backfill
-  the success-edge predecessor chain to `completed` (reuse `_get_predecessors`),
-  then `_activate_stage(stage)`. Keep the raise when a predecessor is `failed`.
-- The backfill only promotes states in `{pending, ready, in_progress}` →
-  `completed`; it never touches `failed`. This keeps a real failure signal intact.
-- In `write_marker`, pass `backfill_predecessors=True` to `start_stage` on the
-  `in_progress` branch. On the `completed` branch, before `complete_stage`,
-  backfill predecessors the same way (via `start_stage(stage,
-  backfill_predecessors=True)` used to reach `in_progress`, then complete) so the
-  pipeline is left consistent. Preserve the existing idempotent-already-completed
-  no-op (exit 0).
-- The D7 loud-failure contract is preserved for genuine failures: a `failed`
-  predecessor, or any exception, still yields exit 1. The change only converts
-  the *first-write-at-a-forward-stage* case from a false failure into a
-  persisted transition.
+**1. New `_backfill_predecessors(stage)` helper on `PipelineStateMachine`
+(scan-then-mutate, single save, distinct metric).** Sketch:
+
+```python
+def _backfill_predecessors(self, stage: str) -> list[str]:
+    """Promote the success-edge predecessor chain of `stage` to completed.
+
+    Scan-then-mutate: collect every transitive predecessor currently in
+    {pending, ready, in_progress}; if ANY chain member is `failed`, raise
+    ValueError BEFORE mutating (a failed predecessor is a real inconsistency,
+    never silently erased, and no partial state is persisted). Then promote
+    all collected members in one pass, persist with a single _save(), and emit
+    sdlc.stage_backfilled per synthetic promotion. Returns the promoted stages.
+    """
+    to_promote: list[str] = []
+    seen: set[str] = set()
+    frontier = list(self._get_predecessors(stage))
+    while frontier:                       # SCAN — no mutation in this loop
+        pred = frontier.pop()
+        if pred in seen:
+            continue
+        seen.add(pred)
+        st = self.states.get(pred, "pending")
+        if st == "failed":
+            raise ValueError(
+                f"Cannot backfill predecessors of {stage}: {pred} is failed"
+            )
+        if st != "completed":
+            to_promote.append(pred)
+        frontier.extend(self._get_predecessors(pred))
+    for pred in to_promote:               # MUTATE — only after a clean scan
+        self.states[pred] = "completed"
+    if to_promote:
+        self._save()                      # single persist for the whole chain
+        for pred in to_promote:
+            _record_stage_metric("sdlc.stage_backfilled", pred)
+    return to_promote
+```
+
+The walk terminates at ISSUE (`_get_predecessors("ISSUE")` is empty). The helper
+never touches `failed` — the `raise` happens in the scan phase before any
+`states[...]` assignment, so a deep `failed` member leaves the machine untouched
+(fixes CONCERN 1: no partial persisted state). The `sdlc.stage_backfilled` metric
+(fixes CONCERN 2) makes synthetic promotions observable and distinct from real
+`sdlc.stage_started` transitions.
+
+**2. `start_stage(stage, backfill_predecessors=False)`.** Add the keyword-only
+default-`False` parameter. On the predecessor loop's failure branch (currently
+`pipeline_state.py:499-502`): if `backfill_predecessors`, call
+`self._backfill_predecessors(stage)` (which raises on a `failed` chain member,
+preserving the loud path) then `self._activate_stage(stage)`; otherwise raise as
+today. The strict default is unchanged for the router and `pre_tool_use` hook.
+
+**3. `write_marker` completed-path fix (fixes the BLOCKER).** The current code
+force-sets `states[stage] = "in_progress"` (`sdlc_stage_marker.py:200-202`) before
+completing. Routing backfill through `start_stage` here is defeated by
+`start_stage`'s `if current == "in_progress": return` no-op
+(`pipeline_state.py:453-455`) — the target is already `in_progress`, so backfill
+is skipped and ISSUE stays `ready`. Fix: call the standalone helper directly,
+**before** setting the target in_progress:
+
+```python
+elif status == "completed":
+    current = sm.states.get(stage, "pending")
+    if current == "completed":
+        return {"stage": stage, "status": status}, 0   # idempotent no-op
+    if current not in ("in_progress", "ready"):
+        sm._backfill_predecessors(stage)   # standalone; raises → outer except → exit 1
+        sm.states[stage] = "in_progress"
+    sm.complete_stage(stage)
+```
+
+Because `_backfill_predecessors` inspects only *predecessors* of `stage`, it is
+independent of the target's own state — the `start_stage` no-op can never gate it.
+
+**4. `write_marker` in_progress path.** Pass `backfill_predecessors=True` to
+`start_stage` on the `in_progress` branch (fresh session: PLAN is `pending`, so
+the early no-op does not fire; the predecessor check fails on `ISSUE=ready`, and
+the new branch backfills ISSUE then activates PLAN).
+
+**5. Loud-failure (D7) contract preserved.** A `failed` predecessor raises
+`ValueError`: on the in_progress path it is caught at `sdlc_stage_marker.py:189`
+→ exit 1; on the completed path it propagates to the outer `except Exception`
+(line 207) → exit 1. Any other write exception still yields exit 1. The change
+only converts the *first-write-at-a-forward-stage* case from a false failure into
+a persisted transition.
 
 ## Failure Path Test Strategy
 
@@ -207,6 +313,17 @@ detection observe the transition.
   — add/confirm a test that an unknown stage is unaffected by backfill.
 - [ ] `start_stage` with a `failed` predecessor + `backfill_predecessors=True`
   must still raise `ValueError` (not silently backfill over a failure).
+
+### Backfill Helper Coverage (`_backfill_predecessors`)
+- [ ] **Partial-state guard (CONCERN 1)**: with a chain where a *deeper*
+  predecessor is `failed` and a nearer one is `pending`, assert `ValueError` is
+  raised AND that no `states[...]` value changed (the nearer predecessor is still
+  `pending`, `_save()` was not called). This proves the scan-then-mutate ordering.
+- [ ] **Single save**: patch `_save` and assert it is invoked at most once per
+  `_backfill_predecessors` call, regardless of chain length.
+- [ ] **Distinct metric (CONCERN 2)**: assert `_record_stage_metric` is called
+  with `"sdlc.stage_backfilled"` (not `"sdlc.stage_started"`) once per promoted
+  predecessor; assert no metric is emitted when the chain is already completed.
 
 ### Error State Rendering
 - [ ] Confirm the marker CLI still prints the loud stderr diagnostic and exits 1
@@ -226,6 +343,16 @@ detection observe the transition.
 - [ ] New test (first-write-at-PLAN acceptance) — ADD to
   `tests/unit/test_sdlc_stage_marker.py`: fresh session → `in_progress` PLAN
   persists; and a `failed`-predecessor case that still exits 1.
+- [ ] New test (completed-path backfill, BLOCKER regression) — ADD to
+  `tests/unit/test_sdlc_stage_marker.py`: on a fresh session (`ISSUE=ready`,
+  `PLAN=pending`), a `--status completed` write for PLAN must persist
+  `ISSUE → completed` AND `PLAN → completed` (asserting the standalone helper is
+  reached and the `start_stage` no-op does not gate it). A companion case where a
+  predecessor is `failed` must exit 1 and leave state unmutated.
+- [ ] New test (`_backfill_predecessors` unit) — ADD to
+  `tests/unit/test_pipeline_state.py` / `test_pipeline_state_machine.py`: the
+  scan-then-mutate, single-save, and `sdlc.stage_backfilled` metric assertions
+  listed under Failure Path Test Strategy.
 
 ## Rabbit Holes
 
@@ -311,8 +438,13 @@ behavior only; no new MCP surface, `.mcp.json`, or bridge import is involved.
 - [ ] `sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number N`
   on a fresh issue exits 0 and persists `ISSUE → completed`, `PLAN → in_progress`
   (verified by re-running the reproduction from the Freshness Check).
-- [ ] `start_stage(stage, backfill_predecessors=True)` with a `failed`
-  predecessor still raises `ValueError` (loud path preserved).
+- [ ] `sdlc-tool stage-marker --stage PLAN --status completed --issue-number N` on
+  a fresh issue (`ISSUE=ready`) exits 0 and persists `ISSUE → completed`,
+  `PLAN → completed` — no stage left stuck at `ready` behind a completed stage
+  (this is the "ISSUE stuck at ready" half of the defect, now in scope).
+- [ ] `start_stage(stage, backfill_predecessors=True)` and
+  `_backfill_predecessors(stage)` with a `failed` predecessor still raise
+  `ValueError` (loud path preserved) and mutate no state.
 - [ ] Strict-default `start_stage` behavior is unchanged for router/hook callers
   (existing tests pass).
 - [ ] A test covers the first-write-at-PLAN path (acceptance criterion from #1916).
@@ -329,18 +461,28 @@ behavior only; no new MCP surface, `.mcp.json`, or bridge import is involved.
 | Backfill param exists | `grep -c "backfill_predecessors" agent/pipeline_state.py` | output > 0 |
 | Marker opts in | `grep -c "backfill_predecessors=True" tools/sdlc_stage_marker.py` | output > 0 |
 | Fresh PLAN in_progress persists | `sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number 1916; echo $?` | output contains in_progress |
+| Standalone helper exists | `grep -c "_backfill_predecessors" agent/pipeline_state.py` | output > 0 |
+| Backfill metric emitted | `grep -c "sdlc.stage_backfilled" agent/pipeline_state.py` | output > 0 |
+| Completed path calls helper directly | `grep -c "_backfill_predecessors" tools/sdlc_stage_marker.py` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Round 1 verdict: NEEDS REVISION** (2026-07-09). Revision applied — all findings
+addressed:
 
----
-
-## Open Questions
-
-1. Scope of the `completed`-path consistency fix: the acceptance criterion is
-   satisfied by the `in_progress` fix alone. Should this plan also backfill
-   predecessors on the `completed` path (so a forced PLAN completion no longer
-   leaves ISSUE at `ready`), or keep the fix minimal to `in_progress` and file
-   the `completed`-path inconsistency separately? Current plan includes it as a
-   small, same-mechanism change.
+- **BLOCKER (completed-path backfill defeated by `start_stage` early no-op).**
+  Fixed. Extracted a standalone `_backfill_predecessors(stage)` helper; the
+  completed path calls it **directly** and no longer routes through `start_stage`
+  (whose `if current == "in_progress": return` no-op skipped backfill) and no
+  longer pre-sets `states[stage] = "in_progress"` before backfill. See Technical
+  Approach step 3.
+- **CONCERN 1 (partial state on a `failed` deep predecessor).** Fixed. The helper
+  is scan-then-mutate: it validates the whole chain and raises before any
+  mutation, then promotes all members with a single `_save()`. Test added.
+- **CONCERN 2 (backfill bypassed metrics).** Fixed. The helper emits a distinct
+  `sdlc.stage_backfilled` metric per synthetic promotion. Test added.
+- **CONCERN 3 (open scope question).** Resolved in favor of inclusion. See
+  "Scope Decision" under Appetite, which documents why the loud-rejection-only
+  alternative was rejected. Open Questions section removed.
+- **Two informational nits.** Accepted; no separate action taken beyond the above
+  structural changes, which subsume them.
