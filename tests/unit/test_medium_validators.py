@@ -18,12 +18,103 @@ from __future__ import annotations
 import pytest
 
 from bridge.message_drafter import (
+    LOCAL_FILE_PATH_RULE,
     Violation,
     _validate_for_medium,
+    detect_local_file_reference,
     format_violations,
     validate_email,
     validate_telegram,
 )
+
+
+class TestDetectLocalFileReference:
+    """``detect_local_file_reference`` flags machine-local paths and ``open`` refs.
+
+    Local paths (``/tmp/...``, ``/Users/...``, ``/home/...``, ``~/...``) and
+    macOS ``open -a ...`` command references are meaningless once a message
+    leaves the machine that produced it (issue #1955 — the weekly-review
+    incident). See docs/plans/message-drafter-file-path-flagging.md.
+    """
+
+    def test_empty_string_returns_empty_list(self) -> None:
+        assert detect_local_file_reference("") == []
+
+    def test_ordinary_prose_returns_empty_list(self) -> None:
+        text = "Everything looks good. The task is complete, no issues found."
+        assert detect_local_file_reference(text) == []
+
+    def test_standalone_slash_and_tilde_are_not_flagged(self) -> None:
+        """Bare '/' or '~' characters with no following path segment must
+        not trip the detector — only real path-shaped substrings do."""
+        text = "Use a / to separate paths, or ~ for home."
+        assert detect_local_file_reference(text) == []
+
+    def test_tmp_path_detected(self) -> None:
+        violations = detect_local_file_reference("Done. Saved to /tmp/x.txt.")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+        assert "/tmp/x.txt" in violations[0].snippet
+
+    def test_tilde_path_detected(self) -> None:
+        violations = detect_local_file_reference("cd ~/projects/ai && run tests")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+        assert "~/projects/ai" in violations[0].snippet
+
+    def test_users_path_detected(self) -> None:
+        violations = detect_local_file_reference("Log is at /Users/tomcounsell/out.log")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+
+    def test_home_linux_path_detected(self) -> None:
+        violations = detect_local_file_reference("Config is at /home/deploy/app.conf")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+
+    def test_bare_open_dash_a_detected(self) -> None:
+        violations = detect_local_file_reference("Open with open -a TextEdit /tmp/x.txt")
+        rules = {v.rule for v in violations}
+        assert LOCAL_FILE_PATH_RULE in rules
+
+    def test_backtick_wrapped_open_command_detected(self) -> None:
+        violations = detect_local_file_reference("Run `open -a TextEdit /tmp/x.txt` to view it.")
+        rules = {v.rule for v in violations}
+        assert LOCAL_FILE_PATH_RULE in rules
+
+    def test_multiple_violations_on_separate_lines_report_correct_line_numbers(self) -> None:
+        text = "line one\nline two has /tmp/foo.txt here\nline three"
+        violations = detect_local_file_reference(text)
+        assert len(violations) == 1
+        assert violations[0].line == 2
+
+    def test_ordinary_url_without_local_segment_passes(self) -> None:
+        """A plain URL that doesn't happen to contain a local-path segment
+        (/tmp/, /Users/, /home/, ~/) must not be flagged."""
+        text = "See https://example.com/docs for more, or https://github.com/org/repo/pull/42."
+        assert detect_local_file_reference(text) == []
+
+    def test_remote_etc_path_passes(self) -> None:
+        """Remote/server paths without the home-directory signal (/etc/,
+        /var/, arbitrary server paths) are not flagged — only local-machine
+        home-directory-style paths are (Risk 1 mitigation)."""
+        text = "The config lives at /etc/nginx/nginx.conf on your server."
+        assert detect_local_file_reference(text) == []
+
+    def test_code_block_with_unrelated_path_passes(self) -> None:
+        text = "```\npath: /var/log/syslog\n```"
+        assert detect_local_file_reference(text) == []
+
+    def test_snippet_truncated_to_80_chars(self) -> None:
+        long_path = "/tmp/" + "x" * 200
+        violations = detect_local_file_reference(f"Saved to {long_path}")
+        assert len(violations[0].snippet) <= 80
+
+    def test_violations_never_mutate_input(self) -> None:
+        text = "Saved to /tmp/x.txt."
+        original = text
+        detect_local_file_reference(text)
+        assert text == original
 
 
 class TestValidateTelegram:
@@ -153,6 +244,23 @@ class TestValidateForMedium:
     def test_empty_text_returns_empty_list(self) -> None:
         assert _validate_for_medium("", "telegram") == []
         assert _validate_for_medium("", "email") == []
+
+    def test_local_file_path_check_runs_regardless_of_medium(self) -> None:
+        """detect_local_file_reference is medium-agnostic — it runs for
+        telegram, email, and even an unknown/empty medium string."""
+        text = "Saved to /tmp/x.txt."
+        for medium in ("telegram", "email", "slack", ""):
+            vs = _validate_for_medium(text, medium)
+            assert any(v.rule == "local_file_path_reference" for v in vs), (
+                f"expected local_file_path_reference violation for medium={medium!r}, got {vs}"
+            )
+
+    def test_telegram_medium_combines_table_and_local_path_violations(self) -> None:
+        text = "| a | b |\n| --- | --- |\nSaved to /tmp/x.txt."
+        vs = _validate_for_medium(text, "telegram")
+        rules = {v.rule for v in vs}
+        assert "no_markdown_tables" in rules
+        assert "local_file_path_reference" in rules
 
 
 class TestFormatViolations:
