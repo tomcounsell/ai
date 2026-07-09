@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-09
 tracking: https://github.com/tomcounsell/ai/issues/1980
 last_comment_id:
+revision_applied: true
 ---
 
 # Wrap-up Guard Reply-Text Loss (stale-UUID fallback clobbers a valid result)
@@ -125,14 +126,26 @@ No prerequisites — this work has no external dependencies. The regression test
 
 ### Key Elements
 
-- **Stale-UUID fallback gate (`agent/sdk_client.py:2607`)**: add a `result_text is None`
-  clause so the destructive fresh-session retry fires only when the resumed subprocess
-  produced no `result` event at all (the genuine stale/invalid-UUID case, where `claude
-  --resume` errors out before emitting any result). A resumed turn that emitted a `result`
-  event is a successful resume; a subsequent non-zero exit must not discard the completion.
-- **Comment update**: document that the fallback is gated on "no result event fired," and
-  that this enforces at the harness layer the same "result event is the completion signal"
-  invariant that `role_driver.py:453-454` documents at the driver layer.
+- **Stale-UUID fallback gate (`agent/sdk_client.py:2607`)**: gate the destructive
+  fresh-session retry on the *true* "did a `result` event fire on the primary invocation?"
+  boolean, so it fires only when **no** result event fired. A resumed turn that emitted a
+  `result` event is a successful resume; a subsequent non-zero exit must not discard the
+  completion. The retry still fires for a genuinely stale/invalid UUID (`claude --resume`
+  errors before any result event) AND for a crashed subprocess that streamed only partial
+  text with no result event (BRANCH B, below) — preserving all pre-existing recovery.
+- **Capture the boolean precisely, not via `result_text`**: `_run_harness_subprocess`'s
+  returned `result_text` does NOT cleanly encode "result event fired." It has three branches
+  (`sdk_client.py:3093-3129`): **A** result event fired → returns `""` or text (non-None);
+  **B** no result event but accumulated `full_text` → returns a **non-empty string**
+  (non-None); **C** nothing → returns `None`. So `result_text is None` is true only in
+  BRANCH C — it would wrongly skip the fallback in BRANCH B. The precise fact already exists:
+  `_run_harness_subprocess` calls `on_exit_status(returncode, result_text is not None)`
+  (`sdk_client.py:3089`) where the second arg is exactly `result_event_fired`. Capture it
+  for the primary invocation and gate on `not result_event_fired`.
+- **Comment + log update**: document that the fallback is gated on "no result event fired,"
+  enforcing at the harness layer the same "result event is the completion signal" invariant
+  that `role_driver.py:453-454` documents at the driver layer; add a log line at the gate
+  recording `prior_uuid`, `returncode`, and the fallback-fired decision for incident triage.
 
 ### Flow
 
@@ -144,23 +157,42 @@ the real text.
 
 ### Technical Approach
 
+- Capture the primary invocation's `result_event_fired` boolean. Immediately before the
+  primary `_run_harness_subprocess` call (site 1, `sdk_client.py:2526`), define a wrapper
+  around the caller's `on_exit_status` that records the `fired` flag into a local, then
+  chains to the original callback (so the role driver's `exit_statuses` list still receives
+  every invocation for its residual-#1916 logic):
+  ```python
+  primary_result_event_fired = False
+
+  def _capture_primary_exit(rc, fired):
+      nonlocal primary_result_event_fired
+      primary_result_event_fired = fired
+      if on_exit_status is not None:
+          on_exit_status(rc, fired)
+  ```
+  Pass `on_exit_status=_capture_primary_exit` at call site 1 only. (Sites 2 and 3 keep the
+  raw `on_exit_status`; the gate decision precedes any fallback, so the primary's value is
+  authoritative at gate-evaluation time.)
 - Change the gate at `agent/sdk_client.py:2607` from:
   ```python
   if prior_uuid and returncode is not None and returncode != 0:
   ```
   to:
   ```python
-  if prior_uuid and returncode is not None and returncode != 0 and result_text is None:
+  if prior_uuid and returncode is not None and returncode != 0 and not primary_result_event_fired:
   ```
-  `result_text is None` iff no `result` event fired on the primary invocation (the
-  `_run_harness_subprocess` return contract: `result_text` is non-None exactly when a
-  result event fired — see `sdk_client.py:3085-3129` and the `on_exit_status(returncode,
-  result_text is not None)` call at line 3089). An empty-but-present result (`""`) is a
-  genuinely empty turn and correctly does NOT trigger the fallback, satisfying acceptance
-  criterion #3.
+  This fires the fallback in BRANCH B (partial `full_text`, no result event — a crashed
+  subprocess worth a fresh retry) and BRANCH C (genuine stale UUID, nothing produced),
+  matching the pre-existing behavior, and skips it only in BRANCH A (a result event fired —
+  the completion is authoritative). An empty-but-present result event (`""`, BRANCH A with
+  empty text) correctly does NOT trigger the fallback and returns `""`, so
+  OPERATOR_TERMINAL_MESSAGE stays reserved for a genuinely empty turn (acceptance #3).
+- Add a `logger.info` at the gate recording the branch decision (skip vs. fire) with
+  `prior_uuid`, `returncode`, `primary_result_event_fired`.
 - Leave the image-dimension fallback (`sdk_client.py:2559-2600`) untouched — it is gated
-  independently on `IMAGE_DIMENSION_SENTINEL` and a truthy `result_text`, and does not
-  interact with this change (that path runs on `returncode == 0`).
+  independently on `IMAGE_DIMENSION_SENTINEL` and a truthy `result_text`, and runs on
+  `returncode == 0`, so it does not interact with this change.
 - No change to `role_driver.py` or `runner.py`: once the harness stops clobbering, the
   existing residual-#1916 guard and wrap-up-guard classification deliver the text correctly.
 
@@ -172,11 +204,19 @@ the real text.
 - State: "No exception handlers added in scope."
 
 ### Empty/Invalid Input Handling
-- The core behavior under test IS empty-output handling. New tests assert:
-  - Non-empty `result` event + non-zero exit + `prior_uuid` → real text returned (fallback skipped).
-  - `result_text is None` (no result event) + non-zero exit + `prior_uuid` → fallback still fires (stale-UUID recovery preserved).
-  - Empty-string `result` event (`""`) + non-zero exit → fallback NOT fired; returns `""` (genuinely empty; OPERATOR_TERMINAL_MESSAGE is then correct downstream).
-- Verifies empty output does not trigger a silent loop: the fallback is bounded to one retry and now only fires when there is genuinely nothing to preserve.
+- The core behavior under test IS empty-output handling. New tests assert, keyed to the
+  three `_run_harness_subprocess` return branches:
+  - **BRANCH A (fired=True)**: result event fired + non-zero exit + `prior_uuid` → real text
+    returned, fallback skipped (the bug fix).
+  - **BRANCH A empty (fired=True, `""`)**: empty result event + non-zero exit → fallback NOT
+    fired; returns `""` (genuinely empty; OPERATOR_TERMINAL_MESSAGE correct downstream).
+  - **BRANCH B (fired=False, partial `full_text`)**: no result event + accumulated partial
+    text + non-zero exit + `prior_uuid` → fallback STILL fires (crashed-subprocess recovery
+    preserved; NOT a regression).
+  - **BRANCH C (fired=False, `None`)**: no result event, nothing produced + non-zero exit +
+    `prior_uuid` → fallback STILL fires (genuine stale-UUID recovery preserved).
+- Verifies empty output does not trigger a silent loop: the fallback is bounded to one retry
+  and only skipped when a result event genuinely fired.
 
 ### Error State Rendering
 - End-to-end `run_turn` test asserts that a nonzero-exit-with-result turn yields a non-empty
@@ -186,7 +226,7 @@ the real text.
 ## Test Impact
 
 - [ ] `tests/unit/test_harness_retry.py::TestHarnessRetry::test_first_retry_increments_counter_and_returns_empty` — REVIEW/no change expected: this covers the AgentSession-level agent retry (different mechanism), not the stale-UUID subprocess fallback. Verify it still passes; no edit anticipated.
-- [ ] `tests/integration/test_harness_resume.py::test_stale_uuid_triggers_fallback` — REVIEW/no change expected: a genuinely stale UUID produces NO result event on the primary, so `result_text is None` and the fallback still fires. Confirm this integration test still passes unchanged.
+- [ ] `tests/integration/test_harness_resume.py::test_stale_uuid_triggers_fallback` — UPDATE (required re-run + CI coverage): a genuinely stale UUID produces NO result event on the primary (`fired=False`, BRANCH C), so the fallback still fires. This is a **live** test (does not mock `_run_harness_subprocess`) and is skipped in binary-free CI, so it cannot be relied on to catch a regression of the gate. The new unit test file MUST include a mocked BRANCH C case (fired=False → fallback fires) so the guard runs without a `claude` binary. Confirm the live test still passes where a binary is present.
 - [ ] `tests/unit/test_sdk_client_harness_counters.py` — REVIEW/no change expected: counter accumulation across primary+fallback is unaffected when the fallback is legitimately skipped. Confirm green.
 
 No existing test asserts the buggy behavior (clobber-on-nonzero-exit-with-result), so no
@@ -208,13 +248,15 @@ test needs DELETE/REPLACE — the fix is additive to the gate and the regression
 
 ### Risk 1: A genuinely stale UUID that somehow emits a result event before erroring
 **Impact:** If `claude --resume <bad-uuid>` could emit a `result` event and *then* fail, the
-gated fallback would be skipped and we'd return that (possibly partial) result instead of
-retrying fresh.
+gated fallback would be skipped and we'd return that result instead of retrying fresh.
 **Mitigation:** By protocol, `claude --resume` on an unrecognized UUID errors during startup
-*before* producing any `result` event — `result_text` stays `None`, so the fallback still
-fires. The integration test `test_stale_uuid_triggers_fallback` guards this empirically. If a
-result event fired, the resume demonstrably succeeded and its output is authoritative
-(consistent with the role-driver's documented contract).
+*before* producing any `result` event — `primary_result_event_fired` stays `False`, so the
+fallback still fires. The integration test `test_stale_uuid_triggers_fallback` guards this
+empirically where a binary is present, and the new mocked BRANCH C unit test guards it in CI.
+If a result event fired, the resume demonstrably succeeded and its output is authoritative
+(consistent with the role-driver's documented contract). Note this gate keys off the true
+`result_event_fired` boolean, NOT `result_text is None` — so BRANCH B (partial `full_text`,
+no result event) still correctly triggers the fallback.
 
 ### Risk 2: Masking a real failure by delivering a result from a subprocess that exited non-zero
 **Impact:** Delivering content from a subprocess that ultimately exited non-zero.
@@ -270,19 +312,24 @@ tests exercise `get_response_via_harness` and `HeadlessRoleDriver.run_turn` dire
 
 ## Success Criteria
 
-- [ ] Root cause documented: stale-UUID fallback at `sdk_client.py:2607` clobbers a valid
+- [ ] **User-facing outcome**: on a resumed wrap-up turn whose subprocess emits a valid
+  `[/complete]`/`[/user]` final message and then exits non-zero, the human receives the real
+  completion text — NOT the canned `OPERATOR_TERMINAL_MESSAGE`. Verified by the
+  `HeadlessRoleDriver.run_turn` end-to-end test (non-empty `reply_text`, `exit_reason !=
+  "empty_output"`). (Acceptance #2)
+- [ ] Root cause documented: stale-UUID fallback at `sdk_client.py:2607` clobbered a valid
   `result_text` on a non-zero exit that followed a fired `result` event. (Acceptance #1)
-- [ ] Regression test: a turn whose primary subprocess emits valid final text and exits
-  non-zero returns that text (fallback skipped), and `HeadlessRoleDriver.run_turn` propagates
-  it (non-empty `reply_text`, `exit_reason != "empty_output"`) — real text delivered, not
-  `OPERATOR_TERMINAL_MESSAGE`. (Acceptance #2)
-- [ ] Test: `result_text is None` + non-zero exit + `prior_uuid` still triggers the fallback
-  (stale-UUID recovery preserved).
-- [ ] Test: empty-string result event does not spuriously trigger the fallback and yields
-  `""` — OPERATOR_TERMINAL_MESSAGE remains reserved for a genuinely empty PM turn. (Acceptance #3)
+- [ ] Test BRANCH A (fired=True): valid final text + non-zero exit + `prior_uuid` → text
+  returned, fallback skipped.
+- [ ] Test BRANCH B (fired=False, partial text) + non-zero exit + `prior_uuid` → fallback
+  STILL fires (crashed-subprocess recovery preserved, not regressed).
+- [ ] Test BRANCH C (fired=False, `None`) + non-zero exit + `prior_uuid` → fallback STILL
+  fires (stale-UUID recovery preserved). Runs mocked in binary-free CI.
+- [ ] Test empty-string result event (fired=True, `""`) → fallback NOT fired; returns `""`.
+  OPERATOR_TERMINAL_MESSAGE remains reserved for a genuinely empty PM turn. (Acceptance #3)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `grep -n "result_text is None" agent/sdk_client.py` confirms the gate change is present.
+- [ ] `grep -n "not primary_result_event_fired" agent/sdk_client.py` confirms the gate change is present.
 
 ## Team Orchestration
 
@@ -339,7 +386,7 @@ Small single-file fix; solo builder + code reviewer.
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Gate change present | `grep -n "returncode != 0 and result_text is None" agent/sdk_client.py` | exit code 0 |
+| Gate change present | `grep -n "not primary_result_event_fired" agent/sdk_client.py` | exit code 0 |
 | Regression tests pass | `pytest tests/unit/test_harness_stale_uuid_result_preservation.py -q` | exit code 0 |
 | Existing harness tests pass | `pytest tests/unit/test_harness_retry.py tests/unit/test_sdk_client_harness_counters.py tests/unit/test_sdk_client.py -q` | exit code 0 |
 | Lint clean | `python -m ruff check agent/sdk_client.py tests/unit/test_harness_stale_uuid_result_preservation.py` | exit code 0 |
@@ -348,6 +395,10 @@ Small single-file fix; solo builder + code reviewer.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk & Robustness + History & Consistency | `result_text is None` gate is not equivalent to "no result event fired" — BRANCH B (partial `full_text`, no result event) returns non-None, so the gate would silently skip the fallback and regress crashed-subprocess recovery. | Gate now keys off the true `result_event_fired` boolean (captured from the primary invocation's `on_exit_status`), gating on `not primary_result_event_fired`. Technical Approach + Solution rewritten; false "iff" claim removed. | Capture `fired` via a wrapper around `on_exit_status` at primary call site 1; chain to the original so role-driver's `exit_statuses` still receives every invocation. |
+| CONCERN | Risk & Robustness | BRANCH B adversarial path untested (matrix only covered A and C). | Added BRANCH B unit test (fired=False, partial text → fallback fires) to the test matrix and Success Criteria. | Mock returns `("partial…", sid, 1, ...)` with `on_exit_status(1, False)`; assert fallback fires. |
+| CONCERN | Risk & Robustness + History & Consistency | Stale-UUID safety rested only on a CI-skippable live test; no gate observability. | Added a mocked BRANCH C unit test (runs in binary-free CI); upgraded Test Impact disposition to UPDATE/required-re-run; added a `logger.info` at the gate recording the skip-vs-fire decision. | Live `test_stale_uuid_triggers_fallback` remains as an empirical guard where a binary exists. |
+| NIT | Scope & Value | Success criteria were almost entirely mechanical. | Promoted the user-facing outcome (human receives the real completion, not the canned message) to an explicit, user-phrased Success Criterion. | — |
