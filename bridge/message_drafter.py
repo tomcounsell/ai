@@ -309,6 +309,52 @@ def validate_email(text: str) -> list[Violation]:
     return violations
 
 
+# Rule name emitted by detect_local_file_reference; exported so callers
+# (e.g. agent/output_handler.py's self-draft instruction builder) can match
+# on the constant instead of a bare string literal.
+LOCAL_FILE_PATH_RULE = "local_file_path_reference"
+
+# Local filesystem paths and macOS-only shell command references are
+# meaningless once a message leaves the machine that produced it (Telegram
+# or email). Case-sensitive — these are Unix path conventions.
+_LOCAL_FILE_PATH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"/tmp/\S+"),  # temp-file paths
+    re.compile(r"/Users/\S+"),  # absolute macOS home-directory paths
+    re.compile(r"/home/\S+"),  # absolute Linux home-directory paths
+    re.compile(r"~/\S+"),  # tilde-relative paths
+    # macOS `open` command references, backtick-wrapped or bare.
+    re.compile(r"`open (?:-a\s+\S+\s+)?\S+`|\bopen -a \S+"),
+]
+
+
+def detect_local_file_reference(text: str) -> list[Violation]:
+    """Detect references to machine-local filesystem paths or `open` commands.
+
+    Local paths (``/tmp/...``, ``/Users/...``, ``/home/...``, ``~/...``) and
+    macOS-only ``open -a ...`` command references only resolve on the machine
+    that produced the message — meaningless to a Telegram or email recipient
+    reading on a different machine. Medium-agnostic: called for both mediums
+    regardless of the per-medium validator dispatch.
+
+    Returns a list of Violation entries; empty list == pass.
+    """
+    if not text:
+        return []
+    violations: list[Violation] = []
+    for idx, raw_line in enumerate(text.split("\n"), start=1):
+        for pattern in _LOCAL_FILE_PATH_PATTERNS:
+            match = pattern.search(raw_line)
+            if match:
+                violations.append(
+                    Violation(
+                        rule=LOCAL_FILE_PATH_RULE,
+                        line=idx,
+                        snippet=match.group(0)[:80],
+                    )
+                )
+    return violations
+
+
 def format_violations(violations: list[Violation], medium: str) -> str:
     """Render violations as a ``⚠️`` note for the review gate presentation."""
     if not violations:
@@ -321,12 +367,18 @@ def format_violations(violations: list[Violation], medium: str) -> str:
 
 
 def _validate_for_medium(text: str, medium: str) -> list[Violation]:
-    """Dispatch to the per-medium validator. Unknown medium returns []."""
+    """Dispatch to the per-medium validator, plus medium-agnostic checks.
+
+    Local file-path references are checked regardless of medium — a
+    machine-local path is meaningless on both Telegram and email.
+    """
+    violations: list[Violation] = []
     if medium == "telegram":
-        return validate_telegram(text)
-    if medium == "email":
-        return validate_email(text)
-    return []
+        violations.extend(validate_telegram(text))
+    elif medium == "email":
+        violations.extend(validate_email(text))
+    violations.extend(detect_local_file_reference(text))
+    return violations
 
 
 def extract_artifacts(text: str) -> dict[str, list[str]]:
