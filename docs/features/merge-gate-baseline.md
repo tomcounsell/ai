@@ -281,7 +281,13 @@ change how staleness is enforced:
 - **No scheduled full-suite auto-regeneration.** A weekly 3×-full-suite
   reflection running on a live worker machine would reintroduce the
   Redis-collision / memory-thrash hazard that parallel full-suite runs are
-  already known to cause on this project. Rejected as a fix.
+  already known to cause on this project. Rejected as a fix. The
+  [Test Concurrency Coordination](test-concurrency-coordination.md) lock
+  (`scripts/full_suite_lock.py`, shipped in #1984) now mitigates the
+  CPU-oversubscription and Redis-collision dimensions by serializing
+  concurrent full-suite runs, but a scheduled regeneration would still
+  hold the lock for 3+ minutes and block developer-initiated runs (or wait
+  behind one), so the rejection stands for now.
 - **New: a cheap age-only detector reflection.** `reflections/housekeeping/test_baseline_refresh_check.py`
   reads `data/main_test_baseline.json`'s `generated_at` and compares it
   against `STALENESS_THRESHOLD` (imported from `scripts/baseline_gate.py` —
