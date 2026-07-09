@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor Engels
@@ -108,11 +108,9 @@ No prerequisites — this work has no external dependencies. All changes are to 
 
 ## Solution
 
-### Key Elements
-
-- **`TimeoutSettings` group** (env prefix `TIMEOUTS__`): typed, bounded fields for the recurring subprocess/HTTP timeout categories — `git_subprocess_s`, `gh_cli_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_client_s`. Each carries a description naming its env var, matching the existing `FeatureSettings` style.
-- **Named module-level TTL/retry constants**: for lock/dedup TTLs that are logic-coupled and not per-machine-tuned (`ex=3600`, `ex=120`), a single named constant per semantic value, reused across the sites that share it (extend the existing `OUTBOX_TTL` pattern). Promote to a settings field only where per-machine tuning is plausible.
-- **Call-site rewiring**: replace inline literals with `settings.timeouts.<field>` or the named constant.
+- **`TimeoutSettings` group** (env prefix `TIMEOUTS__`): one **general** system-timing config group — not a rigid taxonomy of exclusive sub-categories. Collapse the arbitrarily-drifted values into a small set of normalized, generously-commented fields (e.g. `git_subprocess_s`, `subprocess_default_s`, `http_request_s`, `smtp_s`, `redis_socket_s`, `anthropic_client_s`). Every field carries an inline comment explaining what it's for and why the default is what it is, matching the existing `FeatureSettings` commenting style. Add fields only where they earn their keep; do not manufacture distinctions the code doesn't need.
+- **Session-object TTLs** (`AgentSession` and things sessions use): these may legitimately run **up to a week** (`604800s`) — the existing 7-day root-id mapping at `bridge/context.py:528` is the precedent. Promote session-lifecycle TTLs to `.env`-overridable settings fields with week-scale upper bounds. Non-session TTLs (short dedup/lock windows like `ex=120`) stay named module-level constants at builder discretion, reused across the sites that share them (extend the existing `OUTBOX_TTL` pattern).
+- **Call-site rewiring**: replace inline literals with `settings.timeouts.<field>` / `settings.<group>.<field>` or the named constant. Where a hard timeout is genuinely runtime-dependent (its right value depends on how the process is running), the migration may **drop the arbitrary cap and log a warning** instead of pinning a made-up number, letting the runtime/agent decide — see Technical Approach.
 - **Catalog audit + cleanup**: delete verified-dead fields, de-duplicate `data_dir`, fix/remove the stale `ServerSettings.port`, and regenerate/repair `.env.example` to document the real override surface.
 - **Regression guard**: a validator under `.claude/hooks/validators/` that flags new inline `timeout=<int>` in `subprocess`/`requests` calls, with a test proving it fires.
 
@@ -122,13 +120,14 @@ Call site with `timeout=10` → replace with `settings.timeouts.git_subprocess_s
 
 ### Technical Approach
 
-- **Promote-vs-name-locally criterion**: promote to a `settings` field if the value is duplicated across ≥2 modules OR is plausibly tuned per-machine (network/subprocess timeouts qualify). Name-locally (module constant) for logic-coupled one-offs (a dedup TTL sized to actor skew).
-- **Timeout normalization decision (surfaced as Open Question)**: the ~150 git/subprocess sites use arbitrarily-drifted values (5/10/30). Collapsing each semantic category to a single canonical default is the point of the cleanup, but a call site previously at `timeout=5` that becomes `timeout=10` is a (benign) behavior change on the *failure/hang* path only — never the success path. The plan proposes normalizing per category to the **longest** current value in that category (a longer timeout only delays failure detection, never breaks a working call) and asks the human to confirm vs. preserving each value exactly via distinct fields.
-- **Batching** (each independently reviewable; the build orchestrates as parallel tasks landing in one PR, or sequenced PRs if the diff is too large to review at once):
-  1. `TimeoutSettings` scaffolding + the git/gh subprocess-timeout family (~150 sites).
-  2. HTTP/SMTP/Redis/Anthropic client timeouts + inline sleeps/backoff.
-  3. TTL/retry consolidation to named constants.
-  4. Catalog audit, dead-field removal, `.env.example` sync, regression guard + test.
+Four decisions are settled (supervisor sign-off, 2026-07-09):
+
+- **Collapse and normalize — the drifted values are arbitrary.** The 5/10/30 spread across the ~150 git/subprocess sites reflects copy-paste drift, not deliberate per-site tuning. Collapse each into a single normalized field. Normalizing to the **longest** value in a category is safe by default (a longer timeout only delays failure detection on the hang path, never breaks a working call). This is an intended, documented normalization, not a "no behavior change" constraint — the arbitrary short values were the defect.
+- **Prefer drop-the-cap-and-warn where the right value is runtime-dependent.** For a subprocess/HTTP call whose correct timeout genuinely depends on how the process is running (workload, machine, interactive vs. headless), the migration may **remove the hard timeout and log a warning** rather than pin an invented number, letting the runtime/agent decide. Bounded to avoid a rabbit hole: default to a normalized `settings` field; only drop the cap where a fixed number is demonstrably wrong, and always log so the behavior is observable. Never drop a timeout on a watchdog/health-probe fast-fail path where a hang is the failure mode being guarded against.
+- **One general, well-commented config group — no exclusive taxonomy.** These are general system-timing settings; do not over-partition into narrow exclusive subgroups. A single `TimeoutSettings` group (plus session-TTL fields), each field generously inline-commented for what it controls and why its default was chosen.
+- **Session-object TTLs may be week-scale.** `AgentSession` and session-used objects get `.env`-overridable TTL fields with upper bounds up to a week (`604800s`), precedented by `bridge/context.py:528`. Short non-session dedup/lock TTLs stay named constants at builder discretion.
+- **Promote-vs-name-locally criterion**: promote to a `settings` field if duplicated across ≥2 modules, plausibly tuned per-machine, or a session-lifecycle TTL. Name-locally (module constant) for logic-coupled short one-offs.
+- **Ship as ONE PR** (supervisor decision). The build fans out to parallel builders by non-overlapping file scope, but all batches land in a single reviewable PR. Internal order: scaffold → subprocess sweep + http/ttl sweep + guard (parallel) → audit → validation.
 - **`VALOR_LAUNCHD` propagation**: any new `.env` key that a worker/bridge service reads must be added to the launchd plist injection path in `scripts/update/`, not only to `.env`.
 - **Dead-field verification**: before deleting any zero-usage field, confirm nothing reads `settings` reflectively (grep for `getattr(settings`, `settings.dict(`, `model_dump`) — grep-absence is necessary but not sufficient.
 
@@ -167,9 +166,9 @@ Existing behavioral tests should be unaffected because defaults preserve current
 **Impact:** The "one source of truth" invariant is silently violated; the drift persists.
 **Mitigation:** The regression-guard grep doubles as a completeness check — after each batch, `git grep -nE 'timeout\s*=\s*[0-9]'` over migrated dirs must return only `settings`/constant references. A Verification row asserts this.
 
-### Risk 2: Timeout normalization changes behavior on a latency-sensitive path
-**Impact:** A call that intentionally used a short timeout (fast-fail) now waits longer, delaying a failover.
-**Mitigation:** Normalize to the longest value per category (delays failure detection only, never breaks success). Surface as an Open Question; if the human wants exact preservation, keep distinct fields per value. Reviewer specifically checks watchdog/health-probe sites where fast-fail matters.
+### Risk 2: Normalization (or a dropped cap) changes behavior on a latency-sensitive path
+**Impact:** A call that intentionally used a short timeout (fast-fail) now waits longer or has no cap, delaying a failover on a path where a hang is the guarded failure mode.
+**Mitigation:** Normalize to the longest value per category (delays failure detection only, never breaks success). The drop-the-cap-and-warn disposition is explicitly forbidden on watchdog/health-probe fast-fail paths — those keep a bounded `settings` timeout. Reviewer specifically audits `monitoring/*_watchdog.py` and health-probe sites to confirm no fast-fail cap was loosened or removed.
 
 ### Risk 3: Deleting a field that is read reflectively or by an external tool
 **Impact:** Runtime `AttributeError` or a silently-broken integration.
@@ -363,17 +362,15 @@ Tier 1 core agents (`builder`, `validator`, `documentarian`) cover this work; no
 | Guard test present and passing | `pytest tests/unit/test_validate_no_inline_timeout.py -q` | exit code 0 |
 | .env.example has TIMEOUTS keys | `grep -c 'TIMEOUTS__' .env.example` | output > 0 |
 
+## Resolved Decisions (supervisor, 2026-07-09)
+
+1. **Normalize, don't preserve.** The drifted 5/10/30 values are arbitrary — collapse each category to one normalized field (default to the longest safe value). Where the right value is runtime-dependent, drop the cap and log a warning, letting the runtime decide (except on watchdog/health-probe fast-fail paths).
+2. **One general config group**, no exclusive taxonomy; generous inline comments on every field explaining purpose and default choice.
+3. **Session-object TTLs may be week-scale** (`AgentSession` and session-used objects, up to `604800s`, `.env`-overridable). Other short TTLs stay named constants at builder discretion.
+4. **One big PR** — parallel builders by file scope, single reviewable PR.
+
 ## Critique Results
 
 <!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-
----
-
-## Open Questions
-
-1. **Timeout normalization vs. exact preservation.** The ~150 git/subprocess sites use drifted values (5/10/30). Proposal: normalize each semantic category to a single field defaulting to the **longest** current value in that category (safe — a longer timeout only delays failure detection, never breaks a working call). Acceptable, or must each distinct value be preserved exactly via separate fields (`git_quick_s=5`, `git_default_s=10`, `git_slow_s=30`)?
-2. **Config taxonomy.** One flat `TimeoutSettings` group for all timeout categories, or fold subprocess timeouts into `PerformanceSettings` and add only the genuinely-new categories? I lean toward a dedicated `TimeoutSettings` group for discoverability.
-3. **TTL/retry promotion.** Should the `ex=3600`/`ex=120` lock TTLs become `.env`-overridable settings fields, or stay named module-level constants (my default, since they're logic-coupled and sized to internal timing, not per-machine tuning)?
-4. **One PR or sequenced PRs.** ~200 sites is a large diff. Land as one reviewable PR, or sequence the four batches as separate PRs (scaffold → subprocess → http/ttl → audit+guard)?
