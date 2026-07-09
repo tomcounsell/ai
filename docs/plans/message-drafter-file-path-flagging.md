@@ -238,15 +238,15 @@ No agent integration changes required beyond the skill-doc edit already covered 
 
 ## Success Criteria
 
-- [ ] `detect_local_file_reference()` exists in `bridge/message_drafter.py` and correctly flags `/tmp/...`, `~/...`, `/Users/...`, `/home/...`, and `` `open -a ...` `` references while passing false-positive guards on ordinary prose.
-- [ ] `draft_message()` sets `needs_self_draft=True` whenever `_validate_for_medium()` returns a non-empty violations list, on **both** return paths — the short-output early return (`:770-781`) and the main-path return (`:801-831`) — not just on empty-promise detection (critique B1).
-- [ ] A SHORT terse message carrying a local path (the reported incident class, e.g. `"Done. Saved to /tmp/x.txt."`) is deferred via self-draft steering rather than delivered verbatim — verified by an explicit short-output test case.
-- [ ] The self-draft steering message for a `local_file_path_reference` violation includes an addendum instructing the agent to attach the file via `tools/send_message.py "<caption>" --file <path>` (critique B2), while other violation types get the base instruction unchanged.
-- [ ] `.claude/skills-global/weekly-review/SKILL.md` no longer instructs `open -a TextEdit <path>` as its delivery mechanism.
-- [ ] `bridge/message_drafter.py`'s docstring no longer references the dead `agent/hooks/stop.py` review gate as the violation-surfacing mechanism.
-- [ ] All Test Impact items implemented and passing.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `detect_local_file_reference()` exists in `bridge/message_drafter.py` and correctly flags `/tmp/...`, `~/...`, `/Users/...`, `/home/...`, and `` `open -a ...` `` references while passing false-positive guards on ordinary prose.
+- [x] `draft_message()` sets `needs_self_draft=True` whenever `_validate_for_medium()` returns a non-empty violations list, on **both** return paths — the short-output early return (`:770-781`) and the main-path return (`:801-831`) — not just on empty-promise detection (critique B1).
+- [x] A SHORT terse message carrying a local path (the reported incident class, e.g. `"Done. Saved to /tmp/x.txt."`) is deferred via self-draft steering rather than delivered verbatim — verified by an explicit short-output test case.
+- [x] The self-draft steering message for a `local_file_path_reference` violation includes an addendum instructing the agent to attach the file via `tools/send_message.py "<caption>" --file <path>` (critique B2), while other violation types get the base instruction unchanged.
+- [x] `.claude/skills-global/weekly-review/SKILL.md` no longer instructs `open -a TextEdit <path>` as its delivery mechanism.
+- [x] `bridge/message_drafter.py`'s docstring no longer references the dead `agent/hooks/stop.py` review gate as the violation-surfacing mechanism.
+- [x] All Test Impact items implemented and passing.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
