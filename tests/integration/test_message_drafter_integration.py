@@ -14,6 +14,65 @@ import pytest
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_local_file_path_incident_deferred_via_self_draft_steering():
+    """Regression guard for issue #1955 (the weekly-review incident).
+
+    A session sent a Telegram message containing a /tmp/... path and an
+    `open -a TextEdit ...` command reference — both meaningless to a
+    recipient reading on a different machine. This is the exact incident
+    text shape: verify the real draft_message() -> TelegramRelayOutputHandler
+    chain defers delivery via self-draft steering (with the attach-via-
+    --file addendum) instead of shipping the dead local path verbatim.
+    """
+    from agent.output_handler import TelegramRelayOutputHandler
+
+    incident_text = (
+        "✅ Weekly review done (Jul 1–8, 2026) — saved to /tmp/eng_review_jul1-8.txt. "
+        "Open with `open -a TextEdit /tmp/eng_review_jul1-8.txt`."
+    )
+
+    mock_session = MagicMock()
+    mock_session.session_id = "test-incident-1955"
+    mock_session.session_type = "eng"
+    mock_session.sdlc_stage = None
+    mock_session.sdlc_slug = None
+    mock_session.has_pm_messages = MagicMock(return_value=False)
+    mock_session.get_parent_session = MagicMock(return_value=None)
+    mock_session.is_sdlc = False
+    mock_session.session_events = None
+
+    handler = TelegramRelayOutputHandler()
+    mock_redis = MagicMock()
+    handler._redis = mock_redis
+
+    with (
+        patch("agent.steering.peek_steering_sender", return_value=None),
+        patch("agent.steering.push_steering_message") as mock_push,
+    ):
+        # draft_message is intentionally NOT mocked here — this is the
+        # real detect_local_file_reference / draft_message() chain, proving
+        # the incident text is caught end-to-end, not just at the unit level.
+        await handler.send(
+            chat_id="-1003743854645",
+            text=incident_text,
+            reply_to_msg_id=None,
+            session=mock_session,
+        )
+
+    # Delivery deferred — no outbox write of the raw local-path text.
+    mock_redis.rpush.assert_not_called()
+
+    # Self-draft steering was pushed with the attach-via-file addendum.
+    mock_push.assert_called_once()
+    args, kwargs = mock_push.call_args
+    assert args[0] == "test-incident-1955"
+    instruction = args[1]
+    assert "tools/send_message.py" in instruction
+    assert "--file" in instruction
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_response_summarizer_wiring():
     """Verify that TelegramRelayOutputHandler.send invokes draft_message for all text.
 
