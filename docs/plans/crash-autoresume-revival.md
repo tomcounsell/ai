@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -49,7 +49,7 @@ Issue #1539 built exactly this layer — a crash-recovery reflection that finger
 
 **Notes — how the drift reshapes scope (revised premise):**
 - **Gap #1 (unscheduled reflection): fully live, unchanged. This is the dominant blocker** — nothing extracts signatures or resumes because the reflection never runs. Primary fix.
-- **Gap #2 (no `turn_start` → non-resumable): overtaken by #1930 for the current transport, but NOT dead as a hardening target.** Two residual cases keep the `_has_demonstrable_progress` port worthwhile as defense-in-depth: (a) a runner session killed while its `turn_start` telemetry write lagged or was lost (the exact failure class `_has_demonstrable_progress` was built to cover in the stall classifier), and (b) historical PTY-era session rows still in Redis with `turn_count > 0` and no `turn_start` that the warming library would otherwise stamp non-resumable. The issue's acceptance-criteria unit test (a session with `turn_count > 0` killed for a tool wedge extracts a resumable signature over a synthetic timeline with no `turn_start`) is still exactly right as a regression guard, and is satisfiable by the port. We keep this work, reframed from "structural death" to "classification hardening."
+- **Gap #2 (no `turn_start` → non-resumable): overtaken by #1930 for the current transport, but NOT dead as a hardening target.** One residual case keeps the `_has_demonstrable_progress` port worthwhile as defense-in-depth: a runner session killed while its `turn_start` telemetry write lagged or was lost (the exact failure class `_has_demonstrable_progress` was built to cover in the stall classifier). (Critique C3 retired the earlier "historical PTY-era rows in Redis" justification: `run_crash_recovery` gates on `updated_at > now - CRASH_AUTORESUME_LOOKBACK_HOURS` (default 2.0h), so months-old rows never reach `extract_signature` and that case is unreachable through the real path — dropped rather than papered over with a lookback-bypassing test.) The issue's acceptance-criteria unit test (a session with `turn_count > 0` killed for a tool wedge extracts a resumable signature over a synthetic timeline with no `turn_start`) is still exactly right as a regression guard, and is satisfiable by the port. We keep this work, reframed from "structural death" to "classification hardening."
 - **Gap #3 (posture blocks warm-up): fully live, unchanged.** Deterministic floor + machine-ownership posture are the second substantive piece.
 - **Bottom line:** the issue's *headline mechanism* (granite PTY) is stale, but its *operator requirement* (self-heal a failed transient session) is unmet and every acceptance criterion remains valid and testable. Proceeding on the revised premise above rather than closing. Flagged for confirmation at critique.
 
@@ -58,6 +58,7 @@ Issue #1539 built exactly this layer — a crash-recovery reflection that finger
 - **PR #1718 (#1539)**: "crash-signature library + auto-resume policy from session telemetry" — built the entire layer this plan revives: `reflections/crash_recovery.py`, `agent/crash_signature.py`, `models/crash_signature.py`, settings fields, docs. Complete and correct except registration + posture. This plan does not re-implement; it schedules and hardens.
 - **PR #1722 (#1538)**: "Stalled-Session Advisory Classifier" — introduced `agent/session_stall_classifier.py` and, via #1724, `_has_demonstrable_progress`. This is the ground-truth pattern we port into the signature extractor.
 - **PR #1930 (#1924)**: "Granite PTY teardown / headless session runner cutover" — deleted the PTY substrate and added `turn_start` telemetry emission in the new runner. Source of the Freshness Check drift; makes gap #2 a hardening target rather than a structural fix.
+- **#1980 / #1985 (commit `662d5b50`)**: "preserve valid completion when a resumed turn exits non-zero after a result event" — patched exactly the `resume_session` → runner `--resume` path this plan drives. Auto-resume exercises `--resume` far more often, specifically against sessions that just died mid-tool-call (the conditions that produce partial/no result events). The floor's failure-path test (below) covers this interaction directly (critique C7).
 - No prior attempt tried to schedule the reflection or add a deterministic floor — those are net-new.
 
 ## Research
@@ -86,7 +87,7 @@ No relevant external findings — this is purely internal (reflection scheduling
 ## Architectural Impact
 
 - **New dependencies:** none. Reuses `tools/machine_identity.py::computer_name()`, `config.settings`, existing reflection scheduler and CrashSignature model.
-- **Interface changes:** `extract_signature` / `_extract_signature_inner` gain reliance on the passed `session` object's progress fields (already an accepted `session=` kwarg — no signature change). `CrashSignatureKey` may gain an additive `transient_kind: str | None` field (default `None`) — backward compatible.
+- **Interface changes:** `extract_signature` / `_extract_signature_inner` gain reliance on the passed `session` object's progress fields (already an accepted `session=` kwarg — no signature change). No change to `CrashSignatureKey`: the confirmed-dead clean-kill-to-`failed` shape the floor needs is derived **inline in `reflections/crash_recovery.py`** from the terminal `status_transition` already in the `events` list at the floor branch, leaving the shared extractor dataclass (also consumed by `get_or_create_by_hash`) untouched (critique C4).
 - **Coupling:** the extractor gains a soft dependency on AgentSession progress fields, mirroring the stall classifier's existing pattern (read via `getattr`, fail-soft). No new import of the kill/recovery machinery.
 - **Data ownership:** unchanged. Auto-resume decisions stay owned by the reflection; machine ownership stays owned by `projects.json`.
 - **Reversibility:** high. Registration is a vault entry (`enabled: false` reverts). Deterministic floor is a settings field (set to 0 to disable). Posture is the existing env flag. The classifier port is fail-soft and additive.
@@ -126,11 +127,13 @@ Session dies (`failed`, tool wedge, confirmed-dead kill) → crash-recovery refl
 
 ### Technical Approach
 
-**Gap 1 — registration (Update System is the seam).** `config/reflections.yaml` is gitignored (the vault is source of truth, copied per-machine by `scripts/update/env_sync.py::sync_reflections_yaml`; `tools/reflection_machine_filter.py` gates project-scoped entries by ownership at update time). Add an idempotent assertion to the update flow (a new function invoked from `scripts/update/run.py`, or an extension of `scripts/update/reflections_yaml.py`) that: parses the vault `reflections.yaml`, and if no entry named `crash-recovery` exists, appends the documented entry (300s cadence, `execution_type: function`, `callable: reflections.crash_recovery.run_crash_recovery`, `enabled: true`, unscoped so every machine runs it in propose mode). Idempotent: a no-op when the entry is already present. Runs per-machine, editing that machine's vault copy, so it survives resets.
+**Gap 1 — registration (Update System is the seam).** `config/reflections.yaml` is gitignored (the vault is source of truth, copied per-machine by `scripts/update/env_sync.py::sync_reflections_yaml`; `tools/reflection_machine_filter.py` gates project-scoped entries by ownership at update time). Add an idempotent assertion to the update flow. **It must write the vault registry, not the per-machine `config/reflections.yaml` copy (critique C6):** resolve the target by calling `agent.reflection_scheduler._resolve_registry_path()` and appending to the file it returns — the vault path when a vault exists, which `_resolve_registry_path()` deprioritizes the config copy below. A builder who follows `reflections_yaml.py`'s convention would write the config copy, which the resolver ignores in favor of the vault, silently reproducing #1539's "looks wired, never lands." The assertion parses the resolved registry, and if no entry named `crash-recovery` exists, appends the documented entry (300s cadence, `execution_type: function`, `callable: reflections.crash_recovery.run_crash_recovery`, `enabled: true`, unscoped so every machine runs it in propose mode). Idempotent: a no-op when the entry is already present. A unit test asserts the entry lands in the resolved (vault) file specifically. **Ordering (critique NIT):** the assertion runs **before** Step 1.66's vault→config copy so the appended entry propagates into the per-machine `config/reflections.yaml` on the same update cycle (or triggers a re-copy if it runs after). Runs per-machine, editing that machine's vault copy, so it survives resets.
 
-**Gap 2 — classifier hardening.** In `_extract_signature_inner`, before the `if not has_turn` early return, add a progress-fields probe mirroring `agent/session_stall_classifier.py::_has_demonstrable_progress`: read `getattr(session, "turn_count", None)` and `getattr(session, "last_tool_use_at", None)` (converted via `bridge.utc.to_unix_ts`), fail-soft. When the timeline lacks `turn_start` but the session's own fields prove progress, do NOT return `NON_RESUMABLE_DETERMINISTIC[no_turn_start]`; fall through to the normal resumable-signature path (terminal subsequence tokens + `_derive_signature_class`). Sessions with no `turn_start` AND no demonstrable progress keep the existing deterministic non-resumable classification (genuine never-started). Extract the shared helper or inline a fail-soft copy — do not import the stall/kill machinery into the extractor (the extractor must stay dependency-light).
+**Gap 2 — classifier hardening.** In `_extract_signature_inner`, before the `if not has_turn` early return, add a progress-fields probe mirroring `agent/session_stall_classifier.py::_has_demonstrable_progress`: read `getattr(session, "turn_count", None)` and `getattr(session, "last_tool_use_at", None)`, fail-soft. **Progress is proven by `turn_count > 0`, OR by `last_tool_use_at` merely being present (`ts is not None`) — NOT by wall-clock freshness (critique C2).** The extractor runs inside a 2h-lookback reflection over already-terminal sessions, so "now" is minutes-to-hours after death; a `(time.time() - ts) < IDLE_SUSPECT_SECS` window would read stale/False for exactly the sessions we want to rescue, leaving the freshness path dead. Dropping the window (any recorded tool use is ground truth of progress) keeps the residual case — a mid-first-turn wedge with `turn_count == 0` but a recorded `last_tool_use_at` — actually covered. When the timeline lacks `turn_start` but the session's own fields prove progress, do NOT return `NON_RESUMABLE_DETERMINISTIC[no_turn_start]`; fall through to the normal resumable-signature path (terminal subsequence tokens + `_derive_signature_class`). Sessions with no `turn_start` AND no demonstrable progress (no `turn_count`, no `last_tool_use_at`) keep the existing deterministic non-resumable classification (genuine never-started). Extract the shared helper or inline a fail-soft copy — do not import the stall/kill machinery into the extractor (the extractor must stay dependency-light).
 
-**Gap 3a — deterministic floor.** Add a settings field `crash_autoresume_deterministic_floor_attempts: int = Field(default=1, ge=0, le=5, ...)` (`FEATURES__CRASH_AUTORESUME_DETERMINISTIC_FLOOR_ATTEMPTS`). Expose from the extractor whether the terminal `status_transition` was a **confirmed-dead clean kill to `failed`** (i.e. `kill.confirmed_dead == true` and `to == "failed"`) — the known-transient tool-wedge shape — as an additive `CrashSignatureKey.transient_kind` (`"tool_wedge"` or `None`). In `run_crash_recovery`, before the `is_auto_eligible` gate: if `sig.transient_kind` is set AND `settings.features.crash_autoresume_deterministic_floor_attempts > 0` AND the session's `auto_resume_attempts < deterministic_floor_attempts`, permit the resume path even when the signature is not yet statistically eligible. The floor is still bounded by `crash_autoresume_max_attempts` (per-session) and `crash_autoresume_run_budget` (per-run). Setting the field to 0 disables the floor and restores pure statistical gating.
+**Gap 3a — deterministic floor.** Add a settings field `crash_autoresume_deterministic_floor_attempts: int = Field(default=1, ge=0, le=5, ...)` (`FEATURES__CRASH_AUTORESUME_DETERMINISTIC_FLOOR_ATTEMPTS`). Derive the **confirmed-dead clean kill to `failed`** shape (i.e. `kill.confirmed_dead == true` and `to == "failed"` — the known-transient tool-wedge shape) **inline in `reflections/crash_recovery.py`** at the floor branch, reading the last `status_transition` in the `events` list already in scope there (reuse the `kill.confirmed_dead` / `to` read shown in `agent/crash_signature.py::_normalize_status_transition`). Do NOT thread a `transient_kind` field through `CrashSignatureKey` — that dataclass is shared with `get_or_create_by_hash` and widening it for one caller's predicate is unnecessary coupling (critique C4). In `run_crash_recovery`, before the `is_auto_eligible` gate: if the inline transient-shape predicate matches AND `settings.features.crash_autoresume_deterministic_floor_attempts > 0` AND the session's `auto_resume_attempts < deterministic_floor_attempts`, permit the resume path even when the signature is not yet statistically eligible. The floor is still bounded by `crash_autoresume_max_attempts` (per-session) and `crash_autoresume_run_budget` (per-run). Setting the field to 0 disables the floor and restores pure statistical gating.
+
+**Floor convergence — a failed resume must still consume an attempt (critique C1).** Today `auto_resume_attempts` is only advanced inside `if result.success:`. That means a persistently-failing `resume_session` (missing UUID → refuses; `transition_status` raises) re-satisfies `attempt_count < floor` (`0 < 1`) on every 300s tick forever — the floor's boundedness is a lie on the failure path. Fix: in the `else:` branch after `if result.success:` (`reflections/crash_recovery.py` ~lines 384-390), advance the counter too — `fresh_session.auto_resume_attempts = str(attempt_count + 1); fresh_session.save()` — mirroring the success-path lines (~370-371). A failed resume then consumes an attempt and converges to the `attempt_count >= max_auto_attempts` guard (~line 334) instead of looping.
 
 **Gap 3b — machine posture (resolves open question 2).** Retain `FEATURES__CRASH_AUTORESUME_ENABLED` as the master auto-mode enable (still default off; the update/setup flow sets it in the designated worker machine's vault `.env`). Add a per-project ownership gate in the resume branch: resolve the session's `project_key` to its owner via `projects.json` (`projects.<key>.machine`) and compare to `computer_name()`; skip auto-resume (fall to propose) when this machine is not the owner. This makes the single-machine invariant structural rather than relying on the operator setting the flag on exactly one box, and scales to N machines. Unowned / unknown `project_key` → treat as not-owned (safe: propose only).
 
@@ -145,16 +148,22 @@ Session dies (`failed`, tool wedge, confirmed-dead kill) → crash-recovery refl
 ### Empty/Invalid Input Handling
 - [ ] Extractor with empty `events` list → still `unclassifiable` (unchanged). Test retained.
 - [ ] Extractor with `session=None` and no `turn_start` → deterministic `no_turn_start` (no progress fields to consult). Test added.
+- [ ] **`turn_count == 0` with a present-but-non-fresh `last_tool_use_at` and no `turn_start` → resumable (critique C2).** This is the mid-first-turn-wedge residual case; it fails if the probe uses a wall-clock freshness window instead of `ts is not None`. Test added.
 - [ ] Deterministic-floor field set to 0 → floor disabled, statistical gating unchanged. Test asserts a cold transient signature is proposed, not resumed.
 
 ### Error State Rendering
 - [ ] Reflection `summary` string reports `auto_resumed`/`proposed`/`escalated` counts truthfully after the floor and ownership gate; assert a floor-resume increments `auto_resumed` and a non-owner tick increments `proposed`.
 
+### Failure-Path Convergence & Resume Interaction
+- [ ] **Failed floor resume consumes an attempt and converges (critique C1).** Drive `run_crash_recovery` with a floor-eligible session whose `resume_session` fails every tick (e.g. missing UUID → refusal); assert `auto_resume_attempts` increments on the failure path and the session stops being retried once `attempt_count >= max_auto_attempts` (no infinite loop).
+- [ ] **Floor-triggered `--resume` exits non-zero after a fired result event (critique C7).** Reuse the branch fixtures in `tests/unit/test_harness_stale_uuid_result_preservation.py` to exercise a floor-triggered `resume_session` whose `--resume` subprocess exits non-zero after emitting a result event; assert Phase-1 outcome attribution records the correct outcome (valid completion preserved, per #1980/#1985) rather than mis-recording a crash.
+
 ## Test Impact
 
-- [ ] `tests/unit/test_crash_signature.py` (or the existing signature-extractor test module) — UPDATE: existing `no_turn_start → NON_RESUMABLE_DETERMINISTIC` cases must now pass a session WITHOUT progress fields to keep asserting the deterministic path; add new cases for `turn_count > 0` → resumable and `transient_kind` detection.
-- [ ] `tests/unit/test_crash_recovery*.py` / reflection tests — UPDATE: add deterministic-floor and machine-ownership-gate cases; existing propose-mode assertions stay valid when the floor field is 0 or the machine is not the owner.
-- [ ] `tests/**` reflection-registry/dry-run tests, if any assert a fixed reflection count — UPDATE: account for `crash-recovery` when the vault entry is present (guard on the assertion machine).
+- [ ] `tests/unit/test_crash_signature.py` (or the existing signature-extractor test module) — UPDATE: existing `no_turn_start → NON_RESUMABLE_DETERMINISTIC` cases must now pass a session WITHOUT progress fields to keep asserting the deterministic path; add new cases for `turn_count > 0` → resumable and the `turn_count == 0` + present `last_tool_use_at` residual case (C2).
+- [ ] `tests/unit/test_crash_recovery*.py` / reflection tests — UPDATE: add deterministic-floor (inline transient-shape derivation), machine-ownership-gate, and failed-resume-consumes-an-attempt (C1) cases; existing propose-mode assertions stay valid when the floor field is 0 or the machine is not the owner.
+- [ ] `tests/unit/test_harness_stale_uuid_result_preservation.py` — REUSE fixtures for the C7 failure-path test (floor-triggered `--resume` exits non-zero after a result event); add a new case rather than modifying existing ones.
+- [ ] `tests/**` reflection-registry/dry-run tests, if any assert a fixed reflection count — UPDATE: account for `crash-recovery` when the vault entry is present (guard on the assertion machine). Add a unit test asserting the registration assertion lands the entry in the resolved (vault) file specifically (C6).
 - [ ] Any test asserting `crash_autoresume_*` settings defaults — UPDATE: add the new `crash_autoresume_deterministic_floor_attempts` default (1).
 
 If a grep of `tests/` for `extract_signature`, `crash_recovery`, and `crash_autoresume` returns no existing coverage for a given branch, the builder adds new tests rather than updating — but the four modules above are the expected touch set.
@@ -162,7 +171,7 @@ If a grep of `tests/` for `extract_signature`, `crash_recovery`, and `crash_auto
 ## Rabbit Holes
 
 - **Rewriting the whole granite/PTY narrative in every doc.** Scope the doc work to `docs/features/crash-signature-auto-resume.md` only. Do not sweep the repo for stale PTY references — #1930 already did that.
-- **Adding a new `failure_kind` field to AgentSession.** Not needed — the confirmed-dead clean-kill shape is already in the terminal `status_transition` telemetry the extractor reads. Deriving `transient_kind` from telemetry avoids a Popoto migration.
+- **Adding a new `failure_kind` field to AgentSession (or a `transient_kind` field to `CrashSignatureKey`).** Not needed — the confirmed-dead clean-kill shape is already in the terminal `status_transition` telemetry, derived inline in the reflection's floor branch (critique C4). This avoids both a Popoto migration and widening the shared extractor dataclass.
 - **Reusing `session-recovery-drip` to drip `failed` sessions.** Explicitly rejected in the issue's recon — it is scoped to circuit-recovery stampede control and would bypass the signature library and attempt caps.
 - **Building lossless checkpoint resume.** That is #1721, superseded by #1930's four-scalar resume. This plan is about *whether* a dead session gets re-run, not resuming at the exact stopped point.
 - **Making the deterministic floor pattern-match arbitrary failure kinds.** Restrict to the one confirmed-dead clean-kill-to-`failed` shape. Broadening the transient set is a follow-up once the library warms.
@@ -210,7 +219,7 @@ If a grep of `tests/` for `extract_signature`, `crash_recovery`, and `crash_auto
 
 ## No-Gos (Out of Scope)
 
-- [EXTERNAL] Setting `FEATURES__CRASH_AUTORESUME_ENABLED=1` in the designated worker machine's vault `.env` — this is a per-machine secret edit the agent cannot perform on the target box; the update/setup flow asserts the reflection registration, but flipping auto mode on is a human `.env` action on the owning machine. The ownership gate ensures leaving it off elsewhere is safe.
+- [EXTERNAL] Setting `FEATURES__CRASH_AUTORESUME_ENABLED=1` in the designated worker machine's vault `.env` — this is a per-machine secret edit the agent cannot perform on the target box; the update/setup flow asserts the reflection registration, but flipping auto mode on is a human `.env` action on the owning machine. The ownership gate ensures leaving it off elsewhere is safe. **Owned follow-up (critique C5):** because the operator's "auto-heal, no human in the loop" requirement is unmet until this flag is set, the PR opens a tracked follow-up issue (linked in the PR description) that (a) requires a human to set `FEATURES__CRASH_AUTORESUME_ENABLED=1` on the designated worker machine within 7 days of `/do-deploy`, and (b) after activation, confirms via `valor-session crash-policy list` that propose-mode findings convert to auto-resumes. This closes the #1539 "built but never activated" failure shape with an owned, time-boxed action rather than another silent deferral.
 - [ORDERED] Fleet-wide activation of auto mode — must follow this PR's merge and a `/do-deploy` so every machine has the ownership gate before any machine acts; enabling auto mode before the gate ships risks double-resume.
 - Broadening the deterministic-floor transient set beyond confirmed-dead clean-kill-to-`failed` — deliberately out of scope until the library warms; revisit as a data-driven follow-up, not a speculative expansion now.
 
@@ -218,10 +227,10 @@ If a grep of `tests/` for `extract_signature`, `crash_recovery`, and `crash_auto
 
 **Changes required.** This is the primary fix for Gap 1.
 
-- Add an idempotent "ensure `crash-recovery` registered" assertion to the update flow (new function invoked from `scripts/update/run.py`, or an extension of `scripts/update/reflections_yaml.py`). It appends the `crash-recovery` entry to the machine's vault `reflections.yaml` when absent, validates by re-loading the registry, and no-ops when present. Replaces the manual operator step the design doc documented.
+- Add an idempotent "ensure `crash-recovery` registered" assertion to the update flow. It resolves the target file via `agent.reflection_scheduler._resolve_registry_path()` (the **vault** registry, not the per-machine `config/reflections.yaml` copy — critique C6), appends the `crash-recovery` entry when absent, validates by re-loading the registry, and no-ops when present. Replaces the manual operator step the design doc documented. **Ordering (critique NIT):** it runs before Step 1.66's vault→config copy so the entry propagates to the per-machine config copy on the same cycle (or triggers a re-copy if it lands after).
 - The entry is **unscoped** (`enabled: true`, no `project_key`) so every machine runs it in propose mode; auto mode is gated separately by the env flag + ownership check, so `tools/reflection_machine_filter.py` needs no change.
 - New settings field `crash_autoresume_deterministic_floor_attempts` propagates via the existing pydantic settings surface; add a placeholder line to `.env.example` with the required comment above it (`FEATURES__CRASH_AUTORESUME_DETERMINISTIC_FLOOR_ATTEMPTS`). No secret.
-- No Popoto model change → no `scripts/update/migrations.py` entry. (Confirmed: `transient_kind` is a dataclass field on `CrashSignatureKey`, not a persisted model; the floor reuses `AgentSession.auto_resume_attempts`.)
+- No Popoto model change → no `scripts/update/migrations.py` entry. (Confirmed: the transient-shape predicate is derived inline in the reflection, not stored; the floor reuses `AgentSession.auto_resume_attempts`.)
 
 ## Agent Integration
 
@@ -248,6 +257,9 @@ No agent integration required — this is a worker/reflection-internal change. T
 - [ ] A session finalized `failed` with a confirmed-dead clean kill to `failed` is auto-resumed within one reflection cadence under the deterministic floor (with the floor field > 0, auto flag on, and this machine owning the project), respecting `crash_autoresume_max_attempts` — integration test.
 - [ ] With the deterministic-floor field set to 0, a cold transient signature is proposed (not resumed) — statistical-gating regression test.
 - [ ] A non-owning machine proposes (does not resume) a resume-eligible session — ownership-gate test.
+- [ ] A persistently-failing floor resume advances `auto_resume_attempts` and converges to the attempt cap (no infinite retry loop) — C1 convergence test.
+- [ ] A floor-triggered `--resume` that exits non-zero after a result event attributes the correct outcome (valid completion preserved) — C7 test reusing `test_harness_stale_uuid_result_preservation.py` fixtures.
+- [ ] An owned, time-boxed follow-up issue is opened and linked in the PR for human activation of `FEATURES__CRASH_AUTORESUME_ENABLED=1` on the designated machine within 7 days of `/do-deploy` (critique C5).
 - [ ] `valor-session crash-signatures` shows records accumulating from real terminal sessions after registration (manual/soak verification noted in the PR).
 - [ ] `docs/features/crash-signature-auto-resume.md` describes actual post-fix behavior with no "previously broken" or granite-PTY narration.
 - [ ] Tests pass (`/do-test`)
@@ -261,7 +273,7 @@ The lead agent orchestrates; it never builds directly.
 
 - **Builder (classifier)**
   - Name: `classifier-builder`
-  - Role: Port the progress-fields ground-truth probe into `agent/crash_signature.py`; add `transient_kind` detection.
+  - Role: Port the progress-fields ground-truth probe into `agent/crash_signature.py` (any recorded `turn_count`/`last_tool_use_at` proves progress — no wall-clock freshness window).
   - Agent Type: builder
   - Domain: async/telemetry (fail-soft classification)
   - Resume: true
@@ -306,19 +318,20 @@ The lead agent orchestrates; it never builds directly.
 - **Assigned To**: classifier-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add a fail-soft progress-fields probe to `_extract_signature_inner`; override `no_turn_start` only when `turn_count > 0` or fresh `last_tool_use_at`.
-- Add additive `CrashSignatureKey.transient_kind` set to `"tool_wedge"` on a confirmed-dead clean kill to `failed`; `None` otherwise.
+- Add a fail-soft progress-fields probe to `_extract_signature_inner`; override `no_turn_start` when `turn_count > 0` OR `last_tool_use_at is not None` (no wall-clock freshness window — critique C2).
+- Do NOT add a `transient_kind` field to `CrashSignatureKey` (critique C4) — the transient shape is derived inline in the reflection (Task 2).
 - Update guardrail docstring; do not import stall/kill machinery.
 
 ### 2. Deterministic floor + machine posture in the reflection
 - **Task ID**: build-reflection
-- **Depends On**: build-classifier (uses `transient_kind`)
+- **Depends On**: none (transient shape derived inline here, not from the classifier — critique C4). Can run parallel to build-classifier.
 - **Validates**: reflection/crash_recovery tests, settings default test
 - **Assigned To**: reflection-builder
 - **Agent Type**: builder
-- **Parallel**: false
+- **Parallel**: true
 - Add `crash_autoresume_deterministic_floor_attempts` settings field (default 1).
-- Insert the deterministic-floor branch before `is_auto_eligible`; bound by attempt cap + run budget.
+- Derive the confirmed-dead clean-kill-to-`failed` shape inline from the last `status_transition` in `events`; insert the deterministic-floor branch before `is_auto_eligible`; bound by attempt cap + run budget.
+- Advance `auto_resume_attempts` on the failed-resume `else:` branch so a persistently-failing resume converges (critique C1).
 - Add the per-project ownership gate (`computer_name()` vs `projects.json`), fail-soft to propose.
 - Keep `resume_session` (hard-PATCH) as the resume path.
 
@@ -338,9 +351,9 @@ The lead agent orchestrates; it never builds directly.
 - **Assigned To**: test-eng
 - **Agent Type**: test-engineer
 - **Parallel**: false
-- Unit: classifier ground-truth override, `transient_kind`, fail-soft, empty/None inputs.
-- Integration: floor-resume respecting caps; floor=0 propose; non-owner propose.
-- Update any registry-count assertions.
+- Unit: classifier ground-truth override (incl. `turn_count == 0` + present `last_tool_use_at`, C2), inline transient-shape derivation, fail-soft, empty/None inputs.
+- Integration: floor-resume respecting caps; floor=0 propose; non-owner propose; failed-resume-consumes-an-attempt convergence (C1); floor `--resume` non-zero-after-result-event outcome attribution (C7, reuse `test_harness_stale_uuid_result_preservation.py` fixtures).
+- Update any registry-count assertions; add a test that the registration assertion lands the entry in the resolved vault file (C6).
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -364,17 +377,19 @@ The lead agent orchestrates; it never builds directly.
 | Check | Command | Expected |
 |-------|---------|----------|
 | Tests pass | `pytest tests/unit/ -x -q -k "crash"` | exit code 0 |
-| Lint clean | `python -m ruff check .` | exit code 0 |
-| Format clean | `python -m ruff format --check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 (format-only per repo rail; do NOT run `ruff check`) |
 | Classifier port present | `grep -c "turn_count" agent/crash_signature.py` | output > 0 |
 | Deterministic floor field present | `python -c "from config.settings import settings; print(settings.features.crash_autoresume_deterministic_floor_attempts)"` | output contains 1 |
 | Ownership gate present | `grep -c "computer_name" reflections/crash_recovery.py` | output > 0 |
-| Registration assertion wired | `grep -rc "crash-recovery" scripts/update/` | output > 0 |
+| Registration assertion targets the vault | `grep -c "_resolve_registry_path" scripts/update/` (assertion resolves the vault file, not the config copy — critique C6) | output > 0 |
+| Registration lands (dry-run) | `python -m reflections --dry-run` after the assertion runs on the vault machine | lists `crash-recovery` |
 | No stale "previously broken" narration | `grep -ci "previously.*broken\|structurally dead\|granite pty" docs/features/crash-signature-auto-resume.md` | match count == 0 |
 
 ## Critique Results
 
 **Verdict: READY TO BUILD (with concerns)** — FULL war room (Risk & Robustness, Scope & Value, History & Consistency). 0 blockers, 6 concerns, 1 nit. Concerns are embeddable refinements, not re-planning items; a revision pass folds the Implementation Notes below into the plan text before build.
+
+**Revision applied (2026-07-09):** all 6 concerns and the nit are now folded into the plan text — C1 (failed-resume consumes an attempt: Gap 3a + Failure-Path tests), C2 (`ts is not None`, no wall-clock window; `turn_count==0` residual: Gap 2 + tests), C3 (dropped the unreachable historical-rows justification: Freshness Check), C4 (derive transient shape inline, no `CrashSignatureKey.transient_kind`: Architectural Impact, Gap 3a, Steps 1-2), C5 (owned time-boxed activation follow-up: No-Gos + Success Criteria), C6 (registration targets the vault via `_resolve_registry_path()` + vault-landing test + Verification rows), and the NIT (assertion runs before Step 1.66's copy). The table below is retained as the recorded war-room artifact.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
@@ -399,4 +414,4 @@ The three questions the issue left to the planner are **resolved in-plan** (see 
 2. **Which machine gets `FEATURES__CRASH_AUTORESUME_ENABLED=1`?** RESOLVED: derive eligibility from per-project machine ownership (`projects.<key>.machine == computer_name()`) as a structural gate, with the env flag retained as the master enable and set on the designated worker machine's vault `.env` by a human (No-Go [EXTERNAL]).
 3. **Fresh run vs `resume_session` hard-PATCH?** RESOLVED: keep `resume_session` (preserves context via `claude_session_uuid`; behaves correctly for headless runner sessions). No context-losing fresh re-enqueue; UUID-less sessions escalate rather than restart blind.
 
-**One confirmation needed from the supervisor (not a scoping unknown):** the Freshness Check flags **Major drift** — #1930 deleted the granite PTY substrate and the new runner emits `turn_start`, so the issue's headline gap #2 is overtaken. This plan proceeds on the revised premise (gap #1 scheduling + gap #3 posture are the substantive work; gap #2 becomes classification hardening / regression guard). Confirm this rescope rather than closing the issue.
+**Rescope confirmed by critique (formerly "one confirmation needed"):** the Freshness Check flagged **Major drift** — #1930 deleted the granite PTY substrate and the new runner emits `turn_start`, so the issue's headline gap #2 is overtaken. This plan proceeds on the revised premise (gap #1 scheduling + gap #3 posture are the substantive work; gap #2 becomes classification hardening / regression guard). The war room's cross-validation note explicitly confirmed this rescope reasonable ("proceed on the revised premise, trimming the justification"), and the READY TO BUILD verdict ratifies it — no supervisor decision outstanding.
