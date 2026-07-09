@@ -353,18 +353,30 @@ def _rerank_single_candidate(
             if "impact_type" in parsed:
                 chunk = {**chunk, "haiku_impact_type": parsed["impact_type"]}
             return (score, reason, chunk)
-    except (json.JSONDecodeError, KeyError, IndexError):
+    except (json.JSONDecodeError, KeyError, IndexError, ValueError):
+        # The rerank request ran but returned an unparseable or malformed
+        # response (bad JSON, missing/non-numeric score). This is "ran, did not
+        # qualify," not a transport failure. Return None so it is treated the
+        # same as a below-threshold score, never counted as a hard failure.
         logger.warning(
             "Could not parse Haiku response for %s %s",
             chunk.get("path", "?"),
             chunk.get("section", "?"),
         )
+        return None
     except Exception:
-        logger.exception(
-            "Haiku reranking failed for %s %s",
+        # Transport/API error (e.g. a misconfigured ANTHROPIC_BASE_URL that 404s
+        # on the Haiku model): the rerank could not run at all. Re-raise instead
+        # of swallowing so the caller can distinguish "reranker is down" from
+        # "nothing scored" and route to the embedding-only fallback. Logged at
+        # warning (not exception) to avoid duplicate noise once find_affected
+        # logs the aggregate failure.
+        logger.warning(
+            "Haiku rerank request failed for %s %s (re-raising for fallback detection)",
             chunk.get("path", "?"),
             chunk.get("section", "?"),
         )
+        raise
     return None
 
 
@@ -373,7 +385,7 @@ def _rerank_candidates(
     change_summary: str,
     candidates: list[tuple[float, dict]],
     prompt_builder: Callable[[str, dict], str],
-) -> list[tuple[float, str, dict]]:
+) -> tuple[list[tuple[float, str, dict]], int]:
     """Parallel Haiku reranking with ThreadPoolExecutor(max_workers=5).
 
     Args:
@@ -383,9 +395,16 @@ def _rerank_candidates(
         prompt_builder: Callable that takes (change_summary, chunk) and returns prompt string.
 
     Returns:
-        List of (score, reason, chunk) tuples for candidates scoring >= 5.
+        A ``(results, failure_count)`` tuple where ``results`` is the list of
+        ``(score, reason, chunk)`` tuples for candidates scoring >= 5, and
+        ``failure_count`` is the number of candidates whose rerank request raised
+        a transport/API error (the reranker could not run). ``find_affected``
+        uses ``failure_count == len(candidates)`` to tell "reranker is down"
+        apart from "nothing scored," which look identical from the results list
+        alone (both yield an empty ``results``).
     """
     results: list[tuple[float, str, dict]] = []
+    failure_count = 0
 
     def _do_rerank(client, change_summary, chunk):
         return _rerank_single_candidate(client, prompt_builder(change_summary, chunk), chunk)
@@ -396,13 +415,20 @@ def _rerank_candidates(
             for _sim_score, chunk in candidates
         }
         for future in as_completed(futures):
-            result = future.result()
+            try:
+                result = future.result()
+            except Exception:
+                # A transport/API error re-raised by _rerank_single_candidate.
+                # Count it as a hard failure and keep collecting the remaining
+                # futures; one bad request must not abort the whole batch.
+                failure_count += 1
+                continue
             if result is not None:
                 results.append(result)
 
     # Sort by score descending
     results.sort(key=lambda x: x[0], reverse=True)
-    return results
+    return results, failure_count
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +467,17 @@ def find_affected(
     Returns:
         List of result models (type depends on result_builder).
         Returns empty list if no embedding API key is available.
+
+    Fallback behavior:
+        The embedding-only ``fallback_builder`` is used in two cases: (1) the
+        Anthropic client cannot be constructed, and (2) *every* Stage 2 rerank
+        request hard-fails with a transport/API error (e.g. a misconfigured
+        ``ANTHROPIC_BASE_URL`` that 404s on the Haiku model). The second case is
+        an all-or-nothing gate by design: a partial failure where at least one
+        candidate still reranks is trusted as-is, and a clean run where nothing
+        scores >= 5 legitimately returns ``[]`` (never a false-positive fallback
+        dump). A degraded-but-not-fully-broken reranker therefore does not
+        trigger fallback.
     """
     if repo_root is None:
         repo_root = Path.cwd()
@@ -493,7 +530,24 @@ def find_affected(
         # Fall back to embedding-only results
         return fallback_builder(candidates)
 
-    results = _rerank_candidates(client, change_summary, candidates, rerank_prompt_builder)
+    results, failure_count = _rerank_candidates(
+        client, change_summary, candidates, rerank_prompt_builder
+    )
+
+    # All-or-nothing fallback gate: only when *every* rerank request hard-failed
+    # (transport/API error, e.g. a misconfigured ANTHROPIC_BASE_URL that 404s on
+    # the Haiku model) do we route to the embedding-only fallback. A clean run
+    # where nothing scored >= 5 legitimately returns []. A partial failure (some
+    # requests fail, at least one succeeds) is trusted as-is and does NOT fall
+    # back. This deliberate boundary means a degraded-but-not-fully-broken
+    # reranker will not dump the full embedding-only candidate list.
+    if candidates and failure_count == len(candidates):
+        logger.warning(
+            "All %d Haiku rerank requests failed (check ANTHROPIC_BASE_URL / "
+            "model id); falling back to embedding-only candidates.",
+            len(candidates),
+        )
+        return fallback_builder(candidates)
 
     return result_builder(results)
 

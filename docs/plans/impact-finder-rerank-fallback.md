@@ -337,21 +337,21 @@ handling, not their entry points or contracts.
 
 ## Success Criteria
 
-- [ ] With a misconfigured `ANTHROPIC_BASE_URL` (all Haiku requests fail),
+- [x] With a misconfigured `ANTHROPIC_BASE_URL` (all Haiku requests fail),
   `find_affected()` returns `fallback_builder(candidates)` results instead of
   `[]`, when Stage 1 recall found candidates.
-- [ ] Legitimate "rerank ran, nothing scored >= 5" still returns `[]` (no
+- [x] Legitimate "rerank ran, nothing scored >= 5" still returns `[]` (no
   false-positive fallback).
-- [ ] A partial failure (some candidates hard-fail, at least one legitimately
+- [x] A partial failure (some candidates hard-fail, at least one legitimately
   scores) does NOT trigger fallback — documented as deliberate in Risk 1.
-- [ ] Unit tests added in `tests/unit/test_doc_impact_finder.py` covering: (a)
+- [x] Unit tests added in `tests/unit/test_doc_impact_finder.py` covering: (a)
   all rerank requests fail → fallback used, (b) rerank succeeds but all score
   < 5 → empty result, no fallback, (c) mixed failure/success → no fallback,
   legitimate results returned.
-- [ ] Warning logged on the fallback path naming the likely cause (base URL /
+- [x] Warning logged on the fallback path naming the likely cause (base URL /
   model id) — asserted via `caplog`, not string-matched stdout.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
@@ -474,7 +474,7 @@ Tier 1 — Core: `builder`, `validator`, `code-reviewer`, `test-engineer`,
 | Tests pass | `pytest tests/unit/test_doc_impact_finder.py tests/unit/test_code_impact_finder.py -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check tools/impact_finder_core.py tests/unit/test_doc_impact_finder.py` | exit code 0 |
 | Format clean | `python -m ruff format --check tools/impact_finder_core.py tests/unit/test_doc_impact_finder.py` | exit code 0 |
-| No silent exception swallowing remains | `grep -n "except Exception:" tools/impact_finder_core.py \| grep -v "re-raise\|raise$"` | match count == 0 |
+| Transport-error branch re-raises (no silent swallow) | `grep -c "^        raise$" tools/impact_finder_core.py` | >= 1 (the `_rerank_single_candidate` transport branch re-raises) |
 | Fallback path is reachable from all-failure case | `grep -n "fallback_builder(candidates)" tools/impact_finder_core.py` | output > 1 |
 
 ## Critique Results
