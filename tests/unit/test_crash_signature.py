@@ -278,6 +278,84 @@ class TestDeterminismGuardrail:
 
 
 # ---------------------------------------------------------------------------
+# Progress-fields ground-truth override (#1917 gap 2, critique C2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ProgressSession:
+    """Session stub exposing the progress fields the extractor consults."""
+
+    turn_count: object = 0
+    last_tool_use_at: object = None
+    startup_failure_kind: str | None = None
+
+
+class _RaisingTurnCount:
+    """Session stub whose ``turn_count`` access raises — exercises fail-soft."""
+
+    startup_failure_kind = None
+    last_tool_use_at = None
+
+    @property
+    def turn_count(self):
+        raise RuntimeError("boom")
+
+
+class TestProgressFieldsGroundTruth:
+    """A missing telemetry ``turn_start`` is overridden to the resumable path
+    when the session's OWN progress fields prove it started and did work.
+    Ported from #1724's ``_has_demonstrable_progress`` (no wall-clock window)."""
+
+    def test_turn_count_gt_zero_overrides_no_turn_start(self):
+        """turn_count > 0 with no turn_start -> resumable (acceptance criterion)."""
+        session = _ProgressSession(turn_count=1)
+        events = [_status_transition("failed", kill=_kill_dict(True, "SIGKILL"))]
+        key = extract_signature(events, session=session)
+        assert key.signature_class != NON_RESUMABLE_DETERMINISTIC
+        assert key.resumable is True
+        assert "no_turn_start" not in key.human_form
+
+    def test_turn_count_string_gt_zero_overrides(self):
+        """turn_count stored as a numeric string still proves progress."""
+        session = _ProgressSession(turn_count="2")
+        events = [_status_transition("failed", kill=_kill_dict(True, "SIGKILL"))]
+        key = extract_signature(events, session=session)
+        assert key.resumable is True
+
+    def test_turn_count_zero_with_last_tool_use_at_overrides(self):
+        """turn_count == 0 but a present (non-fresh) last_tool_use_at -> resumable.
+
+        The mid-first-turn-wedge residual case (critique C2): turn_count only
+        increments on turn completion, so a session killed mid-first-turn has
+        turn_count == 0. A recorded last_tool_use_at (present, NOT wall-clock
+        fresh) is ground truth of progress; a freshness window would read this
+        stale/False and leave the path dead.
+        """
+        session = _ProgressSession(turn_count=0, last_tool_use_at="2020-01-01T00:00:00Z")
+        events = [_status_transition("failed", kill=_kill_dict(True, "SIGKILL"))]
+        key = extract_signature(events, session=session)
+        assert key.signature_class != NON_RESUMABLE_DETERMINISTIC
+        assert key.resumable is True
+
+    def test_no_progress_fields_stays_deterministic_non_resumable(self):
+        """turn_count == 0 AND no last_tool_use_at -> genuine never-started."""
+        session = _ProgressSession(turn_count=0, last_tool_use_at=None)
+        events = [_status_transition("failed")]
+        key = extract_signature(events, session=session)
+        assert key.signature_class == NON_RESUMABLE_DETERMINISTIC
+        assert key.resumable is False
+
+    def test_progress_probe_is_fail_soft(self):
+        """A session whose progress-field access raises falls through to the
+        deterministic non-resumable path rather than propagating."""
+        events = [_status_transition("failed")]
+        key = extract_signature(events, session=_RaisingTurnCount())
+        assert key.signature_class == NON_RESUMABLE_DETERMINISTIC
+        assert key.resumable is False
+
+
+# ---------------------------------------------------------------------------
 # Never-raises contract
 # ---------------------------------------------------------------------------
 
