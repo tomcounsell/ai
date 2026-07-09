@@ -7,6 +7,7 @@ created: 2026-07-09
 tracking: https://github.com/tomcounsell/ai/issues/1916
 last_comment_id:
 revision_applied: true
+revision_round: 2
 ---
 
 # stage-marker in_progress rejected at PLAN on a fresh pipeline
@@ -212,22 +213,66 @@ detection observe the transition.
 ### Technical Approach
 
 **1. New `_backfill_predecessors(stage)` helper on `PipelineStateMachine`
-(scan-then-mutate, single save, distinct metric).** Sketch:
+(spine-restricted walk, scan-then-mutate, single save, distinct metric).**
+
+The walk MUST be restricted to the ISSUE-rooted main-line spine. This is the
+round-2 BLOCKER fix. `_get_predecessors` derives from `PIPELINE_EDGES`, and TEST
+has **two** success in-edges — `("BUILD","success"): "TEST"` **and**
+`("PATCH","success"): "TEST"` (`pipeline_graph.py:45,57`). So
+`_get_predecessors("TEST") == [BUILD, PATCH]`. A naive transitive walk that
+reached TEST (any `in_progress`/`completed` marker for TEST, REVIEW, DOCS, or
+MERGE) would pull the off-happy-path **PATCH** into `to_promote` and force-set
+`states["PATCH"] = "completed"` even though no patch ran — corrupting later
+genuine TEST→PATCH re-entry (backfill mutates `self.states` directly, so
+`patch_cycle_count` is never incremented). The fix: only walk predecessors that
+sit on the ISSUE spine.
+
+A stage is **on the ISSUE spine** iff its transitive *success*-predecessor set
+contains ISSUE (or it IS ISSUE). PATCH has **no** success in-edge
+(`_get_predecessors("PATCH") == []`, because the only edges into PATCH are
+`("TEST","fail")`, `("REVIEW","fail")`, `("REVIEW","partial")` — none are
+`"success"`), so PATCH is off-spine and is skipped. The spine is exactly the
+linear happy path ISSUE→PLAN→CRITIQUE→BUILD→TEST→REVIEW→DOCS→MERGE.
 
 ```python
-def _backfill_predecessors(self, stage: str) -> list[str]:
-    """Promote the success-edge predecessor chain of `stage` to completed.
+def _reaches_issue(self, stage: str) -> bool:
+    """True iff `stage` sits on the ISSUE-rooted success spine — its transitive
+    success-predecessor set contains ISSUE (or it IS ISSUE). PATCH is off-spine
+    (`_get_predecessors("PATCH") == []`), so this returns False for it — that is
+    what stops a backfill reaching TEST (predecessors [BUILD, PATCH]) from
+    pulling the off-happy-path PATCH into the promotion set.
+    """
+    if stage == "ISSUE":
+        return True
+    seen: set[str] = set()
+    frontier = list(self._get_predecessors(stage))
+    while frontier:
+        p = frontier.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        if p == "ISSUE":
+            return True
+        frontier.extend(self._get_predecessors(p))
+    return False
 
-    Scan-then-mutate: collect every transitive predecessor currently in
-    {pending, ready, in_progress}; if ANY chain member is `failed`, raise
+def _backfill_predecessors(self, stage: str) -> list[str]:
+    """Promote the ISSUE-rooted success spine behind `stage` to completed.
+
+    Scan-then-mutate: collect every transitive ON-SPINE predecessor currently in
+    {pending, ready, in_progress}; if ANY collected member is `failed`, raise
     ValueError BEFORE mutating (a failed predecessor is a real inconsistency,
-    never silently erased, and no partial state is persisted). Then promote
-    all collected members in one pass, persist with a single _save(), and emit
-    sdlc.stage_backfilled per synthetic promotion. Returns the promoted stages.
+    never silently erased, and no partial state is persisted). Then promote all
+    collected members in one pass, persist with a single _save(), and emit
+    sdlc.stage_backfilled per synthetic promotion. Off-spine predecessors (PATCH,
+    reached via TEST's second success in-edge) are never walked or promoted.
+    Returns the promoted stages.
     """
     to_promote: list[str] = []
     seen: set[str] = set()
-    frontier = list(self._get_predecessors(stage))
+    # Seed and extend the frontier with ON-SPINE predecessors only — PATCH,
+    # being off-spine, is excluded here and never force-completed.
+    frontier = [p for p in self._get_predecessors(stage) if self._reaches_issue(p)]
     while frontier:                       # SCAN — no mutation in this loop
         pred = frontier.pop()
         if pred in seen:
@@ -240,7 +285,9 @@ def _backfill_predecessors(self, stage: str) -> list[str]:
             )
         if st != "completed":
             to_promote.append(pred)
-        frontier.extend(self._get_predecessors(pred))
+        frontier.extend(
+            p for p in self._get_predecessors(pred) if self._reaches_issue(p)
+        )
     for pred in to_promote:               # MUTATE — only after a clean scan
         self.states[pred] = "completed"
     if to_promote:
@@ -250,12 +297,13 @@ def _backfill_predecessors(self, stage: str) -> list[str]:
     return to_promote
 ```
 
-The walk terminates at ISSUE (`_get_predecessors("ISSUE")` is empty). The helper
-never touches `failed` — the `raise` happens in the scan phase before any
-`states[...]` assignment, so a deep `failed` member leaves the machine untouched
-(fixes CONCERN 1: no partial persisted state). The `sdlc.stage_backfilled` metric
-(fixes CONCERN 2) makes synthetic promotions observable and distinct from real
-`sdlc.stage_started` transitions.
+The walk terminates at ISSUE (`_get_predecessors("ISSUE")` is empty) and never
+descends into PATCH (the `_reaches_issue` filter drops it at both the seed and
+the extend step). The helper never touches `failed` — the `raise` happens in the
+scan phase before any `states[...]` assignment, so a deep `failed` member leaves
+the machine untouched (fixes CONCERN 1: no partial persisted state). The
+`sdlc.stage_backfilled` metric (fixes CONCERN 2) makes synthetic promotions
+observable and distinct from real `sdlc.stage_started` transitions.
 
 **2. `start_stage(stage, backfill_predecessors=False)`.** Add the keyword-only
 default-`False` parameter. On the predecessor loop's failure branch (currently
@@ -324,6 +372,12 @@ a persisted transition.
 - [ ] **Distinct metric (CONCERN 2)**: assert `_record_stage_metric` is called
   with `"sdlc.stage_backfilled"` (not `"sdlc.stage_started"`) once per promoted
   predecessor; assert no metric is emitted when the chain is already completed.
+- [ ] **Off-spine PATCH exclusion (round-2 BLOCKER)**: `_backfill_predecessors("TEST")`
+  (and `("REVIEW")`, `("MERGE")`) on a fresh session promotes ISSUE/PLAN/CRITIQUE/BUILD
+  to `completed` and leaves `PATCH` unchanged (`pending`); assert PATCH is NOT in the
+  returned promoted list and `states["PATCH"] == "pending"`. Also unit-test the
+  `_reaches_issue` predicate directly: `True` for ISSUE/PLAN/CRITIQUE/BUILD/TEST/
+  REVIEW/DOCS/MERGE, `False` for PATCH.
 
 ### Error State Rendering
 - [ ] Confirm the marker CLI still prints the loud stderr diagnostic and exits 1
@@ -353,6 +407,12 @@ a persisted transition.
   `tests/unit/test_pipeline_state.py` / `test_pipeline_state_machine.py`: the
   scan-then-mutate, single-save, and `sdlc.stage_backfilled` metric assertions
   listed under Failure Path Test Strategy.
+- [ ] New test (off-spine PATCH exclusion, round-2 BLOCKER regression) — ADD to
+  `tests/unit/test_pipeline_state.py` / `test_pipeline_state_machine.py`:
+  `_backfill_predecessors("TEST")` / `("REVIEW")` / `("MERGE")` on a fresh session
+  promotes only the ISSUE-spine stages and leaves `PATCH == "pending"` with
+  `patch_cycle_count == 0`; plus a direct `_reaches_issue` truth-table test
+  (`True` for all spine stages, `False` for PATCH).
 
 ## Rabbit Holes
 
@@ -374,11 +434,17 @@ a persisted transition.
 ### Risk 1: Backfill masks a genuinely-skipped stage
 **Impact:** A marker write for a late stage (e.g. REVIEW) could backfill BUILD/TEST
 to completed even if they were truly skipped.
-**Mitigation:** The marker records "we reached this stage", which implies prior
-stages ran; this matches the tool's documented best-effort semantics. The guard
-against masking *failures* (never backfill over `failed`) preserves the only
-signal that would indicate genuine trouble. Router/hook callers keep strict
-default, so real ordering enforcement is untouched.
+**Mitigation:** The marker records "we reached this stage on the happy path",
+which implies the prior **spine** stages ran; this matches the tool's documented
+best-effort semantics. Backfill is restricted to the ISSUE-rooted success spine
+(ISSUE→PLAN→CRITIQUE→BUILD→TEST→REVIEW→DOCS→MERGE): reaching REVIEW implies
+BUILD/TEST ran, but does **not** imply the off-spine PATCH ran, so PATCH is never
+force-completed (see Technical Approach step 1 — `_reaches_issue`). This is the
+key correction over the naive "all predecessors" walk: PATCH is an error-recovery
+detour, not a happy-path prerequisite, so its absence is normal and must not be
+synthesized. The guard against masking *failures* (never backfill over `failed`)
+preserves the only signal that would indicate genuine trouble. Router/hook callers
+keep strict default, so real ordering enforcement is untouched.
 
 ### Risk 2: Behavior change leaks to strict callers
 **Impact:** If the default flipped, the router could silently advance over
@@ -447,6 +513,11 @@ behavior only; no new MCP surface, `.mcp.json`, or bridge import is involved.
   `ValueError` (loud path preserved) and mutate no state.
 - [ ] Strict-default `start_stage` behavior is unchanged for router/hook callers
   (existing tests pass).
+- [ ] A marker write at a **multi-predecessor stage** (TEST — predecessors
+  `[BUILD, PATCH]`) or any stage downstream of it (REVIEW/DOCS/MERGE) that
+  triggers backfill promotes the spine (ISSUE/PLAN/CRITIQUE/BUILD) to `completed`
+  but leaves **PATCH un-promoted** (still `pending`), and `patch_cycle_count`
+  stays `0` (round-2 BLOCKER regression guard).
 - [ ] A test covers the first-write-at-PLAN path (acceptance criterion from #1916).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -464,6 +535,8 @@ behavior only; no new MCP surface, `.mcp.json`, or bridge import is involved.
 | Standalone helper exists | `grep -c "_backfill_predecessors" agent/pipeline_state.py` | output > 0 |
 | Backfill metric emitted | `grep -c "sdlc.stage_backfilled" agent/pipeline_state.py` | output > 0 |
 | Completed path calls helper directly | `grep -c "_backfill_predecessors" tools/sdlc_stage_marker.py` | output > 0 |
+| Spine-restriction predicate exists | `grep -c "_reaches_issue" agent/pipeline_state.py` | output > 0 |
+| Backfill at TEST leaves PATCH pending | `pytest tests/unit/test_pipeline_state_machine.py -k patch_not_backfilled -q` | exit code 0 |
 
 ## Critique Results
 
@@ -486,3 +559,28 @@ addressed:
   alternative was rejected. Open Questions section removed.
 - **Two informational nits.** Accepted; no separate action taken beyond the above
   structural changes, which subsume them.
+
+**Round 2 verdict: NEEDS REVISION** (2026-07-09). Revision applied — the new
+BLOCKER is addressed:
+
+- **BLOCKER (backfill walk promotes off-spine PATCH via TEST's second
+  success-predecessor edge).** Fixed. `_get_predecessors("TEST")` returns
+  `[BUILD, PATCH]` because `("PATCH","success"): "TEST"` exists alongside
+  `("BUILD","success"): "TEST"` (`pipeline_graph.py:45,57`). The prior naive
+  transitive walk would pull PATCH into `to_promote` for any backfill reaching
+  TEST/REVIEW/DOCS/MERGE, force-completing PATCH without incrementing
+  `patch_cycle_count` and corrupting later genuine TEST→PATCH re-entry. Fix:
+  restrict the walk to the ISSUE-rooted success spine via a new `_reaches_issue`
+  predicate (a stage is on-spine iff its transitive success-predecessor set
+  contains ISSUE). PATCH has no success in-edge (`_get_predecessors("PATCH") ==
+  []`), so it is off-spine and is skipped at both the seed and extend steps of
+  the frontier. See Technical Approach step 1. A success criterion, Failure-Path
+  test, and Test Impact case were added covering a backfill at a multi-predecessor
+  stage (TEST) that leaves PATCH `pending` and `patch_cycle_count == 0`. Risk 1's
+  mitigation was corrected to state that reaching a stage implies prior *spine*
+  stages ran (not PATCH).
+- **Two EXCLUDED findings** (per the round-2 critic) are intentionally NOT acted
+  on: (1) "completed-path backfill is an uncaught crash" is factually wrong — the
+  outer `try/except` at `tools/sdlc_stage_marker.py:207` already catches it and
+  exits 1; (2) the concurrent-failure race is a pre-existing `_save()` property,
+  out of scope for this bugfix.
