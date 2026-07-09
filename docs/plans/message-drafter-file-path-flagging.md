@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-08
 tracking: https://github.com/tomcounsell/ai/issues/1955
 last_comment_id: null
+revision_applied: true
 ---
 
 # Message Drafter File-Path Flagging
@@ -91,9 +92,13 @@ No relevant external findings — this is a regex-based internal validator addit
 1. **Entry point:** An agent (any persona, any skill) produces turn text ending in `[/user]`/`[/complete]` (or, for a direct CLI invocation, calls `tools/send_message.py`). Either path funnels to `agent/output_handler.py::TelegramRelayOutputHandler.send()`.
 2. **Drafter call:** `send()` calls `draft_message(text, session=session, medium=drafter_medium)` (`output_handler.py:414-420`).
 3. **Validation:** Inside `draft_message()`, `_validate_for_medium(composed_text, medium)` (`message_drafter.py:798`) dispatches to `validate_telegram`/`validate_email`, which today return `Violation` objects for markdown-table/markdown-syntax problems only. This plan adds a medium-agnostic `detect_local_file_reference(text)` check, merged into the same violations list regardless of transport.
-4. **Promotion to actionable:** Today, a non-empty `violations` list is returned in the `MessageDraft` but does **not** set `needs_self_draft` (only `_detect_empty_promise` does, `message_drafter.py:801-809`) — so violations are silently dropped for eng sessions (their only consumer, `stop.py`, is dead). This plan changes `draft_message()` to set `needs_self_draft=True` whenever `violations` is non-empty, generalizing the existing empty-promise-triggers-self-draft pattern to cover ALL violations, not just the new local-path one.
-5. **Surfacing:** Back in `output_handler.py:434-441`, `needs_self_draft=True` triggers `_inject_self_draft_steering(session)` — a steering message is pushed into the session's Redis steering queue, the agent notices it at its next turn boundary, and rewrites/resends (or the budget/pending-guard falls through to narration fallback, per existing logic — see Race Conditions).
-6. **Output:** The agent's next turn either resends corrected text (e.g., replacing the local path with an attached file via `tools/send_message.py --file`) or, if the self-draft budget is exhausted, the original text is delivered as-is (existing non-blocking-guard behavior — never silently dropped).
+4. **Promotion to actionable — BOTH return paths (critique B1):** Today, a non-empty `violations` list is returned in the `MessageDraft` but does **not** set `needs_self_draft` (only `_detect_empty_promise` does, `message_drafter.py:801-809`) — so violations are silently dropped for eng sessions (their only consumer, `stop.py`, is dead). `draft_message()` has **two** distinct return statements that carry a `violations` list without promoting it, and the incident text (`"Done. Saved to /tmp/x.txt."` — short, no `?`, no fence, no artifacts, no SDLC session) exits through the *first* of them:
+   - **Short-output early return** (`message_drafter.py:770-781`) — returns `MessageDraft(text=raw_response, artifacts=artifacts, violations=_validate_for_medium(raw_response, medium))` for brief non-SDLC replies. It computes violations inline but never inspects them, so a terse message carrying a raw local path ships verbatim. This is the path the reported incident-class message hits.
+   - **Main-path return** (`message_drafter.py:823-831`) — reached for composed/longer messages; also returns `needs_self_draft=False` with a populated `violations` list (unless the earlier empty-promise branch at `:801-809` fired first).
+   This plan promotes violations to `needs_self_draft=True` at **both** return points, generalizing the existing empty-promise-triggers-self-draft pattern to cover ALL violations, not just the new local-path one, on every path that can carry them. Covering only the main path (as the pre-critique draft did) would let the exact reported message class slip through — hence B1 is a hard blocker, not a nicety.
+5. **Surfacing:** Back in `output_handler.py:434-441`, `needs_self_draft=True` triggers `_inject_self_draft_steering(session, draft)` — a steering message is pushed into the session's Redis steering queue, the agent notices it at its next turn boundary, and rewrites/resends (or the budget/pending-guard falls through to narration fallback, per existing logic — see Race Conditions).
+6. **Instruction content — violation-aware nudge (critique B2):** The steering message the agent receives is built from `SELF_DRAFT_INSTRUCTION`. That constant (`message_drafter.py:570-578`) is fixed and violation-type-agnostic: it never mentions local paths or file attachment and actively says "Omit internal code details" — so on its own it does **not** steer the agent toward the outcome the issue asks for ("attach the file as a real Telegram attachment"). This plan makes the injected instruction violation-aware: when the deferred draft carries a `local_file_path_reference` violation, `_inject_self_draft_steering` appends a targeted addendum instructing the agent to attach the referenced file via `tools/send_message.py "<caption>" --file <path>` (or drop the path if no file was meant), rather than re-pasting it. Without this, the self-draft round-trip would fire but produce the same unusable local-path text — the plan's outcome would under-claim relative to the issue.
+7. **Output:** The agent's next turn either resends corrected text (replacing the local path with a real attachment via `tools/send_message.py --file`, as the addendum now explicitly directs) or, if the self-draft budget is exhausted, the original text is delivered as-is (existing non-blocking-guard behavior — never silently dropped).
 
 ## Why Previous Fixes Failed
 
@@ -106,10 +111,11 @@ No relevant external findings — this is a regex-based internal validator addit
 ## Architectural Impact
 
 - **New dependencies:** none.
-- **Interface changes:** `draft_message()`'s behavior changes for any composed text containing a wire-format violation — previously delivered as-is (silently, for eng sessions) or bounced via the dead stop.py gate (for whatever, if anything, still used the pre-teardown path); now uniformly triggers `needs_self_draft=True` and the (already-live) self-draft steering flow. `MessageDraft`'s public shape is unchanged (no new fields) — `violations` already exists; only the wiring of "does a violation set `needs_self_draft`" changes.
-- **Coupling:** unchanged — no new cross-module dependency; the new validator function lives in the same file as its siblings and is invoked through the same existing dispatcher.
+- **Interface changes:** `draft_message()`'s behavior changes for any text containing a wire-format violation, on **both** its return paths (short-output early return and main-path return) — previously delivered as-is (silently, for eng sessions) or bounced via the dead stop.py gate (for whatever, if anything, still used the pre-teardown path); now uniformly triggers `needs_self_draft=True` and the (already-live) self-draft steering flow. `MessageDraft`'s public shape is unchanged (no new fields) — `violations` already exists; only the wiring of "does a violation set `needs_self_draft`" changes.
+- **`_inject_self_draft_steering` signature change:** in `agent/output_handler.py`, `_inject_self_draft_steering(self, session)` gains a second parameter — the deferred `draft` (or its `violations` list) — so it can compose a violation-aware steering instruction (critique B2). The single existing call site (`output_handler.py:435`) already has `draft` in scope; no other caller exists (verified). This is an internal method; no public API changes.
+- **Coupling:** the new validator function lives in the same file as its siblings and is invoked through the same existing dispatcher. One additional file enters scope — `agent/output_handler.py` — but only to thread the already-in-scope `draft`/`violations` into the instruction builder; no new cross-module import beyond the `local_file_path_reference` rule-name constant already exported by `message_drafter.py`.
 - **Data ownership:** unchanged.
-- **Reversibility:** high — the change is additive (one new function) plus a boolean-condition tweak (`if violations:` alongside the existing empty-promise check) in `draft_message()`. Reverting is a single-commit revert.
+- **Reversibility:** high — the change is additive (one new validator function) plus two matching boolean-condition tweaks (`if violations:` promotion at both return paths in `draft_message()`) plus a violation-aware instruction addendum in `_inject_self_draft_steering`. Reverting is a single-commit revert.
 
 ## Appetite
 
@@ -129,27 +135,35 @@ No prerequisites — this work has no external dependencies; everything runs aga
 
 ### Key Elements
 
-- **`detect_local_file_reference(text)`**: a new medium-agnostic validator in `bridge/message_drafter.py`, alongside `validate_telegram`/`validate_email`, that regex-scans for local filesystem path patterns and macOS-only shell command references.
-- **Violation promotion**: `draft_message()` sets `needs_self_draft=True` whenever `_validate_for_medium()` returns any non-empty violations list (generalizing the existing empty-promise trigger, since the violations' documented consumer — `agent/hooks/stop.py` — is confirmed dead for the session type that matters).
-- **Docstring correction**: `draft_message()`'s docstring (currently stale at `message_drafter.py:728-730`) updated to describe the corrected flow.
+- **`detect_local_file_reference(text)`**: a new medium-agnostic validator in `bridge/message_drafter.py`, alongside `validate_telegram`/`validate_email`, that regex-scans for local filesystem path patterns and macOS-only shell command references. Emits `Violation(rule="local_file_path_reference", ...)`. The rule-name string is exported as a module constant (`LOCAL_FILE_PATH_RULE = "local_file_path_reference"`) so the self-draft instruction builder can detect it without hard-coding the literal.
+- **Violation promotion on BOTH return paths (critique B1)**: `draft_message()` sets `needs_self_draft=True` whenever `_validate_for_medium()` returns any non-empty violations list — applied at **both** the short-output early return (`message_drafter.py:770-781`) and the main-path return (`:823-831`), generalizing the existing empty-promise trigger. The short-output path is the one the reported incident message class actually exits through, so promoting only the main path (the pre-critique draft) would leave the exact bug unfixed.
+- **Violation-aware self-draft instruction (critique B2)**: the fixed `SELF_DRAFT_INSTRUCTION` constant stays compact and unchanged as the base. `_inject_self_draft_steering` (in `agent/output_handler.py`) is extended to accept the deferred `draft` and, when its violations include a `local_file_path_reference`, append a targeted addendum telling the agent to attach the referenced file via `tools/send_message.py "<caption>" --file <path>` (or drop the path if no file was intended). This is what actually produces the issue's requested "real Telegram attachment" outcome — the base instruction alone steers toward omitting details, not attaching.
+- **Docstring correction**: `draft_message()`'s docstring (currently stale at `message_drafter.py:728-730`) updated to describe the corrected flow (both return paths promote violations; violation-aware steering).
 - **Skill fix**: `.claude/skills-global/weekly-review/SKILL.md`'s "Final step" section stops instructing `open -a TextEdit <path>` as the delivery mechanism.
 
 ### Flow
 
-Agent drafts a reply containing `/tmp/eng_review_jul1-8.txt` → `draft_message()` composes the text → `detect_local_file_reference()` fires a `Violation(rule="local_file_path_reference")` → `violations` is non-empty → `MessageDraft(text="", needs_self_draft=True, violations=[...])` returned → `output_handler.py` injects self-draft steering instead of sending → agent's next turn sees the steering nudge, rewrites using `tools/send_message.py "<caption>" --file /tmp/eng_review_jul1-8.txt` → file arrives as a real Telegram attachment.
+Agent drafts a reply containing `/tmp/eng_review_jul1-8.txt` → `draft_message()` runs `_validate_for_medium()` → `detect_local_file_reference()` fires a `Violation(rule="local_file_path_reference")` → `violations` is non-empty → the return path taken (short-output early return for the terse incident message, or main-path return for a longer one) promotes to `MessageDraft(text="", needs_self_draft=True, violations=[...])` → `output_handler.py` calls `_inject_self_draft_steering(session, draft)`, which composes the base instruction plus a local-file addendum ("attach via `tools/send_message.py --file <path>`") because the draft carries a `local_file_path_reference` violation → agent's next turn sees the steering nudge, rewrites using `tools/send_message.py "<caption>" --file /tmp/eng_review_jul1-8.txt` → file arrives as a real Telegram attachment.
 
 ### Technical Approach
 
-1. **`bridge/message_drafter.py`**: add `detect_local_file_reference(text: str) -> list[Violation]` near `validate_telegram`/`validate_email` (after line 309). Patterns to check (case-sensitive, since these are Unix paths):
+1. **`bridge/message_drafter.py` — new validator**: add `detect_local_file_reference(text: str) -> list[Violation]` near `validate_telegram`/`validate_email` (after line 309), plus a module constant `LOCAL_FILE_PATH_RULE = "local_file_path_reference"` used as the emitted rule name (so the instruction builder in step 6 matches on the constant, not a bare literal). Patterns to check (case-sensitive, since these are Unix paths):
    - `` /tmp/\S+ `` — temp-file paths
    - `` /Users/\S+ `` and `` /home/\S+ `` — absolute home-directory paths
    - `` ~/\S+ `` — tilde-relative paths
    - `` `open (-a\s+\S+\s+)?\S+` `` (backtick-wrapped) or bare `open -a \S+` — macOS `open` command references
-   Each match produces `Violation(rule="local_file_path_reference", line=..., snippet=...)`. Keep the same shape/pattern as `validate_telegram`'s markdown-table scan (single pass over lines, `re.compile` module-level patterns).
+   Each match produces `Violation(rule=LOCAL_FILE_PATH_RULE, line=..., snippet=...)`. Keep the same shape/pattern as `validate_telegram`'s markdown-table scan (single pass over lines, `re.compile` module-level patterns).
 2. **`bridge/message_drafter.py::_validate_for_medium`** (line 323): after the medium-specific dispatch, extend the returned list with `detect_local_file_reference(text)` regardless of medium — local paths are meaningless on both Telegram and email.
-3. **`bridge/message_drafter.py::draft_message`** (around line 798-809): change the condition that currently only checks `_detect_empty_promise` to also check `if violations:` — either condition sets `needs_self_draft=True` and returns early with `MessageDraft(text="", needs_self_draft=True, artifacts=artifacts, violations=violations)`. Preserve the existing empty-promise-specific log message; add a parallel log line for the violations case (e.g. `"Wire-format violation(s) detected — requesting self-draft via steering: %s"`, listing violation rules).
-4. **Docstring**: update `draft_message()`'s docstring at `message_drafter.py:709-735` to remove the stale "surface via the stop-hook review gate (agent/hooks/stop.py)" line and replace with: "Wire-format violations (markdown table, local file-path reference, etc.) now trigger `needs_self_draft=True` directly, same as empty-promise detection — both route through the self-draft steering path (`agent/output_handler.py:429-441`)."
-5. **`.claude/skills-global/weekly-review/SKILL.md`** (lines 97-104): replace "After saving, offer: `open -a TextEdit <path>`" with guidance that the file has been saved locally and the agent should let the delivery pipeline flag it (no special-casing needed — the new drafter check handles it generically). Keep the `/tmp/` save instruction (still correct — the file must exist somewhere before it can be attached); only the "how to hand it to the user" framing changes.
+3. **`bridge/message_drafter.py::draft_message` — promote violations on BOTH return paths (critique B1)**:
+   - **Short-output early return (`:770-781`)**: this path currently returns `MessageDraft(text=raw_response, artifacts=artifacts, violations=_validate_for_medium(raw_response, medium))` and never inspects the violations. Capture the validator result into a local (`short_violations = _validate_for_medium(raw_response, medium)`) and, when it is non-empty, return `MessageDraft(text="", needs_self_draft=True, artifacts=artifacts, violations=short_violations)` instead of the verbatim pass-through. This is the path the reported incident message (`"Done. Saved to /tmp/x.txt."`) exits through, so it MUST promote. When `short_violations` is empty, behavior is unchanged (verbatim pass-through).
+   - **Main-path return (`:801-831`)**: change the early-return condition that currently checks only `_detect_empty_promise(...)` to also fire on a non-empty `violations` list — i.e. `if _detect_empty_promise(stripped_text.lower()) or violations:` returns `MessageDraft(text="", needs_self_draft=True, full_output_file=full_output_file, artifacts=artifacts, violations=violations)`. Preserve the existing empty-promise-specific log message; add a parallel log line for the violations-only case (e.g. `"Wire-format violation(s) detected — requesting self-draft via steering: %s"`, listing violation rules). With this early return in place, the final `:823-831` return (`needs_self_draft=False`) is reached only when `violations` is empty, so its `needs_self_draft=False` remains correct.
+   - Consider extracting a tiny local helper (e.g. `_promoted_draft(violations, artifacts, full_output_file=None)`) to keep the two promotion sites identical and avoid drift; optional, builder's discretion.
+4. **`agent/output_handler.py` — violation-aware self-draft instruction (critique B2)**:
+   - Change `_inject_self_draft_steering(self, session)` → `_inject_self_draft_steering(self, session, draft)` and update the sole call site at `output_handler.py:435` to pass the in-scope `draft`.
+   - Build the pushed message as `SELF_DRAFT_INSTRUCTION` plus, when `draft.violations` contains a violation whose `rule == LOCAL_FILE_PATH_RULE` (imported from `message_drafter`), a concise addendum such as: `"\n\nOne or more local filesystem paths were detected in your message. Those paths are meaningless to the recipient. If you meant to share a file, attach it as a real Telegram attachment with `tools/send_message.py \"<caption>\" --file <path>` instead of pasting the path. If no file was meant, remove the path reference."` Keep the base `SELF_DRAFT_INSTRUCTION` constant compact and unchanged (the existing `len < 1000` assertion in `test_message_drafter.py:270` still applies to the base constant).
+   - The addendum composition lives in `_inject_self_draft_steering` (not in the constant) so it fires only when the local-path rule is present; other violation types (markdown table, empty promise) keep the base instruction alone.
+5. **Docstring**: update `draft_message()`'s docstring at `message_drafter.py:709-735` to remove the stale "surface via the stop-hook review gate (agent/hooks/stop.py)" line and replace with: "Wire-format violations (markdown table, local file-path reference, etc.) now trigger `needs_self_draft=True` directly on both the short-output and main return paths, same as empty-promise detection — all route through the self-draft steering path (`agent/output_handler.py:429-441`), where a `local_file_path_reference` violation adds an attach-via-`--file` instruction."
+6. **`.claude/skills-global/weekly-review/SKILL.md`** (lines 97-104): replace "After saving, offer: `open -a TextEdit <path>`" with guidance that the file has been saved locally and the agent should let the delivery pipeline flag it (no special-casing needed — the new drafter check handles it generically). Keep the `/tmp/` save instruction (still correct — the file must exist somewhere before it can be attached); only the "how to hand it to the user" framing changes.
 
 ## Failure Path Test Strategy
 
@@ -161,6 +175,7 @@ Agent drafts a reply containing `/tmp/eng_review_jul1-8.txt` → `draft_message(
 - [ ] `detect_local_file_reference("")` returns `[]` (matches sibling validators' empty-string contract).
 - [ ] `detect_local_file_reference` on text with no path-like substrings returns `[]` (no false positives on ordinary prose, including text containing standalone `/` or `~` characters that aren't part of a path).
 - [ ] `draft_message()` with a violations-only (non-empty-promise) composed text still returns `needs_self_draft=True` and `text=""` — verify the promotion doesn't accidentally require both conditions.
+- [ ] `draft_message()` on a SHORT-OUTPUT message carrying a local path (e.g. `"Done. Saved to /tmp/x.txt."` — under 200 chars, no `?`, no fence, no artifacts, no SDLC session) returns `needs_self_draft=True` and `text=""` (critique B1 — proves the short-output early return promotes, not just the main path). A short-output message with NO violation still returns verbatim pass-through with `needs_self_draft=False`.
 
 ### Error State Rendering
 - [ ] Not applicable — this validator produces no user-facing rendering of its own; it feeds into the existing self-draft steering message, whose rendering is already tested (`tests/unit/test_output_handler.py`).
@@ -169,8 +184,8 @@ Agent drafts a reply containing `/tmp/eng_review_jul1-8.txt` → `draft_message(
 
 - [ ] `tests/unit/test_medium_validators.py` — UPDATE: add a `TestDetectLocalFileReference` class covering `/tmp/...`, `~/...`, `/Users/...`, `open -a ...` patterns, plus false-positive guards (ordinary prose, code blocks referencing unrelated paths like URLs).
 - [ ] `tests/unit/test_drafter_validators.py` — UPDATE: this file duplicates `test_medium_validators.py`'s validator coverage (both test `validate_telegram`/`validate_email` independently) — add the same new test class here too for consistency with the existing (if redundant) pattern, OR flag the duplication to the user as a candidate cleanup outside this plan's scope. Default: add matching coverage in both files to avoid diverging test suites; do not attempt to de-duplicate the two files (out of scope, see No-Gos).
-- [ ] `tests/unit/test_message_drafter.py::TestDraftMessage` — UPDATE: add a case asserting that composed text containing a local file path returns `needs_self_draft=True` (mirroring the existing `test_default_needs_self_draft_false` and the over-length-does-NOT-trigger-self-draft case at line ~218-222). Also update/extend any assertion that currently expects wire-format violations to leave `needs_self_draft=False` — that expectation flips as part of this fix.
-- [ ] `tests/unit/test_output_handler.py` — UPDATE: the existing `test_needs_self_draft_pushes_steering_and_defers_outbox_write` and sibling tests (lines ~490-622) already exercise the `needs_self_draft=True` → steering-injection path generically via a mocked `MessageDraft`; no structural change needed, but add one test that constructs the draft via a real `draft_message()` call with local-path text to prove the full chain (drafter → handler → steering) end-to-end, not just the handler's reaction to a pre-built `MessageDraft`.
+- [ ] `tests/unit/test_message_drafter.py::TestDraftMessage` — UPDATE: add TWO cases (critique B1): (a) a **short-output** message carrying a local path returns `needs_self_draft=True` / `text=""` (exercises the `:770-781` early-return promotion), and (b) a **long/composed** message carrying a local path returns `needs_self_draft=True` / `text=""` (exercises the `:801-831` main-path promotion). Mirror the existing `test_default_needs_self_draft_false` and the over-length-does-NOT-trigger-self-draft case at line ~218-222. Also update/extend any assertion that currently expects wire-format violations to leave `needs_self_draft=False` — that expectation flips as part of this fix. The existing `SELF_DRAFT_INSTRUCTION` content/`len < 1000` assertion (`:264-270`) stays valid — the base constant is unchanged; the addendum is composed at injection time in `output_handler.py`, tested there.
+- [ ] `tests/unit/test_output_handler.py` — UPDATE: (a) update existing callers/mocks of `_inject_self_draft_steering` for the new `(session, draft)` signature (the mock at `:1190` and the flow tests at ~490-622). (b) Add a test asserting that when the deferred draft carries a `local_file_path_reference` violation, the pushed steering message CONTAINS the attach-via-`--file` addendum (`tools/send_message.py` + `--file`), and that a draft with a non-local-path violation (e.g. markdown table) pushes the base `SELF_DRAFT_INSTRUCTION` WITHOUT the addendum (critique B2 — proves the instruction actually tells the agent to attach the file). (c) Add one end-to-end test that constructs the draft via a real `draft_message()` call with short local-path text to prove the full chain (drafter short-output path → handler → violation-aware steering).
 - [ ] `tests/integration/test_message_drafter_integration.py` — UPDATE: add an integration case for the local-file-path incident scenario (text resembling the actual weekly-review message) to guard against regression of this exact bug.
 
 ## Rabbit Holes
@@ -222,8 +237,9 @@ No agent integration changes required beyond the skill-doc edit already covered 
 ## Success Criteria
 
 - [ ] `detect_local_file_reference()` exists in `bridge/message_drafter.py` and correctly flags `/tmp/...`, `~/...`, `/Users/...`, `/home/...`, and `` `open -a ...` `` references while passing false-positive guards on ordinary prose.
-- [ ] `draft_message()` sets `needs_self_draft=True` whenever `_validate_for_medium()` returns a non-empty violations list (not just on empty-promise detection).
-- [ ] A drafted message containing a local file path is deferred via the self-draft steering path (`agent/output_handler.py:429-441`) rather than delivered verbatim.
+- [ ] `draft_message()` sets `needs_self_draft=True` whenever `_validate_for_medium()` returns a non-empty violations list, on **both** return paths — the short-output early return (`:770-781`) and the main-path return (`:801-831`) — not just on empty-promise detection (critique B1).
+- [ ] A SHORT terse message carrying a local path (the reported incident class, e.g. `"Done. Saved to /tmp/x.txt."`) is deferred via self-draft steering rather than delivered verbatim — verified by an explicit short-output test case.
+- [ ] The self-draft steering message for a `local_file_path_reference` violation includes an addendum instructing the agent to attach the file via `tools/send_message.py "<caption>" --file <path>` (critique B2), while other violation types get the base instruction unchanged.
 - [ ] `.claude/skills-global/weekly-review/SKILL.md` no longer instructs `open -a TextEdit <path>` as its delivery mechanism.
 - [ ] `bridge/message_drafter.py`'s docstring no longer references the dead `agent/hooks/stop.py` review gate as the violation-surfacing mechanism.
 - [ ] All Test Impact items implemented and passing.
@@ -236,7 +252,7 @@ No agent integration changes required beyond the skill-doc edit already covered 
 
 - **Builder (drafter)**
   - Name: drafter-builder
-  - Role: `detect_local_file_reference`, `_validate_for_medium` wiring, `draft_message` promotion logic, docstring fix
+  - Role: `detect_local_file_reference`, `_validate_for_medium` wiring, `draft_message` promotion logic on BOTH return paths, `output_handler.py::_inject_self_draft_steering` violation-aware addendum, docstring fix
   - Agent Type: builder
   - Resume: true
 - **Builder (skill fix)**
@@ -262,16 +278,17 @@ No agent integration changes required beyond the skill-doc edit already covered 
 
 ## Step by Step Tasks
 
-### 1. Drafter validator + promotion logic
+### 1. Drafter validator + promotion logic + violation-aware steering
 - **Task ID**: build-drafter
 - **Depends On**: none
-- **Validates**: tests/unit/test_medium_validators.py, tests/unit/test_message_drafter.py
+- **Validates**: tests/unit/test_medium_validators.py, tests/unit/test_message_drafter.py, tests/unit/test_output_handler.py
 - **Assigned To**: drafter-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `detect_local_file_reference(text)` to `bridge/message_drafter.py`
+- Add `detect_local_file_reference(text)` + `LOCAL_FILE_PATH_RULE` constant to `bridge/message_drafter.py`
 - Wire it into `_validate_for_medium` (medium-agnostic)
-- Change `draft_message()` to set `needs_self_draft=True` on any non-empty violations list
+- Change `draft_message()` to set `needs_self_draft=True` on any non-empty violations list at **BOTH** return paths: the short-output early return (`:770-781`) and the main-path return (`:801-831`) (critique B1)
+- Extend `agent/output_handler.py::_inject_self_draft_steering` to accept the `draft` and append the attach-via-`--file` addendum when a `local_file_path_reference` violation is present; update the call site at `:435` (critique B2)
 - Correct the stale docstring reference to `agent/hooks/stop.py`
 
 ### 2. Weekly-review skill fix
@@ -313,18 +330,24 @@ No agent integration changes required beyond the skill-doc edit already covered 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Tests pass | `scripts/pytest-clean.sh tests/unit/test_medium_validators.py tests/unit/test_drafter_validators.py tests/unit/test_message_drafter.py tests/unit/test_output_handler.py tests/integration/test_message_drafter_integration.py -q` | exit code 0 |
-| Lint clean | `python -m ruff check bridge/message_drafter.py` | exit code 0 |
-| Format clean | `python -m ruff format --check bridge/message_drafter.py` | exit code 0 |
+| Lint clean | `python -m ruff check bridge/message_drafter.py agent/output_handler.py` | exit code 0 |
+| Format clean | `python -m ruff format --check bridge/message_drafter.py agent/output_handler.py` | exit code 0 |
 | New validator exists | `grep -c "def detect_local_file_reference" bridge/message_drafter.py` | output > 0 |
-| Promotion logic wired | `grep -c "needs_self_draft=True" bridge/message_drafter.py` | output > 0 |
+| Promotion wired on BOTH paths | `grep -c "needs_self_draft=True" bridge/message_drafter.py` | output >= 2 |
+| Violation-aware steering wired | `grep -c "send_message.py" agent/output_handler.py` | output > 0 |
+| Instruction builder takes draft | `grep -c "_inject_self_draft_steering(self, session, draft" agent/output_handler.py` | output > 0 |
 | Stale docstring gone | `grep -c "stop-hook review gate" bridge/message_drafter.py` | match count == 0 |
 | Skill fixed | `grep -c "open -a TextEdit" .claude/skills-global/weekly-review/SKILL.md` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Critique verdict (round 1): **NEEDS REVISION** — 2 blockers, 2 concerns. Revision applied 2026-07-09.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Blocker | B1 | Promotion logic covered only the main-path return (`:801-809`); the short-output early return (`:770-781`) also carries a violations list but was unpatched — so a terse message like `"Done. Saved to /tmp/x.txt."` would ship the raw local path, contradicting the plan's universal-coverage Success Criteria. | Technical Approach item 3 (now covers BOTH return paths); Data Flow step 4; Solution "Violation promotion on BOTH return paths"; Success Criteria (short-output criterion); Test Impact `test_message_drafter.py` (two cases: short + long); Verification (`>= 2` promotion sites). | The short-output path is the exact path the reported incident message class exits through — it is the primary fix target, not an edge case. |
+| Blocker | B2 | `SELF_DRAFT_INSTRUCTION` (`:570-578`) is a fixed, violation-type-agnostic constant that never mentions local paths or `--file` and actively steers toward omitting details — so the issue's "attach the file as a real Telegram attachment" outcome is not actually produced; the plan's criteria stopped at "deferred via self-draft" and under-claimed. | Technical Approach item 4 (violation-aware `_inject_self_draft_steering(session, draft)` composing a base + local-file addendum in `agent/output_handler.py`); Data Flow step 6; Solution "Violation-aware self-draft instruction"; Success Criteria (attach-instruction criterion); Test Impact `test_output_handler.py` (asserts addendum presence/absence by violation type); Architectural Impact (signature change). | Base constant stays compact (`len < 1000` test still valid); the addendum is composed at injection time so it fires only for the local-path rule. |
+| Concern | — | Full concern text was not retrievable on this machine (`sdlc-tool verdict get` returns no persisted state — no PM session resolved here; no issue comments recorded). Both concerns are addressed defensively by the B1/B2 revisions: promotion-path coverage, instruction efficacy, and test coverage for both the short-output path and the instruction content are now explicit. If a concern named something outside this surface, it should be re-raised at re-critique. | B1/B2 revisions + expanded Test Impact. | Noted for the critique re-run: verify no concern was silently dropped. |
 
 ---
 
