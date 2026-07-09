@@ -790,16 +790,29 @@ _holder_token: str | None = None
 
 
 def _process_holder_token() -> str:
-    """Return this OS process's unique lock-ownership token.
+    """Return this process's lock-ownership token.
 
-    Lazily generated on first call and cached in a module-level variable for
-    the remainder of the process's lifetime. This -- not session_id -- is
-    the unit of comparison for issue-lock ownership; see the module note
-    above for why session_id cannot be used.
+    Resolution order, cached in a module-level variable for the remainder of
+    the process's lifetime:
+
+    1. ``SDLC_HOLDER_TOKEN`` env var, when set to a non-empty value. This is
+       the shared-ownership seam (issue #1971): a local ``/do-sdlc``
+       supervisor drives the router through many short-lived ``sdlc-tool``
+       subprocesses, each a fresh OS process. Without a shared token, process
+       B (``next-skill``) sees process A's (``session-ensure``) lock as
+       foreign and blocks the supervisor against itself. The supervisor mints
+       ONE token per run and exports it so all its subprocesses present one
+       consistent owner. The standalone worker calls ``touch_issue_lock()``
+       in-process (one stable token for its lifetime) and never sets this
+       var, so the real worker-vs-local guard (#1954 / #1915) is preserved.
+    2. Otherwise a random ``uuid4`` -- unique per OS process.
+
+    This token -- not session_id -- is the unit of comparison for issue-lock
+    ownership; see the module note above for why session_id cannot be used.
     """
     global _holder_token
     if _holder_token is None:
-        _holder_token = uuid.uuid4().hex
+        _holder_token = os.environ.get("SDLC_HOLDER_TOKEN") or uuid.uuid4().hex
     return _holder_token
 
 
