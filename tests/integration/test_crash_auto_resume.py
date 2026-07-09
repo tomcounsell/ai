@@ -718,3 +718,210 @@ class TestCrashAutoResume:
             _cleanup_sessions(*sessions)
             _cleanup_signatures(sig_hash)
             _cleanup_telemetry(session_id)
+
+
+def _floor_trace(*, to_status: str = "failed") -> list[dict]:
+    """Confirmed-dead clean-kill-to-`failed` trace: the known-transient tool-wedge
+    shape the deterministic first-retry floor acts on (Gap 3a). turn_start is
+    present so the classifier yields a resumable (non-deterministic) signature."""
+    return [
+        {"type": "turn_start", "timestamp": 1717000000.0},
+        {
+            "type": "status_transition",
+            "from": "running",
+            "to": to_status,
+            "timestamp": 1717001000.0,
+            "kill": {"confirmed_dead": True, "signal_sent": "SIGKILL"},
+        },
+    ]
+
+
+@pytest.mark.integration
+class TestDeterministicFloorAndConvergence:
+    """End-to-end coverage for the deterministic first-retry floor (Gap 3a),
+    its disable switch, the ownership gate on a floor-eligible session, and the
+    failed-resume convergence guarantee (critique C1)."""
+
+    def test_floor_resumes_cold_transient_signature(self, redis_test_db):
+        """A confirmed-dead clean-kill-to-`failed` signature with ZERO statistical
+        warm-up is auto-resumed by the deterministic floor: the cold library still
+        self-heals the exact current failure mode."""
+        from agent.crash_signature import extract_signature
+
+        trace = _floor_trace()
+        sig_hash = extract_signature(trace).hash
+        session_id = "test-car-floor-resume"
+        _make_session(session_id, "failed", claude_session_uuid="uuid-floor")
+        _write_telemetry(session_id, trace)
+        try:
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                    crash_autoresume_deterministic_floor_attempts=1,
+                ),
+                patch(
+                    "reflections.crash_recovery._machine_owns_project",
+                    return_value=True,
+                ),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
+                from reflections.crash_recovery import run_crash_recovery
+
+                result = run_crash_recovery()
+
+            assert result["status"] == "ok", f"Unexpected error: {result}"
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            assert sessions, f"Session {session_id!r} not found"
+            assert sessions[0].status == "pending", (
+                f"Floor resume failed: expected 'pending', got {sessions[0].status!r}. "
+                f"Findings: {result['findings']}"
+            )
+            assert "auto_resumed=0" not in result["summary"], result["summary"]
+        finally:
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            _cleanup_sessions(*sessions)
+            _cleanup_signatures(sig_hash)
+            _cleanup_telemetry(session_id)
+
+    def test_floor_disabled_proposes_cold_transient(self, redis_test_db):
+        """With the floor set to 0, the same cold transient signature falls back
+        to pure statistical gating and is proposed, not resumed."""
+        from agent.crash_signature import extract_signature
+
+        trace = _floor_trace()
+        sig_hash = extract_signature(trace).hash
+        session_id = "test-car-floor-disabled"
+        _make_session(session_id, "failed", claude_session_uuid="uuid-floor-off")
+        _write_telemetry(session_id, trace)
+        try:
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                    crash_autoresume_deterministic_floor_attempts=0,
+                ),
+                patch(
+                    "reflections.crash_recovery._machine_owns_project",
+                    return_value=True,
+                ),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
+                from reflections.crash_recovery import run_crash_recovery
+
+                result = run_crash_recovery()
+
+            assert result["status"] == "ok", f"Unexpected error: {result}"
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            assert sessions[0].status == "failed", (
+                f"Floor disabled but session was resumed: {sessions[0].status!r}. "
+                f"Findings: {result['findings']}"
+            )
+            assert "auto_resumed=0" in result["summary"], result["summary"]
+        finally:
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            _cleanup_sessions(*sessions)
+            _cleanup_signatures(sig_hash)
+            _cleanup_telemetry(session_id)
+
+    def test_non_owner_proposes_floor_eligible_session(self, redis_test_db):
+        """The machine-ownership gate (Gap 3b) blocks a floor-eligible resume when
+        this machine does not own the session's project — it proposes instead."""
+        from agent.crash_signature import extract_signature
+
+        trace = _floor_trace()
+        sig_hash = extract_signature(trace).hash
+        session_id = "test-car-floor-not-owner"
+        _make_session(session_id, "failed", claude_session_uuid="uuid-not-owner")
+        _write_telemetry(session_id, trace)
+        try:
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                    crash_autoresume_deterministic_floor_attempts=1,
+                ),
+                patch(
+                    "reflections.crash_recovery._machine_owns_project",
+                    return_value=False,
+                ),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
+                from reflections.crash_recovery import run_crash_recovery
+
+                result = run_crash_recovery()
+
+            assert result["status"] == "ok", f"Unexpected error: {result}"
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            assert sessions[0].status == "failed", (
+                f"Non-owner resumed the session: {sessions[0].status!r}. "
+                f"Findings: {result['findings']}"
+            )
+            assert any("not-owner" in f for f in result["findings"]), result["findings"]
+        finally:
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            _cleanup_sessions(*sessions)
+            _cleanup_signatures(sig_hash)
+            _cleanup_telemetry(session_id)
+
+    def test_failed_floor_resume_consumes_attempt_and_converges(self, redis_test_db):
+        """Critique C1: a resume that fails every tick must still consume an attempt.
+        Without this, floor eligibility (0 < 1) re-satisfied on every 300s tick would
+        retry forever. After one failed floor resume the counter advances to 1, and
+        the next run finds the floor no longer eligible → proposes, not retries."""
+        from agent.crash_signature import extract_signature
+        from tools.valor_session import ResumeResult
+
+        trace = _floor_trace()
+        sig_hash = extract_signature(trace).hash
+        session_id = "test-car-floor-converge"
+        _make_session(session_id, "failed", claude_session_uuid="uuid-converge")
+        _write_telemetry(session_id, trace)
+
+        failing = ResumeResult(success=False, session_id=session_id, error="missing uuid → refusal")
+        try:
+            with (
+                _patch_settings(
+                    crash_autoresume_enabled=True,
+                    crash_autoresume_min_occurrences=3,
+                    crash_autoresume_min_success_ratio=0.7,
+                    crash_autoresume_deterministic_floor_attempts=1,
+                    crash_autoresume_max_attempts=3,
+                ),
+                patch(
+                    "reflections.crash_recovery._machine_owns_project",
+                    return_value=True,
+                ),
+                patch("tools.valor_session.resume_session", return_value=failing),
+                patch.dict(os.environ, {"CRASH_AUTORESUME_LOOKBACK_HOURS": "9999"}),
+            ):
+                from reflections.crash_recovery import run_crash_recovery
+
+                first = run_crash_recovery()
+                assert first["status"] == "ok", first
+                # The failed resume consumed one attempt.
+                s1 = list(AgentSession.query.filter(session_id=session_id))[0]
+                assert str(getattr(s1, "auto_resume_attempts", "0")) == "1", (
+                    f"Expected attempt consumed on failure, got "
+                    f"{getattr(s1, 'auto_resume_attempts', None)!r}. {first['findings']}"
+                )
+                assert s1.status == "failed"
+
+                # Second tick: floor no longer eligible (attempts 1 == floor 1),
+                # signature still statistically cold → propose, no further retry.
+                second = run_crash_recovery()
+                assert second["status"] == "ok", second
+                s2 = list(AgentSession.query.filter(session_id=session_id))[0]
+                assert str(getattr(s2, "auto_resume_attempts", "0")) == "1", (
+                    f"Converged run must NOT advance the counter again, got "
+                    f"{getattr(s2, 'auto_resume_attempts', None)!r}. {second['findings']}"
+                )
+                assert "auto_resumed=0" in second["summary"], second["summary"]
+        finally:
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            _cleanup_sessions(*sessions)
+            _cleanup_signatures(sig_hash)
+            _cleanup_telemetry(session_id)
