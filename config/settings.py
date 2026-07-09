@@ -286,6 +286,22 @@ class FeatureSettings(BaseModel):
             "Env: FEATURES__CRASH_AUTORESUME_MIN_SUCCESS_RATIO."
         ),
     )
+    crash_autoresume_deterministic_floor_attempts: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description=(
+            "Deterministic first-retry floor for confirmed-dead clean-kill-to-"
+            "failed crash signatures. A session whose terminal transition is a "
+            "confirmed-dead kill to `failed` (the known-transient tool-wedge "
+            "shape) is permitted this many resumes ahead of statistical warm-up, "
+            "so a cold signature library still self-heals the exact current "
+            "failure mode. Bounded by crash_autoresume_max_attempts (per-session) "
+            "and crash_autoresume_run_budget (per-run). Set to 0 to disable the "
+            "floor and restore pure statistical gating. "
+            "Env: FEATURES__CRASH_AUTORESUME_DETERMINISTIC_FLOOR_ATTEMPTS."
+        ),
+    )
 
     # --- Stall-recovery action-mode (issue #1768) ---
     # Promotes the stall-advisory reflection from observe-only to an actor that
