@@ -1,11 +1,11 @@
 """Integration test for tools.sdlc_session_ensure bridge short-circuit.
 
-Drives the headline dashboard claim for #1147: a bridge-initiated PM session
+Drives the headline dashboard claim for #1147: a bridge-initiated Eng session
 with no issue_url (only message_text) must NOT produce a duplicate
 ``sdlc-local-{N}`` record when /sdlc Step 1.5 runs ``ensure_session``.
 
 Uses real Popoto Redis writes (no mocks) to validate the end-to-end flow:
-1. Create a PM AgentSession mimicking bridge creation (session_type=pm,
+1. Create an Eng AgentSession mimicking bridge creation (session_type=eng,
    message_text="SDLC issue 9999", issue_url=None).
 2. Set VALOR_SESSION_ID=<bridge_session_id>.
 3. Invoke ensure_session(9999).
@@ -53,12 +53,12 @@ def cleanup_test_sessions():
 
 
 def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_sessions):
-    """End-to-end: bridge PM session + VALOR_SESSION_ID => no sdlc-local-N duplicate."""
+    """End-to-end: bridge Eng session + VALOR_SESSION_ID => no sdlc-local-N duplicate."""
     from tools.sdlc_session_ensure import ensure_session
 
     bridge_session_id = "tg_valor_test_9999"
 
-    # Create a bridge-style PM session the way the Telegram bridge would.
+    # Create a bridge-style Eng session the way the Telegram bridge would.
     bridge_session = AgentSession.create_eng(
         session_id=bridge_session_id,
         project_key=TEST_PROJECT_KEY,
@@ -93,15 +93,15 @@ def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_se
     zombie = list(AgentSession.query.filter(session_id="sdlc-local-9999"))
     assert zombie == [], (
         "ensure_session must NOT create sdlc-local-9999 when "
-        "VALOR_SESSION_ID points at a live PM session"
+        "VALOR_SESSION_ID points at a live Eng session"
     )
 
-    # And there should be exactly one PM session in our test project_key.
-    pm_sessions = [
+    # And there should be exactly one Eng session in our test project_key.
+    eng_sessions = [
         s
         for s in AgentSession.query.all()
         if getattr(s, "project_key", None) == TEST_PROJECT_KEY
-        and getattr(s, "session_type", None) == "pm"
+        and getattr(s, "session_type", None) == "eng"
     ]
-    assert len(pm_sessions) == 1
-    assert pm_sessions[0].session_id == bridge_session_id
+    assert len(eng_sessions) == 1
+    assert eng_sessions[0].session_id == bridge_session_id
