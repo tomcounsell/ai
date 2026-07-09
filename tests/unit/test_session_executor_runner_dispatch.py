@@ -343,6 +343,65 @@ class TestExecutorGuardEmptyTurnInput:
         ]
         assert not guard_errors, f"Guard must NOT fire; got: {guard_errors}"
 
+    @pytest.mark.asyncio
+    async def test_last_resort_save_failure_is_logged(self, redis_test_db, caplog):
+        """Issue #1959: when the empty-turn-input guard's last-resort status
+        save raises, the failure is logged (no silent ``except Exception: pass``).
+
+        Reaches the guard with an empty ``message_text``, forces
+        ``finalize_session`` to raise a non-terminal error (so the executor
+        falls back to a direct ``session.save``), then forces that save to
+        raise as well. The previously-silent swallow must now emit a WARNING
+        carrying the session id so the failure is observable in production.
+        """
+        session = AgentSession.create(
+            session_id=f"guard-save-fail-{uuid.uuid4().hex[:8]}",
+            session_type="eng",
+            project_key="test",
+            working_dir="/tmp",
+            status="pending",
+            chat_id="999",
+            message_text="",  # empty → triggers the empty_turn_input guard
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        # Force the last-resort direct save on THIS session instance to raise.
+        def _boom(*args, **kwargs):
+            raise RuntimeError("redis write failed")
+
+        session.save = _boom  # instance-level; leaves the class save intact
+
+        with (
+            _patch_runner(),
+            _patch_worktree(),
+            # finalize_session raising a generic Exception drops the executor
+            # into the last-resort branch that calls session.save directly.
+            patch(
+                "models.session_lifecycle.finalize_session",
+                side_effect=RuntimeError("finalize blew up"),
+            ),
+            caplog.at_level(logging.WARNING),
+        ):
+            # Must not raise: the swallow keeps its continue-past-error intent.
+            await _execute_agent_session(session)
+
+        assert not FakeSessionRunner.instances, "Runner must not be constructed on the guard path"
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "last-resort status save failed" in r.message
+        ]
+        assert warnings, (
+            "Expected a WARNING when the last-resort save raises; "
+            f"got records: {[r.message for r in caplog.records]}"
+        )
+        assert any(session.agent_session_id in r.message for r in warnings), (
+            "Last-resort save warning must carry the session id for traceability"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Reaction-gating tests (runner exit-classification vocabulary)

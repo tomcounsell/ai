@@ -1787,8 +1787,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 try:
                     session.status = "failed"
                     session.save(update_fields=["status", "updated_at"])
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as last_resort_err:  # noqa: BLE001
+                    logger.warning(
+                        "[executor-guard] last-resort status save failed for "
+                        "session %s (non-fatal): %s",
+                        session.agent_session_id,
+                        last_resort_err,
+                        exc_info=True,
+                    )
             return
 
         # All session types route through the headless session runner (plan
