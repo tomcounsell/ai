@@ -253,17 +253,17 @@ No agent integration required — this is a worker/reflection-internal change. T
 ## Success Criteria
 
 - [ ] `python -m reflections --dry-run` lists `crash-recovery` as a loaded reflection on a machine whose vault registry has been asserted by the update flow.
-- [ ] A session with `turn_count > 0` killed for a tool wedge extracts a resumable crash signature (not `NON_RESUMABLE_DETERMINISTIC[no_turn_start]`) over a synthetic timeline with no `turn_start` plus session progress fields — unit test.
-- [ ] A session finalized `failed` with a confirmed-dead clean kill to `failed` is auto-resumed within one reflection cadence under the deterministic floor (with the floor field > 0, auto flag on, and this machine owning the project), respecting `crash_autoresume_max_attempts` — integration test.
-- [ ] With the deterministic-floor field set to 0, a cold transient signature is proposed (not resumed) — statistical-gating regression test.
-- [ ] A non-owning machine proposes (does not resume) a resume-eligible session — ownership-gate test.
-- [ ] A persistently-failing floor resume advances `auto_resume_attempts` and converges to the attempt cap (no infinite retry loop) — C1 convergence test.
-- [ ] A floor-triggered `--resume` that exits non-zero after a result event attributes the correct outcome (valid completion preserved) — C7 test reusing `test_harness_stale_uuid_result_preservation.py` fixtures.
-- [ ] An owned, time-boxed follow-up issue is opened and linked in the PR for human activation of `FEATURES__CRASH_AUTORESUME_ENABLED=1` on the designated machine within 7 days of `/do-deploy` (critique C5).
+- [x] A session with `turn_count > 0` killed for a tool wedge extracts a resumable crash signature (not `NON_RESUMABLE_DETERMINISTIC[no_turn_start]`) over a synthetic timeline with no `turn_start` plus session progress fields — unit test.
+- [x] A session finalized `failed` with a confirmed-dead clean kill to `failed` is auto-resumed within one reflection cadence under the deterministic floor (with the floor field > 0, auto flag on, and this machine owning the project), respecting `crash_autoresume_max_attempts` — integration test.
+- [x] With the deterministic-floor field set to 0, a cold transient signature is proposed (not resumed) — statistical-gating regression test.
+- [x] A non-owning machine proposes (does not resume) a resume-eligible session — ownership-gate test.
+- [x] A persistently-failing floor resume advances `auto_resume_attempts` and converges to the attempt cap (no infinite retry loop) — C1 convergence test.
+- [x] A floor-triggered `--resume` that exits non-zero after a result event attributes the correct outcome (valid completion preserved) — C7 test reusing `test_harness_stale_uuid_result_preservation.py` fixtures.
+- [x] An owned, time-boxed follow-up issue is opened and linked in the PR for human activation of `FEATURES__CRASH_AUTORESUME_ENABLED=1` on the designated machine within 7 days of `/do-deploy` (critique C5).
 - [ ] `valor-session crash-signatures` shows records accumulating from real terminal sessions after registration (manual/soak verification noted in the PR).
-- [ ] `docs/features/crash-signature-auto-resume.md` describes actual post-fix behavior with no "previously broken" or granite-PTY narration.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] `docs/features/crash-signature-auto-resume.md` describes actual post-fix behavior with no "previously broken" or granite-PTY narration.
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
