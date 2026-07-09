@@ -41,6 +41,7 @@ from scripts.update import (  # noqa: E402
     redis_persistence,
     redis_replication,
     reflection_arm,
+    reflection_register,
     reflections_yaml,
     rodney,
     sentry_cli,
@@ -138,6 +139,7 @@ class UpdateResult:
     migration_result: migrations.MigrationResult | None = None
     reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
     reflection_arm_result: reflection_arm.ArmResult | None = None
+    reflection_register_result: reflection_register.RegisterResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -590,6 +592,24 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if projects_r.error:
         log(f"WARN: projects.json: {projects_r.error}", v, always=True)
         result.warnings.append(f"projects.json: {projects_r.error}")
+
+    # Step 1.655: Ensure the crash-recovery reflection is registered in the
+    # vault registry (issue #1917). Runs BEFORE Step 1.66's vault→config copy
+    # (critique NIT) so the appended entry propagates into the per-machine
+    # config/reflections.yaml on this same cycle. Guarded on vault presence +
+    # 'valor' ownership; idempotent no-op once the entry exists.
+    log("Ensuring crash-recovery reflection is registered...", v)
+    result.reflection_register_result = reflection_register.register_crash_recovery(project_dir)
+    rr = result.reflection_register_result
+    if rr.action == "registered":
+        log("crash-recovery reflection registered in vault reflections.yaml", v, always=True)
+    elif rr.action == "noop":
+        log("crash-recovery reflection already registered", v)
+    elif rr.action == "skipped":
+        log(f"crash-recovery registration skipped: {rr.detail}", v)
+    if not rr.success:
+        log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
+        result.warnings.append(f"crash-recovery registration: {rr.detail}")
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a
