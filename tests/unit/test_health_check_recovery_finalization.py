@@ -351,11 +351,25 @@ class TestHasProgressDualHeartbeat:
 class TestStdoutStaleRetired:
     """The stdout-stale Tier 1 kill signal (#1046) was retired by #1172.
 
-    Fresh heartbeats are now sufficient evidence of progress regardless of
-    stdout cadence. These regression tests assert the removal held —
-    long-thinking turns and large tool outputs no longer false-kill PM work.
-    See ``tests/unit/test_session_health_inference_removed.py`` for the
-    structural guards on the deleted constants.
+    Fresh heartbeats are sufficient evidence of progress ONLY while
+    sdk_ever_output is False (the SDK has never produced ANY recognized
+    output — tool, turn, or stream). Long-thinking turns and large tool
+    outputs no longer false-kill PM work via the deleted stdout-freshness
+    path. See ``tests/unit/test_session_health_inference_removed.py`` for
+    the structural guards on the deleted constants.
+
+    Issue #1935 (headless-runner-zombie-liveness) added ``last_stdout_at``
+    presence as a THIRD input to ``sdk_ever_output`` (owner directive,
+    ``agent.session_runner.liveness.derive_sdk_ever_output``). This has a
+    real, intended side effect on sub-check B below: once a headless turn
+    has streamed ANY output at all (which happens within seconds of every
+    turn, via the ``init`` event), the heartbeat-only fallback stops
+    applying — sub-check A's tool/turn freshness becomes the sole
+    authoritative Tier 1 signal, exactly as its docstring already stated
+    ("once sdk_ever_output is True, sub-check A is authoritative"). A
+    genuinely hung post-``init`` turn is still recovered — not by this
+    heartbeat fallback, but by the runner's whole-turn deadline (see the
+    plan's Risk 1 / the accepted detection-latency tradeoff).
     """
 
     @staticmethod
@@ -374,11 +388,37 @@ class TestStdoutStaleRetired:
         entry.get_children = lambda: []
         return entry
 
-    def test_fresh_heartbeats_stale_stdout_returns_true(self):
-        """Fresh heartbeats + stale stdout → progress (deleted path must NOT fire)."""
+    def test_fresh_heartbeats_stale_stdout_alone_no_longer_sufficient(self):
+        """Fresh heartbeats + stale stdout + NO tool/turn ever → no progress.
+
+        Stdout PRESENCE (even stale) now marks sdk_ever_output=True (#1935),
+        which disables the heartbeat-only sub-check B fallback; sub-check A
+        (tool/turn freshness) is the sole remaining Tier 1 signal and finds
+        nothing fresh here. This is the accepted, plan-intended tradeoff —
+        NOT a resurrection of the deleted #1046 stdout-freshness kill path
+        (that path compared stdout freshness directly; this is the OR-input
+        broadening of a different, presence-based signal)."""
         from agent.agent_session_queue import _has_progress
 
         entry = self._make_entry(last_stdout_at=_ago(700))
+        assert _has_progress(entry) is False
+
+    def test_fresh_heartbeats_stale_stdout_with_fresh_tool_output_returns_true(self):
+        """Fresh heartbeats + stale stdout + a FRESH tool/turn signal → progress
+        (the deleted #1046 stdout-freshness kill path must NOT fire; sub-check
+        A's tool/turn freshness is authoritative and finds real evidence)."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(last_stdout_at=_ago(700), last_tool_use_at=_ago(30))
+        assert _has_progress(entry) is True
+
+    def test_no_stdout_ever_fresh_heartbeat_still_returns_true(self):
+        """No stdout, no tool/turn, but a fresh heartbeat and a young session →
+        sdk_ever_output stays False, so sub-check B's heartbeat fallback still
+        applies unchanged for sessions that have never streamed anything."""
+        from agent.agent_session_queue import _has_progress
+
+        entry = self._make_entry(last_stdout_at=None, started_at=_ago(30))
         assert _has_progress(entry) is True
 
     def test_fresh_heartbeats_no_stdout_old_started_at_returns_false_d0_gate(self):

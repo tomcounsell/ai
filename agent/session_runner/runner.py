@@ -46,8 +46,10 @@ import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
+from agent.hooks.liveness_writers import is_in_cooldown
 from agent.session_runner.adapter import (
     RunSummary,
     SessionRunnerAdapter,
@@ -378,6 +380,14 @@ class SessionRunner:
         self._dev_agent_id: str | None = None
         self._last_dev_history_text: str | None = None
         self._claude_version: str | None = None
+        # _stamp_stdout_liveness's cooldown state lives entirely in
+        # agent.hooks.liveness_writers' module-level bucket map (keyed by
+        # f"{session_id}:stdout"), not on this instance — no per-instance
+        # cooldown dict is needed since a SessionRunner is 1:1 with a single
+        # session_id for its lifetime and the shared bucket key already
+        # prevents two concurrently running SessionRunner instances
+        # (distinct session_ids) from suppressing each other's stamp
+        # (CRITIQUE pass 3 BLOCKER fix, preserved via bucket-keying).
 
         if steering_pop_fn is None:
             steering_pop_fn = self._default_steering_pop
@@ -458,8 +468,69 @@ class SessionRunner:
             turn_timeout_s=self._turn_timeout_s + self._term_grace_s + DRIVER_BACKSTOP_MARGIN_S,
             harness_fn=harness_fn,
             on_spawn=self._on_turn_spawn,
-            on_init=self._on_harness_init,
+            on_stdout_event=self._on_stdout_event_liveness,
+            on_init=self._on_init_composed,
         )
+
+    def _on_stdout_event_liveness(self) -> None:
+        """0-arg ``on_stdout_event`` adapter (issue #1935).
+
+        The driver's ``on_stdout_event`` slot is 0-arg
+        (``role_driver.py:175``); this delegates straight to
+        :meth:`_stamp_stdout_liveness`.
+        """
+        self._stamp_stdout_liveness()
+
+    def _on_init_composed(self, data: dict) -> None:
+        """1-arg ``on_init`` adapter that COMPOSES with ``_on_harness_init``.
+
+        HARD CONSTRAINT (issue #1935, CRITIQUE pass 2): ``_on_harness_init``
+        persists ``claude_session_uuid``/``runner_cwd``/``claude_version`` and
+        MUST keep doing so, unchanged. It early-returns when the init event
+        carries no ``session_id`` and wraps its body in a try/except, so the
+        liveness stamp must NOT be placed inside it — a stamp placed there
+        would be silently skipped on exactly the events where "the init
+        event is real output" matters most. This adapter therefore calls
+        ``_on_harness_init`` first (preserving resume-scalar persistence
+        byte-for-byte) and stamps liveness unconditionally afterward.
+        """
+        self._on_harness_init(data)
+        self._stamp_stdout_liveness()
+
+    def _stamp_stdout_liveness(self) -> None:
+        """Stamp ``last_stdout_at`` on the AgentSession (issue #1935).
+
+        This is the headless-runner replacement for the PTY-era
+        ``last_pty_read_loop_at`` liveness signal (#1843 Gap B, deleted with
+        the granite substrate): a per-stream-activity progress write so a
+        toolless-streaming turn (``init`` fires, then assistant output with
+        no tool call) is recognized as having produced output by
+        ``agent.session_runner.liveness.derive_sdk_ever_output`` instead of
+        being misclassified ``zombie_uuid_no_output`` past the never-started
+        grace window.
+
+        Fail-silent (never raises — a liveness-write failure must never
+        crash or wedge the turn) with a per-session-keyed cooldown bounding
+        the Redis write rate on a chatty stdout stream (Risk 2). Reuses
+        ``agent.hooks.liveness_writers.is_in_cooldown`` (the same
+        lock-protected, ``COOLDOWN_WINDOW_SEC``-bound bucket map the CLI
+        hooks already share) under a distinct ``f"{session_id}:stdout"``
+        bucket key, instead of maintaining a second cooldown implementation.
+        """
+        session_id = str(getattr(self._agent_session, "session_id", "") or "")
+        if not session_id:
+            return
+        if is_in_cooldown(f"{session_id}:stdout", time.time()):
+            return
+        try:
+            if self._agent_session is not None:
+                self._agent_session.last_stdout_at = datetime.now(tz=UTC)
+                save = getattr(self._agent_session, "save", None)
+                if callable(save):
+                    save(update_fields=["last_stdout_at"])
+                    logger.debug("stdout_liveness_stamped session_id=%s", session_id)
+        except Exception as e:  # noqa: BLE001 — liveness writes must never crash a turn
+            logger.debug("[runner] stdout liveness stamp failed: %s", e)
 
     def _default_steering_pop(self) -> list[dict]:
         """Pop all pending steering messages for this session (Redis list)."""

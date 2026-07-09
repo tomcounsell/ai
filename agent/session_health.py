@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import agent.session_state as _session_state
+from agent.session_runner.liveness import derive_sdk_ever_output
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -980,11 +981,10 @@ def _never_started_past_grace(
     This predicate NEVER raises.
     """
     try:
-        # Derive sdk_ever_output the same way _has_progress and
-        # _tier2_reprieve_signal do: True iff either per-turn field is set.
-        sdk_ever_output = bool(
-            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-        )
+        # Derive sdk_ever_output via the single authoritative function
+        # (owner directive) — any stream or turn signal, owned by
+        # agent.session_runner.liveness.
+        sdk_ever_output = derive_sdk_ever_output(entry)
         if sdk_ever_output:
             return False
 
@@ -1123,10 +1123,9 @@ def _has_progress(entry: AgentSession) -> bool:
     now_utc = _trusted_utc_now()
 
     # Compute sdk_ever_output once — used by both sub-check A and the own-progress
-    # field guard. True iff last_tool_use_at or last_turn_at has ever been written.
-    sdk_ever_output = bool(
-        getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-    )
+    # field guard. Derived via the single authoritative function (owner
+    # directive): any stream or turn signal, owned by agent.session_runner.liveness.
+    sdk_ever_output = derive_sdk_ever_output(entry)
 
     # Sub-check A: per-turn SDK activity (issue #1226).
     # last_tool_use_at (PreToolUse/PostToolUse hooks) and last_turn_at (result event)
@@ -1307,9 +1306,9 @@ def _tier2_reprieve_signal(
     # reaches MAX_NO_OUTPUT_REPRIEVES. This ensures sessions that hang from
     # the very first turn are eventually recovered rather than being reprieved
     # forever. Sessions with sdk_ever_output=True are NOT subject to this cap.
-    sdk_ever_output = bool(
-        getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-    )
+    # Derived via the single authoritative function (owner directive): any
+    # stream or turn signal, owned by agent.session_runner.liveness.
+    sdk_ever_output = derive_sdk_ever_output(entry)
     reprieve_count = getattr(entry, "reprieve_count", 0) or 0
     if not sdk_ever_output and (
         reprieve_count >= MAX_NO_OUTPUT_REPRIEVES or _never_started_past_grace(entry)
@@ -2173,16 +2172,14 @@ async def _apply_recovery_transition(
     # AC4 narrow telemetry counter (issue #1614): track recoveries that match
     # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
     # but sdk_ever_output=False — the confirmed Branch 2 failure mode).
-    # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it from the
-    # real fields last_tool_use_at and last_turn_at (same derivation as
-    # _has_progress). Do NOT read the attribute directly from entry — use the
-    # derived expression below instead.
+    # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it via the
+    # single authoritative function (owner directive), owned by
+    # agent.session_runner.liveness. Do NOT read the attribute directly from
+    # entry — use the derived call below instead.
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R2
 
-        _sdk_ever_output = bool(
-            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-        )
+        _sdk_ever_output = derive_sdk_ever_output(entry)
         if bool(getattr(entry, "claude_session_uuid", None)) and not _sdk_ever_output:
             project_key = getattr(entry, "project_key", "unknown")
             counter_key = f"{project_key}:session-health:recoveries:zombie_uuid_no_output"

@@ -889,11 +889,17 @@ through delete-and-recreate paths (retry, orphan-fix, continuation fallback).
 
 ### Messenger callbacks (ORM-free)
 
-`BossMessenger` exposes three optional callbacks (`on_sdk_started`,
+`BossMessenger` defines three optional callback slots (`on_sdk_started`,
 `on_heartbeat_tick`, `on_stdout_event`) with `notify_*` wrappers that catch
-callback exceptions and log at WARNING. The messenger imports nothing from
-`models/`; the queue layer (`_execute_agent_session`) defines closures that
-bump ORM fields and passes them into the `BossMessenger` constructor.
+callback exceptions and log at WARNING, but only `on_sdk_started` and
+`on_heartbeat_tick` are wired at its construction site — `on_stdout_event`'s
+prior wiring was a dead, unlanded attempt at the headless-runner stdout
+liveness signal and was removed by issue #1935; `last_stdout_at` is now
+written by `SessionRunner._stamp_stdout_liveness` instead (see
+[Headless Session Runner § Liveness signals](headless-session-runner.md#liveness-signals-sdk_ever_output-issue-1935)).
+The messenger imports nothing from `models/`; the queue layer
+(`_execute_agent_session`) defines closures that bump ORM fields and passes
+them into the `BossMessenger` constructor.
 
 `_active_sessions: dict[str, SessionHandle]` is the per-session registry the
 health check uses to look up cancellable tasks and subprocess pids. It is

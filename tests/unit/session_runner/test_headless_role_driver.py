@@ -293,6 +293,49 @@ async def test_claude_session_id_capture(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Driver-seam: stdout stream drives liveness even in a toolless window
+# (issue #1935, CRITIQUE pass 1 Concern 4)
+# --------------------------------------------------------------------------
+
+
+async def test_toolless_stdout_window_fires_on_stdout_event(tmp_path):
+    """Deterministic proof that the real stream (not just Element 1's unit
+    test stamping last_stdout_at directly) fires on_stdout_event during a
+    toolless window: a fake harness that emits `init` then assistant stdout
+    lines with NO tool-call event must still drive the on_stdout_event
+    callback the same way sdk_client.py's real dispatch does
+    (`_run_harness_subprocess`, one call per non-empty stdout line)."""
+
+    async def _toolless_streaming_harness(message, working_dir, **kwargs):
+        on_init = kwargs.get("on_init")
+        on_stdout_event = kwargs.get("on_stdout_event")
+        if on_init is not None:
+            on_init({"type": "system", "subtype": "init", "session_id": "claude-uuid-toolless"})
+        # Simulate several stdout lines of assistant reasoning/output with NO
+        # tool_use content block anywhere — the exact toolless-turn shape
+        # that used to be silently invisible to session-health.
+        for _ in range(3):
+            if on_stdout_event is not None:
+                on_stdout_event()
+        return "final toolless reply"
+
+    stdout_events = []
+    driver = HeadlessRoleDriver(
+        role="pm",
+        session_id="sess-toolless",
+        working_dir=str(tmp_path),
+        harness_fn=_toolless_streaming_harness,
+        on_stdout_event=lambda: stdout_events.append(1),
+    )
+    outcome = await driver.run_turn("go")
+    assert outcome.reply_text == "final toolless reply"
+    assert len(stdout_events) >= 1, (
+        "the stdout stream must drive on_stdout_event even when no tool "
+        "boundary ever fires during the turn"
+    )
+
+
+# --------------------------------------------------------------------------
 # G5 — explicit subscription-auth env injection
 # --------------------------------------------------------------------------
 

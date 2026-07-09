@@ -38,6 +38,7 @@ class FakeSession:
         self.chat_id = 111
         self.telegram_message_id = 222
         self.session_events = None
+        self.last_stdout_at = None
         self.saved_fields: list[list[str]] = []
 
     def save(self, update_fields=None):
@@ -225,3 +226,215 @@ async def test_driver_subprocess_exception_classified_not_raised(tmp_path):
     assert outcome.turn_ended is False
     assert outcome.exit_reason is not None
     assert outcome.exit_reason.startswith("headless_subprocess_error")
+
+
+# --------------------------------------------------------------------------
+# Headless per-stream liveness (issue #1935): on_stdout_event/on_init wiring
+# --------------------------------------------------------------------------
+
+
+def _make_stdout_liveness_runner(session_id: str, *, harness_fn=None, **runner_kwargs):
+    """Build a real SessionRunner via _build_driver (no injected `driver=`),
+    so the wiring under test (the runner's own on_stdout_event/on_init
+    adapters) actually runs. Extra ``runner_kwargs`` (e.g. ``turn_timeout_s``,
+    ``term_grace_s``) pass straight through to ``SessionRunner``."""
+    session = FakeSession()
+    session.session_id = session_id
+
+    def send_cb(chat_id, payload, reply_to, agent_session):
+        return None
+
+    adapter = SessionRunnerAdapter(
+        session, "test-proj", "telegram", resolve_callbacks=lambda pk, t: (send_cb, None)
+    )
+    runner = SessionRunner(
+        agent_session=session,
+        adapter=adapter,
+        working_dir="/tmp/wd",
+        harness_fn=harness_fn,
+        steering_pop_fn=lambda: [],
+        **runner_kwargs,
+    )
+    return runner, session
+
+
+def test_build_driver_wires_on_stdout_event_adapter():
+    """_build_driver wires a 0-arg on_stdout_event adapter that stamps
+    last_stdout_at (issue #1935 Element 1)."""
+    runner, session = _make_stdout_liveness_runner("sess-stdout-wiring")
+    assert session.last_stdout_at is None
+    assert runner._driver._on_stdout_event is not None
+
+    runner._driver._on_stdout_event()
+
+    assert session.last_stdout_at is not None
+    assert ["last_stdout_at"] in session.saved_fields
+
+
+def test_build_driver_on_init_composes_resume_persist_and_stamp(monkeypatch):
+    """The on_init adapter FIRST persists resume scalars via
+    _on_harness_init (unchanged), THEN stamps last_stdout_at — never the
+    inline-inside-_on_harness_init alternative (CRITIQUE pass 2 HARD
+    CONSTRAINT)."""
+    runner, session = _make_stdout_liveness_runner("sess-init-composed")
+
+    persisted = []
+    monkeypatch.setattr(
+        runner._adapter,
+        "persist_resume_scalars",
+        lambda **kw: persisted.append(kw),
+    )
+
+    assert session.last_stdout_at is None
+    runner._driver._on_init({"type": "system", "subtype": "init", "session_id": "claude-uuid-1"})
+
+    # _on_harness_init's resume-scalar persistence still fires.
+    assert persisted and persisted[0]["claude_session_id"] == "claude-uuid-1"
+    # AND the liveness stamp fires too — composition, not replacement.
+    assert session.last_stdout_at is not None
+    assert ["last_stdout_at"] in session.saved_fields
+
+
+def test_on_init_skips_resume_persist_but_still_stamps_liveness(monkeypatch):
+    """A session_id-less init event hits _on_harness_init's early return
+    (runner.py, `if not sid: return`) — resume scalars are correctly
+    skipped, but the liveness stamp (which fires unconditionally AFTER
+    _on_harness_init returns) must still land. This is exactly why the
+    stamp cannot live inside _on_harness_init's try/except."""
+    runner, session = _make_stdout_liveness_runner("sess-init-no-sid")
+
+    persisted = []
+    monkeypatch.setattr(
+        runner._adapter,
+        "persist_resume_scalars",
+        lambda **kw: persisted.append(kw),
+    )
+
+    runner._driver._on_init({"type": "system", "subtype": "init"})  # no session_id
+
+    assert persisted == []  # resume-scalar persistence correctly skipped
+    assert session.last_stdout_at is not None  # liveness stamp still fires
+
+
+# --------------------------------------------------------------------------
+# _stamp_stdout_liveness: fail-silent + per-session-keyed cooldown
+# --------------------------------------------------------------------------
+
+
+def test_stamp_stdout_liveness_fail_silent_on_save_error():
+    """A save() failure must never raise — the turn must never crash or
+    wedge on a liveness-write failure."""
+    runner, session = _make_stdout_liveness_runner("sess-stdout-fail")
+
+    def _boom(update_fields=None):
+        raise RuntimeError("redis down")
+
+    session.save = _boom
+    runner._stamp_stdout_liveness()  # must not raise
+
+
+def test_stamp_stdout_liveness_cooldown_suppresses_rapid_repeats():
+    """Two stamps within the cooldown window collapse to a single Redis
+    write (Risk 2 — write-amplification bound)."""
+    runner, session = _make_stdout_liveness_runner("sess-stdout-cooldown")
+
+    runner._stamp_stdout_liveness()
+    first_saves = len(session.saved_fields)
+    runner._stamp_stdout_liveness()
+    assert len(session.saved_fields) == first_saves  # second stamp coalesced
+
+
+def test_stamp_stdout_liveness_cooldown_is_per_session_not_shared():
+    """CRITIQUE pass 3 BLOCKER fix: two concurrently instantiated
+    SessionRunner instances (distinct session_ids) each get an independent
+    last_stdout_at stamp within the same 5s window — the cooldown state
+    must NOT be a bare module/class-level timestamp that would let one
+    session's stdout suppress another's stamp."""
+    runner_a, session_a = _make_stdout_liveness_runner("sess-A")
+    runner_b, session_b = _make_stdout_liveness_runner("sess-B")
+
+    runner_a._stamp_stdout_liveness()
+    runner_b._stamp_stdout_liveness()
+
+    assert session_a.last_stdout_at is not None
+    assert session_b.last_stdout_at is not None
+    assert ["last_stdout_at"] in session_a.saved_fields
+    assert ["last_stdout_at"] in session_b.saved_fields
+
+
+def test_stamp_stdout_liveness_noop_without_session_id():
+    """No session_id resolvable → no-op, no crash."""
+    runner, session = _make_stdout_liveness_runner("")
+    runner._stamp_stdout_liveness()
+    assert session.saved_fields == []
+
+
+# --------------------------------------------------------------------------
+# Risk 1 regression guard (issue #1935): a post-init hang is caught by the
+# whole-turn deadline, NOT by session-health's never-started gate (which
+# correctly no longer fires once init stamps last_stdout_at).
+# --------------------------------------------------------------------------
+
+
+async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(monkeypatch):
+    """A subprocess that streams `init` (real output — last_stdout_at gets
+    stamped via the production SessionRunner._on_init_composed ->
+    _stamp_stdout_liveness path) and then hangs forever must NOT be caught by
+    the never-started gate (it correctly does not fire, since sdk_ever_output
+    is now True) — the actual backstop is the driver's own whole-turn
+    deadline (asyncio.wait_for -> outcome.hung=True /
+    exit_reason=headless_turn_timeout).
+
+    Built via ``_make_stdout_liveness_runner`` (like its neighbors) so this
+    exercises the real ``SessionRunner``/``_build_driver``/
+    ``_on_init_composed``/``_stamp_stdout_liveness`` wiring, not a hand-rolled
+    on_init stand-in.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import agent.session_runner.runner as runner_module
+    from agent.session_health import _never_started_past_grace
+
+    async def _init_then_hang(message, working_dir, **kwargs):
+        on_init = kwargs.get("on_init")
+        if on_init is not None:
+            on_init({"type": "system", "subtype": "init", "session_id": "claude-uuid-hang"})
+        await asyncio.sleep(30)  # never resolves within the tiny turn budget
+        return "never reached"
+
+    # Collapse the driver-backstop margin _build_driver adds on top of the
+    # role timeout so the tiny turn_timeout_s below actually bounds the
+    # driver's own asyncio.wait_for within this test's lifetime.
+    monkeypatch.setattr(runner_module, "DRIVER_BACKSTOP_MARGIN_S", 0.0)
+
+    runner, session = _make_stdout_liveness_runner(
+        "sess-post-init-hang",
+        harness_fn=_init_then_hang,
+        turn_timeout_s=0.05,
+        term_grace_s=0.0,
+    )
+    # Resume-scalar persistence is covered by
+    # test_build_driver_on_init_composes_resume_persist_and_stamp; stub it
+    # here so this test stays focused on the liveness stamp + turn-deadline
+    # path under test.
+    monkeypatch.setattr(runner._adapter, "persist_resume_scalars", lambda **kw: None)
+
+    outcome = await runner._driver.run_turn("go")
+
+    # The init event's liveness stamp landed via the real production path —
+    # real output was produced.
+    assert session.last_stdout_at is not None
+    assert ["last_stdout_at"] in session.saved_fields
+
+    # A session whose last_stdout_at is fresh must NOT be flagged by the
+    # never-started gate, even though this simulated session is well past
+    # the grace window on created_at/started_at.
+    session.created_at = datetime.now(tz=UTC) - timedelta(seconds=500)
+    session.started_at = None
+    assert _never_started_past_grace(session) is False
+
+    # The turn IS still recovered — via the whole-turn deadline, not the
+    # never-started gate.
+    assert outcome.hung is True
+    assert outcome.exit_reason == "headless_turn_timeout"
+    assert outcome.turn_ended is False

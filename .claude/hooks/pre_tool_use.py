@@ -46,7 +46,7 @@ def _sidecar_dir(session_id: str) -> Path:
 
 
 def _liveness_cooldown_ok(session_id: str, now: float) -> bool:
-    """File-based per-session cooldown mirroring ``liveness_writers._is_in_cooldown``.
+    """File-based per-session cooldown mirroring ``liveness_writers.is_in_cooldown``.
 
     The CLI hooks run as a fresh process per tool call, so the SDK-path's
     in-memory cooldown cannot coalesce writes across invocations. Persist the
