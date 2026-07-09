@@ -45,27 +45,52 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 REFLECTION_NAME = "crash-recovery"
 OWNING_PROJECT_KEY = "valor"
 
-# The documented registry entry, appended verbatim when absent. Kept as a text
-# block (not a yaml.safe_dump) so the surrounding hand-authored registry keeps
-# its header docs and inline comments -- a dump round-trip would strip them.
-_ENTRY_BLOCK = """\
-
-  - name: crash-recovery
-    description: "Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)"
-    every: 300s # 5 minutes
-    priority: normal
-    execution_type: function
-    callable: "reflections.crash_recovery.run_crash_recovery"
-    enabled: true
-"""
-
 _EXPECTED_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
+
+# Matches the leading whitespace of an existing ``reflections:`` list item so the
+# appended entry adopts the file's own indentation (the hand-authored registry
+# uses a 2-space dash; a yaml.safe_dump copy uses a column-0 dash).
+_LIST_ITEM_RE = re.compile(r"^(\s*)-\s")
+
+
+def _detect_dash_indent(text: str) -> str:
+    """Return the leading whitespace of the first block-sequence item in ``text``.
+
+    Falls back to a 2-space indent (the hand-authored registry's convention)
+    when the list is empty or no item is found.
+    """
+    for line in text.splitlines():
+        m = _LIST_ITEM_RE.match(line)
+        if m:
+            return m.group(1)
+    return "  "
+
+
+def _build_entry_block(dash_indent: str) -> str:
+    """Render the ``crash-recovery`` entry text at the file's own indentation.
+
+    Kept as a text block (not a yaml.safe_dump) so the surrounding hand-authored
+    registry keeps its header docs and inline comments -- a dump round-trip would
+    strip them.
+    """
+    field = dash_indent + "  "
+    desc = "Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)"
+    return (
+        f"\n{dash_indent}- name: crash-recovery\n"
+        f'{field}description: "{desc}"\n'
+        f"{field}every: 300s # 5 minutes\n"
+        f"{field}priority: normal\n"
+        f"{field}execution_type: function\n"
+        f'{field}callable: "{_EXPECTED_CALLABLE}"\n'
+        f"{field}enabled: true\n"
+    )
 
 
 @dataclass
@@ -185,7 +210,7 @@ def _append_entry(path: Path) -> str:
     new_text = text
     if not new_text.endswith("\n"):
         new_text += "\n"
-    new_text += _ENTRY_BLOCK
+    new_text += _build_entry_block(_detect_dash_indent(text))
 
     # Validate before replacing: the appended text must parse and the entry must
     # be readable with the expected callable. Guards against appending into a
