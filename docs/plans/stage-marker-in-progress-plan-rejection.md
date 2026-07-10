@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: docs_complete
 type: bug
 appetite: Small
 owner: Valor Engels
@@ -487,40 +487,40 @@ behavior only; no new MCP surface, `.mcp.json`, or bridge import is involved.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/pipeline-state-machine.md` to document the
+- [x] Update `docs/features/pipeline-state-machine.md` to document the
   `backfill_predecessors` parameter on `start_stage` and the marker-vs-router
   semantics distinction (marker records reality; router enforces ordering).
-- [ ] Update `docs/features/sdlc-stage-tracking.md` to note that a fresh pipeline
+- [x] Update `docs/features/sdlc-stage-tracking.md` to note that a fresh pipeline
   entering at PLAN backfills ISSUE to completed on the first `in_progress` write.
 
 ### Inline Documentation
-- [ ] Docstring on `start_stage` explaining `backfill_predecessors` and the
+- [x] Docstring on `start_stage` explaining `backfill_predecessors` and the
   never-backfill-over-`failed` guard.
-- [ ] Update the D7 degradation-contract docstring in `sdlc_stage_marker.py` to
+- [x] Update the D7 degradation-contract docstring in `sdlc_stage_marker.py` to
   reflect that first-write-at-a-forward-stage now persists rather than failing.
 
 ## Success Criteria
 
-- [ ] `sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number N`
+- [x] `sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number N`
   on a fresh issue exits 0 and persists `ISSUE → completed`, `PLAN → in_progress`
   (verified by re-running the reproduction from the Freshness Check).
-- [ ] `sdlc-tool stage-marker --stage PLAN --status completed --issue-number N` on
+- [x] `sdlc-tool stage-marker --stage PLAN --status completed --issue-number N` on
   a fresh issue (`ISSUE=ready`) exits 0 and persists `ISSUE → completed`,
   `PLAN → completed` — no stage left stuck at `ready` behind a completed stage
   (this is the "ISSUE stuck at ready" half of the defect, now in scope).
-- [ ] `start_stage(stage, backfill_predecessors=True)` and
+- [x] `start_stage(stage, backfill_predecessors=True)` and
   `_backfill_predecessors(stage)` with a `failed` predecessor still raise
   `ValueError` (loud path preserved) and mutate no state.
-- [ ] Strict-default `start_stage` behavior is unchanged for router/hook callers
+- [x] Strict-default `start_stage` behavior is unchanged for router/hook callers
   (existing tests pass).
-- [ ] A marker write at a **multi-predecessor stage** (TEST — predecessors
+- [x] A marker write at a **multi-predecessor stage** (TEST — predecessors
   `[BUILD, PATCH]`) or any stage downstream of it (REVIEW/DOCS/MERGE) that
   triggers backfill promotes the spine (ISSUE/PLAN/CRITIQUE/BUILD) to `completed`
   but leaves **PATCH un-promoted** (still `pending`), and `patch_cycle_count`
   stays `0` (round-2 BLOCKER regression guard).
-- [ ] A test covers the first-write-at-PLAN path (acceptance criterion from #1916).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] A test covers the first-write-at-PLAN path (acceptance criterion from #1916).
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Verification
 

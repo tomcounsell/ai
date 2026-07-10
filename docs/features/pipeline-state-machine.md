@@ -80,6 +80,29 @@ The state machine validates transitions using `PIPELINE_EDGES` from `agent/pipel
 - PATCH can start when TEST or REVIEW has failed/completed
 - TEST can restart after PATCH completes (cycle support)
 
+## Predecessor Backfill (Opt-In)
+
+`start_stage()` takes an optional `backfill_predecessors: bool = False` parameter (issue #1916). When the predecessor check would otherwise raise `ValueError`, passing `backfill_predecessors=True` promotes the missing predecessors to `completed` instead of raising, then activates the target stage.
+
+- **Default `False`** preserves strict ordering for callers that enforce forward-transition decisions: the SDLC router and the PreToolUse hook (`agent/hooks/pre_tool_use.py`) both call `start_stage()` without the flag, so a genuinely out-of-order dispatch still raises.
+- **`tools/sdlc_stage_marker.py` opts in** (`backfill_predecessors=True` on its `in_progress` path) because it records reality rather than deciding what should happen next. Reaching a stage as the first marker write of a pipeline — e.g. PLAN on a freshly auto-ensured session, where ISSUE is only `ready` — implies ISSUE was in fact reached, even though nothing ever wrote its marker.
+
+### `_backfill_predecessors(stage)`
+
+Promotes the ISSUE-rooted success spine behind `stage` to `completed`, using `_reaches_issue(stage)` to test spine membership:
+
+- **Spine-only walk**: only predecessors whose transitive success-predecessor set contains ISSUE are considered. PATCH is excluded — it has no success in-edge (it's reached only via TEST's fail/partial edges), so a backfill never force-completes it.
+- **Scan-then-mutate**: the walk first collects every not-yet-`completed` on-spine predecessor without mutating any state. If any collected predecessor is `failed`, it raises `ValueError` before touching state, so a genuine failure is never silently erased and no partial promotion is left behind.
+- **Single save**: all promotions from one call are persisted with one `_save()`, not one write per stage.
+- **Distinct metric**: each promoted stage emits `sdlc.stage_backfilled` (not `sdlc.stage_started`), so synthetic promotions are observable and distinguishable from real stage-start events.
+
+### Marker vs. Router Semantics
+
+The marker tool (`tools/sdlc_stage_marker.py`) and the router (`.claude/skills/sdlc/SKILL.md`) both operate on the same `PipelineStateMachine`, but with different intent:
+
+- **The marker tool records reality.** A marker write means "we reached this stage" — an unrecorded predecessor is evidence it happened, not an ordering violation, so the tool opts into backfill.
+- **The router enforces ordering.** It decides which stage to dispatch next, so a missing predecessor there is a genuine misorder signal, and it keeps the strict default so it still raises.
+
 ## Artifact-Based Inference
 
 Artifact inference was **deleted in PR #733** (issue #729). `get_display_progress()` no longer accepts a `slug=` parameter and does not check plan files, PRs, or GitHub review state. Stored `stage_states` is the single source of truth.
