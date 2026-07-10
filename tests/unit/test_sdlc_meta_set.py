@@ -238,26 +238,42 @@ class TestMetaSetWriteMeta:
 
         assert result == {}
 
-    def test_pr_number_coerced_to_int(self):
-        """D4: write_meta with pr_number stores _pr_number as an int."""
+    def test_pr_number_writes_session_field_not_meta_key(self):
+        """#2003 T1.7: `--key pr_number` writes the AgentSession.pr_number FIELD.
+
+        Single-writer contract: no `_pr_number` meta key is ever written to
+        stage_states — update_stage_states must not be called at all.
+        """
         from tools.sdlc_meta_set import write_meta
 
         mock_session = MagicMock()
         mock_session.stage_states = "{}"
-
-        def fake_update(session, update_fn, **kwargs):
-            result = update_fn({})
-            assert result["_pr_number"] == 42
-            assert isinstance(result["_pr_number"], int)
-            return True
+        mock_session.pr_number = None
 
         with (
             patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
-            patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update),
+            patch("tools.stage_states_helpers.update_stage_states") as update_mock,
         ):
             result = write_meta(key="pr_number", value="42")
 
         assert result == {"key": "pr_number", "value": 42}
+        assert mock_session.pr_number == 42
+        assert isinstance(mock_session.pr_number, int)
+        mock_session.save.assert_called_once()
+        update_mock.assert_not_called()
+
+    def test_pr_number_save_failure_returns_empty_dict(self):
+        """Field-write path fails soft: session.save() raising returns {}."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_session = MagicMock()
+        mock_session.stage_states = "{}"
+        mock_session.save.side_effect = RuntimeError("redis down")
+
+        with patch("tools.sdlc_meta_set.find_session", return_value=mock_session):
+            result = write_meta(key="pr_number", value="42")
+
+        assert result == {}
 
     def test_pr_number_invalid_returns_empty_dict(self):
         """D4: non-numeric / non-positive pr_number is rejected by write_meta (fail-soft)."""
@@ -298,16 +314,37 @@ class TestMetaSetWhitelist:
         assert "plan_revising" in _KEY_REGISTRY
         assert "plan_hash_at_build_start" in _KEY_REGISTRY
         assert "pr_number" in _KEY_REGISTRY
-        assert _KEY_REGISTRY["pr_number"] == ("_pr_number", int)
+        # #2003 T1.7: pr_number is FIELD-backed (AgentSession.pr_number), not
+        # a stage_states meta key — no leading underscore on the target.
+        assert _KEY_REGISTRY["pr_number"] == ("pr_number", int)
 
-    def test_whitelist_maps_to_underscore_internal_keys(self):
-        """Internal storage keys must use leading underscore convention."""
+    def test_whitelist_storage_targets_follow_convention(self):
+        """Meta keys use the leading-underscore convention; field-backed keys
+        (currently only pr_number) name a real AgentSession attribute."""
+        from models.agent_session import AgentSession
         from tools.sdlc_meta_set import _KEY_REGISTRY
 
-        for public_key, (internal_key, _) in _KEY_REGISTRY.items():
-            assert internal_key.startswith("_"), (
-                f"Internal key for {public_key!r} must start with '_'; got {internal_key!r}"
+        for public_key, (target, _) in _KEY_REGISTRY.items():
+            if target.startswith("_"):
+                continue  # stage_states meta key
+            assert hasattr(AgentSession, target), (
+                f"Field-backed key {public_key!r} targets {target!r}, "
+                f"which is not an AgentSession attribute"
             )
+
+    def test_do_build_addendum_documents_pr_number_writer(self):
+        """Build-path pr_number contract (#2003): docs/sdlc/do-build.md must
+        instruct writing the PR number via the single-writer command shape
+        (`meta-set --key pr_number` with `--run-id`) after PR creation."""
+        addendum = (REPO_ROOT / "docs" / "sdlc" / "do-build.md").read_text(encoding="utf-8")
+
+        assert "meta-set --key pr_number" in addendum, (
+            "do-build.md must document the pr_number single-writer command"
+        )
+        pr_line = next(line for line in addendum.splitlines() if "meta-set --key pr_number" in line)
+        assert "--run-id" in pr_line, (
+            "the documented pr_number writer command must carry --run-id (state-mutating)"
+        )
 
 
 class TestMetaSetCLI:

@@ -325,7 +325,7 @@ def _gh_pr_search_issue_ref(issue_number: int, repo: str | None = None) -> int |
     return None
 
 
-def _lookup_pr_number(
+def _lookup_pr(
     issue_number: int | None, slug: str | None = None, repo: str | None = None
 ) -> int | None:
     """Attempt to find the open PR number for this issue via ``gh``.
@@ -419,18 +419,20 @@ def _compute_meta(
     latest_review = _extract_verdict_text(verdicts.get("REVIEW"))
 
     pr_number = None
-    # Resolution order (D4): explicit session attribute → the writable
-    # `_pr_number` meta key (set via `meta-set`, the primary out-of-band
-    # recovery path) → a gh lookup (issue-search then branch-head fallback).
+    # Resolution ladder (#2003 T1.7 single-writer): the AgentSession.pr_number
+    # FIELD first — its single writer is `sdlc-tool meta-set --key pr_number`,
+    # invoked by /do-build at PR creation (and by out-of-band operator
+    # recovery). When the field is unset, fall through to READ-ONLY recovery
+    # rungs that never write anything back: the validated gh issue-search
+    # (#1998: fuzzy matches trusted only with a word-boundary
+    # Closes/Fixes/Resolves body reference), then the `session/{slug}`
+    # branch-head fallback — both inside _lookup_pr.
     session_pr = getattr(session, "pr_number", None) if session is not None else None
-    meta_pr = raw_states.get("_pr_number")
     slug = getattr(session, "slug", None) if session is not None else None
     if isinstance(session_pr, int) and session_pr > 0:
         pr_number = session_pr
-    elif isinstance(meta_pr, int) and meta_pr > 0:
-        pr_number = meta_pr
     else:
-        pr_number = _lookup_pr_number(issue_number, slug=slug, repo=resolved_repo)
+        pr_number = _lookup_pr(issue_number, slug=slug, repo=resolved_repo)
 
     # Fetch live PR merge state and CI status for G6 guard
     pr_merge_state, ci_all_passing = _fetch_pr_merge_state(pr_number, repo=resolved_repo)
