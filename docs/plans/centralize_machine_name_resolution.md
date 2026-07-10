@@ -182,7 +182,30 @@ build/rework.
 
 ## Solution
 
-### Decision required first (see Open Questions #1)
+### RESOLVED (2026-07-10): Option B variant — adopt PR #2008's `config/machine.py`, retire `tools/machine_identity.py`
+
+Decision (human-confirmed): **`config/machine.py` (from PR #2008) is the canonical
+hub.** Rationale: the issue explicitly asked for `config/machine.py`; the module is a
+strict superset of `tools/machine_identity.py` (adds `get_machine_project_keys` +
+`get_machine_slug`); and the no-legacy-code rule forbids two coexisting scutil hubs.
+Execution (all on PR #2008's branch `session/dev-7bd4cf82`):
+
+1. `tools/machine_identity.py` deleted; `get_display_machine_name()` (its
+   ComputerName→hostname→"unknown" chain) absorbed into `config/machine.py`.
+2. The 5 former hub consumers repointed (`tools/reflection_machine_filter.py`,
+   `reflections/docs_auditor.py`, `reflections/crash_recovery.py`,
+   `scripts/update/reflection_arm.py`, `scripts/update/reflection_register.py`).
+3. The remaining raw copies cut over (`reflections/pm_briefings/__init__.py`,
+   `bridge/telegram_bridge.py`, `scripts/update/verify.py::check_machine_identity`).
+4. Contract reconciliation: the **stricter** `returncode == 0` check from
+   `get_machine_name()` is kept (old `computer_name()` didn't check exit status);
+   documented in the module docstring.
+5. The ~21 test patches on `tools.machine_identity.computer_name` retargeted to
+   `config.machine.get_machine_name`.
+
+The Option A/B analysis below is retained as the decision record.
+
+### Decision record (superseded by the resolution above)
 
 The issue names `config/machine.py`, but `tools/machine_identity.py` already IS the
 canonical hub. Two viable targets:
