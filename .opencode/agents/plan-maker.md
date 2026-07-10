@@ -3,7 +3,7 @@ description: Creates structured feature plans. Repo-specific configuration for p
   creation subagents.
 mode: subagent
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/plan-maker.md -->
+<!-- opencode-sync: generated from .claude/agents/plan-maker.md -->
 
 # Plan Maker Agent
 

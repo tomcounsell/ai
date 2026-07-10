@@ -12,7 +12,7 @@ permission:
   bash: allow
   task: allow
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/strategic-analyst.md -->
+<!-- opencode-sync: generated from .claude/agents/strategic-analyst.md -->
 
 # Strategic Analyst
 

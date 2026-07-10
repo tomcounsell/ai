@@ -1,5 +1,6 @@
-// opencode-sync: generated 2026-07-08
-// Source of truth: .claude/settings.json (permissions) + this script's template.
+// opencode-sync: generated from .claude/settings.json
+// Source of truth: committed .claude/settings.json (permissions) + this script's template.
+// settings.local.json is machine-local and deliberately excluded.
 // Re-run scripts/sync_claude_to_opencode.py to regenerate idempotently.
 {
   "$schema": "https://opencode.ai/config.json",
@@ -12,21 +13,10 @@
     "edit": "allow",
     "write": "allow",
     "bash": {
-      "*": "ask",
-      "gh pr *": "allow",
-      "gh issue *": "allow",
-      ".venv/bin/python -m tools.valor_session list": "allow",
-      "rm /Users/valorengels/src/ai/.claude/skills-global/analyze/ORCHESTRATOR.md": "allow",
-      "git add *": "allow",
-      "cp -r ~/.claude/skills/do-investigation-issue /Users/valorengels/src/ai/.claude/skills-global/": "allow",
-      "rm -rf ~/.claude/skills/do-investigation-issue": "allow"
+      "*": "ask"
     },
     "skill": {
-      "*": "allow",
-      "do-issue": "allow",
-      "frontend-design": "deny",
-      "grill-me": "deny",
-      "mermaid-render": "deny"
+      "*": "allow"
     }
   }
 }

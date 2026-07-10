@@ -4,7 +4,7 @@ description: Subagent dispatched by do-test to classify test failures as regress
 mode: subagent
 color: warning
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/baseline-verifier.md -->
+<!-- opencode-sync: generated from .claude/agents/baseline-verifier.md -->
 
 # Baseline Verifier
 

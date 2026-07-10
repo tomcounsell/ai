@@ -8,7 +8,7 @@ permission:
   write: deny
   edit: deny
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/validator.md -->
+<!-- opencode-sync: generated from .claude/agents/validator.md -->
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 
 # Validator

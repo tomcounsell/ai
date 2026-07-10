@@ -5,7 +5,7 @@ description: Frontend web testing specialist that uses BYOB MCP to execute UI te
 mode: subagent
 model: anthropic/claude-sonnet-4-5
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/frontend-tester.md -->
+<!-- opencode-sync: generated from .claude/agents/frontend-tester.md -->
 
 You are a **frontend testing specialist**. Your job is to execute a single browser-based test scenario using BYOB MCP (`mcp__byob__browser_*`, real Chrome) and return a structured result.
 

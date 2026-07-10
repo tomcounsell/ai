@@ -1,11 +1,15 @@
 {
-  "generated_on": "2026-07-08",
+  "generated_on": "2026-07-10",
+  "generator_version": 2,
+  "settings": {
+    ".claude/settings.json": "4fa64de9b4a835b1cd0923f7619d16916d832229de5d780479dfc59a963194f2"
+  },
   "agents": {
     ".claude/agents/baseline-verifier.md": "2fd442ff330058c1994c10b1c14536d9f62f6aabcbff40a9cc0df0089829343d",
     ".claude/agents/builder.md": "8e46bd51fa6ac72a93861c5d708e728a9bccc0ac6632ad46a5fa3a094929ccee",
     ".claude/agents/code-reviewer.md": "44c323be46d598e2e9d68568d42527a627c70b968ee74fea99f9d72f7dd01e79",
     ".claude/agents/cruft-auditor.md": "bc27d2efc21431ea21c153db828356f841e11e618e60ae0222592fd452ab2162",
-    ".claude/agents/dev.md": "2605b8371832706ec7c1b857ece4cd733bd27cfb52747326ffd8910161ddd4c6",
+    ".claude/agents/dev.md": "ba0cc145cc791cd547e2e74629d33b0ecc0bfe8346c8b6b6d04545b860ce74e8",
     ".claude/agents/documentarian.md": "8de00ee1fa86a4b4f2f731d34693a3a47f5372ddf2b67b6b4a88e740663b0488",
     ".claude/agents/frontend-tester.md": "a738a9bece3c54881472a80311db875ed47488ee18d8f0c2b807725088665233",
     ".claude/agents/linear.md": "763288f42cb904d70e47d55bbfc075696ba0655cce32c0f07dae2438b2908ef9",

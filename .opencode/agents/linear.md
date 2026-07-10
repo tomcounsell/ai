@@ -9,7 +9,7 @@ description: 'Handles project management, issue tracking, sprint planning, and t
 mode: subagent
 model: anthropic/claude-haiku-4-5
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/linear.md -->
+<!-- opencode-sync: generated from .claude/agents/linear.md -->
 
 # Linear Project Management & Issue Tracking Expert
 

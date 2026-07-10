@@ -4,7 +4,7 @@ description: Implementation agent that executes ONE task at a time. Use when wor
 mode: all
 color: info
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/builder.md -->
+<!-- opencode-sync: generated from .claude/agents/builder.md -->
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 
 # Builder

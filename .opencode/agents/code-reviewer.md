@@ -3,7 +3,7 @@ description: Expert code reviewer focusing on correctness, maintainability, secu
   and adherence to project standards
 mode: subagent
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/code-reviewer.md -->
+<!-- opencode-sync: generated from .claude/agents/code-reviewer.md -->
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 
 You are a Code Reviewer for the AI system. Your role is to ensure code quality, correctness, and adherence to project standards through thorough review.

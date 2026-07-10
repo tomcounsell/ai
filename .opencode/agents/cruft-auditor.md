@@ -2,7 +2,7 @@
 description: Scans PR diffs for legacy patterns that should have been cleaned up.
 mode: subagent
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/cruft-auditor.md -->
+<!-- opencode-sync: generated from .claude/agents/cruft-auditor.md -->
 # Cruft Auditor
 
 Scans PR diffs for legacy patterns that should have been cleaned up.

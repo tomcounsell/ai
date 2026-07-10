@@ -8,7 +8,7 @@ permission:
   find: allow
   ls: allow
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/plan-reviewer.md -->
+<!-- opencode-sync: generated from .claude/agents/plan-reviewer.md -->
 You are a plan reviewer agent. Your job is to critically evaluate implementation plans.
 
 For each plan you review:

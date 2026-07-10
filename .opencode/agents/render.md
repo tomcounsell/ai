@@ -10,7 +10,7 @@ description: 'Handles cloud infrastructure, deployments, and service management 
 mode: subagent
 model: anthropic/claude-haiku-4-5
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/render.md -->
+<!-- opencode-sync: generated from .claude/agents/render.md -->
 
 # Render Infrastructure & Deployment Expert
 

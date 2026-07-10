@@ -10,7 +10,7 @@ description: 'Handles payment processing, subscriptions, billing, and revenue an
 mode: subagent
 model: anthropic/claude-sonnet-4-5
 ---
-<!-- opencode-sync: generated 2026-07-08 from .claude/agents/stripe.md -->
+<!-- opencode-sync: generated from .claude/agents/stripe.md -->
 
 # Stripe Payment & Billing Expert
 
