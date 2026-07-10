@@ -24,7 +24,7 @@ The algorithm:
     3. If no rule matches, return ``Blocked(reason="no matching rule")``.
 
 The ``DISPATCH_RULES`` ordering mirrors the documented row numbers
-(1, 2, 2b, 2c, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 8c, 8d, 9, 10, 10b). Each rule
+(1, 2, 2b, 2c, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 8c, 8d, 9, 10). Each rule
 carries a ``row_id`` string for traceability in parity tests.
 """
 
@@ -661,7 +661,7 @@ def evaluate_guards(
 
 
 # ---------------------------------------------------------------------------
-# Dispatch table (Rows 1–10b from SKILL.md)
+# Dispatch table (Rows 1–10 from SKILL.md)
 # ---------------------------------------------------------------------------
 
 
@@ -905,7 +905,7 @@ def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, contex
     disjoint.
 
     Narrowly gated so it cannot fire when:
-      - a PR exists (defer to G3 / PR-stage rows 7-10b)
+      - a PR exists (defer to G3 / PR-stage rows 7-10)
       - any critique verdict IS recorded (let rows 2b/3/4a handle it)
       - CRITIQUE is not in_progress (None/pending → row 2; completed/failed → other rows)
 
@@ -1103,13 +1103,6 @@ def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     return _stages_completed(stage_states, needed)
 
 
-def _rule_stage_states_unavailable_pr_open(stage_states: dict, meta: dict, context: dict) -> bool:
-    """stage_states unavailable AND an open PR exists for this issue."""
-    if meta.get("pr_number") and not stage_states:
-        return True
-    return False
-
-
 # Attach human-readable state strings as docstrings — the parity test uses
 # these to cross-check SKILL.md row state cells. Keep in sync with SKILL.md.
 _rule_no_plan.__doc__ = "No plan exists"
@@ -1148,10 +1141,6 @@ _rule_ready_to_merge.__doc__ = (
     "AND all display stages show completed in stage_states "
     "(or stage_states unavailable), ready to merge"
 )
-_rule_stage_states_unavailable_pr_open.__doc__ = (
-    "stage_states unavailable AND an open PR exists for this issue"
-)
-
 
 DISPATCH_RULES: list[DispatchRule] = [
     DispatchRule(
@@ -1281,15 +1270,6 @@ DISPATCH_RULES: list[DispatchRule] = [
         state_predicate=_rule_ready_to_merge,
         skill=SKILL_DO_MERGE,
         reason="Execute programmatic merge gate",
-    ),
-    DispatchRule(
-        row_id="10b",
-        state_predicate=_rule_stage_states_unavailable_pr_open,
-        skill=SKILL_DO_MERGE,
-        reason=(
-            "Fallback: if stage_states cannot confirm stages but an open PR "
-            "exists after DOCS, dispatch merge"
-        ),
     ),
 ]
 

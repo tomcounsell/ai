@@ -632,7 +632,7 @@ def test_g6_does_not_fire_without_pr_number():
     """G6 is silent when no PR exists."""
     meta = {k: v for k, v in _g6_happy_meta().items() if k != "pr_number"}
     result = decide_next_dispatch(_g6_happy_states(), meta)
-    # G6 must not fire — result may be Dispatch (row 10/10b) or Blocked
+    # G6 must not fire — result may be Dispatch (row 10) or Blocked
     if isinstance(result, Dispatch):
         assert result.row_id != "G6"
     # Blocked is also acceptable (no pr_number + all stages done = ambiguous state)

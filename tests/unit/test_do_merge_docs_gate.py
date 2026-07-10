@@ -1,244 +1,398 @@
-"""Tests for the Step 2b DOCS-stage merge gate (issue #1944).
+"""Tests for the shared terminal merge predicate (``tools/merge_predicate.py``).
 
-The Step 2b gate logic lives as a shell snippet inside this repo's merge-gate
-addendum ``docs/sdlc/do-merge.md`` (the portable ``/do-merge`` skill defers
-repo-specific gates to it). We can't execute the full gate here without a live
-PR and a populated Redis session, so these tests exercise the extracted snippet
-directly: we parse the markdown, pull out the fenced ``bash`` block that contains
-``DOCS_GATE:``, substitute the ``{PR}`` / ``{issue_number}`` placeholders, and run
-it under ``bash`` with a temporary PATH shim that provides fake ``gh``,
-``sdlc-tool``, and ``git`` executables the test controls.
+The Step 2b DOCS-stage gate (issue #1944) and the REVIEW-verdict freshness
+check (issue #2003, critique BLOCKER 2) used to live as shell snippets inside
+``docs/sdlc/do-merge.md``. Both were extracted into
+``tools.merge_predicate.evaluate_merge_predicate`` — the single deterministic
+predicate consumed by BOTH the /do-merge skill and the merge-guard hook — so
+these tests exercise the helper directly.
 
-Extracting the *live* snippet (rather than hardcoding a copy) is what pins the
-test to the markdown: any drift in the gate's decision logic breaks the test.
+The subprocess seams (``_gh_pr_view``, ``_run_stage_query``, ``_run_verdict_get``,
+``_gh_latest_commit``, ``_sdlc_tool_resolvable``) are monkeypatched; the repo
+root is a tmp_path fixture carrying a ``docs/sdlc/do-merge.md`` marker (the
+substrate probe) and real ``docs/features/{slug}.md`` fixture files for the
+degraded fallback.
 
-The shim lets each test control:
-
-- the PR head-ref (``gh pr view ... headRefName``) — hence the derived slug,
-- the ``stages.DOCS`` value (``sdlc-tool stage-query`` JSON), and
-- the current-branch fallback (``git rev-parse --abbrev-ref HEAD``).
-
-Bash runs from a temp working directory where ``docs/features/{slug}.md`` fixture
-files are created as needed, so the ``test -f`` degraded fallback is exercised
-against a real filesystem. ``python3`` is expected on PATH (not shimmed).
+Covers:
+- DOCS gate: completed / in_progress / pending / empty-stages / no-usable-slug
+  (behavior parity with the pre-extraction bash snippet)
+- Verdict freshness: stale timestamp, head_sha trailer mismatch, matching
+  trailer (``-k stale_verdict`` selects these — Verification row)
+- Ordered substrate detection: absent → groups b/c skipped, group (a) still
+  enforced; present + evaluation error → fail closed
+- Parity guard (plan Risk 3): the do-merge addendum must reference the helper.
 """
 
 from __future__ import annotations
 
-import re
-import shutil
-import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
 
+import tools.merge_predicate as mp
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DO_MERGE_MD = REPO_ROOT / "docs" / "sdlc" / "do-merge.md"
 
-
-def _extract_docs_gate_snippet() -> str:
-    """Pull the fenced ``bash`` block containing ``DOCS_GATE:`` from do-merge.md.
-
-    The block is embedded (indented) under a markdown list item, so we dedent it
-    after extraction. Returns the raw shell source.
-    """
-    md = DO_MERGE_MD.read_text()
-    # Match every ```bash ... ``` fenced block (fence may be indented under a
-    # list item, so allow leading whitespace on the fence lines).
-    pattern = re.compile(
-        r"^[ \t]*```bash[ \t]*\n(.*?)^[ \t]*```[ \t]*$",
-        re.DOTALL | re.MULTILINE,
-    )
-    for match in pattern.finditer(md):
-        body = match.group(1)
-        if "DOCS_GATE:" in body:
-            return textwrap.dedent(body)
-    raise AssertionError("No ```bash block containing DOCS_GATE: found in do-merge.md")
+ISSUE = 1944
+PR = 999
+HEAD_SHA = "a" * 40
 
 
-def _write_shim(shim_dir: Path, name: str, body: str) -> None:
-    path = shim_dir / name
-    path.write_text("#!/usr/bin/env bash\n" + body)
-    path.chmod(0o755)
-
-
-def _run_gate(
-    tmp_path: Path,
-    *,
-    head_ref: str,
-    stages_json: str,
-    git_branch: str = "main",
-) -> str:
-    """Run the extracted Step 2b snippet under a controlled PATH shim.
-
-    Args:
-        head_ref: what ``gh pr view ... headRefName`` echoes (empty = unavailable).
-        stages_json: what ``sdlc-tool stage-query`` echoes on stdout.
-        git_branch: what ``git rev-parse --abbrev-ref HEAD`` echoes (fallback path).
-
-    Returns combined stdout+stderr of the snippet run.
-    """
-    if shutil.which("bash") is None:
-        pytest.skip("bash not installed")
-
-    snippet = _extract_docs_gate_snippet()
-    snippet = snippet.replace("{PR}", "999").replace("{issue_number}", "1944")
-
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
-
-    # Fake `gh`: only handle `pr view ... headRefName`. Echo the controlled
-    # head-ref (or nothing, to simulate an unavailable lookup).
-    _write_shim(
-        shim_dir,
-        "gh",
-        f'if [[ "$*" == *headRefName* ]]; then printf %s {head_ref!r}; fi\n',
-    )
-    # Fake `sdlc-tool`: emit the controlled stage-query JSON on stdout.
-    _write_shim(
-        shim_dir,
-        "sdlc-tool",
-        f"cat <<'EOF'\n{stages_json}\nEOF\n",
-    )
-    # Fake `git`: answer rev-parse --abbrev-ref HEAD with the controlled branch.
-    _write_shim(
-        shim_dir,
-        "git",
-        f'if [[ "$*" == *"rev-parse --abbrev-ref HEAD"* ]]; then echo {git_branch!r}; fi\n',
-    )
-
-    workdir = tmp_path / "work"
-    (workdir / "docs" / "features").mkdir(parents=True, exist_ok=True)
-
-    env = {
-        "PATH": f"{shim_dir}:/usr/bin:/bin:/usr/local/bin",
+def _good_pr(**overrides) -> dict:
+    pr = {
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}],
+        "reviewDecision": "APPROVED",
+        "body": f"Does the thing.\n\nCloses #{ISSUE}",
+        "headRefName": "session/my-slug",
     }
-    result = subprocess.run(
-        ["bash", "-c", snippet],
-        cwd=workdir,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+    pr.update(overrides)
+    return pr
+
+
+def _fresh_verdict(**overrides) -> dict:
+    record = {"verdict": "APPROVED", "recorded_at": "2026-07-10T12:00:00+00:00"}
+    record.update(overrides)
+    return record
+
+
+@pytest.fixture
+def substrate_repo(tmp_path, monkeypatch):
+    """A tmp repo root with the substrate present and green default seams."""
+    (tmp_path / "docs" / "sdlc").mkdir(parents=True)
+    (tmp_path / "docs" / "sdlc" / "do-merge.md").write_text("# addendum\n")
+    (tmp_path / "docs" / "features").mkdir(parents=True)
+
+    monkeypatch.setattr(mp, "_sdlc_tool_resolvable", lambda root: True)
+    monkeypatch.setattr(mp, "_gh_pr_view", lambda pr, root: _good_pr())
+    monkeypatch.setattr(
+        mp,
+        "_run_stage_query",
+        lambda issue, root: {"stages": {"DOCS": "completed"}, "_meta": {}},
     )
-    return result.stdout + result.stderr
-
-
-def _make_feature_doc(tmp_path: Path, slug: str) -> None:
-    features_dir = tmp_path / "work" / "docs" / "features"
-    features_dir.mkdir(parents=True, exist_ok=True)
-    (features_dir / f"{slug}.md").write_text("# feature\n")
-
-
-# ---------------------------------------------------------------------------
-# completed → authoritative PASS
-# ---------------------------------------------------------------------------
-
-
-def test_completed_passes(tmp_path):
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/my-slug",
-        stages_json='{"stages": {"DOCS": "completed"}, "_meta": {}}',
+    monkeypatch.setattr(mp, "_run_verdict_get", lambda issue, root: _fresh_verdict())
+    monkeypatch.setattr(
+        mp,
+        "_gh_latest_commit",
+        lambda pr, root: {"sha": HEAD_SHA, "date": "2026-07-10T00:00:00Z"},
     )
-    assert "DOCS_GATE: PASS" in out
-    assert "GATES_FAILED" not in out
+    return tmp_path
 
 
-def test_skip_recorded_as_completed_passes(tmp_path):
-    """A DOCS-skip (#1799) records the ``completed`` status, so it is admitted
-    with no special skip-branch — identical to a real completion."""
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/trivial-docs-skip",
-        stages_json='{"stages": {"DOCS": "completed"}, "_meta": {}}',
+def _make_feature_doc(repo_root: Path, slug: str) -> None:
+    (repo_root / "docs" / "features" / f"{slug}.md").write_text("# feature\n")
+
+
+# ---------------------------------------------------------------------------
+# DOCS gate: completed → authoritative PASS
+# ---------------------------------------------------------------------------
+
+
+def test_completed_passes(substrate_repo):
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+    assert result.substrate_present is True
+    assert result.failed_checks == []
+
+
+def test_skip_recorded_as_completed_passes(substrate_repo):
+    """A DOCS-skip (#1799) records ``completed``, admitted identically."""
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# DOCS gate: in_progress → the only HARD fail
+# ---------------------------------------------------------------------------
+
+
+def test_in_progress_hard_fails(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp,
+        "_run_stage_query",
+        lambda issue, root: {"stages": {"DOCS": "in_progress"}, "_meta": {}},
     )
-    assert "DOCS_GATE: PASS" in out
-    assert "GATES_FAILED" not in out
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert "DOCS stage in_progress" in result.failed_checks
 
 
 # ---------------------------------------------------------------------------
-# in_progress → the only HARD fail
+# DOCS gate: pending → degraded fallback to docs/features/{slug}.md existence
 # ---------------------------------------------------------------------------
 
 
-def test_in_progress_hard_fails(tmp_path):
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/my-slug",
-        stages_json='{"stages": {"DOCS": "in_progress"}, "_meta": {}}',
+def test_pending_with_feature_doc_passes_degraded(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp,
+        "_run_stage_query",
+        lambda issue, root: {"stages": {"DOCS": "pending"}, "_meta": {}},
     )
-    assert "GATES_FAILED" in out
-    assert "DOCS_GATE: FAIL" in out
-    assert "in_progress" in out
+    _make_feature_doc(substrate_repo, "my-slug")
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+    assert any("degraded" in note for note in result.notes)
 
 
-# ---------------------------------------------------------------------------
-# pending → degraded fallback to docs/features/{slug}.md existence
-# ---------------------------------------------------------------------------
-
-
-def test_pending_with_feature_doc_passes_degraded(tmp_path):
-    _make_feature_doc(tmp_path, "my-slug")
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/my-slug",
-        stages_json='{"stages": {"DOCS": "pending"}, "_meta": {}}',
+def test_pending_without_feature_doc_fails(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp,
+        "_run_stage_query",
+        lambda issue, root: {"stages": {"DOCS": "pending"}, "_meta": {}},
     )
-    assert "PASS (degraded)" in out
-    assert "GATES_FAILED" not in out
-
-
-def test_pending_without_feature_doc_fails(tmp_path):
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/my-slug",
-        stages_json='{"stages": {"DOCS": "pending"}, "_meta": {}}',
-    )
-    assert "GATES_FAILED" in out
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("my-slug.md absent" in check for check in result.failed_checks)
 
 
 # ---------------------------------------------------------------------------
-# empty stages (session reaped) → degraded fallback
+# DOCS gate: empty stages (session reaped) → degraded fallback
 # ---------------------------------------------------------------------------
 
 
-def test_empty_stages_with_feature_doc_passes_degraded(tmp_path):
-    _make_feature_doc(tmp_path, "my-slug")
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/my-slug",
-        stages_json='{"stages": {}, "_meta": {}}',
-    )
-    assert "PASS (degraded)" in out
-    assert "GATES_FAILED" not in out
+def test_empty_stages_with_feature_doc_passes_degraded(substrate_repo, monkeypatch):
+    monkeypatch.setattr(mp, "_run_stage_query", lambda issue, root: {"stages": {}, "_meta": {}})
+    _make_feature_doc(substrate_repo, "my-slug")
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+    assert any("degraded" in note for note in result.notes)
 
 
-def test_empty_stages_without_feature_doc_fails(tmp_path):
-    out = _run_gate(
-        tmp_path,
-        head_ref="session/my-slug",
-        stages_json='{"stages": {}, "_meta": {}}',
-    )
-    assert "GATES_FAILED" in out
+def test_empty_stages_without_feature_doc_fails(substrate_repo, monkeypatch):
+    monkeypatch.setattr(mp, "_run_stage_query", lambda issue, root: {"stages": {}, "_meta": {}})
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
 
 
 # ---------------------------------------------------------------------------
-# no usable slug (invoked from main / detached HEAD) → FAIL with <no-slug>
+# DOCS gate: no usable slug (head ref main / detached) → FAIL, no main.md lookup
 # ---------------------------------------------------------------------------
 
 
-def test_no_usable_slug_fails_without_main_lookup(tmp_path):
-    """When the PR head-ref resolves to ``main`` (and the git fallback is also
-    ``main``), the slug normalizes to empty: the gate must FAIL naming
-    ``<no-slug>`` and must NOT do a ``docs/features/main.md`` lookup."""
-    out = _run_gate(
-        tmp_path,
-        head_ref="main",
-        stages_json='{"stages": {"DOCS": "pending"}, "_meta": {}}',
-        git_branch="main",
+def test_no_usable_slug_fails_without_main_lookup(substrate_repo, monkeypatch):
+    monkeypatch.setattr(mp, "_gh_pr_view", lambda pr, root: _good_pr(headRefName="main"))
+    monkeypatch.setattr(
+        mp,
+        "_run_stage_query",
+        lambda issue, root: {"stages": {"DOCS": "pending"}, "_meta": {}},
     )
-    assert "GATES_FAILED" in out
-    assert "<no-slug>" in out
-    assert "docs/features/main.md" not in out
+    _make_feature_doc(substrate_repo, "main")  # must NOT be consulted
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("no usable slug" in check for check in result.failed_checks)
+    assert not any("main.md" in check for check in result.failed_checks)
+
+
+# ---------------------------------------------------------------------------
+# DOCS gate: stage-query failure with substrate present → FAIL CLOSED
+# ---------------------------------------------------------------------------
+
+
+def test_stage_query_error_fails_closed(substrate_repo, monkeypatch):
+    def boom(issue, root):
+        raise RuntimeError("stage-query exited 2")
+
+    monkeypatch.setattr(mp, "_run_stage_query", boom)
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("DOCS stage state unavailable" in check for check in result.failed_checks)
+
+
+# ---------------------------------------------------------------------------
+# Verdict presence / freshness (#2003 BLOCKER 2) — `-k stale_verdict` rows
+# ---------------------------------------------------------------------------
+
+
+def test_missing_review_verdict_fails(substrate_repo, monkeypatch):
+    monkeypatch.setattr(mp, "_run_verdict_get", lambda issue, root: {})
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert "no recorded REVIEW verdict" in result.failed_checks
+
+
+def test_non_approved_verdict_fails(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: _fresh_verdict(verdict="CHANGES REQUESTED"),
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("not APPROVED" in check for check in result.failed_checks)
+
+
+def test_stale_verdict_timestamp_predates_head_commit_fails(substrate_repo, monkeypatch):
+    """APPROVED verdict recorded BEFORE the PR's latest commit → stale, fail."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: _fresh_verdict(recorded_at="2026-07-09T00:00:00+00:00"),
+    )
+    monkeypatch.setattr(
+        mp,
+        "_gh_latest_commit",
+        lambda pr, root: {"sha": HEAD_SHA, "date": "2026-07-10T00:00:00Z"},
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert "REVIEW verdict predates PR head commit" in result.failed_checks
+
+
+def test_stale_verdict_head_sha_trailer_mismatch_fails(substrate_repo, monkeypatch):
+    """An APPROVED verdict carrying a head_sha trailer for a DIFFERENT commit
+    is stale relative to the PR head — a bare 'APPROVED in text' pass would
+    reopen the stale-approval bypass."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: _fresh_verdict(verdict=f"APPROVED\nREVIEW_CONTEXT head_sha={'b' * 40}"),
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("head_sha trailer mismatch" in check for check in result.failed_checks)
+
+
+def test_stale_verdict_matching_trailer_is_fresh_and_passes(substrate_repo, monkeypatch):
+    """The trailer comparison is PREFERRED over the timestamp: a matching
+    head_sha trailer is fresh even when the recorded timestamp is old."""
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: _fresh_verdict(
+            verdict=f"APPROVED\nREVIEW_CONTEXT head_sha={HEAD_SHA}",
+            recorded_at="2020-01-01T00:00:00+00:00",
+        ),
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+    assert any("head_sha trailer matches" in note for note in result.notes)
+
+
+def test_stale_verdict_missing_latest_commit_fails_closed(substrate_repo, monkeypatch):
+    """Substrate present + latest-commit data unavailable → fail closed with a
+    named leg, never a silent freshness pass."""
+
+    def boom(pr, root):
+        raise RuntimeError("gh api pulls commits exited 1")
+
+    monkeypatch.setattr(mp, "_gh_latest_commit", boom)
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("PR latest commit unavailable" in check for check in result.failed_checks)
+
+
+# ---------------------------------------------------------------------------
+# Group (a) PR state legs
+# ---------------------------------------------------------------------------
+
+
+def test_closed_pr_fails_group_a(substrate_repo, monkeypatch):
+    monkeypatch.setattr(mp, "_gh_pr_view", lambda pr, root: _good_pr(state="MERGED"))
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("must be OPEN" in check for check in result.failed_checks)
+
+
+def test_ci_failure_and_pending_both_fail(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp,
+        "_gh_pr_view",
+        lambda pr, root: _good_pr(
+            statusCheckRollup=[
+                {"name": "tests", "conclusion": "FAILURE"},
+                {"name": "lint", "conclusion": "", "state": "PENDING"},
+            ]
+        ),
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("concluded FAILURE" in check for check in result.failed_checks)
+    assert any("still pending" in check for check in result.failed_checks)
+
+
+def test_missing_issue_link_fails(substrate_repo, monkeypatch):
+    monkeypatch.setattr(
+        mp, "_gh_pr_view", lambda pr, root: _good_pr(body="No closing keyword here")
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("issue link" in check for check in result.failed_checks)
+
+
+def test_gh_error_fails_closed(substrate_repo, monkeypatch):
+    def boom(pr, root):
+        raise RuntimeError("gh pr view exited 1")
+
+    monkeypatch.setattr(mp, "_gh_pr_view", boom)
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("PR state unavailable" in check for check in result.failed_checks)
+
+
+# ---------------------------------------------------------------------------
+# Ordered substrate detection (cycle-2 CONCERN 3)
+# ---------------------------------------------------------------------------
+
+
+def test_substrate_absent_skips_groups_b_c_but_enforces_group_a(tmp_path, monkeypatch):
+    """Foreign repo (no addendum): groups (b)/(c) skip with a logged notice,
+    group (a) still enforces — and no substrate subprocess is ever invoked."""
+
+    def substrate_boom(*args, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("substrate call invoked in a substrate-absent repo")
+
+    monkeypatch.setattr(mp, "_run_stage_query", substrate_boom)
+    monkeypatch.setattr(mp, "_run_verdict_get", substrate_boom)
+    monkeypatch.setattr(mp, "_gh_latest_commit", substrate_boom)
+    monkeypatch.setattr(mp, "_gh_pr_view", lambda pr, root: _good_pr(state="CLOSED"))
+
+    result = mp.evaluate_merge_predicate(PR, repo_root=tmp_path)
+    assert result.substrate_present is False
+    assert result.allowed is False  # group (a) still enforced
+    assert any("must be OPEN" in check for check in result.failed_checks)
+    assert any("substrate absent" in note for note in result.notes)
+
+
+def test_substrate_absent_green_pr_allows(tmp_path, monkeypatch):
+    monkeypatch.setattr(mp, "_gh_pr_view", lambda pr, root: _good_pr())
+    result = mp.evaluate_merge_predicate(PR, repo_root=tmp_path)
+    assert result.substrate_present is False
+    assert result.allowed is True
+    assert any("substrate absent" in note for note in result.notes)
+
+
+def test_substrate_probe_requires_tool_resolvability(tmp_path, monkeypatch):
+    """Addendum present but sdlc-tool unresolvable → substrate absent."""
+    (tmp_path / "docs" / "sdlc").mkdir(parents=True)
+    (tmp_path / "docs" / "sdlc" / "do-merge.md").write_text("# addendum\n")
+    monkeypatch.setattr(mp, "_sdlc_tool_resolvable", lambda root: False)
+    monkeypatch.setattr(mp, "_gh_pr_view", lambda pr, root: _good_pr())
+    result = mp.evaluate_merge_predicate(PR, repo_root=tmp_path)
+    assert result.substrate_present is False
+    assert result.allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Parity guard (plan Risk 3): skill addendum must consume the shared helper
+# ---------------------------------------------------------------------------
+
+
+def test_do_merge_addendum_references_merge_predicate():
+    """The repo addendum must invoke ``tools.merge_predicate`` as its single
+    deterministic gate — re-inlined bash copies of the extracted checks would
+    drift from the hook (the #1944 class with roles reversed)."""
+    text = DO_MERGE_MD.read_text(encoding="utf-8")
+    assert "tools.merge_predicate" in text, (
+        "docs/sdlc/do-merge.md must reference `python -m tools.merge_predicate` "
+        "as the deterministic merge gate shared with the merge-guard hook"
+    )
+
+
+def test_merge_guard_hook_references_merge_predicate():
+    hook = (REPO_ROOT / ".claude" / "hooks" / "validators" / "validate_merge_guard.py").read_text(
+        encoding="utf-8"
+    )
+    assert "merge_predicate" in hook

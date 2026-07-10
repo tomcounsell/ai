@@ -1,8 +1,15 @@
-"""Tests for the merge-guard tokenizer (item 7 of sdlc-1155).
+"""Tests for the merge-guard hook: tokenizer + live-predicate enforcement.
 
-Covers the new ``_extract_executed_commands`` tokenizer and the
-``_merge_cmd_in_command`` wrapper that restricts the merge-command regex
-to actual command positions. The tokenizer must:
+Part 1 covers the ``_extract_executed_commands`` tokenizer (item 7 of
+sdlc-1155) and the ``_merge_cmd_in_command`` wrapper that restricts the
+merge-command regex to actual command positions.
+
+Part 2 (issue #2003) covers the enforcement contract: the hook evaluates the
+shared merge predicate (``tools.merge_predicate``) live instead of checking
+that an auth file exists. The break-glass override file must carry an
+``override: <reason>`` line; empty/legacy files authorize nothing.
+
+The tokenizer must:
 
 - Block a direct merge call.
 - Allow an ``echo``/``printf`` prefix (handled by the fast path in main,
@@ -172,3 +179,182 @@ def test_commit_heredoc_body_with_substitution_patterns_allowed(guard):
     # The entire merge-token content is inside the heredoc body, so the
     # guard must NOT block this commit.
     assert guard._merge_cmd_in_command(cmd) is False
+
+
+# ---------------------------------------------------------------------------
+# Part 2 (issue #2003): live-predicate enforcement + break-glass override
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+
+def _run_main(guard, monkeypatch, capsys, command: str) -> dict | None:
+    """Drive guard.main() with a Bash payload; return the parsed block decision
+    (or None when the hook allowed the command silently)."""
+    monkeypatch.setattr(
+        guard,
+        "read_stdin",
+        lambda: {"tool_name": "Bash", "tool_input": {"command": command}},
+    )
+    guard.main()
+    out = capsys.readouterr().out.strip()
+    if not out:
+        return None
+    return json.loads(out)
+
+
+@pytest.fixture
+def enforcement(guard, monkeypatch, tmp_path):
+    """Point the override dir at tmp_path and install a green predicate seam."""
+    monkeypatch.setattr(guard, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(
+        guard,
+        "_evaluate_predicate",
+        lambda pr: SimpleNamespace(allowed=True, failed_checks=[]),
+    )
+    return guard
+
+
+def test_predicate_pass_allows_silently(enforcement, monkeypatch, capsys):
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42 --squash")
+    assert decision is None
+
+
+def test_predicate_fail_blocks_naming_the_leg(enforcement, monkeypatch, capsys):
+    monkeypatch.setattr(
+        enforcement,
+        "_evaluate_predicate",
+        lambda pr: SimpleNamespace(
+            allowed=False,
+            failed_checks=["DOCS stage in_progress", "REVIEW verdict predates PR head commit"],
+        ),
+    )
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+    assert decision is not None and decision["decision"] == "block"
+    assert "DOCS stage in_progress" in decision["reason"]
+    assert "REVIEW verdict predates PR head commit" in decision["reason"]
+    assert "/do-merge 42" in decision["reason"]
+    assert "override:" in decision["reason"]  # break-glass remediation named
+
+
+def test_predicate_raise_blocks_fail_closed(enforcement, monkeypatch, capsys):
+    def boom(pr):
+        raise RuntimeError("predicate import exploded")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", boom)
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+    assert decision is not None and decision["decision"] == "block"
+    assert "fail-closed" in decision["reason"]
+    assert "predicate import exploded" in decision["reason"]
+    assert "/do-merge 42" in decision["reason"]
+
+
+def test_no_pr_number_blocks_with_generic_message(enforcement, monkeypatch, capsys):
+    """No extractable PR number → the predicate cannot run → fail-closed block."""
+
+    def must_not_run(pr):  # pragma: no cover - guard against regression
+        raise AssertionError("predicate must not be evaluated without a PR number")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", must_not_run)
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} --auto")
+    assert decision is not None and decision["decision"] == "block"
+    assert "/do-merge" in decision["reason"]
+
+
+def test_merge_guard_override_valid_file_allows_logs_and_emits_metric(
+    enforcement, monkeypatch, capsys, tmp_path, caplog
+):
+    """`override: <reason>` file → allow + WARNING log + metric, predicate skipped."""
+    (tmp_path / "merge_authorized_42").write_text("override: redis down, human-verified PR\n")
+
+    def must_not_run(pr):  # pragma: no cover
+        raise AssertionError("valid override must short-circuit the predicate")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", must_not_run)
+
+    emitted: list[tuple] = []
+    monkeypatch.setattr(
+        enforcement,
+        "_load_metric_recorder",
+        lambda: lambda name, value, dimensions=None: emitted.append((name, value, dimensions)),
+    )
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+
+    assert decision is None  # allowed
+    assert any(
+        "override" in rec.message.lower() and rec.levelno == logging.WARNING
+        for rec in caplog.records
+    )
+    assert emitted == [
+        (
+            "merge_guard.override_used",
+            1,
+            {"pr_number": "42", "reason": "redis down, human-verified PR"},
+        )
+    ]
+
+
+def test_merge_guard_override_empty_file_blocks(enforcement, monkeypatch, capsys, tmp_path):
+    """An empty auth file is legacy format — treated as absent; with a failing
+    predicate the merge blocks and the reason says the file was ignored."""
+    (tmp_path / "merge_authorized_42").write_text("")
+    monkeypatch.setattr(
+        enforcement,
+        "_evaluate_predicate",
+        lambda pr: SimpleNamespace(allowed=False, failed_checks=["no recorded REVIEW verdict"]),
+    )
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+    assert decision is not None and decision["decision"] == "block"
+    assert "no recorded REVIEW verdict" in decision["reason"]
+    assert "treated as absent" in decision["reason"]
+
+
+def test_merge_guard_override_legacy_content_blocks(enforcement, monkeypatch, capsys, tmp_path):
+    """A pre-#2003 touch-file (content without `override:`) never authorizes."""
+    (tmp_path / "merge_authorized_42").write_text("authorized by do-merge gate run\n")
+    monkeypatch.setattr(
+        enforcement,
+        "_evaluate_predicate",
+        lambda pr: SimpleNamespace(allowed=False, failed_checks=["DOCS stage in_progress"]),
+    )
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+    assert decision is not None and decision["decision"] == "block"
+    assert "treated as absent" in decision["reason"]
+
+
+def test_merge_guard_override_metric_failure_never_crashes(
+    enforcement, monkeypatch, capsys, tmp_path
+):
+    """Metric emission failure must not break the override allow path."""
+    (tmp_path / "merge_authorized_42").write_text("override: emergency\n")
+
+    def broken_loader():
+        raise ImportError("analytics unavailable")
+
+    monkeypatch.setattr(enforcement, "_load_metric_recorder", broken_loader)
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42")
+    assert decision is None  # still allowed
+
+
+def test_substrate_absent_repo_enforces_group_a_without_traceback(
+    enforcement, monkeypatch, capsys, tmp_path
+):
+    """Hook-level view of the foreign-repo posture: the predicate result for a
+    substrate-absent repo (group (a) failure, groups b/c skipped via notes)
+    blocks cleanly with the group-(a) leg — no unhandled traceback."""
+    monkeypatch.setattr(
+        enforcement,
+        "_evaluate_predicate",
+        lambda pr: SimpleNamespace(
+            allowed=False,
+            failed_checks=["PR state is 'CLOSED' (must be OPEN)"],
+        ),
+    )
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 7")
+    assert decision is not None and decision["decision"] == "block"
+    assert "must be OPEN" in decision["reason"]

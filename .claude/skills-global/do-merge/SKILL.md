@@ -24,6 +24,13 @@ suite), plan migration, and post-merge cleanup/restart. When the file is absent
 (the common case in a foreign repo), this skill runs entirely on `git` and `gh`
 — no repo-specific tooling required.
 
+If the addendum declares a **shared deterministic merge predicate** (a single
+command that evaluates the whole gate and returns structured pass/fail legs),
+run that command and honor its result in place of hand-assembling the
+equivalent checks — it is the same predicate the repo's merge-guard hook
+enforces, so evaluating anything else invites drift. The repo-specific command
+lives in the addendum, never in this body.
+
 ## Variables
 
 PR_ARG: the PR number to merge (e.g. `42` or `#42`). Strip any leading `#`.

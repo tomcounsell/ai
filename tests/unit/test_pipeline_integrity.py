@@ -99,18 +99,13 @@ class TestMergeGuardHook:
         return None
 
     def test_blocks_gh_pr_merge(self):
+        """End-to-end block: PR 42 is long merged, so the live predicate fails
+        (state != OPEN); if `gh` is unavailable the hook fails closed. Either
+        way the direct merge call is blocked with a /do-merge pointer."""
         result = self._run_hook("Bash", "gh pr merge 42")
         assert result is not None
         assert result["decision"] == "block"
-        # Hotfix 1d67d81e reworded the block message away from "human
-        # authorization" framing. The block message now points to /do-merge
-        # as the authorization mechanism.
         assert "/do-merge" in result["reason"]
-
-    def test_blocks_gh_pr_merge_with_flags(self):
-        result = self._run_hook("Bash", "gh pr merge 42 --squash")
-        assert result is not None
-        assert result["decision"] == "block"
 
     def test_allows_gh_pr_merge_help(self):
         result = self._run_hook("Bash", "gh pr merge --help")
@@ -132,35 +127,35 @@ class TestMergeGuardHook:
         result = self._run_hook("Bash", "gh pr list")
         assert result is None
 
-    def test_blocks_merge_in_pipeline(self):
-        result = self._run_hook("Bash", "cd repo && gh pr merge 10 --merge")
-        assert result is not None
-        assert result["decision"] == "block"
-
-    def test_allows_authorized_merge(self, tmp_path, monkeypatch):
-        """Merge is allowed when authorization file exists."""
-        # Create the data dir and auth file in the project root
+    def test_allows_break_glass_override_merge(self):
+        """A `override: <reason>` auth file short-circuits the predicate and
+        allows the merge (#2003 break-glass contract)."""
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        auth_file = os.path.join(project_root, "data", "merge_authorized_42")
+        auth_file = os.path.join(project_root, "data", "merge_authorized_424242")
         os.makedirs(os.path.dirname(auth_file), exist_ok=True)
         try:
             with open(auth_file, "w") as f:
-                f.write("")
-            result = self._run_hook("Bash", "gh pr merge 42 --squash")
+                f.write("override: pipeline-integrity test break-glass\n")
+            result = self._run_hook("Bash", "gh pr merge 424242 --squash")
             assert result is None  # Allowed
         finally:
             os.unlink(auth_file)
 
-    def test_blocks_unauthorized_merge(self):
-        """Merge is blocked when no authorization file exists."""
-        # Ensure no auth file exists
+    def test_empty_auth_file_no_longer_authorizes(self):
+        """The pre-#2003 bypass: an empty touch-file used to authorize any
+        merge (the PR #2005 incident). It must now be treated as absent — the
+        live predicate runs (and fails closed for a nonexistent PR)."""
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        auth_file = os.path.join(project_root, "data", "merge_authorized_999")
-        if os.path.exists(auth_file):
+        auth_file = os.path.join(project_root, "data", "merge_authorized_424243")
+        os.makedirs(os.path.dirname(auth_file), exist_ok=True)
+        try:
+            with open(auth_file, "w") as f:
+                f.write("")
+            result = self._run_hook("Bash", "gh pr merge 424243 --squash")
+            assert result is not None
+            assert result["decision"] == "block"
+        finally:
             os.unlink(auth_file)
-        result = self._run_hook("Bash", "gh pr merge 999 --squash")
-        assert result is not None
-        assert result["decision"] == "block"
 
     def test_blocks_merge_without_pr_number(self):
         """Merge without a PR number is blocked (can't check authorization)."""
