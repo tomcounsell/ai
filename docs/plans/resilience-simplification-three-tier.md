@@ -56,13 +56,16 @@ confirmed facts — so future fixes land as structure, not scar tissue.
       `session_stall_classifier._has_demonstrable_progress`,
       `crash_signature._has_demonstrable_progress`) call these. Presence-vs-freshness becomes
       an explicit parameter, not a forked function. **Scope addition from open-issue review:**
-      evidence must be *attempt-scoped* — open #1979 shows a sticky `response_delivered_at`
-      from a prior attempt force-finalizing a resumed session mid-run. Introduce an
-      `attempt_id` (or generation counter bumped on resume/requeue) and have every "did X
-      happen" guard compare against the current attempt, instead of ad-hoc field clearing on
-      each resume path. Fix the 3 pre-existing `test_session_heartbeat_progress.py` failures
-      (open #1983) as part of this item — they pin the exact predicates being unified.
-      *Prevents: #1962, #1917, #1979.*
+      evidence must be *attempt-scoped* — #1979 showed a sticky `response_delivered_at`
+      from a prior attempt force-finalizing a resumed session mid-run. **#1979's targeted
+      fix is in flight (being built as of 2026-07-10) — it lands first and owns the
+      delivery-guard change.** T1.2 then generalizes: an `attempt_id` (or generation counter
+      bumped on resume/requeue) that every "did X happen during this run" guard compares
+      against, replacing per-field clearing conventions so the *class* can't recur on the
+      next sticky field. Do not touch the delivery guard until #1979's PR merges; absorb its
+      regression test unchanged. Fix the 3 pre-existing `test_session_heartbeat_progress.py`
+      failures (open #1983) as part of this item — they pin the exact predicates being
+      unified. *Prevents: #1962, #1917, the #1979 class.*
 - [ ] **T1.3 `ArtifactEnvelope`** in `scripts/_baseline_common.py`: writers stamp
       `{generated_at, commit, generated_by, runs, degraded, max_age_days,
       max_commit_distance}`; one shared `staleness(envelope)` used by both
@@ -218,6 +221,14 @@ already folded in above (#1979/#1983 → T1.2; #1987 → T1.7; #1760/#1871/#1267
 #1815/#1868/#1312 → T3.3; #1629 → T3.4), three program-level relationships need explicit
 sequencing, plus one candidate scope extension.
 
+**Supersession rule (owner direction, 2026-07-10):** we know substantially more now than
+when most of these issues were filed — line references are dead post-teardown, suspected
+mechanisms have been confirmed or refuted, and several "solution sketches" predate the
+patterns this plan names. When an item here absorbs an open issue, the *plan's* framing
+wins: the implementing issue/plan restates current understanding and links the old issue as
+history, rather than inheriting its body as spec. Close absorbed issues with a pointer here
+instead of leaving them open as drifting duplicates.
+
 ### Sibling programs — coordinate, don't duplicate
 
 - **#1926 (post-teardown scar-tissue removal)** is this plan's philosophical sibling with an
@@ -276,6 +287,41 @@ checkpoint resume — complementary to attempt-scoping in T1.2; resume handles a
 resume, attempt_id is *which run* signals belong to), #1630 (prompt-injection inspection),
 #1541 (per-project fan-out — will lean on T2.1's run identity if built after it), #1338,
 #1336, #1031.
+
+## Packaging into SDLC Issues
+
+Can Tiers 1 and 2 ship as one SDLC issue? Mechanically yes — the pipeline doesn't cap
+scope — but a full T1+T2 mega-issue recreates hazards this very review documented, and
+T2.3/T2.4 are excluded regardless (they ride #1927/#1925 to avoid racing migrations on
+`AgentSession` and refactoring a harness path #1925 deletes).
+
+**Recommended: two issues, split by file-overlap boundary rather than by tier.** The tier
+grouping is an effort/risk taxonomy; the shipping boundary should be "which items touch the
+same files":
+
+- **Issue A — pipeline substrate: ownership + single merge enforcement.**
+  T1.7 (+#1987, live-blocked — makes this the urgent one), T2.1 (run_id), T2.2 (merge-gate
+  enforcement). One coherent story ("pipeline state gets one owner and one gate"), one
+  surface (`tools/sdlc_*`, `models/session_lifecycle.py`, `agent/sdlc_router.py`, sdlc/merge
+  skill bodies, merge-guard hook). Combining these avoids three sequential rebases over the
+  same files. ~1 week.
+- **Issue B — signals, gates, and loud-failure hygiene sweep.**
+  T1.1, T1.2 (after #1979 merges), T1.3, T1.4, T1.5, T1.6, T1.8, plus the four live defects
+  above. Heterogeneous files but zero overlap with Issue A, so the two pipelines can run
+  concurrently without lane conflicts. Items are individually small and additive; one serial
+  builder in one worktree. ~1 week.
+
+**Why not one combined T1+T2 issue:** a ~2-week single PR concentrates review and makes the
+full-suite merge gate all-or-nothing over 12 subsystem changes (one flake blocks
+everything, regressions are hard to bisect). And the alternative failure mode is equally
+documented: the 2026-07-05 six-issue parallel batch needed manual recovery on 4 of 6
+pipelines (#1915), so "twelve tiny issues" is *worse*, not better. Two medium issues with
+disjoint file sets is the optimum between those two observed failure modes. If forced to
+one issue, run builders strictly serially in one worktree and expect the review/gate stage
+to be the bottleneck.
+
+Per the supersession rule, each issue is written fresh from this plan (current knowledge),
+lists which open issues it absorbs (#1987 into A; #1983 into B), and closes them on merge.
 
 ## Success Criteria
 
