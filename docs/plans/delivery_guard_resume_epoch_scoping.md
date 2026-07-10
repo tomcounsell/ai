@@ -335,23 +335,23 @@ this code path directly; it runs autonomously inside the worker's health loop.
 
 ## Success Criteria
 
-- [ ] A session resumed after a prior delivery is **not** force-finalized as
+- [x] A session resumed after a prior delivery is **not** force-finalized as
   `completed` by either Delivery guard based on the prior delivery's timestamp
   (regression test: deliver → terminal → resume → pickup stamps fresh `started_at`
   → run health check with a fresh heartbeat while `running` → assert NOT finalized).
-- [ ] The original guard purpose still works: a session that delivered **this run**
+- [x] The original guard purpose still works: a session that delivered **this run**
   (`response_delivered_at >= started_at`) but is stuck `running` is still finalized
   `completed` (regression test asserts finalize fires).
-- [ ] Both guard sites (`_apply_recovery_transition` line ~2222 and
+- [x] Both guard sites (`_apply_recovery_transition` line ~2222 and
   `_agent_session_health_check` line ~3228) use the shared epoch predicate —
   grep confirms both reference `_delivery_belongs_to_current_run`.
-- [ ] Legacy-None edge (`started_at` and `created_at` both None) preserves the
+- [x] Legacy-None edge (`started_at` and `created_at` both None) preserves the
   original always-fire behavior (unit test).
-- [ ] #1614 sticky-field audit completed: a note in the PR description (or a filed
+- [x] #1614 sticky-field audit completed: a note in the PR description (or a filed
   issue) records which other `session_health.py` fields were checked and their
   run-scoping status.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
