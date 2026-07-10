@@ -10,6 +10,8 @@ last_comment_id:
 
 # Concurrent Full-Suite pytest Coordination
 
+> **Reconciliation note (as shipped).** The lock module described below as `scripts/full_suite_lock.py` (with `recommended_workers()` and `tests/unit/test_full_suite_lock.py`) shipped ahead of this plan as **`scripts/suite_lock.py`** via PR #1981. PR #1984 delivered the residual companion slice only: the `refresh_test_baseline.py` lock integration and the randomized-sentinel test isolation. References to `full_suite_lock.py`, `recommended_workers()`, and `test_full_suite_lock.py` in the sections below describe the original design and are superseded by that as-shipped surface. This document is retained as the historical plan record.
+
 ## Problem
 
 On a 10-core machine, 3+ full-suite pytest invocations (manual + `/do-test` + `refresh_test_baseline.py`) can overlap, each spawning ~10 xdist workers. No entry point checks whether another full-suite run is in progress. System load average reached 79-82 (8x oversubscribed). One `refresh_test_baseline.py` run accumulated only 15 seconds of CPU across 90 minutes of wall-clock before being killed.
