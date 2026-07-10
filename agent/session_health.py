@@ -2234,8 +2234,13 @@ async def _apply_recovery_transition(
         pass
 
     # Guard: if response was already delivered, finalize instead of recovering
-    # to pending (prevents duplicate delivery, #918).
-    if getattr(entry, "response_delivered_at", None) is not None:
+    # to pending (prevents duplicate delivery, #918). Field-presence alone is
+    # not sufficient: a stale response_delivered_at from a prior run (before a
+    # resume) must not suppress recovery of the current run, so this checks
+    # that the delivery belongs to the current run's epoch
+    # (response_delivered_at >= started_at, falling back to created_at; a
+    # legacy row with no anchor still passes through, unguarded).
+    if _delivery_belongs_to_current_run(entry):
         try:
             from models.session_lifecycle import (
                 StatusConflictError,
@@ -3240,8 +3245,13 @@ async def _agent_session_health_check() -> None:
         # recovery path while the heartbeat is fresh (gated on
         # NO_OUTPUT_BUDGET_SECONDS since #1614 — no longer permanent), so
         # sessions that delivered but failed to finalize would otherwise stay
-        # stuck as "running" until the heartbeat goes stale.
-        if getattr(entry, "response_delivered_at", None) is not None:
+        # stuck as "running" until the heartbeat goes stale. Field-presence
+        # alone is not sufficient here either: the delivery must belong to
+        # the current run's epoch (response_delivered_at >= started_at,
+        # falling back to created_at) so a stale prior-run delivery doesn't
+        # suppress recovery of a genuinely stuck current run; legacy rows
+        # with no anchor still pass through unguarded.
+        if _delivery_belongs_to_current_run(entry):
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 
