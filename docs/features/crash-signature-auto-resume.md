@@ -109,12 +109,12 @@ Sessions that could never recover are detected before any resume attempt:
 
 ### Progress-fields ground truth
 
-A `turn_start` telemetry event is the primary signal that a session started a turn, but that write can lag or be lost when the subprocess is killed mid-turn. So the extractor consults the AgentSession's own progress fields as ground truth before stamping the deterministic never-started key. `_has_demonstrable_progress(session)` (ported from #1724's stall-classifier probe) returns `True` when either holds:
+A `turn_start` telemetry event is the primary signal that a session started a turn, but that write can lag or be lost when the subprocess is killed mid-turn. So the extractor consults the AgentSession's own progress fields as ground truth before stamping the deterministic never-started key. `_has_demonstrable_progress(session)` delegates to the consolidated leaf `agent.session_runner.liveness.has_demonstrable_activity(session, freshness_window=None)` (issue #2004 Task 2 — this was previously a hand-ported copy of the stall-classifier's own probe; the two callers now share one implementation). It returns `True` when either holds:
 
-- `turn_count > 0` (the session completed at least one turn), or
-- `last_tool_use_at is not None` (a tool fired at some point).
+- `turn_count > 0` (the session completed at least one turn — a numeric-string `turn_count` is coerced defensively, `int(turn_count) > 0`), or
+- `last_tool_use_at is not None` (a tool fired at some point — presence-only, since this caller passes `freshness_window=None`).
 
-When the trace lacks `turn_start` but the session's fields prove progress, classification falls through to the normal resumable-signature path instead of `NON_RESUMABLE_DETERMINISTIC[no_turn_start]`. This covers the mid-first-turn wedge (`turn_count == 0` with a recorded `last_tool_use_at`). Presence alone counts as progress: no wall-clock freshness window is applied, because the extractor runs over already-terminal sessions inside the lookback reflection where "now" is minutes-to-hours after death. The probe is fail-soft (any field-access error counts as no-progress) and reads the fields via `getattr` without importing the stall or kill machinery, keeping the extractor dependency-light. A session with no `turn_start` and no progress fields keeps the deterministic never-started classification.
+When the trace lacks `turn_start` but the session's fields prove progress, classification falls through to the normal resumable-signature path instead of `NON_RESUMABLE_DETERMINISTIC[no_turn_start]`. This covers the mid-first-turn wedge (`turn_count == 0` with a recorded `last_tool_use_at`). Presence alone counts as progress: no wall-clock freshness window is applied here, because the extractor runs over already-terminal sessions inside the lookback reflection where "now" is minutes-to-hours after death — unlike the [Stall Advisory Classifier](stall-advisory-classifier.md)'s live caller, which passes its own `IDLE_SUSPECT_SECS` as the freshness window. The leaf is fail-soft (any field-access error counts as no-progress), reads ONLY `{turn_count, last_tool_use_at}` via `getattr`/dict access, and deliberately does NOT treat `log_path`, `claude_session_uuid`, `last_stdout_at`, or `last_turn_at` as presence signals here — an init-only/log-only session must still read no-progress (`session_health.py`'s wider `derive_sdk_ever_output` leaf owns the started-vs-never-started axis instead). `agent/session_runner/liveness.py` stays stdlib-only so this extractor can import it without pulling in the stall or kill machinery. A session with no `turn_start` and no progress fields keeps the deterministic never-started classification.
 
 `NON_RESUMABLE_DETERMINISTIC` sessions are escalated (a warning is logged with `[ESCALATE]` prefix) and the `escalated` flag on the library record is set to `True`. They are never proposed for resume.
 
@@ -301,6 +301,7 @@ valor-session crash-policy list --json
 | File | Role |
 |---|---|
 | `agent/crash_signature.py` | Normalization and extraction logic |
+| `agent/session_runner/liveness.py` | `has_demonstrable_activity()` — the shared progress-fields leaf consulted by `_has_demonstrable_progress` (also used by the stall classifier) |
 | `models/crash_signature.py` | Popoto model and outcome tally management |
 | `reflections/crash_recovery.py` | Periodic reflection: scan, extract, propose, auto-resume; deterministic floor and machine-ownership gate |
 | `scripts/update/reflection_register.py` | Idempotent update step that registers the reflection in the vault registry |

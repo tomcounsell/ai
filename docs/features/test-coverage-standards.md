@@ -27,7 +27,28 @@ Replaced 7 `except Exception: pass` blocks in critical session queue functions w
 - `_save_cooldowns` -- file write
 - `check_revival` -- branch existence check
 
-**Test approach:** `tests/test_silent_failures.py` uses `caplog` to assert warnings are emitted when exceptions occur. Assertions check log level and presence of key identifiers -- not exact message text -- to avoid brittle tests.
+**Test approach:** `tests/integration/test_silent_failures.py` uses `caplog` to assert warnings are emitted when exceptions occur. Assertions check log level and presence of key identifiers -- not exact message text -- to avoid brittle tests.
+
+**Superseded by ruff S110/S112 (issue #2004).** The guard test above only
+ever covered these 7 hand-picked functions via a source-text scan
+(`TestNoSilentPassRemaining::test_no_bare_pass_in_critical_functions` —
+`inspect.getsource()` plus a line-by-line `pass`/`except Exception` string
+match, not an AST analysis). Repo-wide, ~87 additional `except Exception:
+pass`/`except Exception: continue` sites existed uncovered outside those 7
+functions. Issue #2004 replaced the whole approach: ruff's `S110`
+(try-except-pass) and `S112` (try-except-continue) rules are now enabled
+(`pyproject.toml`, scoped to `agent/ bridge/ tools/ worker/ monitoring/` plus
+the four `scripts/` files this sweep touches) and enforced by `python -m
+ruff check .` on every commit — a real AST-level check, not a string scan,
+and one that covers every function in scope rather than 7 named ones. The
+131 sites found in-scope were triaged: 39 fixed with `logger.warning`
+(matching this section's original pattern), 92 allowlisted with a per-line
+`# noqa: S110`/`# noqa: S112` plus a mandatory reason comment (e.g. memory
+ops that are silent by documented design, best-effort cleanup/teardown, or
+optional telemetry counters). `TestNoSilentPassRemaining` was deleted; the
+behavioral `caplog`-based test classes above (`TestPushJobLogging`,
+`TestPopJobLogging`, etc.) were kept unchanged — they test actual logging
+behavior, not source text, so the lint rule doesn't make them redundant.
 
 ### Gap 2: Empty Output Anomaly Detection (agent/agent_session_queue.py)
 
@@ -84,13 +105,13 @@ Added a **Quality Checks (Post-Test)** section to the test skill (`.claude/skill
 Run the full test suite to verify all coverage standards are met:
 
 ```bash
-python -m pytest tests/test_silent_failures.py tests/test_build_validation.py tests/test_auto_continue.py tests/test_enqueue_continuation.py tests/unit/test_message_drafter.py -v
+python -m pytest tests/integration/test_silent_failures.py tests/test_build_validation.py tests/test_auto_continue.py tests/test_enqueue_continuation.py tests/unit/test_message_drafter.py -v
 ```
 
-Verify no bare exception handlers remain in critical paths:
+Verify no silent `except: pass`/`except: continue` remain in the linted scope (issue #2004 — this replaces the old `grep`-based heuristic that used to live here):
 
 ```bash
-grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logger\|log\.\|warning\|error\|raise\|# .*tested" | head -20
+python -m ruff check --select S110,S112 agent/ bridge/ tools/ worker/ monitoring/
 ```
 
 ## Files Changed
@@ -98,7 +119,7 @@ grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logge
 | File | Change |
 |------|--------|
 | `agent/agent_session_queue.py` | Replace 7 silent exception handlers with logger.warning; extract `should_guard_empty_output()` and `classify_routing_decision()` |
-| `tests/test_silent_failures.py` | New: 8 test classes for Gap 1 exception logging |
+| `tests/integration/test_silent_failures.py` | New: 8 test classes for Gap 1 exception logging (the source-scan meta-test, `TestNoSilentPassRemaining`, was later deleted and superseded by ruff S110/S112 — issue #2004) |
 | `tests/test_auto_continue.py` | Add `TestClassifyRoutingDecision` (10 tests) and `TestEmptyOutputAnomalyDetection` (6 tests calling production `should_guard_empty_output`) |
 | `tests/test_enqueue_continuation.py` | Add `TestEmptyOutputLoopTermination` (3 tests) |
 | `tests/unit/test_message_drafter.py` | Add `TestErrorStateRendering` (7 tests) |

@@ -46,10 +46,19 @@ from tools.code_impact_finder import find_affected_code, index_code
 index_code()
 
 # Find affected code
-results = find_affected_code("change session ID derivation")
+results, meta = find_affected_code("change session ID derivation")
+if meta.degraded:
+    print(f"finder degraded: {meta.reason}")
 for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type} | {r.reason}")
 ```
+
+`find_affected_code` returns `(results, meta)`, not a bare list — the same
+`ImpactFinderMeta` degraded-result contract as `find_affected_docs`; see
+[Semantic Doc Impact Finder → Degraded-Result Contract](semantic-doc-impact-finder.md#degraded-result-contract-impactfindermeta-issue-2004)
+for the full field reference and reason values (issue #2004 T1.4). The CLI
+(below) already prints a `WARNING: impact finder degraded (...)` line when
+`meta.degraded` is true.
 
 ### Output Model
 
@@ -86,7 +95,7 @@ Results map to plan sections:
 - Model mismatch (provider change) → full rebuild
 - Content hashing → only changed files re-embedded
 - Cost warning at >1000 chunks (informational, non-blocking)
-- Rerank endpoint down → embedding-only fallback. Because `find_affected_code` shares `tools/impact_finder_core.py` with the doc finder, it inherits the same all-or-nothing fallback: when *every* Stage 2 Haiku rerank request fails with a transport/API error (e.g. a misconfigured `ANTHROPIC_BASE_URL`), the finder returns embedding-only candidates instead of `[]` and logs a warning naming the likely cause. See [Semantic Doc Impact Finder → Graceful Degradation](semantic-doc-impact-finder.md#graceful-degradation) for the full behavior. (issue #1950)
+- Rerank endpoint down → embedding-only fallback. Because `find_affected_code` shares `tools/impact_finder_core.py` with the doc finder, it inherits the same all-or-nothing fallback: when *every* Stage 2 Haiku rerank request fails with a transport/API error (e.g. a misconfigured `ANTHROPIC_BASE_URL`), the finder returns embedding-only candidates (`meta.reason="rerank_all_failed"`) instead of a bare `[]`, and logs a warning naming the likely cause. Every fallback/failure branch is visible on `meta.degraded`/`meta.reason` rather than only in log output. See [Semantic Doc Impact Finder → Graceful Degradation](semantic-doc-impact-finder.md#graceful-degradation) for the full behavior. (issue #1950, tuple contract added #2004)
 
 ## Index Storage
 

@@ -65,6 +65,7 @@ Developer on main                         /do-merge on PR branch
   "generated_by": "python scripts/refresh_test_baseline.py --runs 3",
   "runs": 3,
   "commit": "bc23403c",
+  "degraded": false,
   "tests": {
     "tests/unit/test_intake_classifier.py::TestRealHaikuClassification::test_foo": {
       "category": "flaky",
@@ -90,8 +91,36 @@ Developer on main                         /do-merge on PR branch
 | `generated_by` | human debugging of drift |
 | `runs` | classifier's `fail_rate` denominator |
 | `commit` | reader confirmation; `-dirty` suffix marks an irreproducible baseline (always warns) |
+| `degraded` | `true` when the artifact was written from fewer than 2 usable runs; read by the gate's `--strict-freshness` mode |
 | `bootstrap` *(optional)* | `true` when the file came from `/do-merge`'s fallback path; always warns |
 | `tests` | map of node ID to per-test record |
+
+### `ArtifactEnvelope` (issue #2004)
+
+`generated_at`, `commit`, `generated_by`, `runs`, and `degraded` are rendered
+by one `ArtifactEnvelope` dataclass (`scripts/_baseline_common.py`), shared by
+`refresh_test_baseline.py` (writer), `baseline_gate.py` (reader), and the
+weekly staleness reflection. The envelope carries **provenance and state
+only** — never threshold fields. Thresholds (`STALENESS_THRESHOLD`,
+`STALE_COMMIT_DISTANCE`, `IMPORT_ERROR_MAX_AGE`,
+`IMPORT_ERROR_MAX_COMMIT_DISTANCE`) live as module constants in
+`baseline_gate.py`, so a stale artifact can never carry its own old
+thresholds forward; `ArtifactEnvelope.is_legacy` is `True` when
+`generated_at`/`runs` are absent (a pre-#2004 artifact), and every reader
+treats that as "no freshness signal" rather than crashing.
+
+Before #2004, a degraded write (fewer than `MIN_USABLE_RUNS_FOR_FLAKY_DETECTION`
+usable runs) only reached the refresh script's own exit code and stderr
+warning — the **persisted artifact** the gate reads later carried no trace of
+it, so a gate run days afterward had no way to tell. `degraded` closes that
+gap: `refresh_test_baseline.py` stamps it directly on the artifact, and
+`baseline_gate.py --strict-freshness` reads it back (see below).
+
+`generated_by` also gets a provenance fix: it now records the **full**
+invocation argv including the script name (e.g. `"python
+scripts/refresh_test_baseline.py --runs 3 --merge"`), replacing the old
+`sys.argv[1:]` join that silently dropped the script name and produced
+misleading strings like `"python --merge"`.
 
 ### Per-test record
 
@@ -251,7 +280,78 @@ On each merge attempt the script emits a JSON verdict to stdout:
 }
 ```
 
-Exit code is `0` when `new_blocking_regressions` is empty and `1` otherwise.
+Exit code is `0` when `new_blocking_regressions` is empty and `1` otherwise
+(`3` under `--strict-freshness` refusal — see below).
+
+### Strict freshness (`--strict-freshness`, issue #2004)
+
+The soft-warn staleness path (below) can print "stale" and still emit a
+possibly-false verdict — the gate has no way to *refuse* to gate at all.
+`baseline_gate.py --strict-freshness --pr-number N` closes that gap: instead
+of producing a verdict, the gate computes
+
+```
+envelope.degraded or envelope.runs < STRICT_MIN_RUNS(2) or staleness(envelope)
+```
+
+and, if any of those hold, refuses outright — printing the exact regen
+command (`python scripts/refresh_test_baseline.py --runs 3`) and exiting
+`EXIT_STRICT_REFUSAL` (`3`), a code distinct from both the clean (`0`) and
+regression (`1`) verdicts so a refusal can never be mistaken for either. A
+pre-#2004 artifact (no envelope fields) logs a legacy-mode warning and fails
+closed — missing `runs` counts as `0`.
+
+**Break-glass:** refusal is skipped when `data/merge_authorized_{pr_number}`
+exists (the same sentinel `/do-merge`'s existing merge-authorization path
+uses), so an operator can always authorize past a false refusal.
+
+**Off by default; not yet wired into `/do-merge`.** The flag is OFF by
+default in the gate script itself. `data/main_test_baseline.json` is
+gitignored and per-machine (see Data ownership below), so a machine that
+hasn't regenerated a fresh (`runs >= 2`) artifact would refuse on day one.
+The `/do-merge` addendum that passes `--strict-freshness --pr-number {N}` is
+deliberately sequenced to land only in a follow-up commit, after the update
+path (`scripts/update/run.py`) gives every machine a chance to regenerate —
+see `docs/plans/resilience-hygiene-sweep.md` for the fleet-rollout plan. Call
+`python -m scripts.baseline_gate --strict-freshness --pr-number N ...`
+directly to exercise it ahead of that wiring.
+
+### Flaky-entry decay
+
+`flaky`-category entries used to ride in the baseline forever — a test that
+flaked three years ago and hasn't been re-observed since would still suppress
+a PR failure today. `scripts._baseline_common.expire_stale_flaky_entries()`
+drops every `flaky` entry once the artifact's own envelope fails the shared
+`staleness()` check (age, `-dirty` commit, or commit-distance): a flaky
+allowance is only as good as the runs that observed it, so once the artifact
+itself is stale, the entries it recorded stop being trusted. The gate calls
+this before comparing PR failures and reports `expired_flaky_entries` in its
+JSON verdict plus a stderr `WARNING`. Legacy artifacts (no envelope) keep
+their entries unchanged — there's no freshness signal to expire against.
+
+### Import-error fast-expiry (issue #2004 Task 4)
+
+An `import_error` entry is a whole-module outage, not an isolated flake — it
+either gets fixed within days or it silently masks every regression in that
+module for as long as it rides in the baseline (the incident this closes:
+#1933's `_build_draft_prompt` entry survived for months; a rename can break
+18 tests at once with no designated loud failure, #1958). `import_error`
+entries get a much tighter window than the general staleness rule:
+`scripts._baseline_common.expire_stale_import_error_entries()` drops every
+`import_error` entry once the envelope is past `IMPORT_ERROR_MAX_AGE` (3
+days) OR `IMPORT_ERROR_MAX_COMMIT_DISTANCE` (30 commits) behind HEAD —
+either bound alone is enough, unlike the general staleness check which
+inspects all three triggers independently. The gate reports
+`expired_import_error_entries` in its JSON verdict plus a stderr `WARNING`.
+Past the window, the gate can never classify a failure as pre-existing via
+an expired `import_error` allowance. Legacy artifacts (no envelope) keep
+existing behavior.
+
+An accompanying `tests/unit/test_public_api_contract.py` module snapshots
+`inspect.signature()` of the public API surface tests depend on (e.g.
+`AgentSession.create_eng`) so a real rename fails one designated,
+named-message test instead of cascading into 18 unrelated failures the gate
+would otherwise have to triage through `import_error`.
 
 ### Staleness warning
 
@@ -288,13 +388,15 @@ change how staleness is enforced:
   but a scheduled regeneration would still
   hold the lock for 3+ minutes and block developer-initiated runs (or wait
   behind one), so the rejection stands for now.
-- **New: a cheap age-only detector reflection.** `reflections/housekeeping/test_baseline_refresh_check.py`
-  reads `data/main_test_baseline.json`'s `generated_at` and compares it
-  against `STALENESS_THRESHOLD` (imported from `scripts/baseline_gate.py` —
-  single source of truth). It runs **no tests** — only reads a small JSON
-  file — so it carries none of the full-suite hazard. It turns silent
-  60-day drift into a visible weekly nudge; the operator then runs the
-  (now #1853-corrected) `refresh_test_baseline.py` manually once the
+- **New: a cheap detector reflection sharing the gate's staleness rules.**
+  `reflections/housekeeping/test_baseline_refresh_check.py` reads
+  `data/main_test_baseline.json`'s envelope and evaluates it against
+  `scripts._baseline_common.staleness()` — the ONE shared staleness
+  definition used by both this reflection and the merge gate (age, `-dirty`
+  commit, and commit-distance; not age-only). It runs **no tests** — only
+  reads a small JSON file — so it carries none of the full-suite hazard. It
+  turns silent 60-day drift into a visible weekly nudge; the operator then
+  runs the (now #1853-corrected) `refresh_test_baseline.py` manually once the
   machine is quiescent.
 - **`_baseline_post_merge_update.py` intentionally does not refresh
   `generated_at`.** Its decay logic ages out stale `real` entries after
@@ -306,27 +408,37 @@ change how staleness is enforced:
 
 #### Deploying the detector reflection
 
-The reflection module ships in this repo, but only runs once registered in
-the per-machine, gitignored, iCloud-synced `~/Desktop/Valor/reflections.yaml`
-(see `docs/features/reflections.md` for the registry format). Add an entry
-like:
+The reflection is registered automatically by the update path (issue #2004):
+`scripts/update/run.py` Step 1.656 calls
+`scripts.update.reflection_register.register_test_baseline_refresh()`, which
+appends a `test-baseline-refresh` entry to the per-machine, gitignored,
+iCloud-synced `~/Desktop/Valor/reflections.yaml` the first time `/update`
+runs after this landed — no manual YAML edit required. The appended entry:
 
 ```yaml
-- name: test-baseline-refresh-check
-  description: "Warn when data/main_test_baseline.json is older than the merge-gate's staleness threshold"
-  every: 604800s   # weekly
+- name: test-baseline-refresh
+  description: "Warn when data/main_test_baseline.json fails the shared staleness definition (#1933/#2004)"
+  every: 7d
   priority: low
   execution_type: function
   callable: "reflections.housekeeping.test_baseline_refresh_check.run"
   enabled: true
-  output_sink: log_only
 ```
 
-No `scripts/update/run.py` change is required — the YAML scheduler picks up
-the callable via `importlib` once the entry exists. Since the reflection
-scheduler subprocess (`python -m reflections`, `com.valor.reflection-worker`)
-is itself only installed on worker/bridge machines, no separate role gate is
-needed on the entry.
+Registration is guarded the same way as `crash-recovery` (`register_reflection`
+in `scripts/update/reflection_register.py`, a generalization of the
+single-reflection helper that previously only handled `crash-recovery`): it
+no-ops if the vault `reflections.yaml` doesn't exist yet (fresh machine — no
+target to append into) or if this machine doesn't own the `valor` project per
+`config/projects.json`. The write is append-only, idempotent, and validated
+by re-parsing the YAML before replacing the file. This closes the same
+"reflection built, registration never landed" gap #1539 left for
+`crash-recovery` (issue #1917) — `test_baseline_refresh_check.py` shipped with
+#1933 but was never wired into the vault registry until now.
+
+Since the reflection scheduler subprocess (`python -m reflections`,
+`com.valor.reflection-worker`) is itself only installed on worker/bridge
+machines, no separate role gate is needed on the entry itself.
 
 ### Bootstrap path
 
@@ -425,16 +537,39 @@ the 5% noise threshold.
   staleness warnings for all three triggers.
 - `tests/unit/reflections/test_test_baseline_refresh_check.py` — the
   staleness-detector reflection: stale → `warning`, fresh → `ok`, and
-  missing/malformed/directory-shaped baseline → benign `ok` (never raises).
+  missing/malformed/directory-shaped baseline → benign `ok` (never raises),
+  now against the shared `staleness()` (all three triggers, not age-only).
+- `tests/unit/test_do_merge_baseline.py` also covers (issue #2004):
+  `ArtifactEnvelope` round-trip and `is_legacy` detection,
+  `--strict-freshness` refusal on degraded/low-run/stale envelopes and its
+  `EXIT_STRICT_REFUSAL` (3) exit code, the `data/merge_authorized_{N}`
+  break-glass skip, `expire_stale_flaky_entries`, and
+  `expire_stale_import_error_entries` (both the age and commit-distance
+  triggers, independently).
+- `tests/unit/test_refresh_test_baseline.py` also covers: `ArtifactEnvelope`
+  stamping (`degraded`, faithful `generated_by` provenance including the
+  script name).
+- `tests/unit/test_public_api_contract.py` — signature snapshot of the
+  public API surface tests depend on; a real rename fails this one
+  designated test with a named message instead of cascading into many
+  unrelated `import_error` failures.
+- `tests/unit/test_reflection_register.py` — `register_reflection()`
+  generalization (issue #2004 subtask 3a): guard conditions, idempotence,
+  and `register_crash_recovery`/`register_test_baseline_refresh` as thin
+  wrappers over it.
 
 ## See also
 
 - `scripts/refresh_test_baseline.py` — refresh tool
-- `scripts/baseline_gate.py` — merge-gate comparison logic
-- `scripts/_baseline_common.py` — shared junitxml parsing helpers
-- `reflections/housekeeping/test_baseline_refresh_check.py` — weekly age-only
-  staleness detector (issue #1933; requires a per-machine
-  `~/Desktop/Valor/reflections.yaml` entry to actually run)
+- `scripts/baseline_gate.py` — merge-gate comparison logic, `--strict-freshness`
+- `scripts/_baseline_common.py` — shared junitxml parsing helpers,
+  `ArtifactEnvelope`, `staleness()`, flaky/import-error expiry
+- `scripts/update/reflection_register.py` — generalized reflection
+  registration (`register_reflection`), used by both `crash-recovery` and
+  `test-baseline-refresh`
+- `reflections/housekeeping/test_baseline_refresh_check.py` — weekly
+  staleness detector (issue #1933; registered automatically via the update
+  path as of issue #2004, no manual `reflections.yaml` edit required)
 - `.claude/commands/do-merge.md` — orchestration
 - [Test Reliability Flaky Filter](test-reliability-flaky-filter.md) — PR #484,
   the PR-branch retry filter (different layer)

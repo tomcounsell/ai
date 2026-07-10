@@ -41,6 +41,36 @@ Without this distinction, a failure to deliver a reply could be masked by a thum
 
 This is deliberate. An error reaction lands on the user's own message. A semantic draw over an "error / something went wrong" feeling string can surface faces that read as hostile toward the person who sent that message (for example, a scream face lands closer to blame than to distress). Pinning `REACTION_ERROR` to 🤔 removes that lottery entirely: every error, in every environment, produces the same deterministic, non-hostile reaction. See [Emoji Embedding Reactions](emoji-embedding-reactions.md#terminal-reactions) for the resolution table covering all three terminal constants.
 
+### Import-Time Distinctness Assert (issue #1961 / #2004)
+
+The 🤔 duplicate (issue #1961) — `REACTION_ERROR`'s pin colliding with a
+semantic draw — was fixed at the incident site, but the invariant that no
+two reaction constants ever share a glyph stayed test-only, so the same
+defect class could recur elsewhere undetected. It did: enabling the assert
+below immediately found a *second*, live collision on this codebase — a
+semantic draw for `REACTION_SUCCESS` (feeling: "acknowledged received
+silently noted") resolved to 🫡, the pinned glyph `REACTION_ABORT` uses for
+the steering-abort acknowledgment.
+
+`bridge/response.py` now defines `_reaction_constants()` (a name → glyph map
+of all six reaction constants: `REACTION_RECEIVED`, `REACTION_PROCESSING`,
+`REACTION_ABORT`, and the three re-exported terminal constants) and
+`_assert_distinct()`, which raises `ImportError` naming both colliding
+constants and the shared glyph if any two share a value. `_assert_distinct()`
+runs unconditionally at **module import time** (a bare call at the bottom of
+`bridge/response.py`), not just in a test — a future collision fails the
+first import of the module, anywhere, rather than waiting to be caught by a
+test run or (worse) shipping silently like #1961 did. The same function is
+shared with `tests/integration/test_reply_delivery.py::TestReactionEmojiSelection`,
+so the distinctness rule has exactly one implementation.
+
+The live 🫡 collision this assert found was fixed at the definition site in
+`agent/constants.py`: `RESERVED_REACTION_GLYPHS` — see
+[Emoji Embedding Reactions § Reserved-glyph exclusion](emoji-embedding-reactions.md#terminal-reactions)
+for how the semantic resolver now excludes reserved and already-cached
+glyphs from every future draw, so the assert stays green going forward
+rather than only catching the one historical case.
+
 ### Invalid Reactions
 
 Telegram only accepts a specific subset of emoji as reactions. Common emoji that are explicitly banned in `INVALID_REACTIONS`:
@@ -115,7 +145,8 @@ Three paths to silent text loss have been identified and guarded:
 | `agent/agent_session_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
 | `agent/agent_session_queue.py` | Nudge loop: output routing decisions via `determine_delivery_action()` |
-| `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
+| `tests/integration/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
+| `tests/integration/test_reply_delivery.py::TestReactionEmojiSelection` | Shares `bridge.response._assert_distinct()` to pin the six-constant distinctness invariant |
 | `tests/unit/test_reaction_never_hostile.py` | Locks `REACTION_ERROR`'s pin to 🤔 and the exact `BLOCKED_REACTION_EMOJIS` hostile deny-list |
 
 ## See Also
