@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-10
 tracking: https://github.com/tomcounsell/ai/issues/1897
 last_comment_id: 4933699033
+revision_applied: true
 ---
 
 # Test-isolation flakes under xdist: cross-file ordering and worker-setup failures (umbrella)
@@ -79,7 +80,7 @@ Two code-read/prototype spikes ran at plan time (parallel Explore agents) and PR
 - **Method**: code-read
 - **Finding**: No budget-state leak — the verdict is pure over `session.tool_call_count` (Redis), and every threshold override uses auto-reverted `monkeypatch.setattr`; `_run_cli_hook` sets `MAX_TOOL_CALLS_PER_SESSION` in the subprocess env explicitly. The real leak is the Redis-**db binding**: `redis_test_db` re-points the canonical `rdb.POPOTO_REDIS_DB` unconditionally but re-points popoto's 31 by-value `POPOTO_REDIS_DB` captures (write path: `models/base.py:59`, `models/query.py:62`, `models/db_key.py:34`, `models/encoding.py:366`, `fields/indexed_field_mixin.py:51`) only via `_POPOTO_MODULE_CACHE`, which is memoized on `len(sys.modules)` and rebuilt only when that length CHANGES. `mock_claude_sdk_cleanup`'s `agent.*` eviction perturbs `len(sys.modules)` non-monotonically; a colliding length leaves the cache stale, so a write-path submodule keeps its db=0 binding. In-process write → db=0; `_run_cli_hook` derives the subprocess db from the canonical binding → db=1; subprocess finds nothing → exit 0.
 - **Confidence**: high
-- **Impact on plan**: The fix must make the popoto db re-point ordering-independent — invalidate `_POPOTO_MODULE_CACHE` on a signal that tracks popoto-module imports directly (count/frozenset of `popoto`-prefixed module names), not on total `len(sys.modules)`.
+- **Impact on plan**: The fix must make the popoto db re-point ordering-independent — invalidate `_POPOTO_MODULE_CACHE` on **object identity**, not on any count-based signal. A count or `frozenset`-of-names key still false-greens the actual corruption: `mock_claude_sdk_cleanup` can evict and a later import can **re-create** a popoto db-holding module object under the *same name* at the *same count*, so a name/count signal sees no change while the cached object is now stale (pointing at the pre-swap `POPOTO_REDIS_DB` binding). Keying on identity — rebuild when `any(sys.modules.get(name) is not mod for name, mod in cache.items())` — is the only signal that survives an equal-count, equal-name-set replacement. (Resolves Open Question 2: identity, neither count nor frozenset.)
 
 ## Data Flow
 
@@ -126,7 +127,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/xdist-test-isolation-f
 
 ### Key Elements
 
-- **Robust popoto db-cache invalidation (fixes #1)**: `_POPOTO_MODULE_CACHE` invalidation keyed on the set of `popoto`-prefixed module names, not `len(sys.modules)`.
+- **Robust popoto db-cache invalidation (fixes #1)**: `_POPOTO_MODULE_CACHE` invalidation keyed on **object identity** of the cached popoto db-holding modules, not `len(sys.modules)` and not a count/name-set signal (both false-green on an equal-count module replacement).
 - **agent-hooks consistency guard (fixes #2)**: a small autouse repair that detects the hooks-less-`agent`-parent state and evicts all `agent.*` so the next import self-heals.
 - **Deterministic regression tests**: one per instance, each reproducing the corrupt precondition directly (no reliance on a fragile multi-file ordering) and asserting hermeticity.
 
@@ -138,8 +139,8 @@ Poisoning ordering → (Fix 2) hooks-less `agent` parent is detected at setup an
 
 ### Technical Approach
 
-- **Fix 1 — `tests/conftest.py` `_popoto_modules_with_redis_db()` / cache key.** Replace the `len(sys.modules)`-based `_POPOTO_MODULE_CACHE_KEY` with a key that tracks popoto imports directly — e.g. the count (or a `frozenset`) of module names in `sys.modules` starting with `"popoto"`. This preserves the O(1)-amortized fast path (the expensive scan runs only when a new popoto submodule is imported) while making the db re-point ordering-independent. `redis_test_db`'s re-point loop (lines 244-246) then always covers every db-holding popoto submodule.
-- **Fix 2 — `tests/conftest.py` agent-consistency guard.** Add a minimal autouse guard (or fold into `mock_claude_sdk_cleanup`) that, at setup, detects `"agent" in sys.modules and "agent.hooks" in sys.modules and not hasattr(sys.modules["agent"], "hooks")` and repairs it by deleting every `agent.*` key from `sys.modules` (proven to self-heal on next import). This is root-cause-agnostic: it neutralizes the corruption regardless of whether an SDK swap, `importlib.reload`, or `patch.dict` created it, so it also covers `test_ui_reflections_data.py` and any other victim. Keep the existing `mock_claude_sdk_cleanup` eviction (it fixes a separate contamination); the guard is belt-and-suspenders for the partial-mutation vectors that eviction's `sdk_after != sdk_before` condition misses.
+- **Fix 1 — `tests/conftest.py` `_popoto_modules_with_redis_db()` / cache key. Key on OBJECT IDENTITY.** Replace the `len(sys.modules)`-based `_POPOTO_MODULE_CACHE_KEY` (an `int`) with an identity check over the cached modules. Store the cache as a `{name: module}` mapping and rebuild when **any cached entry's identity diverges from `sys.modules`** — `any(sys.modules.get(name) is not mod for name, mod in _POPOTO_MODULE_CACHE.items())` — which catches both eviction (`get()` returns `None`) and in-place replacement (a fresh module object under the same name). Also rebuild when a not-yet-cached `popoto` db-holder appears (a new lazy import), so completeness is preserved. This preserves the fast-path amortization (the identity comprehension over the small cached set — ~31 entries — runs per test, but the expensive full `sys.modules` scan runs only on genuine divergence) while making the db re-point ordering-independent. Crucially, identity is the *only* signal that survives the real corruption vector: an eviction-then-reimport that yields an equal `len(sys.modules)` **and** an equal set of `popoto` module names but a different, stale module object. `redis_test_db`'s re-point loop then always covers every currently-live db-holding popoto submodule. **Do NOT** substitute a count or `frozenset`-of-names key: both false-green the equal-count replacement and re-open the bug (see the RED/GREEN binding gate in Success Criteria).
+- **Fix 2 — `tests/conftest.py` agent-consistency guard (separate autouse fixture — see Resolved Decisions #1).** Add a minimal autouse guard, kept independent of `mock_claude_sdk_cleanup`, that at setup detects `"agent" in sys.modules and "agent.hooks" in sys.modules and not hasattr(sys.modules["agent"], "hooks")` and repairs it by deleting every `agent.*` key from `sys.modules` (proven to self-heal on next import). This is root-cause-agnostic: it neutralizes the corruption regardless of whether an SDK swap, `importlib.reload`, or `patch.dict` created it, so it also covers `test_ui_reflections_data.py` and any other victim. Keep the existing `mock_claude_sdk_cleanup` eviction (it fixes a separate contamination); the guard is belt-and-suspenders for the partial-mutation vectors that eviction's `sdk_after != sdk_before` condition misses.
 - **Prefer the guard over deleting the seeders' module-level imports** — removing the `from agent.hooks... import` lines would only move the seeding, not fix the corruption vector, and would churn six unrelated test files.
 - **Do not touch product code.** `agent/__init__.py`'s eager import chain and `agent/hooks/__init__.py`'s SDK import are correct in production (a full fresh import is always consistent); the defect is test-only sys.modules churn.
 
@@ -158,8 +159,8 @@ Poisoning ordering → (Fix 2) hooks-less `agent` parent is detected at setup an
 
 ## Test Impact
 
-- [ ] `tests/conftest.py::_popoto_modules_with_redis_db` / `redis_test_db` — UPDATE: change cache-invalidation key from `len(sys.modules)` to popoto-module-name signal. Existing behavior preserved for the common case; verified by existing suite staying green.
-- [ ] `tests/conftest.py::mock_claude_sdk_cleanup` — UPDATE (or adjacent new autouse fixture): add the agent-hooks consistency guard. Existing eviction behavior retained.
+- [ ] `tests/conftest.py::_popoto_modules_with_redis_db` / `redis_test_db` — UPDATE: change cache invalidation from the `len(sys.modules)` key to an object-identity check over the cached `{name: module}` mapping. Existing behavior preserved for the common case; verified by existing suite staying green.
+- [ ] `tests/conftest.py` — ADD a separate new autouse fixture for the agent-hooks consistency guard (kept independent of `mock_claude_sdk_cleanup`, whose existing eviction behavior is retained unchanged). Per Resolved Decisions #1.
 - [ ] `tests/integration/test_tool_budget_enforcement.py::test_cli_hook_denies_over_budget_exit_2` — no code change; must pass under the poisoning ordering after Fix 1 (this is the instance-#1 acceptance).
 - [ ] `tests/unit/test_teammate_write_restriction.py` (all classes via `fake_project`) — no code change; must pass under `--dist=loadfile` after Fix 2 (instance-#2 acceptance).
 - [ ] `tests/unit/test_ui_reflections_data.py` — no code change; covered by Fix 2.
@@ -175,9 +176,9 @@ Poisoning ordering → (Fix 2) hooks-less `agent` parent is detected at setup an
 
 ## Risks
 
-### Risk 1: Fix-1 cache key reintroduces the per-test O(n) scan
-**Impact:** Unit suite slows if the cache rebuilds every test.
-**Mitigation:** Key on the COUNT of `popoto`-prefixed module names (cheap: one pass building that count is unavoidable, but we can track it incrementally or accept a single filtered comprehension over `sys.modules` — still far cheaper than the current behavior's worst case, and popoto module count is stable after warmup). Benchmark unit-suite wall time before/after; require no material regression.
+### Risk 1: Fix-1 identity check reintroduces a per-test O(n) scan
+**Impact:** Unit suite slows if the cache rebuilds every test or the identity check walks all of `sys.modules` per test.
+**Mitigation:** The per-test identity check iterates only the **cached set** (~31 popoto db-holders), not all ~1500 `sys.modules` entries — `any(sys.modules.get(name) is not mod for name, mod in cache.items())` is a dict-get per cached entry, cheap and constant after warmup. The expensive full `sys.modules` comprehension runs only on genuine divergence (eviction/replacement/new import), which is rare. The one residual full-scan trigger — detecting a brand-new not-yet-cached popoto db-holder — is bounded and only fires on first import of each submodule. Benchmark unit-suite wall time before/after; require no material regression (captured as a Success Criterion).
 
 ### Risk 2: The agent-hooks guard masks a real product import bug
 **Impact:** A genuine `agent.hooks` import failure could be silently repaired in tests.
@@ -207,19 +208,27 @@ No agent integration required — no CLI entry point, no MCP surface, no bridge 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `tests/README.md` — add a "Test isolation under xdist" blind-spot/gotcha entry documenting: the two proven root causes, the `_POPOTO_MODULE_CACHE` invalidation contract (key on popoto-module signal, never `len(sys.modules)`), and the agent-hooks consistency guard. Point future flake investigations here.
+- [ ] Update `tests/README.md` — add a "Test isolation under xdist" blind-spot/gotcha entry documenting: the two proven root causes, the `_POPOTO_MODULE_CACHE` invalidation contract (key on **object identity** of the cached popoto modules; never `len(sys.modules)`, and never a count/name-set signal — both false-green an equal-count module replacement), and the agent-hooks consistency guard. Point future flake investigations here.
 - [ ] Update `docs/features/full-suite-pytest-lock.md` OR add a short `docs/features/test-isolation-hardening.md` cross-referencing #1967/#1981 (concurrency) vs this umbrella (single-run isolation), so the two are not conflated.
 
 ### Inline Documentation
-- [ ] Docstring on the corrected `_popoto_modules_with_redis_db` cache key explaining WHY `len(sys.modules)` is wrong (non-monotonic under `agent.*` eviction).
+- [ ] Docstring on the corrected `_popoto_modules_with_redis_db` cache key explaining WHY `len(sys.modules)` is wrong (non-monotonic under `agent.*` eviction) AND why a count/name-set key is also insufficient (equal-count module replacement), so the invalidation keys on object identity.
 - [ ] Docstring on the agent-hooks guard explaining the CPython cache-hit / hooks-less-parent mechanism and why full `agent.*` eviction self-heals.
 
 ## Success Criteria
 
-- [ ] `tests/integration/test_tool_budget_enforcement.py::test_cli_hook_denies_over_budget_exit_2` passes under the 2026-07-10 poisoning cross-file ordering (previously `1 failed, 21 passed`).
-- [ ] `tests/unit/test_teammate_write_restriction.py` and `tests/unit/test_ui_reflections_data.py` pass under `-n auto --dist=loadfile` across repeated runs (no `agent.hooks` AttributeError at setup).
+**Authoritative (falsifiable) gates:**
+- [ ] **Fix-1 binding gate is RED before / GREEN after.** `tests/unit/test_conftest_isolation_guards.py::Test B` forces the equal-count popoto-module replacement directly (seed a stale cache, swap a cached db-holder's object under the same name), asserts `redis_test_db` re-points the fresh object's `POPOTO_REDIS_DB` to the test client, and is verified to FAIL on the pre-fix `len`/count key and PASS on the identity key. (Not the naive fresh-import check — that false-greens the len key.)
+- [ ] **Fix-2 guard gate.** `tests/unit/test_conftest_isolation_guards.py::Test A` constructs the corrupt hooks-less-`agent` state directly, asserts the guard repairs it (dotted `monkeypatch.setattr("agent.hooks.*", ...)` resolves without AttributeError) and leaves a healthy `agent` untouched.
+- [ ] **Instance-#2 batch acceptance (the ~73-file gate).** The ~73-file batch flagged by PR #2006's gate — or, if the exact list is unrecoverable, the full `tests/unit/` suite as its superset — runs under `-n auto --dist=loadfile` across repeated seeds/worker counts with **zero** `agent.hooks` AttributeError at fixture setup. This is a hard check, not a framing claim.
 - [ ] New `tests/unit/test_conftest_isolation_guards.py` deterministically reproduces both corrupt preconditions and asserts the fixes repair them.
-- [ ] `_POPOTO_MODULE_CACHE` invalidation no longer references `len(sys.modules)` (grep confirms).
+- [ ] `_POPOTO_MODULE_CACHE` invalidation no longer references `len(sys.modules)` in any form (grep confirms; account for the aliased `import sys as _sys` — `_sys.modules` — used in `tests/conftest.py`): `grep -nE "len\((sys|_sys)\.modules\)" tests/conftest.py` returns no cache-key match.
+
+**Corroborating (best-effort, may pass vacuously):**
+- [ ] `tests/integration/test_tool_budget_enforcement.py::test_cli_hook_denies_over_budget_exit_2` passes under the 2026-07-10 poisoning cross-file ordering (previously `1 failed, 21 passed`). Best-effort only — the poisoning composition is collection-order/machine dependent and can pass vacuously; the authoritative signal is the Fix-1 binding gate above.
+- [ ] `tests/unit/test_teammate_write_restriction.py` and `tests/unit/test_ui_reflections_data.py` pass under `-n auto --dist=loadfile` across repeated runs (no `agent.hooks` AttributeError at setup). Corroborates the batch acceptance and Fix-2 guard gates.
+
+**General:**
 - [ ] Full unit suite wall-time shows no material regression vs baseline.
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -263,9 +272,9 @@ Tier 1 core agents (builder, validator, documentarian) suffice. For the import-m
 - **Assigned To**: conftest-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `tests/conftest.py`, change `_POPOTO_MODULE_CACHE_KEY` to track the count/frozenset of `popoto`-prefixed module names instead of `len(sys.modules)`.
+- In `tests/conftest.py`, replace the `len(sys.modules)`-based `_POPOTO_MODULE_CACHE_KEY` with an **object-identity** invalidation: store the cache as `{name: module}` and rebuild when `any(sys.modules.get(name) is not mod for name, mod in cache.items())`, plus when a not-yet-cached `popoto` db-holder appears. Do NOT use a count or frozenset-of-names key — both false-green an equal-count module replacement.
 - Preserve the fast-path skip when no popoto modules are imported.
-- Add docstring explaining why `len(sys.modules)` was wrong.
+- Add docstring explaining why `len(sys.modules)` is wrong (non-monotonic under `agent.*` eviction) and why count/name-set is also insufficient (equal-count replacement) — hence identity.
 
 ### 2. Add agent-hooks consistency guard (instance #2)
 - **Task ID**: build-agent-hooks-guard
@@ -287,7 +296,7 @@ Tier 1 core agents (builder, validator, documentarian) suffice. For the import-m
 - **Parallel**: false
 - Create `tests/unit/test_conftest_isolation_guards.py`.
 - Test A: construct the corrupt `agent`/`agent.hooks` state directly; assert the guard repairs it and a dotted `monkeypatch.setattr("agent.hooks.pre_tool_use.<attr>", ...)` resolves without AttributeError; assert healthy state untouched.
-- Test B: import a fresh popoto db-holding submodule mid-test; assert `redis_test_db` re-points its `POPOTO_REDIS_DB` to the test client (db != 0).
+- **Test B (falsifiable binding gate — MUST force the collision directly, not rely on a fresh import):** After popoto is imported and the cache is warm, seed the *stale* precondition the len-key produced in production: swap a cached popoto db-holding module object in `sys.modules` for a **fresh module object of the same name** carrying its own `POPOTO_REDIS_DB` — an equal-count, equal-name-set replacement — and (to model the len-memo) pre-seed `_POPOTO_MODULE_CACHE`/`_POPOTO_MODULE_CACHE_KEY` so a `len(sys.modules)` key would NOT trigger a rebuild. Then assert `_popoto_modules_with_redis_db()` returns the **new** object (identity rebuild) and that `redis_test_db` re-points that submodule's `POPOTO_REDIS_DB` to the test client (`db != 0`). This test is engineered to be **RED on the pre-fix len/count key** (stale cache → returns the old object → db not re-pointed) and **GREEN on the identity key**. Do NOT rely on the naive "import a fresh popoto submodule mid-test" check as the sole assertion: it changes `len(sys.modules)`, so the old len-key rebuilds too and the test false-greens without proving the fix.
 
 ### 4. Validate acceptance
 - **Task ID**: validate-isolation
@@ -295,8 +304,9 @@ Tier 1 core agents (builder, validator, documentarian) suffice. For the import-m
 - **Assigned To**: isolation-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run the instance-#1 poisoning ordering and confirm exit 2.
-- Run `test_teammate_write_restriction.py` + `test_ui_reflections_data.py` under `-n auto --dist=loadfile` repeatedly; confirm no AttributeError.
+- **Primary (authoritative) gate:** confirm the deterministic RED/GREEN regression tests in `tests/unit/test_conftest_isolation_guards.py` pass (Test A guard repair, Test B forced-collision binding). These are the falsifiable acceptance signals.
+- **Instance-#2 batch acceptance (promoted from framing to a hard check):** run the ~73-file batch that PR #2006's gate flagged — the actual `agent.hooks` AttributeError repro. Reconstruct it as `tests/unit/` under `-n auto --dist=loadfile` (the batch that surfaced the 73), repeated across several seeds/worker counts, and confirm **zero** `agent.hooks` AttributeError at fixture setup. If the exact 73-file list is not recoverable, run the full `tests/unit/` suite under `-n auto --dist=loadfile` as the superset and assert the same. This proves the "most of the 73" claim rather than asserting it.
+- **Best-effort (may pass vacuously):** re-run the exact 2026-07-10 poisoning orderings (budget test cross-file; teammate/reflections under loadfile) and confirm exit 2 / no AttributeError. Treat these as corroborating, NOT authoritative — the precise poisoning composition is collection-order/machine dependent and can pass vacuously on any given run, so they cannot be the sole gate.
 - Confirm unit-suite wall time has no material regression.
 - Report pass/fail.
 
@@ -331,14 +341,22 @@ Tier 1 core agents (builder, validator, documentarian) suffice. For the import-m
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+**Verdict:** READY TO BUILD WITH CONCERNS (concerns embedded below on this revision pass).
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| Major | correctness | Fix-1 cache invalidation keyed on popoto module names/count still false-greens an equal-count eviction-then-reimport (same name, new stale object). | Solution › Technical Approach (Fix 1); Task 1; spike-2 Impact | Key on **object identity**: rebuild when `any(sys.modules.get(name) is not mod for name, mod in cache.items())`, plus on a new not-yet-cached popoto db-holder. Not count, not frozenset. Resolves Open Question 2. |
+| Major | acceptance-falsifiability | Acceptance leaned on the "2026-07-10 poisoning ordering" re-run, which can pass vacuously; a `len()`/count key false-greens the naive fresh-import test. | Success Criteria (authoritative gates); Task 3 Test B; Task 4 | Binding gate forces the collision directly (seed stale cache + swap a cached db-holder object under the same name) and must be RED pre-fix / GREEN post-fix. Poisoning re-run downgraded to best-effort/corroborating. |
+| Medium | test-coverage | The ~73-file batch (Instance 2, `agent.hooks` AttributeError) was framing ("most of the 73"), not a proven check. | Success Criteria (batch acceptance); Task 4 validator | Promoted to a hard Success Criterion + validator step: run the ~73-file batch (or full `tests/unit/` superset) under `-n auto --dist=loadfile`, assert zero `agent.hooks` AttributeError. |
+| Nit (D) | scope-clarity | Open Question 2 (count vs frozenset) left open. | Resolved Decisions; spike-2 Impact | Resolved in-plan: object identity, neither count nor frozenset. |
+| Nit (E) | verification | Success-criterion grep for `len(sys.modules)` missed the aliased `import sys as _sys` (`_sys.modules`) form used in `tests/conftest.py`. | Success Criteria grep; Verification table | Grep updated to `grep -nE "len\((sys\|_sys)\.modules\)"`; Verification-table row already covered both forms. |
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Guard placement**: fold the agent-hooks consistency guard into `mock_claude_sdk_cleanup`, or add a separate small autouse fixture? (Recommendation: separate fixture — keeps the two concerns independent and the guard root-cause-agnostic.)
-2. **Fix-1 cache key shape**: count of popoto module names (cheapest) vs frozenset (detects renames/reimports at equal count)? A count collision is far less likely than a total-`len` collision, but a frozenset is strictly safer at marginal cost. Which do you prefer?
-3. **Umbrella scope**: is fixing the two proven instances (plus the regression harness) the right cut for this PR, leaving the umbrella issue open for future instances — or do you want a broader "isolation flake detector" (e.g. a CI mode that re-runs suspected phantoms in isolation) folded in here?
+All three open questions are resolved as of this critique-revision pass; none remain blocking for build.
+
+1. **Guard placement — RESOLVED: separate autouse fixture.** The agent-hooks consistency guard is a distinct, root-cause-agnostic concern from `mock_claude_sdk_cleanup`'s SDK-swap eviction; keeping it in its own small autouse fixture keeps the two independent and the guard applicable to non-SDK mutation vectors (`importlib.reload`, `patch.dict`).
+2. **Fix-1 cache key shape — RESOLVED: object identity (neither count nor frozenset).** Per critique finding A: a count key or a `frozenset`-of-names key both false-green the actual corruption vector — an eviction-then-reimport that yields an equal `len(sys.modules)`, an equal set of `popoto` module names, but a different, stale module object. Only identity survives it. Rebuild when `any(sys.modules.get(name) is not mod for name, mod in cache.items())` (plus on a new not-yet-cached popoto db-holder). This is the design used in Technical Approach Fix 1, Task 1, and asserted by the Test B binding gate.
+3. **Umbrella scope — RESOLVED: fix the two proven instances + deterministic regression harness only.** No broader "isolation flake detector" / CI re-run mode is folded in here (that would be a separate slug). The umbrella issue #1897 stays open as the durable home for future instances as they are observed and root-caused (see No-Gos).
