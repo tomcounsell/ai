@@ -105,9 +105,11 @@ No prerequisites — this work has no external dependencies. `SENTRY_DSN` need n
 ### Key Elements
 
 - **`_is_designated_bridge_machine()`** (new, `monitoring/sentry_config.py`): reads `projects.json` and the local ComputerName, returns `True` iff this machine owns ≥1 project (`projects.<key>.machine` == ComputerName, case-insensitive). Any failure (missing/unreadable file, `scutil` error) returns `False` — fail-to-development, which is the safe direction for this issue's goal.
+  - **BUILD REQUIREMENT (Critique Concern #1 — load-bearing):** After resolving `machine = get_machine_name().lower()`, add `if not machine: return False` **before** iterating projects. Otherwise, when `scutil` fails/returns empty (`machine == ""`) and any `projects.json` entry has a missing/empty `machine` field, the mirrored predicate `project.get("machine", "").lower() == machine` evaluates `"" == ""` → `True` and mis-tags `production` — the exact inverse of the intended fail-to-development guarantee. Also replicate `config_path.exists()` before `read_text()` and the case-insensitive compare exactly as `ui/data/machine.py::get_machine_project_keys` does (this is the fifth copy of that predicate; it must not diverge). The predicate is bit-for-bit the same one `bridge/config_validation.py::validate_projects_config` enforces (`proj_cfg.get("machine")`) — confirm during build (Nit #6).
 - **`_resolve_environment()`** (new): explicit `SENTRY_ENVIRONMENT` wins; else `"production"` for designated bridge machines; else `"development"`.
 - **`configure_sentry()`** (modified): replace the inline `os.getenv("SENTRY_ENVIRONMENT", "production")` with `_resolve_environment()`; update the module/function docstring so it no longer describes #1834's gating as "layered on later" (that legacy note is now false — remove it, per no-legacy-traces).
-- **`ui/app.py` VALOR-BX fix**: `claude_auth["subscription_type"]` → `claude_auth.get("subscription_type")` at both `:822` and `:882`.
+  - **BUILD REQUIREMENT (Critique Concern #2 — observability):** Before `sentry_sdk.init`, emit one `logger.info` stating the resolved environment plus its raw inputs (ComputerName and the matched project key, or `"none"`), so a wrong tag on a real machine is diagnosable from `logs/bridge.log` / `logs/worker.log` without needing Sentry itself.
+- **`ui/app.py` VALOR-BX fix**: `claude_auth["subscription_type"]` → `claude_auth.get("subscription_type")` at both `:822` and `:882`. Kept bundled in this plan (Critique Concern #3): the issue explicitly lists VALOR-BX as related cleanup and it is a two-line change; shipping it in the same PR keeps the issue's acceptance criteria closed in one place. The `.get()` consumer-side fix is the chosen approach; the `_get_claude_auth_health()` error dicts are NOT modified (see Rabbit Holes).
 
 ### Flow
 
@@ -195,6 +197,7 @@ No agent integration required — this is a bridge/worker-internal initializatio
 - [ ] Explicit `SENTRY_ENVIRONMENT` always wins.
 - [ ] `dashboard_json` and `health` return successfully with `claude_auth_subscription_type: null` when `claude auth status` fails (no `KeyError`).
 - [ ] `monitoring/sentry_config.py` does not import `ui.data.machine`.
+- [ ] Operational (Nit #5): `configure_sentry()` logs the resolved environment + inputs at INFO so a non-bridge dev machine's real bridge/worker run is confirmable to carry `environment=development` from its process log.
 - [ ] Tests pass (`/do-test`).
 - [ ] Documentation updated (`/do-docs`).
 
@@ -287,13 +290,21 @@ Tier 1 core agents suffice (`builder`, `test-engineer`, `validator`, `documentar
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+Verdict: **READY TO BUILD (with concerns)** — 0 blockers, 4 concerns, 2 nits. All embedded below.
+
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk/Consistency | Empty ComputerName + empty `machine` field → `""==""` mis-tags production | Key Elements build requirement | Add `if not machine: return False` before iterating; mirror `get_machine_project_keys` incl. `exists()` + case-insensitive compare |
+| CONCERN | Risk (Skeptic/Operator) | No observability of resolved environment | Key Elements build requirement + Success Criteria | `logger.info` resolved env + ComputerName + matched project key before `sentry_sdk.init` |
+| CONCERN | Scope (Simplifier/User) | VALOR-BX bundled with env gate | Key Elements decision | Kept bundled: issue lists it as related cleanup, two-line change, closes ACs in one PR |
+| CONCERN | Consistency | Open Q #2 contradicts Rabbit Holes | Open Questions resolved | Deleted OQ#2; `.get()` only, error dicts untouched |
+| NIT | Scope (User) | Success criteria all unit-level | Success Criteria | Added operational INFO-log confirmation criterion |
+| NIT | History (Archaeologist) | Predicate alignment with config_validation unverified | Key Elements build requirement | Confirm predicate matches `validate_projects_config` during build |
 
 ---
 
 ## Open Questions
 
-1. **Environment label for dev machines**: `"development"` is proposed. Acceptable, or do you prefer `"dev"` / a machine-name-suffixed label (e.g. `dev-<ComputerName>`) for finer filtering in Sentry?
-2. **VALOR-BX fix breadth**: The plan uses the issue-prescribed consumer-side `.get()` at the two call sites. Do you also want the two `_get_claude_auth_health()` error returns (lines 543, 557) to include `subscription_type: None` for dict-shape consistency, or is `.get()` alone sufficient (my recommendation)?
+_Resolved during critique revision pass:_
+1. **Environment label for dev machines**: RESOLVED — use `"development"` (two-bucket taxonomy; no machine-name-suffixed labels, per Rabbit Holes "Richer environment taxonomy").
+2. **VALOR-BX fix breadth**: RESOLVED — consumer-side `.get()` at the two call sites only; the `_get_claude_auth_health()` error dicts are NOT modified (Rabbit Holes already forecloses adding the key). Deleted the prior contradiction flagged by Critique Concern #4.
