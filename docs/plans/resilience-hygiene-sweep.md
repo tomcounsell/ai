@@ -457,7 +457,13 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - [ ] ruff S110/S112 active; a new bare `except: pass` in `agent/` fails lint; allowlist
       documents every intentional site
 - [ ] Duplicate reaction emoji crashes at import naming the glyph
-- [ ] Fresh baseline regenerated with `runs >= 2`
+- [ ] Fresh baseline regenerated with `runs >= 2` — **NOT DONE on the build machine
+      (supervisor-authorized deviation, 2026-07-10)**: two regen attempts wedged
+      (full-suite runs starved under a concurrent builder's pytest swarms, load avg 57-71,
+      plus live-Ollama integration paths; zero CPU progress for 3+ min, killed cleanly).
+      Safe because `--strict-freshness` ships OFF-by-default and is deliberately NOT wired
+      into `docs/sdlc/do-merge.md` in this PR; the per-machine artifact regenerates via the
+      update-path `test-baseline-refresh` reflection this PR registers (subtask 3a).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
