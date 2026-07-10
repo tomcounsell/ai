@@ -1,0 +1,22 @@
+// opencode-sync: generated from .claude/settings.json
+// Source of truth: committed .claude/settings.json (permissions) + this script's template.
+// settings.local.json is machine-local and deliberately excluded.
+// Re-run scripts/sync_claude_to_opencode.py to regenerate idempotently.
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-sonnet-4-5",
+  "small_model": "anthropic/claude-haiku-4-5",
+  "instructions": [
+    "CLAUDE.md"
+  ],
+  "permission": {
+    "edit": "allow",
+    "write": "allow",
+    "bash": {
+      "*": "ask"
+    },
+    "skill": {
+      "*": "allow"
+    }
+  }
+}

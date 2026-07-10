@@ -409,6 +409,10 @@ data/external/
 *.csv
 *.json
 *.parquet
+# OpenCode project config is safe to commit and regenerated idempotently by
+# scripts/sync_claude_to_opencode.py (no secrets; mirrors .claude/ settings).
+!.opencode/opencode.json
+!.opencode/SYNC_MANIFEST.json
 # Granite golden-recorder fixtures are committed (plan decision): un-ignore
 # the recorded metadata sidecar the broad *.json rule would otherwise hide.
 !tests/granite_faults/fixtures/recorded_meta.json
