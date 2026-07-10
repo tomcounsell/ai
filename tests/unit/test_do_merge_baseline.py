@@ -687,9 +687,7 @@ def test_staleness_reports_dirty_commit_and_commit_distance() -> None:
     from scripts._baseline_common import read_envelope, staleness
 
     now = datetime(2026, 4, 20, tzinfo=UTC)
-    env = read_envelope(
-        {"generated_at": now.isoformat(), "commit": "abc1234-dirty", "runs": 3}
-    )
+    env = read_envelope({"generated_at": now.isoformat(), "commit": "abc1234-dirty", "runs": 3})
     reasons = staleness(env, now=now, commits_behind=STALE_COMMIT_DISTANCE + 50)
     assert any("dirty tree" in r for r in reasons)
     assert any("commits behind HEAD" in r for r in reasons)
@@ -1007,3 +1005,137 @@ def test_strict_refusal_exit_code_is_distinct_from_regression_exit() -> None:
     from scripts.baseline_gate import EXIT_STRICT_REFUSAL
 
     assert EXIT_STRICT_REFUSAL not in (0, 1, 2)  # 2 is argparse's own error exit
+
+
+# ---------------------------------------------------------------------------
+# import_error fast-expiry: a tighter window than the general staleness rule
+# (3 days / 30 commits, gate-module constants; issue #2004 Task 4). An
+# import_error baseline entry on an out-of-window envelope must NEVER classify
+# a PR failure as pre-existing.
+# ---------------------------------------------------------------------------
+
+
+def _import_error_baseline(generated_at: datetime) -> dict:
+    return {
+        "schema_version": 2,
+        "generated_at": generated_at.isoformat(),
+        "commit": "abc1234",
+        "runs": 3,
+        "degraded": False,
+        "tests": {
+            "tests/unit/test_a.py::test_broken_import": {
+                "category": "import_error",
+                "fail_rate": 1.0,
+                "hung_count": 0,
+            },
+            "tests/unit/test_a.py::test_real": {
+                "category": "real",
+                "fail_rate": 1.0,
+                "hung_count": 0,
+            },
+        },
+    }
+
+
+def test_import_error_thresholds_live_in_gate_module_not_artifact() -> None:
+    from scripts import baseline_gate
+
+    assert baseline_gate.IMPORT_ERROR_MAX_AGE == timedelta(days=3)
+    assert baseline_gate.IMPORT_ERROR_MAX_COMMIT_DISTANCE == 30
+
+
+def test_expire_stale_import_error_entries_drops_past_max_age() -> None:
+    from scripts._baseline_common import expire_stale_import_error_entries
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _import_error_baseline(now - timedelta(days=4))
+    new_baseline, expired = expire_stale_import_error_entries(baseline, now=now, commits_behind=0)
+    assert expired == ["tests/unit/test_a.py::test_broken_import"]
+    assert "tests/unit/test_a.py::test_broken_import" not in new_baseline["tests"]
+    # Other categories are untouched by import-error expiry.
+    assert "tests/unit/test_a.py::test_real" in new_baseline["tests"]
+    # Input is not mutated.
+    assert "tests/unit/test_a.py::test_broken_import" in baseline["tests"]
+
+
+def test_expire_stale_import_error_entries_drops_past_commit_distance() -> None:
+    """Time-fresh but >30 commits behind still expires (velocity blind spot)."""
+    from scripts._baseline_common import expire_stale_import_error_entries
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _import_error_baseline(now - timedelta(hours=6))
+    new_baseline, expired = expire_stale_import_error_entries(baseline, now=now, commits_behind=31)
+    assert expired == ["tests/unit/test_a.py::test_broken_import"]
+    assert "tests/unit/test_a.py::test_broken_import" not in new_baseline["tests"]
+
+
+def test_expire_stale_import_error_entries_keeps_within_window() -> None:
+    from scripts._baseline_common import expire_stale_import_error_entries
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _import_error_baseline(now - timedelta(days=2))
+    new_baseline, expired = expire_stale_import_error_entries(baseline, now=now, commits_behind=30)
+    assert expired == []
+    assert "tests/unit/test_a.py::test_broken_import" in new_baseline["tests"]
+
+
+def test_expire_stale_import_error_entries_none_commits_behind_skips_distance() -> None:
+    """Git unavailable / unknown commit skips the distance trigger, not the age one."""
+    from scripts._baseline_common import expire_stale_import_error_entries
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _import_error_baseline(now - timedelta(days=1))
+    new_baseline, expired = expire_stale_import_error_entries(
+        baseline, now=now, commits_behind=None
+    )
+    assert expired == []
+    assert "tests/unit/test_a.py::test_broken_import" in new_baseline["tests"]
+
+
+def test_expire_stale_import_error_entries_legacy_envelope_is_noop() -> None:
+    """No envelope (legacy artifact) => existing behavior: entries kept."""
+    from scripts._baseline_common import expire_stale_import_error_entries
+
+    baseline = {
+        "schema_version": 2,
+        "tests": {"tests/unit/test_a.py::test_broken_import": {"category": "import_error"}},
+    }
+    new_baseline, expired = expire_stale_import_error_entries(baseline, commits_behind=None)
+    assert expired == []
+    assert "tests/unit/test_a.py::test_broken_import" in new_baseline["tests"]
+
+
+def test_main_expired_import_error_failure_becomes_blocking(tmp_path: Path, capsys) -> None:
+    """An import_error allowance past the window no longer reads as pre-existing."""
+    from scripts.baseline_gate import main
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(_import_error_baseline(now - timedelta(days=4))))
+    pr_xml = _write_failing_pr_xml(tmp_path, "test_broken_import")
+
+    exit_code = main(
+        ["--pr-junitxml", str(pr_xml), "--baseline", str(baseline_path), "--now", now.isoformat()]
+    )
+    assert exit_code == 1
+    verdict = json.loads(capsys.readouterr().out)
+    assert "tests/unit/test_a.py::test_broken_import" in verdict["new_blocking_regressions"]
+    assert "tests/unit/test_a.py::test_broken_import" in verdict["expired_import_error_entries"]
+
+
+def test_main_fresh_import_error_failure_stays_preexisting(tmp_path: Path, capsys) -> None:
+    from scripts.baseline_gate import main
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(_import_error_baseline(now - timedelta(days=1))))
+    pr_xml = _write_failing_pr_xml(tmp_path, "test_broken_import")
+
+    exit_code = main(
+        ["--pr-junitxml", str(pr_xml), "--baseline", str(baseline_path), "--now", now.isoformat()]
+    )
+    assert exit_code == 0
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["new_blocking_regressions"] == []
+    assert "tests/unit/test_a.py::test_broken_import" in verdict["preexisting_failures"]
+    assert verdict["expired_import_error_entries"] == []

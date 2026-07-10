@@ -319,3 +319,71 @@ def expire_stale_flaky_entries(
     new_baseline = dict(baseline)
     new_baseline["tests"] = kept
     return new_baseline, sorted(expired)
+
+
+def expire_stale_import_error_entries(
+    baseline: dict,
+    *,
+    now: datetime | None = None,
+    commits_behind: int | None = None,
+) -> tuple[dict, list[str]]:
+    """Drop ``import_error``-category entries past the fast-expiry window.
+
+    An ``import_error`` is a whole-module outage, not an isolated flake -- it
+    is either fixed within days or it silently masks every regression in that
+    module (issue #2004 Task 4; #1933's month-riding entries). So it gets a
+    much tighter window than the general :func:`staleness` rule: the envelope
+    older than ``baseline_gate.IMPORT_ERROR_MAX_AGE`` OR more than
+    ``baseline_gate.IMPORT_ERROR_MAX_COMMIT_DISTANCE`` commits behind HEAD
+    expires the allowance, so the gate can never classify such a failure as
+    pre-existing.  Thresholds live in the gate module (same lazy-import seam
+    as :func:`staleness`); the artifact never carries them.
+    ``commits_behind=None`` (git unavailable / unknown commit) skips the
+    commit-distance trigger.  Legacy artifacts (no envelope) keep existing
+    behavior -- there is no freshness signal to expire against.
+
+    Returns ``(new_baseline, expired_node_ids)``; never mutates the input.
+    """
+    import scripts.baseline_gate as baseline_gate  # noqa: PLC0415 -- lazy: avoids circular import
+
+    if not isinstance(baseline, dict):
+        return {}, []
+
+    env = read_envelope(baseline)
+    tests = baseline.get("tests")
+    if env.is_legacy or not isinstance(tests, dict):
+        return baseline, []
+
+    now = now or datetime.now(UTC)
+    stale = False
+    generated_at = parse_generated_at(env.generated_at)
+    if generated_at is not None and (now - generated_at) > baseline_gate.IMPORT_ERROR_MAX_AGE:
+        stale = True
+    if (
+        isinstance(commits_behind, int)
+        and commits_behind > baseline_gate.IMPORT_ERROR_MAX_COMMIT_DISTANCE
+    ):
+        stale = True
+    if not stale:
+        return baseline, []
+
+    kept: dict[str, dict] = {}
+    expired: list[str] = []
+    for node_id, record in tests.items():
+        if isinstance(record, dict) and record.get("category") == CATEGORY_IMPORT_ERROR:
+            expired.append(node_id)
+            continue
+        kept[node_id] = record
+
+    if not expired:
+        return baseline, []
+
+    logger.warning(
+        "[baseline] expired %d stale import_error entr%s: %s",
+        len(expired),
+        "y" if len(expired) == 1 else "ies",
+        ", ".join(sorted(expired)),
+    )
+    new_baseline = dict(baseline)
+    new_baseline["tests"] = kept
+    return new_baseline, sorted(expired)

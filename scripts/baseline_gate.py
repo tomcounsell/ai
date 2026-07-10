@@ -36,6 +36,7 @@ from scripts._baseline_common import (
     VALID_CATEGORIES,
     JunitxmlParseError,
     expire_stale_flaky_entries,
+    expire_stale_import_error_entries,
     failing_node_ids,
     parse_junitxml,
     read_envelope,
@@ -69,6 +70,17 @@ STRICT_MIN_RUNS = 2
 # the post-merge baseline reset keeps a healthy baseline at/near HEAD so this
 # does not fire on normal operation.
 STALE_COMMIT_DISTANCE = 100
+
+# Import-error fast-expiry window (issue #2004 Task 4). An import_error is a
+# whole-module outage: either it is fixed within days or it masks every
+# regression in that module. Much tighter than the general staleness rule
+# (STALENESS_THRESHOLD / STALE_COMMIT_DISTANCE): past EITHER bound, the gate
+# must never classify a failure as pre-existing via an import_error baseline
+# entry. Thresholds live HERE (module constants, read lazily by
+# scripts._baseline_common.expire_stale_import_error_entries) and are never
+# stored in the artifact.
+IMPORT_ERROR_MAX_AGE = timedelta(days=3)
+IMPORT_ERROR_MAX_COMMIT_DISTANCE = 30
 
 # Categories that block a merge when a PR introduces a node ID in them that
 # is NOT in the baseline (or is in the baseline but as a *different* category).
@@ -594,6 +606,21 @@ def main(argv: list[str] | None = None) -> int:
             f"(envelope is stale). Regenerate with: {REGEN_COMMAND}\n"
         )
 
+    # Import-error fast-expiry: past 3 days / 30 commits (module constants
+    # above), an import_error entry must never classify a failure as
+    # pre-existing. Legacy artifacts (no envelope) keep existing behavior.
+    baseline, expired_import_errors = expire_stale_import_error_entries(
+        baseline, now=now, commits_behind=commits_behind
+    )
+    if expired_import_errors:
+        sys.stderr.write(
+            f"WARNING: expired {len(expired_import_errors)} stale import_error baseline entr"
+            f"{'y' if len(expired_import_errors) == 1 else 'ies'} "
+            f"(envelope past {IMPORT_ERROR_MAX_AGE.days} days / "
+            f"{IMPORT_ERROR_MAX_COMMIT_DISTANCE} commits). "
+            f"Regenerate with: {REGEN_COMMAND}\n"
+        )
+
     try:
         pr_failures = parse_pr_failures(args.pr_junitxml)
     except JunitxmlParseError as exc:
@@ -617,6 +644,7 @@ def main(argv: list[str] | None = None) -> int:
 
     verdict = compute_gate_verdict(baseline, pr_failures)
     verdict["expired_flaky_entries"] = expired_flaky
+    verdict["expired_import_error_entries"] = expired_import_errors
     warning = format_staleness_warning(baseline, now=now, commits_behind=commits_behind)
     if warning is not None:
         verdict["staleness_warning"] = warning
