@@ -20,10 +20,19 @@ Unknown keys are rejected with exit 2 — the whitelist is intentional and must 
 explicit so stale meta keys don't accumulate silently.
 
 Usage:
-    python -m tools.sdlc_meta_set --key plan_revising --value true --issue-number 1302
-    python -m tools.sdlc_meta_set --key plan_revising --value false --issue-number 1302
-    python -m tools.sdlc_meta_set --key plan_hash_at_build_start --value abc123 --issue-number 1302
+    python -m tools.sdlc_meta_set --key plan_revising --value true \
+        --issue-number 1302 --run-id <hex>
+    python -m tools.sdlc_meta_set --key plan_revising --value false \
+        --issue-number 1302 --run-id <hex>
+    python -m tools.sdlc_meta_set --key plan_hash_at_build_start --value abc123 \
+        --issue-number 1302 --run-id <hex>
     python -m tools.sdlc_meta_set --help
+
+Run identity (issue #2003): this tool is state-mutating and REQUIRES
+``--run-id`` (the run identity emitted by ``sdlc-tool session-ensure``).
+Missing flag is a named non-zero error (``RUN_ID_REQUIRED``) — no mint, no
+adopt. A foreign run_id refuses the write with an ``ISSUE_LOCKED``
+diagnostic (exit 1).
 
 Environment variables (checked in order if --session-id not provided):
     VALOR_SESSION_ID   — bridge-injected PM session ID
@@ -34,7 +43,8 @@ to resolve the session by GitHub issue number.
 
 Exit codes:
     0 — success, or fail-soft error (no session found, Redis down, etc.)
-    2 — invalid arguments (unknown key, missing required args)
+    1 — issue lock held by a foreign run (ISSUE_LOCKED; write refused)
+    2 — invalid arguments (unknown key, missing required args, missing --run-id)
 
 Output:
     {} on error (no session found, write failed, etc.)
@@ -48,7 +58,7 @@ import json
 import logging
 import sys
 
-from tools._sdlc_utils import find_session
+from tools._sdlc_utils import check_run_ownership, find_session
 
 logger = logging.getLogger(__name__)
 
@@ -109,17 +119,26 @@ def write_meta(
     value: str,
     session_id: str | None = None,
     issue_number: int | None = None,
+    run_id: str | None = None,
 ) -> dict:
     """Write a metadata key to stage_states["_<key>"] via update_stage_states().
+
+    Run identity (issue #2003): when the resolved session has an issue
+    context, the issue lock is peek-compared against ``run_id`` — a foreign
+    live holder refuses the write and returns the ``ISSUE_LOCKED`` shape.
+    Peek-only: meta-set never renews the lock (#1954 scope-narrowing
+    preserved).
 
     Args:
         key: Whitelisted key name (e.g., "plan_revising").
         value: Raw string value — will be coerced to the key's type.
         session_id: Optional explicit session ID (falls back to env vars).
         issue_number: Optional issue number for local session resolution.
+        run_id: The caller's run identity (the CLI's ``--run-id``).
 
     Returns:
-        Dict with key/value on success, empty dict on any failure.
+        Dict with key/value on success, an ``ISSUE_LOCKED``-shaped dict when
+        a foreign run holds the issue lock, empty dict on any other failure.
     """
     if key not in _KEY_REGISTRY:
         logger.debug(f"sdlc_meta_set: unknown key {key!r}")
@@ -134,6 +153,18 @@ def write_meta(
     session = find_session(session_id, issue_number=issue_number, ensure=True)
     if not session:
         return {}
+
+    # Run-identity gate (issue #2003): refuse the write when a FOREIGN run
+    # holds the issue lock.
+    conflict = check_run_ownership(session, run_id, issue_number=issue_number)
+    if conflict is not None:
+        logger.debug(
+            "sdlc_meta_set: issue lock held by a foreign run (run_id=%s, session=%s) "
+            "-- refusing meta write",
+            conflict.get("owner_run_id"),
+            conflict.get("owner_session_id"),
+        )
+        return dict(conflict)
 
     internal_key, _ = _KEY_REGISTRY[key]
 
@@ -186,6 +217,15 @@ def main() -> None:
         help="GitHub issue number (for local sessions without VALOR_SESSION_ID)",
     )
     parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help=(
+            "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
+            "REQUIRED for this state-mutating tool; missing -> RUN_ID_REQUIRED."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging",
@@ -195,6 +235,17 @@ def main() -> None:
 
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
+
+    # Run-identity gate (issue #2003): a state-mutating call without --run-id
+    # exits non-zero with a NAMED error -- no mint, no adopt.
+    if not args.run_id:
+        print(
+            "sdlc_meta_set: RUN_ID_REQUIRED — state-mutating calls must pass "
+            "--run-id (emitted by `sdlc-tool session-ensure`).",
+            file=sys.stderr,
+        )
+        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+        sys.exit(2)
 
     # Unknown key → exit 2 (invalid argument, not a runtime error)
     if args.key not in _KEY_REGISTRY:
@@ -221,9 +272,20 @@ def main() -> None:
         value=args.value,
         session_id=args.session_id,
         issue_number=args.issue_number,
+        run_id=args.run_id,
     )
     print(json.dumps(result))
-    # Always exit 0 (fail-soft: runtime errors return {} but don't crash the skill)
+    if result.get("reason") == "ISSUE_LOCKED":
+        # Foreign run holds the issue lock — loud so the caller sees the
+        # refused write instead of a silent {} no-op.
+        print(
+            f"sdlc_meta_set: ISSUE_LOCKED — issue lock held by a foreign run "
+            f"(run_id={result.get('owner_run_id')}, "
+            f"session={result.get('owner_session_id')}); write refused.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Otherwise exit 0 (fail-soft: runtime errors return {} but don't crash the skill)
     sys.exit(0)
 
 

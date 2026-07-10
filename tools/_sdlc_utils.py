@@ -356,23 +356,26 @@ def _parse_issue_number_from_url(issue_url: str | None) -> int | None:
         return None
 
 
-def renew_issue_lock_for_session(session, session_id: str | None = None) -> None:
+def renew_issue_lock_for_session(session, run_id: str | None = None) -> None:
     """Renew the per-issue SDLC ownership lock as a side effect of a write.
 
-    Shared helper (issue #1954) for SDLC CLI subcommands that fire during an
-    in-progress BUILD/TEST/REVIEW stage and therefore have an established
-    recurrence path to lean on for renewal -- currently wired into
-    ``sdlc_stage_marker.write_marker()`` only. ``sdlc_dispatch``'s
+    Shared helper (issues #1954/#2003) for SDLC CLI subcommands that fire
+    during an in-progress BUILD/TEST/REVIEW stage and therefore have an
+    established recurrence path to lean on for renewal -- currently wired
+    into ``sdlc_stage_marker.write_marker()`` only. ``sdlc_dispatch``'s
     ``record`` subcommand does NOT call this helper: its underlying
     ``record_dispatch_for_session()`` already calls ``touch_issue_lock()``
     directly as part of its own contention-check-and-refuse logic, so wiring
     this helper there too would touch the same Redis key twice per call for
     no benefit.
 
-    Deliberately NOT wired into ``verdict record`` or ``meta-set`` (critique
-    scope-narrowing, #1954): those fire during PLAN/CRITIQUE-stage
-    bookkeeping with no established recurrence path through an in-progress
-    BUILD/TEST/REVIEW stage, so renewing there would be speculative.
+    Run identity (issue #2003, cycle-2 BLOCKER): renewal compares by run_id,
+    never by session_id or process identity. The identity is the caller's
+    explicit ``run_id`` when given (the CLI's ``--run-id``), falling back to
+    ``session.active_run_id`` -- the read-back of the identity this
+    pipeline's own ``ensure_session()`` established, NOT foreign adoption.
+    Without either, renewal is skipped: an identity-less caller must never
+    extend (or mint) a lock.
 
     Derives the issue number from ``session.issue_number`` (the write-once
     mirror field set by ``ensure_session()``) when present, falling back to
@@ -392,13 +395,73 @@ def renew_issue_lock_for_session(session, session_id: str | None = None) -> None
     if not issue_number:
         return
 
+    effective_run_id = run_id or getattr(session, "active_run_id", None)
+    if not effective_run_id:
+        logger.debug(
+            "renew_issue_lock_for_session: no run_id (explicit or active_run_id) -- "
+            "skipping renewal for issue #%s",
+            issue_number,
+        )
+        return
+
     try:
         from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
-        sid = session_id or getattr(session, "session_id", None) or ""
-        touch_issue_lock(issue_number, sid, ttl=ISSUE_LOCK_TTL_SECONDS)
+        sid = getattr(session, "session_id", None) or ""
+        touch_issue_lock(issue_number, effective_run_id, session_id=sid, ttl=ISSUE_LOCK_TTL_SECONDS)
     except Exception as e:
         logger.debug(f"renew_issue_lock_for_session: touch_issue_lock failed (non-fatal): {e}")
+
+
+def check_run_ownership(
+    session, run_id: str | None, issue_number: int | None = None
+) -> dict | None:
+    """Refuse a state-mutating write when a FOREIGN run holds the issue lock.
+
+    Shared ownership gate (issue #2003) for the mutating sdlc-tool
+    subcommands that do not renew the lock themselves (``verdict record``,
+    ``meta-set``, ``stage-marker``'s pre-write check). Peek-only: never
+    acquires, renews, or mints -- renewal stays scoped to the established
+    recurrence paths (#1954 scope-narrowing).
+
+    Args:
+        session: The resolved AgentSession (used to derive the issue number
+            when ``issue_number`` is not given).
+        run_id: The caller's explicit run identity (from ``--run-id``).
+        issue_number: Optional explicit issue number override.
+
+    Returns:
+        ``None`` when the write may proceed (lock free, owned by this
+        run_id, or no issue context). An ``ISSUE_LOCKED`` dict
+        (``{"reason": "ISSUE_LOCKED", "owner_run_id": ...,
+        "owner_session_id": ...}``) when a foreign run holds the lock.
+        Never raises; errors fail open (``None``).
+    """
+    derived_issue = issue_number
+    if not derived_issue and session is not None:
+        derived_issue = getattr(session, "issue_number", None) or _parse_issue_number_from_url(
+            getattr(session, "issue_url", None)
+        )
+    if not derived_issue:
+        return None
+
+    try:
+        from models.session_lifecycle import touch_issue_lock
+
+        sid = getattr(session, "session_id", None) or "" if session is not None else ""
+        result = touch_issue_lock(derived_issue, run_id, session_id=sid, peek=True)
+    except Exception as e:
+        logger.debug(f"check_run_ownership: peek failed (failing open): {e}")
+        return None
+
+    if result.acquired:
+        return None
+    return {
+        "reason": "ISSUE_LOCKED",
+        "owner_run_id": result.owner_run_id,
+        "owner_session_id": result.owner_session_id,
+        "orphaned_lock": result.orphaned_lock,
+    }
 
 
 def session_owns_issue(session, issue_number) -> bool:

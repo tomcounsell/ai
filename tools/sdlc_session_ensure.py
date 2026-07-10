@@ -14,11 +14,25 @@ Exit codes:
     0 -- always (errors print {} and exit 0, never crash the calling skill)
 
 Output:
-    {"session_id": "<id>", "created": true}  -- new session created
-    {"session_id": "<id>", "created": false} -- existing session found
+    {"session_id": "<id>", "created": true, "run_id": "<hex>"}  -- new session created
+    {"session_id": "<id>", "created": false, "run_id": "<hex>"} -- existing session found
+    {"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ...}
+        -- a foreign live run holds the issue lock
+    {"error": "RUN_BIND_FAILED", ...} -- lock acquired but the run_id could not be
+        persisted to the session record (lock released via compare-and-delete)
     {} on error
     {"orphans": [...], "count": N, "killed": false} -- --kill-orphans --dry-run
     {"results": [...], "count": N, "failures": M, "killed": true} -- --kill-orphans
+
+Run identity (issue #2003): ensure_session is the EXCLUSIVE minting site for
+the pipeline run_id. Each top-level call generates a fresh uuid-hex candidate
+and contests the issue lock (SET NX EX carrying it). The winner's run_id is
+emitted in the JSON output and mirrored to AgentSession.active_run_id; every
+state-mutating sdlc-tool call must then pass it back via --run-id. There is
+deliberately NO adopt-from-record branch: a live foreign holder always means
+ISSUE_LOCKED, regardless of what active_run_id the record carries. Recovery
+after run_id loss = re-run session-ensure (ISSUE_LOCKED until the <=300s lock
+TTL lapses, then a fresh contest mints a new run_id).
 """
 
 from __future__ import annotations
@@ -28,6 +42,7 @@ import json
 import logging
 import os
 import sys
+import uuid
 from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
@@ -41,37 +56,117 @@ logger = logging.getLogger(__name__)
 ORPHAN_AGE_SECONDS = 600
 
 
-def _touch_lock_before_return(issue_number: int, session_id: str) -> dict | None:
-    """Touch the issue-level SDLC ownership lock before ensure_session() returns.
+def _acquire_run_lock_and_bind(issue_number: int, session) -> tuple[str | None, dict | None]:
+    """Mint a fresh run_id candidate, contest the issue lock, and bind the winner.
 
-    Called immediately before EVERY return point in ensure_session() (issue
-    #1954) so no branch -- early-return or create-and-claim -- can skip the
-    lock check. Ownership is compared by this process's holder_token, not by
-    session_id, since two independent live processes can resolve the
-    identical deterministic ``sdlc-local-{N}`` session_id for the same issue
-    (see models.session_lifecycle.touch_issue_lock module note).
+    Called immediately before EVERY return point in ensure_session() (issues
+    #1954/#2003) so no branch -- early-return or create-and-claim -- can skip
+    the lock contest. Minting is decided by the LOCK, never by session
+    status: each top-level call generates a fresh uuid-hex candidate and
+    attempts ``SET NX EX`` carrying it. There is NO adopt-from-record branch
+    (#2003 cycle-1 BLOCKER 1): a live foreign holder always means
+    ISSUE_LOCKED, regardless of what ``active_run_id`` the record carries.
+
+    On acquisition, the candidate is saved to ``session.active_run_id`` and
+    read back from Redis (post-save readback, Race 3). On save failure or
+    readback mismatch, the lock is released via COMPARE-AND-DELETE
+    (``release_issue_lock`` -- never a raw DEL, cycle-2 CONCERN 2) so the
+    next caller acquires immediately instead of waiting out the 300s TTL.
+
+    Args:
+        issue_number: The issue whose lock is contested.
+        session: The AgentSession object to bind the run_id onto.
 
     Returns:
-        A blocked-shape dict (``{"blocked": True, "reason": "ISSUE_LOCKED",
-        "owner_session_id": ...}``) if a different live session holds the
-        lock. ``None`` if the lock was acquired/renewed by this process (or
-        issue_number is falsy, which fails open).
+        ``(run_id, None)`` on success; ``(None, error_dict)`` when blocked
+        (``ISSUE_LOCKED`` shape) or when binding failed (``RUN_BIND_FAILED``
+        shape, lock already released).
     """
-    from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+    from models.session_lifecycle import (
+        ISSUE_LOCK_TTL_SECONDS,
+        release_issue_lock,
+        touch_issue_lock,
+    )
 
-    lock_result = touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+    session_id = getattr(session, "session_id", None) or ""
+    candidate = uuid.uuid4().hex
+
+    lock_result = touch_issue_lock(
+        issue_number, candidate, session_id=session_id, ttl=ISSUE_LOCK_TTL_SECONDS
+    )
     if not lock_result.acquired:
         logger.debug(
-            "sdlc_session_ensure: issue #%s lock held by a different session (%s) -- blocked",
+            "sdlc_session_ensure: issue #%s lock held by a foreign run (run_id=%s, "
+            "session=%s) -- blocked",
             issue_number,
+            lock_result.owner_run_id,
             lock_result.owner_session_id,
         )
-        return {
+        return None, {
             "blocked": True,
             "reason": "ISSUE_LOCKED",
+            "owner_run_id": lock_result.owner_run_id,
             "owner_session_id": lock_result.owner_session_id,
         }
-    return None
+
+    # Acquired: bind the run_id to the session record (inspection mirror +
+    # the identity source for the in-process renewal paths).
+    try:
+        session.active_run_id = candidate
+        session.save()
+    except Exception as e:
+        release_issue_lock(issue_number, candidate)
+        logger.debug(
+            "sdlc_session_ensure: active_run_id save failed for %s (%s: %s) -- "
+            "lock released via compare-and-delete",
+            session_id,
+            type(e).__name__,
+            e,
+        )
+        return None, {
+            "error": "RUN_BIND_FAILED",
+            "reason": f"active_run_id save failed ({type(e).__name__})",
+            "session_id": session_id,
+        }
+
+    # Post-save readback: assert the record really carries the lock's run_id.
+    try:
+        from models.agent_session import AgentSession
+
+        fresh_rows = list(AgentSession.query.filter(session_id=session_id))
+        fresh = fresh_rows[0] if fresh_rows else None
+        readback_run_id = getattr(fresh, "active_run_id", None) if fresh is not None else None
+    except Exception as e:
+        release_issue_lock(issue_number, candidate)
+        logger.debug(
+            "sdlc_session_ensure: post-save readback failed for %s (%s: %s) -- "
+            "lock released via compare-and-delete",
+            session_id,
+            type(e).__name__,
+            e,
+        )
+        return None, {
+            "error": "RUN_BIND_FAILED",
+            "reason": f"post-save readback failed ({type(e).__name__})",
+            "session_id": session_id,
+        }
+
+    if readback_run_id != candidate:
+        release_issue_lock(issue_number, candidate)
+        logger.debug(
+            "sdlc_session_ensure: post-save readback mismatch for %s "
+            "(expected %s, read %s) -- lock released via compare-and-delete",
+            session_id,
+            candidate,
+            readback_run_id,
+        )
+        return None, {
+            "error": "RUN_BIND_FAILED",
+            "reason": "post-save readback mismatch",
+            "session_id": session_id,
+        }
+
+    return candidate, None
 
 
 def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
@@ -146,10 +241,14 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                             env_issue_url = getattr(resolved, "issue_url", None) or ""
                             if env_issue_url.endswith(f"/issues/{issue_number}"):
                                 # Legitimate bridge case — true no-op, no detour.
-                                blocked = _touch_lock_before_return(issue_number, env_session_id)
-                                if blocked is not None:
-                                    return blocked
-                                return {"session_id": env_session_id, "created": False}
+                                run_id, err = _acquire_run_lock_and_bind(issue_number, resolved)
+                                if err is not None:
+                                    return err
+                                return {
+                                    "session_id": env_session_id,
+                                    "created": False,
+                                    "run_id": run_id,
+                                }
                             # Env session is live but does NOT own this issue.
                             # Prefer an existing issue-scoped session if one
                             # exists; otherwise fall through to the issue
@@ -160,10 +259,14 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                             if owned is not None:
                                 owned_id = getattr(owned, "session_id", None)
                                 if owned_id:
-                                    blocked = _touch_lock_before_return(issue_number, owned_id)
-                                    if blocked is not None:
-                                        return blocked
-                                    return {"session_id": owned_id, "created": False}
+                                    run_id, err = _acquire_run_lock_and_bind(issue_number, owned)
+                                    if err is not None:
+                                        return err
+                                    return {
+                                        "session_id": owned_id,
+                                        "created": False,
+                                        "run_id": run_id,
+                                    }
                             # No issue-scoped session yet — fall through to the
                             # legacy issue lookup + create path. (Do NOT return
                             # the divergent env session.)
@@ -177,10 +280,10 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if existing:
             session_id = getattr(existing, "session_id", None)
             if session_id:
-                blocked = _touch_lock_before_return(issue_number, session_id)
-                if blocked is not None:
-                    return blocked
-                return {"session_id": session_id, "created": False}
+                run_id, err = _acquire_run_lock_and_bind(issue_number, existing)
+                if err is not None:
+                    return err
+                return {"session_id": session_id, "created": False, "run_id": run_id}
 
         # No existing session — create one
         from models.agent_session import AgentSession
@@ -191,10 +294,10 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         try:
             existing_by_id = list(AgentSession.query.filter(session_id=local_session_id))
             if existing_by_id:
-                blocked = _touch_lock_before_return(issue_number, local_session_id)
-                if blocked is not None:
-                    return blocked
-                return {"session_id": local_session_id, "created": False}
+                run_id, err = _acquire_run_lock_and_bind(issue_number, existing_by_id[0])
+                if err is not None:
+                    return err
+                return {"session_id": local_session_id, "created": False, "run_id": run_id}
         except Exception:
             pass
 
@@ -262,10 +365,10 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             logger.debug(f"sdlc_session_ensure: transition_status failed: {e}")
             # Session is created but in pending state — still usable
 
-        blocked = _touch_lock_before_return(issue_number, local_session_id)
-        if blocked is not None:
-            return blocked
-        return {"session_id": local_session_id, "created": True}
+        run_id, err = _acquire_run_lock_and_bind(issue_number, session)
+        if err is not None:
+            return err
+        return {"session_id": local_session_id, "created": True, "run_id": run_id}
 
     except Exception as e:
         # ProjectKeyResolutionError and ProjectsConfigUnavailableError both

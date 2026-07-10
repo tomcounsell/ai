@@ -8,11 +8,19 @@ remains the primary marker path for bridge-initiated sessions. This tool handles
 local Claude Code sessions where hooks don't fire.
 
 Usage:
-    python -m tools.sdlc_stage_marker --stage DOCS --status in_progress
-    python -m tools.sdlc_stage_marker --stage DOCS --status completed
-    python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress --session-id <ID>
-    python -m tools.sdlc_stage_marker --stage PLAN --status completed --issue-number 941
+    python -m tools.sdlc_stage_marker --stage DOCS --status in_progress --run-id <hex>
+    python -m tools.sdlc_stage_marker --stage DOCS --status completed --run-id <hex>
+    python -m tools.sdlc_stage_marker --stage REVIEW --status in_progress \
+        --session-id <ID> --run-id <hex>
+    python -m tools.sdlc_stage_marker --stage PLAN --status completed \
+        --issue-number 941 --run-id <hex>
     python -m tools.sdlc_stage_marker --help
+
+Run identity (issue #2003): this tool is state-mutating and REQUIRES
+``--run-id`` (the run identity emitted by ``sdlc-tool session-ensure``).
+Missing flag is a named non-zero error (``RUN_ID_REQUIRED``) — no mint, no
+adopt. A foreign run_id refuses the write with an ``ISSUE_LOCKED``
+diagnostic (exit 1).
 
 Environment variables (checked in order if --session-id not provided):
     VALOR_SESSION_ID   — bridge-injected PM session ID
@@ -76,7 +84,12 @@ import json
 import logging
 import sys
 
-from tools._sdlc_utils import find_session, renew_issue_lock_for_session, session_owns_issue
+from tools._sdlc_utils import (
+    check_run_ownership,
+    find_session,
+    renew_issue_lock_for_session,
+    session_owns_issue,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +142,11 @@ def _degraded(stage: str, reason: str) -> dict:
 
 
 def write_marker(
-    stage: str, status: str, session_id: str | None = None, issue_number: int | None = None
+    stage: str,
+    status: str,
+    session_id: str | None = None,
+    issue_number: int | None = None,
+    run_id: str | None = None,
 ) -> tuple[dict, int]:
     """Write a stage marker to the PipelineStateMachine.
 
@@ -138,18 +155,26 @@ def write_marker(
     exit_code 1 and a stderr diagnostic — preventing a silent artifact divert
     to the wrong session.
 
+    Run identity (issue #2003): when the session has an issue context, the
+    issue lock is peek-compared against ``run_id`` — a foreign live holder
+    refuses the write (``ISSUE_LOCKED``, exit 1). The lock renewal side
+    effect uses the same run_id (falling back to ``session.active_run_id``
+    inside ``renew_issue_lock_for_session``).
+
     Args:
         stage: Pipeline stage name (e.g., "DOCS", "REVIEW").
         status: "in_progress" or "completed".
         session_id: Optional explicit session ID (falls back to env vars).
         issue_number: Optional issue number for local session resolution.
+        run_id: The caller's run identity (the CLI's ``--run-id``).
 
     Returns:
         A ``(result, exit_code)`` tuple (D7 tri-state contract):
         - success / degraded / idempotent no-op → exit_code 0
         - genuine write failure (substrate present, session resolved) →
           exit_code 1 (the only loud case)
-        - ownership guard refusal → exit_code 1 (write refused, stderr emitted)
+        - ownership guard refusal (issue divert or foreign run) → exit_code 1
+          (write refused, stderr emitted)
     """
     if stage not in _VALID_STAGES:
         logger.debug(f"sdlc_stage_marker: invalid stage {stage!r}")
@@ -181,11 +206,25 @@ def write_marker(
         )
         return {"error": "ownership_divert"}, 1
 
-    # Issue-lock renewal (issue #1954): a stage-marker write is evidence of an
-    # in-progress BUILD/TEST/REVIEW-stage recurrence, so touch the per-issue
-    # SDLC ownership lock to keep it alive. Best-effort side effect -- runs
-    # regardless of whether the state-machine write below succeeds or fails.
-    renew_issue_lock_for_session(session)
+    # Run-identity gate (issue #2003): refuse the write when a FOREIGN run
+    # holds the issue lock. Peek-only check; never mints or renews.
+    conflict = check_run_ownership(session, run_id, issue_number=issue_number)
+    if conflict is not None:
+        print(
+            f"[ERROR] ISSUE_LOCKED: issue lock held by a foreign run "
+            f"(run_id={conflict.get('owner_run_id')}, "
+            f"session={conflict.get('owner_session_id')}); marker write refused.",
+            file=sys.stderr,
+        )
+        return {"error": "issue_locked", **conflict}, 1
+
+    # Issue-lock renewal (issues #1954/#2003): a stage-marker write is
+    # evidence of an in-progress BUILD/TEST/REVIEW-stage recurrence, so touch
+    # the per-issue SDLC ownership lock to keep it alive -- keyed by the
+    # caller's run_id (falling back to session.active_run_id). Best-effort
+    # side effect -- runs regardless of whether the state-machine write below
+    # succeeds or fails.
+    renew_issue_lock_for_session(session, run_id=run_id)
 
     # PRESENT_WRITE_FAILED is the ONLY loud case: the session resolved but the
     # state-machine write rejects or raises.
@@ -255,6 +294,15 @@ def main() -> None:
         help="GitHub issue number (for local sessions without VALOR_SESSION_ID)",
     )
     parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help=(
+            "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
+            "REQUIRED for this state-mutating tool; missing -> RUN_ID_REQUIRED."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging",
@@ -265,12 +313,24 @@ def main() -> None:
     if args.verbose:
         logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
 
+    # Run-identity gate (issue #2003): a state-mutating call without --run-id
+    # exits non-zero with a NAMED error -- no mint, no adopt.
+    if not args.run_id:
+        print(
+            "sdlc_stage_marker: RUN_ID_REQUIRED — state-mutating calls must pass "
+            "--run-id (emitted by `sdlc-tool session-ensure`).",
+            file=sys.stderr,
+        )
+        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+        sys.exit(2)
+
     stage = args.stage.upper()
     result, exit_code = write_marker(
         stage=stage,
         status=args.status,
         session_id=args.session_id,
         issue_number=args.issue_number,
+        run_id=args.run_id,
     )
     # Strip internal sentinel keys before printing to stdout so JSON-parsing
     # callers always receive a clean dict (no "error" sentinel leaks out).
@@ -278,10 +338,11 @@ def main() -> None:
     print(json.dumps(stdout_result))
 
     if exit_code != 0:
-        if result.get("error") == "ownership_divert":
-            # Ownership guard already printed the diagnostic in write_marker;
-            # do not emit a second, contradictory "state-machine write rejected"
-            # message — no write was attempted on this path.
+        if result.get("error") in ("ownership_divert", "issue_locked"):
+            # Ownership/run-identity guards already printed their diagnostic
+            # in write_marker; do not emit a second, contradictory
+            # "state-machine write rejected" message — no write was attempted
+            # on these paths.
             pass
         else:
             # PRESENT_WRITE_FAILED — the only loud case. A clear stderr diagnostic

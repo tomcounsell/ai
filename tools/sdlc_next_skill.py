@@ -174,13 +174,34 @@ def decide(
         if issue_number:
             from models.session_lifecycle import touch_issue_lock
 
-            lock_result = touch_issue_lock(issue_number, session_id or "", peek=True)
+            # Run-identity peek (issue #2003, minimal call-site update): this
+            # read-only pre-check compares the lock against the CURRENT
+            # legitimate run's identity, read back from the issue session's
+            # active_run_id mirror (read-only -- peek never mutates or adopts).
+            # When they match, the lock belongs to the run driving this
+            # pipeline and next-skill proceeds; a mismatch (crash window /
+            # foreign takeover mid-write) blocks with the owner surfaced.
+            peek_run_id = None
+            try:
+                from tools._sdlc_utils import find_session_by_issue
+
+                issue_session = find_session_by_issue(issue_number)
+                if issue_session is not None:
+                    peek_run_id = getattr(issue_session, "active_run_id", None)
+            except Exception:
+                peek_run_id = None
+
+            lock_result = touch_issue_lock(
+                issue_number, peek_run_id, session_id=session_id or "", peek=True
+            )
             if not lock_result.acquired:
                 return {
                     "blocked": True,
                     "reason": "ISSUE_LOCKED",
                     "guard_id": "ISSUE_LOCK",
+                    "owner_run_id": lock_result.owner_run_id,
                     "owner_session_id": lock_result.owner_session_id,
+                    "orphaned_lock": lock_result.orphaned_lock,
                 }
 
         enriched = _resolve_enriched(issue_number, session_id)

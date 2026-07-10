@@ -214,6 +214,15 @@ def _tick_issue_lock_renewal(
     (truthy) ``agent_session.issue_number`` -- non-eng sessions and eng
     sessions with no associated issue never touch the lock.
 
+    Run identity (issue #2003, cycle-2 BLOCKER): renewal is keyed by
+    ``agent_session.active_run_id`` -- the read-back of the identity this
+    pipeline's own ``ensure_session()`` established, never a foreign
+    adoption. A session with no ``active_run_id`` (legacy record, or a
+    pipeline whose ensure never ran) skips renewal: an identity-less caller
+    must never extend or mint a lock. When renewal comes back not-owner, a
+    WARNING is logged (no longer fire-and-forget) so an out-from-under
+    takeover is visible before the TTL lapses.
+
     Best-effort and side-effect-only: never raises, returns nothing. A
     Redis hiccup or missing field never blocks the heartbeat loop.
     """
@@ -225,11 +234,30 @@ def _tick_issue_lock_renewal(
     if not issue_number:
         return
 
+    run_id = getattr(agent_session, "active_run_id", None)
+    if not run_id:
+        logger.debug(
+            "[%s] issue-lock renewal skipped: no active_run_id on the session record",
+            getattr(session, "session_id", "<unknown>"),
+        )
+        return
+
     try:
         from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
         session_id = getattr(session, "session_id", None) or ""
-        touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+        result = touch_issue_lock(
+            issue_number, run_id, session_id=session_id, ttl=ISSUE_LOCK_TTL_SECONDS
+        )
+        if not result.acquired:
+            logger.warning(
+                "[%s] issue-lock renewal for issue #%s returned not-owner: lock held "
+                "by a foreign run (run_id=%s, session=%s)",
+                getattr(session, "session_id", "<unknown>"),
+                issue_number,
+                result.owner_run_id,
+                result.owner_session_id,
+            )
     except Exception as exc:  # noqa: BLE001 - renewal must never crash the heartbeat loop
         logger.debug(
             "[%s] issue-lock renewal failed (non-fatal): %s",

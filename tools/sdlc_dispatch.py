@@ -6,9 +6,17 @@ and the safe concurrent write protocol from
 
 Usage::
 
-    python -m tools.sdlc_dispatch record --skill /do-build --issue-number 1040
-    python -m tools.sdlc_dispatch record --skill /do-pr-review --issue-number 1040 --pr-number 42
+    python -m tools.sdlc_dispatch record --skill /do-build --issue-number 1040 --run-id <hex>
+    python -m tools.sdlc_dispatch record --skill /do-pr-review --issue-number 1040 \
+        --pr-number 42 --run-id <hex>
     python -m tools.sdlc_dispatch get --issue-number 1040
+
+Run identity (issue #2003): ``record`` is state-mutating and therefore
+REQUIRES ``--run-id`` (the run identity emitted by ``sdlc-tool
+session-ensure``). A missing flag is a named non-zero error
+(``RUN_ID_REQUIRED``) — no mint, no adopt. A foreign run_id yields the
+``ISSUE_LOCKED`` shape. ``get``/``reset`` are read/reset paths and take no
+run-id.
 
 The ``record`` subcommand is called by the SDLC LLM session **after** the
 router evaluates guards and selects a dispatch target but **before** invoking
@@ -69,13 +77,14 @@ def record_dispatch_for_session(
     skill: str,
     pr_number: int | None = None,
     now: datetime | None = None,
+    run_id: str | None = None,
 ) -> bool:
     """Record a dispatch event on a session's stage_states.
 
     Wraps ``agent.sdlc_router.record_dispatch`` with the optimistic-retry
     safe write helper from ``tools.stage_states_helpers``.
 
-    Issue-lock enforcement (issue #1954): before writing, this calls
+    Issue-lock enforcement (issues #1954/#2003): before writing, this calls
     ``touch_issue_lock()`` DIRECTLY -- it must NOT assume ``ensure_session()``
     ran first, since ``tools._sdlc_utils.find_session(ensure=True)``'s Step-2
     short-circuit (matching an existing session via ``find_session_by_issue``)
@@ -83,8 +92,14 @@ def record_dispatch_for_session(
     number is derived by parsing ``session.issue_url`` (see
     ``_parse_issue_number_from_url``), NOT from a mirrored ``issue_number``
     field, since a continuing session created before this feature shipped may
-    not have one. If the lock is held by a different live session, the write
-    is refused and this returns ``False``.
+    not have one. Ownership is compared by ``run_id``: the caller's explicit
+    identity (the CLI's ``--run-id``), falling back to
+    ``session.active_run_id`` for in-process callers (the read-back of the
+    identity this process's own ``ensure_session`` established -- never
+    foreign adoption). With an issue context but NO run identity at all, the
+    write is refused: an identity-less caller must never mutate. If the lock
+    is held by a foreign run, the write is refused and this returns
+    ``False``.
 
     Args:
         session: AgentSession to write to.
@@ -92,10 +107,13 @@ def record_dispatch_for_session(
         pr_number: Optional PR number — passed into the snapshot so G4
             can include PR state in its equality check.
         now: Optional timestamp override for testability.
+        run_id: The caller's run identity. Falls back to
+            ``session.active_run_id`` when omitted (in-process read-back).
 
     Returns:
         ``True`` if the write succeeded, ``False`` otherwise (including when
-        the issue lock is held by a different session).
+        the issue lock is held by a foreign run, or no run identity is
+        available for an issue-scoped session).
     """
     if session is None:
         logger.debug("sdlc_dispatch: session is None — skipping record")
@@ -103,21 +121,39 @@ def record_dispatch_for_session(
 
     issue_number = _parse_issue_number_from_url(getattr(session, "issue_url", None))
     if issue_number:
+        effective_run_id = run_id or getattr(session, "active_run_id", None)
+        if not effective_run_id:
+            logger.debug(
+                "sdlc_dispatch: issue #%s has no run identity (no --run-id, no "
+                "active_run_id) -- refusing to record dispatch",
+                issue_number,
+            )
+            return False
         try:
             from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
             session_id = getattr(session, "session_id", None) or ""
-            lock_result = touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+            lock_result = touch_issue_lock(
+                issue_number,
+                effective_run_id,
+                session_id=session_id,
+                ttl=ISSUE_LOCK_TTL_SECONDS,
+            )
             if not lock_result.acquired:
                 logger.debug(
-                    "sdlc_dispatch: issue #%s lock held by a different session (%s) -- "
-                    "refusing to record dispatch",
+                    "sdlc_dispatch: issue #%s lock held by a foreign run "
+                    "(run_id=%s, session=%s) -- refusing to record dispatch",
                     issue_number,
+                    lock_result.owner_run_id,
                     lock_result.owner_session_id,
                 )
                 return False
         except Exception as e:
-            logger.debug(f"sdlc_dispatch: touch_issue_lock failed (non-fatal): {e}")
+            logger.debug(
+                "sdlc_dispatch: touch_issue_lock failed (non-fatal; error class %s): %s",
+                type(e).__name__,
+                e,
+            )
 
     try:
         from agent.sdlc_router import record_dispatch
@@ -142,7 +178,7 @@ def record_dispatch_for_session(
     return ok
 
 
-def _peek_issue_lock_conflict(session) -> dict | None:
+def _peek_issue_lock_conflict(session, run_id: str | None = None) -> dict | None:
     """Read-only check for whether a dispatch write failure was issue-lock
     contention (issue #1954 gap: the CLI ``ISSUE_LOCKED`` shape).
 
@@ -157,11 +193,11 @@ def _peek_issue_lock_conflict(session) -> dict | None:
     renews, or otherwise mutates the lock.
 
     Returns:
-        ``{"reason": "ISSUE_LOCKED", "owner_session_id": "..."}`` if the lock
-        is currently held by a different live session. ``None`` if the lock
-        is free/owned by this session (failure was unrelated to the lock),
-        the session has no parseable issue number, or the peek itself
-        errors.
+        ``{"reason": "ISSUE_LOCKED", "owner_run_id": "...",
+        "owner_session_id": "..."}`` if the lock is currently held by a
+        foreign run. ``None`` if the lock is free/owned by this run (failure
+        was unrelated to the lock), the session has no parseable issue
+        number, or the peek itself errors.
     """
     issue_number = _parse_issue_number_from_url(getattr(session, "issue_url", None))
     if not issue_number:
@@ -171,7 +207,10 @@ def _peek_issue_lock_conflict(session) -> dict | None:
         from models.session_lifecycle import touch_issue_lock
 
         session_id = getattr(session, "session_id", None) or ""
-        lock_result = touch_issue_lock(issue_number, session_id, peek=True)
+        effective_run_id = run_id or getattr(session, "active_run_id", None)
+        lock_result = touch_issue_lock(
+            issue_number, effective_run_id, session_id=session_id, peek=True
+        )
     except Exception as e:
         logger.debug(f"sdlc_dispatch: issue-lock peek failed (non-fatal): {e}")
         return None
@@ -179,7 +218,11 @@ def _peek_issue_lock_conflict(session) -> dict | None:
     if lock_result.acquired:
         return None
 
-    return {"reason": "ISSUE_LOCKED", "owner_session_id": lock_result.owner_session_id}
+    return {
+        "reason": "ISSUE_LOCKED",
+        "owner_run_id": lock_result.owner_run_id,
+        "owner_session_id": lock_result.owner_session_id,
+    }
 
 
 def get_dispatch_history(session) -> list:
@@ -229,6 +272,7 @@ def _cli_record(args) -> dict:
         session,
         skill=args.skill,
         pr_number=args.pr_number,
+        run_id=args.run_id,
     )
     history = get_dispatch_history(session)
     result = {"ok": ok, "history_length": len(history)}
@@ -241,7 +285,7 @@ def _cli_record(args) -> dict:
     # their own call sites"). Non-lock failures keep the pre-existing
     # {"ok": False, "history_length": N} shape unchanged -- additive only.
     if not ok:
-        lock_conflict = _peek_issue_lock_conflict(session)
+        lock_conflict = _peek_issue_lock_conflict(session, run_id=args.run_id)
         if lock_conflict is not None:
             result.update(lock_conflict)
 
@@ -313,7 +357,16 @@ def main() -> None:
     rec.add_argument("--pr-number", dest="pr_number", type=int, default=None)
     rec.add_argument("--session-id", dest="session_id", default=None)
     rec.add_argument("--issue-number", dest="issue_number", type=int, default=None)
-    rec.set_defaults(func=_cli_record)
+    rec.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help=(
+            "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
+            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+        ),
+    )
+    rec.set_defaults(func=_cli_record, requires_run_id=True)
 
     gt = subparsers.add_parser("get", help="Print the dispatch history as JSON")
     gt.add_argument("--session-id", dest="session_id", default=None)
@@ -331,6 +384,17 @@ def main() -> None:
     rs.set_defaults(func=_cli_reset)
 
     args = parser.parse_args()
+
+    # Run-identity gate (issue #2003): a state-mutating call without --run-id
+    # exits non-zero with a NAMED error -- no mint, no adopt.
+    if getattr(args, "requires_run_id", False) and not getattr(args, "run_id", None):
+        print(
+            "sdlc_dispatch: RUN_ID_REQUIRED — state-mutating calls must pass "
+            "--run-id (emitted by `sdlc-tool session-ensure`).",
+            file=sys.stderr,
+        )
+        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+        sys.exit(2)
 
     failed = False
     try:
