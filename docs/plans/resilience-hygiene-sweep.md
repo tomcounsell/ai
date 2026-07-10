@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-10
 tracking: https://github.com/tomcounsell/ai/issues/2004
 last_comment_id: none
+revision_applied: true
 ---
 
 # Resilience Hygiene Sweep: Unified Session Evidence, Enforced Artifact Freshness, Loud Degradation
@@ -27,9 +28,14 @@ disjoint from Workstream A (#2003).
    missing from one sibling. Per-run signals are not attempt-scoped (#1979 class — its
    targeted fix is in flight and owns the delivery guard).
 3. The merge-gate baseline's four staleness triggers are advisory-only; the gate can print
-   "stale" and still emit false blocks (#1933: 40 flags at 60 days). The live baseline is
-   degraded (`runs: 1`) with no downstream-visible marker; `flaky` entries never decay; the
-   refresh reflection is unregistered on this machine and reimplements freshness age-only.
+   "stale" and still emit false blocks (#1933: 40 flags at 60 days). The loud surface today
+   is the refresh script — it already emits a WARNING and exits non-zero when it writes a
+   degraded (`runs < 2`) baseline. The *silent* surface is the **persisted artifact** the
+   merge gate reads later: `data/main_test_baseline.json` carries no `degraded` field, no
+   run count the gate consults, and an argv-join provenance bug (`generated_by:
+   "python --merge"`), so a gate run days later cannot tell the artifact was degraded at
+   write time. Additionally `flaky` entries never decay, and the refresh reflection is
+   unregistered on this machine and reimplements freshness age-only.
 4. `find_affected` returns bare `[]` on every degraded branch — callers cannot distinguish
    "no docs affected" from "the finder is broken" (#1950).
 5. The silent-failure guard string-scans 7 hand-picked functions; ~87
@@ -112,10 +118,11 @@ one freshness contract, one degradation shape) was never created.
 - **Interface changes:** `find_affected` returns `(results, meta)`; `ExitReason` StrEnum
   replaces raw strings at producer sites (string *values* unchanged); `ArtifactEnvelope`
   fields added to baseline JSON (readers tolerate absence during migration).
-- **Coupling:** decreases — four predicates collapse onto one helper pair; gate and
-  reflection share one staleness function.
-- **Data ownership:** `session_runner/liveness.py` becomes the single home for progress
-  evidence; `scripts/_baseline_common.py` for artifact freshness.
+- **Coupling:** decreases — four predicates read one shared leaf presence signal (each
+  keeps its own grace/freshness policy); gate and reflection share one staleness function.
+- **Data ownership:** `session_runner/liveness.py` becomes the single home for the
+  progress-evidence *leaf signal* (presence-only, no clock); `scripts/_baseline_common.py`
+  for artifact freshness.
 - **Reversibility:** high — each of the seven items is independently revertable.
 
 ## Appetite
@@ -141,16 +148,38 @@ one freshness contract, one degradation shape) was never created.
 - **`ExitReason` StrEnum (T1.1)**: every member declares `is_clean` / `wrapup_eligible` /
   `is_anomaly`; the frozensets become derivations; role-driver failures become
   `TurnFailure(reason, detail)`. Telemetry string values unchanged.
-- **`SessionEvidence` (T1.2)**: `has_started(entry)` + `has_recent_progress(entry, *,
-  window, now)` in `session_runner/liveness.py`; all four predicates delegate;
-  presence-vs-freshness becomes a parameter. Attempt-scoping: an `attempt_generation`
-  counter bumped on resume/requeue; "did X happen this run" guards compare signal
-  generation, generalizing the in-flight #1979 fix.
+- **`SessionEvidence` (T1.2)**: the shared helper is **per-caller parameterized**, NOT one
+  boolean shared across all four callers. Only the *leaf presence/evidence signal* moves to
+  `session_runner/liveness.py` (`has_started(entry)` — the sticky-evidence triple, presence
+  only, no clock). Each caller keeps its own grace/freshness policy on top of that leaf
+  signal: `session_health._has_progress` retains its ~250 lines of grace-window logic
+  (sub-check A/B, #1356/#1817), `session_stall_classifier` keeps its 300s freshness window,
+  `crash_signature` keeps its presence-only read. They converge on the *same evidence
+  source*, not the same verdict. **`liveness.py` stays presence-only** (dependency-light,
+  stdlib-only — the reason `crash_signature.py` can call it where it cannot import
+  `session_health`); the freshness half is homed where a clock seam already exists (each
+  caller supplies its own `now`/window), so no clock dependency is pulled into `liveness.py`.
+  Before deleting `_has_progress`'s body, diff its grace branches against
+  `session_stall_classifier`'s fork; they are NOT interchangeable if `_has_progress` returns
+  True under grace where `_has_demonstrable_progress` returns False — a parity test pins that
+  an in-grace-window session still reads live post-refactor.
+- **Attempt-scoping (T1.2) — durable field DEFERRED**: this sweep lands the pure
+  predicate-consolidation only. The durable `attempt_generation` schema field is **deferred**
+  to whichever of #1979 (OPEN/unmerged) or #1927 (schema diet, may own the name) settles the
+  field name first — this hygiene sweep adds no durable schema field, no migration, and does
+  not touch the delivery guard (#1979 owns it). #1979's in-flight fix already generalizes
+  attempt-scoping on the one guard it owns; the fleet-wide generation field rides that work.
 - **`ArtifactEnvelope` (T1.3)**: stamped `{generated_at, commit, generated_by, runs,
   degraded, max_age_days, max_commit_distance}`; one `staleness(envelope)` shared by gate
-  and reflection; `/do-merge` invokes `--strict-freshness` (stale/degraded ⇒ refuse to
-  gate); degraded writes stamped; provenance fixed; reflection registered via the update
-  path; `flaky` decay added.
+  and reflection; degraded writes stamped (the persisted artifact carries `degraded`/`runs`,
+  the surface the gate reads later); provenance fixed; reflection registered via the update
+  path; `flaky` decay added. **Strict-freshness sequencing (deadlock guard):**
+  `/do-merge --strict-freshness` (stale/degraded ⇒ refuse to gate) is wired in **strictly
+  after** a confirmed committed `runs >= 2` artifact exists — the regen task lands first and
+  fails **loudly** (non-zero, no write) rather than silently persisting another degraded
+  artifact. `--strict-freshness` honors the existing `data/merge_authorized_{N}` break-glass
+  sentinel: if the operator has authorized the merge, the strict refusal yields to it rather
+  than self-locking every merge.
 - **Degraded-result metadata (T1.4)**: `find_affected` → `(results, meta)` with mandatory
   `degraded`, `reason`, `rerank_failures`, `candidates`; a thin list-subclass shim keeps
   old iteration code working during call-site migration.
@@ -179,16 +208,21 @@ one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
 - T1.1: `class ExitReason(StrEnum)` with a `classify` dataclass per member (or member
   attributes via `__new__`); `CLEAN_EXIT_REASONS = frozenset(r for r in ExitReason if
   r.is_clean)` preserves every import site unchanged. A completeness test iterates members.
-- T1.2: pure functions over the entry dict/model — no imports beyond stdlib in
-  `liveness.py` (it is already the dependency-light home, which is why
-  `crash_signature.py` can call it where it couldn't import `session_health`).
-  `attempt_generation` is one integer field; signals written by the runner stamp the
-  current generation; guards ignore stamps from prior generations. Field name coordinated
-  with #1927.
+- T1.2: `has_started(entry)` is a pure presence function over the entry dict/model — no
+  imports beyond stdlib in `liveness.py` (it is already the dependency-light home, which is
+  why `crash_signature.py` can call it where it couldn't import `session_health`). Each
+  caller layers its own freshness on top: `session_health._has_progress` keeps its grace
+  branches, `session_stall_classifier` its 300s window, both passing their own `now`/window
+  — the clock stays out of `liveness.py`. No durable `attempt_generation` field this sweep
+  (deferred to #1979/#1927); no migration. A parity test constructs an in-grace-window
+  session and asserts `session_health` still reads it live after `_has_progress` delegates
+  its leaf read to `has_started`.
 - T1.3: envelope helpers in `scripts/_baseline_common.py` (shared by `baseline_gate.py`,
   `refresh_test_baseline.py`, `reflections/housekeeping/test_baseline_refresh_check.py`);
-  gate reads envelope fields defensively (absent ⇒ legacy, warn). `--strict-freshness`
-  flag wired into the `/do-merge` addendum (`docs/sdlc/do-merge.md`).
+  gate reads envelope fields defensively (absent ⇒ legacy, warn). The `--strict-freshness`
+  flag is wired into the `/do-merge` addendum (`docs/sdlc/do-merge.md`) **only after** Task 4
+  commits a `runs >= 2` baseline; strict refusal checks for `data/merge_authorized_{N}`
+  before refusing (break-glass parity with the existing merge gate).
 - T1.5: `[tool.ruff.lint]` gains `S110`,`S112` scoped via per-directory `extend-select`
   (or repo-wide with the allowlist pass). Triage rule: swallowed exception on a
   state-mutating or delivery path ⇒ add `logger.warning`; genuinely-by-design silence ⇒
@@ -258,38 +292,39 @@ one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
 budget, land lint enablement + allowlist in this PR and convert the worst 20 sites,
 tracking the remainder in the allowlist itself (each `noqa` reason is the record).
 
-### Risk 2: Attempt-generation stamping misses a writer, recreating a #1962-style false guard
-**Impact:** a guard compares against an unstamped signal and misfires.
-**Mitigation:** stamps are written at the runner's single spawn/exit seam and the
-resume/requeue transitions only; a test enumerates the signal-writing sites (grep-driven)
-and asserts each stamps the generation.
+### Risk 2: Predicate consolidation flattens divergent grace semantics into one verdict
+**Impact:** dropping `session_health._has_progress`'s grace window while delegating marks a
+still-live in-grace-window session stalled/dead — the exact silent degradation this plan
+exists to kill.
+**Mitigation:** SessionEvidence is per-caller parameterized (see T1.2) — only the leaf
+presence signal is shared; each caller keeps its own grace/freshness. A parity test pins
+that an in-grace-window session still reads live after the refactor, and the builder diffs
+the grace branches before deleting `_has_progress`'s body.
 
 ### Risk 3: Strict freshness blocks merges right after enablement (stale baseline on day one)
-**Impact:** the first `/do-merge` after this lands refuses on the current `runs: 1` artifact.
-**Mitigation:** regenerating the baseline is a task in this plan, sequenced before the
-strict flag is wired into the addendum.
+**Impact:** the first `/do-merge` after this lands refuses on a degraded artifact.
+**Mitigation:** two guards — (a) the `runs >= 2` regen (Task 4) is committed *before*
+`--strict-freshness` is wired into the addendum, and the regen fails loudly rather than
+writing a degraded artifact; (b) `--strict-freshness` honors the existing
+`data/merge_authorized_{N}` break-glass sentinel, so an operator can always authorize past a
+false refusal.
 
 ## Race Conditions
 
-### Race 1: Resume bumps attempt_generation while the health check reads mid-transition
-**Location:** `tools/valor_session.py::resume_session` + `agent/session_health.py` scan
-**Trigger:** health tick between status transition and generation bump
-**Data prerequisite:** generation bump must be saved in the same `save()` as the
-pending transition
-**State prerequisite:** guards treat "signal generation > current" as current-run (clock
-of generations is monotonic per session)
-**Mitigation:** bump and status change in one partitioned save; comparison is `>=` on the
-guard side.
-
-No other race conditions identified — remaining items (enum, envelope, lint, contract
-test, import assert) are synchronous, single-writer changes.
+No race conditions in this sweep's scope. The durable `attempt_generation` field — the one
+item that would have introduced a resume/health-check timing hazard — is **deferred** to
+#1979/#1927 (see T1.2). The remaining items (enum, predicate leaf-signal delegation,
+envelope, lint, contract test, import assert) are synchronous, single-writer changes: each
+caller reads the shared presence signal on its own thread with its own clock, and no shared
+mutable state is written by the consolidation.
 
 ## No-Gos (Out of Scope)
 
 - [SEPARATE-SLUG #2003] Workstream A (run ownership, merge enforcement, PR resolution) —
   concurrent, disjoint pipeline.
-- [SEPARATE-SLUG #1927] Any AgentSession field rename beyond adding `attempt_generation`
-  (name coordinated there).
+- [SEPARATE-SLUG #1927 / #1979] The durable `attempt_generation` (or equivalently-named)
+  AgentSession field — deferred entirely to whichever settles the name first. This sweep
+  adds no durable schema field.
 - [SEPARATE-SLUG #1925] `HarnessResult` / harness return-shape changes (program T2.4).
 - [SEPARATE-SLUG #1926] Deletion/pruning of liveness machinery, watchdogs, or the
   stall-classifier taxonomy — this plan unifies what exists; #1926 decides what dies.
@@ -302,8 +337,9 @@ test, import assert) are synchronous, single-writer changes.
   needed): register the baseline-refresh reflection on all machines — closing the
   deployment gap is part of T1.3, not a manual vault edit.
 - `pyproject.toml` ruff config propagates with the repo; no new dependencies.
-- One idempotent migration in `scripts/update/migrations.py` for `attempt_generation`
-  (Popoto rule). No other update-system changes required.
+- **No Popoto migration** — the durable `attempt_generation` field is deferred to
+  #1979/#1927, so this sweep adds no schema field and needs no migration. No other
+  update-system changes required.
 
 ## Agent Integration
 
@@ -328,9 +364,14 @@ through the `find_affected_docs` wrapper the agent actually calls.
 
 - [ ] Adding an `ExitReason` member without classification fails a completeness test; no
       raw exit-reason string literals outside `router.py` (grep check)
-- [ ] All four progress predicates delegate to `SessionEvidence`; #1962 and #1917
-      regression tests pass unmodified; #1983's 3 failures fixed
-- [ ] A prior-attempt signal cannot satisfy a current-run guard (attempt-scoping test)
+- [ ] All four progress predicates read the shared `SessionEvidence.has_started` leaf
+      signal; each caller keeps its own grace/freshness policy; #1962 and #1917 regression
+      tests pass unmodified; #1983's 3 failures fixed
+- [ ] A parity test asserts an in-grace-window session still reads live after
+      `_has_progress` delegates its leaf read (grace semantics preserved, not flattened)
+- [ ] Durable `attempt_generation` field is NOT added this sweep (deferred to #1979/#1927);
+      the fleet-wide attempt-scoping test rides that follow-up. #1979's own regression test
+      stays green when its PR merges
 - [ ] `baseline_gate --strict-freshness` refuses on stale/degraded envelopes;
       `refresh_test_baseline.py` stamps `degraded` and correct provenance; reflection
       registered by the update path; `flaky` entries decay
@@ -393,9 +434,12 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - **Assigned To**: signals-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Gate**: verify #1979 closed before touching any delivery-guard-adjacent code
-- Helpers in liveness.py; four predicates delegate; `attempt_generation` field + migration
-  + stamp sites + guard comparisons
+- **Gate**: do NOT touch the delivery guard (owned by #1979, OPEN). No durable
+  `attempt_generation` field this sweep (deferred to #1979/#1927).
+- `has_started` leaf helper in liveness.py (presence-only, stdlib); the four predicates
+  read it while keeping their own grace/freshness policy; diff `_has_progress`'s grace
+  branches before deleting its body; add the in-grace-window parity test; fix #1983's 3
+  failures against the unified leaf signal
 
 ### 3. ArtifactEnvelope + strict freshness + reflection registration
 - **Task ID**: build-envelope
@@ -471,17 +515,14 @@ through the `find_affected_docs` wrapper the agent actually calls.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | Risk / Scope / History (cross-validated) | Four-predicate collapse can silently reclassify live sessions as dead if SessionEvidence flattens divergent grace semantics into one verdict | T1.2 rewritten: SessionEvidence is per-caller parameterized; only the leaf presence signal (`has_started`) is shared; each caller keeps its own grace/freshness. New in-grace-window parity test + grace-branch diff before deleting `_has_progress`. Risk 2 rewritten. | Delegate the leaf read only; keep the ~250 lines of grace logic in `session_health`; assert an in-grace session still reads live post-refactor |
+| CONCERN | Scope & Value | `has_recent_progress` pulls a clock dependency into the deliberately presence-only `liveness.py` | `liveness.py` stays presence-only (`has_started` only, stdlib); freshness homed per-caller where the clock seam already exists | No `now`/window param enters `liveness.py`; callers pass their own clock |
+| CONCERN | Risk / History | `attempt_generation` None comparison crashes the health guard on legacy sessions | Moot — the durable field is deferred entirely (see below); no generation comparison lands this sweep | If revived later: default 0, coalesce `(x or 0)`, None-case test |
+| CONCERN | Scope & Value | `attempt_generation` durable field couples this hygiene sweep to shifting #1979/#1927 ground | Open Question 2 resolved toward DEFER: land pure predicate-consolidation now; defer the durable field + migration to #1979/#1927 | Scope, Update System, Race Conditions, No-Gos, Success Criteria all updated for the deferral |
+| CONCERN | Risk & Robustness | Strict-freshness + degraded regen can self-lock all merges with no break-glass | T1.3 sequences `--strict-freshness` strictly after a committed `runs>=2` artifact; regen fails loudly (no degraded write); strict refusal honors `data/merge_authorized_{N}` break-glass | Risk 3 rewritten with both guards |
+| CONCERN | History & Consistency | Problem (3) framing blamed the already-loud refresh script; the silent surface is the persisted artifact | Problem (3) + T1.3 reworded to target the persisted artifact (no `degraded`/`runs`/provenance the gate reads later), not the refresh script's exit code | Success criterion asserts the envelope fields the gate consumes |
 
----
-
-## Open Questions
-
-1. **T1.5 scope of enforcement:** enable S110/S112 repo-wide with a large first allowlist,
-   or scope to `agent/ bridge/ tools/ worker/ monitoring/` only (proposed)? Repo-wide
-   catches future `scripts/` sites but inflates the initial triage.
-2. **`attempt_generation` naming:** proposed name pending a quick check against #1927's
-   naming direction — accept `attempt_generation`, or defer the field name to the schema
-   diet and land it there first?
-3. **Strict-freshness default:** proposed warn-by-default everywhere with
-   `--strict-freshness` only at `/do-merge` (per the program plan). Confirm, or go strict
-   everywhere after the first refresh cycle?
+**Open Questions resolved at revision:**
+1. **T1.5 scope** — scoped to `agent/ bridge/ tools/ worker/ monitoring/` (not repo-wide); keeps the initial triage bounded. `scripts/` adopts S110/S112 when next touched.
+2. **`attempt_generation` naming** — DEFERRED (see critique table); no durable field this sweep.
+3. **Strict-freshness default** — warn-by-default everywhere, `--strict-freshness` only at `/do-merge` (per the program plan), sequenced after the first `runs>=2` refresh.
