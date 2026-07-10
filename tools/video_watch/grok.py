@@ -22,6 +22,8 @@ import os
 
 import httpx
 
+from tools.video_watch.constants import VIDEO_WATCH_GROK_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 # xAI is OpenAI-compatible. Provisional/tunable: base URL and model are pinned
@@ -29,9 +31,6 @@ logger = logging.getLogger(__name__)
 # or the recommended vision-capable model changes.
 XAI_BASE_URL = os.getenv("GROK_API_BASE_URL", "https://api.x.ai/v1")
 XAI_MODEL = os.getenv("GROK_MODEL", "grok-2-latest")
-
-# Provisional/tunable: HTTP timeout for the single Grok call. Grain of salt.
-GROK_TIMEOUT_SECONDS = float(os.getenv("GROK_TIMEOUT_SECONDS", "60"))
 
 
 def fetch_x_context(url: str, question: str | None = None) -> str | None:
@@ -76,7 +75,7 @@ def fetch_x_context(url: str, question: str | None = None) -> str | None:
     }
 
     try:
-        with httpx.Client(timeout=GROK_TIMEOUT_SECONDS) as client:
+        with httpx.Client(timeout=VIDEO_WATCH_GROK_TIMEOUT) as client:
             response = client.post(
                 f"{XAI_BASE_URL}/chat/completions",
                 json=payload,

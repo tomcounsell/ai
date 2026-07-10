@@ -24,38 +24,56 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from tools.link_analysis import transcribe_audio_file
+from tools.video_watch.constants import (
+    VIDEO_WATCH_FRAME_DIR_MAX_AGE,
+    VIDEO_WATCH_FRAME_WIDTH,
+    VIDEO_WATCH_MAX_DURATION,
+    VIDEO_WATCH_MAX_FRAMES,
+    VIDEO_WATCH_PROBE_TIMEOUT,
+    VIDEO_WATCH_SUBPROCESS_TIMEOUT,
+    WATCH_CLI_NAME,
+)
 from tools.video_watch.grok import fetch_x_context
 
 logger = logging.getLogger(__name__)
 
-# The agent-facing command name, defined once so a naming reversal touches one
-# place (reused by the enrichment signpost string).
-WATCH_CLI_NAME = "valor-video-watch"
+__all__ = [
+    "WATCH_CLI_NAME",
+    "VIDEO_WATCH_MAX_FRAMES",
+    "VIDEO_WATCH_FRAME_WIDTH",
+    "VIDEO_WATCH_MAX_DURATION",
+    "VIDEO_WATCH_SUBPROCESS_TIMEOUT",
+    "VIDEO_WATCH_PROBE_TIMEOUT",
+    "VIDEO_WATCH_FRAME_DIR_MAX_AGE",
+    "VideoWatchError",
+    "detect_source",
+    "watch_video",
+    "reap_stale_frame_dirs",
+]
 
 # --- Provisional/tunable constants -------------------------------------------
 # All grain-of-salt: adopted from claude-video's balanced defaults, tuned against
 # real usage. Each is env-overridable, mirroring MAX_VIDEO_DURATION in
 # tools/link_analysis.
+#
+# WATCH_CLI_NAME, VIDEO_WATCH_MAX_FRAMES, VIDEO_WATCH_FRAME_WIDTH,
+# VIDEO_WATCH_MAX_DURATION, VIDEO_WATCH_SUBPROCESS_TIMEOUT,
+# VIDEO_WATCH_PROBE_TIMEOUT, and VIDEO_WATCH_FRAME_DIR_MAX_AGE now live in
+# tools/video_watch/constants.py (a dependency-free module bridge/enrichment.py
+# can safely import) and are re-exported above/via __all__ for backward compat.
 
-# Cap on frames emitted per video — bounds agent context/token cost.
-VIDEO_WATCH_MAX_FRAMES = int(os.getenv("VIDEO_WATCH_MAX_FRAMES", "60"))
-# Output frame width in px (height auto-scaled); 512 balances legibility vs tokens.
-VIDEO_WATCH_FRAME_WIDTH = int(os.getenv("VIDEO_WATCH_FRAME_WIDTH", "512"))
-# Only the first N seconds are processed; guards latency/token blowup on long clips.
-VIDEO_WATCH_MAX_DURATION = int(os.getenv("VIDEO_WATCH_MAX_DURATION", "1800"))
 # ffmpeg scene-change score threshold (0..1); higher = fewer, more distinct frames.
 VIDEO_WATCH_SCENE_THRESHOLD = float(os.getenv("VIDEO_WATCH_SCENE_THRESHOLD", "0.3"))
 # Near-duplicate dedup: mean-abs-diff over a 16x16 grayscale thumbnail, 0..255.
 # Frames closer than this to the previous kept frame are dropped.
 VIDEO_WATCH_DEDUP_THRESHOLD = float(os.getenv("VIDEO_WATCH_DEDUP_THRESHOLD", "6.0"))
-
-# yt-dlp download timeout (seconds).
-VIDEO_WATCH_DOWNLOAD_TIMEOUT = int(os.getenv("VIDEO_WATCH_DOWNLOAD_TIMEOUT", "300"))
 
 _YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
 _X_HOSTS = ("twitter.com", "x.com", "mobile.twitter.com", "mobile.x.com")
@@ -75,9 +93,9 @@ def detect_source(url: str) -> str:
     host_match = re.search(r"https?://([^/]+)/?", lowered)
     host = host_match.group(1) if host_match else lowered
     host = host.split("@")[-1]  # strip any userinfo
-    if any(host == h or host.endswith("." + h) or h in host for h in _YOUTUBE_HOSTS):
+    if any(host == h or host.endswith("." + h) for h in _YOUTUBE_HOSTS):
         return "youtube"
-    if any(host == h or host.endswith("." + h) or h in host for h in _X_HOSTS):
+    if any(host == h or host.endswith("." + h) for h in _X_HOSTS):
         return "x"
     return "other"
 
@@ -98,7 +116,7 @@ def _probe_duration(video_path: Path) -> float | None:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=VIDEO_WATCH_PROBE_TIMEOUT,
         )
         if out.returncode == 0 and out.stdout.strip():
             return float(out.stdout.strip())
@@ -128,11 +146,11 @@ def _download_video(url: str, tmpdir: Path) -> Path:
             cmd,
             capture_output=True,
             text=True,
-            timeout=VIDEO_WATCH_DOWNLOAD_TIMEOUT,
+            timeout=VIDEO_WATCH_SUBPROCESS_TIMEOUT,
         )
     except subprocess.TimeoutExpired as e:
         raise VideoWatchError(
-            f"yt-dlp download timed out after {VIDEO_WATCH_DOWNLOAD_TIMEOUT}s"
+            f"yt-dlp download timed out after {VIDEO_WATCH_SUBPROCESS_TIMEOUT}s"
         ) from e
     except FileNotFoundError as e:
         raise VideoWatchError(
@@ -147,6 +165,46 @@ def _download_video(url: str, tmpdir: Path) -> Path:
     if not videos:
         raise VideoWatchError("yt-dlp reported success but no video file was produced.")
     return videos[0]
+
+
+def _extract_audio(video_path: Path, tmpdir: Path) -> Path:
+    """Extract a mono 16kHz audio track from ``video_path`` via ffmpeg.
+
+    Whisper only needs the audio; handing it the full merged .mp4 wastes
+    upload bandwidth and time. ``.wav`` is used because it is in
+    ``tools.link_analysis.transcribe_audio_file``'s known MIME map (avoids a
+    silent MIME mis-type when uploaded to the Whisper API).
+    """
+    audio_path = tmpdir / "audio.wav"
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        str(audio_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=VIDEO_WATCH_SUBPROCESS_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as e:
+        raise VideoWatchError("ffmpeg audio extraction timed out") from e
+    except FileNotFoundError as e:
+        raise VideoWatchError(
+            "ffmpeg not installed. Install ffmpeg and ensure it is on PATH."
+        ) from e
+
+    if result.returncode != 0:
+        raise VideoWatchError(f"ffmpeg audio extraction failed: {result.stderr.strip()[:400]}")
+    if not audio_path.exists():
+        raise VideoWatchError("ffmpeg reported success but no audio file was produced.")
+    return audio_path
 
 
 def _extract_scene_frames(video_path: Path, tmpdir: Path) -> list[tuple[Path, float]]:
@@ -186,7 +244,9 @@ def _extract_scene_frames(video_path: Path, tmpdir: Path) -> list[tuple[Path, fl
         str(frames_dir / "frame_%05d.jpg"),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=VIDEO_WATCH_SUBPROCESS_TIMEOUT
+        )
     except subprocess.TimeoutExpired as e:
         raise VideoWatchError("ffmpeg frame extraction timed out") from e
     except FileNotFoundError as e:
@@ -365,18 +425,28 @@ async def watch_video(
                 result["notes"].append(f"frame extraction failed: {e}")
                 logger.warning("watch_video frame extraction failed for %s: %s", url, e)
 
-            # Transcript from the same downloaded media (reuse link_analysis whisper path).
-            try:
-                transcript = await transcribe_audio_file(video_path)
-                if transcript:
-                    result["transcript"] = transcript
-                else:
-                    result["notes"].append(
-                        "no transcript (silent, music-only, or no OPENAI_API_KEY)."
-                    )
-            except Exception as e:  # noqa: BLE001 -- transcript is best-effort
-                result["notes"].append(f"transcription failed: {e}")
-                logger.warning("watch_video transcription failed for %s: %s", url, e)
+            # Transcript from an extracted audio track (never the raw merged
+            # video) via link_analysis' Whisper path. Duration beyond
+            # VIDEO_WATCH_MAX_DURATION is treated as too long to reasonably
+            # transcribe (mirrors the same ~30min ceiling used for frames).
+            if duration and duration > VIDEO_WATCH_MAX_DURATION:
+                result["notes"].append("[audio too long to transcribe — frames only]")
+            else:
+                try:
+                    audio_path = _extract_audio(video_path, workdir)
+                    transcript = await transcribe_audio_file(audio_path)
+                    if transcript:
+                        result["transcript"] = transcript
+                    else:
+                        result["notes"].append(
+                            "no transcript (silent, music-only, or no OPENAI_API_KEY)."
+                        )
+                except VideoWatchError as e:
+                    result["notes"].append(f"audio extraction failed: {e}")
+                    logger.warning("watch_video audio extraction failed for %s: %s", url, e)
+                except Exception as e:  # noqa: BLE001 -- transcript is best-effort
+                    result["notes"].append(f"transcription failed: {e}")
+                    logger.warning("watch_video transcription failed for %s: %s", url, e)
 
     # X-native Grok context (X source only): post/thread context + media fallback.
     if source == "x":
@@ -400,3 +470,38 @@ async def watch_video(
             + " ".join(result["notes"])
         ).strip()
     return result
+
+
+def reap_stale_frame_dirs(max_age_seconds: int | None = None) -> int:
+    """Remove ``video_watch_frames_*`` temp dirs older than ``max_age_seconds``.
+
+    ``watch_video()`` persists emitted frames to a ``tempfile.mkdtemp`` dir
+    that outlives the call (the agent ``Read``s them after the function
+    returns), so nothing removes it automatically. This sweep bounds the
+    resulting disk leak. Best-effort: a failure removing one dir is logged
+    and does not stop the sweep.
+
+    Args:
+        max_age_seconds: Age threshold in seconds. Defaults to
+            ``VIDEO_WATCH_FRAME_DIR_MAX_AGE`` (24h) when ``None``.
+
+    Returns:
+        Count of directories removed.
+    """
+    if max_age_seconds is None:
+        max_age_seconds = VIDEO_WATCH_FRAME_DIR_MAX_AGE
+
+    removed = 0
+    now = time.time()
+    base = Path(tempfile.gettempdir())
+    for entry in base.glob("video_watch_frames_*"):
+        try:
+            if not entry.is_dir():
+                continue
+            age = now - entry.stat().st_mtime
+            if age > max_age_seconds:
+                shutil.rmtree(entry, ignore_errors=False)
+                removed += 1
+        except OSError as e:
+            logger.warning("Failed to reap stale frame dir %s: %s", entry, e)
+    return removed

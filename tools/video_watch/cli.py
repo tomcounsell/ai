@@ -17,7 +17,8 @@ import asyncio
 import json
 import sys
 
-from tools.video_watch import WATCH_CLI_NAME, watch_video
+from tools.video_watch import reap_stale_frame_dirs, watch_video
+from tools.video_watch.constants import WATCH_CLI_NAME
 
 
 def _format_human(result: dict) -> str:
@@ -61,6 +62,11 @@ def _format_human(result: dict) -> str:
 
 def main():
     """Main CLI entry point for valor-video-watch."""
+    try:
+        reap_stale_frame_dirs()
+    except Exception as e:  # noqa: BLE001 -- reaper failure must never block a watch call
+        print(f"Warning: stale frame-dir reap failed: {e}", file=sys.stderr)
+
     parser = argparse.ArgumentParser(
         prog=WATCH_CLI_NAME,
         description=(

@@ -23,12 +23,9 @@ import logging
 import os
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from tools.video_watch.constants import VIDEO_WATCH_THIN_TRANSCRIPT_CHARS, WATCH_CLI_NAME
 
-# Provisional/tunable: transcripts shorter than this (chars, stripped) are treated as
-# "thin" — likely music-only/silent/on-screen-only — and get a watch signpost. Grain of
-# salt; tune against real usage.
-VIDEO_WATCH_THIN_TRANSCRIPT_CHARS = int(os.getenv("VIDEO_WATCH_THIN_TRANSCRIPT_CHARS", "80"))
+logger = logging.getLogger(__name__)
 
 
 async def enrich_message(
@@ -188,8 +185,10 @@ async def enrich_message(
                     transcript_text = (r.get("transcript") or "").strip()
                     if len(transcript_text) < VIDEO_WATCH_THIN_TRANSCRIPT_CHARS:
                         url = r.get("url") or r.get("video_id") or "the video"
+                        # WATCH_CLI_NAME is the valor-video-watch command (single
+                        # source of truth in tools/video_watch/constants.py).
                         enriched_text += (
-                            f"\n\n[transcript thin for {url} — run valor-video-watch {url} "
+                            f"\n\n[transcript thin for {url} — run {WATCH_CLI_NAME} {url} "
                             f"for visual grounding]"
                         )
         except Exception as e:
