@@ -2383,9 +2383,13 @@ async def get_response_via_harness(
     and pathological large single messages it bounds the argv to prevent the
     binary's "Separator is found" overflow crash.
 
-    If the resumed subprocess exits with **any** non-zero return code, retries
-    once using ``full_context_message`` without ``--resume`` (no stderr substring
-    gate — substring matching is brittle across CLI versions and locales).
+    If the resumed subprocess exits with **any** non-zero return code **without
+    having emitted a ``result`` event**, retries once using
+    ``full_context_message`` without ``--resume`` (no stderr substring gate —
+    substring matching is brittle across CLI versions and locales). Issue #1980:
+    a non-zero exit that follows a fired ``result`` event keeps the captured
+    completion and does NOT retry — the ``result`` event is the protocol's
+    completion signal, and a fresh retry would clobber a valid answer.
 
     A separate exit-code-0 sentinel check (``IMAGE_DIMENSION_SENTINEL``) is placed
     **above** the ``returncode != 0`` guard to handle Claude Code's image-dimension
@@ -2520,6 +2524,26 @@ async def get_response_via_harness(
             "model": model or "default",
         }
 
+    # Capture whether the PRIMARY invocation emitted a `result` event (issue
+    # #1980). `_run_harness_subprocess` reports this as the second arg of
+    # `on_exit_status(returncode, result_event_fired)` — it is the ONLY precise
+    # signal for "a result event fired." The returned `result_text` cannot stand
+    # in for it: `_run_harness_subprocess` returns a non-None string both when a
+    # result event fired (BRANCH A) AND when no result event fired but partial
+    # streamed text accumulated (BRANCH B), so `result_text is None` is true only
+    # in BRANCH C. The stale-UUID fallback below gates on this boolean so a
+    # resumed turn that produced a valid completion is never discarded by a
+    # destructive fresh-session retry on a post-turn non-zero exit.
+    primary_result_event_fired = False
+
+    def _capture_primary_exit(rc: int | None, fired: bool) -> None:
+        nonlocal primary_result_event_fired
+        primary_result_event_fired = fired
+        # Chain to the caller's callback so the role driver's exit_statuses
+        # list still receives every subprocess invocation (residual #1916).
+        if on_exit_status is not None:
+            on_exit_status(rc, fired)
+
     # Call site 1 of 3 — primary harness invocation. 8-tuple unpack
     # (issue #1099 Mode 1 added stderr_snippet; issue #1245 added num_turns
     # and tool_call_count).
@@ -2541,8 +2565,9 @@ async def get_response_via_harness(
         on_sdk_finished=on_sdk_finished,
         on_stdout_event=on_stdout_event,
         on_init=on_init,
-        on_exit_status=on_exit_status,
+        on_exit_status=_capture_primary_exit,
         ttft_metadata=_ttft_meta,
+        true_session_id=session_id,
     )
     # Issue #1245: accumulate counts across primary + fallback subprocess
     # invocations (image-dimension fallback, stale-UUID fallback). Each
@@ -2584,6 +2609,7 @@ async def get_response_via_harness(
                 on_stdout_event=on_stdout_event,
                 on_init=on_init,
                 on_exit_status=on_exit_status,
+                true_session_id=session_id,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2598,11 +2624,23 @@ async def get_response_via_harness(
             )
 
     # Mandatory stale-UUID fallback: when prior_uuid was set and the subprocess
-    # exits with ANY non-zero return code, retry once without --resume using the
-    # full-context message. The fallback does NOT inspect stderr — substring
-    # matching is brittle across CLI versions and locales, and an unnecessary
-    # retry on a non-stale-UUID error costs only one extra subprocess spawn.
-    if prior_uuid and returncode is not None and returncode != 0:
+    # exits with ANY non-zero return code WITHOUT having emitted a `result` event,
+    # retry once without --resume using the full-context message. The fallback
+    # does NOT inspect stderr — substring matching is brittle across CLI versions
+    # and locales, and an unnecessary retry on a non-stale-UUID error costs only
+    # one extra subprocess spawn.
+    #
+    # Issue #1980: gate on `not primary_result_event_fired`. A resumed turn that
+    # emitted a `result` event is a SUCCESSFUL resume; its completion is the
+    # protocol's completion signal (mirrors the role driver's residual-#1916
+    # contract at role_driver.py: "a nonzero exit AFTER a result event keeps the
+    # result"). Without this gate, a valid completion followed by a post-turn
+    # non-zero exit triggered a fresh-session retry whose empty output clobbered
+    # the good result_text — the wrap-up guard then delivered the canned
+    # OPERATOR_TERMINAL_MESSAGE instead of the real answer. The fallback still
+    # fires when no result event fired (BRANCH B partial text, or BRANCH C genuine
+    # stale UUID), preserving all pre-existing recovery.
+    if prior_uuid and returncode is not None and returncode != 0 and not primary_result_event_fired:
         if full_context_message is not None:
             logger.warning(
                 f"[harness] Stale UUID {prior_uuid} for session_id={session_id}, "
@@ -2640,6 +2678,7 @@ async def get_response_via_harness(
                 on_stdout_event=on_stdout_event,
                 on_init=on_init,
                 on_exit_status=on_exit_status,
+                true_session_id=session_id,
             )
             total_num_turns += this_num_turns
             total_tool_call_count += this_tool_call_count
@@ -2649,6 +2688,18 @@ async def get_response_via_harness(
                 "falling back to first-turn path — no full_context_message available"
             )
             result_text = None
+    elif prior_uuid and returncode is not None and returncode != 0 and primary_result_event_fired:
+        # Issue #1980 observability: a resumed turn exited non-zero but a result
+        # event fired first, so the stale-UUID fallback is deliberately skipped
+        # and the captured completion is kept. Logged so incident triage can tell
+        # this apart from a fallback that fired.
+        logger.info(
+            "[harness] Resumed turn exited %s AFTER a result event for "
+            "session_id=%s — keeping the completion, skipping stale-UUID fallback "
+            "(issue #1980)",
+            returncode,
+            session_id,
+        )
 
     # Store the Claude Code UUID for next-turn --resume (#976)
     if session_id and session_id_from_harness:
@@ -2762,6 +2813,7 @@ async def _run_harness_subprocess(
     on_init: Callable[[dict], None] | None = None,
     on_exit_status: Callable[[int | None, bool], None] | None = None,
     ttft_metadata: dict | None = None,
+    true_session_id: str | None = None,
 ) -> tuple[
     str | None,
     str | None,
@@ -2829,6 +2881,14 @@ async def _run_harness_subprocess(
             model} that are merged into the JSONL entry written to
             ``logs/cold_start_metrics.jsonl`` on first-stdout-byte.  Omitting
             this parameter disables TTFT logging (all non-PM call sites).
+
+    Turn-boundary liveness (issue #1935):
+        true_session_id: the true ``AgentSession.session_id`` (NOT the
+            Claude UUID reported on the ``result`` event, NOT the
+            ``agent_session_id`` env value) — passed explicitly to
+            ``agent.hooks.liveness_writers.record_turn_boundary`` on each
+            ``result`` event so ``last_turn_at`` is written from the worker
+            process, where ``AGENT_SESSION_ID`` is never set.
     """
     # TTFT baseline: record spawn timestamp before exec (issue #1227).
     _spawn_ts = time.monotonic()
@@ -2940,10 +3000,14 @@ async def _run_harness_subprocess(
                 # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
                 # the in-flight AgentSession so the dashboard can show how
                 # recently the SDK completed a turn. Best-effort, never raises.
+                # Passes the true AgentSession.session_id explicitly (issue
+                # #1935) — NOT data.get("session_id") (the Claude UUID) and NOT
+                # the env AGENT_SESSION_ID (unset in the worker process; the
+                # explicit id is what makes this write actually land).
                 try:
                     from agent.hooks.liveness_writers import record_turn_boundary
 
-                    record_turn_boundary()
+                    record_turn_boundary(session_id=true_session_id)
                 except Exception as _liveness_err:
                     logger.debug("liveness turn-boundary write failed: %s", _liveness_err)
                 # Extract per-turn token + cost counts (issue #1128). These

@@ -807,13 +807,22 @@ class TestHealthCheckNoProgressRecovery:
 
     @pytest.mark.asyncio
     async def test_no_progress_with_delivered_response_finalized_completed(self):
-        """Defensive: a no-progress session with response_delivered_at set must
-        still hit the delivery guard first and finalize as ``completed``."""
+        """Defensive: a no-progress session with response_delivered_at set
+        *for this run* (>= started_at) must still hit the delivery guard
+        first and finalize as ``completed``.
+
+        response_delivered_at is deliberately set relative to started_at
+        (rather than a fixed calendar date) so this fixture stays valid under
+        the epoch-scoped delivery guard (#1979): the guard only fires when
+        the delivery belongs to the *current* run, i.e.
+        response_delivered_at >= (started_at or created_at).
+        """
         session = self._make_stuck_dev_session(
             project_key="valor",
             agent_session_id="no-prog-delivered-1",
-            response_delivered_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
+        # Delivered partway through this run: after started_at, well before now.
+        session.response_delivered_at = session.started_at + timedelta(seconds=1)
 
         mock_finalize, mock_transition, lifecycle_ctx = self._patch_lifecycle()
         live_worker = MagicMock(done=MagicMock(return_value=False))

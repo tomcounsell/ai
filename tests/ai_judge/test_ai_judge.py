@@ -59,12 +59,17 @@ class TestJudgeConfig:
 
     def test_default_config(self):
         """Test default configuration values."""
-        from config.settings import settings
+        from config.settings import ModelSettings, settings
 
         config = JudgeConfig()
-        # The judge default now reads the configured generation model.
+        # The judge default reads the configured generation model — the
+        # process-wide singleton, which reflects any machine-local
+        # MODELS__OLLAMA_GENERATION_MODEL override.
         assert config.model == settings.models.ollama_generation_model
-        assert config.model == "gemma4:31b-cloud"
+        # Assert the CODE default env-independently via a bare ModelSettings():
+        # reading the singleton here would test the machine, not the default
+        # (mirrors tests/unit/test_ollama_consolidation.py::test_generation_model_default).
+        assert ModelSettings().ollama_generation_model == "gemma4:31b-cloud"
         assert config.temperature == 0.1
         assert config.strict_mode is True
         assert config.fallback_to_heuristics is True

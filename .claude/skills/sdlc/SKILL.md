@@ -162,6 +162,8 @@ For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output 
 
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass, cleared by `/do-plan` (Phase 4, Step 2b) after pushing the revision, and self-heals when `revision_applied: true` is in the plan frontmatter. Gated on `pr_number is None` so an already-shipped PR is never blocked.
 
+**ISSUE_LOCKED (not a G-guard, issue #1954):** `sdlc-tool next-skill` checks the issue-level ownership lock *before* evaluating G1-G7, and short-circuits to `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_session_id": ...}` if a different live session already holds the lock for this issue. `ensure_session` surfaces the same `{"blocked": true, ...}` shape at its own call site. `dispatch record`'s CLI wrapper surfaces the lock differently: on a failed write it peeks the lock and, if contention caused the failure, merges `reason`/`owner_session_id` into its existing `{"ok": false, "history_length": N}` result (never `blocked`) — see `_cli_record()` in `tools/sdlc_dispatch.py`. Treat either shape exactly like a G1-G7 block: surface the `reason` and `owner_session_id` to the human, do not loop, and do not attempt to route around it by guessing an alternative skill.
+
 **Known gap — stale REVIEW verdict after PATCH (issue #1932 / PR #1941):** G3 and G6 above key off `_verdicts["REVIEW"]` containing `APPROVED`, not off whether that verdict was recorded *after* the most recent PATCH commit. Before PR #1941's router fix (and for any similar gap not yet caught), `next-skill` can propose `/do-merge` on a stale pre-patch `APPROVED`/`CHANGES REQUESTED` verdict because nothing forces a fresh `/do-pr-review` after `/do-patch` resolves REVIEW findings. Before trusting a router-proposed `/do-merge`, verify with `sdlc-tool verdict get --stage REVIEW --issue-number {N}` that the recorded verdict is `APPROVED` and postdates the patch commit; if not, manually dispatch `/do-pr-review` first.
 
 Record every dispatch decision via `sdlc-tool dispatch record` BEFORE invoking the sub-skill — this preserves the G4 oscillation signal even if the sub-skill crashes mid-execution.
@@ -217,10 +219,15 @@ Blocked:
 {"blocked": true, "reason": "G4: stage oscillation ...", "guard_id": "G4"}
 ```
 
+Blocked (issue-level ownership lock -- not a G-guard, see Step 3.5):
+```json
+{"blocked": true, "reason": "ISSUE_LOCKED", "owner_session_id": "..."}
+```
+
 **How to use the output:**
 1. If `multi` is `true`: invoke the `pthread` skill to run all listed `skills` as parallel sub-agents. Record dispatch for the *first* skill in the list (the multi-dispatch is gated by guards as one decision -- a guard fire on the first dispatch replaces the whole pair). After both sub-agents complete, re-invoke `/sdlc` to re-dispatch based on the new pipeline state.
 2. If `dispatched` is `true` (single): record the dispatch via `sdlc-tool dispatch record` (see Step 3.5), then invoke the returned `skill`.
-3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill.
+3. If `blocked` is `true`: surface the `reason` to the human and wait. Do NOT loop or guess an alternative skill. This applies identically whether the block came from a G1-G7 guard or from `reason: "ISSUE_LOCKED"` (another live session already owns this issue) -- report `owner_session_id` to the human, do not loop, do not attempt to route around it.
 4. If neither key is present (error): log the `error` field and escalate to the human.
 
 **Before recording and dispatching**, also supply `--proposed-skill` when you already know what skill you intend to invoke (enables G3 PR-lock detection):

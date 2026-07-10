@@ -117,6 +117,16 @@ other value or no verdict FAILS.
 Whichever source is used: if review approval cannot be confirmed, FAIL closed —
 never merge an unconfirmed-review PR.
 
+If the repo-context file declares a DOCS stage-completion substrate, treat
+DOCS-stage completion as a first-class precondition here alongside the REVIEW
+verdict, following its exact invocation (the deterministic gate lives in that
+substrate addendum, not this global skill). When no such substrate exists, DOCS
+completion cannot be verified at merge time, so emit this announced non-gate
+advisory line to the merge log (an auditable advisory, NOT a silent pass) and
+proceed on supervisor sequencing:
+
+`"DOCS-completion gate: NOT ENFORCED — no substrate; DOCS completion cannot be verified here, merge relies on supervisor sequencing (see #1915)."`
+
 ## Step 3: Verify Issue Link
 
 The PR body (from Step 1's `body`) must contain a `Closes #{issue_number}` (or

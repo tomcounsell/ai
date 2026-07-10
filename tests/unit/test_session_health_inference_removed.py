@@ -241,29 +241,66 @@ def test_zombie_profile_is_not_progress():
 
 def test_own_progress_gate_fresh_heartbeat_is_progress():
     """
-    D0 gate (issue #1724): fresh heartbeat does NOT protect a session that is past
-    the never-started grace window with zero SDK output.
+    Issue #1962: an own-progress session (claude_session_uuid set — the SDK
+    authenticated) with a FRESH heartbeat is protected, even past the
+    never-started grace window.
 
-    A session running for 3600s with sdk_ever_output=False (neither last_tool_use_at
-    nor last_turn_at set) is correctly treated as never-started. The D0 gate denies
-    the fresh-heartbeat fast-path and returns False, enabling recovery.
+    The D0 gate (issue #1724) recovers sessions that NEVER started. A session
+    carrying a sticky own-progress field (turn_count / log_path /
+    claude_session_uuid) has demonstrably started, so it is exempt from the
+    never-started classification — a fresh heartbeat is then dispositive
+    evidence it is alive, and _has_progress returns True. Recovering it would
+    kill a legitimately-running (e.g. bridge-originated) long session.
 
-    Note: the class name "fresh heartbeat is progress" is now a misnomer post-D0 gate.
-    The gate fires before the heartbeat fast-path can return True.
+    Contrast test_own_progress_gate_stale_heartbeat_never_started below, which
+    keeps the D0-gate-fires behavior for a genuinely never-started session with
+    no own-progress evidence.
     """
     now = datetime.now(tz=UTC)
 
     class _S:
         last_tool_use_at = None
         last_turn_at = None
-        last_heartbeat_at = now  # FRESH — but D0 gate fires before fast-path
+        last_heartbeat_at = now  # FRESH — dispositive for a started session
         last_sdk_heartbeat_at = None
         last_stdout_at = None
         started_at = now - timedelta(seconds=3600)  # 3600s >> 150s grace
         created_at = now - timedelta(seconds=3600)
         turn_count = 0
         log_path = None
-        claude_session_uuid = "abc"  # set
+        claude_session_uuid = "abc"  # set — proves the session STARTED
+        project_key = "test"
+
+        def get_children(self):
+            return []
+
+    result = session_health._has_progress(_S())
+    assert result is True, (
+        "A started session (claude_session_uuid set) with a fresh heartbeat must "
+        "return True — issue #1962: own-progress + fresh heartbeat is not orphaned"
+    )
+
+
+def test_own_progress_gate_stale_heartbeat_never_started():
+    """
+    Issue #1724 (retained): a genuinely never-started session — no own-progress
+    evidence (turn_count=0, log_path=None, claude_session_uuid=None) and no SDK
+    output — past the grace window returns False regardless of heartbeat, so the
+    D0 gate still recovers it. This is the regression guard for #1962's exemption.
+    """
+    now = datetime.now(tz=UTC)
+
+    class _S:
+        last_tool_use_at = None
+        last_turn_at = None
+        last_heartbeat_at = now  # FRESH — but no own-progress evidence
+        last_sdk_heartbeat_at = None
+        last_stdout_at = None
+        started_at = now - timedelta(seconds=3600)  # 3600s >> 150s grace
+        created_at = now - timedelta(seconds=3600)
+        turn_count = 0
+        log_path = None
+        claude_session_uuid = None
         project_key = "test"
 
         def get_children(self):
@@ -271,8 +308,8 @@ def test_own_progress_gate_fresh_heartbeat_is_progress():
 
     result = session_health._has_progress(_S())
     assert result is False, (
-        "Session past never-started grace (3600s >> 150s) with sdk_ever_output=False "
-        "must return False — the D0 gate fires before the heartbeat fast-path"
+        "A never-started session (no own-progress fields, sdk_ever_output=False) "
+        "past grace must return False — the D0 gate fires and recovery applies"
     )
 
 

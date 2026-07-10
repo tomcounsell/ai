@@ -25,6 +25,58 @@ generic steps as follows:
   `CHANGES REQUESTED` / `NEEDS REVISION` verdict, or no verdict at all, FAILS —
   route back to `/do-pr-review` or `/do-patch`. In degraded mode the tool may
   return no data; if approval cannot be confirmed, FAIL closed.
+- **Step 2b — Verify DOCS Stage Completed.** Step 2b mirrors the Step 2
+  REVIEW-verdict gate, applied to the DOCS stage. It reads `stages.DOCS` from
+  `sdlc-tool stage-query` and PASSes on `completed`. It hard-FAILs closed on
+  `in_progress` only, because that is the sole affirmative "DOCS unfinished"
+  signal (reachable only via a real `start_stage` call, the cuttlefish #577
+  incident shape), and routes back to `/do-docs` without creating the
+  authorization file. A `pending` status (DOCS never started, indistinguishable
+  from a legitimate skip) and an empty `stages` map (session reaped/orphan-cleaned,
+  per spike-2) both degrade to the pre-existing file-existence check rather than a
+  false refusal. The slug is derived from the PR head-ref because bypass-path
+  operators (raw `gh pr merge`, cross-machine) commonly run from `main` or a
+  detached HEAD, where the current branch is a wrong value. `2>/dev/null` is
+  deliberately omitted from the `stage-query` call so a substrate fault surfaces in
+  the merge log; only stdout is parsed for the status.
+  ```bash
+  # Derive the slug from the PR's head ref (authoritative on every path), NOT the
+  # current branch — a raw `gh pr merge`/cross-machine operator commonly runs from
+  # `main` or a detached HEAD, where `git rev-parse --abbrev-ref HEAD` yields
+  # `main`/`HEAD` and would false-FAIL a `docs/features/main.md` lookup. Fall back to
+  # the current branch only if the PR head-ref lookup is unavailable, and treat
+  # main/master/HEAD/empty as "no usable slug".
+  SLUG=$(gh pr view {PR} --json headRefName -q .headRefName 2>/dev/null | sed 's|^session/||')
+  [ -z "$SLUG" ] && SLUG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^session/||')
+  case "$SLUG" in main|master|HEAD|"") SLUG="" ;; esac
+  DOCS_STATUS=$(sdlc-tool stage-query --issue-number {issue_number} \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('stages',{}).get('DOCS',''))")
+  case "$DOCS_STATUS" in
+    completed)
+      echo "DOCS_GATE: PASS — DOCS stage completed" ;;
+    in_progress)
+      # Affirmative "DOCS unfinished" signal — only reachable via an actual
+      # start_stage call, so a genuinely started-but-stalled DOCS stage (the
+      # cuttlefish #577 incident shape). Fail closed.
+      echo "DOCS_GATE: FAIL — DOCS stage is 'in_progress', not completed"
+      echo "GATES_FAILED" ;;   # route back to /do-docs; do NOT create the auth file
+    *)
+      # pending (DOCS never started — the DEFAULT status for a stage with no marker,
+      # e.g. a docs-free trivial PR before #1799's skip-as-completed ships) OR empty
+      # stages (session reaped/orphan-cleaned, spike-2, so the marker is unreadable).
+      # In NEITHER case can we AFFIRM 'unfinished': a never-started DOCS is
+      # indistinguishable from a legitimate skip, and a reaped session hides a
+      # possibly-completed run. Degrade to the pre-existing file-existence
+      # Documentation Gate rather than false-refuse a merge whose DOCS truly
+      # completed or was legitimately skipped.
+      if [ -n "$SLUG" ] && [ -f "docs/features/${SLUG}.md" ]; then
+        echo "DOCS_GATE: PASS (degraded) — DOCS marker not authoritative (status='${DOCS_STATUS:-<empty>}'); docs/features/${SLUG}.md present"
+      else
+        echo "DOCS_GATE: FAIL — DOCS marker not authoritative (status='${DOCS_STATUS:-<empty>}') AND docs/features/${SLUG:-<no-slug>}.md absent"
+        echo "GATES_FAILED"
+      fi ;;
+  esac
+  ```
 - **Step 4 merge-authorization guard.** `gh pr merge` is blocked by the
   merge-guard hook (`.claude/hooks/validators/validate_merge_guard.py`) unless an
   authorization file exists. Create it immediately before the merge and delete it
@@ -42,7 +94,13 @@ generic steps as follows:
 
 ## Documentation Gate
 
-Before merging, verify `docs/features/{slug}.md` exists if the plan specified one. This is a hard gate — missing feature docs block the merge.
+The authoritative check is now DOCS *stage completion* via Step 2b above: PASS
+when `stages.DOCS == completed`, hard-FAIL closed when it is `in_progress`. When
+the marker is unreadable (session reaped, empty `stages`) or the stage never
+started (`pending`), the gate degrades to verifying `docs/features/{slug}.md`
+exists (the previous behavior), now retained as the degraded fallback rather than
+a separate, weaker check. Present ⇒ PASS (degraded); absent ⇒ FAIL, missing
+feature docs block the merge.
 
 ## Ruff Gates
 

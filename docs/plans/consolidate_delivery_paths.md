@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1370
-last_comment_id: 4786392583
+last_comment_id: 4875179886
 ---
 
 # Consolidate Agent-Message-Delivery Send Paths
@@ -21,19 +21,29 @@ a verbatim pass-through + validation filter) and *widened* (PR #1738 added
 health-checker recovery notices; issues #1730/#1794/#1797 added a synchronous
 terminal-status flush that writes raw payloads to the outbox).
 
-**Current behavior** (verified against `main` @ `e7a7f987`, see Freshness
-Check): agent-authored text can reach the user through paths with three
-different filter postures. `tools/send_telegram.py` — still the tool the
-eng/PM system prompt teaches for proactive sends (`agent/sdk_client.py:3527`,
-`3596`, `3634`; `config/personas/engineer.md:476`) — runs the drafter but
-**ignores its `needs_self_draft` verdict**, skips the redundancy filter and
-RTR, and raw-rpushes to `telegram:outbox`. A wire-format violation or empty
-promise that the canonical handler would bounce back to the agent for
-self-draft sails straight to Telegram on this path. Meanwhile the same module
-is labeled "legacy" in `agent/hooks/stop.py:58-60` yet actively taught to
-every collaboration-mode session. Vocabulary for the stop-hook gate drifts
-across four spellings, and the gate's failure modes (drafter exception, worker
-restart between stops, malformed transcript tail) are undocumented.
+**Current behavior** (re-verified against `main` @ `2201e7d15`, 2026-07-08 —
+see Freshness Check): agent-authored text can reach the user through paths
+with three different filter postures. `tools/send_telegram.py` still runs the
+drafter but **ignores its `needs_self_draft` verdict**, skips the redundancy
+filter and RTR, and raw-rpushes to `telegram:outbox`. A wire-format violation
+or empty promise that the canonical handler would bounce back to the agent for
+self-draft sails straight to Telegram on this path — that defect is real and
+unchanged. **Correction from the original filing:** the claim that
+`tools/send_telegram.py` is "the tool the eng/PM system prompt teaches for
+proactive sends" no longer describes production eng traffic. The granite
+two-PTY architecture that prompt taught was torn down (issue #1924, PR #1930,
+`e8351e4ca`) and replaced by the headless `agent/session_runner/`; today's
+eng/PM sessions communicate via the `[/user]`/`[/complete]` token convention
+(`.claude/commands/roles/prime-pm-role.md`), not a taught CLI tool, and the
+`agent/hooks/stop.py` "delivery review gate" that used to present
+`send_message.py`/`send_telegram.py` as options is dead code on that path (see
+Freshness Check). The one prompt surface that still actively teaches
+`send_telegram.py` to any session (session_runner or otherwise) reachable via
+normal skill-matching is `.claude/skills/telegram/SKILL.md` — this is now the
+load-bearing reference to fix, not the `sdk_client.py`/`engineer.md` prompt
+blocks (those sit behind a `ValorAgent` class nothing instantiates anymore).
+The underlying design problem — no declared canonical pipeline, no bypass
+policy, undocumented gate vocabulary/failure-modes — still stands.
 
 **Desired outcome:** One declared canonical pipeline for agent-authored text;
 one grep-able, documented seam for the only sanctioned bypass class
@@ -46,31 +56,43 @@ real handler.
 
 ## Freshness Check
 
-**Baseline commit:** `e7a7f987c3a05992acbe5d3e246b1879d505eace`
+**Original baseline:** `e7a7f987c3a05992acbe5d3e246b1879d505eace` (2026-07-03)
+**Re-check baseline:** `2201e7d156b3bc50fb3114432c5945662dffe250` (2026-07-08)
 **Issue filed at:** 2026-05-10 (re-scoped to consolidation plan by comment on 2026-06-24)
-**Disposition:** Minor drift (issue's inventory table is stale in three ways; the design problem stands)
+**Disposition:** **Major drift**, discovered while planning a sibling issue (#1955). `e7a7f987c` — this plan's original freshness-check baseline — is a git ancestor of `e8351e4ca`, the "Granite PTY teardown: headless `claude -p` session runner cutover" (PR #1930, issue #1924), which landed AFTER the original check and replaced the two-PTY `agent/granite_container/` architecture with the current `agent/session_runner/`. The original check's file:line citations for the *code-level* delivery pipeline (drafter, output_handler, redundancy filter, RTR) all still hold — those are unaffected by the teardown. What broke is the *framing* of how an agent reaches for a send tool in the first place. See the corrected Data Flow and Problem sections below; the Solution's code-level scope is largely unaffected (detailed per-item in Technical Approach).
 
-**File:line references re-verified:**
+**Original file:line references (still accurate, unaffected by the teardown):**
 
 - `tools/send_message.py:71-145` — issue claimed "no drafter, no RTR, no redundancy filter" — **DRIFTED / already fixed**: PR #1382 (commit `97a6cd8f`) rewrote the tool to route through `TelegramRelayOutputHandler.send`. Today it runs linkify + promise gate CLI-side (`tools/send_message.py:212-225`), then delegates to the handler at `tools/send_message.py:257-270` (telegram) and `:348-360` (email). Full pipeline applies.
 - `tools/send_telegram.py:71-99` — claim "drafter only" — **still holds** (`_draft_text` at `tools/send_telegram.py:71-99`; raw rpush at `:211-217`). Additional finding: `_draft_text` returns the *original* text when `draft.text` is empty (the drafter's blocking `needs_self_draft` signal), so validation verdicts are silently discarded on this path.
 - `agent/output_handler.py:301-552` — **drifted to** `TelegramRelayOutputHandler.send` at `agent/output_handler.py:346-790`: drafter (hoisted, once, `:403-462`) → self-draft steering (`:434-441`) → redundancy filter (`:513-616`, SDLC sessions) → RTR (`:618-724`, env-gated) → transport branch + outbox rpush (`:739-790`). Claims hold.
 - `bridge/email_bridge.py:575-577` — **drifted to** `EmailOutputHandler.send` at `bridge/email_bridge.py:810+`; drafter call at `:923-927`. Runs the drafter only — no self-draft steering, no redundancy filter, no RTR — and sends via direct SMTP (not the outbox).
 - `bridge/telegram_bridge.py:2673` — **drifted to** `:2873-2940`: the bridge's registered send callback wraps `handler.send` (adds `filter_tool_logs`, PM self-messaging bypass, `<<FILE:>>` extraction).
-- `config/personas/project-manager.md:221` — **gone** (persona renamed); the live references are `config/personas/engineer.md:476` and three prompt blocks in `agent/sdk_client.py` (~`:3520-3645`).
-- `agent/session_health.py::_deliver_tool_timeout_degraded_notice` (PR #1738, now merged; `agent/session_health.py:1795-1873`) — the issue comment claimed it "bypasses everything." **Partially stale**: it resolves the send callback via `_resolve_callbacks` (`agent/agent_session_queue.py:1266`), which in the worker process returns `TelegramRelayOutputHandler.send` (registered at `worker/__main__.py:892-901`) — so the canned notice *does* traverse the full filter stack; only the no-callback fallback (`FileOutputHandler`) bypasses it. Two sibling call sites share the pattern: `_deliver_deferred_self_draft_fallback` (`agent/session_health.py:2109-2121`) and the fan-out completion path (`:3598-3617`).
-- **New since filing:** `flush_deferred_self_draft_sync` (`agent/session_health.py:1876-1990`, issues #1794/#1797) is a genuinely raw outbox writer — synchronous `rpush` with no drafter/redundancy/RTR, justified by running in a no-event-loop context. It builds the telegram payload inline (the email branch reuses `build_email_outbox_payload`).
+- `config/personas/project-manager.md:221` — **gone** (persona renamed); the erstwhile live references were `config/personas/engineer.md:476` and three prompt blocks in `agent/sdk_client.py` (~`:3520-3645`) — **now confirmed dead** per the 2026-07-08 re-check below.
+- `agent/session_health.py::_deliver_tool_timeout_degraded_notice` (PR #1738, now merged) — the issue comment claimed it "bypasses everything." **Partially stale**: it resolves the send callback via `_resolve_callbacks` (`agent/agent_session_queue.py:1266`), which in the worker process returns `TelegramRelayOutputHandler.send` (registered at `worker/__main__.py:892-901`) — so the canned notice *does* traverse the full filter stack; only the no-callback fallback (`FileOutputHandler`) bypasses it. Two sibling call sites share the pattern. **Line numbers refreshed 2026-07-08** (file shrank 5120→4944 lines across 8 commits since the original check): `_deliver_tool_timeout_degraded_notice` now at `agent/session_health.py:1726`; `_deliver_deferred_self_draft_fallback` now at `:1967` (its `_resolve_callbacks` call at `:2048-2050`); fan-out completion site's `_resolve_callbacks` now at `:3673-3679`. The three-call-site shape the plan describes is unchanged — only the line numbers moved.
+- **New since original filing:** `flush_deferred_self_draft_sync` (issues #1794/#1797) is a genuinely raw outbox writer — synchronous `rpush` with no drafter/redundancy/RTR, justified by running in a no-event-loop context. It builds the telegram payload inline (the email branch reuses `build_email_outbox_payload`).
 - Pattern 4's claim "no doc for `bridge/redundancy_filter.py`" — **stale**: `docs/features/drafter-redundancy-suppression.md` exists and is indexed in `docs/features/README.md:58`.
+
+**2026-07-08 re-check findings (post-teardown, the Major Drift items):**
+
+- **`agent/sdk_client.py:3527, 3596, 3634` — stale line numbers AND dead code.** The three "teach `send_telegram.py`" blocks now sit around `agent/sdk_client.py:3616-3623` and `:3685-3730` (file grew 3838→3927 lines from PR #1930/#1938). All three are inside `class ValorAgent` (`agent/sdk_client.py:1511`). Grepping every live caller (`agent/session_executor.py`, `agent/agent_session_queue.py`, `agent/health_check.py`, `agent/session_completion.py`, `bridge/routing.py`, `worker/idle_sweeper.py`, `worker/__main__.py`) — **none import `ValorAgent`**; only free functions (`get_response_via_harness`, `get_turn_count`, `get_stop_reason`, `load_principal_context`). No live code instantiates `ValorAgent` anymore.
+- **`config/personas/engineer.md:476` — content unchanged, but unreachable for session_runner.** Only reachable via `load_persona_prompt`/`compose_system_prompt`/`load_eng_system_prompt` (`agent/sdk_client.py:960,1046,1228`), themselves only called from `ValorAgent` methods and `scripts/capture_persona_baseline.py`. `agent/session_runner/role_driver.py` primes via `.claude/commands/roles/prime-{pm,dev,teammate}-role.md` (slash-command path, `_PRIME_SLASH_BY_ROLE`/`_PRIME_FILE_BY_ROLE` at `role_driver.py:58-67`), never `config/personas/`. **Dead for session_runner.**
+- **`.claude/skills/telegram/SKILL.md:18-36` — content matches, and this IS live-reachable.** A generic Claude Code skill, not gated by role/persona — session-matching can surface it to a session_runner turn. This is the one prompt-teaching citation that is stale-in-guidance but not dead-in-reachability, and is now the highest-priority sweep target.
+- **`agent/hooks/stop.py:56-60` (`_LEGACY_SEND_TELEGRAM_PATTERN`) and `:163-190` (`_build_review_prompt`, the "review gate")** — content matches (still teaches `send_message.py`/`react_with_emoji.py`, still has the legacy regex), but **confirmed dead for session_runner**: `agent/session_runner/hook_edge.py::generate_hook_settings` wires the Stop hook only to `hook_forwarder.py`, never to `agent/hooks/stop.py`. Corroborated independently in the sibling-issue (#1955) investigation.
+- **`tools/send_telegram.py`** — file still exists (14.8KB), still referenced by ~20 files. Every *prompt-teaching* reference to it now sits on a dead or minority path (per above); the *code* references (relay/bridge dedup recording, hook classification pattern) are still live regardless of whether anyone invokes the tool, and Decision C's retirement work is unaffected.
+- **What DOES an eng/session_runner system prompt teach for a proactive mid-turn send, today?** Traced `role_driver.py:329-343` (`_prime_args`) → `/roles:prime-pm-role` (or `prime-dev-role`/`prime-teammate-role`) prepended to the first message; `runner.py:445` confirms role `"pm"` for default `session_type="eng"`. Reading `.claude/commands/roles/prime-pm-role.md` and `prime-dev-role.md` in full: **neither mentions `tools/send_telegram.py` or `tools/send_message.py` at all.** The PM's only taught communication mechanism is the `[/user]`/`[/complete]` token convention on final turn text (`prime-pm-role.md:29-33`); the Dev role's final message is forwarded verbatim to the PM, never sent directly. So proactive mid-turn tool-based sends are **not** taught to session_runner/eng sessions today — all communication flows through the end-of-turn text/token → automatic `send_cb` path (Data Flow path 3, corrected below).
+- **Does session_runner have its own review gate for proactive sends?** No. `hook_edge.py`'s `generate_hook_settings` wires only `hook_forwarder.py`; there is no pre-send gate for a hypothetical mid-turn CLI invocation — it would go straight through the CLI's own internal pipeline (linkify/promise-gate/handler), the same sole checkpoint as the automatic path.
 
 **Cited sibling issues/PRs re-checked:**
 - #1369 — CLOSED, fixed by PR #1382 (path 1 consolidation). Its fix is the template this plan extends.
 - PR #1685 / #1680 — MERGED (`513d8eac`): drafter is verbatim pass-through + validation; `needs_self_draft` routes a steering nudge instead of a rewrite.
 - PR #1738 — MERGED: degraded-notice path exists as described above.
 - PR #1415 — MERGED: `build_teammate_instructions()` now uses TOOL POSTURE / OPERATIONAL WORK ENCOURAGED / WHEN BLOCKED blocks; `tests/unit/test_qa_handler.py` already asserts them, and its DELIVERY REVIEW section assertions are unaffected.
+- **#1924 / PR #1930 (`e8351e4ca`) — MERGED, 2026-07-06/07.** The granite-PTY teardown. Root cause of this re-check; see above.
 
-**Active plans in `docs/plans/` overlapping this area:** none (checked the ten most recently modified plans; nearest neighbors are session-lifecycle/granite plans that do not touch the send paths).
+**Active plans in `docs/plans/` overlapping this area:** GitHub issue **#1955** ("Message drafter has no local-file-path awareness") is being planned concurrently and touches the same `bridge/message_drafter.py` / `agent/output_handler.py` self-draft-steering machinery. That plan adds a new `Violation` type (local file-path references) and fixes the fact that violations are never surfaced at all for session_runner/eng sessions (since the only consumer, `agent/hooks/stop.py`, is dead there) — it is scoped narrower than this plan (detection + surfacing of one new violation class, not path consolidation) and does not need to block on this plan landing first, though both should avoid touching `agent/output_handler.py`'s self-draft-steering block (`:429-441`) in conflicting ways in the same review cycle.
 
-**Notes:** Because path 1 is already consolidated, this plan's code scope shrinks to: retiring `send_telegram.py`, naming/centralizing the system-notice bypass seam, vocabulary + docs, and the contract-test suite.
+**Notes:** Because path 1 is already consolidated, this plan's code scope shrinks to: retiring `send_telegram.py`, naming/centralizing the system-notice bypass seam, vocabulary + docs, and the contract-test suite. The re-check does not change this code scope (see Technical Approach for the two adjusted items) — it corrects the plan's prose framing of *why* `send_telegram.py` still gets called and *which* prompt surface is the load-bearing fix target.
 
 ## Prior Art
 
@@ -79,6 +101,7 @@ real handler.
 - **Issue #1680 / PR #1685 (`513d8eac`)** — drafter rewrite deleted `_draft_with_haiku`/`_draft_with_openrouter`; `draft_message()` is verbatim pass-through + validation. This removes the historical reason for `send_telegram.py --no-draft` (there is no LLM rewrite to skip anymore).
 - **Issue #1205** — redundancy filter; **#1193** — RTR; **#1730/#1794/#1797** — deferred self-draft persistence and terminal flushes. These define the filter stack the registry must document.
 - **PR #1738** — tool-timeout degraded notice; its issue comment explicitly asked this plan to answer "when is it correct to bypass the filter stack?"
+- **Issue #1924 / PR #1930 (`e8351e4ca`)** — the granite-PTY teardown, discovered mid-planning (2026-07-08) to have landed after this plan's original freshness check and invalidated its framing of `agent/hooks/stop.py` as the live "delivery review gate" for eng sessions. See the corrected Freshness Check and Data Flow sections. Lesson for future plans: a Medium-appetite plan sitting in `Planning` status for 5+ days should re-run its freshness check if any architecture-level PR lands in the interim, not just check for direct file-line drift on its own citations.
 
 ## Research
 
@@ -86,14 +109,15 @@ No relevant external findings — this is purely internal consolidation of repo-
 
 ## Data Flow
 
-Current outbound flows for agent-authored text (verified):
+Current outbound flows for agent-authored text (re-verified 2026-07-08 against
+session_runner reality — see Freshness Check for the correction history):
 
-1. **Stop-hook tool-call path (canonical CLI):** agent invokes `python tools/send_message.py "text"` during the delivery review gate → linkify → promise gate → Popoto session lookup (fail-closed) → `TelegramRelayOutputHandler.send` → drafter validation → self-draft steering → redundancy filter → RTR → `telegram:outbox:{sid}` / `email:outbox:{sid}` → relay (Telethon / SMTP relay) → user. Relay records `pm_sent_message_ids` and `recent_sent_drafts` post-send (`bridge/telegram_relay.py:846-866`).
-2. **Proactive PM path (to be retired):** agent invokes `python tools/send_telegram.py "text"` mid-session → `_draft_text` (validation verdicts discarded) → linkify → 4096-char truncate → promise gate → raw `rpush telegram:outbox:{sid}` → relay → user.
-3. **Worker silent path:** session return text → worker `send_cb` = `TelegramRelayOutputHandler.send` (telegram/default) or `EmailOutputHandler.send` (email transport; drafter only, direct SMTP with retry + DLQ).
+1. **End-of-turn text/token path (dominant for eng/session_runner):** the PM/Dev's final turn text (classified via the `[/user]`/`[/complete]` token convention, `.claude/commands/roles/prime-pm-role.md:29-33`) is forwarded to the worker's registered `send_cb` = `TelegramRelayOutputHandler.send` → drafter validation → self-draft steering → redundancy filter → RTR → `telegram:outbox:{sid}` / `email:outbox:{sid}` → relay (Telethon / SMTP relay) → user. Relay records `pm_sent_message_ids` and `recent_sent_drafts` post-send (`bridge/telegram_relay.py:846-866`). This is the SAME code as path 3 below — session_runner sessions have no separate "proactive send" tool call; all communication is end-of-turn text. No pre-send review gate exists on this path (`agent/hooks/stop.py` is dead for session_runner turns — see Freshness Check).
+2. **`send_message.py` CLI path (reachable, minority):** an agent invokes `python tools/send_message.py "text"` directly (e.g., a Teammate session, or any session that reaches for the CLI mid-turn rather than relying on end-of-turn forwarding) → linkify → promise gate → Popoto session lookup (fail-closed) → `TelegramRelayOutputHandler.send` (same handler as path 1). Full pipeline applies. This is the tool this plan wants to be the *sole* agent-facing CLI (Decision A).
+3. **Proactive `send_telegram.py` path (to be retired):** an agent invokes `python tools/send_telegram.py "text"` mid-session → `_draft_text` (validation verdicts discarded) → linkify → 4096-char truncate → promise gate → raw `rpush telegram:outbox:{sid}` → relay → user. Reachability today is via `.claude/skills/telegram/SKILL.md`'s guidance (the only live-reachable prompt surface still teaching this tool — see Freshness Check); the `agent/sdk_client.py`/`config/personas/engineer.md` teaching surfaces are dead (`ValorAgent` is never instantiated by live code).
 4. **Health-checker/recovery notices:** `agent/session_health.py` composes a canned string → `_resolve_callbacks` → `handler.send` in the worker (full stack) or `FileOutputHandler` fallback; plus `flush_deferred_self_draft_sync` writing raw payloads synchronously at the `finalize_session` chokepoint.
 
-Target flow after this plan: paths 1 and 3 unchanged (declared canonical); path 2 deleted (callers taught path 1's tool); path 4's async call sites route through one named helper (`deliver_system_notice`) and the sync flush reuses one shared payload builder, with both declared in the registry.
+Target flow after this plan: paths 1 and 2 unchanged (declared canonical — both already funnel through `TelegramRelayOutputHandler.send`); path 3 deleted (its one live teaching surface, `.claude/skills/telegram/SKILL.md`, is repointed to path 2's tool); path 4's async call sites route through one named helper (`deliver_system_notice`) and the sync flush reuses one shared payload builder, with both declared in the registry.
 
 ## Why Previous Fixes Failed
 
@@ -135,7 +159,7 @@ Four decisions, then the mechanical work that follows from them:
 
 - **Decision A — canonical path.** `TelegramRelayOutputHandler.send` is the single queue-side pipeline for agent-authored outbound text (both transports); `tools/send_message.py` is the single agent-facing CLI wrapper. This ratifies what PR #1382 built and extends it to every remaining caller.
 - **Decision B — bypass rule.** *Agent-authored content always traverses the canonical handler. Only system-authored canned notices — fixed strings composed by infrastructure code, containing no agent-generated text — may be delivered outside the CLI wrapper, and only via the named helper `deliver_system_notice()`.* The helper wraps today's `_resolve_callbacks` + `FileOutputHandler` fallback + telemetry pattern, making every bypass enumerable by a single grep. (In the worker the resolved callback is still `handler.send`, so notices retain outbox delivery; the *policy* point is that no new code hand-rolls callback resolution.) `flush_deferred_self_draft_sync` is declared the one sanctioned synchronous outbox writer (no event loop at the `finalize_session` chokepoint) and switches to the shared payload builder so the wire shape is defined once.
-- **Decision C — retire `tools/send_telegram.py`.** Full cutover, no transition shims: delete the file; teach `tools/send_message.py` in the three `agent/sdk_client.py` prompt blocks, `config/personas/engineer.md:476`, and `.claude/skills/telegram/SKILL.md`; migrate `--emoji` (standalone custom-emoji message) to `tools/react_with_emoji.py --standalone`; drop `--react` (already owned by `react_with_emoji.py`) and `--no-draft` (obsolete — the drafter no longer rewrites; verbatim system notices use `deliver_system_notice`); remove `_LEGACY_SEND_TELEGRAM_PATTERN` from `agent/hooks/stop.py`. `has_pm_messages()` / `recent_sent_drafts` tracking is unaffected: the relay records both from the outbox payload regardless of which tool queued it (`bridge/telegram_relay.py:846-866`).
+- **Decision C — retire `tools/send_telegram.py`.** Full cutover, no transition shims: delete the file; the load-bearing prompt-surface fix is `.claude/skills/telegram/SKILL.md` (the only teaching surface still reachable by a live session — see Freshness Check), not the `agent/sdk_client.py` prompt blocks or `config/personas/engineer.md:476` (both dead: gated behind `ValorAgent`, which no live code instantiates post-#1924 teardown — delete those blocks as dead-code cleanup, not as a "re-teaching" migration); migrate `--emoji` (standalone custom-emoji message) to `tools/react_with_emoji.py --standalone`; drop `--react` (already owned by `react_with_emoji.py`) and `--no-draft` (obsolete — the drafter no longer rewrites; verbatim system notices use `deliver_system_notice`); remove `_LEGACY_SEND_TELEGRAM_PATTERN` from `agent/hooks/stop.py` (dead-code cleanup — `stop.py` itself is unreachable for session_runner, but it's still imported/tested code that should not keep referencing a deleted tool). `has_pm_messages()` / `recent_sent_drafts` tracking is unaffected: the relay records both from the outbox payload regardless of which tool queued it (`bridge/telegram_relay.py:846-866`).
 - **Decision D — canonical vocabulary.** Gate concept: **"delivery review gate"** (already the module docstring; the UI label "DELIVERY REVIEW" and doc heading update to match). Outcome verbs: the classifier's four — **send / react / silent / continue** — plus the new `DeliveryOutcome` values for handler results; retire "send as-is" / "edit and send" as distinct terms (both are `send`).
 
 - **Delivery-path registry**: a "Delivery paths" section in `docs/features/agent-message-delivery.md` — one table naming each remaining path, its caller, which filters apply, and *why* (including the two declared intentional divergences: `EmailOutputHandler.send`'s drafter-only direct-SMTP posture for worker email sessions, and `valor-telegram send` as the human-operator CLI that is not an agent delivery path).
@@ -149,10 +173,10 @@ Agent needs to message the user (any moment, any transport) → `python tools/se
 
 ### Technical Approach
 
-1. **`agent/output_handler.py`**: add `DeliveryOutcome` (`enum.StrEnum`); return it from `send()` at each exit (suppression exits, defer exit, outbox write). Extract `build_telegram_outbox_payload(chat_id, text, reply_to, session_id, file_paths)` from the inline payload dict (`:750-758`) and reuse it in `flush_deferred_self_draft_sync`. Add `async def deliver_system_notice(entry, message, *, telemetry_key: str | None = None)` encapsulating the `_resolve_callbacks` + `FileOutputHandler` fallback + WARNING-and-swallow contract currently duplicated at `agent/session_health.py:1839-1858`, `2109-2121`, and `3598-3617` (the fan-out site keeps its own completion-runner logic and uses the helper only for callback resolution if extraction is clean; otherwise leave it and document it in the registry — do not force-fit).
+1. **`agent/output_handler.py`**: add `DeliveryOutcome` (`enum.StrEnum`); return it from `send()` at each exit (suppression exits, defer exit, outbox write). Extract `build_telegram_outbox_payload(chat_id, text, reply_to, session_id, file_paths)` from the inline payload dict (`:750-758`) and reuse it in `flush_deferred_self_draft_sync`. Add `async def deliver_system_notice(entry, message, *, telemetry_key: str | None = None)` encapsulating the `_resolve_callbacks` + `FileOutputHandler` fallback + WARNING-and-swallow contract currently duplicated at `agent/session_health.py:1726` (`_deliver_tool_timeout_degraded_notice`), `:1967`/`:2048-2050` (`_deliver_deferred_self_draft_fallback`), and `:3673-3679` (fan-out completion site) — **line numbers refreshed 2026-07-08**, the file shrank 5120→4944 lines since the original citations; the fan-out site keeps its own completion-runner logic and uses the helper only for callback resolution if extraction is clean; otherwise leave it and document it in the registry — do not force-fit).
 2. **`tools/send_message.py`**: print the returned `DeliveryOutcome` (exit 0 for suppress/defer — they are pipeline verdicts, not errors; the message tells the agent what happened).
 3. **`tools/react_with_emoji.py`**: add `--standalone` (port of `send_emoji` from `send_telegram.py:314-383`, payload `type: custom_emoji_message` unchanged so the relay needs no changes).
-4. **Delete `tools/send_telegram.py`**; sweep references: `agent/sdk_client.py` prompt blocks (~`:3520-3645`), `config/personas/engineer.md:476`, `.claude/skills/telegram/SKILL.md:18-36`, `agent/hooks/stop.py:56-60` + `classify_delivery_outcome`, `docs/tools-reference.md`, `docs/features/emoji-embedding-reactions.md`, `docs/features/README.md:62`, comment-level references in `agent/output_handler.py` / `agent/session_executor.py:1814` / `bridge/promise_gate.py:71` / `bridge/telegram_relay.py:5,564` / `bridge/telegram_bridge.py:2890`.
+4. **Delete `tools/send_telegram.py`**; sweep references, highest-value first: `.claude/skills/telegram/SKILL.md:18-36` (the one live-reachable teaching surface — fix this even if nothing else in this step ships), `agent/hooks/stop.py:56-60` + `classify_delivery_outcome` (dead-code cleanup, still worth doing per NO LEGACY CODE TOLERANCE), `agent/sdk_client.py` prompt blocks (refreshed line numbers: `:3616-3623`, `:3685-3730` — delete outright, do not re-teach; dead `ValorAgent`-only code), `config/personas/engineer.md:476` (same — delete, don't re-teach), `docs/tools-reference.md`, `docs/features/emoji-embedding-reactions.md`, `docs/features/README.md:62`, comment-level references in `agent/output_handler.py` / `agent/session_executor.py:1814` / `bridge/promise_gate.py:71` / `bridge/telegram_relay.py:5,564` / `bridge/telegram_bridge.py:2890`.
 5. **Vocabulary sweep** (Decision D): `agent/hooks/stop.py` docstrings and `_build_review_prompt` header, `agent/teammate_handler.py` DELIVERY REVIEW section wording, `docs/features/agent-message-delivery.md` headings, test names/docstrings touched anyway by the retirement.
 6. **Docs**: registry + failure-modes sections in `docs/features/agent-message-delivery.md`; cross-links to `bridge-worker-architecture.md`, `read-the-room.md`, `drafter-redundancy-suppression.md`, `promise-gate.md`, `session-steering.md` (closing Pattern 4).
 
@@ -209,8 +233,8 @@ Agent needs to message the user (any moment, any transport) → `python tools/se
 **Mitigation:** `DeliveryOutcome` surfacing in the CLI output is part of this plan precisely so the agent sees `suppressed_redundant` / `deferred_self_draft` and can react. The drafter is verbatim pass-through, so no text is altered. Contract tests assert each verdict's CLI output.
 
 ### Risk 2: Missed reference to the deleted tool breaks a prompt or hook at runtime
-**Impact:** A stale `send_telegram.py` mention in a prompt teaches the agent a nonexistent tool (exactly the #641 failure class); a stale pattern in stop.py misclassifies delivery.
-**Mitigation:** Verification table includes a repo-wide grep gate (`match count == 0` outside `docs/plans/`); the sweep list in Technical Approach step 4 was built from a live grep at plan time.
+**Impact:** A stale `send_telegram.py` mention in a prompt teaches the agent a nonexistent tool (exactly the #641 failure class); a stale pattern in stop.py misclassifies delivery. **Updated 2026-07-08:** the highest-impact instance of this risk is `.claude/skills/telegram/SKILL.md` (the one live-reachable teaching surface post-#1924 teardown) — the `agent/sdk_client.py`/`config/personas/engineer.md` surfaces are dead code and carry no runtime risk if missed (though they should still be cleaned up per NO LEGACY CODE TOLERANCE).
+**Mitigation:** Verification table includes a repo-wide grep gate (`match count == 0` outside `docs/plans/`); the sweep list in Technical Approach step 4 was built from a live grep at plan time (refreshed 2026-07-08).
 
 ### Risk 3: `DeliveryOutcome` return value breaks a caller that treated `send()` as fire-and-forget
 **Impact:** None expected — adding a return value to a previously-`None` coroutine is compatible with every `await ... send(...)` call site.
@@ -226,11 +250,11 @@ Agent needs to message the user (any moment, any transport) → `python tools/se
 **Mitigation:** This plan does not change the gating or dedup keys — the refactor swaps only the payload construction (shared builder) and callback resolution (named helper). Contract tests assert the dedup keys are still consulted before any write.
 
 ### Race 2: Prompt-surface cutover vs. in-flight sessions
-**Location:** `agent/sdk_client.py` prompt blocks; running sessions spawned pre-deploy
-**Trigger:** A session primed with the old prompt invokes `tools/send_telegram.py` after the file is deleted
+**Location:** `.claude/skills/telegram/SKILL.md` (the live teaching surface, per the 2026-07-08 re-check — `agent/sdk_client.py` prompt blocks are dead code and cannot race, since no live session primes from them); running sessions spawned pre-deploy
+**Trigger:** A session whose skill-matching already surfaced the old `send_telegram.py` guidance invokes it mid-turn after the file is deleted
 **Data prerequisite:** none
 **State prerequisite:** Long-running session spanning the deploy
-**Mitigation:** Bash returns a clear "No such file" error; the review gate still offers `send_message.py` on the next stop, so delivery degrades to the canonical path rather than silently failing. Acceptable for a hard cutover; noted in the PR description.
+**Mitigation:** Bash returns a clear "No such file" error. Unlike the original (pre-teardown) framing, there is no stop.py review gate to offer `send_message.py` as a fallback on the next turn for session_runner sessions — the agent must recover by reasoning from the Bash error alone. Acceptable for a hard cutover given the narrow window and low frequency of mid-deploy sessions; noted in the PR description.
 
 ## No-Gos (Out of Scope)
 
@@ -247,9 +271,9 @@ No update system changes required — this work modifies repo Python, prompts, a
 
 This plan *is* agent-integration work: it changes which CLI the agent is taught for outbound messages.
 
-- No new `pyproject.toml [project.scripts]` entry and no MCP server changes — `tools/send_message.py` and `tools/react_with_emoji.py` remain `python tools/...` Bash invocations, matching how the review gate prompt already presents them (`agent/hooks/stop.py:176-189`).
-- The prompt surfaces in `agent/sdk_client.py` (three blocks, ~`:3520-3645`) and `config/personas/engineer.md:476` switch from `send_telegram.py` to `send_message.py` (with `--file` examples preserved) — this is the load-bearing wiring, since a tool the prompt does not teach is invisible to the agent.
-- `.claude/skills/telegram/SKILL.md` PM-tool guidance updates to name `send_message.py` and keep the `valor-telegram`-is-for-operators warning.
+- No new `pyproject.toml [project.scripts]` entry and no MCP server changes — `tools/send_message.py` and `tools/react_with_emoji.py` remain `python tools/...` Bash invocations. The review gate at `agent/hooks/stop.py:163-190` still presents them for whatever (if anything) still runs the pre-teardown `ValorAgent` path, but per the 2026-07-08 re-check that path is dead in production — **do not rely on stop.py as the load-bearing agent-integration wiring.**
+- `.claude/skills/telegram/SKILL.md` is the **load-bearing** prompt surface (2026-07-08 correction, superseding the original plan) — it is the only teaching surface still reachable by a live session (session_runner or otherwise) via normal skill-matching. Its PM-tool guidance updates to name `send_message.py` and keep the `valor-telegram`-is-for-operators warning; a tool this skill does not teach is invisible to any session that reaches for Telegram-sending guidance.
+- The `agent/sdk_client.py` (three blocks, refreshed to `:3616-3623`, `:3685-3730`) and `config/personas/engineer.md:476` references are deleted as dead-code cleanup (`ValorAgent` is never instantiated by live code post-#1924), not "switched" — there is no live prompt consumer to re-teach.
 - Integration test: extend `tests/unit/test_tool_call_delivery.py` contract suite to run the real CLI `main()` against fake Redis, proving the agent-invokable entry point produces the canonical outbox payload for both transports.
 
 ## Documentation

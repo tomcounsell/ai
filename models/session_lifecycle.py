@@ -19,8 +19,13 @@ Design constraints:
 - CAS uses Python-level compare-and-set (re-read + status compare), not Redis WATCH/MULTI/EXEC
 """
 
+import json
 import logging
+import os
+import socket
 import time
+import uuid
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -761,6 +766,182 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
             e,
         )
         return True
+
+
+# ── Issue-level SDLC ownership lock (issue #1954) ───────────────────────
+#
+# Two independent SDLC entry points -- a local CLI session and the
+# standalone worker process -- can each resolve the IDENTICAL deterministic
+# session_id (``sdlc-local-{issue_number}``) for the same GitHub issue. If
+# ownership were compared by session_id, the lock would be a no-op: both
+# live processes would see "I already own this" and duplicate SDLC work
+# would proceed unchecked -- the root cause of the #1915 duplicate-PR
+# incident. Ownership is therefore compared by a per-process
+# ``holder_token`` (see _process_holder_token()), never by session_id.
+# session_id is carried in the stored payload for human-readable display
+# only -- it must never be used to decide ownership.
+#
+# Modeled directly on claim_pending_run() above: same plain (non-Popoto-
+# managed) SET NX EX Redis idiom, same fail-open behavior on Redis errors.
+
+ISSUE_LOCK_TTL_SECONDS = int(os.environ.get("ISSUE_LOCK_TTL_SECONDS", "300"))
+
+_holder_token: str | None = None
+
+
+def _process_holder_token() -> str:
+    """Return this process's lock-ownership token.
+
+    Resolution order, cached in a module-level variable for the remainder of
+    the process's lifetime:
+
+    1. ``SDLC_HOLDER_TOKEN`` env var, when set to a non-empty value. This is
+       the shared-ownership seam (issue #1971): a local ``/do-sdlc``
+       supervisor drives the router through many short-lived ``sdlc-tool``
+       subprocesses, each a fresh OS process. Without a shared token, process
+       B (``next-skill``) sees process A's (``session-ensure``) lock as
+       foreign and blocks the supervisor against itself. The supervisor mints
+       ONE token per run and exports it so all its subprocesses present one
+       consistent owner. The standalone worker calls ``touch_issue_lock()``
+       in-process (one stable token for its lifetime) and never sets this
+       var, so the real worker-vs-local guard (#1954 / #1915) is preserved.
+    2. Otherwise a random ``uuid4`` -- unique per OS process.
+
+    This token -- not session_id -- is the unit of comparison for issue-lock
+    ownership; see the module note above for why session_id cannot be used.
+    """
+    global _holder_token
+    if _holder_token is None:
+        _holder_token = os.environ.get("SDLC_HOLDER_TOKEN") or uuid.uuid4().hex
+    return _holder_token
+
+
+class IssueLockResult(NamedTuple):
+    """Result of touch_issue_lock().
+
+    Attributes:
+        acquired: True if this process holds (or now holds, after this
+            call) the lock.
+        owner_session_id: The session_id recorded in the lock payload --
+            for human-readable display/logging only. NEVER compare this to
+            a caller's own session_id to determine ownership: two
+            independent live processes can resolve the identical
+            deterministic session_id for the same issue.
+    """
+
+    acquired: bool
+    owner_session_id: str | None
+
+
+def touch_issue_lock(
+    issue_number: int | None,
+    session_id: str,
+    ttl: int = ISSUE_LOCK_TTL_SECONDS,
+    peek: bool = False,
+) -> IssueLockResult:
+    """Acquire, renew, or peek the per-issue SDLC ownership lock.
+
+    Backed by a plain (non-Popoto-managed) Redis key
+    ``session:issuelock:{issue_number}`` holding a JSON payload
+    ``{"holder_token", "session_id", "pid", "hostname"}``. Ownership is
+    determined SOLELY by comparing ``holder_token`` against this process's
+    own token (``_process_holder_token()``) -- never by session_id, since
+    two independent processes can resolve the identical deterministic
+    session_id for the same issue (see module note above; issue #1954,
+    incident #1915).
+
+    Behavior:
+    - No existing key: ``SET NX EX`` claims it. Returns ``acquired=True``.
+    - Existing key, same holder_token (this process already owns it):
+      renews via ``EXPIRE``. Returns ``acquired=True``.
+    - Existing key, different holder_token: another live process owns it.
+      Returns ``acquired=False``, with the *other* process's session_id
+      surfaced for human-readable logging only.
+    - Malformed/legacy (non-JSON) value: treated as a foreign, non-matching
+      holder -- fails toward "not acquired". Never raises on ``json.loads``.
+    - Race: the ``SET NX`` fails because the key existed, but by the time
+      of the follow-up ``GET`` the key has since expired -- treated as
+      free; this attempt succeeds (``acquired=True``).
+
+    Args:
+        issue_number: The GitHub issue number this lock guards. Falsy
+            (``None`` or ``0``) is a no-op: fails open (``acquired=True``)
+            without touching Redis, mirroring how other call sites in this
+            module guard an absent identity.
+        session_id: The caller's session_id, stored in the payload for
+            display purposes only.
+        ttl: Lock TTL in seconds. Defaults to ``ISSUE_LOCK_TTL_SECONDS``.
+        peek: If True, reports the current lock state (same holder_token
+            comparison) WITHOUT acquiring, renewing, or otherwise mutating
+            the lock. An unheld key is reported as ``acquired=True``
+            (nothing blocking), ``owner_session_id=None``.
+
+    Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
+    ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
+    degrades to no cross-process protection rather than wedging the SDLC
+    pipeline.
+    """
+    if not issue_number:
+        return IssueLockResult(acquired=True, owner_session_id=None)
+
+    key = f"session:issuelock:{issue_number}"
+    token = _process_holder_token()
+
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        if peek:
+            raw = _R.get(key)
+            if raw is None:
+                return IssueLockResult(acquired=True, owner_session_id=None)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return IssueLockResult(acquired=False, owner_session_id=None)
+            if payload.get("holder_token") == token:
+                return IssueLockResult(acquired=True, owner_session_id=payload.get("session_id"))
+            return IssueLockResult(acquired=False, owner_session_id=payload.get("session_id"))
+
+        value = json.dumps(
+            {
+                "holder_token": token,
+                "session_id": session_id,
+                "pid": os.getpid(),
+                "hostname": socket.gethostname(),
+            }
+        )
+        acquired = _R.set(key, value, nx=True, ex=ttl)
+        if acquired:
+            return IssueLockResult(acquired=True, owner_session_id=session_id)
+
+        raw = _R.get(key)
+        if raw is None:
+            # Key existed at SET-NX time but expired before this follow-up
+            # GET (race window) -- nothing blocks us now; treat this
+            # attempt as a successful acquisition.
+            return IssueLockResult(acquired=True, owner_session_id=session_id)
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "[session-lifecycle] issue-lock value for issue=%s is not valid JSON "
+                "(malformed or legacy) -- treating as a foreign, non-matching holder",
+                issue_number,
+            )
+            return IssueLockResult(acquired=False, owner_session_id=None)
+
+        if payload.get("holder_token") == token:
+            _R.expire(key, ttl)
+            return IssueLockResult(acquired=True, owner_session_id=payload.get("session_id"))
+
+        return IssueLockResult(acquired=False, owner_session_id=payload.get("session_id"))
+    except Exception as e:
+        logger.warning(
+            "[session-lifecycle] issue-lock acquisition failed for issue=%s (failing open): %s",
+            issue_number,
+            e,
+        )
+        return IssueLockResult(acquired=True, owner_session_id=session_id)
 
 
 def _finalize_parent_sync(

@@ -25,6 +25,11 @@ def _make_session(**kwargs):
     session.status = kwargs.get("status", "running")
     session.last_tool_use_at = kwargs.get("last_tool_use_at", None)
     session.last_turn_at = kwargs.get("last_turn_at", None)
+    # sdk_ever_output (agent.session_runner.liveness.derive_sdk_ever_output) now
+    # OR's in last_stdout_at too — explicitly default it to None so MagicMock's
+    # auto-attribute (truthy) doesn't silently mark every session as having
+    # produced output.
+    session.last_stdout_at = kwargs.get("last_stdout_at", None)
     session.last_heartbeat_at = kwargs.get("last_heartbeat_at", datetime.now(UTC))
     session.started_at = kwargs.get("started_at", None)
     session.created_at = kwargs.get("created_at", datetime.now(UTC) - timedelta(seconds=200))
@@ -48,6 +53,18 @@ class TestNeverStartedPastGrace:
 
         session = _make_session(
             last_tool_use_at=datetime.now(UTC) - timedelta(seconds=10),
+            created_at=datetime.now(UTC) - timedelta(seconds=500),
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_returns_false_for_session_with_stdout_output(self):
+        """Sessions that have ONLY last_stdout_at (toolless streaming turn, the
+        headless-runner regression this plan fixes) must not be flagged —
+        sdk_ever_output derives True via last_stdout_at alone."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            last_stdout_at=datetime.now(UTC) - timedelta(seconds=10),
             created_at=datetime.now(UTC) - timedelta(seconds=500),
         )
         assert _never_started_past_grace(session) is False
@@ -101,6 +118,91 @@ class TestNeverStartedPastGrace:
         )
         # 200s > threshold using started_at
         assert _never_started_past_grace(session) is True
+
+    def test_returns_false_for_started_session_via_turn_count(self):
+        """Issue #1962: turn_count>0 proves the session STARTED — never flag it.
+
+        A bridge-originated remote session accrues turn_count without ever
+        writing local log_path/claude_session_uuid or the ``*_at`` liveness
+        fields, so ``sdk_ever_output`` stays False. Age past grace must NOT
+        classify it as never-started.
+        """
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=14400),  # 4h, far past grace
+            turn_count=12,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_returns_false_for_started_session_via_log_path(self):
+        """Issue #1962: a non-empty log_path proves the session STARTED."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=14400),
+            log_path="/tmp/logs/session.log",
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_returns_false_for_started_session_via_claude_uuid(self):
+        """Issue #1962: a claude_session_uuid proves the SDK authenticated."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=14400),
+            claude_session_uuid="abc-123",
+        )
+        assert _never_started_past_grace(session) is False
+
+    def test_still_flags_genuinely_never_started_session(self):
+        """Issue #1962 guard: a session with NO own-progress evidence, past
+        grace, and no SDK output IS still flagged (regression protection)."""
+        from agent.session_health import _never_started_past_grace
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=200),
+            turn_count=0,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _never_started_past_grace(session) is True
+
+
+class TestFreshHeartbeatStartedSessionSurvives:
+    """Issue #1962: a running session with a fresh heartbeat that has already
+    STARTED (turn_count>0) must report progress, so the #944 orphan net leaves
+    it alone — regardless of wall-clock age or missing local handle fields."""
+
+    def test_fresh_heartbeat_started_session_has_progress(self):
+        """The exact fixture from the failing integration test: 4h old,
+        turn_count=12, fresh heartbeat, no log_path/uuid → _has_progress True."""
+        from agent.session_health import _has_progress
+
+        session = _make_session(
+            started_at=datetime.now(UTC) - timedelta(hours=4),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=30),
+            turn_count=12,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _has_progress(session) is True
+
+    def test_stale_heartbeat_started_session_no_progress(self):
+        """Counterpart: a started session whose heartbeat has gone stale past
+        the no-output budget reports NO progress, so recovery still applies."""
+        from agent.session_health import _has_progress
+
+        session = _make_session(
+            started_at=datetime.now(UTC) - timedelta(hours=4),
+            last_heartbeat_at=datetime.now(UTC) - timedelta(seconds=3600),  # >1800s budget
+            turn_count=12,
+            log_path=None,
+            claude_session_uuid=None,
+        )
+        assert _has_progress(session) is False
 
 
 class TestSubCheckBDeniedPastGrace:
@@ -194,6 +296,30 @@ class TestReprieveBypassed:
         )
         result = _tier2_reprieve_signal(None, session)
         assert result is None  # Bypassed due to reprieve cap
+
+    def test_reprieve_not_suppressed_past_cap_with_fresh_stdout(self):
+        """Second wedge route (critique BLOCKER): a toolless-streaming session
+        past the reprieve cap but with fresh last_stdout_at must NOT be
+        suppressed — sdk_ever_output derives True via last_stdout_at alone,
+        so the reprieve-cap escalation guard does not fire."""
+        from agent.session_health import MAX_NO_OUTPUT_REPRIEVES, _tier2_reprieve_signal
+
+        session = _make_session(
+            created_at=datetime.now(UTC) - timedelta(seconds=50),  # within grace
+            last_stdout_at=datetime.now(UTC) - timedelta(seconds=5),
+            reprieve_count=MAX_NO_OUTPUT_REPRIEVES,
+        )
+        with patch("psutil.Process") as mock_proc:
+            proc_instance = MagicMock()
+            proc_instance.status.return_value = "running"
+            proc_instance.children.return_value = []
+            mock_proc.return_value = proc_instance
+
+            handle = MagicMock()
+            handle.pid = 12345
+
+            result = _tier2_reprieve_signal(handle, session)
+            assert result is not None  # NOT bypassed (has stdout output)
 
 
 class TestNeverStartedGraceConstantAlignment:

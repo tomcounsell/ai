@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,17 @@ from scripts._baseline_common import (
 logger = logging.getLogger(__name__)
 
 STALENESS_THRESHOLD = timedelta(days=14)
+
+# Commit-distance staleness trigger (issue #1965). The 14-day wall-clock
+# threshold missed a real incident: a baseline only 7 days old but 425 commits
+# behind HEAD silently produced 38 false-positive "new regression" flags,
+# because failing tests accrue on ``main`` per-commit, not per-day. A baseline
+# more than this many commits behind HEAD is flagged as stale regardless of
+# its wall-clock age. Chosen conservatively: at this project's observed commit
+# velocity (~60 commits/day) ~100 commits is well under two days of drift, and
+# the post-merge baseline reset keeps a healthy baseline at/near HEAD so this
+# does not fire on normal operation.
+STALE_COMMIT_DISTANCE = 100
 
 # Categories that block a merge when a PR introduces a node ID in them that
 # is NOT in the baseline (or is in the baseline but as a *different* category).
@@ -171,13 +183,71 @@ def compute_gate_verdict(baseline: dict, pr_failures: set[str]) -> dict:
     }
 
 
-def format_staleness_warning(baseline: dict, now: datetime | None = None) -> str | None:
+def commits_behind_head(
+    baseline_commit: str | None,
+    repo_root: str | Path | None = None,
+) -> int | None:
+    """Return how many commits ``HEAD`` is ahead of ``baseline_commit``.
+
+    Best-effort and never raises: returns ``None`` when the answer cannot be
+    determined (git unavailable, the recorded commit is missing/unknown, or it
+    is not an ancestor reachable from ``HEAD``). Any ``-dirty`` suffix written
+    by ``refresh_test_baseline.capture_commit`` is stripped before comparison.
+
+    The count comes from ``git rev-list --count <commit>..HEAD``, i.e. the
+    number of commits on ``HEAD`` not reachable from the baseline's commit.
+    ``0`` means the baseline is at (or newer than) ``HEAD``.
+    """
+    if not isinstance(baseline_commit, str):
+        return None
+    sha = baseline_commit.strip()
+    if sha.endswith("-dirty"):
+        sha = sha[: -len("-dirty")]
+    # ``capture_commit`` writes the literal "unknown" when git is unavailable;
+    # treat that (and empty) as "no usable commit".
+    if not sha or sha == "unknown":
+        return None
+
+    cwd = str(repo_root) if repo_root is not None else None
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", f"{sha}..HEAD"],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        # Unknown commit, not a git repo, etc.
+        return None
+    out = result.stdout.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
+def format_staleness_warning(
+    baseline: dict,
+    now: datetime | None = None,
+    commits_behind: int | None = None,
+) -> str | None:
     """Return a warning string if the baseline is stale, or ``None``.
 
-    Three triggers:
-    - ``bootstrap: true``                   -- always warn
-    - ``commit`` ends with ``-dirty``       -- always warn
-    - ``generated_at`` more than 14 days    -- warn with age in days
+    Four triggers:
+    - ``bootstrap: true``                        -- always warn
+    - ``commit`` ends with ``-dirty``            -- always warn
+    - ``generated_at`` more than 14 days         -- warn with age in days
+    - ``commits_behind`` past ``STALE_COMMIT_DISTANCE`` -- warn with distance
+
+    ``commits_behind`` is the caller-supplied commit distance between the
+    baseline's recorded commit and current ``HEAD`` (see
+    :func:`commits_behind_head`). It is a separate axis from wall-clock age:
+    a baseline can be time-fresh yet many commits behind on a high-velocity
+    day, which is the exact blind spot the age check missed in issue #1965.
+    ``None`` (git unavailable / unknown commit) means "skip this trigger".
     """
     now = now or datetime.now(UTC)
     reasons: list[str] = []
@@ -202,6 +272,11 @@ def format_staleness_warning(baseline: dict, now: datetime | None = None) -> str
             if age > STALENESS_THRESHOLD:
                 days = age.days
                 reasons.append(f"generated_at is {days} days old (> 14)")
+
+    if isinstance(commits_behind, int) and commits_behind > STALE_COMMIT_DISTANCE:
+        reasons.append(
+            f"baseline commit is {commits_behind} commits behind HEAD (> {STALE_COMMIT_DISTANCE})"
+        )
 
     if not reasons:
         return None
@@ -441,7 +516,8 @@ def main(argv: list[str] | None = None) -> int:
             now = now.replace(tzinfo=UTC)
     else:
         now = datetime.now(UTC)
-    warning = format_staleness_warning(baseline, now=now)
+    commits_behind = commits_behind_head(baseline.get("commit"))
+    warning = format_staleness_warning(baseline, now=now, commits_behind=commits_behind)
     if warning is not None:
         verdict["staleness_warning"] = warning
         sys.stderr.write(warning + "\n")

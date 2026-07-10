@@ -109,7 +109,7 @@ INVALID_REACTIONS = [
 
 # Reaction emojis for different stages (all validated 2026-02-13)
 REACTION_RECEIVED = "👀"  # Message acknowledged
-REACTION_PROCESSING = "🤔"  # Default thinking emoji
+REACTION_PROCESSING = "✍"  # Actively composing a reply (distinct from REACTION_ERROR's pinned 🤔)
 # REACTION_ABORT parallels REACTION_RECEIVED for the steering-ack path: when a
 # user's follow-up matches an abort keyword, the bridge salutes (🫡 = "understood,
 # standing down") instead of the standard "noted" eyes. Selected inside

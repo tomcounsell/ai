@@ -21,6 +21,7 @@ from tools.valor_email import (
     EMAIL_DRAFT_INLINE_MAX_TOTAL_BYTES,
     _build_session_id,
     _imap_fallback_fetch,
+    _normalize_file_args,
     _normalize_msgid,
     _validate_attachment_files,
     cmd_draft,
@@ -65,6 +66,23 @@ class TestNormalizeMsgid:
     def test_whitespace_only_rejected(self):
         with pytest.raises(argparse.ArgumentTypeError):
             _normalize_msgid("   ")
+
+
+class TestNormalizeFileArgs:
+    """Regression for #1960: normalize the ``--file`` arg into a list of paths."""
+
+    def test_none_returns_empty_list(self):
+        assert _normalize_file_args(None) == []
+
+    def test_empty_list_returns_empty_list(self):
+        assert _normalize_file_args([]) == []
+
+    def test_bare_string_wrapped_not_iterated(self):
+        # The bug: iterating "/abs/path" walks characters. Must wrap as one path.
+        assert _normalize_file_args("/abs/path/doc.txt") == ["/abs/path/doc.txt"]
+
+    def test_list_passed_through(self):
+        assert _normalize_file_args(["/a.pdf", "/b.pdf"]) == ["/a.pdf", "/b.pdf"]
 
 
 class TestImapFallbackFetchAttachments:
@@ -223,6 +241,19 @@ class TestCmdSend:
         keys = list(r.scan_iter(match="email:outbox:cli-*"))
         ttl = r.ttl(keys[0])
         assert 0 < ttl <= 3600
+
+    def test_bare_string_file_arg_attaches_full_path(self, r, tmp_path, capsys):
+        # Regression for #1960: a bare-string ``--file`` value (single path, not
+        # wrapped in a list) must attach the whole path, not be iterated
+        # character-by-character. The old code reported "File not found: /"
+        # because the first character of an absolute path is ``/``.
+        f = tmp_path / "doc.txt"
+        f.write_text("payload")
+        rc = cmd_send(self._args(message="see attached", file=str(f)))
+        assert rc == 0, capsys.readouterr().err
+        keys = list(r.scan_iter(match="email:outbox:cli-*"))
+        payload = json.loads(r.lpop(keys[0]))
+        assert payload["attachments"] == [str(f.resolve())]
 
 
 class TestCmdRead:

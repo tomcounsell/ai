@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import agent.session_state as _session_state
+from agent.session_runner.liveness import derive_sdk_ever_output
 from agent.session_stall_classifier import (
     NEVER_STARTED_CONFIRM_MARGIN_SECS,
     NEVER_STARTED_GRACE_SECS,
@@ -292,6 +293,22 @@ def _ts(val):
     if isinstance(val, int | float):
         return float(val)
     return None
+
+
+def _delivery_belongs_to_current_run(entry) -> bool:
+    """Return True only if response_delivered_at falls at or after this run's
+    start anchor (started_at, falling back to created_at). This distinguishes
+    a delivery from *this* run (guard should fire) from a stale delivery
+    carried over from a prior run before a resume (guard should NOT fire).
+    Legacy rows with no anchor at all preserve the original always-fire
+    behavior."""
+    rd = _ts(getattr(entry, "response_delivered_at", None))
+    if rd is None:
+        return False
+    anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
+    if anchor is None:
+        return True  # legacy: no anchor at all, preserve original always-fire behavior
+    return rd >= anchor
 
 
 # Agent session health check constants
@@ -972,6 +989,11 @@ def _never_started_past_grace(
 
     Returns False (safe default) when:
       - ``sdk_ever_output`` is True (session has produced output).
+      - Own-progress sticky evidence is present (issue #1962):
+        ``turn_count > 0``, non-empty ``log_path``, or ``claude_session_uuid``
+        set. Any one proves the session STARTED, so it can never be "never
+        started" — even a bridge-originated remote session that lacks the
+        ``*_at`` liveness fields.
       - ``started_at`` and ``created_at`` are both None (legacy / phantom
         record) — no running_seconds to compute.
       - ``running_seconds`` is below the combined threshold.
@@ -980,12 +1002,31 @@ def _never_started_past_grace(
     This predicate NEVER raises.
     """
     try:
-        # Derive sdk_ever_output the same way _has_progress and
-        # _tier2_reprieve_signal do: True iff either per-turn field is set.
-        sdk_ever_output = bool(
-            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-        )
+        # Derive sdk_ever_output via the single authoritative function
+        # (owner directive) — any stream or turn signal, owned by
+        # agent.session_runner.liveness.
+        sdk_ever_output = derive_sdk_ever_output(entry)
         if sdk_ever_output:
+            return False
+
+        # Own-progress sticky evidence (#944/#963, issue #1962): a session
+        # carrying any of ``turn_count > 0`` / ``log_path`` / ``claude_session_uuid``
+        # has demonstrably STARTED — a turn boundary was observed, a log file
+        # was opened, or the SDK authenticated. These sticky fields cannot
+        # prove *current* liveness (that is the fresh-heartbeat / sdk_ever_output
+        # concern, gated elsewhere), but "never started" is a strictly weaker
+        # claim: a started-then-stuck session is NOT a never-started one.
+        # Without this guard, a bridge-originated remote session (turn_count>0
+        # but no local log_path/uuid or ``*_at`` liveness fields) is
+        # misclassified as never-started once past the grace window, and the
+        # D0 gate in ``_has_progress`` sub-check B short-circuits the whole
+        # function to False — causing the #944 orphan net to recover a session
+        # that is actively heartbeating (issue #1962).
+        if (getattr(entry, "turn_count", 0) or 0) > 0:
+            return False
+        if (getattr(entry, "log_path", None) or "").strip():
+            return False
+        if getattr(entry, "claude_session_uuid", None):
             return False
 
         if now is None:
@@ -1123,10 +1164,9 @@ def _has_progress(entry: AgentSession) -> bool:
     now_utc = _trusted_utc_now()
 
     # Compute sdk_ever_output once — used by both sub-check A and the own-progress
-    # field guard. True iff last_tool_use_at or last_turn_at has ever been written.
-    sdk_ever_output = bool(
-        getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-    )
+    # field guard. Derived via the single authoritative function (owner
+    # directive): any stream or turn signal, owned by agent.session_runner.liveness.
+    sdk_ever_output = derive_sdk_ever_output(entry)
 
     # Sub-check A: per-turn SDK activity (issue #1226).
     # last_tool_use_at (PreToolUse/PostToolUse hooks) and last_turn_at (result event)
@@ -1307,9 +1347,9 @@ def _tier2_reprieve_signal(
     # reaches MAX_NO_OUTPUT_REPRIEVES. This ensures sessions that hang from
     # the very first turn are eventually recovered rather than being reprieved
     # forever. Sessions with sdk_ever_output=True are NOT subject to this cap.
-    sdk_ever_output = bool(
-        getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-    )
+    # Derived via the single authoritative function (owner directive): any
+    # stream or turn signal, owned by agent.session_runner.liveness.
+    sdk_ever_output = derive_sdk_ever_output(entry)
     reprieve_count = getattr(entry, "reprieve_count", 0) or 0
     if not sdk_ever_output and (
         reprieve_count >= MAX_NO_OUTPUT_REPRIEVES or _never_started_past_grace(entry)
@@ -1528,6 +1568,17 @@ def _confirm_subprocess_dead(pid: "int | None", *, timeout: float) -> Subprocess
     both the SIGTERM→SIGKILL escalation and the ``signal 0`` liveness probes. If
     ``os.getpgid(pid)`` raises ``ProcessLookupError`` the process is already gone.
     """
+    # ``claude_pid`` is read off Popoto's generic ``IndexedField``, which returns
+    # the raw string stored in Redis rather than casting to int. Callers (e.g.
+    # ``_apply_recovery_transition``) pass that value through untouched, so this
+    # helper must tolerate a numeric string here — mirrors the same defensive
+    # cast in ``AgentSession.find_by_claude_pid``.
+    if pid is not None:
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            pid = None
+
     if pid is None or pid <= 0:
         return SubprocessKillResult(confirmed_dead=True, signal_sent=False)
 
@@ -2162,16 +2213,14 @@ async def _apply_recovery_transition(
     # AC4 narrow telemetry counter (issue #1614): track recoveries that match
     # the zombie-uuid-no-output profile specifically (has claude_session_uuid,
     # but sdk_ever_output=False — the confirmed Branch 2 failure mode).
-    # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it from the
-    # real fields last_tool_use_at and last_turn_at (same derivation as
-    # _has_progress). Do NOT read the attribute directly from entry — use the
-    # derived expression below instead.
+    # NOTE: sdk_ever_output is NOT a field on AgentSession; derive it via the
+    # single authoritative function (owner directive), owned by
+    # agent.session_runner.liveness. Do NOT read the attribute directly from
+    # entry — use the derived call below instead.
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R2
 
-        _sdk_ever_output = bool(
-            getattr(entry, "last_tool_use_at", None) or getattr(entry, "last_turn_at", None)
-        )
+        _sdk_ever_output = derive_sdk_ever_output(entry)
         if bool(getattr(entry, "claude_session_uuid", None)) and not _sdk_ever_output:
             project_key = getattr(entry, "project_key", "unknown")
             counter_key = f"{project_key}:session-health:recoveries:zombie_uuid_no_output"
@@ -2185,8 +2234,13 @@ async def _apply_recovery_transition(
         pass
 
     # Guard: if response was already delivered, finalize instead of recovering
-    # to pending (prevents duplicate delivery, #918).
-    if getattr(entry, "response_delivered_at", None) is not None:
+    # to pending (prevents duplicate delivery, #918). Field-presence alone is
+    # not sufficient: a stale response_delivered_at from a prior run (before a
+    # resume) must not suppress recovery of the current run, so this checks
+    # that the delivery belongs to the current run's epoch
+    # (response_delivered_at >= started_at, falling back to created_at; a
+    # legacy row with no anchor still passes through, unguarded).
+    if _delivery_belongs_to_current_run(entry):
         try:
             from models.session_lifecycle import (
                 StatusConflictError,
@@ -3093,12 +3147,22 @@ async def _agent_session_health_check() -> None:
     4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
-    **Delivery guard (#918):** Before recovering a running session to pending,
-    the health check inspects ``response_delivered_at``. If the field is set,
-    the session already delivered its final response to Telegram — re-queuing
-    would cause a duplicate reply. Instead, the session is finalized as
-    ``completed`` via ``finalize_session()``. This prevents the crash-recover
-    loop that previously produced 6+ duplicate messages per session.
+    **Delivery guard (#918, epoch-scoped per #1979):** Before recovering a
+    running session to pending, the health check evaluates
+    ``_delivery_belongs_to_current_run(entry)`` rather than simply checking
+    whether ``response_delivered_at`` is set. That predicate compares
+    ``response_delivered_at`` against the current run's start anchor
+    (``started_at``, falling back to ``created_at``): only a delivery
+    timestamped at or after the anchor belongs to *this* run and fires the
+    guard. A delivery timestamp left over from a prior run — sticky across a
+    resume — falls before the anchor and is ignored, so the resumed session
+    remains eligible for normal recovery instead of being prematurely
+    finalized as ``completed`` while it is still running. When the predicate
+    does fire, the session is finalized as ``completed`` via
+    ``finalize_session()`` instead of being re-queued. This prevents both the
+    original crash-recover loop that produced 6+ duplicate messages per
+    session and the premature-finalization regression the epoch scoping
+    fixes.
 
     **No wall-clock timeout (#1172):** the per-session
     ``_get_agent_session_timeout`` cap was retired. A session writing fresh
@@ -3191,8 +3255,13 @@ async def _agent_session_health_check() -> None:
         # recovery path while the heartbeat is fresh (gated on
         # NO_OUTPUT_BUDGET_SECONDS since #1614 — no longer permanent), so
         # sessions that delivered but failed to finalize would otherwise stay
-        # stuck as "running" until the heartbeat goes stale.
-        if getattr(entry, "response_delivered_at", None) is not None:
+        # stuck as "running" until the heartbeat goes stale. Field-presence
+        # alone is not sufficient here either: the delivery must belong to
+        # the current run's epoch (response_delivered_at >= started_at,
+        # falling back to created_at) so a stale prior-run delivery doesn't
+        # suppress recovery of a genuinely stuck current run; legacy rows
+        # with no anchor still pass through unguarded.
+        if _delivery_belongs_to_current_run(entry):
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 

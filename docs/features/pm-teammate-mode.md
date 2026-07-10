@@ -61,7 +61,7 @@ Provides teammate-specific instructions that replace the PM dispatch block when 
 - **Eng session delegation**: when source code changes are needed, the teammate surfaces `valor-session create --role eng --slug <slug> --message "<task>"` and waits for human go-ahead rather than refusing
 - **Nudge cap**: 10 (vs 50 for normal sessions), set via `TEAMMATE_MAX_NUDGE_COUNT`
 - **Persona**: same PM persona with teammate-specific additions (conversational tone, cite file paths, direct answers)
-- **Delivery**: teammate sessions use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). Falls through to the message drafter when no delivery instruction is set.
+- **Delivery**: teammate sessions were designed to use the [stop-hook review gate](agent-message-delivery.md) when Telegram-triggered, giving the agent final say over output (SEND/EDIT/REACT/SILENT/CONTINUE). That gate is dead code for sessions executed through `agent/session_runner/` (issue #1955) — in practice, delivery falls through to the message drafter's self-draft steering path, the live mechanism for both eng and teammate `session_runner` traffic.
 
 ### Metrics (`agent/teammate_metrics.py`)
 

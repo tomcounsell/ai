@@ -819,7 +819,7 @@ def create_app() -> FastAPI:
                     "claude_auth": claude_auth["status"],
                     "claude_auth_logged_in": claude_auth["logged_in"],
                     "claude_auth_method": claude_auth["auth_method"],
-                    "claude_auth_subscription_type": claude_auth["subscription_type"],
+                    "claude_auth_subscription_type": claude_auth.get("subscription_type"),
                     "redis_offload": {
                         "label": "drain-loop idle-check latency",
                         "p95_latency_s": get_redis_latency_p95(),
@@ -879,7 +879,7 @@ def create_app() -> FastAPI:
                 "claude_auth": claude_auth["status"],
                 "claude_auth_logged_in": claude_auth["logged_in"],
                 "claude_auth_method": claude_auth["auth_method"],
-                "claude_auth_subscription_type": claude_auth["subscription_type"],
+                "claude_auth_subscription_type": claude_auth.get("subscription_type"),
                 # Additive-only (issue #1825): AgentSession SQLite secondary
                 # store freshness -- see docs/plans/session-archive-sqlite.md.
                 "archive": archive["status"],

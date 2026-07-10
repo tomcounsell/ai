@@ -178,3 +178,32 @@ To silence a noisy finding without fixing the underlying rule:
 - **Not a `--file-issues` flag** on `audit_skills.py` itself. The streak gate is a reflection-cadence concept that does not make sense for one-off CLI invocations. The script remains side-effect-free.
 - **Not WARN-finding filing.** Only FAIL findings file issues. WARNs are surfaced in reflection telemetry only.
 - **Not auto-closing.** Issues stay open until a human closes them. The reflection has no opinion about when a finding has been "fixed".
+
+## Architecture audit
+
+The 20-rule lint above catches hygiene (rot, husks, budget, trigger collisions) —
+it does not judge whether a skill is the *right shape*. That judgment lives in
+a separate, human-gated pass: the `--arch` rubric at
+`.claude/skills-global/do-skills-audit/references/rubric.md`, executed as a
+multi-agent fan-out (one analyst per skill cluster, adversarial verification of
+every non-`keep` disposition, single synthesis report) rather than as a
+deterministic script, since primitive-fit and consolidation calls require
+judgment the lint layer can't make.
+
+The rubric applies five lenses to every skill: context economy (progressive
+disclosure vs. always-loaded body), primitive fit (Skill vs. Workflow vs.
+Subagent vs. Script — a Subagent needs a cited reason of parallelism or
+fresh-mind isolation, a Workflow needs named stage boundaries and a handoff
+schema), consolidation (merge direction + trigger-precision-preserving
+description text), model tier (sonnet mechanical / opus multi-step / fable
+frontier-judgment), and efficiency (token cost estimate per invocation).
+
+The first full run (2026-07) is recorded at
+[`docs/audits/skills-architecture-audit-2026-07.md`](../audits/skills-architecture-audit-2026-07.md) —
+65 rows (60 live skills + 5 tracking-artifact orphans), zero restructuring
+actions survived adversarial review this cycle (the fleet was largely
+pre-renovated by PR #1894), with ~14 minor findings and 6 cross-cluster
+observations flagged as candidate follow-up issues rather than executed. A
+disposition report of this shape is a one-shot analysis, not part of the
+regular lint cadence — re-run manually when the fleet has drifted enough to
+warrant a fresh pass (see the report's own header for the baseline commit).

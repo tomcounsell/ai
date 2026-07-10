@@ -47,6 +47,29 @@ class TestMetaSetWriteMeta:
 
         assert result == {"key": "plan_revising", "value": True}
 
+    def test_write_meta_does_not_touch_issue_lock(self):
+        """Issue #1954 scope-narrowing: meta-set fires during PLAN/CRITIQUE-stage
+        bookkeeping with no established recurrence path through an in-progress
+        BUILD/TEST/REVIEW stage, so it must NOT renew the issue-level SDLC
+        ownership lock. touch_issue_lock() must never be called from this path."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_session = MagicMock()
+        mock_session.stage_states = "{}"
+        mock_session.session_type = "eng"
+
+        with (
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch(
+                "tools.stage_states_helpers.update_stage_states",
+                return_value=True,
+            ),
+            patch("models.session_lifecycle.touch_issue_lock") as mock_touch,
+        ):
+            write_meta(key="plan_revising", value="true", issue_number=1954)
+
+        mock_touch.assert_not_called()
+
     def test_valid_bool_key_false_clears_value(self):
         """write_meta with plan_revising=false writes _plan_revising=False."""
         from tools.sdlc_meta_set import write_meta

@@ -63,10 +63,22 @@ SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null ||
 # repo's plans live. Set once and exported for the lifetime of the supervision loop.
 SDLC_TARGET_REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 export SDLC_TARGET_REPO
+# SDLC_HOLDER_TOKEN (issue #1971): ONE shared issue-lock ownership token for this whole
+# supervision run. /do-sdlc drives the #1954 issue lock through many short-lived `sdlc-tool`
+# subprocesses; each is a fresh OS process, so without a shared token every call mints its
+# own and the run blocks ITSELF (next-skill sees session-ensure's lock as foreign). Persist
+# it to a gitignored file because shell env does not survive across separate tool calls —
+# every state-mutating `sdlc-tool` call below re-exports it from this file. The standalone
+# worker never sets this var (keeps its own random per-process token), so the real
+# worker-vs-local guard is preserved.
+SDLC_RUN_DIR="${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run"
+mkdir -p "$SDLC_RUN_DIR"
+python3 -c 'import uuid;print(uuid.uuid4().hex)' > "$SDLC_RUN_DIR/holder_{issue_number}"
+export SDLC_HOLDER_TOKEN=$(cat "$SDLC_RUN_DIR/holder_{issue_number}")
 sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
 ```
 
-Idempotent — reuses the existing `sdlc-local-{N}` session on re-runs.
+Idempotent — reuses the existing `sdlc-local-{N}` session on re-runs. **Every `sdlc-tool` state call in Step 3 below MUST re-export `SDLC_HOLDER_TOKEN` from the run file first** (shown inline), or that call self-blocks on the issue lock.
 
 ## Step 3: Supervision Loop
 
@@ -75,6 +87,7 @@ Repeat the following cycle. **Iteration cap: 15 dispatches** (a happy path is 8 
 ### 3a. Ask the router
 
 ```bash
+export SDLC_HOLDER_TOKEN=$(cat "${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run/holder_{issue_number}")
 sdlc-tool next-skill --issue-number {issue_number}
 ```
 
@@ -88,6 +101,7 @@ Interpret the JSON from the tool result:
 ### 3b. Record the dispatch
 
 ```bash
+export SDLC_HOLDER_TOKEN=$(cat "${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run/holder_{issue_number}")
 sdlc-tool dispatch record --skill {skill} --issue-number {issue_number}
 # include --pr-number {pr} once a PR exists (review/patch/docs/merge stages)
 ```
@@ -124,6 +138,7 @@ Carry forward context between iterations: once BUILD reports a PR number, includ
 `/do-test` and `/do-patch` do not write their own stage markers — on the bridge, the worker's dev-completion handler does it. Locally, the supervisor must:
 
 ```bash
+export SDLC_HOLDER_TOKEN=$(cat "${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run/holder_{issue_number}")
 sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_number} 2>/dev/null || true
 # or --status failed, per the subagent's report
 ```

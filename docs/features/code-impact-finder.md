@@ -86,6 +86,7 @@ Results map to plan sections:
 - Model mismatch (provider change) → full rebuild
 - Content hashing → only changed files re-embedded
 - Cost warning at >1000 chunks (informational, non-blocking)
+- Rerank endpoint down → embedding-only fallback. Because `find_affected_code` shares `tools/impact_finder_core.py` with the doc finder, it inherits the same all-or-nothing fallback: when *every* Stage 2 Haiku rerank request fails with a transport/API error (e.g. a misconfigured `ANTHROPIC_BASE_URL`), the finder returns embedding-only candidates instead of `[]` and logs a warning naming the likely cause. See [Semantic Doc Impact Finder → Graceful Degradation](semantic-doc-impact-finder.md#graceful-degradation) for the full behavior. (issue #1950)
 
 ## Index Storage
 

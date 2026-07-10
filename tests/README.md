@@ -131,7 +131,8 @@ tests/
 | unit | `test_pipeline_graph.py` | 29 | Pipeline graph visualization |
 | unit | `test_observer_early_return.py` | 18 | Early return optimization |
 | unit | `test_pipeline_state.py` | 15 | Pipeline state transitions |
-| unit | `test_sdlc_stage_marker.py` | 12 | Stage marker writes via CLI (session resolution, issue-number fallback) |
+| unit | `test_pipeline_state_machine.py` | 137 | `PipelineStateMachine` transitions, outcome classification, opt-in predecessor backfill (`_backfill_predecessors`, `_reaches_issue`) |
+| unit | `test_sdlc_stage_marker.py` | 25 | Stage marker writes via CLI (session resolution, issue-number fallback, opt-in predecessor backfill on `in_progress`/`completed`) |
 | unit | `test_sdlc_stage_query.py` | 17 | Stage query CLI (session-id and issue-number resolution) |
 | unit | `test_sdlc_session_ensure.py` | 8 | Local session creation/reuse for SDLC pipeline state |
 | unit | `test_sdlc_utils.py` | 6 | Shared `find_session_by_issue()` helper |

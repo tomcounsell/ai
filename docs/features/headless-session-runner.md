@@ -28,6 +28,7 @@ process pool, no idle-scraping startup phase.
 | `hook_edge.py` / `hook_forwarder.py` | The turn-end/needs-human signal path: a fail-silent NDJSON forwarder writes each hook event to a per-session file; the consumer tails it with a durable `(event_cursor, byte_offset, fingerprint)` cursor. |
 | `transcript_tailer.py` | Incremental JSONL transcript reads for dashboard telemetry (byte-offset cadence, unchanged from the prior implementation). |
 | `adapter.py` | Executor-facing construction: delivery callbacks, the four-scalar resume persistence, exit-summary publication. |
+| `liveness.py` | Single authoritative `sdk_ever_output` derivation (`derive_sdk_ever_output`), consumed by `agent/session_health.py`'s recovery-path checks. |
 
 `.claude/agents/dev.md` is the `dev` subagent definition — authored from the
 former Dev prime command plus the shared WORKER rails, with the
@@ -157,6 +158,40 @@ Stale or invalid scalars (missing `runner_cwd`, unknown `claude_session_uuid`)
 discard cleanly to a cold start with a full first-turn prime — there is no
 crash on a bad resume pointer.
 
+### Stale-UUID fallback vs. the result-event completion signal (issue #1980)
+
+A resumed (`--resume`) turn whose subprocess exits **non-zero** may need one
+fresh-session retry — a genuinely stale/invalid UUID makes `claude --resume`
+error out before producing any output. `get_response_via_harness`
+(`agent/sdk_client.py`) runs exactly that retry once, without `--resume`, using
+the caller's `full_context_message`.
+
+That retry is **gated on whether the primary invocation emitted a `result`
+event**, not on whether it exited zero. The invariant: *a `result` event is the
+protocol's completion signal.* If the resumed subprocess emitted a `result`
+event (`stop_reason: end_turn`) and only *then* exited non-zero — a post-turn or
+cleanup artifact — the captured completion is authoritative and the fallback is
+**skipped**, keeping the real answer. This mirrors, one layer down, the role
+driver's residual-#1916 rule (`role_driver.py`: "a nonzero exit AFTER a result
+event keeps the result").
+
+The gate keys off the true `result_event_fired` boolean, captured from the
+primary invocation's `on_exit_status(returncode, result_event_fired)` callback —
+**not** off the returned `result_text`. `result_text` is a non-empty string in
+two distinct cases (a fired result event, or accumulated partial text with *no*
+result event from a crashed subprocess), so `result_text is None` cannot
+distinguish "resume succeeded" from "crashed with partial text." The fallback
+therefore still fires whenever no result event fired (partial text or a genuine
+stale UUID), preserving all recovery.
+
+Before this gate existed, a valid completion followed by a non-zero exit
+triggered the retry, whose empty output overwrote the good `result_text`;
+`get_response_via_harness` returned `""`, `HeadlessRoleDriver.run_turn`'s
+`if not reply:` guard set `exit_reason="empty_output"`, and the wrap-up guard
+delivered the canned `OPERATOR_TERMINAL_MESSAGE` instead of the real answer.
+`OPERATOR_TERMINAL_MESSAGE` is now reserved for a genuinely empty PM turn (no
+result event and no recoverable text).
+
 ## Auth
 
 The runner sets `CLAUDE_CODE_OAUTH_TOKEN` and strips `ANTHROPIC_API_KEY` in
@@ -172,7 +207,7 @@ itself is minted and rotated.
 `SESSION_RUNNER__`: `pm_model`, `dev_model`, `hook_turn_end_wait_s`,
 `hook_crash_resume_cap`, plus the per-turn timeout and the steer debounce
 (both env-overridable, provisional). A settings-load warning fires loudly if
-any legacy `GRANITE__*`/`GRANITE_*` env key is still present, so a stale
+a pre-cutover `GRANITE__*`/`GRANITE_*` env key is still present, so a stale
 vault override never silently reverts to defaults; `/update` surfaces the
 same warning during deploy.
 
@@ -203,6 +238,51 @@ question to the human. `session_executor.py` recognizes it via the single
 imported `CLEAN_EXIT_REASONS` set (no separate literal to drift out of sync),
 so it never falls into the `failed`/error-reaction path that a genuinely
 non-clean `exit_reason` would.
+
+### Liveness signals (`sdk_ever_output`, issue #1935)
+
+The never-started gate (`_never_started_past_grace`) and the `_tier2_reprieve_signal`
+reprieve-cap guard both ask the same question: "has the SDK EVER produced
+recognized output?" That question is answered by one function,
+`agent.session_runner.liveness.derive_sdk_ever_output(entry)` — the single
+authoritative liveness signal, owned by the runner package (owner directive,
+2026-07-07: *"One authoritative liveness signal makes the most sense. As much
+as we can strengthen a single module, let's do that instead of manipulating
+the worker."*). `agent/session_health.py` imports and calls it at all four of
+its recovery-path derivation sites instead of inlining the OR expression.
+
+`derive_sdk_ever_output` is `bool(last_tool_use_at OR last_turn_at OR
+last_stdout_at)`:
+
+- `last_tool_use_at` — a tool boundary fired (PreToolUse/PostToolUse CLI
+  hooks, via `agent.hooks.liveness_writers.record_tool_boundary`).
+- `last_turn_at` — a turn boundary completed (the harness `result` event,
+  via `agent.hooks.liveness_writers.record_turn_boundary`, called with the
+  true `AgentSession.session_id` from `agent/sdk_client.py`'s result-event
+  handler).
+- `last_stdout_at` — the headless stream produced ANY output at all (the
+  `init` event or any subsequent stdout line). Stamped by
+  `SessionRunner._stamp_stdout_liveness`, wired via two driver adapters in
+  `_build_driver`: a 0-arg `on_stdout_event` adapter, and a 1-arg `on_init`
+  adapter that composes with (never replaces) `_on_harness_init`'s
+  `claude_session_uuid`/`runner_cwd`/`claude_version` persistence. This is
+  the headless replacement for the PTY-era `last_pty_read_loop_at`
+  per-stream liveness signal (#1843 Gap B), which the granite teardown
+  deleted with no headless equivalent — the root cause of the
+  toolless-streaming zombie wedge this section documents the fix for. The
+  stamp is fail-silent with a per-session-keyed 5s cooldown (mirrors
+  `agent.hooks.liveness_writers.COOLDOWN_WINDOW_SEC`'s discipline) to bound
+  Redis write rate; a successful stamp emits a debug-level
+  `stdout_liveness_stamped` log line so `grep stdout_liveness_stamped
+  logs/worker.log` post-deploy positively confirms the write path is firing.
+
+This is a **presence** check, not a freshness check — it does not by itself
+detect a mid-turn hang. A subprocess that streams `init` and then genuinely
+hangs is caught by the whole-turn deadline (the preempt watcher's
+`_kill_turn(cause="timeout")` and the driver's own `asyncio.wait_for`
+backstop), not by session-health — accepting a wider detection window (up to
+`turn_timeout_s`, 7200s for PM/eng turns) for that rare case in exchange for
+eliminating false zombie verdicts on legitimately toolless-streaming turns.
 
 ## Supersedes
 

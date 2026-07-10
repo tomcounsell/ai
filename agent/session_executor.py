@@ -195,6 +195,49 @@ def _tick_backstop_check_compaction(
         )
 
 
+def _tick_issue_lock_renewal(
+    session: AgentSession,
+    agent_session: AgentSession | None,
+) -> None:
+    """Renew the per-issue SDLC ownership lock on the tier-1 (60s) heartbeat tick.
+
+    Issue #1954: an in-progress eng session working an issue must keep the
+    per-issue ``touch_issue_lock()`` lock alive for as long as it is ticking,
+    or the lock's ``ISSUE_LOCK_TTL_SECONDS`` (300s) will expire mid-session
+    and let a second independent process claim the same issue (the #1915
+    duplicate-PR root cause). This is deliberately called from the tier-1
+    (60s) heartbeat block, NOT the 25-minute calendar block elsewhere in
+    ``_heartbeat_loop`` -- that slower cadence would blow straight past the
+    300s TTL and defeat the purpose of renewal.
+
+    Guarded on ``agent_session.session_type == "eng"`` and a resolved
+    (truthy) ``agent_session.issue_number`` -- non-eng sessions and eng
+    sessions with no associated issue never touch the lock.
+
+    Best-effort and side-effect-only: never raises, returns nothing. A
+    Redis hiccup or missing field never blocks the heartbeat loop.
+    """
+    if agent_session is None:
+        return
+    if getattr(agent_session, "session_type", None) != "eng":
+        return
+    issue_number = getattr(agent_session, "issue_number", None)
+    if not issue_number:
+        return
+
+    try:
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
+
+        session_id = getattr(session, "session_id", None) or ""
+        touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - renewal must never crash the heartbeat loop
+        logger.debug(
+            "[%s] issue-lock renewal failed (non-fatal): %s",
+            getattr(session, "session_id", "<unknown>"),
+            exc,
+        )
+
+
 # -----------------------------------------------------------------------------
 # Post-session memory extraction scheduling (hotfix #1055)
 # -----------------------------------------------------------------------------
@@ -775,9 +818,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
         (return, raise, ``CancelledError``).
       * A T+0 ``last_heartbeat_at`` write ensures the first health-check tick
         after session start sees a fresh heartbeat.
-      * Three messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``,
-        ``on_stdout_event``) bump per-session ORM fields; the messenger
-        itself imports nothing from ``models/``.
+      * Two messenger callbacks (``on_sdk_started``, ``on_heartbeat_tick``)
+        bump per-session ORM fields; the messenger itself imports nothing
+        from ``models/``. ``last_stdout_at`` liveness is owned by
+        ``SessionRunner._stamp_stdout_liveness`` (issue #1935) — this
+        messenger no longer duplicates that write (a prior, unlanded,
+        dead-in-production attempt at the same signal was removed here).
     """
     from agent import BackgroundTask, BossMessenger
 
@@ -1527,17 +1573,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     e,
                 )
 
-        def _on_stdout_event() -> None:
-            try:
-                session.last_stdout_at = datetime.now(tz=UTC)
-                session.save(update_fields=["last_stdout_at"])
-            except Exception as e:
-                logger.warning(
-                    "[%s] on_stdout_event save failed: %s",
-                    session.session_id,
-                    e,
-                )
-
         messenger = BossMessenger(
             _send_callback=send_to_chat,
             chat_id=session.chat_id,
@@ -1545,7 +1580,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
             on_sdk_started=_on_sdk_started,
             on_sdk_finished=_on_sdk_finished,
             on_heartbeat_tick=_on_heartbeat_tick,
-            on_stdout_event=_on_stdout_event,
         )
 
         # Deferred enrichment: process media, YouTube, links, reply chain.
@@ -1753,8 +1787,14 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 try:
                     session.status = "failed"
                     session.save(update_fields=["status", "updated_at"])
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as last_resort_err:  # noqa: BLE001
+                    logger.warning(
+                        "[executor-guard] last-resort status save failed for "
+                        "session %s (non-fatal): %s",
+                        session.agent_session_id,
+                        last_resort_err,
+                        exc_info=True,
+                    )
             return
 
         # All session types route through the headless session runner (plan
@@ -1960,6 +2000,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         session.session_id,
                         hb_err,
                     )
+
+                # Issue-lock renewal (issue #1954): tier-1 (60s) block, NOT the
+                # 25-min calendar block below -- see _tick_issue_lock_renewal
+                # docstring for why that cadence would blow past
+                # ISSUE_LOCK_TTL_SECONDS (300s) and let the lock expire mid-cycle.
+                _tick_issue_lock_renewal(session, agent_session)
 
                 # Calendar + updated_at heartbeat on the 25-min cadence (preserved).
                 if elapsed >= CALENDAR_HEARTBEAT_INTERVAL:
@@ -2180,6 +2226,16 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         or "This continues a previously completed session."
                     )
                     augmented = f"[Prior session context: {_summary}]\n\n{combined_text}"
+                    # Reuse the slug already checked out in working_dir (if it's a
+                    # worktree) so the continuation's synthetic-slug fallback
+                    # (session_executor.py's `is_synthetic_slug` branch) doesn't
+                    # mint a fresh slug from the *new* agent_session_id — that
+                    # mismatches the branch already checked out here and trips
+                    # the worktree-branch-guard (issue #1377), killing the
+                    # continuation instantly instead of resuming it.
+                    continuation_slug = (
+                        working_dir.name if WORKTREES_DIR in str(working_dir) else None
+                    )
                     await enqueue_agent_session(
                         project_key=session.project_key,
                         session_id=session.session_id,
@@ -2193,6 +2249,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         sender_id=session.sender_id,
                         session_type=session.session_type or "eng",
                         project_config=getattr(session, "project_config", None),
+                        slug=continuation_slug,
                     )
                     logger.info(
                         f"[{session.project_key}] Re-enqueued {len(leftover)} steering "
