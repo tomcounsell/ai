@@ -157,32 +157,45 @@ class TestReactionEmojiSelection:
         assert "❌" in INVALID_REACTIONS
 
     def test_reaction_constants_are_distinct(self):
-        """All reaction constants should be different emojis.
+        """All reaction constants must be pairwise distinct emojis.
 
-        REACTION_SUCCESS/COMPLETE/ERROR are EmojiResult objects (unhashable),
-        so we compare by .emoji string value rather than using set() directly.
+        Delegates to bridge.response._assert_distinct — the exact helper that
+        runs at import time (#2004 T1.8) — so the distinctness invariant has
+        one implementation, not a test-side copy (issue #1961 class).
         """
-        from bridge.response import (
-            REACTION_COMPLETE,
-            REACTION_ERROR,
-            REACTION_PROCESSING,
-            REACTION_RECEIVED,
-            REACTION_SUCCESS,
-        )
+        from bridge.response import _assert_distinct
 
-        # Extract string representations — EmojiResult objects are unhashable
-        all_reaction_strs = [
-            REACTION_RECEIVED,  # plain string
-            REACTION_PROCESSING,  # plain string
-            str(REACTION_SUCCESS),  # EmojiResult -> str via __str__
-            str(REACTION_COMPLETE),  # EmojiResult -> str via __str__
-            str(REACTION_ERROR),  # EmojiResult -> str via __str__
-        ]
-        duplicates = [e for e in set(all_reaction_strs) if all_reaction_strs.count(e) > 1]
-        assert len(set(all_reaction_strs)) == len(all_reaction_strs), (
-            f"Reply-delivery reaction constants must be pairwise distinct; "
-            f"duplicated emoji: {duplicates} in {all_reaction_strs}"
-        )
+        _assert_distinct()  # raises ImportError on any collision
+
+    def test_assert_distinct_names_glyph_and_both_constants(self):
+        """The failure message names the duplicated glyph and BOTH constant names."""
+        from bridge.response import _assert_distinct
+
+        with pytest.raises(ImportError) as excinfo:
+            _assert_distinct(
+                {
+                    "REACTION_RECEIVED": "👀",
+                    "REACTION_PROCESSING": "🤔",
+                    "REACTION_ERROR": "🤔",
+                }
+            )
+        message = str(excinfo.value)
+        assert "🤔" in message
+        assert "REACTION_PROCESSING" in message
+        assert "REACTION_ERROR" in message
+
+    def test_assert_distinct_covers_full_constant_set(self):
+        """The import-time registry names every reaction constant in bridge.response."""
+        from bridge.response import _reaction_constants
+
+        assert set(_reaction_constants()) == {
+            "REACTION_RECEIVED",
+            "REACTION_PROCESSING",
+            "REACTION_ABORT",
+            "REACTION_SUCCESS",
+            "REACTION_COMPLETE",
+            "REACTION_ERROR",
+        }
 
     def test_no_validated_reaction_in_invalid_list(self):
         """No emoji should be in both VALIDATED_REACTIONS and INVALID_REACTIONS."""

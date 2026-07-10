@@ -169,3 +169,56 @@ class TestNoTerminalConstantIsHostile:
 
         result = getattr(constants, name)
         assert result.emoji not in BLOCKED_REACTION_EMOJIS
+
+
+class TestSemanticDrawExcludesReservedGlyphs:
+    """The semantic lottery can never land on a glyph another constant owns.
+
+    Issue #1961 class, found live by bridge.response._assert_distinct (#2004
+    T1.8): on some machines find_best_emoji("acknowledged received silently
+    noted") returns 🫡 — the pinned glyph of bridge.response.REACTION_ABORT —
+    making REACTION_SUCCESS ambiguous with the abort ack. A semantic result in
+    RESERVED_REACTION_GLYPHS, or already cached for a different terminal
+    constant, is treated as a failed resolution and the hardcoded fallback is
+    cached instead.
+    """
+
+    def test_reserved_glyphs_cover_bridge_pins_and_terminal_config(self):
+        """The reserved set contains the bridge pins and every config emoji."""
+        from agent.constants import _TERMINAL_EMOJI_CONFIG, RESERVED_REACTION_GLYPHS
+
+        # Bridge-owned pins (bridge/response.py): 👀 RECEIVED, ✍ PROCESSING, 🫡 ABORT
+        assert {"\U0001f440", "✍", "\U0001fae1"} <= RESERVED_REACTION_GLYPHS
+        # Every pinned/fallback emoji in the terminal config: 👌 👏 🤔
+        assert {c.emoji for c in _TERMINAL_EMOJI_CONFIG.values()} <= RESERVED_REACTION_GLYPHS
+
+    def test_draw_landing_on_reserved_glyph_falls_back(self):
+        """A semantic draw of 🫡 (REACTION_ABORT's pin) yields the 👌 fallback."""
+        _clear_terminal_cache()
+        from tools.emoji_embedding import EmojiResult
+
+        with patch(
+            "tools.emoji_embedding.find_best_emoji",
+            return_value=EmojiResult(emoji="\U0001fae1"),  # 🫡
+        ):
+            from agent.constants import REACTION_SUCCESS
+
+            assert REACTION_SUCCESS.emoji == "\U0001f44c"  # 👌 hardcoded fallback
+        _clear_terminal_cache()
+
+    def test_draw_colliding_with_other_cached_constant_falls_back(self):
+        """A draw matching the OTHER semantic constant's cached glyph falls back."""
+        _clear_terminal_cache()
+        import agent.constants as constants
+        from tools.emoji_embedding import EmojiResult
+
+        # 🎉 is not reserved — a legitimate semantic result for REACTION_SUCCESS.
+        with patch(
+            "tools.emoji_embedding.find_best_emoji",
+            return_value=EmojiResult(emoji="\U0001f389"),  # 🎉
+        ):
+            assert constants.REACTION_SUCCESS.emoji == "\U0001f389"
+            # REACTION_COMPLETE's draw returns the SAME glyph → collision with
+            # the cached REACTION_SUCCESS → hardcoded 👏 fallback.
+            assert constants.REACTION_COMPLETE.emoji == "\U0001f44f"  # 👏
+        _clear_terminal_cache()
