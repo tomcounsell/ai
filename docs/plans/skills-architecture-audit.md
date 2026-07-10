@@ -1,11 +1,11 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Tom Counsell
 created: 2026-07-03
 tracking: https://github.com/tomcounsell/ai/issues/1883
-last_comment_id: 4877872940
+last_comment_id: 4880668532
 ---
 
 # Skills Architecture Audit
@@ -26,19 +26,22 @@ A per-skill architecture audit that produces, for every one of the 60 skills: (1
 
 ## Freshness Check
 
-**Baseline commit:** `56124515` (re-verified 2026-07-03 after the do-skills-audit renovation; originally planned at `06fca807`)
+**Baseline commit:** `56124515` (originally); **re-verified 2026-07-10** at the current `main` HEAD before finalization.
 **Issue filed at:** plan-initiated (tracking issue created alongside this plan; no pre-existing issue to re-verify)
-**Disposition:** Minor drift — the renovation (this plan's own groundwork) changed the inventory substrate and pre-resolved the husk anomalies; premises otherwise hold
+**Disposition:** Minor drift — the renovation groundwork landed and PR #1894 merged; premises hold and the audit re-runs live inventory at execution, so nothing blocks build.
 
-**File:line references re-verified:** Inventory taken directly from the working tree at the baseline commit (see Spike Results) — 46 global + 14 project-only skills confirmed present.
+**File:line references re-verified:** Inventory re-counted at HEAD on 2026-07-10 — **46 global + 14 project-only skills = 60** confirmed (`.claude/skills/_shared` is a shared reference dir, not a skill). The audit's constitution `.claude/skills-global/do-skills-audit/references/rubric.md` still present. Fleet count unchanged since plan time; no net-new or removed skills.
 
-**Cited sibling issues/PRs re-checked:**
-- #1783 / PR #1806 — "Generalize all global skills to be repo-agnostic" — merged 2026-06-26. The skill-context seam (probe sentences, `docs/sdlc/*.md` addenda) is now the established mechanism; this audit must respect it, not undo it.
+**Cited sibling issues/PRs re-checked (2026-07-10):**
+- #1783 / PR #1806 — "Generalize all global skills to be repo-agnostic" — merged 2026-06-26. The skill-context seam (probe sentences, `docs/sdlc/*.md` addenda) is the established mechanism; this audit respects it, does not undo it.
 - #1299, #1395 — skills-audit reflection wiring (FAIL findings file issues via the two-run gate) — closed; the nightly reflection runs the *lint* audit, not an architecture audit.
+- **PR #1894** — "Renovate skill fleet (60 skills)" — now **MERGED 2026-07-05** (was in-flight at plan time). Its post-renovation disposition recommendations (tracking-issue comment `4880668532`) are folded in below as pre-computed seed input.
 
-**Active plans in `docs/plans/` overlapping this area:** none — the five most recent active plans (delivery paths, TUI liveness, session lifecycle, granite hooks, reflection scheduler) touch runtime systems, not skills.
+**Commits touching skill dirs since plan (self-correcting):** `do-merge`, `sdlc`, `do-sdlc`, and husk-prune (#1909) edits landed on skills since 2026-07-03. These shift exact line counts for a few decompose candidates but do not change the audit's shape — Task 1 re-runs `--json --no-sync` against live HEAD, so the inventory substrate is always current at execution.
 
-**Notes:** Groundwork performed between plan creation and this revision (issue comments 4877617569, 4877872940, both incorporated): a blind-draft comparison of the existing lint, then a full renovation shipped in `56124515`. Lint baseline at that commit: 60 skills · 828 PASS · 73 WARN · 7 FAIL (all seven FAILs are line-count monoliths — this plan's decompose candidates). Fleet description total: 16,596 chars against the 4,000 budget.
+**Active plans in `docs/plans/` overlapping this area:** none — recent active plans touch runtime systems (delivery paths, session lifecycle, reflection scheduler), not skills.
+
+**Notes:** Groundwork performed between plan creation and finalization (issue comments 4877617569, 4877872940, and 4880668532 — all incorporated): a blind-draft comparison of the existing lint, a full renovation shipped in `56124515`, then the 60-skill fleet renovation (PR #1894) whose leftover disposition recommendations feed this audit. Lint baseline at renovation (`--no-sync`): 60 skills · 828 PASS · 73 WARN · 7 FAIL (all seven FAILs are line-count monoliths — this plan's decompose candidates).
 
 ## Prior Art
 
@@ -136,6 +139,13 @@ The audit itself is read-only; the appetite is spent on analysis quality and the
   - Merge: do-debrief + do-voice-recording (both TTS; debrief = collect+draft+speak, voice-recording = speak — one skill, two entry modes); do-design-audit absorbs the orphan do-design-review; the audit-* family shares one skeleton — candidates for a single parameterized `audit` skill or generation from `new-audit-skill` templates; analyze/grill-me/zoom-out → one "think" skill with modes is *plausible* but they have distinct triggers — verifier must weigh trigger-precision loss.
   - Decompose: do-pr-review (multi-dimension review + screenshot capture is a natural Workflow: dimensions fan out, findings adversarially verified — mirrors the built-in /code-review shape); do-build (already delegates to builder agents; audit whether its 526-line body is orchestration prose that should be a Workflow script); linkedin/x-com (800/728 lines of mixed reference + procedure — split reference tables into sub-files with progressive disclosure rather than convert; browser-driving is inherently sequential, a Workflow buys nothing); setup (620 lines, deterministic — most of it should be a script the skill runs).
   - Model tiers (seed, per-skill final call is the audit's job): fable → do-plan-critique, analyze, grill-me, imagine-agent, do-plan (architecture judgment); opus → do-build, do-pr-review, do-docs, do-design-system, frontend-design; sonnet → telegram, email, reading-sms-messages, update, do-skills-audit, weekly-review, do-voice-recording, get-telegram-messages-style I/O skills.
+- **Pre-computed disposition input (PR #1894 renovation pass, tracking comment `4880668532`)**: the 60-skill renovation surfaced concrete disposition recommendations that were deliberately *not* executed (frontmatter/placement changes were out of scope). These are handed to the audit as **verifier claims to refute**, exactly like the seed hypotheses — never as analyst defaults. Grouped:
+  - *Placement / seam*: `do-sdlc` (doc says Bucket C project-only but it lives in `skills-global/` and syncs everywhere — resolve the contradiction); `do-discover-paths`, `do-pr-review` sub-skill, `reclassify`, `analyze`, `do-test` all invoke ai-repo toolchain from global bodies via signals rule 13 misses — probe-guard, Bucket C move (+ RENAMED_REMOVALS), or extend the coupling-signal set.
+  - *Merge / consolidation*: audit-models → do-oop-audit; do-design-audit ≈ do-design-review (orphan); linkedin + x-com shared skeleton; skillify + new-skill; new-audit-skill → new-skill `references/audit-template.md`; claude-standards ↔ do-skills-audit overlap; audit-tools vs audit-next-tool.
+  - *Rewrite / cleanup*: pthread (pseudo-code vs real Agent API; CLAUDE.md Principle 8 overlap); x-com `references/posting.md` duplicate "Iterate" sections; do-plan-critique dead version-history + repo-policy recitation; sdlc G1–G7 guard-table duplication; do-merge Steps 1–3 scripts extraction; setup Phases 5/6 vs `/update --full`; prime stale cross-repo comment.
+  - *Model-tier proposals*: build-agent → fable (client-facing, billing consequences); authenticity-pass → sonnet (classification).
+  - *User-level orphans needing disposition*: audit-next-tool, do-design-review, get-telegram-messages, searching-message-history, sentry-cli (no repo source) + diverged user-level `sentry` copy.
+  - *Always-true policy in skill bodies (CLAUDE.md candidates)*: pthread ↔ Principle 8; linkedin's em-dash prohibition (kept inline because drafter subagent prompts need it verbatim).
 - **Disposition report**: one table row per skill (60 rows): current lines/files, cluster, findings summary, disposition, model tier, token estimate, verifier verdict. Dispositions are recommendations; nothing is executed in this slug.
 - **Issue generation**: after human sign-off on the report, one `gh issue create` per accepted merge/split/conversion, each self-contained with the affected paths, the `RENAMED_REMOVALS` requirement, and the doc-sweep requirement (prior art: #1416-#1618 drift). The revived nightly skills-audit reflection will independently file issues for the 7 standing rule-1 FAILs after 2 consecutive runs (streak gate) — the issue-generation step must check for those auto-filed issues and absorb or close them against the audit's own decompose issues rather than leaving duplicates.
 
@@ -320,9 +330,11 @@ No agent integration required — no MCP servers, `.mcp.json` entries, or bridge
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Auto-apply threshold**: the plan hard-stops for human sign-off before filing issues. Should verifier-CONFIRMED *trivial* dispositions (e.g., retiring the do-design-review orphan) skip the checkpoint, or does everything wait for review? (Plan currently: everything waits.)
-2. **Model-tier wiring**: recommendations land as frontmatter `model:` guidance + a do-sdlc table amendment in follow-ups. Is there appetite for a stronger mechanism (e.g., the session runner reading a tier field and actually switching models), or is advisory guidance enough for now?
-3. **Fable tier scope**: fable is reserved here for frontier-judgment skills (critique, war-room, architecture). Should client-facing skills (imagine-agent, build-agent) default to fable for quality, or opus for cost, given they run in client accounts?
-4. **Audit cadence**: one-shot, or should a quarterly re-run be scheduled (reflection or cron) once the first pass proves out?
+The four open questions raised during drafting are resolved on their documented defaults for this slug — none blocks the read-only audit's execution; each governs downstream policy the audit merely records. Revisit at the disposition-review checkpoint (Task 5) if the operator wants to override.
+
+1. **Auto-apply threshold** — *Everything waits for human sign-off.* No issues are filed before the Task 5 checkpoint, including verifier-CONFIRMED trivial dispositions. Preserves the single hard stop; trivial items are cheap to approve in the same review.
+2. **Model-tier wiring** — *Advisory only for this slug.* Recommendations land as a report column + proposed frontmatter `model:` guidance + a `do-sdlc` stage→model table amendment, all deferred to follow-up issues. A stronger mechanism (session runner reading a tier field to switch models) is explicitly out of scope and can be its own issue if the first pass proves demand.
+3. **Fable tier scope** — *Frontier-judgment default; client-facing skills default to fable for quality.* Consistent with PR #1894's `build-agent → fable` proposal (client-facing launch has billing/account consequences where a wrong call is expensive). Per-skill final call remains the audit's job with task-property rationale.
+4. **Audit cadence** — *One-shot for now.* No scheduled re-run is wired in this slug. Whether to schedule a quarterly re-run (reflection or cron) is deferred to a follow-up decision once the first pass proves the rubric out.
