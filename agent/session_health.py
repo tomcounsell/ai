@@ -295,6 +295,22 @@ def _ts(val):
     return None
 
 
+def _delivery_belongs_to_current_run(entry) -> bool:
+    """Return True only if response_delivered_at falls at or after this run's
+    start anchor (started_at, falling back to created_at). This distinguishes
+    a delivery from *this* run (guard should fire) from a stale delivery
+    carried over from a prior run before a resume (guard should NOT fire).
+    Legacy rows with no anchor at all preserve the original always-fire
+    behavior."""
+    rd = _ts(getattr(entry, "response_delivered_at", None))
+    if rd is None:
+        return False
+    anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
+    if anchor is None:
+        return True  # legacy: no anchor at all, preserve original always-fire behavior
+    return rd >= anchor
+
+
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 AGENT_SESSION_HEALTH_MIN_RUNNING = (
