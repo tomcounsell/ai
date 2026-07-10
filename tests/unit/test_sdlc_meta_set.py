@@ -47,16 +47,24 @@ class TestMetaSetWriteMeta:
 
         assert result == {"key": "plan_revising", "value": True}
 
-    def test_write_meta_does_not_touch_issue_lock(self):
-        """Issue #1954 scope-narrowing: meta-set fires during PLAN/CRITIQUE-stage
-        bookkeeping with no established recurrence path through an in-progress
-        BUILD/TEST/REVIEW stage, so it must NOT renew the issue-level SDLC
-        ownership lock. touch_issue_lock() must never be called from this path."""
+    def test_write_meta_never_renews_issue_lock(self):
+        """Issue #1954 scope-narrowing (preserved under #2003): meta-set fires
+        during PLAN/CRITIQUE-stage bookkeeping with no established recurrence
+        path through an in-progress BUILD/TEST/REVIEW stage, so it must NOT
+        renew/acquire the issue-level SDLC ownership lock. The only lock
+        touch allowed is the read-only ownership PEEK (#2003)."""
+        from models.session_lifecycle import IssueLockResult
         from tools.sdlc_meta_set import write_meta
 
         mock_session = MagicMock()
         mock_session.stage_states = "{}"
         mock_session.session_type = "eng"
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id="run-1954"
+            )
+        )
 
         with (
             patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
@@ -64,11 +72,48 @@ class TestMetaSetWriteMeta:
                 "tools.stage_states_helpers.update_stage_states",
                 return_value=True,
             ),
-            patch("models.session_lifecycle.touch_issue_lock") as mock_touch,
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
         ):
-            write_meta(key="plan_revising", value="true", issue_number=1954)
+            write_meta(key="plan_revising", value="true", issue_number=1954, run_id="run-1954")
 
-        mock_touch.assert_not_called()
+        # Every lock touch on this path must be peek-only -- never a
+        # mutating acquire/renew.
+        assert mock_touch.call_args_list, "ownership peek expected"
+        for call in mock_touch.call_args_list:
+            assert call.kwargs.get("peek") is True
+
+    def test_write_meta_foreign_run_returns_issue_locked(self):
+        """#2003: a foreign run holding the issue lock refuses the meta write
+        with the ISSUE_LOCKED shape."""
+        from models.session_lifecycle import IssueLockResult
+        from tools.sdlc_meta_set import write_meta
+
+        mock_session = MagicMock()
+        mock_session.stage_states = "{}"
+        mock_session.session_type = "eng"
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+        write_mock = MagicMock(return_value=True)
+
+        with (
+            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("tools.stage_states_helpers.update_stage_states", write_mock),
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+        ):
+            result = write_meta(
+                key="plan_revising", value="true", issue_number=1954, run_id="intruder-run"
+            )
+
+        assert result["reason"] == "ISSUE_LOCKED"
+        assert result["owner_run_id"] == "foreign-run"
+        assert result["owner_session_id"] == "other-session"
+        write_mock.assert_not_called()
 
     def test_valid_bool_key_false_clears_value(self):
         """write_meta with plan_revising=false writes _plan_revising=False."""
@@ -271,7 +316,17 @@ class TestMetaSetCLI:
     def test_unknown_key_exits_2(self):
         """CLI exits 2 when an unknown key is provided."""
         proc = subprocess.run(
-            [sys.executable, "-m", "tools.sdlc_meta_set", "--key", "unknown_key", "--value", "x"],
+            [
+                sys.executable,
+                "-m",
+                "tools.sdlc_meta_set",
+                "--key",
+                "unknown_key",
+                "--value",
+                "x",
+                "--run-id",
+                "run-cli-test",
+            ],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
@@ -311,6 +366,8 @@ class TestMetaSetCLI:
                 "plan_revising",
                 "--value",
                 "true",
+                "--run-id",
+                "run-cli-test",
                 # NO --issue-number: no issue context → ensure guard returns None.
             ],
             capture_output=True,
@@ -340,6 +397,8 @@ class TestMetaSetCLI:
                     "pr_number",
                     "--value",
                     bad,
+                    "--run-id",
+                    "run-cli-test",
                 ],
                 capture_output=True,
                 text=True,

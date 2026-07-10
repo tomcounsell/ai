@@ -178,18 +178,28 @@ class TestIssueLockPreCheck:
         resolve_mock = MagicMock()
         monkeypatch.setattr(sdlc_next_skill, "_resolve_enriched", resolve_mock)
 
-        lock_result = IssueLockResult(acquired=False, owner_session_id="sdlc-local-4001-other")
+        lock_result = IssueLockResult(
+            acquired=False,
+            owner_session_id="sdlc-local-4001-other",
+            owner_run_id="foreign-run",
+            orphaned_lock=False,
+        )
 
-        with patch(
-            "models.session_lifecycle.touch_issue_lock", return_value=lock_result
-        ) as lock_mock:
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch(
+                "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+            ) as lock_mock,
+        ):
             result = sdlc_next_skill.decide(issue_number=4001)
 
         assert result == {
             "blocked": True,
             "reason": "ISSUE_LOCKED",
             "guard_id": "ISSUE_LOCK",
+            "owner_run_id": "foreign-run",
             "owner_session_id": "sdlc-local-4001-other",
+            "orphaned_lock": False,
         }
         resolve_mock.assert_not_called()
         lock_mock.assert_called_once()
@@ -212,12 +222,17 @@ class TestIssueLockPreCheck:
         )
 
         lock_result = IssueLockResult(acquired=True, owner_session_id=None)
-        with patch(
-            "models.session_lifecycle.touch_issue_lock", return_value=lock_result
-        ) as lock_mock:
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch(
+                "models.session_lifecycle.touch_issue_lock", return_value=lock_result
+            ) as lock_mock,
+        ):
             sdlc_next_skill.decide(issue_number=4002, session_id="sdlc-local-4002")
 
-        lock_mock.assert_called_once_with(4002, "sdlc-local-4002", peek=True)
+        # peek=True on every call; the peek identity is the issue session's
+        # active_run_id read-back (None here -- no issue session exists).
+        lock_mock.assert_called_once_with(4002, None, session_id="sdlc-local-4002", peek=True)
 
     def test_no_issue_number_skips_lock_check(self, monkeypatch):
         """No issue_number supplied -- the lock pre-check must not run at all

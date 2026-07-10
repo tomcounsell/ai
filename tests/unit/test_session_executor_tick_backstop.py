@@ -178,27 +178,114 @@ class TestTurnCountTracker:
 
 class TestIssueLockRenewal:
     """Tests for _tick_issue_lock_renewal — the tier-1 (60s) heartbeat's
-    issue #1954 renewal side effect. Must fire for a live `eng` session with
-    a resolved issue_number, and must NOT fire for a non-eng session, a
-    session with no issue_number, or a missing agent_session -- see
-    _tick_issue_lock_renewal's docstring for why this lives in the tier-1
-    (60s) block rather than the 25-minute calendar block.
+    issue #1954/#2003 renewal side effect. Must fire for a live `eng`
+    session with a resolved issue_number AND an established run identity
+    (``active_run_id``), and must NOT fire for a non-eng session, a session
+    with no issue_number, a session with no active_run_id, or a missing
+    agent_session -- see _tick_issue_lock_renewal's docstring for why this
+    lives in the tier-1 (60s) block rather than the 25-minute calendar
+    block.
     """
 
-    def test_eng_session_with_issue_number_renews_lock(self):
+    def test_lock_renewal_sources_active_run_id(self):
+        """#2003 cycle-2 BLOCKER: renewal identity is
+        agent_session.active_run_id (own-identity read-back), never
+        session_id or a process token."""
         session = _make_session()
         agent_session = _make_agent_session()
         agent_session.session_type = "eng"
         agent_session.issue_number = 1954
+        agent_session.active_run_id = "run-1954"
 
-        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+        from models.session_lifecycle import IssueLockResult
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="sess-1", owner_run_id="run-1954"
+            )
+        )
+
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
             _tick_issue_lock_renewal(session, agent_session)
 
         mock_touch.assert_called_once()
         args, kwargs = mock_touch.call_args
         assert args[0] == 1954
-        assert args[1] == "sess-1"
+        assert args[1] == "run-1954"
+        assert kwargs.get("session_id") == "sess-1"
         assert kwargs.get("ttl") is not None
+
+    def test_lock_renewal_past_ttl_by_same_session_object(self):
+        """Regression (#2003): a lock acquired with run_id X is still
+        renewable PAST its original TTL by the same session object. Real
+        Redis: acquire with a 1s TTL, then let the tick renew with the
+        default 300s TTL -- the key's TTL extends beyond the original
+        expiry, proving the renewal path presents the OWNING identity."""
+        import popoto.redis_db as rdb
+
+        from models.session_lifecycle import touch_issue_lock
+
+        issue_number = 21954
+        acquired = touch_issue_lock(issue_number, "run-x", session_id="sess-1", ttl=1)
+        assert acquired.acquired is True
+
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = issue_number
+        agent_session.active_run_id = "run-x"
+
+        _tick_issue_lock_renewal(session, agent_session)
+
+        # Renewed by the same owner: TTL now far beyond the original 1s.
+        pttl = rdb.POPOTO_REDIS_DB.pttl(f"session:issuelock:{issue_number}")
+        assert pttl > 1_000, f"lock TTL not extended past original expiry (pttl={pttl})"
+        peek = touch_issue_lock(issue_number, "run-x", session_id="sess-1", peek=True)
+        assert peek.acquired is True
+
+    def test_lock_renewal_warns_on_not_owner(self, caplog):
+        """#2003: a not-owner renewal result logs a WARNING (no longer
+        fire-and-forget) so an out-from-under takeover is visible."""
+        import logging
+
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 1954
+        agent_session.active_run_id = "run-mine"
+
+        from models.session_lifecycle import IssueLockResult
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            caplog.at_level(logging.WARNING),
+        ):
+            _tick_issue_lock_renewal(session, agent_session)
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("not-owner" in m and "foreign-run" in m for m in warnings), warnings
+
+    def test_no_active_run_id_skips_renewal(self):
+        """A session with no established run identity must never extend (or
+        mint) the lock -- renewal is skipped."""
+        session = _make_session()
+        agent_session = _make_agent_session()
+        agent_session.session_type = "eng"
+        agent_session.issue_number = 1954
+        agent_session.active_run_id = None
+
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            _tick_issue_lock_renewal(session, agent_session)
+
+        mock_touch.assert_not_called()
 
     def test_non_eng_session_does_not_renew_lock(self):
         session = _make_session()
@@ -237,6 +324,7 @@ class TestIssueLockRenewal:
         agent_session = _make_agent_session()
         agent_session.session_type = "eng"
         agent_session.issue_number = 1954
+        agent_session.active_run_id = "run-1954"
 
         with patch(
             "models.session_lifecycle.touch_issue_lock",

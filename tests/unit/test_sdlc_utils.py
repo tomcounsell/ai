@@ -999,3 +999,109 @@ class TestSessionOwnsIssue:
         # Must not raise; graceful False return.
         result = session_owns_issue(bad_session, 42)
         assert result is False
+
+
+class TestRenewIssueLockForSession:
+    """Issues #1954/#2003: renew_issue_lock_for_session() sources its
+    identity from the caller's explicit run_id, falling back to
+    ``session.active_run_id`` -- the read-back of the identity this
+    pipeline's own ensure_session() established. An identity-less session
+    never extends (or mints) the lock."""
+
+    def test_lock_renewal_sources_active_run_id(self):
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import renew_issue_lock_for_session
+
+        session = MagicMock()
+        session.issue_number = 1954
+        session.session_id = "sdlc-local-1954"
+        session.active_run_id = "run-1954"
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="sdlc-local-1954", owner_run_id="run-1954"
+            )
+        )
+
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            renew_issue_lock_for_session(session)
+
+        mock_touch.assert_called_once()
+        args, kwargs = mock_touch.call_args
+        assert args[0] == 1954
+        assert args[1] == "run-1954"
+        assert kwargs.get("session_id") == "sdlc-local-1954"
+        assert kwargs.get("ttl") is not None
+
+    def test_lock_renewal_explicit_run_id_wins_over_record(self):
+        from models.session_lifecycle import IssueLockResult
+        from tools._sdlc_utils import renew_issue_lock_for_session
+
+        session = MagicMock()
+        session.issue_number = 1954
+        session.session_id = "sdlc-local-1954"
+        session.active_run_id = "record-run"
+
+        mock_touch = MagicMock(return_value=IssueLockResult(acquired=True, owner_session_id="s"))
+
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            renew_issue_lock_for_session(session, run_id="explicit-run")
+
+        args, _ = mock_touch.call_args
+        assert args[1] == "explicit-run"
+
+    def test_lock_renewal_skipped_without_any_identity(self):
+        from tools._sdlc_utils import renew_issue_lock_for_session
+
+        session = MagicMock()
+        session.issue_number = 1954
+        session.session_id = "sdlc-local-1954"
+        session.active_run_id = None  # legacy record, no established run
+
+        with patch("models.session_lifecycle.touch_issue_lock") as mock_touch:
+            renew_issue_lock_for_session(session)
+
+        mock_touch.assert_not_called()
+
+    def test_lock_renewal_past_ttl_by_same_session_object(self):
+        """Regression (#2003 cycle-2 BLOCKER): a lock acquired with run_id X
+        is still renewable PAST its original TTL by the same session object.
+        Real Redis: acquire with a 1s TTL, renew via the helper with the
+        default 300s TTL -- the key's TTL extends beyond the original
+        expiry, proving the helper presents the OWNING identity (not a
+        session_id or per-process token that would mismatch and let the
+        lock lapse mid-session)."""
+        import popoto.redis_db as rdb
+
+        from models.session_lifecycle import touch_issue_lock
+        from tools._sdlc_utils import renew_issue_lock_for_session
+
+        issue_number = 31954
+        acquired = touch_issue_lock(issue_number, "run-y", session_id="sdlc-local-31954", ttl=1)
+        assert acquired.acquired is True
+
+        session = MagicMock()
+        session.issue_number = issue_number
+        session.session_id = "sdlc-local-31954"
+        session.active_run_id = "run-y"
+
+        renew_issue_lock_for_session(session)
+
+        pttl = rdb.POPOTO_REDIS_DB.pttl(f"session:issuelock:{issue_number}")
+        assert pttl > 1_000, f"lock TTL not extended past original expiry (pttl={pttl})"
+        peek = touch_issue_lock(issue_number, "run-y", session_id="sdlc-local-31954", peek=True)
+        assert peek.acquired is True
+
+    def test_lock_renewal_never_raises(self):
+        from tools._sdlc_utils import renew_issue_lock_for_session
+
+        session = MagicMock()
+        session.issue_number = 1954
+        session.active_run_id = "run-1954"
+
+        with patch(
+            "models.session_lifecycle.touch_issue_lock",
+            side_effect=RuntimeError("redis exploded"),
+        ):
+            # Must not raise -- best-effort side effect only.
+            renew_issue_lock_for_session(session)

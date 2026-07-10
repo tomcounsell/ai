@@ -299,10 +299,12 @@ class TestWriteMarker:
         find_mock.assert_called_once_with(None, issue_number=1558, ensure=True)
 
     def test_successful_write_renews_issue_lock(self):
-        """Issue #1954: a stage-marker write is evidence of an in-progress
-        BUILD/TEST/REVIEW-stage recurrence, so a successful write must renew
-        the per-issue SDLC ownership lock via the shared
-        renew_issue_lock_for_session() helper."""
+        """Issues #1954/#2003: a stage-marker write is evidence of an
+        in-progress BUILD/TEST/REVIEW-stage recurrence, so a successful write
+        must renew the per-issue SDLC ownership lock via the shared
+        renew_issue_lock_for_session() helper -- keyed by the caller's
+        run_id."""
+        from models.session_lifecycle import IssueLockResult
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
 
         mock_session = MagicMock()
@@ -310,20 +312,67 @@ class TestWriteMarker:
         mock_sm = MagicMock()
         mock_sm.states = {"PLAN": "in_progress"}
 
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id="run-1954"
+            )
+        )
+
         with (
             patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
             patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
             patch("agent.pipeline_state.PipelineStateMachine", return_value=mock_sm),
-            patch("models.session_lifecycle.touch_issue_lock") as mock_touch,
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
         ):
-            result, code = write_marker(stage="PLAN", status="completed", issue_number=1954)
+            result, code = write_marker(
+                stage="PLAN", status="completed", issue_number=1954, run_id="run-1954"
+            )
 
         assert code == 0
         assert result == {"stage": "PLAN", "status": "completed"}
-        mock_touch.assert_called_once()
-        args, kwargs = mock_touch.call_args
+        # Two lock touches: the read-only ownership peek, then the renewal.
+        renew_calls = [c for c in mock_touch.call_args_list if not c.kwargs.get("peek")]
+        assert len(renew_calls) == 1
+        args, kwargs = renew_calls[0]
         assert args[0] == 1954
+        assert args[1] == "run-1954"
         assert kwargs.get("ttl") is not None
+
+    def test_foreign_run_id_refused_issue_locked(self):
+        """#2003: a foreign run holding the issue lock refuses the marker
+        write with the ISSUE_LOCKED shape (exit 1) -- the owning run_id and
+        session_id are surfaced."""
+        from models.session_lifecycle import IssueLockResult
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_session.issue_number = 1955
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+        write_mock = MagicMock()
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
+            patch("agent.pipeline_state.PipelineStateMachine", write_mock),
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+        ):
+            result, code = write_marker(
+                stage="PLAN", status="completed", issue_number=1955, run_id="intruder-run"
+            )
+
+        assert code == 1
+        assert result["error"] == "issue_locked"
+        assert result["reason"] == "ISSUE_LOCKED"
+        assert result["owner_run_id"] == "foreign-run"
+        assert result["owner_session_id"] == "other-session"
+        write_mock.assert_not_called()  # no state-machine write attempted
 
     def test_degraded_no_session_does_not_touch_issue_lock(self):
         """No session resolved → nothing to renew; touch_issue_lock must not fire."""
@@ -363,8 +412,18 @@ class TestCLI:
         assert result.returncode != 0
 
     def test_with_issue_number_outputs_json(self):
+        import popoto.redis_db as rdb
+
         strip = ("VALOR_SESSION_ID", "AGENT_SESSION_ID")
         clean_env = {k: v for k, v in os.environ.items() if k not in strip}
+        # Isolate the subprocess to the per-worker test Redis db -- unit tests
+        # must never touch production Redis (#2003: the auto-ensure path can
+        # now WRITE a lock + active_run_id, not just read).
+        kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
+        clean_env["REDIS_URL"] = (
+            f"redis://{kwargs.get('host') or 'localhost'}:"
+            f"{kwargs.get('port') or 6379}/{kwargs.get('db', 1)}"
+        )
         result = subprocess.run(
             [
                 sys.executable,
@@ -376,24 +435,34 @@ class TestCLI:
                 "completed",
                 "--issue-number",
                 "99999",
+                "--run-id",
+                "run-cli-test",
             ],
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
             env=clean_env,
         )
-        assert result.returncode == 0
         output = json.loads(result.stdout.strip())
-        # Output depends on substrate state (D7 tri-state contract):
-        # - degraded marker if the substrate is absent or no session resolves
-        #   for issue 99999 (the common case in CI),
-        # - {"stage": "PLAN", "status": "completed"} if a session happens to
-        #   exist. All are valid — the test verifies the CLI accepts
-        #   --issue-number and produces well-formed JSON with exit 0.
-        assert output.get("status") == "degraded" or output == {
-            "stage": "PLAN",
-            "status": "completed",
-        }
+        # Output depends on substrate state (D7 tri-state contract, extended
+        # by the #2003 run-identity gate):
+        # - exit 0 + degraded marker if the substrate is absent or no session
+        #   resolves for issue 99999 (the common case in CI),
+        # - exit 0 + {"stage": "PLAN", "status": "completed"} if an owning
+        #   session/lock exists,
+        # - exit 1 + ISSUE_LOCKED if auto-ensure minted its own run identity
+        #   (the caller's arbitrary --run-id is then foreign -- fail-loud by
+        #   design; recovery is re-running session-ensure).
+        # All are valid — the test verifies the CLI accepts --issue-number /
+        # --run-id and produces well-formed JSON.
+        if result.returncode == 0:
+            assert output.get("status") == "degraded" or output == {
+                "stage": "PLAN",
+                "status": "completed",
+            }
+        else:
+            assert result.returncode == 1
+            assert output.get("reason") == "ISSUE_LOCKED"
 
 
 class TestOwnershipGateMarker:
@@ -549,6 +618,8 @@ class TestOwnershipGateMarker:
             "completed",
             "--issue-number",
             "42",
+            "--run-id",
+            "run-42",
         ]
         with (
             patch("sys.argv", test_args),
