@@ -13,6 +13,7 @@ from tools.doc_impact_finder import (
     HAIKU_CONTENT_PREVIEW_CHARS,
     MIN_SIMILARITY_THRESHOLD,
     AffectedDoc,
+    ImpactFinderMeta,
     _candidates_to_affected_docs,
     chunk_markdown,
     cosine_similarity,
@@ -123,7 +124,7 @@ class TestCosineSimilarity:
 
 class TestGracefulDegradation:
     def test_graceful_degradation_no_api_key(self):
-        """With no embedding keys, find_affected_docs returns empty list."""
+        """With no embedding keys: ([], meta(degraded=True, reason=named))."""
         with patch.dict(
             "os.environ",
             {
@@ -140,11 +141,62 @@ class TestGracefulDegradation:
                 if k not in ("OPENAI_API_KEY", "VOYAGE_API_KEY", "ANTHROPIC_API_KEY")
             }
             with patch.dict("os.environ", env, clear=True):
-                result = find_affected_docs(
+                result, meta = find_affected_docs(
                     "Changed the thread ID derivation logic",
                     repo_root=Path("/nonexistent"),
                 )
                 assert result == []
+                assert meta == ImpactFinderMeta(
+                    degraded=True,
+                    reason="no_embedding_provider",
+                    rerank_failures=0,
+                    candidates=0,
+                )
+
+
+class TestDegradedMetaBranches:
+    """Every degraded/fallback branch must be distinguishable from 'no docs affected'.
+
+    Issue #2004 T1.4: a bare [] can mean either "nothing is affected" (clean run,
+    degraded=False) or "the finder is broken" (degraded=True with a named reason).
+    """
+
+    def test_empty_index_returns_degraded_meta(self, tmp_path):
+        """A missing/empty index is degraded, never a silent []."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            results, meta = find_affected_docs("Some change", repo_root=tmp_path)
+
+        assert results == []
+        assert meta.degraded is True
+        assert meta.reason == "empty_index"
+        assert meta.rerank_failures == 0
+        assert meta.candidates == 0
+
+    def test_query_embedding_failure_returns_degraded_meta(self, tmp_path):
+        """A query-embedding transport failure is degraded, never a silent []."""
+        from tools.doc_impact_finder import index_docs
+
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "test.md").write_text("# Test\n\n## Section\n\nContent here.\n")
+
+        def fake_embed(texts):
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+                index_docs(repo_root=tmp_path)
+
+        def failing_embed(texts):
+            raise RuntimeError("embedding API down")
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=failing_embed):
+                results, meta = find_affected_docs("Some change", repo_root=tmp_path)
+
+        assert results == []
+        assert meta.degraded is True
+        assert meta.reason == "query_embedding_failed"
 
 
 # ---------------------------------------------------------------------------
@@ -357,13 +409,18 @@ class TestFullPipelineIntegration:
                     "tools.impact_finder_core._rerank_single_candidate",
                     side_effect=mock_rerank,
                 ):
-                    results = find_affected_docs(
+                    results, meta = find_affected_docs(
                         "Changed the OAuth login flow to support PKCE",
                         repo_root=tmp_path,
                     )
 
         # Verify we got results back through the full pipeline
         assert isinstance(results, list)
+        # A clean run is NOT degraded
+        assert meta.degraded is False
+        assert meta.reason is None
+        assert meta.rerank_failures == 0
+        assert meta.candidates > 0
         # All results should be AffectedDoc instances
         for r in results:
             assert isinstance(r, AffectedDoc)
@@ -403,13 +460,16 @@ class TestFullPipelineIntegration:
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
             with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 with patch("builtins.__import__", side_effect=mock_import):
-                    results = find_affected_docs(
+                    results, meta = find_affected_docs(
                         "Some change",
                         repo_root=tmp_path,
                     )
 
-        # Should still get results via embedding-only fallback
+        # Should still get results via embedding-only fallback — visibly degraded
         assert isinstance(results, list)
+        assert meta.degraded is True
+        assert meta.reason == "rerank_client_init_failed"
+        assert meta.candidates > 0
         # All should have cosine sim of 1.0 (identical vectors), which is > threshold
         for r in results:
             assert r.relevance == 1.0
@@ -464,11 +524,15 @@ class TestRerankEndpointFailureFallback:
                         "tools.impact_finder_core._rerank_single_candidate",
                         side_effect=failing_rerank,
                     ):
-                        results = find_affected_docs("Some change", repo_root=tmp_path)
+                        results, meta = find_affected_docs("Some change", repo_root=tmp_path)
 
-        # Fallback produced embedding-only results instead of []
+        # Fallback produced embedding-only results instead of [] — visibly degraded
         assert isinstance(results, list)
         assert len(results) > 0
+        assert meta.degraded is True
+        assert meta.reason == "rerank_all_failed"
+        assert meta.rerank_failures == meta.candidates
+        assert meta.candidates > 0
         for r in results:
             assert "embedding similarity" in r.reason.lower()
 
@@ -497,9 +561,14 @@ class TestRerankEndpointFailureFallback:
                         "tools.impact_finder_core._rerank_single_candidate",
                         side_effect=below_threshold_rerank,
                     ):
-                        results = find_affected_docs("Some change", repo_root=tmp_path)
+                        results, meta = find_affected_docs("Some change", repo_root=tmp_path)
 
         assert results == []
+        # "No docs affected" on a clean run is NOT degraded — this is the
+        # distinguishable counterpart of every degraded branch.
+        assert meta.degraded is False
+        assert meta.reason is None
+        assert meta.rerank_failures == 0
         # No false-positive fallback warning.
         assert not [rec for rec in caplog.records if "rerank requests failed" in rec.getMessage()]
 
@@ -519,7 +588,7 @@ class TestRerankEndpointFailureFallback:
                         "tools.impact_finder_core._rerank_single_candidate",
                         side_effect=mixed_rerank,
                     ):
-                        results = find_affected_docs("Some change", repo_root=tmp_path)
+                        results, meta = find_affected_docs("Some change", repo_root=tmp_path)
 
         # The surviving Haiku result is returned (relevance 0.8 from score/10),
         # not the embedding-only fallback text.
@@ -527,6 +596,14 @@ class TestRerankEndpointFailureFallback:
         assert results[0].relevance == 0.8
         assert "embedding similarity" not in results[0].reason.lower()
         assert "Alpha is relevant" in results[0].reason
+
+        # Partial results are flagged degraded so the caller can see the gap.
+        # The fixture doc chunks into 3 candidates (preamble + Alpha + Beta);
+        # only Alpha reranks successfully.
+        assert meta.degraded is True
+        assert meta.reason == "rerank_partial_failure"
+        assert meta.rerank_failures == 2
+        assert meta.candidates == 3
 
         # Partial failure must NOT trigger the fallback warning.
         assert not [rec for rec in caplog.records if "rerank requests failed" in rec.getMessage()]

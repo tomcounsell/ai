@@ -308,12 +308,15 @@ class TestCodeFinderPipeline:
                     "tools.impact_finder_core._rerank_single_candidate",
                     side_effect=mock_rerank,
                 ):
-                    results = find_affected_code(
+                    results, meta = find_affected_code(
                         "Changed the start function to accept arguments",
                         repo_root=tmp_path,
                     )
 
         assert isinstance(results, list)
+        # A clean run is NOT degraded
+        assert meta.degraded is False
+        assert meta.reason is None
         for r in results:
             assert isinstance(r, AffectedCode)
             assert r.relevance > 0
@@ -321,8 +324,8 @@ class TestCodeFinderPipeline:
             assert len(r.reason) > 0
 
     def test_graceful_degradation_no_api_key(self):
-        """With no embedding keys, find_affected_code returns empty list."""
-        from tools.code_impact_finder import find_affected_code
+        """With no embedding keys: ([], meta(degraded=True, reason=named))."""
+        from tools.code_impact_finder import ImpactFinderMeta, find_affected_code
 
         env = {
             k: v
@@ -330,11 +333,17 @@ class TestCodeFinderPipeline:
             if k not in ("OPENAI_API_KEY", "VOYAGE_API_KEY", "ANTHROPIC_API_KEY")
         }
         with patch.dict("os.environ", env, clear=True):
-            result = find_affected_code(
+            result, meta = find_affected_code(
                 "Some change",
                 repo_root=Path("/nonexistent"),
             )
             assert result == []
+            assert meta == ImpactFinderMeta(
+                degraded=True,
+                reason="no_embedding_provider",
+                rerank_failures=0,
+                candidates=0,
+            )
 
 
 # ---------------------------------------------------------------------------
