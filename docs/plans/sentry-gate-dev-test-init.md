@@ -192,14 +192,14 @@ No agent integration required — this is a bridge/worker-internal initializatio
 
 ## Success Criteria
 
-- [ ] On a machine that owns no project (no `projects.<key>.machine` match), with `SENTRY_DSN` set and no `SENTRY_ENVIRONMENT`, `configure_sentry()` calls `sentry_sdk.init` with `environment="development"`.
-- [ ] On a designated bridge machine, `environment="production"` (unchanged behavior).
-- [ ] Explicit `SENTRY_ENVIRONMENT` always wins.
-- [ ] `dashboard_json` and `health` return successfully with `claude_auth_subscription_type: null` when `claude auth status` fails (no `KeyError`).
-- [ ] `monitoring/sentry_config.py` does not import `ui.data.machine`.
-- [ ] Operational (Nit #5): `configure_sentry()` logs the resolved environment + inputs at INFO so a non-bridge dev machine's real bridge/worker run is confirmable to carry `environment=development` from its process log.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] On a machine that owns no project (no `projects.<key>.machine` match), with `SENTRY_DSN` set and no `SENTRY_ENVIRONMENT`, `configure_sentry()` calls `sentry_sdk.init` with `environment="development"`.
+- [x] On a designated bridge machine, `environment="production"` (unchanged behavior).
+- [x] Explicit `SENTRY_ENVIRONMENT` always wins.
+- [x] `dashboard_json` and `health` return successfully with `claude_auth_subscription_type: null` when `claude auth status` fails (no `KeyError`).
+- [x] `monitoring/sentry_config.py` does not import `ui.data.machine`.
+- [x] Operational (Nit #5): `configure_sentry()` logs the resolved environment + inputs at INFO so a non-bridge dev machine's real bridge/worker run is confirmable to carry `environment=development` from its process log.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
