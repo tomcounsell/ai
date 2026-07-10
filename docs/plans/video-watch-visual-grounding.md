@@ -412,22 +412,22 @@ forced mid-pipeline `CalledProcessError`; (c) the reaper removes over-age dirs.
 
 ## Success Criteria
 
-- [ ] `valor-video-watch <youtube-url>` emits deduped scene-frame JPEG paths
+- [x] `valor-video-watch <youtube-url>` emits deduped scene-frame JPEG paths
   (`t=MM:SS`) + a timestamped transcript the agent can `Read`.
-- [ ] `valor-video-watch <x-url>` works on an x.com/twitter.com video: frames +
+- [x] `valor-video-watch <x-url>` works on an x.com/twitter.com video: frames +
   transcript when yt-dlp succeeds; Grok X-context (+ description fallback) when
   it doesn't.
-- [ ] Default enrichment for a bare YouTube link is unchanged (transcript-only,
+- [x] Default enrichment for a bare YouTube link is unchanged (transcript-only,
   no frames) — no token/latency regression on the push path.
-- [ ] Thin/empty transcript on the push path appends the `valor-video-watch`
+- [x] Thin/empty transcript on the push path appends the `valor-video-watch`
   signpost to the enriched text.
-- [ ] `GROK_API_KEY` wired: `.env.example` placeholder present; Grok client
+- [x] `GROK_API_KEY` wired: `.env.example` placeholder present; Grok client
   reads it via `os.getenv("GROK_API_KEY")` (no `APISettings` field — see
   Technical Approach); missing key degrades gracefully.
-- [ ] Frame cap / resolution / max-duration are env-overridable named constants
+- [x] Frame cap / resolution / max-duration are env-overridable named constants
   with grain-of-salt comments.
-- [ ] `grep "valor-video-watch" pyproject.toml` confirms the entry point.
-- [ ] **Visual-grounding outcome (E2E):** a slide-deck or silent-demo fixture
+- [x] `grep "valor-video-watch" pyproject.toml` confirms the entry point.
+- [x] **Visual-grounding outcome (E2E):** a slide-deck or silent-demo fixture
   where the answer is on-screen (not in the transcript) → `valor-video-watch`
   emits frames that let the agent answer correctly, where transcript-only fails.
   Committed evidence: `tools/video_watch/tests/test_e2e_visual_grounding.py`
@@ -435,10 +435,10 @@ forced mid-pipeline `CalledProcessError`; (c) the reaper removes over-age dirs.
   slide deck (only the two network edges patched) and asserts transcript-only
   yields nothing while the emitted frames are multiple, persistent, and
   pairwise visually distinct.
-- [ ] Emitted frame paths still exist after the CLI process returns (two-dir
+- [x] Emitted frame paths still exist after the CLI process returns (two-dir
   temp discipline verified).
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
