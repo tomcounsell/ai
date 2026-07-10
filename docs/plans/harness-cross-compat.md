@@ -65,6 +65,18 @@ dev-lane framing supersedes any whole-session wording below where they conflict)
 - `agent/session_runner/router.py:46` — `PREFIX_TOKEN_RE` prefix routing — holds.
 - `config/settings.py:403-421` — `SessionRunnerSettings.pm_model`/`dev_model` declared, zero readers — holds (deferred to #1968, see No-Gos).
 
+**Reconciliation update (2026-07-10, later same day):** the resilience-simplification
+program landed in parallel (`resilience-simplification-three-tier.md` draft;
+`sdlc-run-ownership-merge-enforcement.md` → #2003; `resilience-hygiene-sweep.md` → #2004,
+both Ready and in flight) and three PRs merged (#2006 fixing #1979, #2005 for #1834,
+#1998 for #2003's T1.7 rung). Phase 1's fold-in code work is dissolved: #1979 shipped,
+#1983 is absorbed by #2004, #1855's disposition belongs to #1926's pruning pass. #1818's
+disposition changes CLOSE → EDIT (the program cites it as the substrate-durability anchor).
+Phase 2 sequences behind #2004 (same `session_runner` files), adopts its `ExitReason`
+StrEnum as the `TurnResult.exit_reason` taxonomy, and delivers program item T2.4 via
+`TurnResult`. Scope-revision sections on #1999 and #2000 are authoritative where this
+document's phase details conflict.
+
 **Active plans in `docs/plans/` overlapping this area:**
 - `consolidate_delivery_paths.md` (#1370, Planning) — owns the *outbound outbox send paths* downstream of the runner. This plan changes how the PM's final message is *produced and classified* (schema vs prefix tokens), not how it is delivered. Coordinate: the schema payload must land on the same canonical outbox path #1370 designates. Not a blocker.
 - `conversational-dev-fanout.md` (#1541, Planning) — premised on the removed `session_type="dev"`; the Phase 1 issue survey recommends closing it (see Step 1.1).
@@ -174,8 +186,8 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 **Phase 1 (cleanup):**
 - Issue hygiene per the survey table (Step 1.1/1.2): CLOSE #1721, #1541, #1818, #1336 with evidence comments; EDIT #1968 (add `pm_model`/`dev_model` to dead-field inventory), #1802 (rewrite root cause for `agent/session_runner/adapter.py` + prime-pm-role, Option A `<<FILE:>>` shape), #1267 (reframe for eng/teammate taxonomy).
-- Fold-in fixes, one PR: #1979 (clear run-scoped `response_delivered_at` on resume, or scope the delivery guard to the current attempt), #1983 (root-cause the 3 red `test_session_heartbeat_progress.py` tests as the liveness baseline gate), #1855 (single decision: delete the stall-advisory actuation or unflag always-on — align with #1926's happy-path direction; the flag goes either way).
-- Acceptance: `tests/unit/session_runner/` + heartbeat suite green; issue tracker reflects headless reality.
+- Fold-in fixes: **dissolved by the 2026-07-10 reconciliation** — #1979 shipped (PR #2006, epoch-scoped delivery guard), #1983 is absorbed by #2004's SessionEvidence unification, #1855's disposition is owned by #1926's pruning pass (Phase 1 only verifies that decision has a home). #1818 changes CLOSE → EDIT: prune its stale PTY-era items but keep it as the substrate-durability anchor the resilience program references.
+- Acceptance: issue tracker reflects headless reality; no code changes remain in Phase 1 (appetite: Small). Heartbeat-suite-green becomes Phase 2's entry gate, delivered by #2004.
 
 **Phase 2 (agent-agnostic seam, claude-only, no behavior change except routing):**
 - New package `agent/session_runner/harness/`: `base.py` (protocol: `TurnRequest`, `TurnResult`, `TurnEvent`, `HarnessCapabilities{supports_hooks, supports_compaction, supports_schema, id_stability}`), `claude.py` (adapter wrapping today's argv assembly + stream-json parsing, extracted from `sdk_client.py`), `events.py` (normalized event model, field names deliberately aligned with codex ThreadEvents: `turn.started`, `item.*`, `turn.completed{usage}`, `turn.failed{error}`).
@@ -214,7 +226,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 - [ ] `tests/unit/session_runner/*` (role_driver/runner/router suites) — UPDATE: route through the `HarnessAdapter` seam; router tests split into schema-first + regex-fallback cases
 - [ ] `tests/unit/test_output_router.py`, `test_output_router_compaction_guard.py` — UPDATE: routing input becomes structured object with regex fallback
 - [ ] `tests/unit/test_harness_streaming.py`, `test_harness_retry.py`, `test_harness_stale_uuid_result_preservation.py`, `test_harness_token_capture.py`, `test_harness_context_usage_log.py`, `test_harness_thinking_block_sentinel.py`, `test_harness_oom_backoff.py`, `test_sdk_client_harness_counters.py` — UPDATE: point at the extracted claude adapter; stale-uuid test may become the spike-2 drift alarm test
-- [ ] `tests/unit/test_session_heartbeat_progress.py` — UPDATE: 3 currently-red tests root-caused and fixed in Phase 1 (#1983)
+- [ ] `tests/unit/test_session_heartbeat_progress.py` — no change here: the 3 red tests are fixed by #2004 (which absorbed #1983); green suite is Phase 2's entry gate
 - [ ] `tests/integration/test_harness_resume.py`, `test_harness_env_pm_injection.py`, `test_harness_no_op_contract.py` — UPDATE: resume-handle semantics + env assembly move behind the adapter
 - [ ] `tests/integration/test_runner_dispatch_e2e.py`, `test_headless_probe_e2e.py`, `test_runner_teardown_reap.py` — UPDATE: assert seam-level contracts; teardown-reap contract unchanged but exercised per adapter
 - [ ] NEW: `tests/unit/session_runner/test_harness_argv_golden.py` — byte-equivalence golden test for the Phase 2 extraction
@@ -273,7 +285,8 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 - [SEPARATE-SLUG #1925] Removing `claude_code_sdk` / the PydanticAI split for non-harness calls — Phase 2 coordinates with (and advances) the harness half but the SDK removal ships under its own issue.
 - [SEPARATE-SLUG #1968] Deleting dead `SessionRunnerSettings.pm_model`/`dev_model` — belongs to that issue's Part-2 dead-field inventory; Phase 1 edits the issue to include them.
-- [SEPARATE-SLUG #1926] Broad liveness/Sentry scar-tissue removal — Phase 1's fold-ins (#1983, #1855) execute inside its direction; the umbrella stays independent.
+- [SEPARATE-SLUG #1926] Broad liveness/Sentry scar-tissue removal — owns #1855's disposition (per the resilience program's pruning-pass assignment); the umbrella stays independent.
+- [SEPARATE-SLUG #2004] Resilience hygiene sweep — owns #1983's fix, the `ExitReason` StrEnum, and the SessionEvidence unification; Phase 2 sequences behind it and consumes its enum.
 - [SEPARATE-SLUG #1370] Outbound send-path consolidation — this plan produces the routed payload; #1370 owns delivery-path canonicalization.
 - Codex for any top-level bridge-connected session (PM or teammate) — claude-only by owner decision (2026-07-10); codex is reachable exclusively through the eng dev lane.
 - Dev-subagent *emulation* on codex (Agent-tool/sidechain semantics) — the external-executor design is the scope (see Rabbit Holes).
@@ -307,7 +320,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 ## Success Criteria
 
-- [ ] Phase 1: 4 issues closed with evidence comments, 3 issues edited, #1979/#1983/#1855 fixed, heartbeat suite green
+- [ ] Phase 1: 3 issues closed with evidence comments (#1721/#1541/#1336), 4 issues edited (#1968/#1802/#1267/#1818), ceded items cross-linked (#1979 shipped via PR #2006, #1983 → #2004, #1855 → #1926)
 - [ ] Phase 2: golden argv test proves extraction is behavior-preserving; PM routing driven by `--json-schema` with regex fallback; resume-id behavior empirically recorded and capture-at-init simplified or alarm-fitted accordingly; runner imports no claude-specific parsing outside `harness/claude.py`
 - [ ] Phase 3: a dev-lane-flagged eng session completes real dev work on codex end-to-end (incl. process-restart resume via persisted thread_id) on a provisioned machine; absent binary/auth fails fast with an actionable message; top-level sessions cannot reach codex; fallback-removal follow-up issue filed
 - [ ] Tests pass (`/do-test`)
@@ -346,24 +359,23 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 - #1267: reframe outcome-verification for eng/teammate taxonomy (dev = in-turn subagent)
 - Comment on #1925 linking this plan as the vehicle for the harness-abstraction half
 
-### 1.3 Fold-in fixes
-- **Task ID**: p1-foldin-fixes
+### 1.3 Reconciliation hygiene (replaces the dissolved fold-in task)
+- **Task ID**: p1-reconcile
 - **Depends On**: none
-- **Validates**: tests/unit/test_session_heartbeat_progress.py, tests/unit/session_runner/
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
-- **Parallel**: false
-- #1979: clear `response_delivered_at` (and audit sibling run-scoped sticky fields) on `resume_session`, or scope the delivery guard to the current attempt — pick the smaller correct fix
-- #1983: root-cause and fix the 3 red heartbeat-progress tests; suite green is the phase gate
-- #1855: disposition NOT pre-decided (owner, 2026-07-10) — the Phase 1 plan step researches (post-cutover failure telemetry, #1926's direction, whether the actuator ever fired usefully) and decides between deleting the stall actuation and unflagging it always-on; remove `FEATURES__STALL_RECOVERY_ENABLED` either way; update stale PTY-era comments in touched code
+- **Parallel**: true
+- #1818: EDIT (not close) — prune stale PTY-era roadmap items with the survey's evidence, reframe surviving scope around substrate durability (Redis AOF etc.) per the resilience program's sibling-coordination section
+- #1855: verify its disposition is tracked under #1926's pruning pass; cross-link, do not decide or fix here
+- Verify #1979 (PR #2006) and #1983 (#2004) need nothing from this phase
 
 ### 1.4 Phase 1 validation
 - **Task ID**: p1-validate
-- **Depends On**: p1-close-issues, p1-edit-issues, p1-foldin-fixes
+- **Depends On**: p1-close-issues, p1-edit-issues, p1-reconcile
 - **Assigned To**: phase-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify issue states, run heartbeat + session_runner suites, confirm no `FEATURES__STALL_RECOVERY_ENABLED` references remain
+- Verify issue states match the survey verdicts as revised (closures, edits, ceded items cross-linked)
 
 ### 2.1 Empirical probes (schema + resume-id)
 - **Task ID**: p2-probes
@@ -378,7 +390,8 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 ### 2.2 Extract HarnessAdapter seam (behavior-preserving)
 - **Task ID**: p2-extract-seam
-- **Depends On**: p2-probes
+- **Depends On**: p2-probes, #2004 merged (ExitReason StrEnum + SessionEvidence land first; heartbeat suite green is the entry gate)
+- `TurnResult.exit_reason` uses #2004's `ExitReason` enum — one taxonomy, no parallel one; keep its "no raw exit-reason literals outside router" verification passing. `TurnResult` delivers program item T2.4 (supersedes the sketched `HarnessResult`)
 - **Validates**: tests/unit/session_runner/test_harness_argv_golden.py (create), tests/unit/session_runner/, tests/integration/test_harness_resume.py
 - **Assigned To**: seam-builder
 - **Agent Type**: builder
@@ -463,8 +476,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Heartbeat suite green (P1) | `pytest tests/unit/test_session_heartbeat_progress.py -q` | exit code 0 |
-| Stall flag gone (P1) | `grep -rc "STALL_RECOVERY_ENABLED" config/ agent/ \| grep -v ':0'` | match count == 0 |
+| Heartbeat suite green (P2 entry gate, delivered by #2004) | `pytest tests/unit/test_session_heartbeat_progress.py -q` | exit code 0 |
 | Golden argv test exists (P2) | `pytest tests/unit/session_runner/test_harness_argv_golden.py -q` | exit code 0 |
 | No prefix-token teaching in PM prime (P2) | `grep -c "\[/user\]" .claude/commands/roles/prime-pm-role.md` | match count == 0 |
 | No claude argv outside adapter (P2) | `grep -rn '"claude", "-p"' agent/ --include="*.py" \| grep -vc harness/` | match count == 0 |
