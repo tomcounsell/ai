@@ -335,6 +335,66 @@ class TestSelectiveRewrite:
 
 
 # --------------------------------------------------------------------------- #
+# Orphan cleanup
+# --------------------------------------------------------------------------- #
+class TestOrphanCleanup:
+    def test_orphaned_agent_artifact_deleted_on_next_run(self, claude_dir, tmp_path, capsys):
+        opencode_dir = tmp_path / ".opencode"
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        artifact = opencode_dir / "agents" / "helper.md"
+        assert artifact.exists()
+        (claude_dir / "agents" / "helper.md").unlink()
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        assert not artifact.exists()
+        out = capsys.readouterr().out
+        assert "REMOVED orphaned artifact agents/helper.md" in out
+
+    def test_orphaned_command_artifact_deleted_on_next_run(self, claude_dir, tmp_path):
+        opencode_dir = tmp_path / ".opencode"
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        artifact = opencode_dir / "commands" / "prime-x.md"
+        assert artifact.exists()
+        (claude_dir / "commands" / "roles" / "prime-x.md").unlink()
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        assert not artifact.exists()
+
+    def test_manifest_entry_removed_with_orphan(self, claude_dir, tmp_path):
+        opencode_dir = tmp_path / ".opencode"
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        (claude_dir / "agents" / "helper.md").unlink()
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        manifest = json.loads((opencode_dir / "SYNC_MANIFEST.json").read_text())
+        assert ".claude/agents/helper.md" not in manifest["agents"]
+        assert ".claude/agents/builder.md" in manifest["agents"]  # survivor untouched
+
+    def test_non_generated_files_untouched(self, claude_dir, tmp_path):
+        """Hand-written files in the scanned dirs, the skills dir, and the plugin
+        must survive the removal pass."""
+        opencode_dir = tmp_path / ".opencode"
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        handwritten = opencode_dir / "agents" / "handmade.md"
+        handwritten.write_text("hand-written agent notes, no provenance stamp\n")
+        skill = opencode_dir / "skills" / "sync-claude-config" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: sync-claude-config\n---\nhand-written skill\n")
+        (claude_dir / "agents" / "helper.md").unlink()  # create a real orphan too
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        assert handwritten.exists()
+        assert skill.exists()
+        assert (opencode_dir / "plugins" / "valor-bridge.ts").exists()
+        assert not (opencode_dir / "agents" / "helper.md").exists()
+
+    def test_no_orphans_reports_zero(self, claude_dir, tmp_path, capsys):
+        opencode_dir = tmp_path / ".opencode"
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        capsys.readouterr()
+        main(claude_dir=claude_dir, opencode_dir=opencode_dir)
+        out = capsys.readouterr().out
+        assert "removed 0 orphans" in out
+        assert "REMOVED" not in out
+
+
+# --------------------------------------------------------------------------- #
 # Block-decision plumbing (Blocker 1)
 # --------------------------------------------------------------------------- #
 class TestBlockDecisionPlumbing:

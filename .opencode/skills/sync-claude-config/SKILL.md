@@ -29,7 +29,11 @@ The script:
    are skipped (a byte-compare backstops every write).
 3. Stamps every generated file with a stable, date-free `generated from .claude/...`
    provenance comment, so unchanged sources produce zero churn on any day.
-4. Advances `generated_on` in the manifest only when something actually changed.
+4. Removes orphaned artifacts: a file in `.opencode/agents/` or `.opencode/commands/`
+   whose `.claude/` source was deleted is removed (deletion logged loudly) and its
+   manifest entry dropped. Only stamped, generator-written files are eligible —
+   hand-written files, the skills dir, and the plugin are never touched.
+5. Advances `generated_on` in the manifest only when something actually changed.
 
 Re-running it is safe and produces no churn when sources are unchanged. If you change the
 generator script itself (templates, headers), bump `GENERATOR_VERSION` in it — a version

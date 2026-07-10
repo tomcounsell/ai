@@ -32,6 +32,11 @@ Skills are NOT migrated — OpenCode discovers `.claude/skills/*/SKILL.md` nativ
 - **Generator versioning.** The manifest records `generator_version`. When the
   script's templates change, bumping `GENERATOR_VERSION` invalidates the hash-skip and
   forces a full content-compare pass, so stale artifacts from older templates refresh.
+- **Orphan removal.** After syncing, any file in `.opencode/agents/` or
+  `.opencode/commands/` whose `.claude/` source no longer exists is deleted (and its
+  manifest entry dropped), with each deletion logged loudly. Only files carrying the
+  generator's provenance stamp are eligible — hand-written files in those directories,
+  the skills directory, and the plugin are never touched.
 - **Loud hook accounting.** `parse_hooks` registers combined matchers (e.g.
   `Bash|Write`) in every matching group and prints a stderr WARNING listing any hook
   command it cannot map to an OpenCode event — safety validators are never dropped

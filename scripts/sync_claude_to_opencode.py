@@ -546,6 +546,37 @@ def write_plugin(
 
 
 # --------------------------------------------------------------------------- #
+# Orphan cleanup
+# --------------------------------------------------------------------------- #
+def remove_orphans(claude_dir: Path = CLAUDE_DIR, opencode_dir: Path = OPENCODE_DIR) -> int:
+    """Delete generated artifacts whose source file no longer exists.
+
+    Scans .opencode/agents/ and .opencode/commands/ only. A file is removed solely
+    when BOTH hold: its corresponding .claude/ source is gone, AND it carries this
+    generator's provenance stamp — hand-written files are never touched. Each
+    deletion is logged loudly. Returns the number of files removed.
+    """
+    removed = 0
+    for out_sub, src_sub in (("agents", "agents"), ("commands", "commands/roles")):
+        out_dir = opencode_dir / out_sub
+        if not out_dir.exists():
+            continue
+        for artifact in sorted(out_dir.glob("*.md")):
+            src = claude_dir / src_sub / artifact.name
+            if src.exists():
+                continue
+            if "opencode-sync: generated from" not in artifact.read_text():
+                continue  # not one of ours — leave hand-written files alone
+            print(
+                f"[opencode-sync] REMOVED orphaned artifact {out_sub}/{artifact.name} "
+                f"(source .claude/{src_sub}/{artifact.name} no longer exists)"
+            )
+            artifact.unlink()
+            removed += 1
+    return removed
+
+
+# --------------------------------------------------------------------------- #
 # Manifest
 # --------------------------------------------------------------------------- #
 def write_manifest(manifest: dict, opencode_dir: Path = OPENCODE_DIR) -> bool:
@@ -576,6 +607,9 @@ def main(claude_dir: Path = CLAUDE_DIR, opencode_dir: Path = OPENCODE_DIR) -> No
     agents_written, agents_skipped = sync_agents(manifest, old_manifest, claude_dir, opencode_dir)
     cmds_written, cmds_skipped = sync_commands(manifest, old_manifest, claude_dir, opencode_dir)
     wrote_plugin = write_plugin(manifest, claude_dir, opencode_dir)
+    removed = remove_orphans(claude_dir, opencode_dir)
+    # The manifest is rebuilt from existing sources every run, so a deleted source's
+    # entry drops out here — write_manifest sees the diff and persists the removal.
     wrote_manifest = write_manifest(manifest, opencode_dir)
 
     written = agents_written + cmds_written + sum([wrote_cfg, wrote_plugin, wrote_manifest])
@@ -586,7 +620,7 @@ def main(claude_dir: Path = CLAUDE_DIR, opencode_dir: Path = OPENCODE_DIR) -> No
         f"opencode.json={'rewritten' if wrote_cfg else 'unchanged'}, "
         f"valor-bridge.ts={'rewritten' if wrote_plugin else 'unchanged'}, "
         f"manifest={'advanced' if wrote_manifest else 'unchanged'}); "
-        f"skipped {skipped} unchanged"
+        f"skipped {skipped} unchanged; removed {removed} orphans"
     )
 
 
