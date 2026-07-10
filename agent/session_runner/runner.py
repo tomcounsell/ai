@@ -64,6 +64,7 @@ from agent.session_runner.role_driver import (
 )
 from agent.session_runner.router import (
     WRAPUP_ELIGIBLE_EXIT_REASONS,
+    ExitReason,
     classify_pm_prefix,
     truncate_exit_message,
 )
@@ -250,7 +251,7 @@ class _RouteDecision:
     """
 
     should_break: bool
-    exit_reason: str | None = None
+    exit_reason: ExitReason | None = None
     next_message: str | None = None
     compliance_miss: bool = False
 
@@ -707,7 +708,7 @@ class SessionRunner:
                 steers, abort = self._drain_steering_boundary()
                 if abort:
                     self._adapter.on_user_payload(STEER_ABORT_USER_MESSAGE)
-                    summary.exit_reason = "steer_abort"
+                    summary.exit_reason = ExitReason.STEER_ABORT
                     break
                 if steers:
                     message = self._merge_steers(message, steers)
@@ -728,7 +729,7 @@ class SessionRunner:
                         # Graceful preempt, not an error: partial work stays
                         # in the transcript; surface needs-attention.
                         self._adapter.on_user_payload(TIMEOUT_NEEDS_ATTENTION_MESSAGE)
-                        summary.exit_reason = "turn_timeout"
+                        summary.exit_reason = ExitReason.TURN_TIMEOUT
                         break
                     # Steer preempt: pending steers drain at the next
                     # boundary; resume with them injected.
@@ -736,16 +737,21 @@ class SessionRunner:
                     continue
 
                 # -- Turn-level failures -------------------------------------
-                if outcome.exit_reason is not None and outcome.exit_reason != "empty_output":
+                failure = outcome.failure
+                if failure is not None and failure.reason is not ExitReason.EMPTY_OUTPUT:
                     # Subprocess failure: never "completed" (the #1916 class).
-                    summary.exit_reason = "error"
-                    summary.exit_message = truncate_exit_message(outcome.exit_reason)
+                    # str(failure) reproduces the legacy "reason: detail" wire
+                    # format, so exit_message telemetry is unchanged.
+                    summary.exit_reason = ExitReason.ERROR
+                    summary.exit_message = truncate_exit_message(str(failure))
                     self._adapter.on_user_payload(RUNNER_ERROR_USER_MESSAGE)
                     break
-                if outcome.exit_reason == "empty_output" or not (outcome.reply_text or "").strip():
+                if (failure is not None and failure.reason is ExitReason.EMPTY_OUTPUT) or not (
+                    outcome.reply_text or ""
+                ).strip():
                     # Empty/whitespace-only PM turn → wrap-up guard, never an
                     # infinite loop (plan Failure Path).
-                    summary.exit_reason = "pm_empty_turn"
+                    summary.exit_reason = ExitReason.PM_EMPTY_TURN
                     break
 
                 # -- Genuine turn end ----------------------------------------
@@ -765,24 +771,24 @@ class SessionRunner:
                 if nudges > MAX_COMPLIANCE_NUDGES:
                     # Non-routing PM exhausted its nudges — hand off to the
                     # wrap-up guard rather than burning the turn cap.
-                    summary.exit_reason = "pm_max_turns"
+                    summary.exit_reason = ExitReason.PM_MAX_TURNS
                     summary.exit_message = "compliance nudges exhausted without a routable prefix"
                     break
                 message = decision.next_message or PM_COMPLIANCE_NUDGE
             else:
-                summary.exit_reason = "pm_max_turns"
+                summary.exit_reason = ExitReason.PM_MAX_TURNS
                 summary.exit_message = f"reached max_turns={self._max_turns} without a [/complete]"
 
             # -- Wrap-up guard (graduated): guarantee a user-facing message --
             summary.user_facing_routed = self._adapter.user_facing_routed
             wrapup_trigger = summary.exit_reason in WRAPUP_ELIGIBLE_EXIT_REASONS or (
-                summary.exit_reason == "pm_empty_turn"
+                summary.exit_reason is ExitReason.PM_EMPTY_TURN
             )
             if wrapup_trigger and not summary.user_facing_routed:
                 await self._run_wrapup_guard(summary)
         except Exception as e:  # noqa: BLE001 — terminal classification, never a crash
             logger.error("[runner] session loop raised: %s", e, exc_info=True)
-            summary.exit_reason = "exception"
+            summary.exit_reason = ExitReason.EXCEPTION
             summary.exit_message = truncate_exit_message(f"{type(e).__name__}: {e}")
 
         # Steers popped mid-turn but never injected (the turn completed
@@ -1117,14 +1123,16 @@ class SessionRunner:
 
         if classification.destination == "user" and classification.payload:
             self._adapter.on_user_payload(classification.payload)
-            return _RouteDecision(should_break=True, exit_reason="pm_user", compliance_miss=miss)
+            return _RouteDecision(
+                should_break=True, exit_reason=ExitReason.PM_USER, compliance_miss=miss
+            )
 
         if classification.destination == "complete":
             payload = classification.payload or ""
             if payload:
                 self._adapter.on_complete_payload(payload)
             return _RouteDecision(
-                should_break=True, exit_reason="pm_complete", compliance_miss=miss
+                should_break=True, exit_reason=ExitReason.PM_COMPLETE, compliance_miss=miss
             )
 
         # A substantive needs-human edge alongside an unroutable turn: the
@@ -1135,7 +1143,7 @@ class SessionRunner:
         if outcome.needs_human is not None and text.strip():
             self._adapter.on_user_payload(text.strip())
             return _RouteDecision(
-                should_break=True, exit_reason="pm_needs_human", compliance_miss=miss
+                should_break=True, exit_reason=ExitReason.PM_NEEDS_HUMAN, compliance_miss=miss
             )
 
         # Anything else — legacy [/dev], unknown prefix, empty payload —
@@ -1162,22 +1170,22 @@ class SessionRunner:
                 classification = classify_pm_prefix(text)
                 if classification.destination == "user" and classification.payload:
                     self._adapter.on_user_payload(classification.payload)
-                    summary.exit_reason = "pm_user"
+                    summary.exit_reason = ExitReason.PM_USER
                 elif classification.destination == "complete" and classification.payload:
                     self._adapter.on_complete_payload(classification.payload)
-                    summary.exit_reason = "pm_complete"
+                    summary.exit_reason = ExitReason.PM_COMPLETE
                 else:
                     # Non-empty but prefix-less: deliver directly (relaxed
                     # floor) — OPERATOR_TERMINAL_MESSAGE is reserved for a
                     # genuinely silent PM.
                     self._adapter.on_user_payload(text)
-                    summary.exit_reason = "pm_floor_delivered"
+                    summary.exit_reason = ExitReason.PM_FLOOR_DELIVERED
                 summary.user_facing_routed = self._adapter.user_facing_routed
                 if summary.user_facing_routed:
                     return
             if not self._adapter.user_facing_routed:
                 self._adapter.on_user_payload(OPERATOR_TERMINAL_MESSAGE)
-                summary.exit_reason = "pm_no_user_message"
+                summary.exit_reason = ExitReason.PM_NO_USER_MESSAGE
                 summary.user_facing_routed = self._adapter.user_facing_routed
         except Exception as e:  # noqa: BLE001 — the guard must never crash the run
             logger.warning("[runner] wrap-up guard raised unexpectedly: %s", e)

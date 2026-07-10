@@ -85,7 +85,7 @@ def _runner_final_status(task_error, agent_session) -> str:
     """Terminal AgentSession status for a finished runner session.
 
     ``SessionRunner.run()`` never raises — subprocess failures and loop
-    exceptions become ``summary.exit_reason="error"/"exception"`` — so
+    exceptions become ``summary.exit_reason=ExitReason.ERROR/EXCEPTION`` — so
     ``task_error`` alone cannot gate finalization: a failed run would
     finalize ``completed`` (the #1916 class). Consult the runner's persisted
     ``exit_reason`` alongside ``task_error``; ``agent_session=None`` (lookup

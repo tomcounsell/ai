@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from agent.session_runner.router import ExitReason
+
 logger = logging.getLogger(__name__)
 
 # Default timeout for the synchronous delivery of a routed payload. Matches
@@ -230,14 +232,15 @@ def _append_session_event(agent_session, event: dict) -> None:
 class RunSummary:
     """Terminal summary of a runner session, published as ``exit_summary``.
 
-    ``exit_reason`` uses the exit-classification vocabulary in
-    :mod:`agent.session_runner.router`. ``user_facing_routed`` is True when
+    ``exit_reason`` is an :class:`~agent.session_runner.router.ExitReason`
+    member (the exit-classification vocabulary in
+    :mod:`agent.session_runner.router`). ``user_facing_routed`` is True when
     at least one ``[/user]`` or non-empty ``[/complete]`` payload was
     delivered during the run (the adapter's delivery callbacks OR the
     runner's wrap-up guard may set it).
     """
 
-    exit_reason: str = "in_progress"
+    exit_reason: ExitReason = ExitReason.IN_PROGRESS
     exit_message: str = ""
     turn_count: int = 0
     compliance_misses: int = 0
@@ -395,11 +398,13 @@ class SessionRunnerAdapter:
         wrap-up guard) onto agent_session so the executor's emoji branch can
         see it.
         """
+        # str(...) at the persistence boundary: the wire/telemetry value is
+        # the raw vocabulary string, byte-identical to the pre-enum records.
         _append_session_event(
             self._agent_session,
             {
                 "type": "exit_summary",
-                "exit_reason": summary.exit_reason,
+                "exit_reason": str(summary.exit_reason),
                 "turns": summary.turn_count,
                 "compliance_misses": summary.compliance_misses,
                 "ts": _now_iso(),
@@ -412,9 +417,9 @@ class SessionRunnerAdapter:
                 if routed:
                     self._agent_session.user_facing_routed = routed
                     update_fields.append("user_facing_routed")
-                # Persist exit_reason. Fail-silent: observability must never
-                # crash the run.
-                self._agent_session.exit_reason = summary.exit_reason
+                # Persist exit_reason (as its raw string value). Fail-silent:
+                # observability must never crash the run.
+                self._agent_session.exit_reason = str(summary.exit_reason)
                 update_fields.append("exit_reason")
                 self._agent_session.updated_at = datetime.now(UTC)
                 save = getattr(self._agent_session, "save", None)
