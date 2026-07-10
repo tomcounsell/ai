@@ -7,8 +7,8 @@ exited non-zero, WITHOUT checking whether that subprocess had already emitted a
 ``result`` event. A resumed wrap-up turn that produced a valid ``[/complete]``
 completion and then exited non-zero had its good ``result_text`` overwritten by
 the empty output of the fresh retry, so ``get_response_via_harness`` returned
-``""``. ``HeadlessRoleDriver.run_turn``'s ``if not reply:`` guard then set
-``exit_reason="empty_output"`` and the wrap-up guard delivered the canned
+``""``. ``HeadlessRoleDriver.run_turn``'s ``if not reply:`` guard then set an
+``ExitReason.EMPTY_OUTPUT`` failure and the wrap-up guard delivered the canned
 ``OPERATOR_TERMINAL_MESSAGE`` instead of the real answer.
 
 The fix gates the fallback on the true ``result_event_fired`` boolean (captured
@@ -29,6 +29,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from agent.session_runner.router import ExitReason
 
 VALID_UUID = "36514af3-c4e9-455d-9087-f5850101990e"
 
@@ -245,7 +247,9 @@ class TestRunTurnPropagatesCompletion:
             outcome = await driver.run_turn("send your wrap-up now")
 
         assert outcome.reply_text == COMPLETION_TEXT, "real completion must reach run_turn's return"
-        assert outcome.exit_reason != "empty_output", "must NOT hit the empty-output guard"
+        assert outcome.failure is None or outcome.failure.reason is not ExitReason.EMPTY_OUTPUT, (
+            "must NOT hit the empty-output guard"
+        )
         assert fake.state["calls"] == 1, "fallback must not have clobbered the completion"
 
     @pytest.mark.asyncio
@@ -296,5 +300,5 @@ class TestRunTurnPropagatesCompletion:
             "floor-triggered --resume must preserve the valid completion so "
             "outcome attribution records 'recovered', not a crash"
         )
-        assert outcome.exit_reason != "empty_output"
+        assert outcome.failure is None or outcome.failure.reason is not ExitReason.EMPTY_OUTPUT
         assert fake.state["calls"] == 1, "the completion must not be clobbered by a fresh retry"
