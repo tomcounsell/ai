@@ -273,7 +273,14 @@ def _cli_record(args) -> dict:
     # trail then has the same issue-scoped home the router reads. `get`/`reset`
     # stay non-ensuring — `get` is read-only and `reset` must not fabricate a
     # session.
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
+    # caller_run_id gates the cold-state auto-ensure (#2003 cycle-3): a
+    # run_id-carrying record call that resolves no session must not mint one.
+    session = _find_session(
+        session_id=args.session_id,
+        issue_number=args.issue_number,
+        ensure=True,
+        caller_run_id=args.run_id,
+    )
     if session is None:
         logger.debug("sdlc_dispatch record: no session resolved — no-op")
         return {}

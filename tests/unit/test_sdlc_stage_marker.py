@@ -235,7 +235,7 @@ class TestWriteMarker:
         assert result == {"stage": "PLAN", "status": "completed"}
         mock_sm.complete_stage.assert_called_once_with("PLAN")
         # #1558: write path resolves through the shared resolver with ensure=True.
-        find_mock.assert_called_once_with(None, issue_number=941, ensure=True)
+        find_mock.assert_called_once_with(None, issue_number=941, ensure=True, caller_run_id=None)
 
     def test_marker_lands_on_issue_session_under_divergent_env(self):
         """#1671/#1672: with VALOR_SESSION_ID pointing at a DIFFERENT session, a
@@ -296,7 +296,7 @@ class TestWriteMarker:
 
         assert code == 0
         assert result == {"stage": "REVIEW", "status": "in_progress"}
-        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True)
+        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True, caller_run_id=None)
 
     def test_successful_write_renews_issue_lock(self):
         """Issues #1954/#2003: a stage-marker write is evidence of an

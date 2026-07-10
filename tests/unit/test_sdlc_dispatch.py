@@ -53,7 +53,9 @@ class TestDispatchRecordEnsures:
             result = sdlc_dispatch._cli_record(args)
 
         # The critical assertion: record resolves with ensure=True.
-        find_mock.assert_called_once_with(session_id=None, issue_number=1671, ensure=True)
+        find_mock.assert_called_once_with(
+            session_id=None, issue_number=1671, ensure=True, caller_run_id="run-1671"
+        )
         assert result == {"ok": True, "history_length": 1}
 
     def test_record_lands_on_issue_session_under_divergent_env(self, monkeypatch):
@@ -96,9 +98,38 @@ class TestDispatchRecordEnsures:
         assert captured["session"] is issue_session
         assert result == {"ok": True, "history_length": 1}
 
-    def test_record_cold_start_creates_via_ensure(self, monkeypatch):
-        """Cold start (no pre-existing session, no env) → ensure creates
-        sdlc-local-N and the dispatch write lands there."""
+    def test_record_cold_start_with_run_id_refuses_without_ensure(self, monkeypatch):
+        """Cold-state run-identity gate (#2003 cycle-3): a record call that
+        carries a --run-id but resolves NO session must be refused WITHOUT
+        auto-ensuring — ensuring would mint a fresh session + issue lock as a
+        side effect of a write that is about to be refused, wedging the next
+        legitimate session-ensure behind ISSUE_LOCKED for up to the TTL."""
+        from tools import sdlc_dispatch
+
+        monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
+        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+
+        args = SimpleNamespace(
+            session_id=None, issue_number=1671, skill="/do-build", pr_number=None, run_id="run-1671"
+        )
+
+        with (
+            # No existing issue session on the pure lookup.
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("tools.sdlc_session_ensure.ensure_session") as ensure_mock,
+            patch.object(sdlc_dispatch, "record_dispatch_for_session") as record_mock,
+        ):
+            result = sdlc_dispatch._cli_record(args)
+
+        # No session minted, no write recorded, quiet no-op shape.
+        ensure_mock.assert_not_called()
+        record_mock.assert_not_called()
+        assert result == {}
+
+    def test_record_cold_start_identity_less_still_creates_via_ensure(self, monkeypatch):
+        """Cold start with NO run_id (identity-less programmatic caller) keeps
+        the #1671 auto-ensure behavior: ensure creates sdlc-local-N and the
+        dispatch write lands there."""
         from tools import sdlc_dispatch
 
         monkeypatch.delenv("VALOR_SESSION_ID", raising=False)
@@ -114,7 +145,7 @@ class TestDispatchRecordEnsures:
             return True
 
         args = SimpleNamespace(
-            session_id=None, issue_number=1671, skill="/do-build", pr_number=None, run_id="run-1671"
+            session_id=None, issue_number=1671, skill="/do-build", pr_number=None, run_id=None
         )
 
         mock_as = MagicMock()

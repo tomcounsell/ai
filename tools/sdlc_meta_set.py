@@ -163,7 +163,9 @@ def write_meta(
         logger.debug(f"sdlc_meta_set: value coercion failed for key {key!r}: {e}")
         return {}
 
-    session = find_session(session_id, issue_number=issue_number, ensure=True)
+    # caller_run_id gates the cold-state auto-ensure (#2003 cycle-3): a
+    # run_id-carrying write that resolves no session must not mint one.
+    session = find_session(session_id, issue_number=issue_number, ensure=True, caller_run_id=run_id)
     if not session:
         return {}
 

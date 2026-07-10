@@ -262,6 +262,62 @@ def test_no_pr_number_blocks_with_generic_message(enforcement, monkeypatch, caps
     assert "/do-merge" in decision["reason"]
 
 
+def test_cross_repo_flag_blocks_without_evaluating(enforcement, monkeypatch, capsys):
+    """#2003 cycle-3 TD1: `-R other/repo` means the PR number belongs to a
+    DIFFERENT repository — the hook must block with a named cross-repo
+    message instead of evaluating the LOCAL repo's PR of the same number."""
+
+    def must_not_run(pr):  # pragma: no cover - guard against regression
+        raise AssertionError("predicate must not be evaluated for a foreign repo")
+
+    monkeypatch.setattr(enforcement, "_evaluate_predicate", must_not_run)
+    monkeypatch.setattr(enforcement, "_local_repo_slug", lambda: "tomcounsell/ai")
+    decision = _run_main(
+        enforcement, monkeypatch, capsys, f"{MERGE} 42 -R otherorg/otherrepo --squash"
+    )
+    assert decision is not None and decision["decision"] == "block"
+    assert "Cross-repo merge not evaluable here" in decision["reason"]
+    assert "otherorg/otherrepo" in decision["reason"]
+
+
+def test_cross_repo_flag_before_pr_number_blocks(enforcement, monkeypatch, capsys):
+    """Flag-first form (`-R o/r 42`) also gets the named cross-repo block,
+    not the generic no-PR-number message."""
+    monkeypatch.setattr(enforcement, "_local_repo_slug", lambda: "tomcounsell/ai")
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} --repo otherorg/otherrepo 42")
+    assert decision is not None and decision["decision"] == "block"
+    assert "Cross-repo merge not evaluable here" in decision["reason"]
+
+
+def test_repo_flag_matching_local_repo_evaluates_normally(enforcement, monkeypatch, capsys):
+    """An explicit -R naming THIS repo is harmless: normal predicate path."""
+    monkeypatch.setattr(enforcement, "_local_repo_slug", lambda: "tomcounsell/ai")
+    decision = _run_main(
+        enforcement, monkeypatch, capsys, f"{MERGE} 42 --repo tomcounsell/ai --squash"
+    )
+    assert decision is None  # green predicate seam from the fixture
+
+
+def test_repo_flag_url_form_normalizes_to_local(enforcement, monkeypatch, capsys):
+    monkeypatch.setattr(enforcement, "_local_repo_slug", lambda: "tomcounsell/ai")
+    decision = _run_main(
+        enforcement,
+        monkeypatch,
+        capsys,
+        f"{MERGE} 42 -R https://github.com/TomCounsell/AI",
+    )
+    assert decision is None
+
+
+def test_cross_repo_unresolvable_local_fails_closed(enforcement, monkeypatch, capsys):
+    """When the local origin slug cannot be resolved, a -R command blocks
+    (fail-closed) rather than guessing."""
+    monkeypatch.setattr(enforcement, "_local_repo_slug", lambda: None)
+    decision = _run_main(enforcement, monkeypatch, capsys, f"{MERGE} 42 -R tomcounsell/ai")
+    assert decision is not None and decision["decision"] == "block"
+    assert "Cross-repo merge not evaluable here" in decision["reason"]
+
+
 def test_merge_guard_override_valid_file_allows_logs_and_emits_metric(
     enforcement, monkeypatch, capsys, tmp_path, caplog
 ):

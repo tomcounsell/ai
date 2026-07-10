@@ -16,8 +16,10 @@ Exit codes:
 Output:
     {"session_id": "<id>", "created": true, "run_id": "<hex>"}  -- new session created
     {"session_id": "<id>", "created": false, "run_id": "<hex>"} -- existing session found
-    {"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ...}
-        -- a foreign live run holds the issue lock
+    {"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ...,
+     "owner_session_id": ..., "orphaned_lock": ...}
+        -- a foreign live run holds the issue lock (orphaned_lock=true means
+        the owning run died before its next renewal; frees within the TTL)
     {"error": "RUN_BIND_FAILED", ...} -- lock acquired but the run_id could not be
         persisted to the session record (lock released via compare-and-delete)
     {} on error
@@ -33,6 +35,19 @@ deliberately NO adopt-from-record branch: a live foreign holder always means
 ISSUE_LOCKED, regardless of what active_run_id the record carries. Recovery
 after run_id loss = re-run session-ensure (ISSUE_LOCKED until the <=300s lock
 TTL lapses, then a fresh contest mints a new run_id).
+
+Verified reuse (#2003 cycle-3 BLOCKER 1): a caller that already holds a
+run_id for this issue from an earlier stage of the SAME top-level invocation
+passes it back via --reuse-run-id. The claim is honored only when the caller
+can PROVE continuity: the live lock's owner run_id equals the claim, or the
+lock is free and the session record's active_run_id equals the claim. A
+verified claim renews/re-acquires under that same run_id instead of minting
+fresh -- this is what lets the per-stage /sdlc router survive its own prior
+stage's live lock instead of self-wedging at every stage boundary. An
+unverified claim is silently ignored (falls through to the fresh-mint
+contest); a live foreign holder still always means ISSUE_LOCKED. This is
+claim-echo with proof, never adoption: the run_id must arrive FROM the
+caller, and the lock/record must corroborate it.
 """
 
 from __future__ import annotations
@@ -56,7 +71,56 @@ logger = logging.getLogger(__name__)
 ORPHAN_AGE_SECONDS = 600
 
 
-def _acquire_run_lock_and_bind(issue_number: int, session) -> tuple[str | None, dict | None]:
+def _validated_reuse_candidate(issue_number: int, session, reuse_run_id: str) -> str | None:
+    """Return ``reuse_run_id`` when the caller proves it is the same top-level
+    invocation; ``None`` otherwise (caller falls back to a fresh mint contest).
+
+    Proof is one of (#2003 cycle-3 BLOCKER 1):
+
+    1. **Live lock owner match**: the lock's owner run_id equals the claim --
+       the caller IS the current holder. This is the consecutive-stage case:
+       the prior stage's completion marker renewed the lock under this id,
+       and the next /sdlc invocation seconds later carries it back.
+    2. **Free lock + record mirror match**: the lock lapsed AND the session
+       record's ``active_run_id`` equals the claim -- the mirror written by
+       this pipeline's own earlier ``ensure_session()`` corroborates the
+       claim after a TTL lapse.
+
+    Anything else returns ``None`` -- never an error: an unverified claim
+    simply falls through to the normal fresh-mint contest, where a live
+    foreign holder still yields ISSUE_LOCKED. The no-adopt invariant holds:
+    this helper never reads a run_id OUT of the lock or the record to hand
+    to the caller; it only echoes back a claim the caller already carried,
+    and only when the lock/record corroborates it.
+    """
+    from models.session_lifecycle import touch_issue_lock
+
+    sid = getattr(session, "session_id", None) or ""
+    try:
+        peek = touch_issue_lock(issue_number, reuse_run_id, session_id=sid, peek=True)
+    except Exception as e:
+        logger.debug(
+            "sdlc_session_ensure: reuse peek failed for issue #%s (%s: %s) -- "
+            "falling back to fresh mint",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return None
+
+    if peek.acquired and peek.owner_run_id == reuse_run_id:
+        # Live lock, owned by the claimed run_id: the caller is the holder.
+        return reuse_run_id
+    if peek.acquired and peek.owner_run_id is None:
+        # Lock free: honor the claim only when the record mirror vouches for it.
+        if getattr(session, "active_run_id", None) == reuse_run_id:
+            return reuse_run_id
+    return None
+
+
+def _acquire_run_lock_and_bind(
+    issue_number: int, session, reuse_run_id: str | None = None
+) -> tuple[str | None, dict | None]:
     """Mint a fresh run_id candidate, contest the issue lock, and bind the winner.
 
     Called immediately before EVERY return point in ensure_session() (issues
@@ -66,6 +130,14 @@ def _acquire_run_lock_and_bind(issue_number: int, session) -> tuple[str | None, 
     attempts ``SET NX EX`` carrying it. There is NO adopt-from-record branch
     (#2003 cycle-1 BLOCKER 1): a live foreign holder always means
     ISSUE_LOCKED, regardless of what ``active_run_id`` the record carries.
+
+    Verified reuse (#2003 cycle-3 BLOCKER 1): when ``reuse_run_id`` is given
+    AND :func:`_validated_reuse_candidate` corroborates the claim (live lock
+    owner match, or free lock + record mirror match), the candidate is the
+    claimed id instead of a fresh uuid -- the ``touch_issue_lock`` below then
+    renews (same-owner EXPIRE) or re-acquires (SET NX on a free key) under
+    the caller's existing identity. An unverified claim silently falls back
+    to the fresh candidate, preserving no-adopt for foreign/stale callers.
 
     On acquisition, the candidate is saved to ``session.active_run_id`` and
     read back from Redis (post-save readback, Race 3). On save failure or
@@ -90,6 +162,8 @@ def _acquire_run_lock_and_bind(issue_number: int, session) -> tuple[str | None, 
 
     session_id = getattr(session, "session_id", None) or ""
     candidate = uuid.uuid4().hex
+    if reuse_run_id:
+        candidate = _validated_reuse_candidate(issue_number, session, reuse_run_id) or candidate
 
     lock_result = touch_issue_lock(
         issue_number, candidate, session_id=session_id, ttl=ISSUE_LOCK_TTL_SECONDS
@@ -102,11 +176,27 @@ def _acquire_run_lock_and_bind(issue_number: int, session) -> tuple[str | None, 
             lock_result.owner_run_id,
             lock_result.owner_session_id,
         )
+        # Follow-up peek for the orphaned_lock flag (cycle-3 nit): the
+        # non-peek refusal path does not compute it, and callers deciding
+        # whether to wait out the TTL need the signal. Best-effort.
+        orphaned = False
+        try:
+            orphaned = touch_issue_lock(
+                issue_number, candidate, session_id=session_id, peek=True
+            ).orphaned_lock
+        except Exception as peek_err:
+            logger.debug(
+                "sdlc_session_ensure: orphan peek failed for issue #%s (%s: %s)",
+                issue_number,
+                type(peek_err).__name__,
+                peek_err,
+            )
         return None, {
             "blocked": True,
             "reason": "ISSUE_LOCKED",
             "owner_run_id": lock_result.owner_run_id,
             "owner_session_id": lock_result.owner_session_id,
+            "orphaned_lock": orphaned,
         }
 
     # Acquired: bind the run_id to the session record (inspection mirror +
@@ -169,7 +259,11 @@ def _acquire_run_lock_and_bind(issue_number: int, session) -> tuple[str | None, 
     return candidate, None
 
 
-def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
+def ensure_session(
+    issue_number: int,
+    issue_url: str | None = None,
+    reuse_run_id: str | None = None,
+) -> dict:
     """Ensure a local AgentSession exists for the given issue number.
 
     Resolution order (env-vs-issue reconciliation — concern C1, #1671/#1672):
@@ -205,6 +299,10 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
     Args:
         issue_number: GitHub issue number.
         issue_url: Optional full issue URL (e.g., https://github.com/owner/repo/issues/N).
+        reuse_run_id: Optional run_id the caller already holds for this issue
+            from an earlier stage of the SAME top-level invocation. Honored
+            only when verified against the live lock or the record mirror
+            (see :func:`_validated_reuse_candidate`); otherwise ignored.
 
     Returns:
         Dict with session_id and created flag, or empty dict on error.
@@ -241,7 +339,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                             env_issue_url = getattr(resolved, "issue_url", None) or ""
                             if env_issue_url.endswith(f"/issues/{issue_number}"):
                                 # Legitimate bridge case — true no-op, no detour.
-                                run_id, err = _acquire_run_lock_and_bind(issue_number, resolved)
+                                run_id, err = _acquire_run_lock_and_bind(
+                                    issue_number, resolved, reuse_run_id=reuse_run_id
+                                )
                                 if err is not None:
                                     return err
                                 return {
@@ -259,7 +359,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
                             if owned is not None:
                                 owned_id = getattr(owned, "session_id", None)
                                 if owned_id:
-                                    run_id, err = _acquire_run_lock_and_bind(issue_number, owned)
+                                    run_id, err = _acquire_run_lock_and_bind(
+                                        issue_number, owned, reuse_run_id=reuse_run_id
+                                    )
                                     if err is not None:
                                         return err
                                     return {
@@ -280,7 +382,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         if existing:
             session_id = getattr(existing, "session_id", None)
             if session_id:
-                run_id, err = _acquire_run_lock_and_bind(issue_number, existing)
+                run_id, err = _acquire_run_lock_and_bind(
+                    issue_number, existing, reuse_run_id=reuse_run_id
+                )
                 if err is not None:
                     return err
                 return {"session_id": session_id, "created": False, "run_id": run_id}
@@ -294,7 +398,9 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
         try:
             existing_by_id = list(AgentSession.query.filter(session_id=local_session_id))
             if existing_by_id:
-                run_id, err = _acquire_run_lock_and_bind(issue_number, existing_by_id[0])
+                run_id, err = _acquire_run_lock_and_bind(
+                    issue_number, existing_by_id[0], reuse_run_id=reuse_run_id
+                )
                 if err is not None:
                     return err
                 return {"session_id": local_session_id, "created": False, "run_id": run_id}
@@ -365,7 +471,7 @@ def ensure_session(issue_number: int, issue_url: str | None = None) -> dict:
             logger.debug(f"sdlc_session_ensure: transition_status failed: {e}")
             # Session is created but in pending state — still usable
 
-        run_id, err = _acquire_run_lock_and_bind(issue_number, session)
+        run_id, err = _acquire_run_lock_and_bind(issue_number, session, reuse_run_id=reuse_run_id)
         if err is not None:
             return err
         return {"session_id": local_session_id, "created": True, "run_id": run_id}
@@ -555,6 +661,15 @@ def main() -> None:
         help="Full GitHub issue URL (optional, used for issue_url field)",
     )
     parser.add_argument(
+        "--reuse-run-id",
+        default=None,
+        help="Run_id already held for this issue from an earlier stage of the SAME "
+        "top-level invocation. Verified against the live lock (owner match) or, on a "
+        "free lock, against the session record's active_run_id; a verified claim "
+        "renews/re-acquires under that id instead of minting fresh. An unverified "
+        "claim is ignored (fresh mint contest; foreign holder still ISSUE_LOCKED).",
+    )
+    parser.add_argument(
         "--kill-orphans",
         action="store_true",
         help="Finalize zombie sdlc-local-* PM sessions (status=running, no heartbeat, "
@@ -593,6 +708,7 @@ def main() -> None:
     result = ensure_session(
         issue_number=args.issue_number,
         issue_url=args.issue_url,
+        reuse_run_id=args.reuse_run_id,
     )
     print(json.dumps(result))
 

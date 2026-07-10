@@ -78,11 +78,17 @@ in a loop until it sees one. Skipping it is the #1 local-pipeline stall. Always
 pass `--issue-number` (quoted) — it is the authoritative session selector:
 
 ```bash
+# Compute the PR head SHA first — the recorded verdict MUST embed the
+# `REVIEW_CONTEXT head_sha=<sha>` trailer (#2003): it is what lets the merge
+# predicate's SHA-freshness rung prove the verdict matches the reviewed head
+# instead of falling back to timestamp comparison. Survives verdict
+# normalization (the predicate regex tolerates the uppercased image).
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
 # APPROVED (status=success) — verdict + completion marker are ONE block (#1642):
-sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+sdlc-tool verdict record --stage REVIEW --verdict "APPROVED REVIEW_CONTEXT head_sha=$HEAD_SHA" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 # Findings:
-sdlc-tool verdict record --stage REVIEW --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+sdlc-tool verdict record --stage REVIEW --verdict "CHANGES REQUESTED REVIEW_CONTEXT head_sha=$HEAD_SHA" --blockers $BLOCKERS --tech-debt $TECH_DEBT --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 # Preflight short-circuits:
 sdlc-tool verdict record --stage REVIEW --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 sdlc-tool verdict record --stage REVIEW --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"

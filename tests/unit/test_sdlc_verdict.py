@@ -203,7 +203,9 @@ class TestCliRecordEnsure:
             result = _cli_record(self._args())
 
         assert result["verdict"] == "READY TO BUILD"
-        find_mock.assert_called_once_with(session_id=None, issue_number=1558, ensure=True)
+        find_mock.assert_called_once_with(
+            session_id=None, issue_number=1558, ensure=True, caller_run_id="run-test"
+        )
 
     def test_cli_get_stays_ensure_false(self, fake_session_reload_patched):
         from tools.sdlc_verdict import _cli_get, _cli_record

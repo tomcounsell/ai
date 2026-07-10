@@ -191,8 +191,10 @@ def write_marker(
     # Substrate is present. A missing session is QUIET (a session-less local
     # invocation, or a non-`ai` repo with no PM session) — degraded, exit 0.
     # Writes opt into auto-ensure so a sessionless local invocation with issue
-    # context still gets a PM session to persist into (#1558).
-    session = find_session(session_id, issue_number=issue_number, ensure=True)
+    # context still gets a PM session to persist into (#1558). caller_run_id
+    # gates that auto-ensure (#2003 cycle-3): a run_id-carrying write that
+    # resolves no session must not mint one.
+    session = find_session(session_id, issue_number=issue_number, ensure=True, caller_run_id=run_id)
     if not session:
         return _degraded(stage, "state not persisted — no PM session resolved"), 0
 

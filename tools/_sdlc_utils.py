@@ -220,6 +220,7 @@ def find_session(
     session_id: str | None = None,
     issue_number: int | None = None,
     ensure: bool = False,
+    caller_run_id: str | None = None,
 ):
     """Resolve a PM AgentSession by session_id or issue_number.
 
@@ -271,6 +272,20 @@ def find_session(
             dedup (#1147) verbatim; an ensure failure yields ``None`` rather
             than raising. The side effect is opt-in and grep-able via
             ``grep -rn 'ensure=True' tools/``.
+        caller_run_id: The caller's ``--run-id``, threaded by the four write
+            subcommands. **Cold-state run-identity gate (#2003 cycle-3):**
+            when the pure lookup misses AND the caller carries a run_id, the
+            auto-ensure branch is SKIPPED and ``None`` is returned. A run_id
+            is minted only by ``ensure_session`` (which creates and binds the
+            session record), so a run_id-carrying write that finds no session
+            is stale by definition — ensuring here would mint a fresh session
+            + issue lock as a side effect of a write that is about to be
+            refused anyway, wedging the next legitimate ``session-ensure``
+            behind ISSUE_LOCKED for up to the 300s TTL. Recovery is the
+            documented one: re-run ``session-ensure`` (with ``--reuse-run-id``
+            when the lock is still yours). Identity-less programmatic callers
+            (``caller_run_id=None``) keep the #1558/#1671 auto-ensure
+            behavior unchanged.
 
     Returns:
         The PM AgentSession or None.
@@ -315,6 +330,17 @@ def find_session(
     # Opt-in auto-ensure (writes only). Create a session so the write has a home.
     # Gated: only when there is an issue context (issue_number >= 1) or a
     # session-id env var is present. Reads (ensure=False) never reach this branch.
+    #
+    # Cold-state run-identity gate (#2003 cycle-3): a run_id-carrying caller
+    # that reaches this point has a claim no session record can corroborate —
+    # never ensure-mint on its behalf (see the caller_run_id arg docstring).
+    if ensure and caller_run_id:
+        logger.debug(
+            "find_session: cold-state write with run_id=%s and no resolvable "
+            "session — refusing auto-ensure (re-run session-ensure to recover)",
+            caller_run_id,
+        )
+        return None
     if ensure and (
         (issue_number is not None and issue_number >= 1)
         or os.environ.get("VALOR_SESSION_ID")
@@ -451,7 +477,12 @@ def check_run_ownership(
         sid = getattr(session, "session_id", None) or "" if session is not None else ""
         result = touch_issue_lock(derived_issue, run_id, session_id=sid, peek=True)
     except Exception as e:
-        logger.debug(f"check_run_ownership: peek failed (failing open): {e}")
+        logger.warning(
+            "check_run_ownership: peek failed for issue #%s (failing open; error class %s): %s",
+            derived_issue,
+            type(e).__name__,
+            e,
+        )
         return None
 
     if result.acquired:

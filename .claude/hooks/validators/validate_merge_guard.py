@@ -65,6 +65,50 @@ _DATA_DIR = _REPO_ROOT / "data"
 # treated as absent.
 _OVERRIDE_LINE_RE = re.compile(r"override:\s*(\S[^\n]*)")
 
+# Cross-repo flag on the merge command (#2003 cycle-3 TD1). `gh` accepts
+# `-R/--repo OWNER/REPO` (also `HOST/OWNER/REPO` and full URLs), in which
+# case the PR number in the command belongs to a DIFFERENT repository —
+# evaluating the predicate here would judge the LOCAL repo's PR of the same
+# number. Foreign repos are never evaluable from this checkout: block with a
+# named message instead of mis-evaluating.
+_REPO_FLAG_RE = re.compile(r"(?:^|\s)(?:-R|--repo)(?:=|\s+)(\S+)")
+
+
+def _normalize_repo_slug(value: str) -> str | None:
+    """Reduce a -R/--repo value (or git remote URL) to lowercase OWNER/REPO.
+
+    Accepts ``OWNER/REPO``, ``HOST/OWNER/REPO``, ``https://host/owner/repo``,
+    and ``git@host:owner/repo.git`` forms. Returns None when no owner/repo
+    tail is extractable.
+    """
+    v = value.strip().strip("'\"")
+    v = re.sub(r"^(?:https?://|ssh://)?(?:git@)?", "", v)
+    v = v.replace(":", "/")
+    if v.endswith(".git"):
+        v = v[: -len(".git")]
+    parts = [p for p in v.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return f"{parts[-2]}/{parts[-1]}".lower()
+
+
+def _local_repo_slug() -> str | None:
+    """OWNER/REPO of this checkout's origin remote, or None when unresolvable."""
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        return _normalize_repo_slug(proc.stdout.strip())
+    except Exception:
+        return None
+
 
 def _read_override(pr_number: int) -> tuple[str, str | None]:
     """Classify the override file for a PR.
@@ -545,6 +589,24 @@ def main() -> None:
         return
     if _command_has_help_flag(command):
         return
+
+    # Cross-repo guard (#2003 cycle-3 TD1): a -R/--repo flag means the PR
+    # number belongs to ANOTHER repository — the predicate below would judge
+    # this repo's PR of the same number. Never evaluate foreign repos here.
+    repo_flag = _REPO_FLAG_RE.search(command)
+    if repo_flag:
+        target = _normalize_repo_slug(repo_flag.group(1))
+        local = _local_repo_slug()
+        if target is None or local is None or target != local:
+            _block(
+                "Cross-repo merge not evaluable here: this command targets"
+                f" '{repo_flag.group(1)}' via -R/--repo, but the merge-guard"
+                " hook evaluates the live merge predicate against THIS"
+                f" repository only ({local or 'origin unresolvable'})."
+                " Run the merge from a checkout of the target repository so"
+                " its own merge gate applies."
+            )
+            return
 
     match = _PR_NUMBER_RE.search(command)
     if not match:

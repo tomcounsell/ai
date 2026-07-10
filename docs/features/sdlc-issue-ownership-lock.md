@@ -23,9 +23,24 @@ The unit of ownership is a **pipeline run**, not an OS process and not a session
 `tools/sdlc_session_ensure.py::ensure_session()` is the **only** place a `run_id` is minted. Immediately before *every* one of its return points -- cold-start create, or any of its early-return branches -- `_acquire_run_lock_and_bind()` generates a fresh uuid-hex candidate and contests the issue lock with `touch_issue_lock(issue_number, candidate, ...)` (a `SET NX EX` carrying the candidate).
 
 - **Lock acquired** → this run owns the issue. The candidate is saved to `AgentSession.active_run_id` and returned in the JSON output: `{"session_id": ..., "created": ..., "run_id": "<hex>"}`.
-- **Lock held by a foreign run_id** → `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ...}`, regardless of what `active_run_id` the session *record* happens to carry.
+- **Lock held by a foreign run_id** → `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ..., "orphaned_lock": ...}`, regardless of what `active_run_id` the session *record* happens to carry. The `orphaned_lock` flag comes from a follow-up peek so callers can distinguish a healthy foreign owner from a ghost whose lock frees within the TTL.
 
 **There is no adopt-from-record branch.** A round-1 critique BLOCKER named the failure mode directly: reading `active_run_id` off the shared, deterministically-keyed session record (`sdlc-local-{N}`) to decide "do I already own this" lets a second live supervisor calling `ensure_session` while the incumbent is still running silently impersonate it -- the exact #1915 collision one layer up. Minting is therefore keyed off the **lock's live holder**, never off `session.status`. Every top-level call is a fresh contest; the loser is told who the foreign owner is and steps aside.
+
+### Verified reuse: `--reuse-run-id` (cycle-3 BLOCKER 1)
+
+The per-stage `/sdlc` router runs `session-ensure` at the start of EVERY stage, and each stage's final `stage-marker --status completed` renews the lock to the full TTL. Without a reuse path, the router's next invocation seconds later would mint a fresh candidate, lose `SET NX` to its **own** prior stage's live lock, and treat the resulting `ISSUE_LOCKED` as a hard block -- self-wedging every multi-stage run at the first stage boundary.
+
+`session-ensure --reuse-run-id <id>` is the verified continue path. The claimed run_id must arrive FROM the caller (the conversation that minted it), and it is honored only when the caller can prove continuity (`_validated_reuse_candidate()`):
+
+1. **Live lock owner match** -- the lock's owner run_id equals the claim (the consecutive-stage case), or
+2. **Free lock + record mirror match** -- the lock lapsed and `AgentSession.active_run_id` equals the claim (lossless recovery after a TTL lapse).
+
+A verified claim renews/re-acquires under the same run_id; an unverified claim is silently ignored and falls through to the fresh-mint contest, where a live foreign holder still yields `ISSUE_LOCKED`. This is claim-echo with proof, never adoption: the code never reads a run_id OUT of the lock or record to hand to a caller.
+
+### Cold-state write gate (cycle-3)
+
+The four state-mutating subcommands resolve their session via `find_session(..., ensure=True, caller_run_id=<--run-id>)`. When the pure lookup finds **no session** and the caller carries a run_id, the auto-ensure branch is **skipped** and the write is quietly refused: a run_id is minted only by `ensure_session` (which creates and binds the record), so a run_id-carrying write with no session is stale by definition. Ensuring on its behalf would mint a fresh session + lock as a side effect of a write that is about to be refused anyway, wedging the next legitimate `session-ensure` behind `ISSUE_LOCKED` for up to the TTL. Identity-less programmatic callers (no run_id) keep the #1558/#1671 auto-ensure behavior.
 
 ### Mid-run identity travels explicitly, never ambiently
 
@@ -97,14 +112,14 @@ This covers the save-failure branch precisely; it cannot cover a true process de
 
 ### Recovery after run_id loss
 
-If a local supervisor loses track of its `run_id` (context compaction, crash of the driving CLI session), there is deliberately **no adopt-from-record shortcut**. The documented recovery is: re-run `sdlc-tool session-ensure`. While the old lock is still live, this returns `ISSUE_LOCKED` (bounded by the ≤300s TTL, since nothing is renewing the orphaned run's lock); once the TTL lapses, a fresh contest succeeds and mints a new `run_id`. Bounded and loud -- an operator sees a named block, not a silent split-identity continuation.
+If a local supervisor loses track of its `run_id` (context compaction, crash of the driving CLI session), there is deliberately **no adopt-from-record shortcut**. The documented recovery is: re-run `sdlc-tool session-ensure`. While the old lock is still live, this returns `ISSUE_LOCKED` (bounded by the ≤300s TTL, since nothing is renewing the orphaned run's lock); once the TTL lapses, a fresh contest succeeds and mints a new `run_id`. Bounded and loud -- an operator sees a named block, not a silent split-identity continuation. A caller that still HAS its run_id recovers immediately with `--reuse-run-id` (verified reuse above) -- no TTL wait, same identity.
 
 ## The Two In-Process Renewal Paths
 
 Two call sites renew the lock without going through a `sdlc-tool` CLI subprocess. Both source their identity from `agent_session.active_run_id` -- the read-back of the identity *this same pipeline's own* `ensure_session()` established -- never a foreign adoption, so neither violates the no-adopt rule above.
 
 - **`tools/_sdlc_utils.py::renew_issue_lock_for_session(session, run_id=None)`** -- wired into `tools/sdlc_stage_marker.py::write_marker()`. Falls back to `session.active_run_id` when no explicit `run_id` is passed. Best-effort: logs and returns on any failure, never blocks or alters the marker write's outcome.
-- **`agent/session_executor.py::_tick_issue_lock_renewal()`** -- the worker's 60s heartbeat renewal for `session_type == "eng"` sessions with a resolved `issue_number`. Skips renewal entirely (with a debug log) when the session has no `active_run_id` at all -- an identity-less caller must never extend a lock. When a renewal attempt comes back `not acquired` (a foreign run now holds the lock), it logs at **WARNING** -- no longer purely fire-and-forget -- so an out-from-under takeover is visible before the TTL lapses.
+- **`agent/session_executor.py::_tick_issue_lock_renewal()`** -- the worker's 60s heartbeat renewal for `session_type == "eng"` sessions with a resolved `issue_number`. Cycle-3 BLOCKER 2: the identity is **re-fetched from Redis on every tick** (`_fetch_live_active_run_id()`, one indexed Popoto query) -- the executor's in-memory `agent_session` snapshot was fetched once at session start, *before* the session-ensure subprocess wrote `active_run_id`, so reading the snapshot attribute is permanently stale (None on fresh runs → renewal skips forever and the lock lapses mid-stage; the previous run's id on resumed sessions → a lapsed lock gets re-acquired under a dead identity and renewed forever). Skips renewal for that tick (with a debug log) when the record carries no live `active_run_id` or the fetch fails -- an identity-less tick must never extend or mint a lock. When a renewal attempt comes back `not acquired` (a foreign run now holds the lock), it logs at **WARNING** -- no longer purely fire-and-forget -- so an out-from-under takeover is visible before the TTL lapses.
 
 ## The `issue_number` Mirror Field
 
@@ -127,7 +142,7 @@ Every mutation-adjacent checkpoint in the SDLC pipeline touches the lock. This i
 | `ensure_session()` -- all return points | `tools/sdlc_session_ensure.py` | Every session resolution for an issue (cold-start create, or any early-return branch) | Mints a fresh candidate per top-level call via `_acquire_run_lock_and_bind()`, invoked immediately before *each* `return` so no branch can silently skip it. |
 | `record_dispatch_for_session()` -- direct call | `tools/sdlc_dispatch.py` | Before writing every dispatch event (i.e. before every sub-skill invocation) | The caller's explicit `run_id` (CLI `--run-id`), falling back to `session.active_run_id` for in-process callers. An issue-scoped session with **no** run identity at all refuses the write outright. |
 | `decide()` peek pre-check | `tools/sdlc_next_skill.py` | Every `sdlc-tool next-skill` call, before G1-G7 guard evaluation | Read-only: peeks with the identity read back from the resolved issue session's `active_run_id`. Never acquires or renews. |
-| `_tick_issue_lock_renewal` | `agent/session_executor.py` | Every 60s heartbeat tick, for a worker-driven `session_type == "eng"` session with a resolved `issue_number` | `agent_session.active_run_id` (read-back only; skips renewal if absent). Warns at WARNING on a not-owner result. |
+| `_tick_issue_lock_renewal` | `agent/session_executor.py` | Every 60s heartbeat tick, for a worker-driven `session_type == "eng"` session with a resolved `issue_number` | `active_run_id` re-fetched from Redis each tick via `_fetch_live_active_run_id()` (read-back only; skips the tick if absent or fetch fails). Warns at WARNING on a not-owner result. |
 | `sdlc-tool stage-marker` write | `tools/sdlc_stage_marker.py` (via `tools/_sdlc_utils.py::renew_issue_lock_for_session()`) | Every stage-marker write (BUILD/TEST/REVIEW stage transitions) | The CLI's `--run-id`, falling back to `session.active_run_id`. Fires after the ownership guard and before the state-machine write; best-effort, never blocks or alters the write outcome on failure. |
 
 ### Gated but not renewed: `verdict record`, `meta-set`

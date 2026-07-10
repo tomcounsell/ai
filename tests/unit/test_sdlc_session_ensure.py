@@ -1188,6 +1188,9 @@ class TestIssueLockWiring:
             "reason": "ISSUE_LOCKED",
             "owner_run_id": "foreign-run-hex",
             "owner_session_id": "sdlc-local-2007-other-owner",
+            # Cycle-3 nit: the refusal carries the orphan signal (from the
+            # follow-up peek; the mocked lock reports not-orphaned).
+            "orphaned_lock": False,
         }
 
     def test_no_adopt_from_record_second_call_blocked(self):
@@ -1325,3 +1328,126 @@ class TestIssueLockWiring:
         assert result["session_id"] == "sdlc-local-2054"
         assert result["run_id"]
         assert legacy.active_run_id == result["run_id"]
+
+
+class TestVerifiedRunIdReuse:
+    """#2003 cycle-3 BLOCKER 1: the per-stage /sdlc router re-runs
+    session-ensure at every stage boundary while its OWN prior stage's lock
+    is still live (the stage's completion marker renews it to the full TTL).
+    A bare re-ensure mints a fresh candidate, loses SET NX to itself, and
+    self-wedges the pipeline. --reuse-run-id is the escape: a claim the
+    caller already carries is verified against the live lock (owner match)
+    or, on a free lock, against the record mirror -- and only then honored.
+    No-adopt stays intact for foreign/stale claims.
+    """
+
+    @staticmethod
+    def _readback_as(session):
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        return mock_as
+
+    def test_consecutive_stage_reuse_survives_own_live_lock(self):
+        """The judge-mandated regression: ensure -> stage-completion renewal
+        -> second ensure WITHIN the TTL. With --reuse-run-id the second
+        ensure returns the SAME run_id instead of wedging on ISSUE_LOCKED.
+        Real Redis lock throughout."""
+        from tools._sdlc_utils import renew_issue_lock_for_session
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2060
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.issue_number = issue_number
+
+        # Stage N: first ensure mints run_id A.
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result_a = ensure_session(issue_number=issue_number)
+        run_id_a = result_a["run_id"]
+        assert run_id_a
+
+        # Stage N's final `stage-marker --status completed` renews the lock
+        # to the full TTL (the exact write_marker side effect).
+        renew_issue_lock_for_session(session, run_id=run_id_a)
+
+        # Stage N+1: the router re-ensures seconds later, carrying the
+        # conversation's run_id. Must NOT wedge; must return the same id.
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result_b = ensure_session(issue_number=issue_number, reuse_run_id=run_id_a)
+
+        assert result_b.get("blocked") is None, result_b
+        assert result_b["run_id"] == run_id_a
+        assert result_b["session_id"] == f"sdlc-local-{issue_number}"
+
+    def test_reuse_with_wrong_id_against_live_lock_still_blocked(self):
+        """An unverifiable claim while a foreign lock is live falls through
+        to the fresh-mint contest and stays ISSUE_LOCKED (no adopt)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2061
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result_a = ensure_session(issue_number=issue_number)
+        run_id_a = result_a["run_id"]
+
+        intruder = MagicMock()
+        intruder.session_id = f"sdlc-local-{issue_number}"
+        intruder.active_run_id = None
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=intruder),
+            patch("models.agent_session.AgentSession", self._readback_as(intruder)),
+        ):
+            result_b = ensure_session(issue_number=issue_number, reuse_run_id="bogus-claim")
+
+        assert result_b["blocked"] is True
+        assert result_b["reason"] == "ISSUE_LOCKED"
+        assert result_b["owner_run_id"] == run_id_a
+        assert "orphaned_lock" in result_b
+
+    def test_reuse_on_free_lock_with_record_match_reacquires_same_id(self):
+        """TTL lapsed but the record mirror corroborates the claim: the
+        ensure re-acquires under the SAME run_id (lossless recovery)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2062
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.active_run_id = "aabbccdd" * 4  # prior mint, mirrored on the record
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result = ensure_session(issue_number=issue_number, reuse_run_id="aabbccdd" * 4)
+
+        assert result["run_id"] == "aabbccdd" * 4
+
+    def test_reuse_on_free_lock_with_record_mismatch_mints_fresh(self):
+        """A claim the record does NOT corroborate is ignored on a free
+        lock: fresh mint, never claim-echo."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2063
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.active_run_id = "11112222" * 4
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result = ensure_session(issue_number=issue_number, reuse_run_id="deadbeef" * 4)
+
+        assert result["run_id"] != "deadbeef" * 4
+        assert len(result["run_id"]) == 32

@@ -414,7 +414,14 @@ def get_verdict(session, stage: str) -> dict:
 
 
 def _cli_record(args) -> dict:
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
+    # caller_run_id gates the cold-state auto-ensure (#2003 cycle-3): a
+    # run_id-carrying write that resolves no session must not mint one.
+    session = _find_session(
+        session_id=args.session_id,
+        issue_number=args.issue_number,
+        ensure=True,
+        caller_run_id=args.run_id,
+    )
     if session is None:
         return {}
     # Ownership guard: when --issue-number N is passed, the resolved session must

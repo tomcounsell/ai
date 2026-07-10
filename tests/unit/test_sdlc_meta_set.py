@@ -301,7 +301,7 @@ class TestMetaSetWriteMeta:
             result = write_meta(key="plan_revising", value="true", issue_number=1558)
 
         assert result == {"key": "plan_revising", "value": True}
-        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True)
+        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True, caller_run_id=None)
 
 
 class TestMetaSetWhitelist:
