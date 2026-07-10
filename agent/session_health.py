@@ -3147,12 +3147,22 @@ async def _agent_session_health_check() -> None:
     4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
-    **Delivery guard (#918):** Before recovering a running session to pending,
-    the health check inspects ``response_delivered_at``. If the field is set,
-    the session already delivered its final response to Telegram — re-queuing
-    would cause a duplicate reply. Instead, the session is finalized as
-    ``completed`` via ``finalize_session()``. This prevents the crash-recover
-    loop that previously produced 6+ duplicate messages per session.
+    **Delivery guard (#918, epoch-scoped per #1979):** Before recovering a
+    running session to pending, the health check evaluates
+    ``_delivery_belongs_to_current_run(entry)`` rather than simply checking
+    whether ``response_delivered_at`` is set. That predicate compares
+    ``response_delivered_at`` against the current run's start anchor
+    (``started_at``, falling back to ``created_at``): only a delivery
+    timestamped at or after the anchor belongs to *this* run and fires the
+    guard. A delivery timestamp left over from a prior run — sticky across a
+    resume — falls before the anchor and is ignored, so the resumed session
+    remains eligible for normal recovery instead of being prematurely
+    finalized as ``completed`` while it is still running. When the predicate
+    does fire, the session is finalized as ``completed`` via
+    ``finalize_session()`` instead of being re-queued. This prevents both the
+    original crash-recover loop that produced 6+ duplicate messages per
+    session and the premature-finalization regression the epoch scoping
+    fixes.
 
     **No wall-clock timeout (#1172):** the per-session
     ``_get_agent_session_timeout`` cap was retired. A session writing fresh
