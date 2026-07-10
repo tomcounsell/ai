@@ -152,18 +152,23 @@ def _is_designated_bridge_machine() -> bool:
     return _owned_project_key(_get_machine_name()) is not None
 
 
-def _resolve_environment() -> str:
+def _resolve_environment(owned_project_key: str | None) -> str:
     """Resolve the Sentry ``environment`` tag for this process (issue #1834).
+
+    Pure function of the ownership result so the caller can compute the
+    ``projects.json`` + ``scutil`` inputs exactly once and reuse them for both
+    the tag and the init log line.
 
     Precedence: an explicit ``SENTRY_ENVIRONMENT`` always wins (preserves the
     existing escape hatch and lets a designated machine be forced to e.g.
-    ``staging``); otherwise a designated bridge machine reports as
-    ``"production"`` and every other machine reports as ``"development"``.
+    ``staging``); otherwise a machine that owns a project
+    (``owned_project_key is not None``) reports as ``"production"`` and every
+    other machine reports as ``"development"``.
     """
     explicit = os.getenv("SENTRY_ENVIRONMENT")
     if explicit:
         return explicit
-    return "production" if _is_designated_bridge_machine() else "development"
+    return "production" if owned_project_key is not None else "development"
 
 
 def configure_sentry(component: str, before_send=None) -> bool:
@@ -192,16 +197,19 @@ def configure_sentry(component: str, before_send=None) -> bool:
 
     import sentry_sdk  # noqa: PLC0415
 
-    environment = _resolve_environment()
+    # Resolve the ownership inputs exactly once and reuse them for both the
+    # environment tag and the observability log line (no double scutil/file read).
+    machine = _get_machine_name()
+    owned_key = _owned_project_key(machine)
+    environment = _resolve_environment(owned_key)
     # Observability (issue #1834, critique concern #2): make a wrong environment
     # tag diagnosable from the process log without needing Sentry itself.
-    machine = _get_machine_name()
     logger.info(
         "[%s] Sentry init: environment=%s (ComputerName=%r, owned_project=%s)",
         component,
         environment,
         machine,
-        _owned_project_key(machine) or "none",
+        owned_key or "none",
     )
     sentry_sdk.init(
         dsn=dsn,

@@ -43,7 +43,7 @@ def test_configure_sentry_inits_when_dsn_set_and_no_guard(monkeypatch):
             return_value="abc123\n",
         ),
         # Pin ownership so the assertion does not depend on the host's projects.json.
-        patch("monitoring.sentry_config._is_designated_bridge_machine", return_value=True),
+        patch("monitoring.sentry_config._owned_project_key", return_value="valor"),
     ):
         result = configure_sentry("worker", before_send=None)
 
@@ -99,7 +99,7 @@ def test_configure_sentry_passes_before_send_for_bridge(monkeypatch):
             "monitoring.sentry_config.subprocess.check_output",
             return_value="abc123\n",
         ),
-        patch("monitoring.sentry_config._is_designated_bridge_machine", return_value=True),
+        patch("monitoring.sentry_config._owned_project_key", return_value="valor"),
     ):
         result = configure_sentry("bridge", before_send=_before_send)
 
@@ -122,7 +122,7 @@ def test_configure_sentry_passes_before_send_for_worker(monkeypatch):
             "monitoring.sentry_config.subprocess.check_output",
             return_value="abc123\n",
         ),
-        patch("monitoring.sentry_config._is_designated_bridge_machine", return_value=True),
+        patch("monitoring.sentry_config._owned_project_key", return_value="valor"),
     ):
         result = configure_sentry("worker", before_send=drop_orphan_noise)
 
@@ -136,24 +136,21 @@ def test_configure_sentry_passes_before_send_for_worker(monkeypatch):
 
 
 def test_environment_development_when_not_bridge_machine(monkeypatch):
-    """No explicit override + not a designated bridge machine → development."""
+    """No explicit override + owns no project (owned_key is None) → development."""
     monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
-    with patch("monitoring.sentry_config._is_designated_bridge_machine", return_value=False):
-        assert _resolve_environment() == "development"
+    assert _resolve_environment(None) == "development"
 
 
 def test_environment_production_when_bridge_machine(monkeypatch):
-    """No explicit override + designated bridge machine → production."""
+    """No explicit override + owns a project → production."""
     monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
-    with patch("monitoring.sentry_config._is_designated_bridge_machine", return_value=True):
-        assert _resolve_environment() == "production"
+    assert _resolve_environment("valor") == "production"
 
 
 def test_explicit_sentry_environment_overrides(monkeypatch):
     """Explicit SENTRY_ENVIRONMENT wins over machine ownership (even a bridge machine)."""
     monkeypatch.setenv("SENTRY_ENVIRONMENT", "staging")
-    with patch("monitoring.sentry_config._is_designated_bridge_machine", return_value=True):
-        assert _resolve_environment() == "staging"
+    assert _resolve_environment("valor") == "staging"
 
 
 def test_owned_project_key_empty_machine_returns_none():
