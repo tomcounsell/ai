@@ -91,6 +91,10 @@ deliberately disjoint file surface; concurrent pipelines by design).
   of a degradation contract.
 - **#1959 / PR #1976**: logged one swallowed exception; the guard covers 7 functions.
 - **#1961 / PR #1974**: fixed the duplicate emoji; the invariant stayed test-only.
+- **#1539 (CLOSED)**: crash-signature library + auto-resume policy — the precedent
+  `reflection_register.py` cites for "reflection built, registration never landed"; its
+  single-reflection registration shape is what T1.3 must generalize to add a second
+  reflection.
 
 ## Research
 
@@ -109,8 +113,11 @@ reason comments. Verified against the installed ruff during build (no web depend
 | PR #1976 (#1959) | Logged one bare `except: pass` | Guard test enumerates 7 functions by hand; the other ~86 sites ship uncovered |
 
 **Root cause pattern:** fixes at the incident site instead of the contract level — each
-signal/artifact/fallback got a local patch while the shared convention (one evidence home,
-one freshness contract, one degradation shape) was never created.
+signal/artifact/fallback got a local patch while the shared conventions (one evidence-leaf
+home, one staleness function) were never created. Degradation stays two intentional
+representations (the baseline envelope `degraded` bool and `find_affected`'s `meta.degraded`)
+— a single shared type across a JSON artifact and an in-memory return value would be
+over-engineering; the win is that each *makes degradation loud*, not that they share a class.
 
 ## Architectural Impact
 
@@ -137,9 +144,13 @@ one freshness contract, one degradation shape) was never created.
 
 ## Prerequisites
 
-| Requirement | Check Command | Purpose |
-|-------------|---------------|---------|
-| #1979 PR merged (before task 2 only) | `gh issue view 1979 --json state -q .state \| grep -qi closed` | T1.2 must not touch the delivery guard while #1979's build owns it; all other tasks are unblocked |
+No hard blockers — every task can proceed now. The one sequencing constraint (#1979 owns
+the delivery guard) is encoded as Task 2's Gate, which is the **single source of truth**:
+Task 2 does NOT touch the delivery-guard code regardless of #1979's merge state, so there is
+no "wait for #1979 to merge" gate that could block Task 2 indefinitely. If a merge check is
+ever needed, use merged-PR evidence, not issue-closed:
+`gh issue view 1979 --json closedByPullRequestsReferences -q '.closedByPullRequestsReferences[].state' | grep -qi MERGED`
+(issue-closed does not imply the delivery-guard fix merged).
 
 ## Solution
 
@@ -148,21 +159,30 @@ one freshness contract, one degradation shape) was never created.
 - **`ExitReason` StrEnum (T1.1)**: every member declares `is_clean` / `wrapup_eligible` /
   `is_anomaly`; the frozensets become derivations; role-driver failures become
   `TurnFailure(reason, detail)`. Telemetry string values unchanged.
-- **`SessionEvidence` (T1.2)**: the shared helper is **per-caller parameterized**, NOT one
-  boolean shared across all four callers. Only the *leaf presence/evidence signal* moves to
-  `session_runner/liveness.py` (`has_started(entry)` — the sticky-evidence triple, presence
-  only, no clock). Each caller keeps its own grace/freshness policy on top of that leaf
-  signal: `session_health._has_progress` retains its ~250 lines of grace-window logic
-  (sub-check A/B, #1356/#1817), `session_stall_classifier` keeps its 300s freshness window,
-  `crash_signature` keeps its presence-only read. They converge on the *same evidence
-  source*, not the same verdict. **`liveness.py` stays presence-only** (dependency-light,
-  stdlib-only — the reason `crash_signature.py` can call it where it cannot import
-  `session_health`); the freshness half is homed where a clock seam already exists (each
-  caller supplies its own `now`/window), so no clock dependency is pulled into `liveness.py`.
-  Before deleting `_has_progress`'s body, diff its grace branches against
-  `session_stall_classifier`'s fork; they are NOT interchangeable if `_has_progress` returns
-  True under grace where `_has_demonstrable_progress` returns False — a parity test pins that
-  an in-grace-window session still reads live post-refactor.
+- **`SessionEvidence` (T1.2) — field-set-precise, per-caller parameterized**: the callers
+  do NOT share one leaf; they read **different presence field-sets** and must keep doing so.
+  Verified in code: `session_health` reads `turn_count`/`log_path`/`claude_session_uuid`
+  plus the `*_at` triple via the *already-shared* `derive_sdk_ever_output`
+  (`liveness.py:20`, imported at `session_health.py:31`, called at :992/:1153/:1336/:2207 —
+  its delegation is already done); `session_stall_classifier._has_demonstrable_progress`
+  (:208-214) and `crash_signature._has_demonstrable_progress` (:174) each read only
+  `{turn_count, last_tool_use_at}`. The consolidation is **narrow**: reuse the existing
+  `derive_sdk_ever_output` as session_health's leaf (no rename, no churn), and add ONE small
+  composable helper `has_demonstrable_activity(entry, *, freshness_window=None)` in
+  `liveness.py` reading only `{turn_count, last_tool_use_at}` — the exact subset both forks
+  already use — with an optional freshness window supplied by the caller
+  (`stall_classifier` passes `IDLE_SUSPECT_SECS`, `crash_signature` passes `None` for
+  presence-only). The two forks delegate to it; `session_health` is untouched beyond the leaf
+  it already calls. **B1 guard: crash/stall must NOT gain `log_path`/`claude_session_uuid`/
+  `last_stdout_at`/`last_turn_at` as presence signals** — an init-only/log-only session
+  (`log_path` set, `turn_count==0`, `last_tool_use_at` None) must still read no-progress for
+  the stall/crash paths. **`liveness.py` stays presence-only** (dependency-light, stdlib —
+  the reason `crash_signature.py` can import it where it cannot import `session_health`); the
+  freshness window is arithmetic on a caller-supplied value, no module-level clock.
+  **Tests:** (a) an init-only session with only `last_stdout_at`/`log_path` set asserts
+  `crash_signature._has_demonstrable_progress(...) is False` and
+  `stall_classifier._has_demonstrable_progress(...) is False`; (b) an in-grace-window session
+  still reads live through `session_health` post-refactor.
 - **Attempt-scoping (T1.2) — durable field DEFERRED**: this sweep lands the pure
   predicate-consolidation only. The durable `attempt_generation` schema field is **deferred**
   to whichever of #1979 (OPEN/unmerged) or #1927 (schema diet, may own the name) settles the
@@ -181,10 +201,12 @@ one freshness contract, one degradation shape) was never created.
   sentinel: if the operator has authorized the merge, the strict refusal yields to it rather
   than self-locking every merge.
 - **Degraded-result metadata (T1.4)**: `find_affected` → `(results, meta)` with mandatory
-  `degraded`, `reason`, `rerank_failures`, `candidates`; a thin list-subclass shim keeps
-  old iteration code working during call-site migration.
+  `degraded`, `reason`, `rerank_failures`, `candidates`. All `find_affected` callers are
+  in-repo and enumerable, so they migrate to the tuple return **in the same PR** — no
+  list-subclass shim (it would be dead weight at merge; no out-of-repo consumer exists).
 - **Silent-failure lint (T1.5)**: ruff `S110`/`S112` enabled for `agent/ bridge/ tools/
-  worker/ monitoring/`; ~87 sites triaged to fix (add logging) or allowlist (per-line
+  worker/ monitoring/` plus the four `scripts/` files this sweep touches; ~87 sites triaged
+  to fix (add logging) or allowlist (per-line
   `noqa: S110` + mandatory reason comment; memory ops are silent by documented design).
   Delete `TestNoSilentPassRemaining`'s string scan; keep behavioral caplog tests.
 - **Import-error fast-expiry + API contract test (T1.6)**: gate never allowlists
@@ -208,21 +230,31 @@ one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
 - T1.1: `class ExitReason(StrEnum)` with a `classify` dataclass per member (or member
   attributes via `__new__`); `CLEAN_EXIT_REASONS = frozenset(r for r in ExitReason if
   r.is_clean)` preserves every import site unchanged. A completeness test iterates members.
-- T1.2: `has_started(entry)` is a pure presence function over the entry dict/model — no
-  imports beyond stdlib in `liveness.py` (it is already the dependency-light home, which is
-  why `crash_signature.py` can call it where it couldn't import `session_health`). Each
-  caller layers its own freshness on top: `session_health._has_progress` keeps its grace
-  branches, `session_stall_classifier` its 300s window, both passing their own `now`/window
-  — the clock stays out of `liveness.py`. No durable `attempt_generation` field this sweep
-  (deferred to #1979/#1927); no migration. A parity test constructs an in-grace-window
-  session and asserts `session_health` still reads it live after `_has_progress` delegates
-  its leaf read to `has_started`.
+- T1.2: reuse the existing `derive_sdk_ever_output` (`liveness.py:20`) as session_health's
+  leaf (already wired). Add one composable `has_demonstrable_activity(entry, *,
+  freshness_window=None)` in `liveness.py` reading only `{turn_count, last_tool_use_at}` —
+  pure over the entry dict/model, stdlib only, the clock is arithmetic on the caller-supplied
+  `freshness_window`. Point `session_stall_classifier._has_demonstrable_progress` (passing
+  `IDLE_SUSPECT_SECS`) and `crash_signature._has_demonstrable_progress` (passing `None`) at
+  it; their field-set is unchanged, only the duplication is removed. Do NOT widen crash/stall
+  to `log_path`/`claude_session_uuid`/`*_stdout_at` presence (B1). No durable
+  `attempt_generation` field this sweep (deferred to #1979/#1927); no migration. Tests pin
+  both the init-only-reads-False case for the two forks and the in-grace-window session still
+  reads live through `session_health`.
 - T1.3: envelope helpers in `scripts/_baseline_common.py` (shared by `baseline_gate.py`,
   `refresh_test_baseline.py`, `reflections/housekeeping/test_baseline_refresh_check.py`);
-  gate reads envelope fields defensively (absent ⇒ legacy, warn). The `--strict-freshness`
-  flag is wired into the `/do-merge` addendum (`docs/sdlc/do-merge.md`) **only after** Task 4
-  commits a `runs >= 2` baseline; strict refusal checks for `data/merge_authorized_{N}`
-  before refusing (break-glass parity with the existing merge gate).
+  gate reads envelope fields defensively (absent ⇒ legacy, warn). **Enforcement lives in the
+  gate exit code, not the addendum** (C1): `baseline_gate.parse_args` (:459) gains
+  `--strict-freshness` and `--pr-number`; under strict, the gate computes
+  `envelope.degraded or envelope.runs < 2 or staleness(envelope)` and, if true,
+  short-circuits to a **refuse** exit code (never a false pre-existing/regression verdict),
+  printing the exact `refresh_test_baseline.py` regen command. The break-glass seam:
+  strict refusal is skipped when `data/merge_authorized_{pr_number}` exists (parity with the
+  existing merge gate sentinel). `data/main_test_baseline.json` is gitignored/per-machine
+  (`.gitignore:181`) — so the artifact cannot travel with the PR; the runtime gate check +
+  break-glass ARE the guard (a committed baseline in the PR is not relied upon). `/do-merge`
+  passes `--strict-freshness --pr-number {N}`; the addendum documents it but enforcement is
+  the gate exit code.
 - T1.5: `[tool.ruff.lint]` gains `S110`,`S112` scoped via per-directory `extend-select`
   (or repo-wide with the allowlist pass). Triage rule: swallowed exception on a
   state-mutating or delivery path ⇒ add `logger.warning`; genuinely-by-design silence ⇒
@@ -266,7 +298,11 @@ one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
       delegate to `SessionEvidence`; the #1962 fresh-heartbeat regression test must pass
       unmodified
 - [ ] `tests/unit/test_crash_signature.py`, `tests/unit/test_crash_recovery_gates.py` —
-      UPDATE: extractor consults the shared helper; #1917 regression pins unchanged
+      UPDATE: extractor consults `has_demonstrable_activity`; #1917 regression pins
+      unchanged; ADD init-only-reads-False pin (B1)
+- [ ] `tests/unit/session_runner/test_liveness.py` — UPDATE: add
+      `has_demonstrable_activity` unit coverage (field-set + freshness-window param);
+      `derive_sdk_ever_output` call sites in `session_health` unchanged
 - [ ] `tests/integration/test_session_heartbeat_progress.py` — UPDATE: fix the 3
       pre-existing failures (#1983) against the unified predicates
 - [ ] `tests/integration/test_reply_delivery.py::TestReactionEmojiSelection` — UPDATE:
@@ -291,6 +327,9 @@ one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
 **Mitigation:** triage is mechanical (log-or-noqa); if the diff exceeds ~2/3 of review
 budget, land lint enablement + allowlist in this PR and convert the worst 20 sites,
 tracking the remainder in the allowlist itself (each `noqa` reason is the record).
+Independently, the low-risk T1.4 degraded-meta (subtask 5a) and T1.8 import asserts
+(subtask 5b) have their own commit/PR checkpoint and ship first if the T1.5 lint triage
+stalls — they never wait on the lint negotiation.
 
 ### Risk 2: Predicate consolidation flattens divergent grace semantics into one verdict
 **Impact:** dropping `session_health._has_progress`'s grace window while delegating marks a
@@ -303,11 +342,14 @@ the grace branches before deleting `_has_progress`'s body.
 
 ### Risk 3: Strict freshness blocks merges right after enablement (stale baseline on day one)
 **Impact:** the first `/do-merge` after this lands refuses on a degraded artifact.
-**Mitigation:** two guards — (a) the `runs >= 2` regen (Task 4) is committed *before*
-`--strict-freshness` is wired into the addendum, and the regen fails loudly rather than
-writing a degraded artifact; (b) `--strict-freshness` honors the existing
-`data/merge_authorized_{N}` break-glass sentinel, so an operator can always authorize past a
-false refusal.
+**Mitigation:** the baseline is gitignored/per-machine, so the guard cannot be "commit a
+fresh baseline in the PR" — it is enforced at runtime in the gate exit code: (a) under
+`--strict-freshness` the gate refuses (distinct exit code) on `degraded`/`runs<2`/stale and
+prints the exact regen command, so a machine with a stale local baseline gets an actionable
+refusal, not a false verdict; (b) refusal is skipped when `data/merge_authorized_{pr}`
+exists, so an operator can always authorize past a false refusal (existing break-glass
+parity). The `runs>=2` regen (Task 4) still lands before `/do-merge` starts passing the
+strict flag, so the common path is a fresh artifact.
 
 ## Race Conditions
 
@@ -333,10 +375,22 @@ mutable state is written by the consolidation.
 
 ## Update System
 
-- `scripts/update/reflection_register.py` (+ `scripts/update/run.py` if a new step is
-  needed): register the baseline-refresh reflection on all machines — closing the
-  deployment gap is part of T1.3, not a manual vault edit.
-- `pyproject.toml` ruff config propagates with the repo; no new dependencies.
+- `scripts/update/reflection_register.py` is **single-reflection-shaped today**
+  (`REFLECTION_NAME = "crash-recovery"` at :52, `_EXPECTED_CALLABLE` at :55, `_build_entry_block`
+  interpolates the literal name, `_has_entry` at :167/:187 tests `== REFLECTION_NAME`,
+  `register_crash_recovery` at :244). Registering a SECOND reflection (baseline-refresh)
+  requires a **generalization**, scoped as a concrete T1.3 subtask: add
+  `register_reflection(project_dir, *, name, callable_path, description, cadence, priority)`
+  routed through the existing `_append_entry`/`_resolve_target`/`_this_machine_owns_valor`
+  machinery, with `_has_entry(text, name)` taking the name as an argument; keep
+  `register_crash_recovery` as a thin wrapper over it (no behavior change for the existing
+  reflection). Then call `register_reflection(..., name="test-baseline-refresh", ...)` from
+  the update path (+ `scripts/update/run.py` step if a new one is needed). This closes the
+  #1539-class "reflection built, registration never landed" deployment gap.
+- `pyproject.toml` ruff config propagates with the repo; no new dependencies. The four
+  `scripts/` files this sweep touches or creates (`_baseline_common.py`, `baseline_gate.py`,
+  `refresh_test_baseline.py`, `update/reflection_register.py`) adopt S110/S112 now (they carry
+  the exact envelope/degraded-write code this sweep hardens).
 - **No Popoto migration** — the durable `attempt_generation` field is deferred to
   #1979/#1927, so this sweep adds no schema field and needs no migration. No other
   update-system changes required.
@@ -354,7 +408,8 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - [ ] Update `docs/features/merge-gate-baseline.md` — envelope, strict freshness, flaky
       decay, reflection registration
 - [ ] Update `docs/features/session-recovery-mechanisms.md` +
-      `docs/features/agent-session-health-monitor.md` — SessionEvidence, attempt scoping
+      `docs/features/agent-session-health-monitor.md` — SessionEvidence leaf consolidation
+      (the two `_has_demonstrable_progress` forks share one activity helper)
 - [ ] Update `docs/features/headless-session-runner.md` — ExitReason enum
 - [ ] Update `docs/features/semantic-doc-impact-finder.md` +
       `docs/features/code-impact-finder.md` — degraded-result contract
@@ -364,11 +419,15 @@ through the `find_affected_docs` wrapper the agent actually calls.
 
 - [ ] Adding an `ExitReason` member without classification fails a completeness test; no
       raw exit-reason string literals outside `router.py` (grep check)
-- [ ] All four progress predicates read the shared `SessionEvidence.has_started` leaf
-      signal; each caller keeps its own grace/freshness policy; #1962 and #1917 regression
-      tests pass unmodified; #1983's 3 failures fixed
-- [ ] A parity test asserts an in-grace-window session still reads live after
-      `_has_progress` delegates its leaf read (grace semantics preserved, not flattened)
+- [ ] The two `_has_demonstrable_progress` forks (`session_stall_classifier`,
+      `crash_signature`) delegate to one `has_demonstrable_activity` reading only
+      `{turn_count, last_tool_use_at}`; `session_health` reuses `derive_sdk_ever_output`;
+      #1962 and #1917 regression tests pass unmodified; #1983's 3 failures fixed
+- [ ] B1 pin: an init-only/log-only session (`log_path`/`last_stdout_at` set, `turn_count==0`,
+      `last_tool_use_at` None) reads no-progress for BOTH forks (they do not gain
+      log_path/uuid/stdout presence)
+- [ ] A parity test asserts an in-grace-window session still reads live through
+      `session_health` post-refactor (grace semantics preserved, not flattened)
 - [ ] Durable `attempt_generation` field is NOT added this sweep (deferred to #1979/#1927);
       the fleet-wide attempt-scoping test rides that follow-up. #1979's own regression test
       stays green when its PR merges
@@ -390,7 +449,7 @@ through the `find_affected_docs` wrapper the agent actually calls.
 
 - **Builder (session-signals)**
   - Name: signals-builder
-  - Role: T1.1 enum + T1.2 SessionEvidence/attempt scoping
+  - Role: T1.1 enum + T1.2 SessionEvidence leaf/predicate consolidation
   - Agent Type: builder
   - Resume: true
 - **Builder (gates-artifacts)**
@@ -426,7 +485,7 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - Enum with per-member classification; derive frozensets; convert producer sites;
   `TurnFailure(reason, detail)`
 
-### 2. SessionEvidence + attempt scoping
+### 2. SessionEvidence leaf/predicate consolidation
 - **Task ID**: build-session-evidence
 - **Depends On**: build-exit-enum
 - **Validates**: tests/unit/test_never_started_recovery.py, test_crash_signature.py,
@@ -436,10 +495,12 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - **Parallel**: false
 - **Gate**: do NOT touch the delivery guard (owned by #1979, OPEN). No durable
   `attempt_generation` field this sweep (deferred to #1979/#1927).
-- `has_started` leaf helper in liveness.py (presence-only, stdlib); the four predicates
-  read it while keeping their own grace/freshness policy; diff `_has_progress`'s grace
-  branches before deleting its body; add the in-grace-window parity test; fix #1983's 3
-  failures against the unified leaf signal
+- Reuse `derive_sdk_ever_output` as session_health's leaf (already wired); add one
+  `has_demonstrable_activity(entry, *, freshness_window=None)` in liveness.py reading only
+  `{turn_count, last_tool_use_at}`; point both `_has_demonstrable_progress` forks at it
+  (stall passes `IDLE_SUSPECT_SECS`, crash passes `None`); do NOT widen crash/stall presence
+  fields (B1); add the init-only-reads-False test for both forks + the in-grace-window parity
+  test; fix #1983's 3 failures
 
 ### 3. ArtifactEnvelope + strict freshness + reflection registration
 - **Task ID**: build-envelope
@@ -449,8 +510,12 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - **Assigned To**: gates-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Envelope helpers; shared staleness(); gate strict mode; degraded stamp + provenance fix;
-  flaky decay; register reflection via update path
+- Envelope helpers; shared staleness(); gate strict mode (`--strict-freshness`+`--pr-number`
+  in `parse_args`, refusal in the exit code, `data/merge_authorized_{pr}` break-glass);
+  degraded stamp + provenance fix; flaky decay. **Subtask 3a (blocker fix):** generalize
+  `reflection_register.py` to `register_reflection(project_dir, *, name, callable_path,
+  description, cadence, priority)` with `register_crash_recovery` as a thin wrapper; then
+  register `test-baseline-refresh` via the update path.
 
 ### 4. Import-error expiry + API contract test + baseline regen
 - **Task ID**: build-expiry-contract
@@ -470,8 +535,12 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - **Assigned To**: loudness-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- `(results, meta)` + call-site migration; ruff S110/S112 + triage pass + allowlist;
-  delete string-scan guard; `_assert_distinct` at import
+- **Subtask 5a (T1.4, lands first if T1.5 stalls):** `(results, meta)` + full in-PR
+  call-site migration (no shim). **Subtask 5b (T1.8):** `_assert_distinct` at import. 5a+5b
+  are low-risk and can be committed/validated independent of 5c. **Subtask 5c (T1.5):** ruff
+  S110/S112 (scoped to `agent/ bridge/ tools/ worker/ monitoring/` + the four touched
+  `scripts/` files) + triage pass + allowlist; delete the string-scan guard. If 5c's triage
+  balloons past review budget (Risk 1), 5a+5b ship in their own commit/PR checkpoint first.
 
 ### 6. Validation
 - **Task ID**: validate-sweep
@@ -505,7 +574,7 @@ through the `find_affected_docs` wrapper the agent actually calls.
 | Lint clean (incl. S110/S112) | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
 | No raw exit-reason literals outside router | `grep -rn "exit_reason=\"" agent/session_runner/ agent/session_executor.py \| grep -v "ExitReason\." \| wc -l` | match count == 0 |
-| Predicate forks gone | `grep -rc "_has_demonstrable_progress" agent/session_stall_classifier.py agent/crash_signature.py \| grep -v ":0"` | output does not contain def |
+| Leaf read unified | `grep -c "has_demonstrable_activity" agent/session_stall_classifier.py agent/crash_signature.py` | each file >= 1 (both forks delegate; predicates + their own freshness windows stay) |
 | Baseline stamped | `python3 -c "import json; d=json.load(open('data/main_test_baseline.json')); assert d['runs']>=2 and 'degraded' in d"` | exit code 0 |
 | Strict mode refuses stale | `pytest tests/unit/test_do_merge_baseline.py -k strict -q` | exit code 0 |
 | String-scan guard deleted | `grep -c "TestNoSilentPassRemaining" tests/integration/test_silent_failures.py` | match count == 0 |
@@ -522,20 +591,20 @@ through the `find_affected_docs` wrapper the agent actually calls.
 | CONCERN | Risk & Robustness | Strict-freshness + degraded regen can self-lock all merges with no break-glass | T1.3 sequences `--strict-freshness` strictly after a committed `runs>=2` artifact; regen fails loudly (no degraded write); strict refusal honors `data/merge_authorized_{N}` break-glass | Risk 3 rewritten with both guards |
 | CONCERN | History & Consistency | Problem (3) framing blamed the already-loud refresh script; the silent surface is the persisted artifact | Problem (3) + T1.3 reworded to target the persisted artifact (no `degraded`/`runs`/provenance the gate reads later), not the refresh script's exit code | Success criterion asserts the envelope fields the gate consumes |
 
+### Cycle 2 (2026-07-10, war room re-run) — Verdict: NEEDS REVISION (2 blockers) — all resolved
+
+| Severity | Critic | Finding | Addressed By |
+|----------|--------|---------|--------------|
+| BLOCKER | Risk & Robustness | `has_started(entry)` field-set is ambiguous: the three predicates use different field sets, so a shared leaf silently loses/gains a signal for one caller; #1962/#1917 tests won't catch the shift | T1.2 rewritten field-set-precise: reuse `derive_sdk_ever_output` for session_health (unchanged); new `has_demonstrable_activity(entry, *, freshness_window=None)` reads ONLY `{turn_count, last_tool_use_at}` for the two forks (crash passes `None`/presence-only, stall passes `IDLE_SUSPECT_SECS`). B1 guard forbids crash/stall gaining log_path/uuid/stdout presence; init-only-reads-False test for both forks + stale-`last_tool_use_at` tradeoff test (crash sees progress, stall does not) |
+| BLOCKER | History & Consistency | `reflection_register.py` is single-reflection-shaped end to end (`REFLECTION_NAME="crash-recovery"` hardcoded); no task scopes the generalization needed to register a second reflection; Prior Art omits #1539 | Subtask 3a scopes `register_reflection(project_dir, *, name, callable_path, description, cadence, priority)` through existing `_append_entry`/`_resolve_target`/`_this_machine_owns_valor`, `_has_entry(text, name)` takes the name, `register_crash_recovery` becomes a thin wrapper; then register `test-baseline-refresh`. #1539 added to Prior Art |
+| CONCERN | Risk / History | Prerequisites table (`grep -qi closed`, would block Task 2 indefinitely) contradicts Task 2's proceed-while-avoiding Gate; issue-closed ≠ fix-merged | Prerequisites row deleted; Task 2's Gate is the single source of truth (avoid the guard regardless of #1979 state); documented the merged-PR evidence check (`closedByPullRequestsReferences[].state == MERGED`) for any future use |
+| CONCERN | Risk & Robustness | Task 5 bundles T1.4 + T1.5 (may balloon) + T1.8 with no split point; Risk 1 covers T1.5 only | Task 5 split into subtasks 5a (T1.4, no shim), 5b (T1.8), 5c (T1.5 triage); 5a+5b have their own commit/PR checkpoint and ship first if 5c stalls; Risk 1 updated |
+| CONCERN | Scope & Value | OQ1 excludes `scripts/` but this sweep touches four `scripts/` files → new envelope/degraded code ships uncovered by the exact lint | The four touched `scripts/` files adopt S110/S112 now; OQ1 wording narrowed to "scripts/ files NOT touched adopt when next touched"; T1.5 scope + Update System updated |
+| CONCERN | Scope & Value | T1.4 list-subclass shim contradicts Agent Integration's same-PR caller migration | Shim dropped; `find_affected` returns the tuple outright, all in-repo callers migrate in the same PR |
+| NIT | Scope / History | Residual "attempt scoping" labels after the deferral (Task 2 title, role line, Documentation bullet) | Reworded to "SessionEvidence leaf/predicate consolidation" at all three sites |
+| NIT | Structural | Verification "Predicate forks gone" row is incoherent (`grep -rc ... | grep -v :0` can never contain "def") | Row renamed "Leaf read unified"; asserts `has_demonstrable_activity` delegation present in both forks (>=1 each), not removal |
+
 **Open Questions resolved at revision:**
-1. **T1.5 scope** — scoped to `agent/ bridge/ tools/ worker/ monitoring/` (not repo-wide); keeps the initial triage bounded. `scripts/` adopts S110/S112 when next touched.
+1. **T1.5 scope** — scoped to `agent/ bridge/ tools/ worker/ monitoring/` (not repo-wide) PLUS the four `scripts/` files this sweep touches/creates (`_baseline_common.py`, `baseline_gate.py`, `refresh_test_baseline.py`, `update/reflection_register.py`); keeps the initial triage bounded while covering the new envelope/degraded-write code. `scripts/` files NOT touched by this sweep adopt S110/S112 when next touched.
 2. **`attempt_generation` naming** — DEFERRED (see critique table); no durable field this sweep.
 3. **Strict-freshness default** — warn-by-default everywhere, `--strict-freshness` only at `/do-merge` (per the program plan), sequenced after the first `runs>=2` refresh.
-
-### Cycle 2 (2026-07-10, war room re-run on the revised plan) — Verdict: NEEDS REVISION (2 blockers)
-
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
-| BLOCKER | Risk & Robustness | `has_started(entry)` field-set is ambiguous: the three predicates' current sticky-evidence checks use different field sets — `session_health._never_started_past_grace` checks `turn_count`/`log_path`/`claude_session_uuid` (no `last_tool_use_at`), `session_stall_classifier._has_demonstrable_progress` checks `turn_count` + freshness-gated `last_tool_use_at` (300s), `crash_signature._has_demonstrable_progress` checks `turn_count` + presence-only `last_tool_use_at` (docstring: deliberate divergence, critique C2). Whatever set the shared leaf checks, one caller silently loses a signal or gains one it was built without; #1962/#1917 regression tests only re-run existing assertions and won't catch the shift | | Define `has_started()` as the union of fields consumed today (`turn_count`, `log_path`, `claude_session_uuid`, `last_tool_use_at` presence-only) and document it. Each caller's freshness policy must layer on the `last_tool_use_at` leg only — not the whole triple — or the stall classifier's 300s window becomes unreachable once `has_started()` answers True from `turn_count`/`log_path`/`uuid` alone. Add a test pinning crash_signature's no-freshness-gate tradeoff: stale `last_tool_use_at` ⇒ crash_signature sees progress, stall classifier (own window) does not |
-| BLOCKER | History & Consistency | Update System/Task 3/Success Criteria direct registration of the baseline-refresh reflection via `scripts/update/reflection_register.py`, but that module is single-reflection-shaped end to end (`REFLECTION_NAME = "crash-recovery"`, `_EXPECTED_CALLABLE` hardcoded, `_build_entry_block` interpolates the literal name, `_has_entry` tests `e.get("name") == REFLECTION_NAME`) — no task scopes either the fork or the generic refactor needed to register a second reflection. Prior Art omits #1539, the file's own docstring-cited precedent for "reflection built, registration never landed" | | Scope a concrete generalization as a T1.3 subtask: `register_reflection(project_dir, *, name, callable_path, description, cadence, priority)` routed through the existing `_append_entry`/`_resolve_target`/`_this_machine_owns_valor` machinery, updating `_has_entry` to take the name as an argument; keep `register_crash_recovery` as a thin wrapper. Add #1539 to Prior Art |
-| CONCERN | Risk & Robustness + History & Consistency | Prerequisites table and Task 2's Gate now contradict each other: the table requires "#1979 PR merged (before task 2 only)" via `gh issue view 1979 ... \| grep -qi closed` (which would block Task 2 indefinitely since #1979 is OPEN per this plan's own Freshness Check), while Task 2's rewritten Gate says proceed-while-avoiding ("do NOT touch the delivery guard"). Neither is encoded in Task 2's `Depends On`; also `grep -qi closed` matches issue-closed, not fix-merged | | Pick one source of truth: delete the Prerequisites row (the Gate's narrower "avoid the guard" rule supersedes it) or rewrite its Purpose to match. If a merge check is kept anywhere, use merged-PR evidence (`gh issue view 1979 --json closedByPullRequestsReferences -q '.closedByPullRequestsReferences[].state' \| grep -qi MERGED`), and make signals-builder run it as Task 2's literal first command |
-| CONCERN | Risk & Robustness | Task 5 still bundles T1.4 (degraded-meta contract) + T1.5 (~87-site lint triage that Risk 1 says may balloon) + T1.8 (import asserts) with no split point — Risk 1's partial-landing mitigation covers T1.5 only and gives the low-risk T1.4/T1.8 work no independent landing path if the lint review stalls | | Add a sub-task boundary or second PR checkpoint inside Task 5 so loudness-builder can commit/PR T1.4 + T1.8 as soon as validated, independent of the T1.5 triage negotiation; or state in Risk 1 that T1.4/T1.8 ship first if T1.5 stalls |
-| CONCERN | Scope & Value | Resolved Open Question 1 excludes `scripts/` from S110/S112 with rationale "scripts/ adopts S110/S112 when next touched" — but this sweep itself touches `scripts/_baseline_common.py` (new), `scripts/baseline_gate.py`, `scripts/refresh_test_baseline.py`, and `scripts/update/reflection_register.py`; by the plan's own rule those files adopt now, else new envelope/degraded-write code ships without coverage for the exact defect class this sweep targets | | Add the four touched `scripts/` paths to the extend-select scope, or narrow the resolution wording to "scripts/ files NOT touched by this sweep adopt when next touched" |
-| CONCERN | Scope & Value | T1.4's "thin list-subclass shim... during call-site migration" contradicts Agent Integration's "migrates its in-repo callers in the same PR" — all call sites are enumerable from `find_affected`'s callers; if all migrate in-PR the shim is dead weight at merge, and no out-of-repo consumer is named | | Drop the shim and change the return type outright (matching the same-PR claim); if kept as a hedge, cap its lifetime explicitly ("delete once grep confirms zero remaining bare-list callers") so it can't become permanent |
-| NIT | Scope & Value + History & Consistency | Three spots still carry the pre-deferral "attempt scoping" label after the revision deferred the durable field: Task 2's title, signals-builder's role line, and the Documentation bullet for session-recovery docs — the docs task risks describing a feature not shipping this sweep | | Rename to "SessionEvidence (leaf-signal consolidation)" and trim the Documentation bullet |
-| NIT | Structural checks | Verification row "Predicate forks gone" is incoherent: `grep -rc "_has_demonstrable_progress" ... \| grep -v ":0"` emits `file:count` lines that can never contain "def", so the expected condition ("output does not contain def") is vacuously true and verifies nothing | | Change to `grep -c "def _has_demonstrable_progress" <file>` per file with an explicit expected count (0, or 1 if the name remains as a delegating wrapper) |
