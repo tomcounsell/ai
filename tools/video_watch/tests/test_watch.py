@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tools import video_watch as vw
+from tools.video_watch import pipeline as vw
+from tools.video_watch import reaper
 
 # --- pure helpers ------------------------------------------------------------
 
@@ -316,7 +317,7 @@ def test_reap_stale_frame_dirs_removes_old_dirs_keeps_fresh(tmp_path, monkeypatc
     import os
     import time
 
-    monkeypatch.setattr(vw.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(reaper.tempfile, "gettempdir", lambda: str(tmp_path))
 
     stale = tmp_path / "video_watch_frames_stale"
     stale.mkdir()
@@ -326,7 +327,7 @@ def test_reap_stale_frame_dirs_removes_old_dirs_keeps_fresh(tmp_path, monkeypatc
     old_time = time.time() - 1000
     os.utime(stale, (old_time, old_time))
 
-    removed = vw.reap_stale_frame_dirs(max_age_seconds=500)
+    removed = reaper.reap_stale_frame_dirs(max_age_seconds=500)
 
     assert removed == 1
     assert not stale.exists()

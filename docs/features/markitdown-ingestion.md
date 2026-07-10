@@ -140,7 +140,7 @@ valor-ingest [-h] [--vault-subdir PATH] [--force] [--output PATH] [--verbose]
 
 URL inputs:
 
-- YouTube URLs (`youtube.com`, `youtu.be`) are handled by `youtube-transcript-api` — markitdown is bypassed.
+- YouTube URLs (`youtube.com`, `youtu.be`) are handled by `youtube-transcript-api` — markitdown is bypassed. Transcript ingestion is audio-only; when a video's meaning is on-screen (slides, demos, charts), the frames-capable watch tier `valor-video-watch` provides visual grounding instead — see [video-watch-visual-grounding.md](video-watch-visual-grounding.md).
 - Generic URLs are downloaded to `--vault-subdir` (or CWD with a reminder to set `--vault-subdir`) and then passed through the converter.
 
 ## Image Size Guard

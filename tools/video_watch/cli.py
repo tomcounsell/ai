@@ -17,8 +17,9 @@ import asyncio
 import json
 import sys
 
-from tools.video_watch import reap_stale_frame_dirs, watch_video
 from tools.video_watch.constants import WATCH_CLI_NAME
+from tools.video_watch.pipeline import watch_video
+from tools.video_watch.reaper import reap_stale_frame_dirs
 
 
 def _format_human(result: dict) -> str:

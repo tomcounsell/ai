@@ -10,6 +10,8 @@ When users share YouTube links, Valor automatically fetches the transcript and i
 
 The primary path uses the YouTube caption API (no API key required). If captions are unavailable, it falls back to downloading audio and transcribing with OpenAI Whisper. When both paths fail, the agent receives an actionable failure message instead of the original unaltered text.
 
+Transcription is the cheap, audio-only **push tier**. When the answer is on-screen rather than in the audio (slide decks, demos, charts, silent clips), the agent-invoked **pull tier** `valor-video-watch` extracts deduped scene-change frames for real visual grounding — see [video-watch-visual-grounding.md](video-watch-visual-grounding.md). Thin transcripts on this push path automatically append a signpost pointing the agent at that CLI.
+
 ## Features
 
 ### YouTube URL Detection

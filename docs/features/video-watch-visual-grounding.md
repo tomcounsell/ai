@@ -18,7 +18,7 @@ The push path only gains a cheap per-URL text signpost pointing at the pull path
 
 ## Source Coverage
 
-`detect_source(url)` in `tools/video_watch/__init__.py` classifies a URL as one of:
+`detect_source(url)` in `tools/video_watch/pipeline.py` classifies a URL as one of:
 
 - `youtube` — `youtube.com`, `youtu.be`, `youtube-nocookie.com`
 - `x` — `twitter.com`, `x.com`, `mobile.twitter.com`, `mobile.x.com`
@@ -120,7 +120,10 @@ Human-readable output lists each frame's path with a `t=MM:SS` marker, followed 
 
 ## Implementation Files
 
-- `tools/video_watch/__init__.py` — `watch_video()` pipeline, `detect_source()`, provisional constants, `VideoWatchError`
+- `tools/video_watch/__init__.py` — **deliberately light** package init (stdlib + `constants` only): re-exports the tunables and lazily resolves the public callables via PEP 562 `__getattr__`, so `bridge/enrichment.py`'s import of `tools.video_watch.constants` never loads the heavy pipeline. Enforced by `tools/video_watch/tests/test_import_discipline.py`.
+- `tools/video_watch/constants.py` — dependency-free (os-only) tunables + `WATCH_CLI_NAME`; the single module `bridge/enrichment.py` imports from
+- `tools/video_watch/pipeline.py` — `watch_video()` pipeline, `detect_source()`, `VideoWatchError` (yt-dlp/ffmpeg orchestration, Pillow dedup, Whisper path)
+- `tools/video_watch/reaper.py` — stdlib-only `reap_stale_frame_dirs()`, importable by the CLI and `agent/session_health.py` without the pipeline
 - `tools/video_watch/grok.py` — `fetch_x_context()`, xAI client (OpenAI-compatible endpoint at `https://api.x.ai/v1`)
 - `tools/video_watch/cli.py` — `valor-video-watch` CLI entry point (`main`), human/JSON output formatting
 - `bridge/enrichment.py` — thin-transcript signpost, inside the YouTube URL transcription step

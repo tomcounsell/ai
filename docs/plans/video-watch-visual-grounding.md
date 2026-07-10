@@ -430,6 +430,11 @@ forced mid-pipeline `CalledProcessError`; (c) the reaper removes over-age dirs.
 - [ ] **Visual-grounding outcome (E2E):** a slide-deck or silent-demo fixture
   where the answer is on-screen (not in the transcript) → `valor-video-watch`
   emits frames that let the agent answer correctly, where transcript-only fails.
+  Committed evidence: `tools/video_watch/tests/test_e2e_visual_grounding.py`
+  runs the real ffprobe/ffmpeg/Pillow pipeline against a synthesized silent
+  slide deck (only the two network edges patched) and asserts transcript-only
+  yields nothing while the emitted frames are multiple, persistent, and
+  pairwise visually distinct.
 - [ ] Emitted frame paths still exist after the CLI process returns (two-dir
   temp discipline verified).
 - [ ] Tests pass (`/do-test`).
@@ -549,7 +554,7 @@ into the single session worktree without commit interleaving.
 | No decorative settings field | `grep -c "grok_api_key" config/settings.py` | exit code 1 |
 | CLI name is a shared constant | `grep -c 'WATCH_CLI_NAME' tools/video_watch/constants.py` | output > 0 |
 | Enrichment imports constants only | `grep -c 'from tools.video_watch.constants import' bridge/enrichment.py` | output > 0 |
-| Bridge never imports heavy module | `grep -En 'from tools.video_watch import |import tools.video_watch$' bridge/enrichment.py` | exit code 1 |
+| Bridge never imports heavy module (import-chain assertion — the grep alone passes vacuously if the package `__init__` is heavy) | `pytest tools/video_watch/tests/test_import_discipline.py -q` | exit code 0 |
 | Signpost references the CLI | `grep -rc "valor-video-watch" bridge/enrichment.py` | output > 0 |
 | Subprocess timeout wired | `grep -c 'VIDEO_WATCH_SUBPROCESS_TIMEOUT' tools/video_watch/__init__.py` | output > 0 |
 | No key hardcoded | `grep -rn "xai-" tools/ config/ bridge/` | match count == 0 |
