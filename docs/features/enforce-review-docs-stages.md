@@ -78,7 +78,11 @@ existence:
    verdict freshness: a recorded verdict must exist, contain `APPROVED`
    (case-insensitive), and be fresh against the PR's latest commit -- checked
    via the `REVIEW_CONTEXT head_sha=` trailer when present, else by comparing
-   the verdict's recorded timestamp to the latest commit's committer date. A
+   the verdict's recorded timestamp to the latest commit's committer date.
+   The trailer match tolerates `normalize_verdict` storage normalization
+   (`sdlc-tool verdict record` uppercases and maps underscores to spaces, so
+   a stored trailer reads `REVIEW CONTEXT HEAD SHA=<HEX>`); SHA comparison is
+   case-insensitive. A
    bare `"APPROVED" in verdict_text` check with no freshness comparison was
    the exact gap a stale approval could walk through (#2003 critique
    BLOCKER 2) -- fixed by requiring the head-SHA/date comparison.
