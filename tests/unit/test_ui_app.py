@@ -400,3 +400,47 @@ class TestLocalhostBinding:
             content = f.read()
         assert "127.0.0.1" in content
         assert "0.0.0.0" not in content
+
+
+class TestClaudeAuthHealthUnavailable:
+    """VALOR-BX (#1834): when `claude auth status` fails, `_get_claude_auth_health`
+    returns an error dict WITHOUT a `subscription_type` key. `dashboard_json` and
+    `health` must read it with `.get()` and surface `null`, never raise a KeyError
+    (which would 500 the endpoint and itself be captured to Sentry)."""
+
+    def _failing_auth_run(self):
+        """A subprocess.run stub whose `claude auth status` returns non-zero.
+
+        The error branch of `_get_claude_auth_health` returns a dict lacking the
+        `subscription_type` key. Other `subprocess.run` callers in the request
+        path (e.g. scutil for machine name) see an empty, non-crashing result.
+        """
+        from unittest.mock import MagicMock
+
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = ""
+        return result
+
+    def test_dashboard_json_no_keyerror_when_auth_unavailable(self, client):
+        from unittest.mock import patch
+
+        with patch("subprocess.run", return_value=self._failing_auth_run()):
+            response = client.get("/dashboard.json")
+
+        assert response.status_code == 200
+        health = response.json()["health"]
+        assert health["claude_auth"] == "error"
+        assert health["claude_auth_subscription_type"] is None
+
+    def test_health_no_keyerror_when_auth_unavailable(self, client):
+        from unittest.mock import patch
+
+        with patch("subprocess.run", return_value=self._failing_auth_run()):
+            response = client.get("/health")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["claude_auth"] == "error"
+        assert data["claude_auth_subscription_type"] is None
