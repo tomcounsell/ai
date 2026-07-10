@@ -4578,6 +4578,28 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
             sweep_err,
         )
 
+    # === Video-watch stale frames-dir sweep (#1920) ===
+    # valor-video-watch persists frame JPEGs in mkdtemp `video_watch_frames_*`
+    # dirs that must OUTLIVE the CLI so the agent can Read them in a later tool
+    # call; nothing removes them automatically. The reaper also runs at CLI
+    # start, but this hourly registration bounds the leak on machines where the
+    # CLI is invoked rarely. Wrapped in try/except — sweep failure (including
+    # ImportError on minimal installs) must never abort the cleanup function.
+    try:
+        from tools.video_watch import reap_stale_frame_dirs
+
+        frames_reaped = reap_stale_frame_dirs()
+        if frames_reaped:
+            logger.info(
+                "[agent-session-cleanup] Reaped %d stale video_watch_frames_* temp dirs",
+                frames_reaped,
+            )
+    except Exception as frames_err:
+        logger.warning(
+            "[agent-session-cleanup] video-watch frames-dir sweep failed (non-fatal): %s",
+            frames_err,
+        )
+
     return {"corrupted": cleaned, "orphans": orphans_reaped}
 
 

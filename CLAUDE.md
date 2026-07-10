@@ -227,6 +227,8 @@ valor-email threads
 | `valor-youtube-transcribe <url>` | Transcribe a YouTube video (captions-first, Whisper fallback). Prefer this over `WebFetch` for YouTube URLs — YouTube serves anti-bot HTML to non-browser fetchers. |
 | `valor-youtube-transcribe --json <url>` | Same as above, emit raw `process_youtube_url` dict as JSON |
 | `valor-youtube-transcribe --summary-only <url>` | Emit only the GPT-4o-mini summary (or full transcript with a note if none) |
+| `valor-video-watch <url> ["question"]` | Visual grounding for a YouTube or X/Twitter video: yt-dlp download, ffmpeg scene-change frame extraction (deduped), Whisper transcript, and Grok X-native context/fallback for X. Prints frame JPEG paths (`t=MM:SS`) to `Read` image-by-image. Use when the answer is on-screen, not in the audio. See `docs/features/video-watch-visual-grounding.md`. |
+| `valor-video-watch --json <url>` | Same, emitting the raw `watch_video` result dict as JSON |
 | `valor-tts --text "Hello." --output /tmp/out.ogg` | Synthesize text to OGG/Opus (Kokoro local primary, OpenAI tts-1 fallback). See `docs/features/tts.md`. |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --voice af_bella` | Synthesize with a specific voice (catalog in `tools/tts/README.md`) |
 | `valor-tts --text "Hello." --output /tmp/out.ogg --force-cloud` | Force the cloud (OpenAI tts-1) backend even if Kokoro is available |

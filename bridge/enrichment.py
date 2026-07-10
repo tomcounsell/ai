@@ -23,6 +23,8 @@ import logging
 import os
 from pathlib import Path
 
+from tools.video_watch.constants import VIDEO_WATCH_THIN_TRANSCRIPT_CHARS, WATCH_CLI_NAME
+
 logger = logging.getLogger(__name__)
 
 
@@ -176,6 +178,18 @@ async def enrich_message(
                         logger.warning(
                             f"Enrichment: YouTube processing failed for "
                             f"{r.get('video_id')}: {r.get('error')}"
+                        )
+                    # Signpost thin transcripts (music-only/silent/on-screen-only).
+                    # Gate on `transcript` only — `context` is non-empty even on
+                    # failure, so it must never be used for this decision.
+                    transcript_text = (r.get("transcript") or "").strip()
+                    if len(transcript_text) < VIDEO_WATCH_THIN_TRANSCRIPT_CHARS:
+                        url = r.get("url") or r.get("video_id") or "the video"
+                        # WATCH_CLI_NAME is the valor-video-watch command (single
+                        # source of truth in tools/video_watch/constants.py).
+                        enriched_text += (
+                            f"\n\n[transcript thin for {url} — run {WATCH_CLI_NAME} {url} "
+                            f"for visual grounding]"
                         )
         except Exception as e:
             logger.warning(f"Enrichment: YouTube processing failed: {e}")

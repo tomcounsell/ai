@@ -412,28 +412,33 @@ forced mid-pipeline `CalledProcessError`; (c) the reaper removes over-age dirs.
 
 ## Success Criteria
 
-- [ ] `valor-video-watch <youtube-url>` emits deduped scene-frame JPEG paths
+- [x] `valor-video-watch <youtube-url>` emits deduped scene-frame JPEG paths
   (`t=MM:SS`) + a timestamped transcript the agent can `Read`.
-- [ ] `valor-video-watch <x-url>` works on an x.com/twitter.com video: frames +
+- [x] `valor-video-watch <x-url>` works on an x.com/twitter.com video: frames +
   transcript when yt-dlp succeeds; Grok X-context (+ description fallback) when
   it doesn't.
-- [ ] Default enrichment for a bare YouTube link is unchanged (transcript-only,
+- [x] Default enrichment for a bare YouTube link is unchanged (transcript-only,
   no frames) — no token/latency regression on the push path.
-- [ ] Thin/empty transcript on the push path appends the `valor-video-watch`
+- [x] Thin/empty transcript on the push path appends the `valor-video-watch`
   signpost to the enriched text.
-- [ ] `GROK_API_KEY` wired: `.env.example` placeholder present; Grok client
+- [x] `GROK_API_KEY` wired: `.env.example` placeholder present; Grok client
   reads it via `os.getenv("GROK_API_KEY")` (no `APISettings` field — see
   Technical Approach); missing key degrades gracefully.
-- [ ] Frame cap / resolution / max-duration are env-overridable named constants
+- [x] Frame cap / resolution / max-duration are env-overridable named constants
   with grain-of-salt comments.
-- [ ] `grep "valor-video-watch" pyproject.toml` confirms the entry point.
-- [ ] **Visual-grounding outcome (E2E):** a slide-deck or silent-demo fixture
+- [x] `grep "valor-video-watch" pyproject.toml` confirms the entry point.
+- [x] **Visual-grounding outcome (E2E):** a slide-deck or silent-demo fixture
   where the answer is on-screen (not in the transcript) → `valor-video-watch`
   emits frames that let the agent answer correctly, where transcript-only fails.
-- [ ] Emitted frame paths still exist after the CLI process returns (two-dir
+  Committed evidence: `tools/video_watch/tests/test_e2e_visual_grounding.py`
+  runs the real ffprobe/ffmpeg/Pillow pipeline against a synthesized silent
+  slide deck (only the two network edges patched) and asserts transcript-only
+  yields nothing while the emitted frames are multiple, persistent, and
+  pairwise visually distinct.
+- [x] Emitted frame paths still exist after the CLI process returns (two-dir
   temp discipline verified).
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
@@ -549,7 +554,7 @@ into the single session worktree without commit interleaving.
 | No decorative settings field | `grep -c "grok_api_key" config/settings.py` | exit code 1 |
 | CLI name is a shared constant | `grep -c 'WATCH_CLI_NAME' tools/video_watch/constants.py` | output > 0 |
 | Enrichment imports constants only | `grep -c 'from tools.video_watch.constants import' bridge/enrichment.py` | output > 0 |
-| Bridge never imports heavy module | `grep -En 'from tools.video_watch import |import tools.video_watch$' bridge/enrichment.py` | exit code 1 |
+| Bridge never imports heavy module (import-chain assertion — the grep alone passes vacuously if the package `__init__` is heavy) | `pytest tools/video_watch/tests/test_import_discipline.py -q` | exit code 0 |
 | Signpost references the CLI | `grep -rc "valor-video-watch" bridge/enrichment.py` | output > 0 |
 | Subprocess timeout wired | `grep -c 'VIDEO_WATCH_SUBPROCESS_TIMEOUT' tools/video_watch/__init__.py` | output > 0 |
 | No key hardcoded | `grep -rn "xai-" tools/ config/ bridge/` | match count == 0 |
