@@ -10,8 +10,13 @@ See `docs/features/merge-gate-baseline.md` for the feature overview and
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, fields
+from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Exact prefix emitted by pytest-timeout in `<failure message="...">`.
 # We match this prefix and NOT a loose substring like "Timeout" because a
@@ -138,3 +143,179 @@ def _build_node_id(classname: str, name: str) -> str:
 def failing_node_ids(outcomes: dict[str, str]) -> set[str]:
     """Extract node IDs from a ``{node_id: outcome}`` map whose outcome is not pass."""
     return {node_id for node_id, outcome in outcomes.items() if outcome != "pass"}
+
+
+# ---------------------------------------------------------------------------
+# ArtifactEnvelope: provenance + state stamped on the persisted baseline
+# artifact (issue #2004, T1.3).
+#
+# The envelope carries provenance and state ONLY -- never threshold fields.
+# Staleness thresholds live in ``scripts/baseline_gate.py`` module constants
+# (``STALENESS_THRESHOLD``, ``STALE_COMMIT_DISTANCE``); :func:`staleness`
+# reads those constants at call time so a stale artifact can never enforce
+# its own old thresholds.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ArtifactEnvelope:
+    """The five envelope fields stamped on ``data/main_test_baseline.json``.
+
+    ``{generated_at, commit, generated_by, runs, degraded}`` -- nothing else.
+    ``degraded`` marks an artifact written from fewer usable runs than flaky
+    classification requires; the gate reads it later (the persisted artifact
+    is the silent surface, not the refresh script's exit code).
+    """
+
+    generated_at: str | None = None
+    commit: str | None = None
+    generated_by: str | None = None
+    runs: int | None = None
+    degraded: bool = False
+
+    @property
+    def is_legacy(self) -> bool:
+        """True when the artifact predates envelope stamping (core fields absent)."""
+        return self.generated_at is None or self.runs is None
+
+    def to_fields(self) -> dict:
+        """Render the envelope as the five artifact top-level fields."""
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
+def read_envelope(artifact: object) -> ArtifactEnvelope:
+    """Defensively read envelope fields from an artifact dict.
+
+    Never raises: a non-dict artifact or malformed field types coerce to
+    ``None`` (legacy).  ``degraded`` is only honoured as the literal ``True``
+    so a stray string like ``"no"`` can never flip the flag on.
+    """
+    if not isinstance(artifact, dict):
+        return ArtifactEnvelope()
+
+    def _str(key: str) -> str | None:
+        value = artifact.get(key)
+        return value if isinstance(value, str) and value else None
+
+    runs = artifact.get("runs")
+    if isinstance(runs, bool) or not isinstance(runs, int):
+        runs = None
+
+    return ArtifactEnvelope(
+        generated_at=_str("generated_at"),
+        commit=_str("commit"),
+        generated_by=_str("generated_by"),
+        runs=runs,
+        degraded=artifact.get("degraded") is True,
+    )
+
+
+def parse_generated_at(generated_at: str | None) -> datetime | None:
+    """Parse an ISO-8601 ``generated_at`` to a tz-aware datetime, or ``None``."""
+    if not isinstance(generated_at, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def staleness(
+    envelope: ArtifactEnvelope | dict,
+    *,
+    now: datetime | None = None,
+    commits_behind: int | None = None,
+) -> list[str]:
+    """Return the list of staleness reasons for an artifact envelope.
+
+    The ONE shared staleness definition used by both the merge gate
+    (``scripts/baseline_gate.py``) and the weekly reflection
+    (``reflections/housekeeping/test_baseline_refresh_check.py``).  An empty
+    list means "fresh".  Three triggers:
+
+    - ``generated_at`` older than ``baseline_gate.STALENESS_THRESHOLD``
+    - ``commit`` ends with ``-dirty`` (irreproducible capture)
+    - ``commits_behind`` past ``baseline_gate.STALE_COMMIT_DISTANCE``
+
+    Thresholds are read from ``scripts.baseline_gate`` module attributes at
+    call time (lazy import to avoid a circular import; the gate imports this
+    module at its top level).  The envelope itself never carries thresholds.
+    ``commits_behind=None`` (git unavailable / unknown commit) skips the
+    commit-distance trigger.
+    """
+    import scripts.baseline_gate as baseline_gate  # noqa: PLC0415 -- lazy: avoids circular import
+
+    env = envelope if isinstance(envelope, ArtifactEnvelope) else read_envelope(envelope)
+    now = now or datetime.now(UTC)
+    reasons: list[str] = []
+
+    generated_at = parse_generated_at(env.generated_at)
+    if generated_at is not None:
+        age = now - generated_at
+        if age > baseline_gate.STALENESS_THRESHOLD:
+            reasons.append(
+                f"generated_at is {age.days} days old (> {baseline_gate.STALENESS_THRESHOLD.days})"
+            )
+
+    if isinstance(env.commit, str) and env.commit.endswith("-dirty"):
+        reasons.append(f"baseline captured against a dirty tree ({env.commit})")
+
+    if isinstance(commits_behind, int) and commits_behind > baseline_gate.STALE_COMMIT_DISTANCE:
+        reasons.append(
+            f"baseline commit is {commits_behind} commits behind HEAD "
+            f"(> {baseline_gate.STALE_COMMIT_DISTANCE})"
+        )
+
+    return reasons
+
+
+def expire_stale_flaky_entries(
+    baseline: dict,
+    *,
+    now: datetime | None = None,
+    commits_behind: int | None = None,
+) -> tuple[dict, list[str]]:
+    """Drop ``flaky``-category entries when the artifact envelope is stale.
+
+    A flaky allowance is only as good as the runs that observed it -- once
+    the envelope is stale (per the shared :func:`staleness` definition), the
+    entry stops suppressing failures instead of riding in the baseline
+    forever.  Legacy artifacts (no envelope) have no freshness signal, so
+    their entries are kept unchanged.
+
+    Returns ``(new_baseline, expired_node_ids)``; never mutates the input.
+    """
+    if not isinstance(baseline, dict):
+        return {}, []
+
+    env = read_envelope(baseline)
+    tests = baseline.get("tests")
+    if env.is_legacy or not isinstance(tests, dict):
+        return baseline, []
+
+    if not staleness(env, now=now, commits_behind=commits_behind):
+        return baseline, []
+
+    kept: dict[str, dict] = {}
+    expired: list[str] = []
+    for node_id, record in tests.items():
+        if isinstance(record, dict) and record.get("category") == CATEGORY_FLAKY:
+            expired.append(node_id)
+            continue
+        kept[node_id] = record
+
+    if not expired:
+        return baseline, []
+
+    logger.warning(
+        "[baseline] expired %d stale flaky entr%s: %s",
+        len(expired),
+        "y" if len(expired) == 1 else "ies",
+        ", ".join(sorted(expired)),
+    )
+    new_baseline = dict(baseline)
+    new_baseline["tests"] = kept
+    return new_baseline, sorted(expired)

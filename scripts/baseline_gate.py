@@ -35,13 +35,29 @@ from scripts._baseline_common import (
     SCHEMA_VERSION,
     VALID_CATEGORIES,
     JunitxmlParseError,
+    expire_stale_flaky_entries,
     failing_node_ids,
     parse_junitxml,
+    read_envelope,
+    staleness,
 )
 
 logger = logging.getLogger(__name__)
 
 STALENESS_THRESHOLD = timedelta(days=14)
+
+# Distinct exit code for a --strict-freshness refusal: the gate declines to
+# produce a verdict at all (never a false pre-existing/regression verdict).
+# 0 = clean, 1 = regression/parse failure, 2 = argparse's own error exit.
+EXIT_STRICT_REFUSAL = 3
+
+# The exact regen command printed on a strict refusal.
+REGEN_COMMAND = "python scripts/refresh_test_baseline.py --runs 3"
+
+# Minimum usable runs a strict-mode artifact must have been built from.
+# Mirrors refresh_test_baseline.MIN_USABLE_RUNS_FOR_FLAKY_DETECTION without
+# importing it (that module shells out to pytest-collection helpers).
+STRICT_MIN_RUNS = 2
 
 # Commit-distance staleness trigger (issue #1965). The 14-day wall-clock
 # threshold missed a real incident: a baseline only 7 days old but 425 commits
@@ -249,34 +265,15 @@ def format_staleness_warning(
     day, which is the exact blind spot the age check missed in issue #1965.
     ``None`` (git unavailable / unknown commit) means "skip this trigger".
     """
-    now = now or datetime.now(UTC)
     reasons: list[str] = []
 
     if baseline.get("bootstrap") is True:
         reasons.append("baseline is a bootstrap (single-run heuristic)")
 
-    commit = baseline.get("commit")
-    if isinstance(commit, str) and commit.endswith("-dirty"):
-        reasons.append(f"baseline captured against a dirty tree ({commit})")
-
-    generated_at_raw = baseline.get("generated_at")
-    if isinstance(generated_at_raw, str):
-        try:
-            generated_at = datetime.fromisoformat(generated_at_raw)
-        except ValueError:
-            generated_at = None
-        if generated_at is not None:
-            if generated_at.tzinfo is None:
-                generated_at = generated_at.replace(tzinfo=UTC)
-            age = now - generated_at
-            if age > STALENESS_THRESHOLD:
-                days = age.days
-                reasons.append(f"generated_at is {days} days old (> 14)")
-
-    if isinstance(commits_behind, int) and commits_behind > STALE_COMMIT_DISTANCE:
-        reasons.append(
-            f"baseline commit is {commits_behind} commits behind HEAD (> {STALE_COMMIT_DISTANCE})"
-        )
+    # Age / dirty-commit / commit-distance triggers come from the ONE shared
+    # staleness definition in _baseline_common (also used by the weekly
+    # reflection), which reads this module's threshold constants at call time.
+    reasons.extend(staleness(read_envelope(baseline), now=now, commits_behind=commits_behind))
 
     if not reasons:
         return None
@@ -456,6 +453,39 @@ def format_quarantine_hints(
     return hints
 
 
+def strict_freshness_reasons(
+    baseline: dict,
+    *,
+    now: datetime | None = None,
+    commits_behind: int | None = None,
+) -> list[str]:
+    """Return the reasons a --strict-freshness gate must refuse, or ``[]``.
+
+    Strict refusal formula: ``envelope.degraded or envelope.runs < 2 or
+    staleness(envelope)``.  Envelope fields are read defensively -- an
+    artifact predating envelope stamping (absent fields) logs a legacy-mode
+    warning and fails closed (``runs`` absent counts as 0), never crashes.
+    """
+    envelope = read_envelope(baseline)
+    reasons: list[str] = []
+
+    if envelope.is_legacy:
+        logger.warning(
+            "[baseline_gate] artifact has no envelope fields (legacy, pre-#2004); "
+            "strict freshness treats missing runs as 0"
+        )
+
+    if envelope.degraded:
+        reasons.append(f"artifact is stamped degraded (runs={envelope.runs})")
+
+    runs = envelope.runs if isinstance(envelope.runs, int) else 0
+    if runs < STRICT_MIN_RUNS:
+        reasons.append(f"artifact was built from {runs} usable run(s) (< {STRICT_MIN_RUNS})")
+
+    reasons.extend(staleness(envelope, now=now, commits_behind=commits_behind))
+    return reasons
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare PR junitxml against the merge-gate baseline.",
@@ -475,6 +505,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="ISO-8601 timestamp for staleness comparison (testing hook).",
     )
+    parser.add_argument(
+        "--strict-freshness",
+        action="store_true",
+        help=(
+            "Refuse to gate (exit 3) when the baseline envelope is degraded, "
+            "built from fewer than 2 usable runs, or stale -- instead of "
+            "producing a possibly-false verdict. Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--pr-number",
+        type=int,
+        default=None,
+        help=(
+            "PR number for the strict-freshness break-glass check: refusal is "
+            "skipped when data/merge_authorized_{pr_number} exists."
+        ),
+    )
+    parser.add_argument(
+        "--data-dir",
+        default="data",
+        help="Directory holding merge_authorized_{N} sentinels (default: data).",
+    )
     return parser.parse_args(argv)
 
 
@@ -483,6 +536,63 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
     baseline = load_baseline(args.baseline)
+
+    if args.now:
+        now = datetime.fromisoformat(args.now)
+        # Normalise a naive ISO string (e.g. "2026-04-24T12:00:00") to UTC.
+        # Without this, staleness comparison subtracts a naive ``now`` from a
+        # tz-aware ``generated_at`` and raises ``TypeError: can't subtract
+        # offset-naive and offset-aware datetimes``.
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=UTC)
+    else:
+        now = datetime.now(UTC)
+    commits_behind = commits_behind_head(baseline.get("commit"))
+
+    if args.strict_freshness:
+        refusal_reasons = strict_freshness_reasons(baseline, now=now, commits_behind=commits_behind)
+        if refusal_reasons:
+            sentinel = (
+                Path(args.data_dir) / f"merge_authorized_{args.pr_number}"
+                if args.pr_number is not None
+                else None
+            )
+            if sentinel is not None and sentinel.exists():
+                sys.stderr.write(
+                    f"break-glass sentinel {sentinel} present; skipping strict-freshness refusal\n"
+                )
+            else:
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "strict_freshness_refused": True,
+                            "reasons": refusal_reasons,
+                            "regen_command": REGEN_COMMAND,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                sys.stderr.write(
+                    "REFUSED: baseline fails strict freshness ("
+                    + "; ".join(refusal_reasons)
+                    + f"). Regenerate with: {REGEN_COMMAND}\n"
+                )
+                return EXIT_STRICT_REFUSAL
+
+    # Flaky decay: a stale envelope expires flaky allowances so they never
+    # ride in the baseline forever. Legacy artifacts (no envelope) keep
+    # their entries -- there is no freshness signal to expire against.
+    baseline, expired_flaky = expire_stale_flaky_entries(
+        baseline, now=now, commits_behind=commits_behind
+    )
+    if expired_flaky:
+        sys.stderr.write(
+            f"WARNING: expired {len(expired_flaky)} stale flaky baseline entr"
+            f"{'y' if len(expired_flaky) == 1 else 'ies'} "
+            f"(envelope is stale). Regenerate with: {REGEN_COMMAND}\n"
+        )
 
     try:
         pr_failures = parse_pr_failures(args.pr_junitxml)
@@ -506,17 +616,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     verdict = compute_gate_verdict(baseline, pr_failures)
-    if args.now:
-        now = datetime.fromisoformat(args.now)
-        # Normalise a naive ISO string (e.g. "2026-04-24T12:00:00") to UTC.
-        # Without this, ``format_staleness_warning`` compares a naive ``now``
-        # against a tz-aware ``generated_at`` and raises ``TypeError: can't
-        # subtract offset-naive and offset-aware datetimes``.
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=UTC)
-    else:
-        now = datetime.now(UTC)
-    commits_behind = commits_behind_head(baseline.get("commit"))
+    verdict["expired_flaky_entries"] = expired_flaky
     warning = format_staleness_warning(baseline, now=now, commits_behind=commits_behind)
     if warning is not None:
         verdict["staleness_warning"] = warning

@@ -595,3 +595,415 @@ def test_orphan_tracker_entries_collected():
 def test_threshold_defaults_are_documented():
     assert DEFAULT_DECAY_THRESHOLD == 5
     assert DEFAULT_FLAKE_THRESHOLD == 3
+
+
+# ---------------------------------------------------------------------------
+# ArtifactEnvelope: defensive envelope reads (issue #2004, T1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_read_envelope_reads_all_five_fields() -> None:
+    from scripts._baseline_common import read_envelope
+
+    artifact = {
+        "generated_at": "2026-07-01T00:00:00+00:00",
+        "commit": "abc1234",
+        "generated_by": "python scripts/refresh_test_baseline.py --runs 3",
+        "runs": 3,
+        "degraded": False,
+        "tests": {},
+    }
+    env = read_envelope(artifact)
+    assert env.generated_at == "2026-07-01T00:00:00+00:00"
+    assert env.commit == "abc1234"
+    assert env.generated_by == "python scripts/refresh_test_baseline.py --runs 3"
+    assert env.runs == 3
+    assert env.degraded is False
+    assert env.is_legacy is False
+
+
+def test_read_envelope_absent_fields_is_legacy_never_crashes() -> None:
+    """A pre-envelope artifact (no runs/degraded/generated_at) reads as legacy."""
+    from scripts._baseline_common import read_envelope
+
+    env = read_envelope({"schema_version": 2, "tests": {}})
+    assert env.is_legacy is True
+    assert env.runs is None
+    assert env.degraded is False
+
+
+def test_read_envelope_non_dict_and_malformed_types_never_crash() -> None:
+    from scripts._baseline_common import read_envelope
+
+    assert read_envelope(None).is_legacy is True
+    assert read_envelope(["not", "a", "dict"]).is_legacy is True
+    env = read_envelope({"runs": "three", "generated_at": 12345, "degraded": "yes"})
+    assert env.runs is None
+    assert env.generated_at is None
+    assert env.degraded is False  # only literal True counts
+
+
+def test_envelope_carries_no_threshold_fields() -> None:
+    """Thresholds live in baseline_gate module constants, never in the envelope."""
+    import dataclasses
+
+    from scripts._baseline_common import ArtifactEnvelope
+
+    field_names = {f.name for f in dataclasses.fields(ArtifactEnvelope)}
+    assert field_names == {"generated_at", "commit", "generated_by", "runs", "degraded"}
+
+
+# ---------------------------------------------------------------------------
+# shared staleness(): one definition for gate and reflection
+# ---------------------------------------------------------------------------
+
+
+def test_staleness_empty_for_fresh_envelope() -> None:
+    from scripts._baseline_common import read_envelope, staleness
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    env = read_envelope(
+        {"generated_at": now.isoformat(), "commit": "abc1234", "runs": 3, "degraded": False}
+    )
+    assert staleness(env, now=now, commits_behind=0) == []
+
+
+def test_staleness_reports_age_past_gate_threshold() -> None:
+    from scripts._baseline_common import read_envelope, staleness
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    env = read_envelope(
+        {
+            "generated_at": (now - timedelta(days=20)).isoformat(),
+            "commit": "abc1234",
+            "runs": 3,
+        }
+    )
+    reasons = staleness(env, now=now, commits_behind=0)
+    assert any("20 days old" in r for r in reasons)
+
+
+def test_staleness_reports_dirty_commit_and_commit_distance() -> None:
+    from scripts._baseline_common import read_envelope, staleness
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    env = read_envelope(
+        {"generated_at": now.isoformat(), "commit": "abc1234-dirty", "runs": 3}
+    )
+    reasons = staleness(env, now=now, commits_behind=STALE_COMMIT_DISTANCE + 50)
+    assert any("dirty tree" in r for r in reasons)
+    assert any("commits behind HEAD" in r for r in reasons)
+
+
+def test_staleness_reads_thresholds_from_gate_module_constants(monkeypatch) -> None:
+    """staleness() must read the gate's live module constants, not envelope fields."""
+    import scripts.baseline_gate as gate_mod
+    from scripts._baseline_common import read_envelope, staleness
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    env = read_envelope(
+        {"generated_at": (now - timedelta(days=2)).isoformat(), "commit": "abc1234", "runs": 3}
+    )
+    # 2 days old is fresh under the real 14-day threshold...
+    assert staleness(env, now=now, commits_behind=0) == []
+    # ...but stale once the gate constant is tightened to 1 day.
+    monkeypatch.setattr(gate_mod, "STALENESS_THRESHOLD", timedelta(days=1))
+    assert staleness(env, now=now, commits_behind=0) != []
+
+
+def test_staleness_none_commits_behind_skips_distance_trigger() -> None:
+    from scripts._baseline_common import read_envelope, staleness
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    env = read_envelope({"generated_at": now.isoformat(), "commit": "abc1234", "runs": 3})
+    assert staleness(env, now=now, commits_behind=None) == []
+
+
+# ---------------------------------------------------------------------------
+# flaky decay: stale envelopes expire flaky allowances (never ride forever)
+# ---------------------------------------------------------------------------
+
+
+def _flaky_baseline(generated_at: datetime) -> dict:
+    return {
+        "schema_version": 2,
+        "generated_at": generated_at.isoformat(),
+        "commit": "abc1234",
+        "runs": 3,
+        "degraded": False,
+        "tests": {
+            "tests/unit/test_a.py::test_flaky": {
+                "category": "flaky",
+                "fail_rate": 0.33,
+                "hung_count": 0,
+            },
+            "tests/unit/test_a.py::test_real": {
+                "category": "real",
+                "fail_rate": 1.0,
+                "hung_count": 0,
+            },
+        },
+    }
+
+
+def test_expire_stale_flaky_entries_drops_flaky_when_envelope_stale() -> None:
+    from scripts._baseline_common import expire_stale_flaky_entries
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _flaky_baseline(now - timedelta(days=20))
+    new_baseline, expired = expire_stale_flaky_entries(baseline, now=now, commits_behind=0)
+    assert expired == ["tests/unit/test_a.py::test_flaky"]
+    assert "tests/unit/test_a.py::test_flaky" not in new_baseline["tests"]
+    # Non-flaky categories are untouched by flaky decay.
+    assert "tests/unit/test_a.py::test_real" in new_baseline["tests"]
+    # Input is not mutated.
+    assert "tests/unit/test_a.py::test_flaky" in baseline["tests"]
+
+
+def test_expire_stale_flaky_entries_keeps_flaky_when_fresh() -> None:
+    from scripts._baseline_common import expire_stale_flaky_entries
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _flaky_baseline(now)
+    new_baseline, expired = expire_stale_flaky_entries(baseline, now=now, commits_behind=0)
+    assert expired == []
+    assert "tests/unit/test_a.py::test_flaky" in new_baseline["tests"]
+
+
+def test_expire_stale_flaky_entries_legacy_envelope_is_noop() -> None:
+    """No envelope (legacy artifact) => no expiry signal => keep entries."""
+    from scripts._baseline_common import expire_stale_flaky_entries
+
+    baseline = {
+        "schema_version": 2,
+        "tests": {"tests/unit/test_a.py::test_flaky": {"category": "flaky"}},
+    }
+    new_baseline, expired = expire_stale_flaky_entries(baseline, commits_behind=None)
+    assert expired == []
+    assert "tests/unit/test_a.py::test_flaky" in new_baseline["tests"]
+
+
+def _write_passing_pr_xml(tmp_path: Path, name: str = "pr.xml") -> Path:
+    pr_xml = tmp_path / name
+    pr_xml.write_text(
+        textwrap.dedent(
+            """\
+            <?xml version="1.0" encoding="utf-8"?>
+            <testsuites>
+              <testsuite name="pytest">
+                <testcase classname="tests.unit.test_a" name="test_ok"/>
+              </testsuite>
+            </testsuites>
+            """
+        )
+    )
+    return pr_xml
+
+
+def _write_failing_pr_xml(tmp_path: Path, node_name: str = "test_flaky") -> Path:
+    pr_xml = tmp_path / "pr_fail.xml"
+    pr_xml.write_text(
+        textwrap.dedent(
+            f"""\
+            <?xml version="1.0" encoding="utf-8"?>
+            <testsuites>
+              <testsuite name="pytest">
+                <testcase classname="tests.unit.test_a" name="{node_name}">
+                  <failure message="assert failed"/>
+                </testcase>
+              </testsuite>
+            </testsuites>
+            """
+        )
+    )
+    return pr_xml
+
+
+def test_main_expired_flaky_failure_becomes_blocking(tmp_path: Path, capsys) -> None:
+    """A flaky allowance on a stale envelope no longer suppresses the failure."""
+    from scripts.baseline_gate import main
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(_flaky_baseline(now - timedelta(days=20))))
+    pr_xml = _write_failing_pr_xml(tmp_path, "test_flaky")
+
+    exit_code = main(
+        ["--pr-junitxml", str(pr_xml), "--baseline", str(baseline_path), "--now", now.isoformat()]
+    )
+    assert exit_code == 1
+    verdict = json.loads(capsys.readouterr().out)
+    assert "tests/unit/test_a.py::test_flaky" in verdict["new_blocking_regressions"]
+    assert "tests/unit/test_a.py::test_flaky" in verdict["expired_flaky_entries"]
+
+
+def test_main_fresh_flaky_failure_stays_non_blocking(tmp_path: Path, capsys) -> None:
+    from scripts.baseline_gate import main
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(_flaky_baseline(now)))
+    pr_xml = _write_failing_pr_xml(tmp_path, "test_flaky")
+
+    exit_code = main(
+        ["--pr-junitxml", str(pr_xml), "--baseline", str(baseline_path), "--now", now.isoformat()]
+    )
+    assert exit_code == 0
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["new_flaky_occurrences"] == ["tests/unit/test_a.py::test_flaky"]
+
+
+# ---------------------------------------------------------------------------
+# --strict-freshness: refuse-to-gate exit path (selectable via `-k strict`)
+# ---------------------------------------------------------------------------
+
+
+def _fresh_envelope_baseline(now: datetime, **overrides) -> dict:
+    baseline = {
+        "schema_version": 2,
+        "generated_at": now.isoformat(),
+        "commit": "abc1234",
+        "generated_by": "python scripts/refresh_test_baseline.py --runs 3",
+        "runs": 3,
+        "degraded": False,
+        "tests": {},
+    }
+    baseline.update(overrides)
+    return baseline
+
+
+def _run_strict_main(tmp_path: Path, baseline: dict, now: datetime, extra_args=()) -> int:
+    from scripts.baseline_gate import main
+
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps(baseline))
+    pr_xml = _write_passing_pr_xml(tmp_path)
+    return main(
+        [
+            "--pr-junitxml",
+            str(pr_xml),
+            "--baseline",
+            str(baseline_path),
+            "--now",
+            now.isoformat(),
+            "--strict-freshness",
+            *extra_args,
+        ]
+    )
+
+
+def test_strict_fresh_envelope_proceeds_to_normal_verdict(tmp_path: Path, capsys) -> None:
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    exit_code = _run_strict_main(tmp_path, _fresh_envelope_baseline(now), now)
+    assert exit_code == 0
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["new_blocking_regressions"] == []
+
+
+def test_strict_refuses_on_degraded_envelope(tmp_path: Path, capsys) -> None:
+    from scripts.baseline_gate import EXIT_STRICT_REFUSAL
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _fresh_envelope_baseline(now, degraded=True, runs=1)
+    exit_code = _run_strict_main(tmp_path, baseline, now)
+    assert exit_code == EXIT_STRICT_REFUSAL
+    captured = capsys.readouterr()
+    verdict = json.loads(captured.out)
+    assert verdict["strict_freshness_refused"] is True
+    assert verdict["reasons"]
+    # Never a false pre-existing/regression verdict on refusal.
+    assert "new_blocking_regressions" not in verdict
+    # The refusal prints the exact regen command.
+    assert "refresh_test_baseline.py" in captured.err
+
+
+def test_strict_refuses_on_runs_below_two(tmp_path: Path, capsys) -> None:
+    from scripts.baseline_gate import EXIT_STRICT_REFUSAL
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _fresh_envelope_baseline(now, runs=1)
+    exit_code = _run_strict_main(tmp_path, baseline, now)
+    assert exit_code == EXIT_STRICT_REFUSAL
+    verdict = json.loads(capsys.readouterr().out)
+    assert any("run" in r for r in verdict["reasons"])
+
+
+def test_strict_refuses_on_stale_envelope(tmp_path: Path, capsys) -> None:
+    from scripts.baseline_gate import EXIT_STRICT_REFUSAL
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = _fresh_envelope_baseline(now)
+    baseline["generated_at"] = (now - timedelta(days=20)).isoformat()
+    exit_code = _run_strict_main(tmp_path, baseline, now)
+    assert exit_code == EXIT_STRICT_REFUSAL
+    verdict = json.loads(capsys.readouterr().out)
+    assert any("days old" in r for r in verdict["reasons"])
+
+
+def test_strict_legacy_envelope_refuses_with_warning_not_crash(tmp_path: Path, capsys) -> None:
+    """Absent envelope fields => defensive read (warn), fail-closed under strict."""
+    from scripts.baseline_gate import EXIT_STRICT_REFUSAL
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = {"schema_version": 2, "tests": {}}  # no envelope fields at all
+    exit_code = _run_strict_main(tmp_path, baseline, now)
+    assert exit_code == EXIT_STRICT_REFUSAL
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["strict_freshness_refused"] is True
+
+
+def test_nonstrict_legacy_envelope_warns_never_crashes(tmp_path: Path, capsys) -> None:
+    """Without --strict-freshness a legacy artifact keeps the old warn-only path."""
+    from scripts.baseline_gate import main
+
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(json.dumps({"schema_version": 2, "tests": {}}))
+    pr_xml = _write_passing_pr_xml(tmp_path)
+    exit_code = main(["--pr-junitxml", str(pr_xml), "--baseline", str(baseline_path)])
+    assert exit_code == 0
+    verdict = json.loads(capsys.readouterr().out)
+    assert verdict["new_blocking_regressions"] == []
+
+
+def test_strict_break_glass_sentinel_skips_refusal(tmp_path: Path, capsys) -> None:
+    """data/merge_authorized_{pr} parity: operator authorization beats the refusal."""
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "merge_authorized_42").write_text("authorized\n")
+    baseline = _fresh_envelope_baseline(now, degraded=True, runs=1)
+
+    exit_code = _run_strict_main(
+        tmp_path,
+        baseline,
+        now,
+        extra_args=["--pr-number", "42", "--data-dir", str(data_dir)],
+    )
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    verdict = json.loads(captured.out)
+    assert verdict["new_blocking_regressions"] == []
+    assert "merge_authorized_42" in captured.err
+
+
+def test_strict_without_sentinel_still_refuses_with_pr_number(tmp_path: Path, capsys) -> None:
+    from scripts.baseline_gate import EXIT_STRICT_REFUSAL
+
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    baseline = _fresh_envelope_baseline(now, degraded=True, runs=1)
+
+    exit_code = _run_strict_main(
+        tmp_path,
+        baseline,
+        now,
+        extra_args=["--pr-number", "42", "--data-dir", str(data_dir)],
+    )
+    assert exit_code == EXIT_STRICT_REFUSAL
+
+
+def test_strict_refusal_exit_code_is_distinct_from_regression_exit() -> None:
+    from scripts.baseline_gate import EXIT_STRICT_REFUSAL
+
+    assert EXIT_STRICT_REFUSAL not in (0, 1, 2)  # 2 is argparse's own error exit
