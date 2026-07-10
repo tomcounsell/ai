@@ -112,7 +112,7 @@ def _machine_owns_project(project_key: str | None) -> bool:
     if not project_key:
         return False
     try:
-        from tools.machine_identity import computer_name
+        from config.machine import get_machine_name
         from tools.reflection_machine_filter import _load_project_machines
 
         projects_path = Path(__file__).resolve().parent.parent / "config" / "projects.json"
@@ -120,7 +120,7 @@ def _machine_owns_project(project_key: str | None) -> bool:
         owner = owners.get(project_key)
         if not owner:
             return False
-        return owner == computer_name().strip().lower()
+        return owner == get_machine_name().strip().lower()
     except Exception as exc:  # noqa: BLE001
         logger.debug("_machine_owns_project swallowed exception: %r", exc)
         return False

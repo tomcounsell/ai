@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import time
 import uuid
 from collections.abc import Callable
@@ -39,6 +38,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from config.machine import get_machine_name
 from reflections.pm_briefings import daily_log, log_audit, morning
 from reflections.utilities import load_local_projects
 
@@ -63,13 +63,12 @@ def _resolve_machine() -> str:
 
     Returns empty string on failure -- callers should treat that as "filter
     everything out" since matching against an empty string is dangerous.
+    Delegates to :func:`config.machine.get_machine_name`, the canonical hub.
     """
-    try:
-        out = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True, timeout=5)
-        return out.strip()
-    except Exception as e:
-        logger.warning("Could not resolve ComputerName: %s", e)
-        return ""
+    machine = get_machine_name()
+    if not machine:
+        logger.warning("Could not resolve ComputerName; filtering out all projects")
+    return machine
 
 
 def _slot_match(now_local: datetime, schedule: str) -> bool:

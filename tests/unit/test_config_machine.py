@@ -8,6 +8,9 @@ across five modules:
     fallback lives here so a per-machine token filename is never empty).
   * ``get_machine_project_keys`` → case-insensitive ownership match, ``[]`` on any
     read failure, and the #1834 empty-machine fail-to-development guard.
+  * ``get_display_machine_name`` → human-facing ComputerName → hostname →
+    ``"unknown"`` fallback chain (absorbed from the retired
+    ``tools/machine_identity.py`` hub).
 """
 
 from __future__ import annotations
@@ -61,6 +64,29 @@ def test_get_machine_slug_falls_back_when_name_empty(monkeypatch):
     slug = machine.get_machine_slug()
     assert slug == "fallback-host"
     assert slug  # invariant: never empty
+
+
+# --- get_display_machine_name --------------------------------------------------
+
+
+def test_get_display_machine_name_prefers_computer_name(monkeypatch):
+    monkeypatch.setattr(machine, "get_machine_name", lambda: "Prod Box")
+    assert machine.get_display_machine_name() == "Prod Box"
+
+
+def test_get_display_machine_name_falls_back_to_hostname(monkeypatch):
+    monkeypatch.setattr(machine, "get_machine_name", lambda: "")
+    monkeypatch.setattr(machine.socket, "gethostname", lambda: "fallback-host.local")
+    assert machine.get_display_machine_name() == "fallback-host.local"
+
+
+def test_get_display_machine_name_unknown_when_all_fail(monkeypatch):
+    def _boom():
+        raise OSError("no hostname")
+
+    monkeypatch.setattr(machine, "get_machine_name", lambda: "")
+    monkeypatch.setattr(machine.socket, "gethostname", _boom)
+    assert machine.get_display_machine_name() == "unknown"
 
 
 # --- get_machine_project_keys ------------------------------------------------

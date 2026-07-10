@@ -29,7 +29,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from tools.machine_identity import display_machine_name
+from config.machine import get_display_machine_name
 
 logger = logging.getLogger("reflections.docs_auditor")
 
@@ -711,10 +711,10 @@ def _filing_machine_name() -> str:
     host still running this reflection after it was disabled in the synced
     config — name themselves instead of being anonymous.
 
-    Delegates to :func:`tools.machine_identity.display_machine_name`, the shared
+    Delegates to :func:`config.machine.get_display_machine_name`, the shared
     helper that owns the ComputerName→hostname→"unknown" fallback chain.
     """
-    return display_machine_name()
+    return get_display_machine_name()
 
 
 def _open_issue_exists(title: str, repo_root: Path) -> bool:

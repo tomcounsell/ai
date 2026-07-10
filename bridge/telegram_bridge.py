@@ -484,13 +484,10 @@ def _get_active_projects() -> list[str]:
 
     config = _guarded_json_load(config_path)
 
-    # Get this machine's name (e.g. "Valor the Captain")
-    try:
-        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
-    except Exception:
-        hostname = ""
+    # Get this machine's name (e.g. "Valor the Captain") via the canonical hub
+    from config.machine import get_machine_name
 
-    hostname_normalized = hostname.lower()
+    hostname_normalized = get_machine_name().lower()
 
     # Match projects where machine field matches this hostname
     matched = []

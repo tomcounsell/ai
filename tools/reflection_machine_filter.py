@@ -39,7 +39,7 @@ from pathlib import Path
 
 import yaml
 
-from tools.machine_identity import computer_name
+from config.machine import get_machine_name
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_REFLECTIONS = PROJECT_ROOT / "config" / "reflections.yaml"
@@ -50,10 +50,10 @@ def _current_machine_name() -> str:
     """Return this machine's ComputerName (matches projects.json ``machine``).
 
     Empty string on failure → fail-open in the ownership check. Delegates to the
-    canonical :func:`tools.machine_identity.computer_name` so the raw lookup
-    lives in exactly one place.
+    canonical :func:`config.machine.get_machine_name` so the raw lookup lives
+    in exactly one place.
     """
-    return computer_name()
+    return get_machine_name()
 
 
 def _load_project_machines(projects_path: Path) -> dict[str, str]:

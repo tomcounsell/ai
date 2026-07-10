@@ -19,12 +19,24 @@ Fail-soft contracts (never raise on a read failure):
     collapse every machine's token onto one filename).
   * :func:`get_machine_project_keys` returns ``[]`` on any failure and applies
     the empty-machine guard before reading the file.
+  * :func:`get_display_machine_name` is the human-facing variant (triage
+    stamps, issue bodies): ComputerName → OS hostname → ``"unknown"``. Never
+    use it for ownership matching — the hostname fallback is a different
+    identifier than ``projects.json``'s ``machine`` field.
+
+Contract note (#1997 consolidation): this module absorbed the retired
+``tools/machine_identity.py`` hub. That hub's ``computer_name()`` returned
+``scutil`` stdout without checking the exit status; :func:`get_machine_name`
+deliberately keeps the **stricter** ``returncode == 0`` check so a failing
+``scutil`` can never leak partial stderr-adjacent output into ownership
+matching. All former consumers now share this stricter contract.
 """
 
 from __future__ import annotations
 
 import json
 import platform
+import socket
 import subprocess
 
 from config.paths import VALOR_DIR
@@ -69,6 +81,23 @@ def get_machine_slug() -> str:
     if name:
         return name.lower().replace(" ", "-")
     return platform.node().split(".")[0].lower()
+
+
+def get_display_machine_name() -> str:
+    """Human-facing machine label: ComputerName, then OS hostname, then ``"unknown"``.
+
+    For triage/stamping only (e.g. naming the machine that filed an issue) —
+    never use this for ownership matching (use :func:`get_machine_name`), since
+    the hostname fallback is a different identifier than ``projects.json``'s
+    ``machine`` field and would silently break owner matching.
+    """
+    name = get_machine_name()
+    if name:
+        return name
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "unknown"
 
 
 def get_machine_project_keys(machine: str | None = None) -> list[str]:
