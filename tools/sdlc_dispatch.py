@@ -163,9 +163,19 @@ def record_dispatch_for_session(
         return False
 
     ts = now or datetime.now(UTC)
+    record_run_id = run_id or getattr(session, "active_run_id", None)
 
     def _apply(states: dict) -> dict:
-        return record_dispatch(states, skill=skill, now=ts, pr_number=pr_number)
+        states = record_dispatch(states, skill=skill, now=ts, pr_number=pr_number)
+        # Dispatch records carry the run identity (issue #2003) — annotated
+        # here so ``agent.sdlc_router.record_dispatch`` stays run-id-agnostic.
+        try:
+            history = states.get("_sdlc_dispatches") or []
+            if history and isinstance(history[-1], dict):
+                history[-1]["run_id"] = record_run_id
+        except Exception:  # pragma: no cover - annotation must never block the write
+            pass
+        return states
 
     try:
         ok = update_stage_states(session, _apply)
