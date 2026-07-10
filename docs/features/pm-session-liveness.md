@@ -37,7 +37,7 @@ Issue #1172 retires every inference path. Evidence-only signals stay:
 | `worker_dead` | The Python `_active_workers[worker_key]` future is missing or done | `agent/session_health.py::_agent_session_health_check` |
 | `no_progress` (after Tier 2) | `_has_progress` returned False AND every Tier 2 reprieve gate failed | `agent/session_health.py::_has_progress` + `_tier2_reprieve_signal` |
 | Mode 4 OOM defer (#1099) | `exit_returncode == -9` AND psutil reports memory tight | `agent/session_health.py:1017-1036` |
-| Delivery guard (#918) | `response_delivered_at` is set → finalize as `completed`, NOT recover | `agent/session_health.py:798-822` |
+| Delivery guard (#918, epoch-scoped by #1979) | `response_delivered_at >= (started_at or created_at)` (delivery belongs to the current run) → finalize as `completed`, NOT recover. A delivery timestamp from before the current run's `started_at` (e.g. a stale value carried across a resume) no longer trips the guard. | `agent/session_health.py::_delivery_belongs_to_current_run` |
 
 ### What the detector explicitly does NOT kill on
 
