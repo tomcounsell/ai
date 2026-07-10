@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -44,8 +44,14 @@ and we still route by prefix tokens).
 - One `HarnessAdapter` seam through which the runner drives any turn-based
   headless CLI: normalized turn events, schema-enforced final message replacing
   prefix-token routing, verified/simplified resume semantics (Phase 2).
-- `codex exec` usable as an opt-in, per-session substrate behind that seam,
-  with capability degradation handled explicitly (Phase 3; selection policy TBD).
+- `codex exec` usable as an opt-in **dev-lane executor inside eng sessions**
+  behind that seam — every top-level session connected to bridge messaging stays
+  claude-only (owner decision 2026-07-10) — with capability degradation handled
+  explicitly (Phase 3; manual selection only, policy question carried open in #2001).
+
+**Phase issues:** Phase 1 → #1999, Phase 2 → #2000, Phase 3 → #2001 (each feeds
+its own `/do-plan`; this document is their shared design input, and #2001's
+dev-lane framing supersedes any whole-session wording below where they conflict).
 
 ## Freshness Check
 
@@ -127,7 +133,7 @@ Target flow after Phase 2 (harness-agnostic; today's flow is identical minus the
 ## Architectural Impact
 
 - **New dependencies**: none in Phases 1-2; Phase 3 adds the `codex` CLI binary (npm/brew, opt-in per machine) — no Python package.
-- **Interface changes**: `get_response_via_harness` (sdk_client) is superseded by `HarnessAdapter.run_turn` for the runner path; `AgentSession` gains a nullable `harness` field (Phase 3) and `claude_session_uuid` is generalized in meaning to "resume handle" (field name kept — no migration; see Popoto note in Update System).
+- **Interface changes**: `get_response_via_harness` (sdk_client) is superseded by `HarnessAdapter.run_turn` for the runner path; `AgentSession` gains nullable dev-lane fields (dev-harness opt-in + codex `thread_id`, Phase 3) and `claude_session_uuid` is generalized in meaning to "resume handle" (field name kept — no migration; see Popoto note in Update System).
 - **Coupling**: decreases — runner stops importing claude-specific parsing; all CLI knowledge lives in one adapter module per harness.
 - **Data ownership**: unchanged — session_runner still owns subprocess lifecycle and the single authoritative liveness signal (per the single-authoritative-liveness rule).
 - **Reversibility**: Phase 2 is a refactor with byte-equivalent argv as the acceptance bar (easy revert per commit); Phase 3 is additive and gated behind an opt-in field defaulting to `claude`.
@@ -158,7 +164,7 @@ Run via `python scripts/check_prerequisites.py docs/plans/harness-cross-compat.m
 
 - **Phase 1 — Cleanup & issue hygiene**: execute the 2026-07-10 issue-survey verdicts (close 4, edit 3), fix the 3 fold-in bugs living in the resume/liveness seam, and leave the runner surface green and honest before refactoring it.
 - **Phase 2 — HarnessAdapter seam**: extract the runner's claude -p knowledge into a `ClaudeHarnessAdapter` behind a small protocol; normalize turn events to a codex-ThreadEvent-shaped model; move PM routing from prefix tokens to `--json-schema` structured output; verify and simplify resume semantics.
-- **Phase 3 — CodexHarnessAdapter**: second implementation of the same protocol driving `codex exec --json` / `exec resume`, with explicit capability degradation (no hooks, no compaction, sandbox mapping) and an opt-in per-session selection field (policy TBD).
+- **Phase 3 — CodexHarnessAdapter (dev-lane only)**: second implementation of the same protocol driving `codex exec --json` / `exec resume`, wired as an opt-in executor for dev work *inside* eng sessions — the PM (claude, top-level) drives an external codex dev session instead of the in-turn `dev` subagent. Explicit capability degradation (no hooks, no compaction, sandbox mapping); manual selection only.
 
 ### Flow
 
@@ -179,12 +185,14 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 - Hook edge (`hook_edge.py`) declared a claude capability: adapters expose `turn_end` reconciliation behind the protocol; codex path later uses `turn.completed` alone.
 - Coordination with #1925: this extraction IS the harness half of #1925; comment on the issue linking this plan; do not remove `claude_code_sdk` here.
 
-**Phase 3 (codex adapter, opt-in):**
-- `harness/codex.py`: first turn `codex exec --json --output-schema <schema> -C <cwd> <prompt>`, capture `thread.started.thread_id` as the resume handle; later turns `codex exec resume <thread_id> --json ...`. Never pass `--ephemeral`. Sandbox default `workspace-write` inside worktrees; `danger-full-access` requires an explicit setting (mirrors our bypassPermissions posture but stays codex-native). Approvals pinned `never` (headless reality).
-- Role priming: no slash commands in codex — prime via the first-turn prompt body (reuse the prime-role markdown content verbatim as prompt text) and/or repo `AGENTS.md`; decision recorded in build.
-- Capability degradation: no hooks → turn-end = `turn.completed`; no compaction → context-growth guard (max resumed turns per codex session before forced fresh-session summary handoff — provisional, env-overridable constant); steering unchanged (kill + resume is already our mechanism).
-- Selection: nullable `AgentSession.harness` field (default `claude`), `valor-session create --harness codex`, sticky for the session's lifetime (resume handles are not portable across harnesses). Selection *policy* beyond the manual flag is explicitly TBD (Open Question 1).
-- Auth: `~/.codex/auth.json` (ChatGPT plan) preferred, `CODEX_API_KEY` fallback — mirroring our subscription-first posture; adapter fails fast with an actionable message when neither is present.
+**Phase 3 (codex adapter, opt-in dev lane — #2001 supersedes on conflict):**
+- Scope (owner decision 2026-07-10): codex applies ONLY to dev work inside eng sessions. Top-level bridge-connected sessions (PM, teammate) are claude-only, unconditionally. The PM routes dev work to an external codex session instead of spawning the in-turn `dev` Agent-tool subagent when the session is flagged.
+- `harness/codex.py`: first turn `codex exec --json --output-schema <schema> -C <worktree> <prompt>`, capture `thread.started.thread_id` as the resume handle; later turns `codex exec resume <thread_id> --json ...`. Never pass `--ephemeral`. Sandbox default `workspace-write` inside the dev worktree; `danger-full-access` requires an explicit setting. Approvals pinned `never` (headless reality). Version gate at adapter init, recorded like `claude_version`.
+- Dev priming: no slash commands in codex — prime via the first-turn prompt body (reuse the dev rails/persona content as prompt text) and/or repo `AGENTS.md`; decision recorded in build.
+- Continuity: the codex `thread_id` persists alongside the existing resume scalars so the dev lane survives PM turns and process restarts — the same guarantee `dev_agent_id` provides for the claude dev subagent today. Exact PM-facing mechanism (persona instruction + wrapper tool vs. runner-managed) is a #2001 planning decision.
+- Selection — manual only (owner decision 2026-07-10): per-session opt-in at creation (e.g. `valor-session create --dev-harness codex`), immutable once dev work starts (resume handles are not portable across harnesses). Eventual selection policy (per-project `projects.json` config, heuristics, or permanent manual) is deliberately left open — carried in #2001, not resolved by this plan.
+- Auth (owner decision 2026-07-10): subscription-first — `~/.codex/auth.json` (ChatGPT-plan OAuth, one-time human login per machine) preferred, `CODEX_API_KEY` from the vault `.env` as backup; adapter fails fast with an actionable message when neither is present.
+- Required follow-up filing (owner decision 2026-07-10): as part of Phase 3's acceptance, file a follow-up issue to evaluate removing Phase 2's prefix-regex routing fallback, scheduled one week after schema routing landed, decided on `schema_routing_fallback` telemetry.
 
 ## Failure Path Test Strategy
 
@@ -214,7 +222,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 ## Rabbit Holes
 
-- **Porting the dev subagent to codex.** The in-turn continuable `dev` Agent-tool subagent is a claude-native capability with no codex equivalent. Do not attempt to emulate it; a codex-substrate session is a *single-agent* session (or PM-drives-external-codex-dev, a separate future design). Scope guard: Phase 3 targets sessions that don't require the dev-subagent pattern first (teammate/conversational), eng support is conditional on Open Question 2.
+- **Emulating the in-turn dev subagent on codex.** The in-turn continuable `dev` Agent-tool subagent is a claude-native capability with no codex equivalent. Phase 3's design is PM-drives-*external*-codex-dev (which codex's stable thread_id handles natively) — do not attempt to recreate sidechain/Agent-tool semantics, nested subagents, or hook-based turn signaling inside the codex lane.
 - **Building a universal event superset.** Normalize only what the runner consumes (liveness stamps, turn boundaries, usage, final output, error). Do not model every claude/codex event type "for completeness."
 - **PydanticAI-ifying the harness.** #1925's PydanticAI half is for *non-harness* LLM calls; harness sessions stay raw CLI subprocesses (two-transport rule). Don't blend them.
 - **Automatic harness-selection heuristics.** Explicitly TBD; anything beyond the manual per-session flag is out of scope (Open Question 1).
@@ -248,12 +256,12 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 **State prerequisite:** Crash auto-resume reads only persisted scalars.
 **Mitigation:** Preserve persist-at-init through the adapter: adapters MUST emit the normalized `session.started{handle}` event as their first event, and the runner persists on receipt. Codex: `thread.started` is documented first-event, same guarantee.
 
-### Race 2: Harness switch mid-session
-**Location:** new `AgentSession.harness` field consumption in `session_executor`.
-**Trigger:** Session created with harness A, field mutated (or default changed) before a resume; handle from A fed to B.
-**Data prerequisite:** Resume handle is only meaningful to the harness that minted it.
-**State prerequisite:** Harness is immutable once the first turn has run.
-**Mitigation:** Executor resolves harness ONCE at session start and persists it with the resume scalars; on resume, persisted harness wins over field/default; mismatch → discard resume context, cold-start (mirrors the existing invalid-scalar discard rule at `runner.py:418-422`).
+### Race 2: Dev-lane harness switch mid-session
+**Location:** new dev-harness opt-in consumption in `session_executor` / PM dev-routing.
+**Trigger:** Eng session created with dev-lane A (claude subagent), flag mutated (or default changed) before a resume; a claude `dev_agent_id` fed to the codex adapter or a codex `thread_id` fed to Agent-tool continuation.
+**Data prerequisite:** A dev resume handle is only meaningful to the executor that minted it.
+**State prerequisite:** The dev-lane choice is immutable once dev work has started.
+**Mitigation:** Executor resolves the dev harness ONCE at session start and persists it with the resume scalars; on resume, the persisted value wins over field/default; mismatch → discard the dev resume handle, PM starts a fresh dev lane (mirrors the existing invalid-scalar discard rule at `runner.py:418-422`).
 
 ### Race 3: Schema temp-file lifetime vs. spawned process
 **Location:** new schema-arg assembly in `harness/claude.py` / `codex.py`.
@@ -267,21 +275,22 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 - [SEPARATE-SLUG #1968] Deleting dead `SessionRunnerSettings.pm_model`/`dev_model` — belongs to that issue's Part-2 dead-field inventory; Phase 1 edits the issue to include them.
 - [SEPARATE-SLUG #1926] Broad liveness/Sentry scar-tissue removal — Phase 1's fold-ins (#1983, #1855) execute inside its direction; the umbrella stays independent.
 - [SEPARATE-SLUG #1370] Outbound send-path consolidation — this plan produces the routed payload; #1370 owns delivery-path canonicalization.
-- Codex as the dev subagent inside a claude PM turn, or any dev-subagent emulation on codex — future design if ever (see Rabbit Holes).
-- Automatic harness-selection policy (cost/latency/capability heuristics) — explicitly TBD by the owner; only the manual per-session flag ships in Phase 3.
+- Codex for any top-level bridge-connected session (PM or teammate) — claude-only by owner decision (2026-07-10); codex is reachable exclusively through the eng dev lane.
+- Dev-subagent *emulation* on codex (Agent-tool/sidechain semantics) — the external-executor design is the scope (see Rabbit Holes).
+- Automatic harness-selection policy (cost/latency/capability heuristics) — deliberately left open by the owner; only the manual per-session flag ships in Phase 3, and the open question is carried in #2001.
 - [EXTERNAL] codex ChatGPT-plan OAuth login on each machine — one-time human step per machine; the update system installs the binary and validates, a human completes login.
 
 ## Update System
 
 - **Phase 1-2:** No update system changes required — internal refactor; existing launchd plists, env, and deps are untouched.
 - **Phase 3:** `/update` (`scripts/update/run.py`) gains an opt-in step: install/upgrade the codex CLI (npm or brew) on machines whose `projects.json`/machine config opts in, then validate `codex --version` ≥ pinned minimum and warn (not block) when `~/.codex/auth.json` is absent. New settings fields (`SessionRunnerSettings.codex_*`: min version, sandbox default, max resumed turns — all env-overridable, marked provisional) propagate via `config/settings.py` defaults; no `.env` secret required unless a machine chooses `CODEX_API_KEY` (then: vault `.env` + `.env.example` placeholder + settings field per the secrets convention).
-- **Popoto migration:** new nullable `AgentSession.harness` field needs no migration code — `_heal_descriptor_pollution` handles nullable field additions generically (issues #1099/#1172). No `MIGRATIONS` entry required; state this in the PR description.
+- **Popoto migration:** the new nullable dev-lane fields (dev-harness opt-in + codex `thread_id` resume scalar) need no migration code — `_heal_descriptor_pollution` handles nullable field additions generically (issues #1099/#1172). No `MIGRATIONS` entry required; state this in the PR description.
 
 ## Agent Integration
 
 - No new MCP servers and no `.mcp.json` changes.
-- Phase 3: `valor-session create` (`tools/valor_session.py`, existing `pyproject.toml` script) gains `--harness {claude|codex}`; the bridge needs no changes (harness resolution happens in the worker/executor).
-- Integration test: `valor-session create --harness codex` (on a codex-provisioned machine) runs a probe session end-to-end; skipped via `which codex` guard elsewhere.
+- Phase 3: `valor-session create` (`tools/valor_session.py`, existing `pyproject.toml` script) gains a dev-lane opt-in (e.g. `--dev-harness codex`, eng sessions only); the bridge needs no changes (resolution happens in the worker/executor, and top-level sessions never consult it).
+- Integration test: a flagged eng session (on a codex-provisioned machine) completes dev work end-to-end; skipped via `which codex` guard elsewhere.
 - Phase 2's routing change touches the PM prime (`.claude/commands/roles/prime-pm-role.md`) — the agent-facing contract moves from "emit `[/user]` prefix" to "your final message is schema-validated"; same PR, no parallel conventions.
 
 ## Documentation
@@ -300,7 +309,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 - [ ] Phase 1: 4 issues closed with evidence comments, 3 issues edited, #1979/#1983/#1855 fixed, heartbeat suite green
 - [ ] Phase 2: golden argv test proves extraction is behavior-preserving; PM routing driven by `--json-schema` with regex fallback; resume-id behavior empirically recorded and capture-at-init simplified or alarm-fitted accordingly; runner imports no claude-specific parsing outside `harness/claude.py`
-- [ ] Phase 3: `valor-session create --harness codex` completes a real multi-turn probe session (create → steer → resume → complete) on a provisioned machine; absent binary/auth fails fast with an actionable message
+- [ ] Phase 3: a dev-lane-flagged eng session completes real dev work on codex end-to-end (incl. process-restart resume via persisted thread_id) on a provisioned machine; absent binary/auth fails fast with an actionable message; top-level sessions cannot reach codex; fallback-removal follow-up issue filed
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 - [ ] Anti-criteria rows below pass (no prefix-token teaching left in the PM prime; no raw claude argv outside the adapter)
@@ -346,7 +355,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 - **Parallel**: false
 - #1979: clear `response_delivered_at` (and audit sibling run-scoped sticky fields) on `resume_session`, or scope the delivery guard to the current attempt — pick the smaller correct fix
 - #1983: root-cause and fix the 3 red heartbeat-progress tests; suite green is the phase gate
-- #1855: decide with owner-recorded rationale (delete stall actuation per #1926 direction, or unflag always-on); remove `FEATURES__STALL_RECOVERY_ENABLED` either way; update stale PTY-era comments in touched code
+- #1855: disposition NOT pre-decided (owner, 2026-07-10) — the Phase 1 plan step researches (post-cutover failure telemetry, #1926's direction, whether the actuator ever fired usefully) and decides between deleting the stall actuation and unflagging it always-on; remove `FEATURES__STALL_RECOVERY_ENABLED` either way; update stale PTY-era comments in touched code
 
 ### 1.4 Phase 1 validation
 - **Task ID**: p1-validate
@@ -401,34 +410,35 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 ### 3.1 Codex adapter
 - **Task ID**: p3-codex-adapter
-- **Depends On**: p2-validate (and Open Questions 1-2 answered)
+- **Depends On**: p2-validate (detailed via #2001's own `/do-plan`)
 - **Validates**: tests/unit/session_runner/test_codex_adapter.py (create, JSONL fixtures)
 - **Assigned To**: codex-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Implement `harness/codex.py` per Technical Approach (exec/resume loop, `--output-schema`, sandbox mapping, `turn.failed` mapping, version gate, fail-fast on missing binary/auth)
-- Role priming via first-turn prompt body; document the decision
+- Implement `harness/codex.py` per Technical Approach (exec/resume loop, `--output-schema`, sandbox mapping, `turn.failed` mapping, version gate, fail-fast on missing binary/auth — subscription-first, `CODEX_API_KEY` backup)
+- Dev priming via first-turn prompt body; document the decision
 - Bounded-resume context guard (provisional env-overridable constant)
 
-### 3.2 Selection wiring + update system
-- **Task ID**: p3-selection
+### 3.2 Dev-lane wiring + update system
+- **Task ID**: p3-dev-lane
 - **Depends On**: p3-codex-adapter
-- **Validates**: tests/unit for harness resolution + Race 2 mismatch discard
+- **Validates**: tests/unit for dev-harness resolution + Race 2 mismatch discard
 - **Assigned To**: codex-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Nullable `AgentSession.harness` field (no migration needed — nullable, healed generically); executor resolves once, persists with resume scalars; mismatch → cold-start
-- `valor-session create --harness`; `/update` opt-in codex install + version/auth validation step
-- Settings: `codex_*` fields, env-overridable, marked provisional
+- Per-session dev-lane opt-in (e.g. `valor-session create --dev-harness codex`, eng only); nullable fields (no migration — healed generically); executor resolves once, persists with resume scalars incl. codex `thread_id`; mismatch → fresh dev lane
+- PM dev-routing: flagged sessions route dev work to the codex executor instead of spawning the `dev` subagent; exact mechanism per #2001's plan
+- `/update` opt-in codex install + version/auth validation step; settings: `codex_*` fields, env-overridable, marked provisional
+- File the follow-up issue: evaluate removing the prefix-regex routing fallback one week after Phase 2's schema routing landed (telemetry-driven) — required by owner decision
 
 ### 3.3 Phase 3 validation + E2E probe
 - **Task ID**: p3-validate
-- **Depends On**: p3-selection
+- **Depends On**: p3-dev-lane
 - **Assigned To**: phase-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- On a codex-provisioned machine: full probe session (create → multi-turn → steer/kill-resume → complete) via `--harness codex`; verify telemetry, liveness stamps, delivery
-- Verify claude-path regression: default sessions unchanged
+- On a codex-provisioned machine: a flagged eng session completes real dev work end-to-end (create → multi-turn → PM steer → process-restart resume via persisted thread_id → complete); verify telemetry, liveness stamps, delivery
+- Verify claude-path regression: default sessions unchanged; top-level sessions provably cannot reach codex
 
 ### N-1. Documentation
 - **Task ID**: document-feature
@@ -458,7 +468,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 | Golden argv test exists (P2) | `pytest tests/unit/session_runner/test_harness_argv_golden.py -q` | exit code 0 |
 | No prefix-token teaching in PM prime (P2) | `grep -c "\[/user\]" .claude/commands/roles/prime-pm-role.md` | match count == 0 |
 | No claude argv outside adapter (P2) | `grep -rn '"claude", "-p"' agent/ --include="*.py" \| grep -vc harness/` | match count == 0 |
-| Harness field resolved once (P3) | `pytest tests/unit -k "harness_resolution" -q` | exit code 0 |
+| Dev-harness resolved once (P3) | `pytest tests/unit -k "dev_harness_resolution" -q` | exit code 0 |
 | Codex fixtures pass (P3) | `pytest tests/unit/session_runner/test_codex_adapter.py -q` | exit code 0 |
 
 ## Critique Results
@@ -469,10 +479,12 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 ---
 
-## Open Questions
+## Decisions (Owner, 2026-07-10)
 
-1. **Harness selection policy (Phase 3 gate).** The manual `valor-session create --harness codex` flag is the only mechanism this plan ships. What should the eventual policy be — owner-manual only for now, per-project config in `projects.json`, or a future cost/capability heuristic? (Plan assumes: manual only, policy TBD later.)
-2. **Which session types may run on codex?** The dev subagent is claude-native, so a codex eng session loses the PM/dev split and runs single-agent. Restrict codex to teammate/conversational sessions initially, or allow single-agent eng sessions too? (Plan assumes: teammate first, eng behind the same flag with a documented capability note.)
-3. **Codex auth posture.** ChatGPT-plan subscription auth (`~/.codex/auth.json`, human OAuth per machine) to mirror our subscription-first rule, or `CODEX_API_KEY` in the vault `.env` for zero-touch provisioning? (Plan assumes: subscription-first, API key as explicit fallback.)
-4. **Schema routing cutover depth (Phase 2).** When schema routing lands, the prefix regex remains as a runtime fallback. Is that acceptable under the no-parallel-migrations rule, or should the fallback be removed after one clean week and the compliance nudge become the only backstop? (Plan assumes: fallback stays as a guard with telemetry; removal decision data-driven.)
-5. **#1855 disposition.** Delete the stall-advisory actuation machinery (per #1926's happy-path direction) or unflag it always-on? Phase 1 needs the call; the plan leans delete.
+All open questions resolved; incorporated throughout the plan and into the phase issues (#1999, #2000, #2001):
+
+1. **Harness selection policy:** manual only for now. The eventual policy remains a deliberately open question, carried in #2001 — not resolved by this plan.
+2. **Session types:** codex applies ONLY to dev eng subsessions. Every top-level session connected to bridge messaging (PM, teammate) is claude-only. Phase 3 reframed from whole-session harness swap to PM-drives-external-codex-dev; #2001 supersedes any residual whole-session wording here.
+3. **Codex auth:** subscription plan (`~/.codex/auth.json`) with `CODEX_API_KEY` as backup.
+4. **Prefix-regex fallback:** stays at Phase 2 landing; Phase 3's acceptance criteria include filing a follow-up issue to evaluate its removal one week after schema routing lands (telemetry-driven).
+5. **#1855 disposition:** not pre-decided — Phase 1's plan step does further research and decides.
