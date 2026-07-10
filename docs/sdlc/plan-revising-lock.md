@@ -12,8 +12,16 @@ The flag activates guard G7 in `agent/sdlc_router.py`, which blocks `/do-build` 
 
 | Who | When | Action |
 |-----|------|--------|
-| `/do-plan-critique` Step 5.6 | Verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with concerns) AND `revision_applied` not yet true | `sdlc-tool meta-set --key plan_revising --value true --issue-number N` |
-| `/do-plan` Phase 4 Step 2b | After committing the revised plan and writing `revision_applied: true` to frontmatter | `sdlc-tool meta-set --key plan_revising --value false --issue-number N` |
+| `/do-plan-critique` Step 5.6 | Verdict is NEEDS REVISION, MAJOR REWORK, or READY TO BUILD (with concerns) AND `revision_applied` not yet true | `sdlc-tool meta-set --key plan_revising --value true --issue-number N --run-id "$RUN_ID"` |
+| `/do-plan` Phase 4 Step 2b | After committing the revised plan and writing `revision_applied: true` to frontmatter | `sdlc-tool meta-set --key plan_revising --value false --issue-number N --run-id "$RUN_ID"` |
+
+Run identity (#2003): every state-mutating `sdlc-tool` call on this page
+carries `--run-id "$RUN_ID"` — supplied by the invoking supervisor (`/do-sdlc`
+or `/sdlc` carries it from `session-ensure`). When operating standalone (no
+supervisor, e.g. the manual recovery below), run
+`sdlc-tool session-ensure --issue-number N` once and use the emitted `run_id`
+(`ISSUE_LOCKED` means another live run owns the issue — stop and report).
+Read-only calls (`stage-query`) take no run-id.
 
 **Important:** `plan_revising` and `revision_applied` must move together. Both reflect "the plan is settled." If the lock-clear step is skipped (e.g. skill crash after `revision_applied: true` was written), G7 self-heals automatically via the `revision_applied` conjunction.
 
@@ -35,7 +43,7 @@ If the lock is stuck (critique set it but no plan dispatch occurred):
 
 ```bash
 # Clear the lock manually
-sdlc-tool meta-set --key plan_revising --value false --issue-number N
+sdlc-tool meta-set --key plan_revising --value false --issue-number N --run-id "$RUN_ID"
 
 # Verify it was cleared
 sdlc-tool stage-query --issue-number N | python -c "import sys,json; d=json.load(sys.stdin); print(d['_meta']['plan_revising'])"
@@ -52,14 +60,14 @@ The hash is set by `/do-build` Step 7 and verified at Step 21:
 PLAN_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
 git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
 PLAN_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number N
+sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number N --run-id "$RUN_ID"
 
 # Step 21: verify (aborts if changed)
 CURRENT_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
 STORED_HASH=$(sdlc-tool stage-query --issue-number N | python -c "...")
 if [ -n "$STORED_HASH" ] && [ "$CURRENT_HASH" != "$STORED_HASH" ]; then
   echo "BUILD ABORT: plan revised mid-build"
-  sdlc-tool stage-marker --stage BUILD --status failed --issue-number N
+  sdlc-tool stage-marker --stage BUILD --status failed --issue-number N --run-id "$RUN_ID"
   exit 1
 fi
 ```

@@ -9,9 +9,18 @@ The leaned body refers to these abstractly; here are the concrete invocations.
 plan is committed and pushed (end of Phase 4):
 
 ```bash
-sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number {issue_number} 2>/dev/null || true
-sdlc-tool stage-marker --stage PLAN --status completed   --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage PLAN --status in_progress --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+sdlc-tool stage-marker --stage PLAN --status completed   --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
 ```
+
+Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+carries `--run-id {run_id}` — supplied by the invoking supervisor (`/do-sdlc`
+or `/sdlc` carries it from `session-ensure`). When this skill is invoked
+standalone (no supervisor), run
+`sdlc-tool session-ensure --issue-number {issue_number}` once at the start and
+use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
+stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
+take no run-id.
 
 **Cross-repo `gh` targeting.** `GH_REPO` is set automatically by `sdk_client.py`;
 `gh` respects it — no `--repo` flags needed.
@@ -45,7 +54,7 @@ archived). Prerequisite checker: `python scripts/check_prerequisites.py docs/pla
 build:
 
 ```bash
-sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool meta-set --key plan_revising --value false --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
 ```
 
 ## Popoto Schema Migration Requirement

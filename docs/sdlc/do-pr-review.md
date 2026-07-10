@@ -40,8 +40,17 @@ python -c "from agent.worktree_manager import ensure_clean_git_state; from pathl
 `ISSUE_NUMBER`), parse degraded mode:
 
 ```bash
-sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER"
+sdlc-tool stage-marker --stage REVIEW --status in_progress --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 ```
+
+Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+carries `--run-id "$RUN_ID"` — supplied by the invoking supervisor (`/do-sdlc`
+or `/sdlc` carries it from `session-ensure`). When this skill is invoked
+standalone (no supervisor), run
+`sdlc-tool session-ensure --issue-number "$ISSUE_NUMBER"` once at the start and
+use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
+stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
+take no run-id.
 
 **Verification-table runner (§ 4.5):**
 
@@ -70,13 +79,13 @@ pass `--issue-number` (quoted) — it is the authoritative session selector:
 
 ```bash
 # APPROVED (status=success) — verdict + completion marker are ONE block (#1642):
-sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
-sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER"
+sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+sdlc-tool stage-marker --stage REVIEW --status completed --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 # Findings:
-sdlc-tool verdict record --stage REVIEW --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --issue-number "$ISSUE_NUMBER"
+sdlc-tool verdict record --stage REVIEW --verdict "CHANGES REQUESTED" --blockers $BLOCKERS --tech-debt $TECH_DEBT --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 # Preflight short-circuits:
-sdlc-tool verdict record --stage REVIEW --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
-sdlc-tool verdict record --stage REVIEW --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER"
+sdlc-tool verdict record --stage REVIEW --verdict "BLOCKED_ON_CONFLICT" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
+sdlc-tool verdict record --stage REVIEW --verdict "PR_CLOSED" --blockers 0 --tech-debt 0 --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 # Multi-judge: ONE record call with --judges-json/--consensus-json after
 # agent.sdlc_review_consensus.compute_consensus (single-writer invariant).
 # Read back to confirm persistence before emitting the OUTCOME block:
@@ -123,7 +132,7 @@ These are hard gates. No exceptions.
 
 ## Mandatory Finalize — Verdict + Marker Co-Write (#1642)
 
-On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ...` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ...` in the same block. Never record an APPROVED verdict without immediately writing the completion marker.
+On the approval path, the REVIEW verdict record AND the REVIEW completion marker are a **single, self-contained, mandatory block**: `sdlc-tool verdict record --stage REVIEW --verdict "APPROVED" ... --run-id "$RUN_ID"` is immediately followed by `sdlc-tool stage-marker --stage REVIEW --status completed ... --run-id "$RUN_ID"` in the same block. Never record an APPROVED verdict without immediately writing the completion marker.
 
 This closes the #1642 desync: if the marker write is a separable later step and the skill exits before reaching it, the REVIEW marker stays non-`completed` while the verdict says APPROVED. Router **row 9** (`_rule_review_approved_docs_not_done`) requires `REVIEW == completed` **and** a recorded `APPROVED` verdict (issue #1932 tightened the gate — `REVIEW == completed` alone is no longer sufficient, since a crashed re-review can leave REVIEW `completed` with no verdict at all), so a desynced state stalls `/do-docs` — the skill-layer completion-marker write is what advances REVIEW. On any non-APPROVED verdict, leave the marker at `in_progress`.
 

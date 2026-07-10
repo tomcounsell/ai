@@ -121,6 +121,7 @@ Context:
 - PR: {#pr or "none yet"}
 - Plan: {docs/plans/{slug}.md or "none yet"}
 - Prior stage outcome: {one-line summary, or "None — first stage"}
+- Run identity: {run_id} — pass --run-id {run_id} on every state-mutating sdlc-tool call (stage-marker, verdict record, meta-set, dispatch record); read-only calls take none.
 
 When done, report back (this is data for the supervisor, not prose for a human):
 - outcome: success | failure
@@ -129,7 +130,7 @@ When done, report back (this is data for the supervisor, not prose for a human):
 - failures: test failures, blockers, or errors verbatim if any
 ```
 
-Carry forward context between iterations: once BUILD reports a PR number, include it in every subsequent prompt and in `dispatch record --pr-number`.
+Carry forward context between iterations: the `run_id` goes into every stage prompt, and once BUILD reports a PR number, include it in every subsequent prompt and in `dispatch record --pr-number`.
 
 ### 3d. Backfill stage markers (TEST and PATCH only)
 
