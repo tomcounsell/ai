@@ -257,6 +257,74 @@ def _gh_pr_list(args: list[str], repo: str | None = None) -> int | None:
     return None
 
 
+def _body_references_issue(body: str | None, issue_number: int) -> bool:
+    """Return True iff ``body`` contains a closing-keyword reference to the issue.
+
+    Matches a word-boundary GitHub closing keyword (``close``/``closes``/``closed``,
+    ``fix``/``fixes``/``fixed``, ``resolve``/``resolves``/``resolved``, case-insensitive)
+    immediately followed by ``#{issue_number}`` with no trailing digit. The trailing
+    ``(?!\\d)`` negative lookahead is the numeric boundary that prevents ``#195`` from
+    matching a body that says ``Closes #1950``. Empty/None body → False.
+
+    A bare ``#N`` mention with no closing keyword is intentionally NOT a match: fuzzy
+    ``gh pr list --search "#N"`` tokenizes the digits and can surface an unrelated PR,
+    so a literal closing-keyword reference is required to trust the match.
+    """
+    if not body:
+        return False
+    pattern = re.compile(
+        rf"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b[:\s]+#{issue_number}(?!\d)",
+        re.IGNORECASE,
+    )
+    return pattern.search(body) is not None
+
+
+def _gh_pr_search_issue_ref(issue_number: int, repo: str | None = None) -> int | None:
+    """Search open PRs for ``#{issue_number}`` and return the first whose body validates.
+
+    Runs ``gh pr list --search "#{issue_number}" --state open --json number,body`` and
+    iterates the returned candidates in order, returning the ``number`` of the first PR
+    whose ``body`` passes :func:`_body_references_issue`. Fuzzy search alone is untrusted:
+    it can return an unrelated PR whose text merely contains the digits, so the body must
+    carry a literal ``Closes/Fixes/Resolves #{issue_number}`` reference to be trusted.
+
+    Returns the validated PR number, or None on any failure or when no candidate validates.
+    Never raises.
+    """
+    try:
+        cmd = ["gh", "pr", "list", "--search", f"#{issue_number}", "--state", "open"]
+        if repo:
+            cmd = [
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                repo,
+                "--search",
+                f"#{issue_number}",
+                "--state",
+                "open",
+            ]
+        cmd += ["--json", "number,body"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        if proc.returncode != 0:
+            return None
+        prs = json.loads(proc.stdout or "[]")
+        if not isinstance(prs, list):
+            return None
+        for pr in prs:
+            if not isinstance(pr, dict):
+                continue
+            number = pr.get("number")
+            if not isinstance(number, int):
+                continue
+            if _body_references_issue(pr.get("body"), issue_number):
+                return number
+    except Exception as e:
+        logger.debug(f"_gh_pr_search_issue_ref failed: {e}")
+    return None
+
+
 def _lookup_pr_number(
     issue_number: int | None, slug: str | None = None, repo: str | None = None
 ) -> int | None:
@@ -264,17 +332,22 @@ def _lookup_pr_number(
 
     Resolution order (D4):
     1. Issue-number search (``gh pr list --search "#{issue_number}"``) —
-       primary path; resolves PRs whose body references the issue.
+       primary path; returns a PR only when its body carries a literal
+       word-boundary closing-keyword reference (``Closes/Fixes/Resolves
+       #{issue_number}``) to the exact issue. Fuzzy search matches alone are
+       NOT trusted (they can surface an unrelated PR whose text merely contains
+       the digits); validation runs in :func:`_gh_pr_search_issue_ref`.
     2. Branch-head fallback (``gh pr list --head session/{slug}``) — recovers
        out-of-band PRs whose body never referenced the issue. Uses the
        canonical SDLC branch shape ``session/{slug}`` (NOT a fabricated
-       ``session/sdlc-{issue_number}`` form this repo never creates); only
-       runs when a slug is available.
+       ``session/sdlc-{issue_number}`` form this repo never creates); an exact
+       head-ref match needs no body validation. Only runs when a slug is
+       available.
 
     Returns the PR number or None. Never raises.
     """
     if issue_number:
-        pr = _gh_pr_list(["--search", f"#{issue_number}", "--state", "open"], repo=repo)
+        pr = _gh_pr_search_issue_ref(issue_number, repo=repo)
         if pr is not None:
             return pr
 
