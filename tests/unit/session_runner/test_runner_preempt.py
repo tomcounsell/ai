@@ -22,6 +22,7 @@ import signal
 
 from agent.session_runner.adapter import SessionRunnerAdapter
 from agent.session_runner.role_driver import HeadlessTurnOutcome
+from agent.session_runner.router import ExitReason, TurnFailure
 from agent.session_runner.runner import (
     TIMEOUT_NEEDS_ATTENTION_MESSAGE,
     SessionRunner,
@@ -65,7 +66,8 @@ class KillableDriver:
             await self.kill_event.wait()
             # Emulates the harness observing the signaled subprocess.
             return HeadlessTurnOutcome(
-                reply_text="", exit_reason="headless_subprocess_error: signaled"
+                reply_text="",
+                failure=TurnFailure(ExitReason.HEADLESS_SUBPROCESS_ERROR, "signaled"),
             )
         reply = self.script.pop(0) if self.script else "[/user]\ndone"
         return HeadlessTurnOutcome(reply_text=reply, turn_ended=True, turn_end_source="result")
@@ -127,7 +129,7 @@ async def test_steer_preempt_kills_turn_and_resumes_with_steer():
     assert driver.calls[1] == "actually target staging"
     # …and the resumed turn's answer was delivered.
     assert deliveries == ["adjusted per your steer"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     # Turn record: preempted, with PID recorded pre-await (Race 2).
     events = {e["type"]: e for e in session.session_events}
     assert events["runner_turn_spawned"]["pid"] == 4242
@@ -193,7 +195,7 @@ async def test_kill_before_spawn_cancels_task_cooperatively():
     assert kills == []  # nothing to signal — cooperative cancel path
     assert driver.calls[1] == "redirect"
     assert deliveries == ["after steer"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
 
 
 # --------------------------------------------------------------------------
@@ -255,7 +257,7 @@ async def test_steer_during_completion_drains_at_boundary_no_kill():
     summary = await runner.run("task")
     assert kills == []  # generation/done guard held
     assert deliveries == ["natural finish"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     # The undelivered steer is pushed back to the steering list on loop exit
     # (PR #1930 review, A7) — the executor's leftover-steering re-enqueue
     # drains only the Redis list, so retaining it in-memory would drop it.
@@ -319,7 +321,7 @@ async def test_watcher_exception_does_not_kill_the_turn(caplog):
     with caplog.at_level("WARNING"):
         summary = await runner.run("task")
     assert deliveries == ["intact"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     assert any("watcher" in r.message for r in caplog.records)
 
 
@@ -343,7 +345,7 @@ async def test_empty_steer_mid_turn_is_ignored_turn_not_killed():
     summary = await runner.run("task")
     assert kills == []
     assert deliveries == ["uninterrupted"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
 
 
 # --------------------------------------------------------------------------
