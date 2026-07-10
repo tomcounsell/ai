@@ -152,7 +152,7 @@ def get_confidence_ranked(
                 data = msgpack.unpackb(packed_data, raw=False)
                 confidence = float(data.get("confidence", 0.5))
                 entries.append((str_key, confidence))
-            except Exception:
+            except Exception:  # noqa: S112 -- memory ops silent by design
                 continue
 
         # Filter to project scope (project_key is embedded in Redis keys)
@@ -327,7 +327,7 @@ def retrieve_memories(
                 from analytics.collector import record_metric
 
                 record_metric("memory.recall_attempt", 1, {"hits": 0, "project_key": project_key})
-            except Exception:
+            except Exception:  # noqa: S110 -- optional analytics telemetry
                 pass
             return []
 
@@ -340,7 +340,7 @@ def retrieve_memories(
                     # Attach RRF score for downstream use (_apply_category_weights)
                     record.score = rrf_score
                     records.append(record)
-            except Exception:
+            except Exception:  # noqa: S112 -- memory ops silent by design
                 continue
 
         # Filter out superseded records — archived memories remain in Redis for audit
@@ -353,7 +353,7 @@ def retrieve_memories(
 
             dims = {"hits": len(records), "project_key": project_key}
             record_metric("memory.recall_attempt", 1, dims)
-        except Exception:
+        except Exception:  # noqa: S110 -- optional analytics telemetry
             pass
 
         return records

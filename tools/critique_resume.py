@@ -98,7 +98,7 @@ def find_reusable_run(
         hash_file = candidate / ".plan_hash"
         try:
             stored_hash = hash_file.read_text(encoding="utf-8").strip()
-        except Exception:
+        except Exception:  # noqa: S112 -- unknown plan hash: skip (documented)
             # Missing or unreadable .plan_hash → skip (not stale, just unknown)
             continue
 
@@ -111,7 +111,7 @@ def find_reusable_run(
         # --- Gate check ---
         try:
             decision, _rc = evaluate(run_dir)
-        except Exception:
+        except Exception:  # noqa: S112 -- defensive; evaluate should not raise
             # evaluate() should never raise, but be defensive
             continue
 

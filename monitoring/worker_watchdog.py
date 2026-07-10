@@ -142,7 +142,7 @@ def _get_worker_pid() -> int | None:
                 pids = [int(p) for p in result.stdout.split() if p.strip().isdigit()]
                 if pids:
                     return pids[0]
-        except Exception:
+        except Exception:  # noqa: S110 -- falls through to next pgrep pattern
             pass
     return None
 

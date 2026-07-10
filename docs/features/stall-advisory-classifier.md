@@ -52,7 +52,7 @@ The classifier probes for this condition when:
 2. The telemetry trace contains zero `turn_start` events
 3. The session has been alive longer than `NEVER_STARTED_GRACE_SECS` (120 seconds)
 
-When all three conditions hold, the verdict is `stalled` with reason `never_started`.
+When all three conditions hold, the classifier first checks `_has_demonstrable_progress(session)` as a false-positive guard — a session's `turn_start` telemetry write can lag or be lost even though it has genuinely progressed. That check delegates to the shared leaf `agent.session_runner.liveness.has_demonstrable_activity(session, freshness_window=IDLE_SUSPECT_SECS)` (issue #2004 Task 2 — the same leaf `agent/crash_signature.py`'s terminal-session extractor uses, with its own freshness window instead of presence-only), reading `{turn_count, last_tool_use_at}`: `turn_count > 0` or a tool use within `IDLE_SUSPECT_SECS` reads as `healthy/progress_fields_fresh` instead of `stalled/never_started`. Only when the guard also reads no-progress does the verdict become `stalled` with reason `never_started`. See [Crash-Signature Auto-Resume](crash-signature-auto-resume.md#progress-fields-ground-truth) for the sibling caller.
 
 `pending` sessions are explicitly excluded. Stall detection for enqueued-but-not-yet-started sessions belongs to the session watchdog (`monitoring/session_watchdog.py`, issue #1313), which has a different ownership model.
 

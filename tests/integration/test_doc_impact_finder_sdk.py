@@ -75,14 +75,19 @@ class TestSubprocessInvocation:
         assert chunks[2]["section"] == "## Section B"
 
     def test_graceful_degradation_via_subprocess(self):
-        """find_affected_docs returns empty list with no API keys (subprocess)."""
+        """A degraded finder is VISIBLY degraded through the find_affected_docs wrapper.
+
+        With no API keys the wrapper the agent actually calls must return
+        ([], meta) with meta.degraded=True and a named reason — never a bare
+        empty list indistinguishable from "no docs affected" (#2004 T1.4).
+        """
         result = run_tool_subprocess(
             "import sys; sys.path.insert(0, '.'); "
             "from tools.doc_impact_finder import find_affected_docs; "
             "from pathlib import Path; "
-            "results = find_affected_docs("
+            "results, meta = find_affected_docs("
             "'Changed session scoping', repo_root=Path('/nonexistent')); "
-            "print(f'results={len(results)}')",
+            "print(f'results={len(results)} degraded={meta.degraded} reason={meta.reason}')",
             env_override={
                 "OPENAI_API_KEY": "",
                 "VOYAGE_API_KEY": "",
@@ -91,6 +96,8 @@ class TestSubprocessInvocation:
         )
         assert result.returncode == 0, f"Failed: {result.stderr}"
         assert "results=0" in result.stdout
+        assert "degraded=True" in result.stdout
+        assert "reason=no_embedding_provider" in result.stdout
 
     def test_skill_invocation_pattern_index(self):
         """The exact index_docs invocation from SKILL.md works."""
@@ -117,7 +124,10 @@ class TestSubprocessInvocation:
             "import sys, json\n"
             'sys.path.insert(0, ".")\n'
             "from tools.doc_impact_finder import find_affected_docs\n"
-            f"results = find_affected_docs('''{change_summary}''')\n"
+            f"results, meta = find_affected_docs('''{change_summary}''')\n"
+            "if meta.degraded:\n"
+            "    print(f'DEGRADED: {meta.reason} "
+            "(rerank_failures={meta.rerank_failures}/{meta.candidates})')\n"
             "for r in results:\n"
             "    print(f'{r.relevance:.2f} | {r.path} | {r.sections} | {r.reason}')\n"
             "print(f'total={len(results)}')"
@@ -450,10 +460,13 @@ class TestFullPipelineLive:
                 change_desc = (
                     "Refactored session isolation to use slug-based worktrees instead of thread IDs"
                 )
-                results = find_affected_docs(
+                results, meta = find_affected_docs(
                     change_desc,
                     repo_root=tmp_path,
                 )
+
+        # A live clean run is not degraded
+        assert meta.degraded is False, f"Live pipeline unexpectedly degraded: {meta}"
 
         # Session doc should be found, recipes should not
         result_paths = [r.path for r in results]

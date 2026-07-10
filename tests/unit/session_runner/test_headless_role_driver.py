@@ -8,7 +8,7 @@ Covers, in isolation with an injected ``harness_fn`` and a real (or fake)
   present; the clean-exit ``result`` fallback when absent).
 * Race 4 — a stale TURN_END from a prior sequential turn does not end the next.
 * Hung subprocess — bounded-wait timeout kills + classifies the turn.
-* Nonzero exit — the corruption exception propagates an exit_reason.
+* Nonzero exit — the corruption exception propagates a structured TurnFailure.
 * Empty result — hits the empty-output guard.
 * G5 — the subprocess env carries the explicit subscription-auth posture.
 """
@@ -27,6 +27,7 @@ from agent.session_runner.role_driver import (
     PRIME_PATH_SLASH,
     HeadlessRoleDriver,
 )
+from agent.session_runner.router import ExitReason
 
 
 def _write_edge(edge_path, *, kind_event="Stop", session_id=None, ts=None):
@@ -221,12 +222,14 @@ async def test_hung_subprocess_is_killed_and_classified(tmp_path):
     outcome = await driver.run_turn("go")
     assert outcome.hung is True
     assert outcome.turn_ended is False
-    assert outcome.exit_reason == "headless_turn_timeout"
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_TURN_TIMEOUT
 
 
 async def test_nonzero_exit_propagates_exit_reason(tmp_path):
     """A HarnessThinkingBlockCorruptionError (nonzero exit + corruption) is
-    caught and surfaced as an exit_reason, not swallowed."""
+    caught and surfaced as a structured TurnFailure, not swallowed. The
+    exception text travels in ``detail``, never smuggled into the reason."""
     from agent.sdk_client import HarnessThinkingBlockCorruptionError
 
     async def _boom(message, working_dir, **kwargs):
@@ -240,12 +243,15 @@ async def test_nonzero_exit_propagates_exit_reason(tmp_path):
     )
     outcome = await driver.run_turn("go")
     assert outcome.turn_ended is False
-    assert outcome.exit_reason is not None
-    assert "corrupt" in outcome.exit_reason.lower()
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_THINKING_CORRUPTION
+    assert "corrupt" in outcome.failure.detail.lower()
+    # Legacy wire format preserved for exit_message telemetry.
+    assert str(outcome.failure) == "headless_thinking_corruption: thinking block corrupted"
 
 
 async def test_empty_result_hits_empty_output_guard(tmp_path):
-    """An empty reply hits the empty-output guard (exit_reason set, not looped)."""
+    """An empty reply hits the empty-output guard (failure set, not looped)."""
     driver = HeadlessRoleDriver(
         role="pm",
         session_id="sess-9",
@@ -254,7 +260,8 @@ async def test_empty_result_hits_empty_output_guard(tmp_path):
     )
     outcome = await driver.run_turn("go")
     assert outcome.turn_ended is False
-    assert outcome.exit_reason == "empty_output"
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.EMPTY_OUTPUT
 
 
 async def test_binary_missing_classified(tmp_path):
@@ -267,7 +274,8 @@ async def test_binary_missing_classified(tmp_path):
         harness_fn=_make_harness(reply="Error: CLI harness not found — claude"),
     )
     outcome = await driver.run_turn("go")
-    assert outcome.exit_reason == "headless_binary_missing"
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_BINARY_MISSING
 
 
 async def test_claude_session_id_capture(tmp_path, monkeypatch):
@@ -429,7 +437,8 @@ async def test_nonzero_exit_without_result_event_is_not_a_clean_turn(tmp_path):
         harness_fn=_status_harness("partial streamed text", 1, False),
     )
     outcome = await driver.run_turn("go")
-    assert outcome.exit_reason == "headless_nonzero_exit_no_result"
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_NONZERO_EXIT_NO_RESULT
     assert outcome.turn_ended is False
 
 
@@ -443,7 +452,7 @@ async def test_nonzero_exit_with_result_event_stays_clean(tmp_path):
         harness_fn=_status_harness("real result", 1, True),
     )
     outcome = await driver.run_turn("go")
-    assert outcome.exit_reason is None
+    assert outcome.failure is None
     assert outcome.turn_ended is True
     assert outcome.turn_end_source == "result"
 
@@ -457,5 +466,5 @@ async def test_zero_exit_without_result_event_stays_clean(tmp_path):
         harness_fn=_status_harness("accumulated text", 0, False),
     )
     outcome = await driver.run_turn("go")
-    assert outcome.exit_reason is None
+    assert outcome.failure is None
     assert outcome.turn_ended is True

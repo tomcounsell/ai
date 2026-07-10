@@ -31,7 +31,7 @@ def resolve_config() -> tuple[str, str, float]:
 
         m = settings.models
         return m.ollama_host, m.ollama_generation_model, m.memory_title_timeout_s
-    except Exception:
+    except Exception:  # noqa: S110 -- documented import-failure fallback
         pass
 
     # Fallback: construct ModelSettings directly so Pydantic applies its field

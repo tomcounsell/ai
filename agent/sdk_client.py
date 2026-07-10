@@ -123,7 +123,7 @@ def _get_anthropic_circuit():
             from bridge.health import get_health
 
             get_health().register("anthropic", _anthropic_circuit)
-        except Exception:
+        except Exception:  # noqa: S110 -- optional observability registration
             pass  # Non-fatal
     return _anthropic_circuit
 
@@ -3490,8 +3490,11 @@ async def get_agent_response_sdk(
                 _session_type = getattr(_sessions[0], "session_type", None)
                 _session_model = getattr(_sessions[0], "model", None)
                 _session_extra_context = getattr(_sessions[0], "extra_context", None) or {}
-        except Exception:
-            pass
+        except Exception as _lookup_err:
+            logger.warning(
+                f"[{request_id}] Session lookup failed; proceeding without "
+                f"session type/model: {_lookup_err}"
+            )
 
     # Resolve persona early so build_context_prefix can suppress the teammate
     # read-only restriction for customer-service sessions.
@@ -3571,7 +3574,7 @@ async def get_agent_response_sdk(
                 logger.debug(
                     f"[{request_id}] Recorded synthetic teammate classification (config-determined)"
                 )
-            except Exception:
+            except Exception:  # noqa: S110 -- optional telemetry
                 pass  # Best-effort metrics
             # Update session type to Teammate (skip PM sessions — they must stay PM)
             if session_id and _session_type != SessionType.ENG:
@@ -3583,8 +3586,10 @@ async def get_agent_response_sdk(
                             _s.session_type = SessionType.TEAMMATE
                             _s.save()
                             break
-                except Exception:
-                    pass  # Best-effort
+                except Exception as _tm_err:
+                    logger.warning(
+                        f"[{request_id}] Failed to update session type to teammate: {_tm_err}"
+                    )
         elif _config_persona == PersonaType.ENGINEER:
             # Engineer persona: skip intent classifier, but check bridge-level
             # classification for collaboration/other to avoid unnecessary SDLC overhead
@@ -3641,8 +3646,11 @@ async def get_agent_response_sdk(
                                     _s.session_type = SessionType.TEAMMATE
                                     _s.save()
                                     break
-                        except Exception:
-                            pass  # Best-effort
+                        except Exception as _tm_err:
+                            logger.warning(
+                                f"[{request_id}] Failed to update session type to "
+                                f"teammate: {_tm_err}"
+                            )
             except Exception as e:
                 logger.warning(
                     f"[{request_id}] Intent classification failed, defaulting to PM dispatch: {e}"
@@ -3711,7 +3719,7 @@ async def get_agent_response_sdk(
                 from models.task_type_profile import get_delegation_recommendation
 
                 _delegation = get_delegation_recommendation(_pm_project_key, _trm_task_type)
-            except Exception:
+            except Exception:  # noqa: S110 -- falls back to structured by design
                 pass  # Always fall back to structured
 
             # MULTI-ISSUE FAN-OUT applies to all delegation paths.
@@ -3964,7 +3972,7 @@ async def get_agent_response_sdk(
                 from agent.teammate_metrics import record_response_time
 
                 record_response_time("teammate" if _teammate_mode else "work", elapsed)
-            except Exception:
+            except Exception:  # noqa: S110 -- optional telemetry
                 pass  # Best-effort metrics
 
         return response
@@ -3983,8 +3991,8 @@ async def get_agent_response_sdk(
             # actionable bug reports instead of "empty error summary" issues.
             error_summary = f"{type(e).__name__}: {e}"[:500]
             complete_transcript(session_id, status="failed", summary=error_summary)
-        except Exception:
-            pass  # Best-effort cleanup
+        except Exception as _cleanup_err:
+            logger.warning(f"[{request_id}] Crash-guard transcript cleanup failed: {_cleanup_err}")
         return (
             "Sorry, I ran into an issue and couldn't recover. "
             "The error has been logged for investigation."

@@ -34,7 +34,7 @@ try:
     from dotenv import load_dotenv
 
     load_dotenv(PROJECT_DIR / ".env")
-except Exception:
+except Exception:  # noqa: S110 -- dotenv optional; env may be preset
     pass
 
 

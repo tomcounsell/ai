@@ -77,15 +77,20 @@ python3 -c "
 import sys
 sys.path.insert(0, '${AI_REPO_ROOT:-$HOME/src/ai}')
 from tools.doc_impact_finder import find_affected_docs
-results = find_affected_docs('''<CHANGE_SUMMARY>''')
+results, meta = find_affected_docs('''<CHANGE_SUMMARY>''')
+if meta.degraded:
+    print(f'DEGRADED: {meta.reason} (rerank_failures={meta.rerank_failures}/{meta.candidates})')
 for r in results:
     print(f'{r.relevance:.2f} | {r.path} | {r.sections} | {r.reason}')
 "
 ```
 
-Replace `<CHANGE_SUMMARY>` with a 2-3 sentence natural-language summary of the change. May
-return zero results if no embedding API key is configured — that is expected; the cascade
-degrades gracefully to lexical-only matching. Merge per the global body's Step 2 rules.
+Replace `<CHANGE_SUMMARY>` with a 2-3 sentence natural-language summary of the change.
+`find_affected_docs` returns `(results, meta)`; a `DEGRADED:` line (e.g.
+`no_embedding_provider` when no embedding API key is configured) means the finder could not
+run cleanly — that is expected in keyless environments; the cascade degrades gracefully to
+lexical-only matching. Zero results WITHOUT a DEGRADED line means no docs are affected.
+Merge per the global body's Step 2 rules.
 
 ## Stale-reference sweep paths (Step 2b)
 

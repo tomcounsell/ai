@@ -85,7 +85,7 @@ def _runner_final_status(task_error, agent_session) -> str:
     """Terminal AgentSession status for a finished runner session.
 
     ``SessionRunner.run()`` never raises — subprocess failures and loop
-    exceptions become ``summary.exit_reason="error"/"exception"`` — so
+    exceptions become ``summary.exit_reason=ExitReason.ERROR/EXCEPTION`` — so
     ``task_error`` alone cannot gate finalization: a failed run would
     finalize ``completed`` (the #1916 class). Consult the runner's persisted
     ``exit_reason`` alongside ``task_error``; ``agent_session=None`` (lookup
@@ -1289,8 +1289,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             key=lambda s: s.created_at or 0,
                             reverse=True,
                         )[0]
-                except Exception:
-                    pass  # Fall back to stale in-memory copy
+                except Exception as _reread_err:
+                    # Fall back to stale in-memory copy.
+                    logger.warning(
+                        f"[{session.project_key}] Session re-read failed; using stale "
+                        f"in-memory copy: {_reread_err}"
+                    )
 
             session_status = agent_session.status if agent_session else None
             unhealthy_reason = (
@@ -1485,8 +1489,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                             if fresh_sessions:
                                 fresh_sessions.sort(key=lambda s: s.created_at or 0, reverse=True)
                                 agent_session = fresh_sessions[0]
-                        except Exception:
-                            pass
+                        except Exception as _reread_err:
+                            logger.debug(
+                                f"[{session.project_key}] Session re-read after outbox "
+                                f"drain failed: {_reread_err}"
+                            )
                     except Exception as drain_err:
                         logger.debug(
                             f"[{session.project_key}] Outbox drain check failed: {drain_err}"
@@ -1680,8 +1687,11 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 if trigger_msgs and not trigger_msgs[0].agent_session_id:
                     trigger_msgs[0].agent_session_id = session.agent_session_id
                     trigger_msgs[0].save()
-            except Exception:
-                pass  # Non-critical: best-effort cross-reference
+            except Exception as _xref_err:
+                # Non-critical: best-effort cross-reference.
+                logger.debug(
+                    f"[{session.project_key}] Trigger-message back-reference failed: {_xref_err}"
+                )
 
         # Run agent work directly in the project working directory.
         # Read project config from the session (populated at enqueue time).

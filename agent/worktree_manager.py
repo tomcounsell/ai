@@ -200,7 +200,7 @@ def _count_live_session_branches(repo_root: str) -> str:
         if result.returncode == 0:
             lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
             return str(len(lines))
-    except Exception:
+    except Exception:  # noqa: S110 -- count degrades to 'unknown'
         pass
     return "unknown"
 

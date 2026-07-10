@@ -1,6 +1,14 @@
-"""Update-system step: ensure the ``crash-recovery`` reflection is registered.
+"""Update-system step: ensure code-shipped reflections are registered in the vault.
 
-Issue #1917 (the dominant gap). ``reflections/crash_recovery.py`` ships a
+:func:`register_reflection` is the general entry point (subtask 3a of #2004):
+any reflection whose callable ships in the repo can be appended to the vault
+registry through the same guarded, idempotent, comment-preserving machinery.
+Current registrations:
+
+- ``crash-recovery`` (:func:`register_crash_recovery`, issue #1917)
+- ``test-baseline-refresh`` (weekly baseline-staleness detector, #1933/#2004)
+
+History -- issue #1917 (the dominant gap). ``reflections/crash_recovery.py`` ships a
 callable (``run_crash_recovery``) that fingerprints session crashes, warms a
 signature library, and auto-resumes transient tool-wedge deaths -- but it was
 never added to the reflections registry. ``python -m reflections --dry-run``
@@ -49,10 +57,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-REFLECTION_NAME = "crash-recovery"
 OWNING_PROJECT_KEY = "valor"
 
-_EXPECTED_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
+CRASH_RECOVERY_NAME = "crash-recovery"
+CRASH_RECOVERY_CALLABLE = "reflections.crash_recovery.run_crash_recovery"
+
+BASELINE_REFRESH_NAME = "test-baseline-refresh"
+BASELINE_REFRESH_CALLABLE = "reflections.housekeeping.test_baseline_refresh_check.run"
 
 # Matches the leading whitespace of an existing ``reflections:`` list item so the
 # appended entry adopts the file's own indentation (the hand-authored registry
@@ -73,22 +84,30 @@ def _detect_dash_indent(text: str) -> str:
     return "  "
 
 
-def _build_entry_block(dash_indent: str) -> str:
-    """Render the ``crash-recovery`` entry text at the file's own indentation.
+def _build_entry_block(
+    dash_indent: str,
+    *,
+    name: str,
+    callable_path: str,
+    description: str,
+    cadence: str,
+    priority: str,
+) -> str:
+    """Render one reflection entry as text at the file's own indentation.
 
     Kept as a text block (not a yaml.safe_dump) so the surrounding hand-authored
     registry keeps its header docs and inline comments -- a dump round-trip would
-    strip them.
+    strip them.  ``cadence`` is the ``every:`` duration body (e.g. ``300s``,
+    ``7d`` -- see ``agent.reflection_schedule.parse_every_duration``).
     """
     field = dash_indent + "  "
-    desc = "Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)"
     return (
-        f"\n{dash_indent}- name: crash-recovery\n"
-        f'{field}description: "{desc}"\n'
-        f"{field}every: 300s # 5 minutes\n"
-        f"{field}priority: normal\n"
+        f"\n{dash_indent}- name: {name}\n"
+        f'{field}description: "{description}"\n'
+        f"{field}every: {cadence}\n"
+        f"{field}priority: {priority}\n"
         f"{field}execution_type: function\n"
-        f'{field}callable: "{_EXPECTED_CALLABLE}"\n'
+        f'{field}callable: "{callable_path}"\n'
         f"{field}enabled: true\n"
     )
 
@@ -164,8 +183,8 @@ def _this_machine_owns_valor(project_dir: Path) -> bool:
     return owner.strip().lower() == machine.strip().lower()
 
 
-def _has_entry(text: str) -> bool:
-    """True iff a reflection named ``crash-recovery`` already exists in ``text``.
+def _has_entry(text: str, name: str) -> bool:
+    """True iff a reflection named ``name`` already exists in ``text``.
 
     Parses the YAML rather than grepping so a commented-out mention or a
     substring in another entry's description never reads as present.
@@ -184,11 +203,19 @@ def _has_entry(text: str) -> bool:
     entries = data.get("reflections") or []
     if not isinstance(entries, list):
         return True
-    return any(isinstance(e, dict) and e.get("name") == REFLECTION_NAME for e in entries)
+    return any(isinstance(e, dict) and e.get("name") == name for e in entries)
 
 
-def _append_entry(path: Path) -> str:
-    """Append the ``crash-recovery`` entry to the registry at ``path``.
+def _append_entry(
+    path: Path,
+    *,
+    name: str,
+    callable_path: str,
+    description: str,
+    cadence: str,
+    priority: str,
+) -> str:
+    """Append the named reflection entry to the registry at ``path``.
 
     Returns a verdict, never raises:
       "present"    -- entry already there (no write)
@@ -204,13 +231,20 @@ def _append_entry(path: Path) -> str:
     except Exception:
         return "io-error"
 
-    if _has_entry(text):
+    if _has_entry(text, name):
         return "present"
 
     new_text = text
     if not new_text.endswith("\n"):
         new_text += "\n"
-    new_text += _build_entry_block(_detect_dash_indent(text))
+    new_text += _build_entry_block(
+        _detect_dash_indent(text),
+        name=name,
+        callable_path=callable_path,
+        description=description,
+        cadence=cadence,
+        priority=priority,
+    )
 
     # Validate before replacing: the appended text must parse and the entry must
     # be readable with the expected callable. Guards against appending into a
@@ -225,10 +259,10 @@ def _append_entry(path: Path) -> str:
         return "invalid"
     entries = data.get("reflections") or []
     match = next(
-        (e for e in entries if isinstance(e, dict) and e.get("name") == REFLECTION_NAME),
+        (e for e in entries if isinstance(e, dict) and e.get("name") == name),
         None,
     )
-    if match is None or match.get("callable") != _EXPECTED_CALLABLE:
+    if match is None or match.get("callable") != callable_path:
         return "invalid"
 
     tmp = path.with_name(path.name + ".tmp")
@@ -241,12 +275,20 @@ def _append_entry(path: Path) -> str:
     return "appended"
 
 
-def register_crash_recovery(project_dir: Path) -> RegisterResult:
-    """Ensure the ``crash-recovery`` reflection is registered in the vault.
+def register_reflection(
+    project_dir: Path,
+    *,
+    name: str,
+    callable_path: str,
+    description: str,
+    cadence: str,
+    priority: str,
+) -> RegisterResult:
+    """Ensure the named reflection is registered in the vault registry.
 
     See the module docstring for the guard conditions and why the vault file
-    (not the config copy) is written. Idempotent -- a no-op when the entry is
-    already present.
+    (not the config copy) is written. Idempotent -- a no-op when an entry with
+    ``name`` is already present.
     """
     vault_path = _vault_reflections_path()
     if not vault_path.exists():
@@ -263,9 +305,16 @@ def register_crash_recovery(project_dir: Path) -> RegisterResult:
         target = vault_path
         _ = e
 
-    verdict = _append_entry(target)
+    entry_kwargs = {
+        "name": name,
+        "callable_path": callable_path,
+        "description": description,
+        "cadence": cadence,
+        "priority": priority,
+    }
+    verdict = _append_entry(target, **entry_kwargs)
     if verdict == "present":
-        return RegisterResult(True, "noop", f"{REFLECTION_NAME} already registered")
+        return RegisterResult(True, "noop", f"{name} already registered")
     if verdict == "not-found":
         return RegisterResult(
             False,
@@ -290,16 +339,57 @@ def register_crash_recovery(project_dir: Path) -> RegisterResult:
     # from the vault anyway, so a failure here is non-fatal.
     repo_copy = project_dir / "config" / "reflections.yaml"
     if repo_copy.exists() and repo_copy != target:
-        _append_entry(repo_copy)
+        _append_entry(repo_copy, **entry_kwargs)
 
-    return RegisterResult(True, "registered", f"{REFLECTION_NAME} appended to {target}")
+    return RegisterResult(True, "registered", f"{name} appended to {target}")
+
+
+def register_crash_recovery(project_dir: Path) -> RegisterResult:
+    """Ensure the ``crash-recovery`` reflection is registered (issue #1917).
+
+    Thin wrapper over :func:`register_reflection` -- same guards, same target
+    resolution, same idempotence.
+    """
+    return register_reflection(
+        project_dir,
+        name=CRASH_RECOVERY_NAME,
+        callable_path=CRASH_RECOVERY_CALLABLE,
+        description="Fingerprint crashes, warm signatures, auto-resume tool-wedge deaths (#1917)",
+        cadence="300s",
+        priority="normal",
+    )
+
+
+def register_test_baseline_refresh(project_dir: Path) -> RegisterResult:
+    """Ensure the weekly ``test-baseline-refresh`` reflection is registered.
+
+    The callable (``reflections/housekeeping/test_baseline_refresh_check.run``)
+    shipped with #1933 but was never registered via the update path -- the same
+    "looks wired, never lands" gap #1539 left for crash-recovery. Weekly
+    cadence, low priority: it is a read-only staleness detector, not a regen.
+    """
+    return register_reflection(
+        project_dir,
+        name=BASELINE_REFRESH_NAME,
+        callable_path=BASELINE_REFRESH_CALLABLE,
+        description=(
+            "Warn when data/main_test_baseline.json fails the shared staleness "
+            "definition (#1933/#2004)"
+        ),
+        cadence="7d",
+        priority="low",
+    )
 
 
 def main() -> int:
     project_dir = Path(__file__).resolve().parent.parent.parent
-    result = register_crash_recovery(project_dir)
-    print(f"{result.action}: {result.detail}")
-    return 0 if result.success else 1
+    exit_code = 0
+    for register in (register_crash_recovery, register_test_baseline_refresh):
+        result = register(project_dir)
+        print(f"{result.action}: {result.detail}")
+        if not result.success:
+            exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":

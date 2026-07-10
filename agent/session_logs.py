@@ -63,7 +63,7 @@ def _get_git_summary(working_dir: str | None = None, log_depth: int = 3) -> str:
         )
         if log_result.returncode == 0:
             parts.append(f"Recent commits:\n{log_result.stdout.strip()}")
-    except Exception:
+    except Exception:  # noqa: S110 -- best-effort context enrichment
         pass
 
     return "\n".join(parts)

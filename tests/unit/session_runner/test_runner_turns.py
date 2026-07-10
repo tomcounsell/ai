@@ -8,8 +8,8 @@ Covers, with a scripted fake driver and a sync delivery callback:
 * Unroutable turns → bounded compliance nudge, then the wrap-up guard —
   never an infinite loop.
 * Empty/whitespace-only PM text → wrap-up guard (plan Failure Path).
-* Turn failure → ``exit_reason="error"`` (never completed) + persona-safe
-  apology delivered.
+* Turn failure → ``exit_reason=ExitReason.ERROR`` (never completed) +
+  persona-safe apology delivered.
 * Async send_cb on the runner's own loop (the production delivery shape):
   same-thread handoff counts as routed, wrap-up guard does not fire, and
   failure recovery re-enqueues to the outbox.
@@ -24,6 +24,7 @@ import pytest
 
 from agent.session_runner.adapter import SessionRunnerAdapter
 from agent.session_runner.role_driver import HeadlessTurnOutcome
+from agent.session_runner.router import ExitReason, TurnFailure
 from agent.session_runner.runner import (
     OPERATOR_TERMINAL_MESSAGE,
     PM_COMPLIANCE_NUDGE,
@@ -98,7 +99,7 @@ async def test_user_route_delivers_and_exits():
     runner, deliveries, session, driver = make_runner(["[/user]\nhello human"])
     summary = await runner.run("do the thing")
     assert deliveries == ["hello human"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     assert summary.user_facing_routed is True
     assert summary.turn_count == 1
     # Exit summary published to session_events.
@@ -110,7 +111,7 @@ async def test_complete_route_delivers_summary():
     runner, deliveries, _, _ = make_runner(["[/complete]\nshipped the fix"])
     summary = await runner.run("go")
     assert deliveries == ["shipped the fix"]
-    assert summary.exit_reason == "pm_complete"
+    assert summary.exit_reason is ExitReason.PM_COMPLETE
     assert summary.user_facing_routed is True
 
 
@@ -120,7 +121,7 @@ async def test_complete_with_empty_payload_backstopped_by_wrapup():
     summary = await runner.run("go")
     # Wrap-up guard ran one extra PM turn and delivered its answer.
     assert deliveries == ["final word"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     assert "wrapping up" in driver.calls[1]
 
 
@@ -134,7 +135,7 @@ async def test_unroutable_turns_bounded_nudge_then_wrapup():
     assert driver.calls[1] == PM_COMPLIANCE_NUDGE
     assert "wrapping up" in driver.calls[2]
     assert deliveries == ["recovered"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
 
 
 @pytest.mark.parametrize("empty_reply", ["", "   \n\t"])
@@ -144,7 +145,7 @@ async def test_empty_pm_text_routes_to_wrapup_guard(empty_reply):
     summary = await runner.run("go")
     # The wrap-up guard floor-delivered the prefix-less text.
     assert deliveries == ["prefix-less but real answer"]
-    assert summary.exit_reason == "pm_floor_delivered"
+    assert summary.exit_reason is ExitReason.PM_FLOOR_DELIVERED
     assert len(driver.calls) == 2  # one real turn + one wrapup turn
 
 
@@ -154,7 +155,7 @@ async def test_wrapup_silent_pm_gets_terminal_message():
     runner, deliveries, _, _ = make_runner(["", ""])
     summary = await runner.run("go")
     assert deliveries == [OPERATOR_TERMINAL_MESSAGE]
-    assert summary.exit_reason == "pm_no_user_message"
+    assert summary.exit_reason is ExitReason.PM_NO_USER_MESSAGE
     assert summary.user_facing_routed is True
 
 
@@ -162,20 +163,23 @@ async def test_max_turns_exhaustion_reaches_wrapup():
     runner, deliveries, _, _ = make_runner(["nope", "[/user]\nwrapped"], max_turns=1)
     summary = await runner.run("go")
     assert deliveries == ["wrapped"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     assert summary.turn_count == 1
 
 
 async def test_turn_failure_is_error_with_persona_safe_apology():
     """A failed subprocess turn exits ``error`` (never completed) and the
     user gets a persona-safe apology — the #1916 false-success class."""
-    failing = HeadlessTurnOutcome(reply_text="", exit_reason="headless_subprocess_error: exploded")
+    failing = HeadlessTurnOutcome(
+        reply_text="", failure=TurnFailure(ExitReason.HEADLESS_SUBPROCESS_ERROR, "exploded")
+    )
     runner, deliveries, session, _ = make_runner([failing])
     summary = await runner.run("go")
-    assert summary.exit_reason == "error"
-    assert "exploded" in summary.exit_message
+    assert summary.exit_reason is ExitReason.ERROR
+    # exit_message keeps the legacy "reason: detail" wire format.
+    assert summary.exit_message == "headless_subprocess_error: exploded"
     assert deliveries == [RUNNER_ERROR_USER_MESSAGE]
-    # Terminal exit_reason persisted via the exit summary.
+    # Terminal exit_reason persisted via the exit summary (raw string value).
     assert session.exit_reason == "error"
 
 
@@ -193,7 +197,7 @@ async def test_needs_human_edge_with_unroutable_text_delivers():
     runner, deliveries, _, _ = make_runner([outcome])
     summary = await runner.run("go")
     assert deliveries == ["Which environment should I target?"]
-    assert summary.exit_reason == "pm_needs_human"
+    assert summary.exit_reason is ExitReason.PM_NEEDS_HUMAN
     assert summary.user_facing_routed is True
 
 
@@ -243,7 +247,7 @@ async def test_async_send_cb_same_thread_counts_as_routed_no_wrapup():
     await asyncio.sleep(0)
     assert deliveries == ["hello human"]
     assert summary.user_facing_routed is True
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     assert len(driver.calls) == 1  # wrap-up guard never ran an extra turn
 
 
@@ -305,7 +309,7 @@ async def test_steer_abort_at_boundary_stops_before_any_turn():
     )
     summary = await runner.run("go")
     assert deliveries == [STEER_ABORT_USER_MESSAGE]
-    assert summary.exit_reason == "steer_abort"
+    assert summary.exit_reason is ExitReason.STEER_ABORT
     assert driver.calls == []
 
 
@@ -343,7 +347,7 @@ async def test_compliance_misses_counted_in_summary():
     runner, deliveries, session, _ = make_runner(["no prefix here", "[/user]\nok"])
     summary = await runner.run("go")
     assert deliveries == ["ok"]
-    assert summary.exit_reason == "pm_user"
+    assert summary.exit_reason is ExitReason.PM_USER
     assert summary.compliance_misses == 1
     exit_events = [e for e in session.session_events if e["type"] == "exit_summary"]
     assert exit_events[-1]["compliance_misses"] == 1

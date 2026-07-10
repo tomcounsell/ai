@@ -361,7 +361,7 @@ async def _pop_agent_session(
                     _matches = list(_ParentAS.query.filter(id=pid))
                     if _matches and getattr(_matches[0], "status", None) == "waiting_for_children":
                         _parent_waiting.add(pid)
-            except Exception:
+            except Exception:  # noqa: S110 -- no boost on lookup failure (safe)
                 pass  # If lookup fails, no boost — safe fallback
 
         def sort_key(j):

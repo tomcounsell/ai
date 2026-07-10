@@ -214,7 +214,7 @@ def _send_via_telegram(text: str, file_paths: list[str] | None) -> None:
             from bridge.message_drafter import linkify_references
 
             text = linkify_references(text, os.environ.get("PROJECT_KEY", "ai"))
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort linkification
             pass
 
     # Promise gate — see docs/features/promise-gate.md (polymorphic transport).
@@ -338,11 +338,11 @@ def _send_via_email(text: str, file_paths: list[str] | None = None) -> None:
                 session.extra_context = extra
                 try:
                     session.save(update_fields=["extra_context"])
-                except Exception:
+                except Exception:  # noqa: S110 -- defensive backfill (documented)
                     # Non-fatal: stamping is a defensive backfill, not a
                     # prerequisite for delivery.
                     pass
-    except Exception:
+    except Exception:  # noqa: S110 -- defensive backfill; delivery proceeds
         pass
 
     from agent.output_handler import TelegramRelayOutputHandler

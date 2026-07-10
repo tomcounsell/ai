@@ -106,7 +106,7 @@ def start_transcript(
             # Log lifecycle transition
             try:
                 s.log_lifecycle_transition("active", "transcript started")
-            except Exception:
+            except Exception:  # noqa: S110 -- lifecycle audit log is best-effort
                 pass
         else:
             # No existing session — create one (standalone transcript case)
@@ -132,7 +132,7 @@ def start_transcript(
                 sessions = list(AgentSession.query.filter(session_id=session_id))
                 if sessions:
                     sessions[0].log_lifecycle_transition("active", "transcript started")
-            except Exception:
+            except Exception:  # noqa: S110 -- lifecycle audit log is best-effort
                 pass
     except Exception as e:
         logger.warning(f"Failed to update/create AgentSession for {session_id}: {e}")

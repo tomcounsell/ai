@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from scripts.update.reflection_register import register_crash_recovery
+from scripts.update.reflection_register import register_crash_recovery, register_reflection
 
 pytestmark = pytest.mark.sdlc
 
@@ -185,6 +185,103 @@ def test_append_preserves_comments_and_formatting(mock_machine, tmp_path, monkey
     assert "crash-recovery" in _names(vault_path)
     # No stray temp file left behind.
     assert not list(vault_path.parent.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------
+# register_reflection: the generalized entry point (subtask 3a of #2004).
+# register_crash_recovery is a thin wrapper over it; these tests prove a
+# SECOND reflection can be registered through the same machinery.
+# ---------------------------------------------------------------------------
+
+BASELINE_REFRESH_KWARGS = {
+    "name": "test-baseline-refresh",
+    "callable_path": "reflections.housekeeping.test_baseline_refresh_check.run",
+    "description": "Warn when the merge-gate test baseline is stale (#1933/#2004)",
+    "cadence": "7d",
+    "priority": "low",
+}
+
+
+@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+def test_register_reflection_registers_arbitrary_entry(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+
+    assert result.success is True
+    assert result.action == "registered"
+    entry = next(
+        r
+        for r in yaml.safe_load(vault_path.read_text())["reflections"]
+        if r["name"] == "test-baseline-refresh"
+    )
+    assert entry["callable"] == "reflections.housekeeping.test_baseline_refresh_check.run"
+    assert entry["every"] == "7d"
+    assert entry["priority"] == "low"
+    assert entry["enabled"] is True
+
+
+@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+def test_register_reflection_is_idempotent(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    first = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+    second = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+
+    assert first.action == "registered"
+    assert second.action == "noop"
+    assert _names(vault_path).count("test-baseline-refresh") == 1
+
+
+@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+def test_register_reflection_second_entry_coexists_with_crash_recovery(
+    mock_machine, tmp_path, monkeypatch
+):
+    """_has_entry is name-scoped: one entry present never blocks the other."""
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    assert register_crash_recovery(project_dir).action == "registered"
+    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "registered"
+
+    names = _names(vault_path)
+    assert names.count("crash-recovery") == 1
+    assert names.count("test-baseline-refresh") == 1
+    # Re-running each is still a noop with the other present.
+    assert register_crash_recovery(project_dir).action == "noop"
+    assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "noop"
+
+
+@patch("tools.machine_identity.computer_name", return_value="Some Other Machine")
+def test_register_reflection_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    result = register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+
+    assert result.action == "skipped"
+    assert "test-baseline-refresh" not in _names(vault_path)
+
+
+@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+def test_register_reflection_entry_loads_via_scheduler_registry(
+    mock_machine, tmp_path, monkeypatch
+):
+    """The appended weekly entry is well-formed for the scheduler's loader."""
+    from agent.reflection_scheduler import load_registry
+
+    vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
+    monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
+
+    register_reflection(project_dir, **BASELINE_REFRESH_KWARGS)
+
+    registry = load_registry(vault_path)
+    entry = next(r for r in registry if r.name == "test-baseline-refresh")
+    assert entry.interval_seconds() == 7 * 24 * 3600
+    assert entry.priority == "low"
+    assert entry.callable == "reflections.housekeeping.test_baseline_refresh_check.run"
 
 
 @patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")

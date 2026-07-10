@@ -1648,8 +1648,8 @@ async def resolve_customer(
         if r is not None:
             r.delete(f"resolver:failures:{project_key}")
             r.delete("email:resolver_unavailable")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"[resolver] Failed to clear failure counter/alert: {e}")
 
     if customer_id is not None:
         logger.info(f"[resolver] Resolved {sender!r} -> {customer_id!r}")

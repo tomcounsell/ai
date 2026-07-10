@@ -94,7 +94,7 @@ def _get_scheduling_depth() -> int:
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             return int(sessions[0].scheduling_depth or 0)
-    except Exception:
+    except Exception:  # noqa: S110 -- depth defaults to 0
         pass
     return 0
 
@@ -372,8 +372,12 @@ def cmd_schedule(args: argparse.Namespace) -> int:
             config = _all_projects.get(project_key, {})
             if config:
                 working_dir = config.get("working_directory", working_dir)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Project config lookup failed for %s; using default working dir: %s",
+                project_key,
+                e,
+            )
 
         # Inherit fields from parent if this is a child session
         inherited_chat_id = ctx["chat_id"]
@@ -630,8 +634,12 @@ def cmd_push(args: argparse.Namespace) -> int:
         config = _all_projects.get(project_key, {})
         if config:
             working_dir = config.get("working_directory", working_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            "Project config lookup failed for %s; using default working dir: %s",
+            project_key,
+            e,
+        )
 
     try:
         session = AgentSession.create(
@@ -858,7 +866,7 @@ def _find_process_by_session_id(session_id: str) -> int | None:
             pid = int(line.strip())
             if pid != my_pid:
                 return pid
-    except Exception:
+    except Exception:  # noqa: S110 -- best-effort pgrep probe
         pass
     return None
 

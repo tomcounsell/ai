@@ -69,7 +69,7 @@ def _sentry_before_send(event, hint):
         if is_hibernating():
             logger.debug("Sentry event dropped: bridge is hibernating")
             return None
-    except Exception:
+    except Exception:  # noqa: S110 -- filter must never suppress events
         # Filter crash must not suppress real errors
         pass
     return drop_orphan_noise(event, hint)
@@ -590,7 +590,7 @@ def log_event(event_type: str, **kwargs) -> None:
         from models.bridge_event import BridgeEvent
 
         BridgeEvent.log(event_type, **kwargs)
-    except Exception:
+    except Exception:  # noqa: S110 -- event logging never breaks bridge
         # Fallback: don't let event logging break the bridge
         pass
 
@@ -926,8 +926,8 @@ async def _ack_steering_routed(
                 message.id,
                 REACTION_RECEIVED,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("set_reaction failed (non-fatal): %s", e)
 
         try:
             description, files = await process_incoming_media(client, message)
@@ -969,8 +969,8 @@ async def _ack_steering_routed(
                 message.id,
                 REACTION_ABORT if is_abort else REACTION_RECEIVED,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("set_reaction failed (non-fatal): %s", e)
     elif is_abort:
         # Media branch already reacted with REACTION_RECEIVED above; if
         # the enriched text turns out to be an abort keyword, overwrite
@@ -982,8 +982,8 @@ async def _ack_steering_routed(
                 message.id,
                 REACTION_ABORT,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("set_reaction failed (non-fatal): %s", e)
     action = "abort" if is_abort else "steer"
     logger.info(f"{log_context} ({action})")
     await record_telegram_message_handled(event.chat_id, message.id)
@@ -1301,7 +1301,7 @@ async def main():
 
                             # safe_text is already strip_private()'d above (line ~1047).
                             generate_title_async(_mem_record.memory_id, safe_text[:500])
-                        except Exception:
+                        except Exception:  # noqa: S110 -- memory ops silent by design
                             pass
             except Exception as e:
                 logger.warning(f"Memory save failed (non-fatal): {e}")
@@ -2675,7 +2675,7 @@ async def main():
         try:
             if _knowledge_watcher_ref and _knowledge_watcher_ref[0] is not None:
                 _knowledge_watcher_ref[0].stop()
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort shutdown cleanup
             pass
 
         # Write final last-connected timestamp before shutting down
@@ -2898,8 +2898,8 @@ async def main():
                                     and parent.has_pm_messages()
                                 ):
                                     pm_bypass = True
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("PM-bypass parent lookup failed: %s", e)
 
                     # Extract any <<FILE:>> markers before sending text.
                     # File attachments route directly via Telethon since files
@@ -2956,8 +2956,12 @@ async def main():
                             message_id=None,
                             reply_to_msg_id=reply_to_msg_id,
                         )
-                    except Exception:
-                        pass
+                    except Exception as store_err:
+                        logger.warning(
+                            "Outbound history store_message failed for chat %s: %s",
+                            chat_id,
+                            store_err,
+                        )
                 except Exception as e:
                     logger.error(
                         f"Session queue _send callback failed for chat {chat_id}: {e}",

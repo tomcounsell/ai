@@ -21,6 +21,7 @@ import pytest
 
 from agent.session_runner.adapter import SessionRunnerAdapter
 from agent.session_runner.role_driver import HeadlessRoleDriver, HeadlessTurnOutcome
+from agent.session_runner.router import ExitReason, TurnFailure
 from agent.session_runner.runner import (
     ENG_TURN_TIMEOUT_S,
     RUNNER_ERROR_USER_MESSAGE,
@@ -129,17 +130,19 @@ async def test_subprocess_death_classifies_error_never_completed():
     persona-safe user message — never a clean completion (the #1916 class)."""
     dead_turn = HeadlessTurnOutcome(
         turn_ended=False,
-        exit_reason="headless_subprocess_error: [Errno 32] broken pipe",
+        failure=TurnFailure(ExitReason.HEADLESS_SUBPROCESS_ERROR, "[Errno 32] broken pipe"),
     )
     runner, deliveries, session, _ = make_runner([dead_turn])
     summary = await runner.run("do the thing")
 
-    assert summary.exit_reason == "error", "a dead subprocess must classify as error"
+    assert summary.exit_reason is ExitReason.ERROR, "a dead subprocess must classify as error"
     assert summary.exit_reason not in (
-        "pm_complete",
-        "pm_user",
-        "pm_needs_human",
+        ExitReason.PM_COMPLETE,
+        ExitReason.PM_USER,
+        ExitReason.PM_NEEDS_HUMAN,
     ), "never a clean completion"
+    # The exit_message preserves the legacy "reason: detail" wire format.
+    assert summary.exit_message == "headless_subprocess_error: [Errno 32] broken pipe"
     # Persona-safe delivery: the canned message, never the raw exit string.
     assert deliveries == [RUNNER_ERROR_USER_MESSAGE]
     assert all("broken pipe" not in d for d in deliveries), (
@@ -157,12 +160,12 @@ async def test_hung_subprocess_bounded_wait_classifies_error():
     hung_turn = HeadlessTurnOutcome(
         turn_ended=False,
         hung=True,
-        exit_reason="headless_turn_timeout",
+        failure=TurnFailure(ExitReason.HEADLESS_TURN_TIMEOUT),
     )
     runner, deliveries, _, _ = make_runner([hung_turn])
     summary = await runner.run("go")
 
-    assert summary.exit_reason == "error"
+    assert summary.exit_reason is ExitReason.ERROR
     assert deliveries == [RUNNER_ERROR_USER_MESSAGE]
 
 
@@ -172,12 +175,12 @@ async def test_missing_binary_classifies_error():
     missing = HeadlessTurnOutcome(
         reply_text="Error: CLI harness not found",
         turn_ended=False,
-        exit_reason="headless_binary_missing",
+        failure=TurnFailure(ExitReason.HEADLESS_BINARY_MISSING),
     )
     runner, deliveries, _, driver = make_runner([missing])
     summary = await runner.run("go")
 
-    assert summary.exit_reason == "error"
+    assert summary.exit_reason is ExitReason.ERROR
     assert len(driver.calls) == 1, "an infra failure must not spin the turn loop"
     assert deliveries == [RUNNER_ERROR_USER_MESSAGE]
 
@@ -204,7 +207,8 @@ async def test_driver_hung_harness_times_out_with_headless_turn_timeout(tmp_path
     )
     outcome = await driver.run_turn("hello")
     assert outcome.hung is True
-    assert outcome.exit_reason == "headless_turn_timeout"
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_TURN_TIMEOUT
     assert outcome.turn_ended is False
 
 
@@ -224,8 +228,9 @@ async def test_driver_subprocess_exception_classified_not_raised(tmp_path):
     )
     outcome = await driver.run_turn("hello")
     assert outcome.turn_ended is False
-    assert outcome.exit_reason is not None
-    assert outcome.exit_reason.startswith("headless_subprocess_error")
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_SUBPROCESS_ERROR
+    assert outcome.failure.detail == "claude exited -9"
 
 
 # --------------------------------------------------------------------------
@@ -383,7 +388,7 @@ async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(
     the never-started gate (it correctly does not fire, since sdk_ever_output
     is now True) — the actual backstop is the driver's own whole-turn
     deadline (asyncio.wait_for -> outcome.hung=True /
-    exit_reason=headless_turn_timeout).
+    failure.reason=ExitReason.HEADLESS_TURN_TIMEOUT).
 
     Built via ``_make_stdout_liveness_runner`` (like its neighbors) so this
     exercises the real ``SessionRunner``/``_build_driver``/
@@ -436,5 +441,6 @@ async def test_post_init_hang_is_caught_by_turn_deadline_not_never_started_gate(
     # The turn IS still recovered — via the whole-turn deadline, not the
     # never-started gate.
     assert outcome.hung is True
-    assert outcome.exit_reason == "headless_turn_timeout"
+    assert outcome.failure is not None
+    assert outcome.failure.reason is ExitReason.HEADLESS_TURN_TIMEOUT
     assert outcome.turn_ended is False

@@ -296,8 +296,12 @@ async def check_all_sessions() -> None:
                     session.session_id,
                     e,
                 )
-            except Exception:
-                pass
+            except Exception as finalize_err:
+                logger.warning(
+                    "[watchdog] Failed to finalize stale session %s: %s",
+                    session.session_id,
+                    finalize_err,
+                )
         except Exception as e:
             logger.error(
                 "[watchdog] Error handling session %s: %s",
@@ -412,7 +416,7 @@ def check_stalled_sessions() -> list[dict]:
                             history = session._get_history_list()
                             if history:
                                 last_history = str(history[-1])[:120]
-                    except Exception:
+                    except Exception:  # noqa: S110 -- best-effort diagnostic context
                         pass
 
                     stalled_info = {
@@ -799,7 +803,7 @@ def check_worker_liveness_and_slots() -> None:
     for owner in owners:
         try:
             row = AgentSession.get_by_id(owner)
-        except Exception:
+        except Exception:  # noqa: S112 -- unknown owner status: skip (#1868)
             continue
         if row is not None and getattr(row, "status", None) in _terminal_statuses():
             terminal_owners.append(owner)

@@ -18,6 +18,7 @@ from tools.impact_finder_core import (
     EMBEDDING_BATCH_SIZE,
     HAIKU_CONTENT_PREVIEW_CHARS,
     MIN_SIMILARITY_THRESHOLD,
+    ImpactFinderMeta,
     chunk_markdown,
     cosine_similarity,
     get_embedding_provider,
@@ -31,6 +32,7 @@ __all__ = [
     "HAIKU_CONTENT_PREVIEW_CHARS",
     "MIN_SIMILARITY_THRESHOLD",
     "AffectedDoc",
+    "ImpactFinderMeta",
     "chunk_markdown",
     "cosine_similarity",
     "find_affected_docs",
@@ -197,7 +199,7 @@ def find_affected_docs(
     change_summary: str,
     top_n: int = 15,
     repo_root: Path | None = None,
-) -> list[AffectedDoc]:
+) -> tuple[list[AffectedDoc], ImpactFinderMeta]:
     """Find documentation affected by a code change using a two-stage pipeline.
 
     Stage 1: Embed the change summary, compute cosine similarity against all
@@ -205,8 +207,14 @@ def find_affected_docs(
     Stage 2: For each candidate, ask Claude Haiku to score relevance (0-10)
              and explain why. Calls are parallelized for speed. Filter to score >= 5.
 
-    Returns a list of AffectedDoc sorted by relevance (highest first).
-    Returns empty list if no embedding API key is available.
+    Returns a ``(results, meta)`` tuple: ``results`` is a list of AffectedDoc
+    sorted by relevance (highest first); ``meta`` is the core pipeline's
+    :class:`ImpactFinderMeta`, propagated verbatim so degradation stays visible
+    through this wrapper (#2004 T1.4). Check ``meta.degraded`` before trusting
+    an empty result — ``([], degraded=False)`` means "no docs affected", while
+    ``([], degraded=True)`` means the finder itself could not run cleanly
+    (``meta.reason`` names the branch, e.g. ``no_embedding_provider`` or
+    ``empty_index``).
     """
     return _core_find_affected(
         change_summary=change_summary,

@@ -140,6 +140,7 @@ class UpdateResult:
     reflections_yaml_result: reflections_yaml.ReflectionsYamlMigrationResult | None = None
     reflection_arm_result: reflection_arm.ArmResult | None = None
     reflection_register_result: reflection_register.RegisterResult | None = None
+    baseline_refresh_register_result: reflection_register.RegisterResult | None = None
     officecli_result: officecli.InstallResult | None = None
     rodney_result: rodney.InstallResult | None = None
     npm_tools_result: npm_tools.NpmToolsResult | None = None
@@ -619,6 +620,25 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if not rr.success:
         log(f"WARN: crash-recovery registration: {rr.detail}", v, always=True)
         result.warnings.append(f"crash-recovery registration: {rr.detail}")
+
+    # Step 1.656: Ensure the weekly test-baseline-refresh reflection is
+    # registered (#1933/#2004) via the same generalized register path. Same
+    # ordering rationale as Step 1.655: runs BEFORE Step 1.66's vault→config
+    # copy so the entry propagates on this same cycle.
+    log("Ensuring test-baseline-refresh reflection is registered...", v)
+    result.baseline_refresh_register_result = reflection_register.register_test_baseline_refresh(
+        project_dir
+    )
+    br = result.baseline_refresh_register_result
+    if br.action == "registered":
+        log("test-baseline-refresh reflection registered in vault reflections.yaml", v, always=True)
+    elif br.action == "noop":
+        log("test-baseline-refresh reflection already registered", v)
+    elif br.action == "skipped":
+        log(f"test-baseline-refresh registration skipped: {br.detail}", v)
+    if not br.success:
+        log(f"WARN: test-baseline-refresh registration: {br.detail}", v, always=True)
+        result.warnings.append(f"test-baseline-refresh registration: {br.detail}")
 
     # Step 1.66: Ensure config/reflections.yaml is a real file copy (never a
     # symlink — the launchd worker's reflection scheduler reads it, and a

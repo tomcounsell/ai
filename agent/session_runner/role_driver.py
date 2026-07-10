@@ -33,6 +33,7 @@ from agent.session_runner.hook_edge import (
     HookEdge,
     HookEdgeConsumer,
 )
+from agent.session_runner.router import ExitReason, TurnFailure
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -128,8 +129,10 @@ class HeadlessTurnOutcome:
     ``turn_ended`` is True when the turn reached a well-defined boundary;
     ``turn_end_source`` records which signal decided it ("hook_edge" for a
     ``TURN_END`` envelope, "result" for the subprocess clean exit fallback,
-    "none" for a hung/failed turn). ``exit_reason`` is None on success and a
-    slug otherwise (feeds the runner's exit classification).
+    "none" for a hung/failed turn). ``failure`` is None on success and a
+    :class:`~agent.session_runner.router.TurnFailure` otherwise — a structured
+    ``ExitReason`` plus free-form detail (feeds the runner's exit
+    classification; ``str(failure)`` is the legacy wire format).
     """
 
     reply_text: str = ""
@@ -139,7 +142,7 @@ class HeadlessTurnOutcome:
     transcript_path: str | None = None
     needs_human: HookEdge | None = None
     compaction: HookEdge | None = None
-    exit_reason: str | None = None
+    failure: TurnFailure | None = None
     hung: bool = False
     metered: bool = True
 
@@ -411,28 +414,28 @@ class HeadlessRoleDriver:
                 self.turn_timeout_s,
             )
             outcome.hung = True
-            outcome.exit_reason = "headless_turn_timeout"
+            outcome.failure = TurnFailure(ExitReason.HEADLESS_TURN_TIMEOUT)
             return outcome
         except HarnessThinkingBlockCorruptionError as e:
-            # Nonzero exit + thinking-block corruption: propagate exit_reason.
+            # Nonzero exit + thinking-block corruption: propagate the failure.
             logger.error("[role-driver] %s turn corruption: %s", self.role, e)
-            outcome.exit_reason = f"headless_thinking_corruption: {e}"
+            outcome.failure = TurnFailure(ExitReason.HEADLESS_THINKING_CORRUPTION, str(e))
             return outcome
         except Exception as e:  # noqa: BLE001
             logger.error("[role-driver] %s turn subprocess error: %s", self.role, e)
-            outcome.exit_reason = f"headless_subprocess_error: {e}"
+            outcome.failure = TurnFailure(ExitReason.HEADLESS_SUBPROCESS_ERROR, str(e))
             return outcome
 
         # The harness marks a binary-not-found failure inline in the reply text.
         if isinstance(reply, str) and reply.startswith("Error: CLI harness not found"):
             outcome.reply_text = reply
-            outcome.exit_reason = "headless_binary_missing"
+            outcome.failure = TurnFailure(ExitReason.HEADLESS_BINARY_MISSING)
             return outcome
 
         # Empty-output guard: no result event, no accumulated text.
         if not reply:
             outcome.reply_text = ""
-            outcome.exit_reason = "empty_output"
+            outcome.failure = TurnFailure(ExitReason.EMPTY_OUTPUT)
             return outcome
 
         outcome.reply_text = reply
@@ -464,7 +467,7 @@ class HeadlessRoleDriver:
                     returncode,
                     len(reply),
                 )
-                outcome.exit_reason = "headless_nonzero_exit_no_result"
+                outcome.failure = TurnFailure(ExitReason.HEADLESS_NONZERO_EXIT_NO_RESULT)
                 return outcome
 
         # Turn-end reconciliation: prefer a fresh TURN_END envelope; else the

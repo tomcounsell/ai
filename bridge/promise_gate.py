@@ -870,7 +870,7 @@ def cli_check_or_exit(
                 session_id=session_id,
                 source="promise_gate_cli_exception",
             )
-        except Exception:
+        except Exception:  # noqa: S110 -- fail-open audit; no recursive failure
             pass
         return
 

@@ -105,7 +105,7 @@ def _evict_handle_if_needed() -> None:
         try:
             fh.flush()
             fh.close()
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort handle close
             pass
         del _handles[oldest_sid]
 
@@ -338,7 +338,7 @@ def finalize_session(session_id: str) -> None:
                 try:
                     fh.flush()
                     fh.close()
-                except Exception:
+                except Exception:  # noqa: S110 -- best-effort handle close
                     pass
 
         # Remove the lock AFTER releasing it.  We use pop() so a concurrent

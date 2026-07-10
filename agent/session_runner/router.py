@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal
 
 # ---------------------------------------------------------------------------
@@ -145,47 +146,105 @@ def classify_pm_prefix(pm_text: str) -> ClassificationResult:
 # ---------------------------------------------------------------------------
 
 
-# Clean exits: the run ended the way a healthy session ends. Everything else
-# is non-clean and routes to the error reaction / persona-safe apology.
-# (Vocabulary preserved from the pre-cutover telemetry; ``steer_abort`` is an
-# operator-requested abort with its own user-facing confirmation.)
-CLEAN_EXIT_REASONS = frozenset(
-    {
-        "pm_complete",
-        "pm_user",
-        "pm_needs_human",
-        "pm_floor_delivered",
-        "steer_abort",
-    }
-)
+class ExitReason(StrEnum):
+    """The exit-reason vocabulary, with classification declared per member.
 
-# Wrap-up trigger set: successful-shaped terminal states that must still be
-# driven to produce a user-facing message when none was delivered
-# (``user_facing_routed=False``). Distinct from CLEAN_EXIT_REASONS — e.g.
-# ``pm_max_turns`` is wrapup-eligible but not clean.
-WRAPUP_ELIGIBLE_EXIT_REASONS = frozenset(
-    {
-        "pm_complete",
-        "pm_user",
-        "pm_needs_human",
-        "pm_max_turns",
-        "pm_floor_delivered",
-    }
-)
+    Each member is ``(value, is_clean, wrapup_eligible, is_anomaly)``. String
+    VALUES are byte-identical to the pre-enum vocabulary — telemetry
+    (``exit_summary`` session events, ``AgentSession.exit_reason``) depends on
+    them. Members ARE ``str`` (StrEnum), so plain-string comparisons and
+    frozenset membership at every existing import site keep working unchanged.
 
-# Anomalous exits: operator-actionable failures that warrant an error-level
-# log (Sentry capture) and a dashboard session_events entry. The PTY-only
-# producers (``startup_unresolved``) do not exist headless — a turn either
-# yields a stream-json ``result`` or the subprocess errored.
-ANOMALY_EXIT_REASONS = frozenset(
-    {
-        "pm_hang",
-        "dev_hang",
-        "pm_no_user_message",
-        "exception",
-        "error",
-    }
-)
+    Classification semantics:
+
+    * ``is_clean`` — the run ended the way a healthy session ends. Everything
+      else is non-clean and routes to the error reaction / persona-safe
+      apology. (``steer_abort`` is an operator-requested abort with its own
+      user-facing confirmation.)
+    * ``wrapup_eligible`` — successful-shaped terminal states that must still
+      be driven to produce a user-facing message when none was delivered
+      (``user_facing_routed=False``). Distinct from clean — e.g.
+      ``pm_max_turns`` is wrapup-eligible but not clean.
+    * ``is_anomaly`` — operator-actionable failures that warrant an
+      error-level log (Sentry capture) and a dashboard session_events entry.
+      The PTY-only producers (``startup_unresolved``) do not exist headless —
+      a turn either yields a stream-json ``result`` or the subprocess errored.
+
+    A member may carry several flags (``pm_complete`` is clean AND
+    wrapup-eligible) or none (turn-level slugs like ``empty_output`` are
+    translated by the runner before summary classification, so their
+    disposition is all-False by declaration). A new member without a
+    deliberate classification fails the completeness test in
+    ``tests/unit/session_runner/test_exit_reason.py``.
+    """
+
+    is_clean: bool
+    wrapup_eligible: bool
+    is_anomaly: bool
+
+    def __new__(
+        cls, value: str, is_clean: bool, wrapup_eligible: bool, is_anomaly: bool
+    ) -> ExitReason:
+        member = str.__new__(cls, value)
+        member._value_ = value
+        member.is_clean = is_clean
+        member.wrapup_eligible = wrapup_eligible
+        member.is_anomaly = is_anomaly
+        return member
+
+    # -- Adapter default (RunSummary before terminal classification) --------
+    #                                  value                clean  wrapup anomaly
+    IN_PROGRESS = ("in_progress", False, False, False)
+
+    # -- Summary-level terminal reasons --------------------------------------
+    PM_COMPLETE = ("pm_complete", True, True, False)
+    PM_USER = ("pm_user", True, True, False)
+    PM_NEEDS_HUMAN = ("pm_needs_human", True, True, False)
+    PM_FLOOR_DELIVERED = ("pm_floor_delivered", True, True, False)
+    STEER_ABORT = ("steer_abort", True, False, False)
+    PM_MAX_TURNS = ("pm_max_turns", False, True, False)
+    PM_EMPTY_TURN = ("pm_empty_turn", False, False, False)
+    TURN_TIMEOUT = ("turn_timeout", False, False, False)
+    PM_NO_USER_MESSAGE = ("pm_no_user_message", False, False, True)
+    EXCEPTION = ("exception", False, False, True)
+    ERROR = ("error", False, False, True)
+
+    # -- Historical vocabulary preserved for telemetry continuity ------------
+    PM_HANG = ("pm_hang", False, False, True)
+    DEV_HANG = ("dev_hang", False, False, True)
+
+    # -- Turn-level reasons minted by the role driver (TurnFailure.reason) ---
+    EMPTY_OUTPUT = ("empty_output", False, False, False)
+    HEADLESS_TURN_TIMEOUT = ("headless_turn_timeout", False, False, False)
+    HEADLESS_THINKING_CORRUPTION = ("headless_thinking_corruption", False, False, False)
+    HEADLESS_SUBPROCESS_ERROR = ("headless_subprocess_error", False, False, False)
+    HEADLESS_BINARY_MISSING = ("headless_binary_missing", False, False, False)
+    HEADLESS_NONZERO_EXIT_NO_RESULT = ("headless_nonzero_exit_no_result", False, False, False)
+
+
+@dataclass(frozen=True)
+class TurnFailure:
+    """A failed role-driver turn: structured reason + free-form detail.
+
+    Pre-enum, the driver smuggled exception detail into the reason string
+    (``f"headless_subprocess_error: {e}"``); this separates them. ``str()``
+    reproduces the legacy wire format byte-for-byte, so the runner's
+    ``exit_message`` telemetry is unchanged.
+    """
+
+    reason: ExitReason
+    detail: str = ""
+
+    def __str__(self) -> str:
+        return f"{self.reason}: {self.detail}" if self.detail else str(self.reason)
+
+
+# The classification frozensets, derived from the per-member declarations.
+# Every pre-enum import site keeps working unchanged: a frozenset of StrEnum
+# members compares equal to (and contains) the raw strings.
+CLEAN_EXIT_REASONS = frozenset(r for r in ExitReason if r.is_clean)
+WRAPUP_ELIGIBLE_EXIT_REASONS = frozenset(r for r in ExitReason if r.wrapup_eligible)
+ANOMALY_EXIT_REASONS = frozenset(r for r in ExitReason if r.is_anomaly)
 
 # Cap on the size of a terminal ``exit_message``. A multi-KB traceback can
 # land on the exception branch, and the message is published toward the

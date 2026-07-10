@@ -156,8 +156,8 @@ def clear_unhealthy(session_id: str) -> None:
         if sessions:
             sessions[0].watchdog_unhealthy = None
             sessions[0].save()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("clear_unhealthy: failed to clear watchdog flag for %s: %s", session_id, e)
 
 
 def reset_session_count(session_id: str) -> None:
@@ -231,7 +231,7 @@ def _write_activity_stream(
         )
         with open(activity_file, "a") as f:
             f.write(entry + "\n")
-    except Exception:
+    except Exception:  # noqa: S110 -- activity telemetry never blocks agent
         pass  # Never block agent on activity logging
 
 
@@ -270,7 +270,7 @@ def _compute_activity_stats(session_id: str) -> dict[str, Any]:
 
         stats["tool_distribution"] = tool_dist
         stats["commit_count"] = commit_count
-    except Exception:
+    except Exception:  # noqa: S110 -- best-effort diagnostics; partial stats ok
         pass
     return stats
 
@@ -624,8 +624,9 @@ async def watchdog_hook(
             s.tool_call_count = count
             s.updated_at = time.time()
             s.save()
-    except Exception:
-        pass  # Non-fatal: don't let tracking break the agent
+    except Exception as e:
+        # Non-fatal: don't let tracking break the agent.
+        logger.debug("session tracking update failed for %s: %s", session_id, e)
 
     # === MEMORY INJECTION (every tool call, internally rate-limited) ===
     # Computed before steering so both can be combined if needed.

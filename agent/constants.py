@@ -16,8 +16,10 @@ Resolution has two modes, encoded per-constant in _TERMINAL_EMOJI_CONFIG:
   over the VALIDATED_REACTIONS index. Positive variety is desirable and provably
   safe — find_best_emoji filters out BLOCKED_REACTION_EMOJIS, so no hostile face can
   ever be drawn. If find_best_emoji() raises (missing API key, no embeddings file,
-  network error) or returns the bare default, a hardcoded fallback EmojiResult is
-  returned and cached: 👌 (SUCCESS), 👏 (COMPLETE).
+  network error), returns the bare default, draws a glyph in
+  RESERVED_REACTION_GLYPHS (owned by another reaction constant), or draws a glyph
+  already cached for a different terminal constant, a hardcoded fallback
+  EmojiResult is returned and cached: 👌 (SUCCESS), 👏 (COMPLETE).
 
 - **Pinned** (REACTION_ERROR): resolved directly to a fixed emoji — never through
   the semantic resolver. It is pinned to 🤔 so a terminal-failure reaction placed on
@@ -74,6 +76,24 @@ _TERMINAL_EMOJI_CONFIG: dict[str, _TerminalEmojiConfig] = {
     ),  # 👏 semantic
     "REACTION_ERROR": _TerminalEmojiConfig(None, "\U0001f914", True),  # 🤔 pinned
 }
+
+
+# Glyphs the semantic lottery may NEVER draw (#2004 T1.8, issue #1961 class):
+# a semantic result landing on a glyph another constant pins would make two
+# reactions visually ambiguous. The set is the union of:
+#
+# - The bridge-owned pinned reaction glyphs from bridge/response.py, hardcoded
+#   here because importing bridge.response from agent.constants would be an
+#   import cycle (bridge.response imports this module). The drift guard is
+#   bridge.response._assert_distinct(), which runs at bridge.response import
+#   time and fails loudly if any constant pair ever collides:
+#     👀 REACTION_RECEIVED · ✍ REACTION_PROCESSING · 🫡 REACTION_ABORT
+#
+# - Every pinned/fallback emoji declared in _TERMINAL_EMOJI_CONFIG (🤔 👌 👏),
+#   derived from the config so a fallback change propagates automatically.
+RESERVED_REACTION_GLYPHS: frozenset[str] = frozenset(
+    {"\U0001f440", "✍", "\U0001fae1"}  # 👀 ✍ 🫡 — bridge.response pins (see above)
+) | frozenset(config.emoji for config in _TERMINAL_EMOJI_CONFIG.values())
 
 
 # Heartbeat staleness threshold — used by both worker and bridge health checks.
@@ -174,6 +194,22 @@ def _resolve_terminal_emoji(name: str, config: _TerminalEmojiConfig) -> object:
         # Use our own fallback so the constants remain distinct.
         if result.emoji == DEFAULT_EMOJI and not result.is_custom:
             raise ValueError(f"semantic resolution returned default emoji for {name!r}")
+        # A draw landing on a reserved glyph (a pin or fallback owned by another
+        # reaction constant — e.g. 🫡 REACTION_ABORT) is a failed resolution:
+        # two constants sharing a glyph is the issue #1961 defect class, caught
+        # at import time by bridge.response._assert_distinct().
+        if result.emoji in RESERVED_REACTION_GLYPHS:
+            raise ValueError(
+                f"semantic resolution for {name!r} drew reserved glyph {result.emoji!r}"
+            )
+        # Likewise a draw matching a glyph already cached for a DIFFERENT
+        # constant (the other semantic constant resolved first).
+        for other_name, cached in _TERMINAL_EMOJI_CACHE.items():
+            if other_name != name and getattr(cached, "emoji", None) == result.emoji:
+                raise ValueError(
+                    f"semantic resolution for {name!r} drew {result.emoji!r}, "
+                    f"already resolved for {other_name!r}"
+                )
         _TERMINAL_EMOJI_CACHE[name] = result
         return result
     except Exception as exc:

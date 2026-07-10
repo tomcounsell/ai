@@ -76,7 +76,7 @@ Semantic search for code, configs, and docs coupled to a proposed change. Two-st
 from tools.code_impact_finder import find_affected_code, index_code
 
 index_code()  # Build/refresh the embedding index
-results = find_affected_code("change session ID derivation")
+results, meta = find_affected_code("change session ID derivation")  # (results, ImpactFinderMeta) — see docs/features/code-impact-finder.md
 for r in results:
     print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
 ```

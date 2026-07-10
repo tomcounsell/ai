@@ -53,6 +53,7 @@ from scripts._baseline_common import (  # noqa: E402 -- sys.path must be set fir
     CATEGORY_IMPORT_ERROR,
     CATEGORY_REAL,
     SCHEMA_VERSION,
+    ArtifactEnvelope,
     JunitxmlParseError,
     parse_junitxml,
 )
@@ -291,8 +292,17 @@ def build_baseline(
     repo_root: Path,
     argv: list[str],
     preserved_notes: dict[str, str] | None = None,
+    degraded: bool = False,
 ) -> dict:
-    """Build the schema-v2 baseline dict from aggregated outcomes."""
+    """Build the schema-v2 baseline dict from aggregated outcomes.
+
+    ``argv`` is the FULL faithful invocation vector including the script name
+    (e.g. ``["scripts/refresh_test_baseline.py", "--runs", "3"]``) -- it is
+    recorded verbatim (prefixed with ``python``) as ``generated_by``.
+    ``degraded=True`` stamps the persisted artifact so the merge gate can
+    read the degraded state later (issue #2004: the artifact, not the refresh
+    exit code, is the silent surface).
+    """
     preserved_notes = preserved_notes or {}
     tests: dict[str, dict] = {}
     for node_id, outcomes in aggregated.items():
@@ -309,15 +319,15 @@ def build_baseline(
             entry["note"] = preserved_notes[node_id]
         tests[node_id] = entry
 
-    generated_by = "python " + " ".join(argv)
-    baseline = {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(UTC).isoformat(),
-        "generated_by": generated_by,
-        "runs": runs,
-        "commit": capture_commit(repo_root),
-        "tests": tests,
-    }
+    envelope = ArtifactEnvelope(
+        generated_at=datetime.now(UTC).isoformat(),
+        commit=capture_commit(repo_root),
+        generated_by="python " + " ".join(argv),
+        runs=runs,
+        degraded=degraded,
+    )
+    baseline = {"schema_version": SCHEMA_VERSION, "tests": tests}
+    baseline.update(envelope.to_fields())
     return baseline
 
 
@@ -488,7 +498,12 @@ def main(argv: list[str] | None = None) -> int:
 
     global_timeout = args.global_timeout or compute_default_global_timeout(args.test_timeout)
     output_path = resolve_output_path(args)
-    invocation_argv = sys.argv[1:] if argv is None else argv
+    # Faithful provenance (issue #2004): record the FULL invocation including
+    # the script name. The old ``sys.argv[1:]`` join persisted misleading
+    # strings like ``generated_by: "python --merge"``.
+    invocation_argv = (
+        list(sys.argv) if argv is None else ["scripts/refresh_test_baseline.py", *argv]
+    )
 
     successful_runs: list[dict[str, str]] = []
     failed_runs = 0
@@ -550,15 +565,16 @@ def main(argv: list[str] | None = None) -> int:
     aggregated = aggregate_outcomes(successful_runs)
     preserved_notes = load_existing_notes(DEFAULT_BASELINE_PATH) if args.merge else {}
 
+    degraded = len(successful_runs) < MIN_USABLE_RUNS_FOR_FLAKY_DETECTION
     baseline = build_baseline(
         aggregated=aggregated,
         runs=len(successful_runs),
         repo_root=PROJECT_DIR,
         argv=invocation_argv,
         preserved_notes=preserved_notes,
+        degraded=degraded,
     )
 
-    degraded = len(successful_runs) < MIN_USABLE_RUNS_FOR_FLAKY_DETECTION
     degraded_warning = (
         f"WARNING: only {len(successful_runs)} usable run(s) -- flaky classification unavailable"
     )

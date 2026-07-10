@@ -24,7 +24,7 @@ process pool, no idle-scraping startup phase.
 |--------|------|
 | `runner.py` | The single-session turn loop for every session type: spawn one `claude -p` per turn, route the PM's output, run the steer-preempt watcher, own resume-scalar persistence timing. |
 | `role_driver.py` | `HeadlessRoleDriver` — builds the subprocess invocation (prime slash command vs. resume), parses stream-json, reconciles the hook-edge snapshot against the turn's own edges. |
-| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the exit-classification vocabulary (`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS`). `pm_user` (a real `[/user]` answer the PM chose to deliver) and `pm_needs_human` (a runner-forwarded needs-input prompt, from a `needs_human` hook edge firing on an otherwise-unroutable turn) are both clean, wrap-up-eligible exits — kept distinct so the dashboard and reaction gate can tell "the PM answered" from "the PM paused, waiting on the human" (issue #1922). |
+| `router.py` | `classify_pm_prefix` (regex, zero LLM calls; strips the matched routing token from a fallback-classified payload so no raw routing string ever reaches the human) and the `ExitReason` StrEnum (issue #2004), whose per-member `is_clean`/`wrapup_eligible`/`is_anomaly` declarations derive `CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, `ANOMALY_EXIT_REASONS` — see [Exit Classification](#exit-classification-exitreason-issue-2004) below. `pm_user` (a real `[/user]` answer the PM chose to deliver) and `pm_needs_human` (a runner-forwarded needs-input prompt, from a `needs_human` hook edge firing on an otherwise-unroutable turn) are both clean, wrap-up-eligible exits — kept distinct so the dashboard and reaction gate can tell "the PM answered" from "the PM paused, waiting on the human" (issue #1922). |
 | `hook_edge.py` / `hook_forwarder.py` | The turn-end/needs-human signal path: a fail-silent NDJSON forwarder writes each hook event to a per-session file; the consumer tails it with a durable `(event_cursor, byte_offset, fingerprint)` cursor. |
 | `transcript_tailer.py` | Incremental JSONL transcript reads for dashboard telemetry (byte-offset cadence, unchanged from the prior implementation). |
 | `adapter.py` | Executor-facing construction: delivery callbacks, the four-scalar resume persistence, exit-summary publication. |
@@ -284,6 +284,36 @@ backstop), not by session-health — accepting a wider detection window (up to
 `turn_timeout_s`, 7200s for PM/eng turns) for that rare case in exchange for
 eliminating false zombie verdicts on legitimately toolless-streaming turns.
 
+## Exit Classification (`ExitReason`, issue #2004)
+
+`router.py`'s exit-reason vocabulary is a `class ExitReason(StrEnum)`, not a
+plain set of string literals. Each member declares its own classification
+inline via `__new__(value, is_clean, wrapup_eligible, is_anomaly)` — e.g.
+`PM_COMPLETE = ("pm_complete", True, True, False)` — so adding a member
+without deciding its classification fails a completeness test
+(`tests/unit/session_runner/test_exit_reason.py`) instead of silently
+landing "non-clean" by omission (the issue #1922 defect class this closes).
+`CLEAN_EXIT_REASONS`, `WRAPUP_ELIGIBLE_EXIT_REASONS`, and
+`ANOMALY_EXIT_REASONS` are now *derived* frozensets —
+`frozenset(r for r in ExitReason if r.is_clean)` and so on — rather than
+hand-maintained lists that could silently drift out of sync with each other.
+
+Because `ExitReason` members ARE `str` (via `StrEnum`), every existing import
+site — plain-string comparisons, frozenset membership checks, telemetry
+serialization — keeps working unchanged; the enum values are byte-identical
+to the pre-enum vocabulary (`"pm_complete"`, `"pm_user"`,
+`"headless_subprocess_error"`, etc.), since `exit_summary` session events and
+`AgentSession.exit_reason` depend on the exact strings.
+
+Role-driver turn failures (minted in `role_driver.py`, e.g. a subprocess
+crash or a missing binary) used to smuggle exception detail into the reason
+string itself (`f"headless_subprocess_error: {e}"`). They now carry a
+`TurnFailure(reason: ExitReason, detail: str = "")` dataclass instead, whose
+`__str__` reproduces the legacy `"reason: detail"` wire format byte-for-byte
+— so `exit_message` telemetry is unchanged on the wire, but callers can
+inspect `.reason` (an `ExitReason` member) and `.detail` (free text)
+separately instead of re-parsing a string.
+
 ## Supersedes
 
 This replaces the granite PTY container substrate in full — the interactive
@@ -300,7 +330,7 @@ prior substrate was retired outright rather than patched again.
 |------|---------|
 | `agent/session_runner/runner.py` | Turn loop, steer-preempt watcher, resume-scalar timing |
 | `agent/session_runner/role_driver.py` | Subprocess construction, prime vs. resume, stream-json parse |
-| `agent/session_runner/router.py` | `classify_pm_prefix`, exit-classification frozensets |
+| `agent/session_runner/router.py` | `classify_pm_prefix`, `ExitReason` StrEnum, `TurnFailure`, derived exit-classification frozensets |
 | `agent/session_runner/hook_edge.py`, `hook_forwarder.py` | Turn-end / needs-human hook signal path |
 | `agent/session_runner/transcript_tailer.py` | Dashboard telemetry transcript reads |
 | `agent/session_runner/adapter.py` | Executor wiring, delivery callbacks, resume persistence |

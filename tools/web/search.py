@@ -1,9 +1,12 @@
 """Unified web search with provider fallback chain."""
 
 import asyncio
+import logging
 
 from tools.web.providers import perplexity, tavily
 from tools.web.types import SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 async def web_search(query: str, **kwargs) -> SearchResult | None:
@@ -34,8 +37,9 @@ async def web_search(query: str, **kwargs) -> SearchResult | None:
             result = await provider.search(query, **kwargs)
             if result is not None:
                 return result
-        except Exception:
-            # Continue to next provider on any error
+        except Exception as e:
+            # Continue to next provider on any error.
+            logger.debug("search provider %s failed: %s", provider.__name__, e)
             continue
 
     # All providers failed

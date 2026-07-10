@@ -12,6 +12,7 @@ import logging
 import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,41 @@ HAIKU_CONTENT_PREVIEW_CHARS = 2000
 
 # Warn if reindex exceeds this many chunks
 COST_WARNING_THRESHOLD = 1000
+
+
+# ---------------------------------------------------------------------------
+# Degraded-result metadata (#2004 T1.4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ImpactFinderMeta:
+    """Diagnostic metadata returned alongside ``find_affected()`` results.
+
+    Callers branch on ``degraded`` to distinguish "no files affected" (a clean
+    run that legitimately found nothing: ``degraded=False``) from "the finder
+    is broken or fell back" (``degraded=True``). Every degraded/fallback branch
+    inside ``find_affected`` names its cause in ``reason``.
+
+    Attributes:
+        degraded: True when any fallback or failure branch was taken. The
+            accompanying results (possibly empty, embedding-only, or partial)
+            are not a full clean two-stage answer.
+        reason: Machine-readable name of the degraded branch, or ``None`` on a
+            clean run. One of: ``no_embedding_provider``, ``empty_index``,
+            ``query_embedding_failed``, ``no_scorable_candidates``,
+            ``rerank_client_init_failed``, ``rerank_all_failed``,
+            ``rerank_partial_failure``.
+        rerank_failures: Number of Stage-2 rerank requests that hard-failed
+            with a transport/API error (0 when Stage 2 never ran).
+        candidates: Number of Stage-1 candidates selected for reranking
+            (0 when Stage 1 never produced any).
+    """
+
+    degraded: bool
+    reason: str | None
+    rerank_failures: int
+    candidates: int
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +483,7 @@ def find_affected(
     top_n: int = 15,
     repo_root: Path | None = None,
     embed_provider: tuple | None = None,
-) -> list:
+) -> tuple[list, ImpactFinderMeta]:
     """Two-stage impact finder: embed query, cosine recall, Haiku rerank, build results.
 
     Args:
@@ -465,19 +501,23 @@ def find_affected(
         embed_provider: Optional (embed_fn, model_name) tuple. Auto-detected if None.
 
     Returns:
-        List of result models (type depends on result_builder).
-        Returns empty list if no embedding API key is available.
+        A ``(results, meta)`` tuple. ``results`` is the list of result models
+        (type depends on result_builder); ``meta`` is an :class:`ImpactFinderMeta`
+        whose ``degraded``/``reason`` fields let the caller distinguish "no
+        files affected" (``degraded=False``) from "the finder is broken or fell
+        back" (``degraded=True``) on every branch — a bare ``[]`` is never
+        ambiguous.
 
     Fallback behavior:
         The embedding-only ``fallback_builder`` is used in two cases: (1) the
-        Anthropic client cannot be constructed, and (2) *every* Stage 2 rerank
-        request hard-fails with a transport/API error (e.g. a misconfigured
-        ``ANTHROPIC_BASE_URL`` that 404s on the Haiku model). The second case is
-        an all-or-nothing gate by design: a partial failure where at least one
-        candidate still reranks is trusted as-is, and a clean run where nothing
-        scores >= 5 legitimately returns ``[]`` (never a false-positive fallback
-        dump). A degraded-but-not-fully-broken reranker therefore does not
-        trigger fallback.
+        Anthropic client cannot be constructed (``rerank_client_init_failed``),
+        and (2) *every* Stage 2 rerank request hard-fails with a transport/API
+        error (``rerank_all_failed``, e.g. a misconfigured ``ANTHROPIC_BASE_URL``
+        that 404s on the Haiku model). The second case is an all-or-nothing gate
+        by design: a partial failure where at least one candidate still reranks
+        keeps the reranked results (flagged ``rerank_partial_failure``), and a
+        clean run where nothing scores >= 5 legitimately returns ``[]`` with
+        ``degraded=False`` (never a false-positive fallback dump).
     """
     if repo_root is None:
         repo_root = Path.cwd()
@@ -488,7 +528,9 @@ def find_affected(
             "No embedding API key available; cannot find affected files. "
             "Set OPENAI_API_KEY or VOYAGE_API_KEY."
         )
-        return []
+        return [], ImpactFinderMeta(
+            degraded=True, reason="no_embedding_provider", rerank_failures=0, candidates=0
+        )
 
     embed_fn, _model_name = provider
 
@@ -497,14 +539,18 @@ def find_affected(
     chunks = index.get("chunks", [])
     if not chunks:
         logger.warning("Index '%s' is empty. Run build_index() first.", index_name)
-        return []
+        return [], ImpactFinderMeta(
+            degraded=True, reason="empty_index", rerank_failures=0, candidates=0
+        )
 
     # Stage 1: Embedding recall
     try:
         query_embedding = embed_fn([change_summary])[0]
     except Exception:
         logger.exception("Failed to embed change summary")
-        return []
+        return [], ImpactFinderMeta(
+            degraded=True, reason="query_embedding_failed", rerank_failures=0, candidates=0
+        )
 
     scored: list[tuple[float, dict]] = []
     for chunk in chunks:
@@ -518,7 +564,12 @@ def find_affected(
     candidates = scored[:top_n]
 
     if not candidates:
-        return []
+        # The index had chunks but none carried an embedding — an unusable
+        # index is a broken finder, not "no files affected".
+        logger.warning("Index '%s' has no embedded chunks; cannot score candidates.", index_name)
+        return [], ImpactFinderMeta(
+            degraded=True, reason="no_scorable_candidates", rerank_failures=0, candidates=0
+        )
 
     # Stage 2: LLM reranking with Claude Haiku (parallelized)
     try:
@@ -528,7 +579,12 @@ def find_affected(
     except Exception:
         logger.exception("Failed to initialize Anthropic client for reranking")
         # Fall back to embedding-only results
-        return fallback_builder(candidates)
+        return fallback_builder(candidates), ImpactFinderMeta(
+            degraded=True,
+            reason="rerank_client_init_failed",
+            rerank_failures=0,
+            candidates=len(candidates),
+        )
 
     results, failure_count = _rerank_candidates(
         client, change_summary, candidates, rerank_prompt_builder
@@ -538,18 +594,27 @@ def find_affected(
     # (transport/API error, e.g. a misconfigured ANTHROPIC_BASE_URL that 404s on
     # the Haiku model) do we route to the embedding-only fallback. A clean run
     # where nothing scored >= 5 legitimately returns []. A partial failure (some
-    # requests fail, at least one succeeds) is trusted as-is and does NOT fall
-    # back. This deliberate boundary means a degraded-but-not-fully-broken
-    # reranker will not dump the full embedding-only candidate list.
-    if candidates and failure_count == len(candidates):
+    # requests fail, at least one succeeds) keeps the reranked results and does
+    # NOT fall back — but is flagged degraded so the caller can see the gap.
+    if failure_count == len(candidates):
         logger.warning(
             "All %d Haiku rerank requests failed (check ANTHROPIC_BASE_URL / "
             "model id); falling back to embedding-only candidates.",
             len(candidates),
         )
-        return fallback_builder(candidates)
+        return fallback_builder(candidates), ImpactFinderMeta(
+            degraded=True,
+            reason="rerank_all_failed",
+            rerank_failures=failure_count,
+            candidates=len(candidates),
+        )
 
-    return result_builder(results)
+    return result_builder(results), ImpactFinderMeta(
+        degraded=failure_count > 0,
+        reason="rerank_partial_failure" if failure_count else None,
+        rerank_failures=failure_count,
+        candidates=len(candidates),
+    )
 
 
 # ---------------------------------------------------------------------------

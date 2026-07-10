@@ -123,7 +123,7 @@ def _load_env() -> None:
 
         load_dotenv(_repo_root / ".env")
         load_dotenv(Path.home() / "Desktop" / "Valor" / ".env")  # symlink target — no-op
-    except Exception:
+    except Exception:  # noqa: S110 -- dotenv optional; env may be preset
         pass
 
 
@@ -163,7 +163,7 @@ def _resolve_heartbeat_path(repo_root: Path | None = None) -> Path:
             common = Path(output)
             abs_common = common if common.is_absolute() else (anchor / common).resolve()
             return abs_common.parent / "data" / "last_worker_connected"
-    except Exception:
+    except Exception:  # noqa: S110 -- falls back to anchor-relative path
         pass
     return anchor / "data" / "last_worker_connected"
 
@@ -307,7 +307,7 @@ def resolve_project_key(cwd: str) -> str:
                 if wd_len > best_len:
                     best_len = wd_len
                     best_key = key
-        except Exception:
+        except Exception:  # noqa: S112 -- unresolvable path skipped
             continue
 
     if best_key is not None:
@@ -1007,7 +1007,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
                 if callable(val):
                     continue
                 data[field_name] = val
-            except Exception:
+            except Exception:  # noqa: S110 -- inspect skips unreadable fields
                 pass
 
         if args.json:
@@ -1052,8 +1052,8 @@ def cmd_children(args: argparse.Namespace) -> int:
                     # Dual-match: caller may pass either session_id or agent_session_id; check both
                     if pid and (pid == parent_agent_id or pid == parent_id):
                         all_children.append(s)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("children: session query failed for status=%s: %s", st, e)
 
         all_children.sort(key=lambda s: s.created_at or 0)
 
@@ -1110,8 +1110,8 @@ def cmd_list(args: argparse.Namespace) -> int:
                 st = st.strip()
                 try:
                     all_sessions.extend(list(AgentSession.query.filter(status=st)))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("list: session query failed for status=%s: %s", st, e)
         else:
             # All known statuses — use ALL_STATUSES to avoid silently missing statuses
             from models.session_lifecycle import ALL_STATUSES
@@ -1119,8 +1119,8 @@ def cmd_list(args: argparse.Namespace) -> int:
             for st in ALL_STATUSES:
                 try:
                     all_sessions.extend(list(AgentSession.query.filter(status=st)))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("list: session query failed for status=%s: %s", st, e)
 
         # Client-side role filter — matches on session_type only
         if role_filter:
@@ -1217,8 +1217,10 @@ def cmd_kill(args: argparse.Namespace) -> int:
                             killed.append(s.session_id)
                         except Exception as e:
                             errors.append(f"{s.session_id}: {e}")
-                except Exception:
-                    pass
+                except Exception as query_err:
+                    logger.warning(
+                        "kill --all: session query failed for status=%s: %s", st, query_err
+                    )
         else:
             session_id = args.id
             session = _find_session(session_id)
@@ -1325,14 +1327,14 @@ def cmd_release(args: argparse.Namespace) -> int:
         all_completed: list[AgentSession] = []
         try:
             all_completed = list(AgentSession.query.filter(status="completed"))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("release: completed-session query failed: %s", e)
 
         # Also check superseded (may have been superseded after completion)
         try:
             all_completed.extend(list(AgentSession.query.filter(status="superseded")))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("release: superseded-session query failed: %s", e)
 
         # Strategy 2: match by slug via PR branch name (session/{slug})
         # Fetched once up-front so we don't shell out per-session.
@@ -1348,7 +1350,7 @@ def cmd_release(args: argparse.Namespace) -> int:
             )
             if _gh_result.returncode == 0:
                 pr_branch = _gh_result.stdout.strip()
-        except Exception:
+        except Exception:  # noqa: S110 -- gh unavailable: pr_url match fallback
             pass  # gh unavailable — fall back to pr_url matching only
 
         for s in all_completed:

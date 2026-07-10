@@ -122,6 +122,57 @@ REACTION_ABORT = "🫡"  # Steering abort acknowledged
 # resolved lazily via find_best_emoji() on first access with hardcoded fallbacks.
 
 
+def _reaction_constants() -> dict[str, str]:
+    """Name → glyph mapping of every reaction constant this module exposes.
+
+    The lazily-resolved EmojiResult constants (REACTION_SUCCESS,
+    REACTION_COMPLETE, REACTION_ERROR) are compared by their str() glyph value;
+    they are already resolved by this module's top-of-file import.
+    """
+    return {
+        "REACTION_RECEIVED": REACTION_RECEIVED,
+        "REACTION_PROCESSING": REACTION_PROCESSING,
+        "REACTION_ABORT": REACTION_ABORT,
+        "REACTION_SUCCESS": str(REACTION_SUCCESS),
+        "REACTION_COMPLETE": str(REACTION_COMPLETE),
+        "REACTION_ERROR": str(REACTION_ERROR),
+    }
+
+
+def _assert_distinct(constants: dict[str, str] | None = None) -> None:
+    """Raise ImportError if any two reaction constants share a glyph.
+
+    Definition-site invariant (#2004 T1.8) for the issue #1961 defect class:
+    a duplicated glyph between two constant groups (e.g. 🤔 doubling as both
+    "processing" and "error") makes reactions ambiguous to the user. Executed
+    at import time below, and shared with
+    tests/integration/test_reply_delivery.py::TestReactionEmojiSelection so
+    the distinctness rule has exactly one implementation.
+
+    Args:
+        constants: Optional name → glyph mapping to check; defaults to the
+            module's full reaction-constant registry.
+
+    Raises:
+        ImportError: Naming the duplicated glyph and BOTH constant names.
+    """
+    if constants is None:
+        constants = _reaction_constants()
+    seen: dict[str, str] = {}
+    for name, glyph in constants.items():
+        other = seen.get(glyph)
+        if other is not None:
+            raise ImportError(
+                f"Reaction emoji collision in bridge.response: {glyph!r} is used by "
+                f"both {other} and {name}. Every reaction constant must map to a "
+                f"distinct glyph (issue #1961)."
+            )
+        seen[glyph] = name
+
+
+_assert_distinct()
+
+
 # =============================================================================
 # Tool Log Filtering
 # =============================================================================

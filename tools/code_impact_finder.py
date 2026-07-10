@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from tools.impact_finder_core import (
     MIN_SIMILARITY_THRESHOLD,
+    ImpactFinderMeta,
     chunk_markdown,
     get_embedding_provider,
 )
@@ -436,7 +437,7 @@ def find_affected_code(
     change_summary: str,
     top_n: int = 20,
     repo_root: Path | None = None,
-) -> list[AffectedCode]:
+) -> tuple[list[AffectedCode], ImpactFinderMeta]:
     """Find code affected by a proposed change.
 
     Stage 1: Embed the change summary, compute cosine similarity against all
@@ -444,8 +445,13 @@ def find_affected_code(
     Stage 2: For each candidate, ask Claude Haiku to score relevance (0-10)
              and explain why. Calls are parallelized for speed.
 
-    Returns a list of AffectedCode sorted by relevance (highest first).
-    Returns empty list if no embedding API key is available.
+    Returns a ``(results, meta)`` tuple: ``results`` is a list of AffectedCode
+    sorted by relevance (highest first); ``meta`` is the core pipeline's
+    :class:`ImpactFinderMeta`, propagated verbatim so degradation stays visible
+    through this wrapper (#2004 T1.4). Check ``meta.degraded`` before trusting
+    an empty result — ``([], degraded=False)`` means "no code affected", while
+    ``([], degraded=True)`` means the finder itself could not run cleanly
+    (``meta.reason`` names the branch).
     """
     return _core_find_affected(
         change_summary=change_summary,
@@ -520,10 +526,17 @@ def _cli():
         index_code()
 
     print(f"Finding affected code for: {args.change_summary}")
-    results = find_affected_code(args.change_summary, top_n=args.top_n)
+    results, meta = find_affected_code(args.change_summary, top_n=args.top_n)
+
+    if meta.degraded:
+        print(
+            f"WARNING: impact finder degraded ({meta.reason}; "
+            f"rerank_failures={meta.rerank_failures}/{meta.candidates}) — "
+            f"results may be incomplete or embedding-only."
+        )
 
     if not results:
-        print("No affected code found.")
+        print("No affected code found." if not meta.degraded else "No results (finder degraded).")
         return
 
     for r in results:
