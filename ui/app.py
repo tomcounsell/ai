@@ -143,7 +143,8 @@ def create_app() -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
         """Root route: single-page dashboard with all system state."""
-        from ui.data.machine import get_machine_name, get_machine_projects
+        from config.machine import get_machine_name
+        from ui.data.machine import get_machine_projects
         from ui.data.reflections import get_grouped_reflections
         from ui.data.sdlc import get_all_sessions
 
@@ -353,7 +354,7 @@ def create_app() -> FastAPI:
         try:
             import redis as redis_lib
 
-            from ui.data.machine import get_machine_project_keys
+            from config.machine import get_machine_project_keys
 
             r = redis_lib.Redis.from_url(
                 os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
@@ -394,7 +395,7 @@ def create_app() -> FastAPI:
 
             import redis as redis_lib
 
-            from ui.data.machine import get_machine_project_keys
+            from config.machine import get_machine_project_keys
 
             r = redis_lib.Redis.from_url(
                 os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
@@ -765,8 +766,9 @@ def create_app() -> FastAPI:
             get_redis_latency_max,
             get_redis_latency_p95,
         )
+        from config.machine import get_machine_name
         from ui.data.analytics import get_analytics_summary
-        from ui.data.machine import get_machine_name, get_machine_projects
+        from ui.data.machine import get_machine_projects
         from ui.data.reflections import get_all_reflections
         from ui.data.sdlc import get_all_sessions
 

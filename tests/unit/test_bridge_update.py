@@ -75,7 +75,7 @@ def update_env(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(bridge_update, "set_reaction", AsyncMock())
-    monkeypatch.setattr(bridge_update, "_get_machine_name", lambda: "testbox")
+    monkeypatch.setattr(bridge_update, "get_machine_name", lambda: "testbox")
     monkeypatch.setattr(bridge_update, "_get_running_sessions_info", lambda: (0, []))
     monkeypatch.setattr(bridge_update, "_queue_fix_session", AsyncMock())
     monkeypatch.setattr(bridge_update, "_bridge_plist_exists", lambda: False)
@@ -296,7 +296,7 @@ def boot_env(monkeypatch, tmp_path):
     """Point the boot check at a tmp project dir with canned verify results."""
     (tmp_path / "data").mkdir()
     monkeypatch.setattr(bridge_update, "_PROJECT_DIR", tmp_path)
-    monkeypatch.setattr(bridge_update, "_get_machine_name", lambda: "testbox")
+    monkeypatch.setattr(bridge_update, "get_machine_name", lambda: "testbox")
     monkeypatch.setattr("scripts.update.git.get_short_sha", lambda pd: HEAD_SHA)
     monkeypatch.setattr(
         "scripts.update.verify.check_machine_identity",

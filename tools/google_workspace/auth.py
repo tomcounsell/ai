@@ -14,8 +14,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
-import subprocess
 from pathlib import Path
 
 import httplib2
@@ -28,6 +26,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
 from requests.adapters import HTTPAdapter
 
+from config.machine import get_machine_slug
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -95,27 +94,9 @@ class GoogleAuthError(Exception):
         super().__init__(full_message)
 
 
-def _get_machine_name() -> str:
-    """Get a filesystem-safe machine name for per-machine token files."""
-    try:
-        result = subprocess.run(
-            ["scutil", "--get", "ComputerName"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            name = result.stdout.strip()
-            # Make filesystem-safe: lowercase, replace spaces with hyphens
-            return name.lower().replace(" ", "-")
-    except Exception:  # noqa: S110 -- falls back to hostname
-        pass
-    return platform.node().split(".")[0].lower()
-
-
 def _get_token_path() -> Path:
     """Get per-machine token path, migrating from shared token if needed."""
-    machine = _get_machine_name()
+    machine = get_machine_slug()
     per_machine_path = CONFIG_DIR / f"google_token.{machine}.json"
 
     # If per-machine token exists, use it
