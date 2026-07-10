@@ -87,10 +87,13 @@ fix this:
 `.claude/skills-global/do-merge/SKILL.md` is a portable skill that performs the
 deterministic merge gate: verify PR state (OPEN / mergeable / CI-green /
 `mergeStateStatus == CLEAN`) → verify REVIEW `APPROVED` → verify the body links
-the tracking issue → create the authorization file `data/merge_authorized_{pr}`
-the merge-guard hook requires → squash-merge → delete the auth file. It defers
-repo-specific gate detail (shape classification, stale-review filter,
-lockfile/full-suite gates) to `docs/sdlc/do-merge.md`.
+the tracking issue → authorize and squash-merge. In this repo, authorization is
+the live merge predicate the merge-guard hook evaluates
+(`tools/merge_predicate.py`, issue #2003) — the skill no longer creates an
+authorization file on the happy path; a repo whose merge-guard hook still
+gates on file existence gets that behavior instead, per the repo-context file.
+It defers repo-specific gate detail (shape classification, stale-review
+filter, lockfile/full-suite gates) to `docs/sdlc/do-merge.md`.
 
 The skill auto-deploys: `scripts/update/hardlinks.py::_sync_skills` discovers
 any `skills-global/*/SKILL.md` directory and hardlinks it to `~/.claude/skills/`
