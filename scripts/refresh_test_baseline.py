@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from scripts import suite_lock  # noqa: E402 -- sys.path must be set first
 from scripts._baseline_common import (  # noqa: E402 -- sys.path must be set first
     CATEGORY_FLAKY,
     CATEGORY_HUNG,
@@ -75,6 +77,16 @@ _FALLBACK_TEST_COUNT_ESTIMATE = 1500
 # in every transient flake as "real" (issue #1853). Refuse to write it
 # silently: emit a loud WARNING and exit non-zero instead.
 MIN_USABLE_RUNS_FOR_FLAKY_DETECTION = 2
+
+# Full-suite coordination lock timeout (seconds). Acquired before each
+# sequential pytest pass to prevent concurrent full-suite runs from
+# oversubscribing CPU and causing cross-run contention. Provisional/tunable.
+SUITE_LOCK_TIMEOUT = 1800
+
+# Lock dir shared with ``scripts/pytest-clean.sh`` and ``suite_lock.py``.
+# Must match ``data/full-suite-running.lock`` (the canonical default).
+# Absolute (via PROJECT_DIR) so the lock coordinates regardless of cwd.
+SUITE_LOCK_DIR = PROJECT_DIR / "data" / "full-suite-running.lock"
 
 
 def classify(
@@ -487,14 +499,34 @@ def main(argv: list[str] | None = None) -> int:
             per_run_tmp.mkdir()
             xml_path = per_run_tmp / "junit.xml"
 
-            completed = run_pytest_once(
-                run_index=run_index,
-                junitxml_path=xml_path,
-                test_timeout=args.test_timeout,
-                global_timeout=global_timeout,
-                pytest_args=args.pytest_args,
-                verbose=args.verbose,
-            )
+            # Acquire full-suite coordination lock before each sequential run.
+            # Skipped in --dry-run mode so dry-runs never block on (or hold)
+            # the lock. The lock is released in the finally below so the next
+            # run can acquire fresh, allowing interleaving with other waiting
+            # runs.
+            use_lock = not args.dry_run
+            if use_lock:
+                suite_lock.acquire(
+                    lock_dir=SUITE_LOCK_DIR,
+                    owner_pid=os.getpid(),
+                    timeout=SUITE_LOCK_TIMEOUT,
+                )
+            try:
+                completed = run_pytest_once(
+                    run_index=run_index,
+                    junitxml_path=xml_path,
+                    test_timeout=args.test_timeout,
+                    global_timeout=global_timeout,
+                    pytest_args=args.pytest_args,
+                    verbose=args.verbose,
+                )
+            finally:
+                if use_lock:
+                    suite_lock.release(
+                        lock_dir=SUITE_LOCK_DIR,
+                        owner_pid=os.getpid(),
+                    )
+
             if not completed:
                 failed_runs += 1
                 continue

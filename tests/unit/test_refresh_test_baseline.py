@@ -678,3 +678,50 @@ def test_main_dry_run_emits_warning_and_exits_nonzero_when_degraded(
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "WARNING: only 1 usable run(s)" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# full-suite coordination lock gating in main()
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_does_not_touch_suite_lock() -> None:
+    """--dry-run must never acquire (or release) the full-suite lock."""
+    with (
+        patch("scripts.refresh_test_baseline.suite_lock") as mock_lock,
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=False),
+    ):
+        exit_code = main(["--runs", "1", "--dry-run"])
+
+    assert exit_code == 1
+    mock_lock.acquire.assert_not_called()
+    mock_lock.release.assert_not_called()
+
+
+def test_lock_acquired_and_released_once_per_run() -> None:
+    """Each sequential run acquires the lock before pytest and releases it after."""
+    with (
+        patch("scripts.refresh_test_baseline.suite_lock") as mock_lock,
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=False),
+    ):
+        exit_code = main(["--runs", "2"])
+
+    assert exit_code == 1
+    assert mock_lock.acquire.call_count == 2
+    assert mock_lock.release.call_count == 2
+
+
+def test_lock_released_in_finally_when_run_raises() -> None:
+    """The finally block releases the lock even if the pytest run raises."""
+    with (
+        patch("scripts.refresh_test_baseline.suite_lock") as mock_lock,
+        patch(
+            "scripts.refresh_test_baseline.run_pytest_once",
+            side_effect=RuntimeError("simulated pytest launch failure"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="simulated pytest launch failure"):
+            main(["--runs", "1"])
+
+    mock_lock.acquire.assert_called_once()
+    mock_lock.release.assert_called_once()
