@@ -271,6 +271,40 @@ def test_stale_verdict_matching_trailer_is_fresh_and_passes(substrate_repo, monk
     assert any("head_sha trailer matches" in note for note in result.notes)
 
 
+def test_stale_verdict_normalized_trailer_still_matches(substrate_repo, monkeypatch):
+    """``sdlc-tool verdict record`` normalizes stored text through
+    ``normalize_verdict`` (uppercase, underscores -> spaces), so a recorded
+    trailer arrives as ``REVIEW CONTEXT HEAD SHA=<HEX>``. The trailer match
+    must survive that normalization — otherwise the exact-SHA freshness leg
+    is unreachable for every verdict this repo's own tool stores."""
+    normalized = f"APPROVED ... REVIEW CONTEXT HEAD SHA={HEAD_SHA.upper()}"
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: _fresh_verdict(
+            verdict=normalized,
+            recorded_at="2020-01-01T00:00:00+00:00",
+        ),
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is True
+    assert any("head_sha trailer matches" in note for note in result.notes)
+
+
+def test_stale_verdict_normalized_trailer_mismatch_fails(substrate_repo, monkeypatch):
+    """A normalized-form trailer for a DIFFERENT commit still fails —
+    normalization tolerance must not weaken the mismatch leg."""
+    normalized = f"APPROVED ... REVIEW CONTEXT HEAD SHA={'B' * 40}"
+    monkeypatch.setattr(
+        mp,
+        "_run_verdict_get",
+        lambda issue, root: _fresh_verdict(verdict=normalized),
+    )
+    result = mp.evaluate_merge_predicate(PR, repo_root=substrate_repo)
+    assert result.allowed is False
+    assert any("head_sha trailer mismatch" in check for check in result.failed_checks)
+
+
 def test_stale_verdict_missing_latest_commit_fails_closed(substrate_repo, monkeypatch):
     """Substrate present + latest-commit data unavailable → fail closed with a
     named leg, never a silent freshness pass."""

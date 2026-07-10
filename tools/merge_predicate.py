@@ -65,7 +65,15 @@ _ISSUE_REF_CAPTURE_RE = re.compile(
     re.IGNORECASE,
 )
 
-_HEAD_SHA_TRAILER_RE = re.compile(r"REVIEW_CONTEXT head_sha=([0-9a-f]{40})")
+# The stored verdict text may have passed through
+# ``agent.sdlc_router.normalize_verdict`` (``sdlc-tool verdict record``
+# uppercases and maps underscores to spaces), so the trailer must match both
+# the raw ``REVIEW_CONTEXT head_sha=<hex>`` form the review skill emits and
+# its normalized image ``REVIEW CONTEXT HEAD SHA=<HEX>``. SHA comparison is
+# case-insensitive for the same reason.
+_HEAD_SHA_TRAILER_RE = re.compile(
+    r"REVIEW[_ ]CONTEXT\s+HEAD[_ ]SHA=([0-9A-Fa-f]{40})", re.IGNORECASE
+)
 
 # Head refs that can never yield a usable slug for the docs/features fallback.
 _NO_SLUG_REFS = frozenset({"main", "master", "HEAD", ""})
@@ -391,7 +399,7 @@ def _check_verdict_freshness(
         if not head_sha:
             failed.append("PR head SHA unavailable for verdict freshness check")
             return
-        if trailer.group(1) == head_sha:
+        if trailer.group(1).lower() == head_sha.lower():
             notes.append("REVIEW verdict fresh: head_sha trailer matches PR head commit")
             return
         failed.append("REVIEW verdict predates PR head commit (head_sha trailer mismatch)")
