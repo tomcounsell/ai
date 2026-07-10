@@ -725,3 +725,127 @@ def test_lock_released_in_finally_when_run_raises() -> None:
 
     mock_lock.acquire.assert_called_once()
     mock_lock.release.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# ArtifactEnvelope stamping: degraded flag + faithful provenance (#2004, T1.3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_baseline_stamps_full_envelope_with_degraded_false_default(
+    tmp_path: Path,
+) -> None:
+    repo = _init_tmp_repo(tmp_path)
+    baseline = build_baseline(
+        aggregated={"tests/unit/test_a.py::test_real": ["fail", "fail"]},
+        runs=2,
+        repo_root=repo,
+        argv=["scripts/refresh_test_baseline.py", "--runs", "2"],
+    )
+    # All five envelope fields are present on the persisted artifact.
+    for field in ("generated_at", "commit", "generated_by", "runs", "degraded"):
+        assert field in baseline, f"envelope field {field!r} missing"
+    assert baseline["degraded"] is False
+    assert baseline["runs"] == 2
+
+
+def test_build_baseline_stamps_degraded_true_with_run_count(tmp_path: Path) -> None:
+    repo = _init_tmp_repo(tmp_path)
+    baseline = build_baseline(
+        aggregated={"tests/unit/test_a.py::test_real": ["fail"]},
+        runs=1,
+        repo_root=repo,
+        argv=["scripts/refresh_test_baseline.py"],
+        degraded=True,
+    )
+    assert baseline["degraded"] is True
+    assert baseline["runs"] == 1
+
+
+def test_build_baseline_generated_by_is_faithful_invocation(tmp_path: Path) -> None:
+    """Provenance bug fix: generated_by must include the script name, not
+    collapse to `python --merge` (the old argv[1:]-join)."""
+    repo = _init_tmp_repo(tmp_path)
+    baseline = build_baseline(
+        aggregated={},
+        runs=2,
+        repo_root=repo,
+        argv=["scripts/refresh_test_baseline.py", "--merge"],
+    )
+    assert baseline["generated_by"] == "python scripts/refresh_test_baseline.py --merge"
+
+
+def test_main_writes_degraded_true_envelope_on_single_usable_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The persisted artifact carries the degraded state the gate reads later."""
+    output_path = tmp_path / "baseline.json"
+
+    with (
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=True),
+        patch(
+            "scripts.refresh_test_baseline.parse_junitxml",
+            side_effect=[
+                {"tests/unit/test_a.py::test_ok": "pass"},
+                JunitxmlParseError("simulated discard"),
+            ],
+        ),
+    ):
+        exit_code = main(["--runs", "2", "--output", str(output_path)])
+
+    assert exit_code == 1
+    written = json.loads(output_path.read_text())
+    assert written["degraded"] is True
+    assert written["runs"] == 1
+
+
+def test_main_writes_degraded_false_envelope_on_healthy_refresh(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "baseline.json"
+
+    with (
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=True),
+        patch(
+            "scripts.refresh_test_baseline.parse_junitxml",
+            side_effect=[
+                {"tests/unit/test_a.py::test_ok": "pass"},
+                {"tests/unit/test_a.py::test_ok": "pass"},
+            ],
+        ),
+    ):
+        exit_code = main(["--runs", "2", "--output", str(output_path)])
+
+    assert exit_code == 0
+    written = json.loads(output_path.read_text())
+    assert written["degraded"] is False
+    assert written["runs"] == 2
+
+
+def test_main_records_script_name_in_generated_by(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End-to-end provenance: main() with explicit argv records the script name
+    and the args -- never the bare `python --runs 2` shape."""
+    output_path = tmp_path / "baseline.json"
+
+    with (
+        patch("scripts.refresh_test_baseline.run_pytest_once", return_value=True),
+        patch(
+            "scripts.refresh_test_baseline.parse_junitxml",
+            side_effect=[
+                {"tests/unit/test_a.py::test_ok": "pass"},
+                {"tests/unit/test_a.py::test_ok": "pass"},
+            ],
+        ),
+    ):
+        main(["--runs", "2", "--output", str(output_path)])
+
+    written = json.loads(output_path.read_text())
+    generated_by = written["generated_by"]
+    assert generated_by.startswith("python ")
+    assert "refresh_test_baseline.py" in generated_by
+    assert "--runs 2" in generated_by
