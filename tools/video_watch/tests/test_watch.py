@@ -107,7 +107,7 @@ def test_youtube_happy_path(tmp_path, monkeypatch):
         return out
 
     def fake_extract_audio(video_path, workdir):
-        apath = Path(workdir) / "audio.wav"
+        apath = Path(workdir) / "audio.mp3"
         apath.write_bytes(b"fake-audio")
         return apath
 
@@ -149,7 +149,7 @@ def test_audio_extracted_before_transcription(tmp_path):
         return []
 
     def fake_extract_audio(video_path, workdir):
-        apath = Path(workdir) / "audio.wav"
+        apath = Path(workdir) / "audio.mp3"
         apath.write_bytes(b"fake-audio")
         return apath
 
@@ -171,7 +171,7 @@ def test_audio_extracted_before_transcription(tmp_path):
     assert result["transcript"] == "a transcript"
     mock_extract_audio.assert_called_once()
     assert len(received_paths) == 1
-    assert received_paths[0].name == "audio.wav"
+    assert received_paths[0].name == "audio.mp3"
     assert received_paths[0].name != "source.mp4"
 
 
@@ -199,6 +199,39 @@ def test_oversized_duration_skips_transcription_with_exact_note(tmp_path):
     assert result["transcript"] is None
     assert "[audio too long to transcribe — frames only]" in result["notes"]
     mock_extract_audio.assert_not_called()
+    mock_transcribe.assert_not_called()
+
+
+def test_oversized_audio_bytes_skips_transcription_with_exact_note(tmp_path, monkeypatch):
+    """An extracted audio file over VIDEO_WATCH_TRANSCRIBE_MAX_BYTES (Whisper's
+    ~25 MB request ceiling) skips the upload with the exact note, even when the
+    duration gate passes — catches high-bitrate outliers."""
+
+    def fake_download(url, workdir):
+        vpath = Path(workdir) / "source.mp4"
+        vpath.write_bytes(b"fake-bytes")
+        return vpath
+
+    def fake_frames(video_path, workdir):
+        return []
+
+    def fake_extract_audio(video_path, workdir):
+        apath = Path(workdir) / "audio.mp3"
+        apath.write_bytes(b"x" * 64)  # 64 bytes > patched 10-byte ceiling
+        return apath
+
+    monkeypatch.setattr(vw, "VIDEO_WATCH_TRANSCRIBE_MAX_BYTES", 10)
+    with (
+        patch.object(vw, "_download_video", side_effect=fake_download),
+        patch.object(vw, "_extract_scene_frames", side_effect=fake_frames),
+        patch.object(vw, "_probe_duration", return_value=10.0),
+        patch.object(vw, "_extract_audio", side_effect=fake_extract_audio),
+        patch.object(vw, "transcribe_audio_file") as mock_transcribe,
+    ):
+        result = _run(vw.watch_video("https://youtu.be/abc", output_dir=tmp_path))
+
+    assert result["transcript"] is None
+    assert "[audio too long to transcribe — frames only]" in result["notes"]
     mock_transcribe.assert_not_called()
 
 
@@ -254,7 +287,7 @@ def test_silent_video_emits_frames_without_transcript(tmp_path):
         return [(fp, 0.0)]
 
     def fake_extract_audio(video_path, workdir):
-        apath = Path(workdir) / "audio.wav"
+        apath = Path(workdir) / "audio.mp3"
         apath.write_bytes(b"fake-audio")
         return apath
 

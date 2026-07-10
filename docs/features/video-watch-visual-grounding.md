@@ -30,14 +30,15 @@ YouTube and X share the exact same pipeline (yt-dlp download, ffmpeg frame extra
 
 `watch_video(url, question=None, output_dir=None)` runs the following steps, all inside a `tempfile.TemporaryDirectory()` (see Temp-Dir Discipline below):
 
-1. **Acquire** — `yt-dlp` downloads best video+audio into the temp work dir, merged to mp4. Bounded by `VIDEO_WATCH_DOWNLOAD_TIMEOUT`.
+1. **Acquire** — `yt-dlp` downloads best video+audio into the temp work dir, merged to mp4. Bounded by `VIDEO_WATCH_SUBPROCESS_TIMEOUT` (ffmpeg extraction shares the same named timeout; the cheap `ffprobe` header read gets the much shorter `VIDEO_WATCH_PROBE_TIMEOUT`).
 2. **Duration probe** — `ffprobe` checks total duration; if it exceeds `VIDEO_WATCH_MAX_DURATION`, a note is added that only the first N seconds were scanned.
 3. **Frame extraction** — `ffmpeg` samples scene-change frames (`select='gt(scene,VIDEO_WATCH_SCENE_THRESHOLD)'`), scaled to `VIDEO_WATCH_FRAME_WIDTH` px wide, with a `metadata=print` sidecar recovering each frame's presentation timestamp.
 4. **Dedup** — near-duplicate consecutive frames are dropped via a 16x16 grayscale thumbnail mean-absolute-difference comparison against the previously kept frame; frames closer than `VIDEO_WATCH_DEDUP_THRESHOLD` are discarded. Falls back to no-op if Pillow is unavailable.
 5. **Subsample** — the deduped frame list is evenly subsampled down to `VIDEO_WATCH_MAX_FRAMES`, preserving temporal coverage across the clip rather than just taking the first N.
-6. **Transcript** — the downloaded audio track is transcribed via `tools.link_analysis.transcribe_audio_file` (OpenAI `whisper-1`). This is the same source-agnostic helper the push tier uses; it does not go through `process_youtube_url`, which is YouTube-only and rejects X URLs.
-7. **Persist frames** — kept frames are copied out of the temp work dir into `output_dir` (default: a fresh `tempfile.mkdtemp(prefix="video_watch_frames_")`), named `frame_{i:03d}_{MM-SS}.jpg`. This copy step is what lets the frames survive past the `TemporaryDirectory` teardown.
-8. **X-native context (X source only)** — after the temp-dir block closes, `fetch_x_context` is called for `x`-source URLs (see Grok's Role below).
+6. **Audio extraction** — `ffmpeg -vn -ac 1 -ar 16000 -b:a 64k` extracts a mono 16 kHz MP3 track from the merged video. The muxed mp4 is never uploaded: OpenAI Whisper's hard ~25 MB request ceiling is sized for audio, and 64 kbps MP3 keeps a full 30-minute clip at ~14 MB. Sources over `VIDEO_WATCH_MAX_DURATION`, or extracted audio over `VIDEO_WATCH_TRANSCRIBE_MAX_BYTES`, skip transcription with the explicit note `[audio too long to transcribe — frames only]`.
+7. **Transcript** — the extracted audio track is transcribed via `tools.link_analysis.transcribe_audio_file` (OpenAI `whisper-1`). This is the same source-agnostic helper the push tier uses; it does not go through `process_youtube_url`, which is YouTube-only and rejects X URLs.
+8. **Persist frames** — kept frames are copied out of the temp work dir into `output_dir` (default: a fresh `tempfile.mkdtemp(prefix="video_watch_frames_")`), named `frame_{i:03d}_{MM-SS}.jpg`. This copy step is what lets the frames survive past the `TemporaryDirectory` teardown.
+9. **X-native context (X source only)** — after the temp-dir block closes, `fetch_x_context` is called for `x`-source URLs (see Grok's Role below).
 
 The result dict has: `success`, `source`, `url`, `frames` (list of `{path, timestamp, seconds}`), `transcript`, `grok_context`, `notes` (degraded-mode messages), `error`.
 
@@ -46,7 +47,7 @@ The result dict has: `success`, `source`, `url`, `frames` (list of `{path, times
 Two directories with different lifetimes are used on purpose:
 
 - The **download/audio scratch dir** is a `with tempfile.TemporaryDirectory() as work:` block wrapping the whole acquire, extract, and transcribe sequence. A crash partway through (OOM, subprocess timeout, unexpected exception) still reclaims this dir on the way out — it cannot leak a multi-hundred-MB working directory.
-- The **frames output dir** is created separately and deliberately outlives the `watch_video` call, because the agent `Read`s the JPEGs in a later, separate tool invocation. It is not context-managed.
+- The **frames output dir** is created separately and deliberately outlives the `watch_video` call, because the agent `Read`s the JPEGs in a later, separate tool invocation. It is not context-managed. Stale `video_watch_frames_*` dirs older than `VIDEO_WATCH_FRAME_DIR_MAX_AGE` (default 24h) are swept by `reap_stale_frame_dirs()`, which runs non-fatally at every CLI start and is also registered with the hourly `agent-session-cleanup` reflection (`agent/session_health.py::cleanup_corrupted_agent_sessions`), bounding the disk leak on machines where the CLI is invoked rarely.
 
 ## Grok's Role (X links only)
 
@@ -67,15 +68,21 @@ This serves two purposes: X-native context that a raw HTML fetch can't get (anti
 
 All provisional/tunable, each read via `os.getenv(NAME, default)` with a grain-of-salt comment in source, mirroring the `MAX_VIDEO_DURATION` convention in `tools/link_analysis`:
 
-| Constant | Default | Location | Meaning |
-|----------|---------|----------|---------|
-| `VIDEO_WATCH_MAX_FRAMES` | `60` | `tools/video_watch/__init__.py` | Cap on frames emitted per video (bounds agent context/token cost) |
-| `VIDEO_WATCH_FRAME_WIDTH` | `512` | `tools/video_watch/__init__.py` | Output frame width in px (height auto-scaled) |
-| `VIDEO_WATCH_MAX_DURATION` | `1800` (seconds) | `tools/video_watch/__init__.py` | Only the first N seconds of a video are processed |
-| `VIDEO_WATCH_SCENE_THRESHOLD` | `0.3` | `tools/video_watch/__init__.py` | ffmpeg scene-change score threshold (0..1); higher = fewer, more distinct frames |
-| `VIDEO_WATCH_DEDUP_THRESHOLD` | `6.0` | `tools/video_watch/__init__.py` | Mean-abs-diff (0..255) below which a frame is dropped as a near-duplicate |
-| `VIDEO_WATCH_DOWNLOAD_TIMEOUT` | `300` (seconds) | `tools/video_watch/__init__.py` | yt-dlp download subprocess timeout |
-| `VIDEO_WATCH_THIN_TRANSCRIPT_CHARS` | (see `bridge/enrichment.py`) | `bridge/enrichment.py` | Transcript length below which the push tier appends the watch-tier signpost |
+All live in the dependency-free `tools/video_watch/constants.py` (single source of truth — importable by `bridge/enrichment.py` without dragging in the heavy pipeline module):
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `VIDEO_WATCH_MAX_FRAMES` | `60` | Cap on frames emitted per video (bounds agent context/token cost) |
+| `VIDEO_WATCH_FRAME_WIDTH` | `512` | Output frame width in px (height auto-scaled) |
+| `VIDEO_WATCH_MAX_DURATION` | `1800` (seconds) | Only the first N seconds of a video are processed; also the transcription duration ceiling |
+| `VIDEO_WATCH_SCENE_THRESHOLD` | `0.3` | ffmpeg scene-change score threshold (0..1); higher = fewer, more distinct frames |
+| `VIDEO_WATCH_DEDUP_THRESHOLD` | `6.0` | Mean-abs-diff (0..255) below which a frame is dropped as a near-duplicate |
+| `VIDEO_WATCH_SUBPROCESS_TIMEOUT` | `600` (seconds) | Shared subprocess timeout for yt-dlp download and ffmpeg frame/audio extraction |
+| `VIDEO_WATCH_PROBE_TIMEOUT` | `30` (seconds) | ffprobe duration-probe timeout (header read only, deliberately short) |
+| `VIDEO_WATCH_GROK_TIMEOUT` | `60` (seconds) | HTTP timeout for the single Grok X-context call |
+| `VIDEO_WATCH_TRANSCRIBE_MAX_BYTES` | `26214400` (25 MiB) | Extracted-audio upload ceiling (Whisper's hard request limit); over it, transcription is skipped with the "audio too long" note |
+| `VIDEO_WATCH_FRAME_DIR_MAX_AGE` | `86400` (seconds) | Age after which a stale `video_watch_frames_*` dir is reaped |
+| `VIDEO_WATCH_THIN_TRANSCRIPT_CHARS` | `80` | Transcript length below which the push tier appends the watch-tier signpost |
 
 ## Thin-Transcript Signpost
 

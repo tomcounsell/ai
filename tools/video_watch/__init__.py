@@ -22,7 +22,6 @@ fallback), never for frame vision.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -32,12 +31,15 @@ from pathlib import Path
 
 from tools.link_analysis import transcribe_audio_file
 from tools.video_watch.constants import (
+    VIDEO_WATCH_DEDUP_THRESHOLD,
     VIDEO_WATCH_FRAME_DIR_MAX_AGE,
     VIDEO_WATCH_FRAME_WIDTH,
     VIDEO_WATCH_MAX_DURATION,
     VIDEO_WATCH_MAX_FRAMES,
     VIDEO_WATCH_PROBE_TIMEOUT,
+    VIDEO_WATCH_SCENE_THRESHOLD,
     VIDEO_WATCH_SUBPROCESS_TIMEOUT,
+    VIDEO_WATCH_TRANSCRIBE_MAX_BYTES,
     WATCH_CLI_NAME,
 )
 from tools.video_watch.grok import fetch_x_context
@@ -49,8 +51,11 @@ __all__ = [
     "VIDEO_WATCH_MAX_FRAMES",
     "VIDEO_WATCH_FRAME_WIDTH",
     "VIDEO_WATCH_MAX_DURATION",
+    "VIDEO_WATCH_SCENE_THRESHOLD",
+    "VIDEO_WATCH_DEDUP_THRESHOLD",
     "VIDEO_WATCH_SUBPROCESS_TIMEOUT",
     "VIDEO_WATCH_PROBE_TIMEOUT",
+    "VIDEO_WATCH_TRANSCRIBE_MAX_BYTES",
     "VIDEO_WATCH_FRAME_DIR_MAX_AGE",
     "VideoWatchError",
     "detect_source",
@@ -58,22 +63,9 @@ __all__ = [
     "reap_stale_frame_dirs",
 ]
 
-# --- Provisional/tunable constants -------------------------------------------
-# All grain-of-salt: adopted from claude-video's balanced defaults, tuned against
-# real usage. Each is env-overridable, mirroring MAX_VIDEO_DURATION in
-# tools/link_analysis.
-#
-# WATCH_CLI_NAME, VIDEO_WATCH_MAX_FRAMES, VIDEO_WATCH_FRAME_WIDTH,
-# VIDEO_WATCH_MAX_DURATION, VIDEO_WATCH_SUBPROCESS_TIMEOUT,
-# VIDEO_WATCH_PROBE_TIMEOUT, and VIDEO_WATCH_FRAME_DIR_MAX_AGE now live in
-# tools/video_watch/constants.py (a dependency-free module bridge/enrichment.py
-# can safely import) and are re-exported above/via __all__ for backward compat.
-
-# ffmpeg scene-change score threshold (0..1); higher = fewer, more distinct frames.
-VIDEO_WATCH_SCENE_THRESHOLD = float(os.getenv("VIDEO_WATCH_SCENE_THRESHOLD", "0.3"))
-# Near-duplicate dedup: mean-abs-diff over a 16x16 grayscale thumbnail, 0..255.
-# Frames closer than this to the previous kept frame are dropped.
-VIDEO_WATCH_DEDUP_THRESHOLD = float(os.getenv("VIDEO_WATCH_DEDUP_THRESHOLD", "6.0"))
+# All tunables + the CLI name live in the dependency-free
+# tools/video_watch/constants.py (single source of truth, safely importable by
+# bridge/enrichment.py) and are re-exported above via __all__ for internal use.
 
 _YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com")
 _X_HOSTS = ("twitter.com", "x.com", "mobile.twitter.com", "mobile.x.com")
@@ -168,14 +160,17 @@ def _download_video(url: str, tmpdir: Path) -> Path:
 
 
 def _extract_audio(video_path: Path, tmpdir: Path) -> Path:
-    """Extract a mono 16kHz audio track from ``video_path`` via ffmpeg.
+    """Extract a mono 16 kHz MP3 audio track from ``video_path`` via ffmpeg.
 
     Whisper only needs the audio; handing it the full merged .mp4 wastes
-    upload bandwidth and time. ``.wav`` is used because it is in
+    upload bandwidth and time. ``.mp3`` is in
     ``tools.link_analysis.transcribe_audio_file``'s known MIME map (avoids a
-    silent MIME mis-type when uploaded to the Whisper API).
+    silent MIME mis-type when uploaded to the Whisper API) and — unlike
+    uncompressed WAV, whose 32 KB/s mono-16kHz stream crosses Whisper's ~25 MB
+    request ceiling at ~13 minutes — 64 kbps MP3 keeps a full
+    ``VIDEO_WATCH_MAX_DURATION`` (30 min) clip at ~14 MB, comfortably under it.
     """
-    audio_path = tmpdir / "audio.wav"
+    audio_path = tmpdir / "audio.mp3"
     cmd = [
         "ffmpeg",
         "-nostdin",
@@ -187,6 +182,8 @@ def _extract_audio(video_path: Path, tmpdir: Path) -> Path:
         "1",
         "-ar",
         "16000",
+        "-b:a",
+        "64k",
         str(audio_path),
     ]
     try:
@@ -426,21 +423,26 @@ async def watch_video(
                 logger.warning("watch_video frame extraction failed for %s: %s", url, e)
 
             # Transcript from an extracted audio track (never the raw merged
-            # video) via link_analysis' Whisper path. Duration beyond
-            # VIDEO_WATCH_MAX_DURATION is treated as too long to reasonably
-            # transcribe (mirrors the same ~30min ceiling used for frames).
+            # video) via link_analysis' Whisper path. Two independent ceilings
+            # guard Whisper's hard ~25 MB request limit: duration beyond
+            # VIDEO_WATCH_MAX_DURATION (mirrors the ~30min frames ceiling), and
+            # a post-extraction byte check against VIDEO_WATCH_TRANSCRIBE_MAX_BYTES
+            # (catches high-bitrate outliers the duration gate alone would miss).
             if duration and duration > VIDEO_WATCH_MAX_DURATION:
                 result["notes"].append("[audio too long to transcribe — frames only]")
             else:
                 try:
                     audio_path = _extract_audio(video_path, workdir)
-                    transcript = await transcribe_audio_file(audio_path)
-                    if transcript:
-                        result["transcript"] = transcript
+                    if audio_path.stat().st_size > VIDEO_WATCH_TRANSCRIBE_MAX_BYTES:
+                        result["notes"].append("[audio too long to transcribe — frames only]")
                     else:
-                        result["notes"].append(
-                            "no transcript (silent, music-only, or no OPENAI_API_KEY)."
-                        )
+                        transcript = await transcribe_audio_file(audio_path)
+                        if transcript:
+                            result["transcript"] = transcript
+                        else:
+                            result["notes"].append(
+                                "no transcript (silent, music-only, or no OPENAI_API_KEY)."
+                            )
                 except VideoWatchError as e:
                     result["notes"].append(f"audio extraction failed: {e}")
                     logger.warning("watch_video audio extraction failed for %s: %s", url, e)
