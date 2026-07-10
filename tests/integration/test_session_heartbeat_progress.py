@@ -78,20 +78,36 @@ def _ago(seconds: int) -> datetime:
 
 class TestHeartbeatFreshness:
     def test_both_heartbeats_alive_not_flagged(self):
-        """Scenario 1: Both heartbeats within freshness window → has_progress=True."""
+        """Scenario 1: Both heartbeats fresh, session in its startup window → True.
+
+        Updated for #1983 against the unified predicates: heartbeats are an
+        executor-alive signal, honored by sub-check B only BEFORE the SDK has
+        ever produced output (``derive_sdk_ever_output`` False — so no
+        ``last_stdout_at`` here) and only while the session survives the D0
+        never-started gate (#1724/#1905: running <= 150s without output).
+        The original fixture (started 600s ago, ``last_stdout_at`` set) is a
+        stdout-producing session whose Tier-1 answer is now sub-check A's
+        alone; its aliveness is Tier 2's job (``alive``/``children`` gates).
+        """
         s = _mk_session(
+            started_at=_ago(60),
             last_heartbeat_at=_ago(30),
             last_sdk_heartbeat_at=_ago(30),
-            last_stdout_at=_ago(30),
         )
         assert _has_progress(s) is True
 
     def test_queue_fresh_sdk_stale_not_flagged(self):
-        """Scenario 2: Queue heartbeat fresh, SDK stale → still True (OR semantics)."""
+        """Scenario 2: Queue heartbeat fresh, SDK stale → still True (OR semantics).
+
+        Updated for #1983 (same startup-window framing as scenario 1): the
+        queue heartbeat is the sub-check B signal; ``last_sdk_heartbeat_at``
+        is a subprocess-watchdog signal deliberately excluded from Tier 1
+        (#1226), so its staleness must not flip the answer.
+        """
         s = _mk_session(
+            started_at=_ago(60),
             last_heartbeat_at=_ago(30),
             last_sdk_heartbeat_at=_ago(300),
-            last_stdout_at=_ago(30),
         )
         assert _has_progress(s) is True
 
@@ -128,10 +144,21 @@ class TestTier2ReprieveIntegration:
         assert _tier2_reprieve_signal(None, s) is None
 
     def test_reprieve_via_recent_compaction(self):
-        """Compaction within COMPACT_REPRIEVE_WINDOW_SEC reprieves the kill."""
+        """Compaction within COMPACT_REPRIEVE_WINDOW_SEC reprieves the kill.
+
+        Updated for #1983: the reprieve escalation guard (#1226/#1724)
+        suppresses ALL Tier-2 gates for sessions that have NEVER produced any
+        SDK output once past the never-started grace window. A session that
+        compacted has necessarily produced stream output, so the realistic
+        fixture carries a (stale) ``last_stdout_at`` — stale so it exercises
+        the compacting gate rather than Tier 1. The original fixture
+        (compaction with zero output ever) was contradictory: it read as
+        never-started and was correctly escalated past every reprieve.
+        """
         s = _mk_session(
             last_heartbeat_at=_ago(300),
             last_sdk_heartbeat_at=_ago(300),
+            last_stdout_at=_ago(300),
             last_compaction_ts=time.time() - 30,
         )
         assert _has_progress(s) is False

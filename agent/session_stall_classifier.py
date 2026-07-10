@@ -28,6 +28,8 @@ import os
 import time
 from dataclasses import dataclass, field
 
+from agent.session_runner.liveness import has_demonstrable_activity
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -190,31 +192,24 @@ def _has_demonstrable_progress(session) -> bool:
     """Return True if the session's own fields prove it has started and is working.
 
     The ``never_started`` probe keys off telemetry ``turn_start`` events, but
-    a session's telemetry write can lag or be lost. This helper consults the
-    AgentSession's own progress fields as ground truth:
+    a session's telemetry write can lag or be lost. Delegates to the
+    consolidated leaf
+    :func:`agent.session_runner.liveness.has_demonstrable_activity` (#2004
+    Task 2), which consults the AgentSession's own progress fields as ground
+    truth — reading ONLY ``{turn_count, last_tool_use_at}``:
 
-      * ``turn_count > 0``           → the session has taken at least one turn.
+      * ``turn_count > 0``           → the session has taken at least one turn
+        (numeric-string ``turn_count`` coerced defensively — parity with the
+        crash-signature caller).
       * ``last_tool_use_at`` fresh   → a tool fired within the suspect window.
 
-    "Fresh" means within :data:`IDLE_SUSPECT_SECS`. Missing attributes count as
-    no-progress (``getattr`` defaults), so legacy/stub sessions are unaffected.
-    Fail-soft: any error returns False, falling through to the elapsed-grace
-    check rather than masking a genuine never-started session.
+    "Fresh" means within :data:`IDLE_SUSPECT_SECS`, passed as the leaf's
+    ``freshness_window`` — this classifier runs live and must catch
+    *currently* stalled sessions. Missing/malformed attributes count as
+    no-progress and the leaf never raises, falling through to the
+    elapsed-grace check rather than masking a genuine never-started session.
     """
-    try:
-        from bridge.utc import to_unix_ts  # local import: mirror _classify
-
-        turn_count = getattr(session, "turn_count", None)
-        if isinstance(turn_count, int) and turn_count > 0:
-            return True
-
-        now = time.time()
-        ts = to_unix_ts(getattr(session, "last_tool_use_at", None))
-        if ts is not None and (now - ts) < IDLE_SUSPECT_SECS:
-            return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("_has_demonstrable_progress swallowed exception: %r", exc)
-    return False
+    return has_demonstrable_activity(session, freshness_window=IDLE_SUSPECT_SECS)
 
 
 def _classify(

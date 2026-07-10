@@ -14,6 +14,8 @@ analysis and the four call sites this feeds.
 
 from __future__ import annotations
 
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -45,3 +47,99 @@ def derive_sdk_ever_output(entry: Any) -> bool:
         or getattr(entry, "last_turn_at", None)
         or getattr(entry, "last_stdout_at", None)
     )
+
+
+def _read_field(entry: Any, name: str) -> Any:
+    """Read ``name`` from a dict-style or attribute-style entry.
+
+    Both ``_has_demonstrable_progress`` forks historically read AgentSession
+    objects via ``getattr(..., None)``; dict entries are accepted so the leaf
+    is pure over either shape. Missing fields default to ``None``.
+    """
+    if isinstance(entry, dict):
+        return entry.get(name)
+    return getattr(entry, name, None)
+
+
+def _as_unix_ts(val: Any) -> float | None:
+    """Coerce a datetime / int / float / ISO-string to a Unix timestamp.
+
+    Mirrors ``bridge.utc.to_unix_ts`` semantics (naive datetimes are treated
+    as UTC — Popoto strips tzinfo on save) without importing it: this module
+    stays stdlib-only so ``agent/crash_signature.py`` can import it where it
+    deliberately cannot import ``agent/session_health.py``. Returns ``None``
+    when the value cannot be coerced.
+    """
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        if val.tzinfo is None:
+            val = val.replace(tzinfo=UTC)
+        return val.timestamp()
+    if isinstance(val, int | float):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt.timestamp()
+    return None
+
+
+def has_demonstrable_activity(entry: Any, *, freshness_window: float | None = None) -> bool:
+    """Return True iff the entry's own fields prove it has taken a turn or used a tool.
+
+    The consolidated leaf for the two ``_has_demonstrable_progress`` forks
+    (#2004 Task 2): ``agent/session_stall_classifier.py`` (freshness-windowed,
+    passes ``IDLE_SUSPECT_SECS``) and ``agent/crash_signature.py``
+    (presence-only, passes ``None``). Reads ONLY ``{turn_count,
+    last_tool_use_at}`` — the exact subset both forks already used.
+
+    **B1 guard:** ``log_path`` / ``claude_session_uuid`` / ``last_stdout_at``
+    / ``last_turn_at`` are deliberately NOT presence signals here — an
+    init-only/log-only session must read no-progress for the stall/crash
+    paths. (``session_health`` has its own wider leaf,
+    :func:`derive_sdk_ever_output`, for the started-vs-never-started axis.)
+
+    Semantics:
+
+    - ``turn_count > 0`` (int) → progress. A numeric-string ``turn_count``
+      is coerced defensively (``int(turn_count) > 0``) — parity ported from
+      the crash_signature fork for a real persisted shape.
+    - ``last_tool_use_at`` with ``freshness_window=None`` → presence-only:
+      any recorded tool use is progress. The crash extractor runs over
+      already-terminal sessions inside a lookback reflection, so a wall-clock
+      window would read stale/False for exactly the sessions it rescues.
+    - ``last_tool_use_at`` with a numeric ``freshness_window`` (seconds) →
+      progress iff ``now - ts < freshness_window``. The stall classifier runs
+      live and gates on ``IDLE_SUSPECT_SECS`` to catch *currently* stalled
+      sessions. The window is arithmetic on the caller-supplied value; this
+      module holds no freshness policy of its own.
+
+    Never raises: ``None`` / missing / malformed fields read as no-progress.
+    """
+    if entry is None:
+        return False
+    try:
+        turn_count = _read_field(entry, "turn_count")
+        if isinstance(turn_count, int) and turn_count > 0:
+            return True
+        if isinstance(turn_count, str):
+            try:
+                if int(turn_count) > 0:
+                    return True
+            except (TypeError, ValueError):
+                pass
+
+        last_tool_use_at = _read_field(entry, "last_tool_use_at")
+        if freshness_window is None:
+            return last_tool_use_at is not None
+        ts = _as_unix_ts(last_tool_use_at)
+        if ts is not None and (time.time() - ts) < freshness_window:
+            return True
+    except Exception:  # noqa: BLE001 — never-raises contract (fail-soft to no-progress)
+        return False
+    return False

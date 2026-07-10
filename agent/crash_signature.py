@@ -27,6 +27,8 @@ import hashlib
 import logging
 from dataclasses import dataclass, field
 
+from agent.session_runner.liveness import has_demonstrable_activity
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -132,50 +134,23 @@ def _has_telemetry_truncated(events: list[dict]) -> bool:
 def _has_demonstrable_progress(session: object | None) -> bool:
     """Return True if the session's own fields prove it started and did work.
 
-    Ported from ``agent/session_stall_classifier._has_demonstrable_progress``
-    (#1724): the ``no_turn_start`` probe keys off telemetry ``turn_start``
-    events, but a session's telemetry write can lag or be dropped. This helper
-    consults the AgentSession's own progress fields as ground truth:
+    Delegates to the consolidated leaf
+    :func:`agent.session_runner.liveness.has_demonstrable_activity` (#2004
+    Task 2), which reads ONLY ``{turn_count, last_tool_use_at}`` and never
+    raises. ``liveness`` is stdlib-only, so this extractor stays
+    dependency-light — it still does not import the stall classifier, kill
+    machinery, or ``IDLE_SUSPECT_SECS``.
 
-      * ``turn_count > 0``            → the session has taken at least one turn.
-      * ``last_tool_use_at is not None`` → a tool fired at some point.
-
-    Deliberate divergence from #1724 (critique C2): no wall-clock freshness
-    window is applied to ``last_tool_use_at``. #1724 runs live and gates on
-    ``(now - ts) < IDLE_SUSPECT_SECS`` to catch *currently* stalled sessions.
-    This extractor instead runs over already-terminal sessions inside a
-    2h-lookback reflection, so "now" is minutes-to-hours after death; a
-    freshness window would read stale/False for exactly the sessions we want
-    to rescue. Any recorded tool use is therefore treated as ground-truth
-    progress via presence only (``is not None``).
-
-    ``turn_count`` may be stored as a numeric string, so a str is coerced
-    defensively. Missing attributes count as no-progress (``getattr`` defaults),
-    so legacy/stub sessions are unaffected. Fail-soft: any exception logs at
-    debug and returns False, falling through to the existing deterministic
-    non-resumable path rather than masking a genuine never-started session.
-
-    This mirrors #1724 inline to keep the extractor dependency-light — it does
-    not import the stall classifier, kill machinery, or ``IDLE_SUSPECT_SECS``.
+    Deliberate divergence from the stall classifier (critique C2):
+    ``freshness_window=None`` → presence-only. The stall classifier runs live
+    and gates ``last_tool_use_at`` on ``IDLE_SUSPECT_SECS`` to catch
+    *currently* stalled sessions. This extractor instead runs over
+    already-terminal sessions inside a 2h-lookback reflection, so "now" is
+    minutes-to-hours after death; a freshness window would read stale/False
+    for exactly the sessions we want to rescue. Any recorded tool use is
+    therefore ground-truth progress via presence only.
     """
-    if session is None:
-        return False
-    try:
-        turn_count = getattr(session, "turn_count", None)
-        if isinstance(turn_count, int) and turn_count > 0:
-            return True
-        if isinstance(turn_count, str):
-            try:
-                if int(turn_count) > 0:
-                    return True
-            except (TypeError, ValueError):
-                pass
-
-        if getattr(session, "last_tool_use_at", None) is not None:
-            return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("_has_demonstrable_progress swallowed exception: %r", exc)
-    return False
+    return has_demonstrable_activity(session, freshness_window=None)
 
 
 # ---------------------------------------------------------------------------
