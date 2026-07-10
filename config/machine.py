@@ -14,15 +14,17 @@ Fail-soft contracts (never raise on a read failure):
     fallback here would let an unresolved host silently match a
     ``"machine": ""`` entry and mis-tag itself as an owner (the #1834 bug).
   * :func:`get_machine_slug` is the filesystem-safe variant used for per-machine
-    token filenames. It IS allowed a ``platform.node()`` fallback because its
-    invariant is the opposite: the slug must never be empty (an empty slug would
-    collapse every machine's token onto one filename).
+    token filenames. It slugifies :func:`get_machine_display_name` when the
+    ComputerName is unresolved because its invariant is the opposite: the slug
+    must never be empty (an empty slug would collapse every machine's token
+    onto one filename); the display chain's terminal ``"unknown"`` makes that
+    guarantee real.
   * :func:`get_machine_project_keys` returns ``[]`` on any failure and applies
     the empty-machine guard before reading the file.
-  * :func:`get_display_machine_name` is the human-facing variant (triage
-    stamps, issue bodies): ComputerName → OS hostname → ``"unknown"``. Never
-    use it for ownership matching — the hostname fallback is a different
-    identifier than ``projects.json``'s ``machine`` field.
+  * :func:`get_machine_display_name` is the human-facing variant (triage
+    stamps, issue bodies, /update replies): ComputerName → OS hostname →
+    ``"unknown"``. Never use it for ownership matching — the hostname fallback
+    is a different identifier than ``projects.json``'s ``machine`` field.
 
 Contract note (#1997 consolidation): this module absorbed the retired
 ``tools/machine_identity.py`` hub. That hub's ``computer_name()`` returned
@@ -35,11 +37,13 @@ matching. All former consumers now share this stricter contract.
 from __future__ import annotations
 
 import json
-import platform
+import logging
 import socket
 import subprocess
 
 from config.paths import VALOR_DIR
+
+logger = logging.getLogger(__name__)
 
 # scutil is fast, but a hung ComputerName lookup must never wedge a caller on a
 # tight budget (e.g. the calendar hook). Provisional/tunable — grain of salt.
@@ -63,41 +67,49 @@ def get_machine_name() -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except Exception:
-        pass
+        logger.debug(
+            "scutil ComputerName lookup exited %s: %s", result.returncode, result.stderr.strip()
+        )
+    except Exception as exc:
+        # Fail-soft by contract, but leave a trace so a failing scutil is
+        # distinguishable from a genuinely empty ComputerName when debugging.
+        logger.debug("scutil ComputerName lookup failed: %r", exc)
     return ""
+
+
+def get_machine_display_name() -> str:
+    """Human-facing machine label: ComputerName, then OS hostname, then ``"unknown"``.
+
+    For triage/stamping and human-facing messages only (e.g. naming the machine
+    that filed an issue, or the ``/update`` status replies) — never use this for
+    ownership matching (use :func:`get_machine_name`), since the hostname
+    fallback is a different identifier than ``projects.json``'s ``machine``
+    field and would silently break owner matching.
+    """
+    name = get_machine_name()
+    if name:
+        return name
+    try:
+        return socket.gethostname() or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def get_machine_slug() -> str:
     """Return a filesystem-safe, guaranteed-non-empty machine slug.
 
     Lowercases :func:`get_machine_name` and replaces spaces with hyphens; when
-    the ComputerName is unresolved (``""``), falls back to
-    ``platform.node().split(".")[0].lower()`` so the result is never empty.
-    Used for per-machine token filenames (``google_workspace/auth.py``), where
-    an empty slug would collapse every host's token onto one path.
+    the ComputerName is unresolved (``""``), slugifies
+    :func:`get_machine_display_name` instead (first hostname label, lowercased)
+    — whose terminal ``"unknown"`` makes the non-empty guarantee real. Used for
+    per-machine token filenames (``google_workspace/auth.py``), where an empty
+    slug would collapse every host's token onto one path.
     """
     name = get_machine_name()
     if name:
         return name.lower().replace(" ", "-")
-    return platform.node().split(".")[0].lower()
-
-
-def get_display_machine_name() -> str:
-    """Human-facing machine label: ComputerName, then OS hostname, then ``"unknown"``.
-
-    For triage/stamping only (e.g. naming the machine that filed an issue) —
-    never use this for ownership matching (use :func:`get_machine_name`), since
-    the hostname fallback is a different identifier than ``projects.json``'s
-    ``machine`` field and would silently break owner matching.
-    """
-    name = get_machine_name()
-    if name:
-        return name
-    try:
-        return socket.gethostname()
-    except Exception:
-        return "unknown"
+    slug = get_machine_display_name().split(".")[0].lower().replace(" ", "-")
+    return slug or "unknown"
 
 
 def get_machine_project_keys(machine: str | None = None) -> list[str]:

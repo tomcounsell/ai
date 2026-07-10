@@ -75,7 +75,7 @@ def update_env(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(bridge_update, "set_reaction", AsyncMock())
-    monkeypatch.setattr(bridge_update, "get_machine_name", lambda: "testbox")
+    monkeypatch.setattr(bridge_update, "get_machine_display_name", lambda: "testbox")
     monkeypatch.setattr(bridge_update, "_get_running_sessions_info", lambda: (0, []))
     monkeypatch.setattr(bridge_update, "_queue_fix_session", AsyncMock())
     monkeypatch.setattr(bridge_update, "_bridge_plist_exists", lambda: False)
@@ -114,6 +114,38 @@ async def test_stale_bridge_reports_failed_not_ok(update_env, tg_client, event, 
     # The fix session is still spawned, marked failed.
     bridge_update._queue_fix_session.assert_awaited_once()
     assert bridge_update._queue_fix_session.await_args.args[-1] is True
+
+
+@pytest.mark.asyncio
+async def test_update_reply_machine_label_non_empty_when_computername_unresolved(
+    update_env, tg_client, event, monkeypatch
+):
+    """#1997 review blocker: /update replies must never render an empty machine label.
+
+    With ComputerName unresolved (``""``), the display chain must fall back to
+    the OS hostname — the reply prefix is ``"host-x.local - ..."``, never
+    ``" - ..."``.
+    """
+    import config.machine as config_machine
+
+    # Re-wire the fixture's stub back to the real display resolver, then make
+    # ComputerName unresolved so the hostname fallback is exercised end to end.
+    monkeypatch.setattr(
+        bridge_update, "get_machine_display_name", config_machine.get_machine_display_name
+    )
+    monkeypatch.setattr(config_machine, "get_machine_name", lambda: "")
+    monkeypatch.setattr(config_machine.socket, "gethostname", lambda: "host-x.local")
+    monkeypatch.setattr(
+        bridge_update,
+        "_verify_release_after_update",
+        AsyncMock(
+            return_value={"bridge": _info("matches", -9999), "worker": _info("matches", 100)}
+        ),
+    )
+    await bridge_update.handle_update_command(tg_client, event)
+    message = _final_message(tg_client)
+    assert message.startswith("host-x.local - ")
+    assert not message.startswith(" - ")
 
 
 @pytest.mark.asyncio
@@ -296,7 +328,7 @@ def boot_env(monkeypatch, tmp_path):
     """Point the boot check at a tmp project dir with canned verify results."""
     (tmp_path / "data").mkdir()
     monkeypatch.setattr(bridge_update, "_PROJECT_DIR", tmp_path)
-    monkeypatch.setattr(bridge_update, "get_machine_name", lambda: "testbox")
+    monkeypatch.setattr(bridge_update, "get_machine_display_name", lambda: "testbox")
     monkeypatch.setattr("scripts.update.git.get_short_sha", lambda pd: HEAD_SHA)
     monkeypatch.setattr(
         "scripts.update.verify.check_machine_identity",

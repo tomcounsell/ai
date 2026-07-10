@@ -183,6 +183,10 @@ class TestIndexLink:
         with (
             patch("ui.data.sdlc.get_all_sessions", return_value=[]),
             patch("ui.data.reflections.get_grouped_reflections", return_value=[]),
+            # Patch both the source hub (covers function-level importers like
+            # ui.data.memories / ui.app) and ui.data.machine's module-level
+            # binding of the same function.
+            patch("config.machine.get_machine_name", return_value="test-host"),
             patch("ui.data.machine.get_machine_name", return_value="test-host"),
             patch("ui.data.machine.get_machine_projects", return_value=[]),
         ):

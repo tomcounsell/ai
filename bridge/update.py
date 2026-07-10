@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 
 from bridge.response import set_reaction
-from config.machine import get_machine_name
+from config.machine import get_machine_display_name
 
 _PROJECT_DIR = Path(__file__).parent.parent
 
@@ -150,7 +150,7 @@ async def handle_update_command(tg_client, event):
     ``❌ update FAILED`` naming its lagging short-SHA, with per-process reload
     state appended.
     """
-    machine = get_machine_name()
+    machine = get_machine_display_name()
     logger.info(f"[update] /update received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
@@ -326,7 +326,7 @@ async def run_boot_release_check(tg_client) -> None:
        and delete the file — but leave it in place when the fresh bridge
        classified stale, so the watchdog's undrained-report read can escalate.
     """
-    machine = get_machine_name()
+    machine = get_machine_display_name()
     check: dict = {}
     head_short = "?"
     bridge_stale = False
@@ -440,7 +440,7 @@ async def handle_force_update_command(tg_client, event):
     Unlike normal /update which waits for running sessions to finish,
     this immediately kills everything and applies the update.
     """
-    machine = get_machine_name()
+    machine = get_machine_display_name()
     logger.info(f"[update] /update --force received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "🔥")
