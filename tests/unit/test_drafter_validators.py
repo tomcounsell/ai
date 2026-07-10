@@ -18,14 +18,79 @@ from __future__ import annotations
 import pytest
 
 from bridge.message_drafter import (
+    LOCAL_FILE_PATH_RULE,
     SHORT_OUTPUT_THRESHOLD,
     MessageDraft,
     Violation,
+    detect_local_file_reference,
     draft_message,
     format_violations,
     validate_email,
     validate_telegram,
 )
+
+
+class TestDetectLocalFileReference:
+    """detect_local_file_reference flags machine-local paths and open refs.
+
+    Mirrors tests/unit/test_medium_validators.py's TestDetectLocalFileReference
+    class — this file duplicates that file's validator coverage by existing
+    convention (see docs/plans/message-drafter-file-path-flagging.md's Test
+    Impact section; de-duplicating the two files is explicitly out of scope).
+    """
+
+    def test_empty_string_returns_empty_list(self):
+        assert detect_local_file_reference("") == []
+
+    def test_ordinary_prose_returns_empty_list(self):
+        text = "Everything looks good. The task is complete, no issues found."
+        assert detect_local_file_reference(text) == []
+
+    def test_standalone_slash_and_tilde_are_not_flagged(self):
+        text = "Use a / to separate paths, or ~ for home."
+        assert detect_local_file_reference(text) == []
+
+    def test_tmp_path_detected(self):
+        violations = detect_local_file_reference("Done. Saved to /tmp/x.txt.")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+
+    def test_tilde_path_detected(self):
+        violations = detect_local_file_reference("cd ~/projects/ai && run tests")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+
+    def test_users_path_detected(self):
+        violations = detect_local_file_reference("Log is at /Users/tomcounsell/out.log")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+
+    def test_home_linux_path_detected(self):
+        violations = detect_local_file_reference("Config is at /home/deploy/app.conf")
+        assert len(violations) == 1
+        assert violations[0].rule == LOCAL_FILE_PATH_RULE
+
+    def test_bare_open_dash_a_detected(self):
+        violations = detect_local_file_reference("Open with open -a TextEdit /tmp/x.txt")
+        rules = {v.rule for v in violations}
+        assert LOCAL_FILE_PATH_RULE in rules
+
+    def test_backtick_wrapped_open_command_detected(self):
+        violations = detect_local_file_reference("Run `open -a TextEdit /tmp/x.txt` to view it.")
+        rules = {v.rule for v in violations}
+        assert LOCAL_FILE_PATH_RULE in rules
+
+    def test_ordinary_url_without_local_segment_passes(self):
+        text = "See https://example.com/docs for more, or https://github.com/org/repo/pull/42."
+        assert detect_local_file_reference(text) == []
+
+    def test_remote_etc_path_passes(self):
+        text = "The config lives at /etc/nginx/nginx.conf on your server."
+        assert detect_local_file_reference(text) == []
+
+    def test_code_block_with_unrelated_path_passes(self):
+        text = "```\npath: /var/log/syslog\n```"
+        assert detect_local_file_reference(text) == []
 
 
 class TestValidateTelegram:
@@ -200,8 +265,12 @@ class TestDraftMessageViolations:
         assert len(result.violations) >= 1, f"expected >=1 violation, got {result.violations}"
         rules = {v.rule for v in result.violations}
         assert "no_markdown_tables" in rules
-        # Text should come back verbatim (no server-side rewrite per plan §Part B)
-        assert result.text == text
+        # Per docs/plans/message-drafter-file-path-flagging.md (Risk 2): ANY
+        # non-empty violations list now promotes to needs_self_draft=True,
+        # not just the local-file-path rule — a markdown-table violation
+        # also defers delivery instead of shipping verbatim.
+        assert result.needs_self_draft is True
+        assert result.text == ""
 
     @pytest.mark.asyncio
     async def test_clean_short_text_has_no_violations(self):

@@ -101,4 +101,4 @@ Save to plain text in `/tmp/`:
 - Weekly: `/tmp/eng_review_<mon><day>-<day>.txt` (e.g., `/tmp/eng_review_oct6-13.txt`)
 - Monthly: `/tmp/eng_review_<mon><day>-<mon><day>.txt` (e.g., `/tmp/eng_review_sep7-oct7.txt`)
 
-After saving, offer: `open -a TextEdit <path>`
+The file is saved locally; delivery does not depend on the recipient having filesystem access to it. Any local-path reference left in a drafted message is caught and flagged automatically before delivery.

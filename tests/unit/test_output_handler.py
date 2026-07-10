@@ -564,6 +564,106 @@ class TestDrafterFailureRecovery:
         # Raw text survives since it is not narration-only.
         assert payload["text"] == raw
 
+    # ── 2b. Violation-aware self-draft instruction (critique B2) ──
+    # _inject_self_draft_steering(self, session, draft) composes the base
+    # SELF_DRAFT_INSTRUCTION plus a targeted addendum when the deferred
+    # draft carries a local_file_path_reference violation — telling the
+    # agent to attach the file via `tools/send_message.py --file <path>`
+    # instead of re-pasting a dead local path.
+
+    def test_local_file_path_violation_adds_attach_addendum_to_steering(self):
+        """A local_file_path_reference violation appends the attach-via-
+        --file addendum to the pushed steering instruction."""
+        from bridge.message_drafter import LOCAL_FILE_PATH_RULE, MessageDraft, Violation
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "sess-local-path-addendum"
+
+        drafted = MessageDraft(
+            text="",
+            full_output_file=None,
+            needs_self_draft=True,
+            artifacts={},
+            violations=[
+                Violation(rule=LOCAL_FILE_PATH_RULE, line=1, snippet="/tmp/x.txt"),
+            ],
+        )
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message") as mock_push,
+        ):
+            asyncio.run(handler.send("123", "Done. Saved to /tmp/x.txt.", 0, session=session))
+
+        mock_push.assert_called_once()
+        args, kwargs = mock_push.call_args
+        assert args[0] == "sess-local-path-addendum"
+        instruction = args[1]
+        assert "tools/send_message.py" in instruction
+        assert "--file" in instruction
+
+    def test_non_local_path_violation_uses_base_instruction_without_addendum(self):
+        """A non-local-path violation (e.g. markdown table) pushes the base
+        SELF_DRAFT_INSTRUCTION unchanged — no attach-via-file addendum."""
+        from bridge.message_drafter import SELF_DRAFT_INSTRUCTION, MessageDraft, Violation
+
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "sess-table-violation"
+
+        drafted = MessageDraft(
+            text="",
+            full_output_file=None,
+            needs_self_draft=True,
+            artifacts={},
+            violations=[
+                Violation(rule="no_markdown_tables", line=2, snippet="| --- | --- |"),
+            ],
+        )
+
+        with (
+            patch("bridge.message_drafter.draft_message", AsyncMock(return_value=drafted)),
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message") as mock_push,
+        ):
+            asyncio.run(handler.send("123", "| a | b |\n| --- | --- |", 0, session=session))
+
+        mock_push.assert_called_once()
+        args, kwargs = mock_push.call_args
+        instruction = args[1]
+        assert instruction == SELF_DRAFT_INSTRUCTION
+        assert "--file" not in instruction
+        assert "tools/send_message.py" not in instruction
+
+    def test_e2e_short_local_path_reply_pushes_addendum_via_real_draft_message(self):
+        """End-to-end: a real draft_message() call (not mocked) on short
+        local-path text proves the full chain — drafter short-output path
+        -> handler -> violation-aware steering addendum."""
+        handler = self._make_handler()
+        session = MagicMock()
+        session.session_id = "sess-e2e-local-path"
+        session.sdlc_slug = None  # keep is_sdlc False so the short-output path fires
+
+        raw = "Done. Saved to /tmp/x.txt."
+
+        with (
+            patch("agent.steering.peek_steering_sender", return_value=None),
+            patch("agent.steering.push_steering_message") as mock_push,
+        ):
+            asyncio.run(handler.send("123", raw, 0, session=session))
+
+        mock_push.assert_called_once()
+        args, kwargs = mock_push.call_args
+        assert args[0] == "sess-e2e-local-path"
+        instruction = args[1]
+        assert "tools/send_message.py" in instruction
+        assert "--file" in instruction
+
+        # Delivery was deferred — no outbox write.
+        handler._redis.rpush.assert_not_called()
+
     # ── 3. Narration fallback triggers when steering unavailable ──
 
     def test_narration_fallback_substitutes_when_steering_skipped(self):

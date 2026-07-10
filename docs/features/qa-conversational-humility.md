@@ -19,7 +19,7 @@ Controls that make QA responses in teammate group chats conversational rather th
 
 ### Layer 2: Agent-Controlled Message Delivery (`agent/hooks/stop.py`)
 
-The stop-hook review gate gives the agent final say over message delivery. When a session completes, the hook evaluates the output and chooses a delivery action (SEND, EDIT, REACT, SILENT, CONTINUE). React-only responses (e.g., emoji reactions to social banter) are handled through this gate rather than the classifier.
+The stop-hook review gate was designed to give the agent final say over message delivery: when a session completes, the hook evaluates the output and chooses a delivery action (SEND, EDIT, REACT, SILENT, CONTINUE), with react-only responses (e.g., emoji reactions to social banter) handled through this gate rather than the classifier. This gate is dead code for sessions executed through `agent/session_runner/` (confirmed independently in issue #1955) — the self-draft steering path in `agent/output_handler.py` is the live mechanism for that traffic today.
 
 ### Layer 3: Config Cleanup
 

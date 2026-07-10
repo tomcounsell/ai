@@ -309,6 +309,52 @@ def validate_email(text: str) -> list[Violation]:
     return violations
 
 
+# Rule name emitted by detect_local_file_reference; exported so callers
+# (e.g. agent/output_handler.py's self-draft instruction builder) can match
+# on the constant instead of a bare string literal.
+LOCAL_FILE_PATH_RULE = "local_file_path_reference"
+
+# Local filesystem paths and macOS-only shell command references are
+# meaningless once a message leaves the machine that produced it (Telegram
+# or email). Case-sensitive — these are Unix path conventions.
+_LOCAL_FILE_PATH_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"/tmp/\S+"),  # temp-file paths
+    re.compile(r"/Users/\S+"),  # absolute macOS home-directory paths
+    re.compile(r"/home/\S+"),  # absolute Linux home-directory paths
+    re.compile(r"~/\S+"),  # tilde-relative paths
+    # macOS `open` command references, backtick-wrapped or bare.
+    re.compile(r"`open (?:-a\s+\S+\s+)?\S+`|\bopen -a \S+"),
+]
+
+
+def detect_local_file_reference(text: str) -> list[Violation]:
+    """Detect references to machine-local filesystem paths or `open` commands.
+
+    Local paths (``/tmp/...``, ``/Users/...``, ``/home/...``, ``~/...``) and
+    macOS-only ``open -a ...`` command references only resolve on the machine
+    that produced the message — meaningless to a Telegram or email recipient
+    reading on a different machine. Medium-agnostic: called for both mediums
+    regardless of the per-medium validator dispatch.
+
+    Returns a list of Violation entries; empty list == pass.
+    """
+    if not text:
+        return []
+    violations: list[Violation] = []
+    for idx, raw_line in enumerate(text.split("\n"), start=1):
+        for pattern in _LOCAL_FILE_PATH_PATTERNS:
+            match = pattern.search(raw_line)
+            if match:
+                violations.append(
+                    Violation(
+                        rule=LOCAL_FILE_PATH_RULE,
+                        line=idx,
+                        snippet=match.group(0)[:80],
+                    )
+                )
+    return violations
+
+
 def format_violations(violations: list[Violation], medium: str) -> str:
     """Render violations as a ``⚠️`` note for the review gate presentation."""
     if not violations:
@@ -321,12 +367,18 @@ def format_violations(violations: list[Violation], medium: str) -> str:
 
 
 def _validate_for_medium(text: str, medium: str) -> list[Violation]:
-    """Dispatch to the per-medium validator. Unknown medium returns []."""
+    """Dispatch to the per-medium validator, plus medium-agnostic checks.
+
+    Local file-path references are checked regardless of medium — a
+    machine-local path is meaningless on both Telegram and email.
+    """
+    violations: list[Violation] = []
     if medium == "telegram":
-        return validate_telegram(text)
-    if medium == "email":
-        return validate_email(text)
-    return []
+        violations.extend(validate_telegram(text))
+    elif medium == "email":
+        violations.extend(validate_email(text))
+    violations.extend(detect_local_file_reference(text))
+    return violations
 
 
 def extract_artifacts(text: str) -> dict[str, list[str]]:
@@ -721,13 +773,19 @@ async def draft_message(
     4. If over FILE_ATTACH_THRESHOLD, write full-output file (delivery still
        proceeds — text is NOT emptied for over-length responses)
     5. If _detect_empty_promise fires (empty promise: agent acknowledged feedback
-       without substance — "will do", "going forward" etc.):
+       without substance — "will do", "going forward" etc.) OR _validate_for_medium
+       returns any non-empty violations list (markdown table, local file-path
+       reference, etc.):
        return MessageDraft(text="", needs_self_draft=True, violations=[...])
        — caller injects a self-draft steering nudge back to the agent
-       (PRIMARY flag-handling path, not a failure fallback).
-       Wire-format violations (markdown table in Telegram, etc.) are collected
-       in violations but do NOT trigger needs_self_draft — they surface via
-       the stop-hook review gate (agent/hooks/stop.py).
+       (PRIMARY flag-handling path, not a failure fallback). This promotion
+       happens on BOTH return paths that can carry a violations list: the
+       short-output early return and this main-path return. All promoted
+       drafts route through the self-draft steering path
+       (agent/output_handler.py:429-441), where a local_file_path_reference
+       violation adds an attach-via-`--file` instruction telling the agent to
+       use `tools/send_message.py "<caption>" --file <path>` instead of
+       re-pasting a dead local path.
     6. Populate context_summary from _derive_context_summary(stripped_raw_text)
     7. Populate expectations from _extract_open_questions(raw_response)
        (None when no questions found, never "")
@@ -774,10 +832,23 @@ async def draft_message(
         and "?" not in raw_response
         and "```" not in raw_response
     ):
+        short_violations = _validate_for_medium(raw_response, medium)
+        if short_violations:
+            logger.info(
+                "Wire-format violation(s) detected in short-output reply — "
+                "requesting self-draft via steering: %s",
+                [v.rule for v in short_violations],
+            )
+            return MessageDraft(
+                text="",
+                needs_self_draft=True,
+                artifacts=artifacts,
+                violations=short_violations,
+            )
         return MessageDraft(
             text=raw_response,
             artifacts=artifacts,
-            violations=_validate_for_medium(raw_response, medium),
+            violations=short_violations,
         )
 
     # Strip process narration before composition
@@ -797,9 +868,20 @@ async def draft_message(
     # Run the per-medium validator on the composed text
     violations = _validate_for_medium(composed_text, medium)
 
-    # Detect empty promises — agent acknowledged feedback without evidence
-    if _detect_empty_promise(stripped_text.lower()):
-        logger.info("Empty promise detected — requesting self-draft via steering")
+    # Detect empty promises — agent acknowledged feedback without evidence —
+    # or a wire-format violation (markdown table, local file-path reference,
+    # etc.) was flagged by the validator. Either condition promotes to
+    # needs_self_draft=True so the agent rewrites via the self-draft
+    # steering path instead of a violation shipping verbatim.
+    is_empty_promise = _detect_empty_promise(stripped_text.lower())
+    if is_empty_promise or violations:
+        if is_empty_promise:
+            logger.info("Empty promise detected — requesting self-draft via steering")
+        else:
+            logger.info(
+                "Wire-format violation(s) detected — requesting self-draft via steering: %s",
+                [v.rule for v in violations],
+            )
         return MessageDraft(
             text="",
             full_output_file=full_output_file,
