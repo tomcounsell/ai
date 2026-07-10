@@ -432,7 +432,7 @@ class TelegramRelayOutputHandler:
             # asking the agent to rewrite and resend. Silent failure:
             # any error here MUST NOT block delivery.
             if getattr(draft, "needs_self_draft", False):
-                steering_deferred = self._inject_self_draft_steering(session)
+                steering_deferred = self._inject_self_draft_steering(session, draft)
                 if not steering_deferred:
                     # Steering budget exhausted or push failed — apply narration
                     # gate on the original text as a last resort. Substitutes
@@ -791,13 +791,21 @@ class TelegramRelayOutputHandler:
         if self._file_handler is not None:
             await self._file_handler.send(chat_id, text, reply_to_msg_id, session)
 
-    def _inject_self_draft_steering(self, session: Any) -> bool:
+    def _inject_self_draft_steering(self, session: Any, draft: Any) -> bool:
         """Push a self-draft instruction to the session's steering queue.
 
         Called when ``draft.needs_self_draft`` is True (delivery validator
         flagged a wire-format violation or an empty promise). The agent will
         notice the steering message at its next turn boundary and re-draft its
         own output.
+
+        The pushed instruction is violation-aware: when ``draft.violations``
+        contains a ``local_file_path_reference`` violation (a machine-local
+        path or macOS ``open`` command reference detected in the drafted
+        text), a targeted addendum is appended directing the agent to attach
+        the file via ``tools/send_message.py "<caption>" --file <path>``
+        instead of re-pasting a dead local path. Other violation types
+        (markdown table, empty promise) get the base instruction alone.
 
         Attempt budget: uses ``bump_self_draft_attempts`` to track consecutive
         self-draft injections for this session. When the budget is exhausted
@@ -861,11 +869,26 @@ class TelegramRelayOutputHandler:
 
         try:
             from agent.steering import push_steering_message
-            from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
+            from bridge.message_drafter import (
+                LOCAL_FILE_PATH_RULE,
+                SELF_DRAFT_INSTRUCTION,
+            )
+
+            instruction = SELF_DRAFT_INSTRUCTION
+            violations = getattr(draft, "violations", None) or []
+            if any(getattr(v, "rule", None) == LOCAL_FILE_PATH_RULE for v in violations):
+                instruction += (
+                    "\n\nOne or more local filesystem paths were detected in your "
+                    "message. Those paths are meaningless to the recipient. If you "
+                    "meant to share a file, attach it as a real Telegram attachment "
+                    'with `tools/send_message.py "<caption>" --file <path>` instead '
+                    "of pasting the path. If no file was meant, remove the path "
+                    "reference."
+                )
 
             push_steering_message(
                 session_id,
-                SELF_DRAFT_INSTRUCTION,
+                instruction,
                 sender="drafter-fallback",
             )
             logger.info(

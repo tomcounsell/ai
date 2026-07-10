@@ -57,9 +57,28 @@ sentry-issue-triage: 244 issues across 3 project(s) (A=58 B=87 C=12 D=78 E=9), a
 
 In live mode, the digest gets an explicit `[LIVE — Sentry state changes applied]` footer. In dry-run mode, it gets `[dry run — no Sentry state changes]` (mirroring the existing `[dry run — no GitHub issues filed]` line for tier C). The auto-actioned block sits between the per-tier counts and the C-tier highlight rows, separating "what we already handled" from "what still needs you".
 
+## Environment gating (init side)
+
+Triage is the read/dismiss side. The **init** side — deciding whether an event is even captured, and under which `environment` tag — lives in `monitoring/sentry_config.py::configure_sentry()`, called once at startup by both the bridge (`bridge/telegram_bridge.py`) and the worker (`worker/__main__.py`). Two gates run in order:
+
+1. **Test/CI suppression (#1948).** `configure_sentry()` returns early (no `sentry_sdk.init`) whenever `PYTEST_CURRENT_TEST` or `CI` is set. A local `pytest` run therefore never reports to Sentry at all — synthetic test errors can't leak into the production project.
+
+2. **Dev-vs-prod environment resolution (#1834).** When init does proceed, `_resolve_environment()` picks the `environment` tag with this precedence:
+   - An explicit `SENTRY_ENVIRONMENT` env var always wins (escape hatch; can force e.g. `staging`).
+   - Otherwise, a **designated bridge machine** — one that owns ≥1 project in `~/Desktop/Valor/projects.json` (a `projects.<key>.machine` field matching the local `scutil --get ComputerName`, case-insensitive) — reports as `production`.
+   - Every other machine reports as `development`.
+
+   The ownership predicate is a self-contained copy of the one in `ui/data/machine.py::get_machine_project_keys` and enforced by `bridge/config_validation.py::validate_projects_config`; `monitoring/` deliberately does not import `ui/` (layer direction). See [`single-machine-ownership.md`](single-machine-ownership.md) for the ownership model.
+
+   **Fail-to-development is deliberate.** Any failure (unreadable `projects.json`, `scutil` error, or an empty/unresolved ComputerName) resolves to `development`. An empty ComputerName is explicitly short-circuited to "not owned" so it can never accidentally match a config entry with an empty `machine` field (`"" == ""`). A real production bridge machine always resolves a non-empty name and a readable config (it cannot route messages otherwise), so only dev/misconfigured hosts hit the fallback — exactly the ones that should not report as `production`.
+
+`configure_sentry()` logs the resolved environment plus its inputs (ComputerName, matched project key) at INFO on init, so a wrong tag is diagnosable from `logs/bridge.log` / `logs/worker.log` without needing Sentry itself.
+
 ## Related files
 
 - `reflections/sentry_triage.py` — the reflection (apply gate, tier map, update helper)
+- `monitoring/sentry_config.py` — init-side gating: test/CI suppression + dev-vs-prod `environment` resolution
 - `tests/unit/test_sentry_triage_apply.py` — coverage for the apply gate, tier mapping, dry-run no-op, failure isolation, and digest rendering
+- `tests/unit/test_worker_sentry_init.py` — coverage for the init guards and environment resolution
 - `config/reflections.yaml` — daily schedule entry (`sentry-issue-triage`, 86400s)
-- `~/Desktop/Valor/.env` — `SENTRY_AUTH_TOKEN` (read+write) and the optional `SENTRY_TRIAGE_APPLY=1` flag
+- `~/Desktop/Valor/.env` — `SENTRY_AUTH_TOKEN` (read+write) and the optional `SENTRY_TRIAGE_APPLY=1` flag; `SENTRY_ENVIRONMENT` (optional) overrides the resolved environment

@@ -17,18 +17,27 @@ Design notes:
     orphan-index diagnostic it emits in a tight poll loop never floods Sentry. The
     worker deliberately does NOT get the bridge-hibernation filter — this helper
     never imports ``bridge.hibernation``.
-  * **Minimal test/CI guard only.** ``configure_sentry`` returns early under
+  * **Test/CI guard.** ``configure_sentry`` returns early under
     ``PYTEST_CURRENT_TEST`` or ``CI`` so a ``SENTRY_DSN``-present test run never
-    mis-tags ``production``. It deliberately does NOT add a machine/platform gate
-    and does NOT own the richer dev-vs-prod environment gating (that is #1834's
-    scope, layered on top of this helper later).
+    reports at all (and never mis-tags ``production``).
+  * **Dev-vs-prod environment gating (#1834).** When init does proceed,
+    :func:`_resolve_environment` decides the ``environment`` tag: an explicit
+    ``SENTRY_ENVIRONMENT`` always wins; otherwise a *designated bridge machine*
+    (one that owns >=1 project in ``projects.json``) reports as ``production`` and
+    every other machine reports as ``development``. This keeps the production
+    Sentry project clean of events from dev/misconfigured machines that start a
+    real bridge/worker outside pytest. The machine-ownership check is a
+    self-contained copy of the ``projects.json`` + ``scutil`` predicate (it does
+    NOT import the ui-layer machine helper — that would invert the layer direction).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +96,81 @@ def drop_orphan_noise(event, hint):
     return event
 
 
+def _get_machine_name() -> str:
+    """Return the local ComputerName via ``scutil``; ``""`` on any failure.
+
+    Self-contained copy of the ui-layer ``get_machine_name`` — ``monitoring``
+    must not import that layer (wrong direction). ``""`` on failure is the
+    fail-to-development signal consumed by :func:`_owned_project_key`.
+    """
+    try:
+        result = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True)
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _owned_project_key(machine: str) -> str | None:
+    """Return the first ``projects.json`` key whose ``machine`` field matches
+    ``machine`` (case-insensitive), or ``None`` if this host owns no project.
+
+    Mirrors the ui-layer ``get_machine_project_keys`` and the predicate
+    ``bridge.config_validation.validate_projects_config`` enforces
+    (``proj_cfg.get("machine")``), kept as a self-contained copy to avoid the
+    ``monitoring``->``ui`` import inversion. Any failure (missing/unreadable
+    file, malformed JSON) returns ``None`` — fail-to-development.
+    """
+    # Fail-to-development guard (issue #1834, critique concern #1): an unresolved
+    # ComputerName must never match a project. Without this, an empty machine
+    # name would match any projects.json entry that has an empty `machine` field
+    # (`"" == ""`), mis-tagging a dev/misconfigured host as `production` — the
+    # exact bug this gate exists to eliminate. A real production bridge machine
+    # always resolves a non-empty ComputerName and a readable projects.json (it
+    # cannot route messages otherwise), so only dev/misconfigured hosts hit this.
+    if not machine:
+        return None
+    config_path = Path("~/Desktop/Valor/projects.json").expanduser()
+    if not config_path.exists():
+        return None
+    try:
+        config = json.loads(config_path.read_text())
+    except Exception:
+        return None
+    machine_lower = machine.lower()
+    for project_key, project in config.get("projects", {}).items():
+        if project.get("machine", "").lower() == machine_lower:
+            return project_key
+    return None
+
+
+def _is_designated_bridge_machine() -> bool:
+    """``True`` iff this machine owns >=1 project in ``projects.json``.
+
+    Any failure resolves to ``False`` (fail-to-development) — see
+    :func:`_owned_project_key`.
+    """
+    return _owned_project_key(_get_machine_name()) is not None
+
+
+def _resolve_environment(owned_project_key: str | None) -> str:
+    """Resolve the Sentry ``environment`` tag for this process (issue #1834).
+
+    Pure function of the ownership result so the caller can compute the
+    ``projects.json`` + ``scutil`` inputs exactly once and reuse them for both
+    the tag and the init log line.
+
+    Precedence: an explicit ``SENTRY_ENVIRONMENT`` always wins (preserves the
+    existing escape hatch and lets a designated machine be forced to e.g.
+    ``staging``); otherwise a machine that owns a project
+    (``owned_project_key is not None``) reports as ``"production"`` and every
+    other machine reports as ``"development"``.
+    """
+    explicit = os.getenv("SENTRY_ENVIRONMENT")
+    if explicit:
+        return explicit
+    return "production" if owned_project_key is not None else "development"
+
+
 def configure_sentry(component: str, before_send=None) -> bool:
     """Initialize Sentry for a process ``component`` (e.g. ``"bridge"`` / ``"worker"``).
 
@@ -100,9 +184,9 @@ def configure_sentry(component: str, before_send=None) -> bool:
         ``True`` if ``sentry_sdk.init`` was invoked, ``False`` otherwise (no DSN,
         or the pytest/CI guard tripped).
     """
-    # Minimal guard: never initialize (and never mis-tag `production`) under a
-    # test run or CI. This is intentionally the ONLY environment gate here —
-    # #1834's dev-vs-prod gating layers on top later.
+    # Guard: never initialize (and never mis-tag `production`) under a test run
+    # or CI. Runs upstream of environment resolution so `_resolve_environment`
+    # never fires under a normal test (issue #1834).
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("CI"):
         logger.debug("[%s] Sentry init skipped (pytest/CI guard)", component)
         return False
@@ -113,11 +197,25 @@ def configure_sentry(component: str, before_send=None) -> bool:
 
     import sentry_sdk  # noqa: PLC0415
 
+    # Resolve the ownership inputs exactly once and reuse them for both the
+    # environment tag and the observability log line (no double scutil/file read).
+    machine = _get_machine_name()
+    owned_key = _owned_project_key(machine)
+    environment = _resolve_environment(owned_key)
+    # Observability (issue #1834, critique concern #2): make a wrong environment
+    # tag diagnosable from the process log without needing Sentry itself.
+    logger.info(
+        "[%s] Sentry init: environment=%s (ComputerName=%r, owned_project=%s)",
+        component,
+        environment,
+        machine,
+        owned_key or "none",
+    )
     sentry_sdk.init(
         dsn=dsn,
         release=subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         traces_sample_rate=0.1,
-        environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+        environment=environment,
         before_send=before_send,
     )
     logger.info("[%s] Sentry initialized", component)

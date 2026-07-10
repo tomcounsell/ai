@@ -108,6 +108,97 @@ class TestWriteMarker:
         assert code == 1
         assert result == {}
 
+    def test_fresh_plan_in_progress_backfills_and_persists(self):
+        """First-write-at-PLAN acceptance (#1916): a fresh session (ISSUE=ready)
+        must NOT be rejected — start_stage is called with
+        backfill_predecessors=True, and a real PipelineStateMachine persists
+        ISSUE -> completed, PLAN -> in_progress."""
+        from agent.pipeline_state import PipelineStateMachine
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_session.stage_states = None
+        mock_session.save = MagicMock()
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
+        ):
+            result, code = write_marker(stage="PLAN", status="in_progress")
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "in_progress"}
+        sm = PipelineStateMachine(mock_session)
+        assert sm.states["ISSUE"] == "completed"
+        assert sm.states["PLAN"] == "in_progress"
+
+    def test_plan_in_progress_with_failed_issue_still_exits_1(self):
+        """Companion failure case: a genuinely `failed` predecessor is never
+        backfilled — in_progress at PLAN still exits 1 loudly."""
+        import json
+
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "failed"})
+        mock_session.save = MagicMock()
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
+        ):
+            result, code = write_marker(stage="PLAN", status="in_progress")
+
+        assert code == 1
+        assert result == {}
+
+    def test_fresh_plan_completed_backfills_issue_too(self):
+        """Completed-path backfill (BLOCKER regression, #1916): on a fresh
+        session (ISSUE=ready, PLAN=pending), a --status completed write for
+        PLAN must persist ISSUE -> completed AND PLAN -> completed. Proves the
+        standalone _backfill_predecessors helper is reached directly and the
+        start_stage `current == "in_progress"` no-op does not gate it."""
+        from agent.pipeline_state import PipelineStateMachine
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_session.stage_states = None
+        mock_session.save = MagicMock()
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed")
+
+        assert code == 0
+        assert result == {"stage": "PLAN", "status": "completed"}
+        sm = PipelineStateMachine(mock_session)
+        assert sm.states["ISSUE"] == "completed"
+        assert sm.states["PLAN"] == "completed"
+
+    def test_plan_completed_with_failed_issue_exits_1_unmutated(self):
+        """Companion failure case: a `failed` predecessor on the completed
+        path exits 1 and leaves state unmutated (PLAN never force-set to
+        in_progress, ISSUE stays failed)."""
+        import json
+
+        from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "failed", "PLAN": "pending"})
+        mock_session.save = MagicMock()
+
+        with (
+            patch("tools.sdlc_stage_marker.probe_substrate", return_value=SUBSTRATE_PRESENT),
+            patch("tools.sdlc_stage_marker.find_session", return_value=mock_session),
+        ):
+            result, code = write_marker(stage="PLAN", status="completed")
+
+        assert code == 1
+        assert result == {}
+        mock_session.save.assert_not_called()
+
     def test_idempotent_already_completed_exit_0(self):
         """Idempotent already-completed path stays exit 0 (not loud)."""
         from tools.sdlc_stage_marker import SUBSTRATE_PRESENT, write_marker

@@ -261,13 +261,69 @@ class TestDraftMessage:
 
     @pytest.mark.asyncio
     async def test_self_summary_instruction_quality(self):
-        """SELF_DRAFT_INSTRUCTION contains key quality markers."""
+        """SELF_DRAFT_INSTRUCTION contains key quality markers.
+
+        This asserts the BASE constant only — unchanged by the local-path
+        addendum, which is composed at injection time in
+        agent/output_handler.py (tested in tests/unit/test_output_handler.py).
+        """
         from bridge.message_drafter import SELF_DRAFT_INSTRUCTION
 
         assert "outcome" in SELF_DRAFT_INSTRUCTION.lower()
         assert "narration" in SELF_DRAFT_INSTRUCTION.lower()
         assert "bullet" in SELF_DRAFT_INSTRUCTION.lower()
         assert len(SELF_DRAFT_INSTRUCTION) < 1000  # compact, not the full system prompt
+
+    @pytest.mark.asyncio
+    async def test_short_output_local_path_triggers_self_draft(self):
+        """A SHORT terse message carrying a local path (the reported incident
+        class, e.g. 'Done. Saved to /tmp/x.txt.') is deferred via self-draft
+        steering rather than delivered verbatim.
+
+        Exercises the short-output early return (message_drafter.py:~835-847)
+        — critique B1's primary fix target, since this is the exact path the
+        reported incident message class exits through.
+        """
+        text = "Done. Saved to /tmp/x.txt."
+        assert len(text) < 200  # stay under SHORT_OUTPUT_THRESHOLD
+        assert "?" not in text
+        assert "```" not in text
+
+        result = await draft_message(text)
+
+        assert result.needs_self_draft is True
+        assert result.text == ""
+        rules = {v.rule for v in result.violations}
+        assert "local_file_path_reference" in rules
+
+    @pytest.mark.asyncio
+    async def test_short_output_with_no_violation_still_passes_through_verbatim(self):
+        """A short-output message with NO violation still returns verbatim
+        pass-through with needs_self_draft=False (control case for the above)."""
+        text = "Done."
+        result = await draft_message(text)
+
+        assert result.needs_self_draft is False
+        assert result.text == text
+        assert result.violations == []
+
+    @pytest.mark.asyncio
+    async def test_long_composed_local_path_triggers_self_draft(self):
+        """A LONG/composed message carrying a local path also returns
+        needs_self_draft=True / text="" — exercises the main-path promotion
+        (message_drafter.py:~876-890), not just the short-output path."""
+        long_text = (
+            "Fixed the bug and verified the changes successfully. " * 3
+            + "Saved full output to /tmp/report_output_file.txt for review."
+        )
+        assert len(long_text) >= 200  # force the main composition path
+
+        result = await draft_message(long_text)
+
+        assert result.needs_self_draft is True
+        assert result.text == ""
+        rules = {v.rule for v in result.violations}
+        assert "local_file_path_reference" in rules
 
 
 class TestParseSummaryAndQuestions:

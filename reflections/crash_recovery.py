@@ -10,6 +10,11 @@ Periodic reflection that:
 3. Attributes outcomes for already-resumed sessions (crash_outcome_attributed idempotency)
 4. In propose mode (default): logs proposals only, no resume
 5. In auto mode (FEATURES__CRASH_AUTORESUME_ENABLED=1): resumes eligible sessions with safety gates:
+   - machine-ownership gate: only the machine that owns the session's project
+     (projects.<key>.machine == computer_name()) resumes it; others propose (Gap 3b)
+   - deterministic floor (Gap 3a): a confirmed-dead clean-kill-to-`failed`
+     signature is permitted a bounded first retry ahead of statistical warm-up
+     (settings.features.crash_autoresume_deterministic_floor_attempts; default 1, 0 disables)
    - per-session attempt cap (settings.features.crash_autoresume_max_attempts, default 3)
    - global per-run budget (settings.features.crash_autoresume_run_budget, default 5)
    - determinism guardrail: NON_RESUMABLE_DETERMINISTIC sessions are escalated, not resumed
@@ -36,6 +41,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 logger = logging.getLogger("reflections.crash_recovery")
 
@@ -55,6 +61,69 @@ def _has_terminal_status_transition(events: list[dict]) -> bool:
             if to_status in terminal:
                 return True
     return False
+
+
+def _is_transient_clean_kill_to_failed(events: list[dict]) -> bool:
+    """Return True if the terminal transition is a confirmed-dead clean kill to ``failed``.
+
+    This is the known-transient tool-wedge shape the deterministic floor acts on:
+    the worker detected a wedged tool call, killed the subprocess with a confirmed
+    death, and finalized the session ``failed``. Derived **inline** here from the
+    last ``status_transition`` in the ``events`` list (critique C4) rather than
+    threading a ``transient_kind`` field through the shared ``CrashSignatureKey``
+    dataclass. Mirrors the ``kill.confirmed_dead`` / ``to`` read shown in
+    ``agent/crash_signature.py::_normalize_status_transition``.
+
+    Fail-soft: any malformed event → False (no floor, fall to statistical gating).
+    """
+    last_transition: dict | None = None
+    for evt in events:
+        if evt.get("type") == "status_transition":
+            last_transition = evt
+    if last_transition is None:
+        return False
+    try:
+        data = last_transition.get("data") or {}
+        to_status = data.get("to") or last_transition.get("to")
+        if to_status != "failed":
+            return False
+        kill_info = data.get("kill") or last_transition.get("kill")
+        if not isinstance(kill_info, dict):
+            return False
+        return str(kill_info.get("confirmed_dead", "")).lower() == "true"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_is_transient_clean_kill_to_failed swallowed exception: %r", exc)
+        return False
+
+
+def _machine_owns_project(project_key: str | None) -> bool:
+    """Return True if THIS machine owns ``project_key`` per ``projects.json``.
+
+    Single-machine invariant (Gap 3b): auto-resume acts on a session only when
+    ``projects.<project_key>.machine == computer_name()``. Making ownership
+    structural (rather than relying on the operator setting the env flag on
+    exactly one box) means exactly one machine resumes a given session even if
+    the flag is on fleet-wide.
+
+    Fail-soft: an unresolvable / unknown / missing ``project_key`` → False
+    (treated as not-owned, so the reflection falls to propose-only — the safe
+    default). Any lookup error is swallowed and returns False.
+    """
+    if not project_key:
+        return False
+    try:
+        from tools.machine_identity import computer_name
+        from tools.reflection_machine_filter import _load_project_machines
+
+        projects_path = Path(__file__).resolve().parent.parent / "config" / "projects.json"
+        owners = _load_project_machines(projects_path)
+        owner = owners.get(project_key)
+        if not owner:
+            return False
+        return owner == computer_name().strip().lower()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_machine_owns_project swallowed exception: %r", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +151,7 @@ def run_crash_recovery() -> dict:
     min_success_ratio = float(settings.features.crash_autoresume_min_success_ratio)
     max_auto_attempts = int(settings.features.crash_autoresume_max_attempts)
     run_budget = int(settings.features.crash_autoresume_run_budget)
+    floor_attempts = int(settings.features.crash_autoresume_deterministic_floor_attempts)
     lookback_hours = float(os.environ.get("CRASH_AUTORESUME_LOOKBACK_HOURS", "2.0"))
 
     try:
@@ -292,24 +362,50 @@ def run_crash_recovery() -> dict:
                 findings.append(f"escalated: session={session_id} sig={sig.human_form}")
                 continue
 
+            # Per-session attempt count (read once; drives both the deterministic
+            # floor eligibility check and the max-attempts cap below).
+            session_attempts = getattr(session, "auto_resume_attempts", None)
+            try:
+                attempt_count = int(session_attempts or 0)
+            except (TypeError, ValueError):
+                attempt_count = 0
+
+            # Deterministic first-retry floor (Gap 3a): a confirmed-dead
+            # clean-kill-to-`failed` signature (the known-transient tool-wedge
+            # shape) is permitted a bounded first retry ahead of statistical
+            # warm-up, so a cold library still self-heals the exact current
+            # failure mode. The transient shape is derived INLINE from the
+            # terminal status_transition in `events` (critique C4 — no
+            # `transient_kind` field threaded through the shared CrashSignatureKey
+            # dataclass). Bounded by the attempt cap + run budget below; setting
+            # crash_autoresume_deterministic_floor_attempts to 0 disables it and
+            # restores pure statistical gating.
+            floor_eligible = (
+                floor_attempts > 0
+                and attempt_count < floor_attempts
+                and _is_transient_clean_kill_to_failed(events)
+            )
+
             # Confidence gate (Risk 1 mitigation / core safety requirement):
             # never auto-resume a signature that has not earned statistical
-            # confidence. A signature must clear MIN_OCCURRENCES and the
-            # per-strategy MIN_SUCCESS_RATIO before the policy promotes it to
-            # auto-eligible. Until then this is propose-mode: we observed the
-            # pattern but lack the confidence to act on it. The strategy name
-            # "auto_resume" matches record_outcome/policy_confidence usage above
-            # and in models/crash_signature.py.
-            if not sig_record.is_auto_eligible(
+            # confidence UNLESS the deterministic floor permits it. A signature
+            # must clear MIN_OCCURRENCES and the per-strategy MIN_SUCCESS_RATIO
+            # before the policy promotes it to auto-eligible. Until then this is
+            # propose-mode: we observed the pattern but lack the confidence to
+            # act on it. The strategy name "auto_resume" matches
+            # record_outcome/policy_confidence usage above and in
+            # models/crash_signature.py.
+            statistically_eligible = sig_record.is_auto_eligible(
                 strategy="auto_resume",
                 min_occurrences=min_occurrences,
                 min_success_ratio=min_success_ratio,
-            ):
+            )
+            if not statistically_eligible and not floor_eligible:
                 proposed += 1
                 logger.info(
                     "propose-mode: signature=%s not yet auto-eligible "
-                    "(occurrences=%d < %d or confidence=%.2f < %.2f) — "
-                    "observed but not resuming session=%s",
+                    "(occurrences=%d < %d or confidence=%.2f < %.2f) and no "
+                    "deterministic floor — observed but not resuming session=%s",
                     sig.human_form,
                     sig_record.occurrence_count_int,
                     min_occurrences,
@@ -322,15 +418,30 @@ def run_crash_recovery() -> dict:
                 )
                 continue
 
-            # Resume-eligible path
+            # Resume-eligible path (statistical eligibility OR deterministic floor)
             if auto_enabled and run_budget_remaining > 0:
-                # Check per-session attempt cap
-                session_attempts = getattr(session, "auto_resume_attempts", None)
-                try:
-                    attempt_count = int(session_attempts or 0)
-                except (TypeError, ValueError):
-                    attempt_count = 0
+                # Machine-ownership gate (Gap 3b): exactly one machine resumes a
+                # given session. Even with FEATURES__CRASH_AUTORESUME_ENABLED on
+                # fleet-wide, only the machine that owns the session's project
+                # (projects.<key>.machine == computer_name()) acts; every other
+                # machine falls to propose. Unowned / unknown project_key →
+                # not-owned (safe: propose only). This makes the single-machine
+                # invariant structural rather than relying on the operator
+                # setting the flag on exactly one box.
+                if not _machine_owns_project(getattr(session, "project_key", None)):
+                    proposed += 1
+                    logger.info(
+                        "propose-mode: this machine does not own project=%s for "
+                        "session=%s — not resuming (single-machine invariant)",
+                        getattr(session, "project_key", None),
+                        session_id,
+                    )
+                    findings.append(
+                        f"proposed: session={session_id} sig={sig.human_form} (not-owner)"
+                    )
+                    continue
 
+                # Check per-session attempt cap
                 if attempt_count >= max_auto_attempts:
                     logger.warning(
                         "max auto-resume attempts (%d) reached for session %s "
@@ -372,20 +483,32 @@ def run_crash_recovery() -> dict:
                     run_budget_remaining -= 1
                     auto_resumed += 1
                     logger.info(
-                        "auto-resumed session=%s signature=%s attempt=%d",
+                        "auto-resumed session=%s signature=%s attempt=%d floor=%s",
                         session_id,
                         sig.human_form,
                         attempt_count + 1,
+                        floor_eligible and not statistically_eligible,
                     )
                     findings.append(
                         f"auto-resumed: session={session_id} sig={sig.human_form} "
                         f"attempt={attempt_count + 1}"
                     )
                 else:
+                    # Failure-path convergence (critique C1): a failed resume must
+                    # still consume an attempt. auto_resume_attempts was only
+                    # advanced on the success path, so a persistently-failing
+                    # resume_session (missing UUID → refusal; transition raises)
+                    # re-satisfied `attempt_count < floor` (0 < 1) every 300s tick
+                    # forever — the floor's boundedness was a lie on this path.
+                    # Advance the counter here too, mirroring the success-path
+                    # lines above, so it converges to the max-attempts guard.
+                    fresh_session.auto_resume_attempts = str(attempt_count + 1)
+                    fresh_session.save()
                     logger.warning(
-                        "auto-resume failed: session=%s error=%s",
+                        "auto-resume failed: session=%s error=%s (attempt %d consumed)",
                         session_id,
                         result.error,
+                        attempt_count + 1,
                     )
                     findings.append(f"auto-resume-failed: {session_id} — {result.error}")
             else:

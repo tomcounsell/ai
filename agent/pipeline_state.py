@@ -433,7 +433,64 @@ class PipelineStateMachine:
         self._save()
         _record_stage_metric("sdlc.stage_started", stage)
 
-    def start_stage(self, stage: str) -> None:
+    def _reaches_issue(self, stage: str) -> bool:
+        """True iff `stage` sits on the ISSUE-rooted success spine — its transitive
+        success-predecessor set contains ISSUE (or it IS ISSUE). PATCH is off-spine
+        (`_get_predecessors("PATCH") == []`), so this returns False for it — that is
+        what stops a backfill reaching TEST (predecessors [BUILD, PATCH]) from
+        pulling the off-happy-path PATCH into the promotion set.
+        """
+        if stage == "ISSUE":
+            return True
+        seen: set[str] = set()
+        frontier = list(self._get_predecessors(stage))
+        while frontier:
+            p = frontier.pop()
+            if p in seen:
+                continue
+            seen.add(p)
+            if p == "ISSUE":
+                return True
+            frontier.extend(self._get_predecessors(p))
+        return False
+
+    def _backfill_predecessors(self, stage: str) -> list[str]:
+        """Promote the ISSUE-rooted success spine behind `stage` to completed.
+
+        Scan-then-mutate: collect every transitive ON-SPINE predecessor currently in
+        {pending, ready, in_progress}; if ANY collected member is `failed`, raise
+        ValueError BEFORE mutating (a failed predecessor is a real inconsistency,
+        never silently erased, and no partial state is persisted). Then promote all
+        collected members in one pass, persist with a single _save(), and emit
+        sdlc.stage_backfilled per synthetic promotion. Off-spine predecessors (PATCH,
+        reached via TEST's second success in-edge) are never walked or promoted.
+        Returns the promoted stages.
+        """
+        to_promote: list[str] = []
+        seen: set[str] = set()
+        # Seed and extend the frontier with ON-SPINE predecessors only — PATCH,
+        # being off-spine, is excluded here and never force-completed.
+        frontier = [p for p in self._get_predecessors(stage) if self._reaches_issue(p)]
+        while frontier:  # SCAN — no mutation in this loop
+            pred = frontier.pop()
+            if pred in seen:
+                continue
+            seen.add(pred)
+            st = self.states.get(pred, "pending")
+            if st == "failed":
+                raise ValueError(f"Cannot backfill predecessors of {stage}: {pred} is failed")
+            if st != "completed":
+                to_promote.append(pred)
+            frontier.extend(p for p in self._get_predecessors(pred) if self._reaches_issue(p))
+        for pred in to_promote:  # MUTATE — only after a clean scan
+            self.states[pred] = "completed"
+        if to_promote:
+            self._save()  # single persist for the whole chain
+            for pred in to_promote:
+                _record_stage_metric("sdlc.stage_backfilled", pred)
+        return to_promote
+
+    def start_stage(self, stage: str, backfill_predecessors: bool = False) -> None:
         """Mark a stage as in_progress.
 
         Validates that at least one predecessor is completed (via success
@@ -442,9 +499,16 @@ class PipelineStateMachine:
 
         Args:
             stage: Stage name to start.
+            backfill_predecessors: When True, if the predecessor check would
+                otherwise fail, promote the ISSUE-rooted spine of predecessors
+                to completed (see `_backfill_predecessors`) and activate the
+                stage instead of raising. Defaults to False so existing
+                strict callers (router, pre_tool_use hook) are unaffected.
 
         Raises:
-            ValueError: If stage is invalid or predecessor not completed.
+            ValueError: If stage is invalid or predecessor not completed
+                (and backfill_predecessors is False, or a predecessor is
+                `failed`).
         """
         if stage not in ALL_STAGES:
             raise ValueError(f"Invalid stage: {stage!r}. Valid stages: {ALL_STAGES}")
@@ -495,6 +559,11 @@ class PipelineStateMachine:
             if self.states.get(pred) == "completed":
                 self._activate_stage(stage)
                 return
+
+        if backfill_predecessors:
+            self._backfill_predecessors(stage)
+            self._activate_stage(stage)
+            return
 
         pred_statuses = {p: self.states.get(p, "pending") for p in predecessors}
         raise ValueError(

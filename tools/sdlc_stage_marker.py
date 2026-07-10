@@ -38,6 +38,17 @@ Degradation contract (D7 — loud failure, quiet absence):
       Loud is reserved ONLY for this case. The idempotent already-completed
       path stays exit 0.
 
+Predecessor backfill (issue #1916): both the `in_progress` and `completed`
+write paths opt into `PipelineStateMachine`'s predecessor backfill
+(`start_stage(..., backfill_predecessors=True)` / `_backfill_predecessors()`)
+because a marker write records reality, not an ordering decision — reaching a
+stage implies its ISSUE-rooted spine of predecessors was reached too, even if
+nothing ever wrote their markers. A fresh pipeline's first write (e.g. PLAN
+`in_progress` while ISSUE is still `ready`) now persists instead of hitting
+PRESENT_WRITE_FAILED. PRESENT_WRITE_FAILED still fires for a genuine misorder
+or a `failed` predecessor — backfill never promotes over a `failed` state.
+See "Predecessor Backfill (Opt-In)" in `docs/features/pipeline-state-machine.md`.
+
 Ownership gate (issue #1735): when ``--issue-number N`` is explicitly provided,
 the resolved session is verified to own issue N via ``session_owns_issue()`` in
 ``tools._sdlc_utils``. If the check fails (the resolved session belongs to a
@@ -185,7 +196,7 @@ def write_marker(
 
         if status == "in_progress":
             try:
-                sm.start_stage(stage)
+                sm.start_stage(stage, backfill_predecessors=True)
             except ValueError as e:
                 # Predecessor not completed — inconsistent pipeline state, not a
                 # substrate failure. Loud so the operator notices the misorder.
@@ -198,7 +209,13 @@ def write_marker(
                 # Already completed — idempotent no-op (exit 0)
                 return {"stage": stage, "status": status}, 0
             if current not in ("in_progress", "ready"):
-                # Force to in_progress first so complete_stage() accepts it
+                # Reaching this stage implies the ISSUE-rooted spine of
+                # predecessors was reached too — backfill them directly
+                # (NOT via start_stage, whose `current == "in_progress"`
+                # no-op would otherwise skip backfill once we pre-set the
+                # target stage) before forcing the target to in_progress so
+                # complete_stage() accepts it.
+                sm._backfill_predecessors(stage)
                 sm.states[stage] = "in_progress"
             sm.complete_stage(stage)
 

@@ -75,7 +75,7 @@ Note: `was_drafted` has been removed. The drafter no longer calls any LLM — th
 2. Apply deterministic structural composition (`_compose_structured_draft`) — emoji prefix, SDLC stage line, bullet/question parsing, link footer.
 3. Run `_validate_for_medium` on the composed text.
 4. If over `FILE_ATTACH_THRESHOLD`, write a full-output `.txt` file (delivery still proceeds).
-5. If `_detect_empty_promise` fires (agent made a promise without substance — "will do", "going forward" etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. Wire-format violations are populated into `violations` but do **not** set `needs_self_draft`; they surface via the stop-hook review gate.
+5. If `_detect_empty_promise` fires (agent made a promise without substance — "will do", "going forward" etc.) **or** `_validate_for_medium` returns any non-empty `violations` list (markdown table, local file-path reference, etc.): return `MessageDraft(text="", needs_self_draft=True, violations=[...])` — caller injects a self-draft steering nudge. This promotion happens on **both** return points that can carry a `violations` list — the short-output early return (see below) and this main-path return — so a violation never ships silently regardless of message length (issue #1955). All promoted drafts route through the self-draft steering path (`agent/output_handler.py:429-441`), the mechanism actually live for eng/session_runner sessions; `agent/hooks/stop.py`'s stop-hook "delivery review gate" is dead code on that path and is **not** a violation-surfacing mechanism today — see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy).
 6. Populate `context_summary` from `_derive_context_summary(stripped_raw_text)`.
 7. Populate `expectations` from `_extract_open_questions(stripped_raw_text)` — `None` when no questions, never `""`.
 8. Return `MessageDraft(text=<composed>, context_summary=..., expectations=..., violations=[...])`.
@@ -90,6 +90,8 @@ Texts under `SHORT_OUTPUT_THRESHOLD = 200` skip structural composition and retur
 - No fenced code block.
 
 The goal is to bound per-message latency on brief replies. See Risk 1 in `docs/plans/message-drafter.md`.
+
+Even when all four hold, the early return is superseded if `_validate_for_medium` flags a violation on the raw text (e.g. a `local_file_path_reference` — see [Validator surface](#validator-surface)): the draft returns `text=""`, `needs_self_draft=True` instead of verbatim pass-through. This is the path a terse reply like `"Done. Saved to /tmp/x.txt."` actually exits through, and is the one the #1955 fix targeted — promoting only the main-path return would have left this exact message class unfixed.
 
 ## Validator surface
 
@@ -111,9 +113,20 @@ Checks for email wire-format violations (plain prose only). Rejects:
 - `no_markdown_links`, `no_markdown_bullets`
 - Markdown tables (delegates to `validate_telegram`)
 
+### `detect_local_file_reference(text) -> list[Violation]`
+
+Medium-agnostic check (issue #1955): flags machine-local filesystem paths and macOS-only shell command references that are meaningless once a message leaves the machine that produced it. Emits `Violation(rule=LOCAL_FILE_PATH_RULE, ...)`, where `LOCAL_FILE_PATH_RULE = "local_file_path_reference"` is a module constant so callers can match on it without a bare string literal. Patterns checked:
+
+- `/tmp/\S+` — temp-file paths
+- `/Users/\S+` and `/home/\S+` — absolute home-directory paths
+- `~/\S+` — tilde-relative paths
+- `` `open -a ...` `` (backtick-wrapped) or bare `open -a \S+` — macOS `open` command references
+
+Returns `[]` on empty input or text with no path-like substrings (no false positives on ordinary prose). This closes the gap surfaced by a real incident: `/weekly-review` saved output to `/tmp/eng_review_jul1-8.txt` and told the user to run `open -a TextEdit /tmp/...` — instructions that only resolve on the machine that ran the session.
+
 ### `_validate_for_medium(text, medium) -> list[Violation]`
 
-Dispatcher. Routes to `validate_telegram` or `validate_email`. Returns `[]` for unknown mediums.
+Dispatcher. Routes to `validate_telegram` or `validate_email` based on `medium`, then unconditionally extends the result with `detect_local_file_reference(text)` — local paths are meaningless on both Telegram and email, so this check runs regardless of medium (including for an unknown medium, which otherwise contributes `[]` from the per-medium branch).
 
 ### `format_violations(violations, medium) -> str`
 
@@ -121,11 +134,19 @@ Renders violations as a `⚠️` note for the review-gate presentation shown to 
 
 ### `_detect_empty_promise(text_lower) -> bool`
 
-Detects if the agent acknowledged feedback without concrete evidence. Backwards-compat shim — delegates to `bridge.promise_gate._detect_empty_promise`, which covers both legacy behavioral-change patterns ("got it / will do") and forward-deferral patterns ("I'll follow up / stay tuned / more soon").
+Detects if the agent acknowledged feedback without concrete evidence. Backwards-compat shim — delegates to `bridge.promise_gate._detect_empty_promise`, which covers both the original behavioral-change patterns ("got it / will do") and forward-deferral patterns ("I'll follow up / stay tuned / more soon").
 
 ## Steering-first flag handling
 
 When a blocking flag fires (`needs_self_draft=True`), the delivery path does **not** substitute a fallback message. Instead, `_inject_self_draft_steering` (in `agent/output_handler.py`) pushes a steering nudge back to the authoring agent, asking it to rewrite and resend. This is the PRIMARY flag-handling mechanism, not a failure fallback.
+
+### Violation-aware instruction (issue #1955)
+
+`_inject_self_draft_steering(self, session, draft)` takes the deferred `draft` and composes the pushed message from the base `SELF_DRAFT_INSTRUCTION` plus, when `draft.violations` contains an entry with `rule == LOCAL_FILE_PATH_RULE`, a targeted addendum:
+
+> One or more local filesystem paths were detected in your message. Those paths are meaningless to the recipient. If you meant to share a file, attach it as a real Telegram attachment with `tools/send_message.py "<caption>" --file <path>` instead of pasting the path. If no file was meant, remove the path reference.
+
+The base `SELF_DRAFT_INSTRUCTION` constant is unchanged and stays medium-agnostic (it actively says "omit internal code details," which alone does not point the agent at attaching a file) — the addendum is composed at injection time so it fires only for the local-path rule. Other violation types (markdown table, empty promise) get the base instruction alone.
 
 ### Sequential self-draft loop bound
 
@@ -214,7 +235,7 @@ Non-SDLC chats get a simpler emoji + bullets layout. Teammate persona bypasses a
 
 ## Five-outcome delivery (planned)
 
-The stop-hook review gate currently uses a `SEND/EDIT:/REACT:/SILENT/CONTINUE` string menu that regex-parses the agent's response. This will be replaced by **prepopulated `send_message` tool calls** — the agent invokes, edits-and-invokes, swaps for `react_with_emoji`, or stops silent. Clearing is implicit via transcript inspection (five outcomes: send, edit+send, react, silent, continue).
+The stop-hook review gate currently uses a `SEND/EDIT:/REACT:/SILENT/CONTINUE` string menu that regex-parses the agent's response. A planned follow-up swaps this for **prepopulated `send_message` tool calls** — the agent invokes, edits-and-invokes, swaps for `react_with_emoji`, or stops silent. Clearing is implicit via transcript inspection (five outcomes: send, edit+send, react, silent, continue).
 
 This work is staged in follow-up tasks (9 and 11 in the plan).
 
@@ -222,14 +243,14 @@ This work is staged in follow-up tasks (9 and 11 in the plan).
 
 The agent delivers user-visible messages and reactions via two CLI tools invoked through the `Bash` tool, not through a dedicated MCP server:
 
-- `tools/send_message.py '<text>'` — primary delivery tool. Reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send` for both telegram and email transports, so the drafter / redundancy filter / read-the-room gate run identically on the tool-call path and the silent-worker path. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments. Fail-closed on missing session; `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a diagnostic-only legacy raw rpush.
+- `tools/send_message.py '<text>'` — primary delivery tool. Reconstitutes the `AgentSession` from `VALOR_SESSION_ID` and delegates to `agent.output_handler.TelegramRelayOutputHandler.send` for both telegram and email transports, so the drafter / redundancy filter / read-the-room gate run identically on the tool-call path and the silent-worker path. Handles `--reply-to <msg_id>` and `--file <path>` flags for threaded replies and attachments. Fail-closed on missing session; `ALLOW_LEGACY_RPUSH_FALLBACK=1` opts into a diagnostic-only raw-rpush fallback path.
 - `tools/react_with_emoji.py '<emoji>'` — posts a reaction emoji on the triggering message. Used for lightweight acknowledgements ("thumbs up, done") when a full text response would be noise.
 
 The stop hook classifies each turn's outcome by scanning `tool_use` blocks for these exact script paths (`agent/hooks/stop.py::classify_delivery_outcome`). Matches produce one of the five outcomes (send, edit+send, react, silent, continue).
 
 **Why CLI tools over a bespoke MCP server:** a dedicated MCP server would require a root `.mcp.json` registration and add 300–500 lines of infrastructure for a surface that already works. The CLI tools route through the same outbox + relay as every other delivery path, the stop hook already recognizes them, and they are transparent to `gh pr comment` or any other bridge path that bypasses the drafter. Transcript readability (tool calls appearing as `Bash` invocations rather than semantic `send_message` tool_use blocks) is the only real trade-off, and the stop hook compensates by attaching semantic classification after the fact.
 
-**Reversibility:** the CLI-tool surface can be wrapped in an MCP server in a future chore if transcript readability becomes a pain point. The stop-hook classification logic would gain a pattern match on the new tool name and keep the existing Bash-pattern match as a fallback for legacy turns.
+**Reversibility:** the CLI-tool surface can be wrapped in an MCP server in a future chore if transcript readability becomes a pain point. The stop-hook classification logic would gain a pattern match on the new tool name and keep the existing Bash-pattern match as a fallback for older-format turns.
 
 Recorded as **Resolved Decision RD-1** in `docs/plans/message-drafter-followup.md` (2026-04-20 follow-up).
 
@@ -249,17 +270,18 @@ Both layers queue a 👀 reaction on suppress (with an anchor) and emit `session
 - `agent/output_handler.py::TelegramRelayOutputHandler` — canonical delivery entry point. Drafter runs here; payload is written to the Redis outbox. Used by both the worker `send_cb` and (since the #1074 follow-up) the bridge's handler-event send callback.
 - `bridge/email_bridge.py::EmailOutputHandler` — drafter-in-handler wiring for email.
 - `bridge/telegram_relay.py::_send_queued_message` — belt-and-suspenders length guard.
-- `bridge/response.py` — slim reactions + helpers module. Contains `set_reaction`, `VALIDATED_REACTIONS`, `filter_tool_logs`, `extract_files_from_response`, `clean_message`. The pre-#1074 `send_response_with_files` delivery function was removed in the follow-up (see `docs/plans/message-drafter-followup.md` Part C).
-- `agent/hooks/stop.py` — stop-hook review gate that drafts the final reply and classifies delivery outcomes by matching `tool_use` blocks for the CLI delivery tools.
+- `bridge/response.py` — slim reactions + helpers module. Contains `set_reaction`, `VALIDATED_REACTIONS`, `filter_tool_logs`, `extract_files_from_response`, `clean_message`. The pre-#1074 `send_response_with_files` delivery function was deleted as part of the follow-up (see `docs/plans/message-drafter-followup.md` Part C).
+- `agent/hooks/stop.py` — stop-hook review gate that drafts the final reply and classifies delivery outcomes by matching `tool_use` blocks for the CLI delivery tools. **Dead code for `session_type=eng` / `session_runner` sessions** — `agent/session_runner/hook_edge.py::generate_hook_settings` wires the Stop hook only to `hook_forwarder.py`, never to this file (confirmed twice independently: issue #1955 and the `consolidate_delivery_paths` freshness re-check). It is not a live violation-surfacing mechanism for those sessions; see [Agent-Controlled Message Delivery](agent-message-delivery.md#stop-hook-review-gate-agenthooksstoppy).
 - `agent/steering.py` — `SELF_DRAFT_MAX_ATTEMPTS`, `bump_self_draft_attempts`, `reset_self_draft_attempts` — Redis counter for the sequential self-draft loop bound.
 - `tools/send_message.py`, `tools/react_with_emoji.py` — the agent-facing CLI delivery surface (see "Delivery Tool Surface" above).
 
 ## Tests
 
-- `tests/unit/test_message_drafter.py` — drafter classification, artifact extraction, prompt building, per-medium assertions.
-- `tests/unit/test_medium_validators.py` — `validate_telegram`, `validate_email`, `_validate_for_medium`, `format_violations` unit coverage (added in the #1074 follow-up).
-- `tests/unit/test_output_handler.py::TestDrafterInHandler` — drafter-at-the-handler wiring: flag read at init, drafter invoked when enabled, bypassed when disabled, file_paths propagated, exception fallback.
+- `tests/unit/test_message_drafter.py::TestDraftMessage` — drafter classification, artifact extraction, prompt building, per-medium assertions, plus (issue #1955) a short-output case and a long/composed case each asserting a local-path violation promotes to `needs_self_draft=True`/`text=""` on its respective return path.
+- `tests/unit/test_medium_validators.py` — `validate_telegram`, `validate_email`, `_validate_for_medium`, `format_violations` unit coverage (added in the #1074 follow-up), plus `TestDetectLocalFileReference` (issue #1955): `/tmp/...`, `~/...`, `/Users/...`, `/home/...`, `` `open -a ...` `` matches and false-positive guards on ordinary prose.
+- `tests/unit/test_drafter_validators.py::TestDetectLocalFileReference` — mirrors `test_medium_validators.py`'s coverage of the same validator (the two files intentionally duplicate validator tests; see Rabbit Holes in `docs/plans/message-drafter-file-path-flagging.md`).
+- `tests/unit/test_output_handler.py::TestDrafterInHandler` — drafter-at-the-handler wiring: flag read at init, drafter invoked when enabled, bypassed when disabled, file_paths propagated, exception fallback. Also covers (issue #1955) the `_inject_self_draft_steering(session, draft)` signature: the pushed instruction contains the attach-via-`--file` addendum when a `local_file_path_reference` violation is present, and omits it for other violation types (e.g. markdown table).
 - `tests/unit/test_relay_length_guard.py` — 4096-char pass-through, 4097-char `.txt` conversion, no splitting, conversion-failure fallback.
-- `tests/unit/test_tool_call_delivery.py` — stop-hook classification for send / react / silent / edit+send / continue outcomes via `tool_use` pattern match on the CLI delivery tools.
-- `tests/integration/test_message_drafter_integration.py` — pass-through validation: narration strip, composition, validator surface, self-draft steering path.
+- `tests/unit/test_tool_call_delivery.py` — stop-hook classification for send / react / silent / edit+send / continue outcomes via `tool_use` pattern match on the CLI delivery tools (classification logic only — the gate itself is dead for session_runner/eng sessions, see Files above).
+- `tests/integration/test_message_drafter_integration.py` — pass-through validation: narration strip, composition, validator surface, self-draft steering path, plus (issue #1955) a regression case reproducing the weekly-review local-path incident text end-to-end.
 - `tests/integration/test_reply_delivery.py` — end-to-end reaction paths (PM self-message bypass, completion emoji, error emoji).

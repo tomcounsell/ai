@@ -295,6 +295,22 @@ def _ts(val):
     return None
 
 
+def _delivery_belongs_to_current_run(entry) -> bool:
+    """Return True only if response_delivered_at falls at or after this run's
+    start anchor (started_at, falling back to created_at). This distinguishes
+    a delivery from *this* run (guard should fire) from a stale delivery
+    carried over from a prior run before a resume (guard should NOT fire).
+    Legacy rows with no anchor at all preserve the original always-fire
+    behavior."""
+    rd = _ts(getattr(entry, "response_delivered_at", None))
+    if rd is None:
+        return False
+    anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
+    if anchor is None:
+        return True  # legacy: no anchor at all, preserve original always-fire behavior
+    return rd >= anchor
+
+
 # Agent session health check constants
 AGENT_SESSION_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 AGENT_SESSION_HEALTH_MIN_RUNNING = (
@@ -2218,8 +2234,13 @@ async def _apply_recovery_transition(
         pass
 
     # Guard: if response was already delivered, finalize instead of recovering
-    # to pending (prevents duplicate delivery, #918).
-    if getattr(entry, "response_delivered_at", None) is not None:
+    # to pending (prevents duplicate delivery, #918). Field-presence alone is
+    # not sufficient: a stale response_delivered_at from a prior run (before a
+    # resume) must not suppress recovery of the current run, so this checks
+    # that the delivery belongs to the current run's epoch
+    # (response_delivered_at >= started_at, falling back to created_at; a
+    # legacy row with no anchor still passes through, unguarded).
+    if _delivery_belongs_to_current_run(entry):
         try:
             from models.session_lifecycle import (
                 StatusConflictError,
@@ -3126,12 +3147,22 @@ async def _agent_session_health_check() -> None:
     4. If no live worker for session.chat_id AND pending > AGENT_SESSION_HEALTH_MIN_RUNNING:
        start a worker. This replaces the old _recover_stalled_pending mechanism.
 
-    **Delivery guard (#918):** Before recovering a running session to pending,
-    the health check inspects ``response_delivered_at``. If the field is set,
-    the session already delivered its final response to Telegram — re-queuing
-    would cause a duplicate reply. Instead, the session is finalized as
-    ``completed`` via ``finalize_session()``. This prevents the crash-recover
-    loop that previously produced 6+ duplicate messages per session.
+    **Delivery guard (#918, epoch-scoped per #1979):** Before recovering a
+    running session to pending, the health check evaluates
+    ``_delivery_belongs_to_current_run(entry)`` rather than simply checking
+    whether ``response_delivered_at`` is set. That predicate compares
+    ``response_delivered_at`` against the current run's start anchor
+    (``started_at``, falling back to ``created_at``): only a delivery
+    timestamped at or after the anchor belongs to *this* run and fires the
+    guard. A delivery timestamp left over from a prior run — sticky across a
+    resume — falls before the anchor and is ignored, so the resumed session
+    remains eligible for normal recovery instead of being prematurely
+    finalized as ``completed`` while it is still running. When the predicate
+    does fire, the session is finalized as ``completed`` via
+    ``finalize_session()`` instead of being re-queued. This prevents both the
+    original crash-recover loop that produced 6+ duplicate messages per
+    session and the premature-finalization regression the epoch scoping
+    fixes.
 
     **No wall-clock timeout (#1172):** the per-session
     ``_get_agent_session_timeout`` cap was retired. A session writing fresh
@@ -3224,8 +3255,13 @@ async def _agent_session_health_check() -> None:
         # recovery path while the heartbeat is fresh (gated on
         # NO_OUTPUT_BUDGET_SECONDS since #1614 — no longer permanent), so
         # sessions that delivered but failed to finalize would otherwise stay
-        # stuck as "running" until the heartbeat goes stale.
-        if getattr(entry, "response_delivered_at", None) is not None:
+        # stuck as "running" until the heartbeat goes stale. Field-presence
+        # alone is not sufficient here either: the delivery must belong to
+        # the current run's epoch (response_delivered_at >= started_at,
+        # falling back to created_at) so a stale prior-run delivery doesn't
+        # suppress recovery of a genuinely stuck current run; legacy rows
+        # with no anchor still pass through unguarded.
+        if _delivery_belongs_to_current_run(entry):
             try:
                 from models.session_lifecycle import StatusConflictError, finalize_session
 

@@ -52,6 +52,14 @@ Exit code is always 0. Returns `{}` on error, `{"stage": "DOCS", "status": "comp
 
 The bare module form (`python -m tools.sdlc_stage_marker`) is the underlying entry point — runtime callers should always use the `sdlc-tool stage-marker` wrapper so the call is cwd-independent.
 
+### Predecessor Backfill on the First Write (issue #1916)
+
+A fresh pipeline entering at PLAN — the first marker write of the whole pipeline, with ISSUE still at `ready` — now backfills ISSUE to `completed` automatically on the `in_progress` write, rather than failing with the old `PRESENT_WRITE_FAILED` diagnostic (`sdlc_stage_marker: FAILED to write PLAN=in_progress ... State NOT persisted.`).
+
+A `completed`-status write also backfills unrecorded predecessors, not just `in_progress` writes. This closes the asymmetry where a stage could be marked `completed` while its predecessors were never recorded, leaving ISSUE stuck at `ready` behind a completed later stage.
+
+See "Predecessor Backfill (Opt-In)" in `docs/features/pipeline-state-machine.md` for the backfill mechanics (`start_stage(..., backfill_predecessors=True)`, `_backfill_predecessors()`, and the marker-vs-router semantics distinction).
+
 ## `get_display_progress()` — Stored State Only
 
 `PipelineStateMachine.get_display_progress()` returns stored stage states only. It does NOT:

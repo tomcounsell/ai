@@ -149,7 +149,7 @@ Existing callers (tests, integrations) that import from `agent.agent_session_que
 
 ## Drafter Self-Draft Steering (née "Summarizer Fallback")
 
-When the drafter detects a blocking flag (empty promise / forward-deferral without evidence), `_inject_self_draft_steering()` in `agent/output_handler.py` uses the steering infrastructure to request a self-draft from the authoring agent rather than delivering a bad message to the user.
+When the drafter detects a blocking flag (empty promise / forward-deferral without evidence, or — since issue #1955 — any non-empty wire-format `Violation` list, e.g. a markdown table or a local file-path reference), `_inject_self_draft_steering(session, draft)` in `agent/output_handler.py` uses the steering infrastructure to request a self-draft from the authoring agent rather than delivering a bad message to the user. When the deferred draft carries a `local_file_path_reference` violation, the pushed instruction gets a targeted addendum directing the agent to attach the file via `tools/send_message.py "<caption>" --file <path>` instead of re-pasting the path.
 
 This is the **primary** flag-handling path — not a fallback. The drafter no longer calls Haiku or OpenRouter; the steering nudge is how the system handles any output that fails validation.
 

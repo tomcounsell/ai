@@ -11,11 +11,14 @@ See ``docs/plans/merge-gate-baseline-refresh.md`` for motivation.
 from __future__ import annotations
 
 import json
+import subprocess
 import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from scripts.baseline_gate import (
+    STALE_COMMIT_DISTANCE,
+    commits_behind_head,
     compute_gate_verdict,
     format_staleness_warning,
     load_baseline,
@@ -271,6 +274,131 @@ def test_staleness_warning_fires_on_dirty_commit() -> None:
     warning = format_staleness_warning(baseline, now=now)
     assert warning is not None
     assert "dirty tree" in warning
+
+
+def test_staleness_warning_fires_on_commit_distance() -> None:
+    """A time-fresh baseline that is many commits behind HEAD must still warn.
+
+    This is the #1965 blind spot: the incident baseline was only 7 days old
+    (under the 14-day time threshold) but 425 commits behind HEAD, so it
+    silently produced a wall of false-positive regressions. Commit-distance
+    is an independent trigger that catches high-velocity drift the wall-clock
+    check misses.
+    """
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = {
+        "schema_version": 2,
+        "generated_at": now.isoformat(),  # brand new -> time check silent
+        "commit": "abc1234",
+        "tests": {},
+    }
+    warning = format_staleness_warning(baseline, now=now, commits_behind=STALE_COMMIT_DISTANCE + 50)
+    assert warning is not None
+    assert "commits behind HEAD" in warning
+    assert "refresh_test_baseline.py" in warning
+
+
+def test_staleness_warning_silent_under_commit_distance() -> None:
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = {
+        "schema_version": 2,
+        "generated_at": now.isoformat(),
+        "commit": "abc1234",
+        "tests": {},
+    }
+    assert (
+        format_staleness_warning(baseline, now=now, commits_behind=STALE_COMMIT_DISTANCE - 1)
+        is None
+    )
+
+
+def test_staleness_warning_ignores_unknown_commit_distance() -> None:
+    """``commits_behind=None`` (git unavailable/unknown commit) must not warn."""
+    now = datetime(2026, 4, 20, tzinfo=UTC)
+    baseline = {
+        "schema_version": 2,
+        "generated_at": now.isoformat(),
+        "commit": "abc1234",
+        "tests": {},
+    }
+    assert format_staleness_warning(baseline, now=now, commits_behind=None) is None
+
+
+# ---------------------------------------------------------------------------
+# commits_behind_head (git-backed helper)
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def _init_repo(repo: Path) -> None:
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+
+
+def test_commits_behind_head_counts_distance(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "f").write_text("0")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0")
+    base_sha = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True
+    ).strip()
+    for i in range(1, 4):
+        (repo / "f").write_text(str(i))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", f"c{i}")
+    assert commits_behind_head(base_sha, repo) == 3
+    # HEAD is zero commits behind itself.
+    head = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True
+    ).strip()
+    assert commits_behind_head(head, repo) == 0
+
+
+def test_commits_behind_head_returns_none_on_unknown_commit(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "f").write_text("0")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0")
+    # A SHA that does not exist -> None, never raises.
+    assert commits_behind_head("deadbeef", repo) is None
+
+
+def test_commits_behind_head_strips_dirty_suffix(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "f").write_text("0")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0")
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=repo, text=True
+    ).strip()
+    (repo / "f2").write_text("x")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c1")
+    # The recorded commit may carry a "-dirty" suffix; it must be stripped.
+    assert commits_behind_head(f"{sha}-dirty", repo) == 1
+
+
+def test_commits_behind_head_returns_none_for_missing_commit_field(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _init_repo(repo)
+    (repo / "f").write_text("0")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "c0")
+    assert commits_behind_head(None, repo) is None
+    assert commits_behind_head("", repo) is None
+    assert commits_behind_head("unknown", repo) is None
 
 
 # ---------------------------------------------------------------------------
