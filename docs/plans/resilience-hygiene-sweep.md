@@ -95,6 +95,9 @@ deliberately disjoint file surface; concurrent pipelines by design).
   `reflection_register.py` cites for "reflection built, registration never landed"; its
   single-reflection registration shape is what T1.3 must generalize to add a second
   reflection.
+- **#1979 / PR #2006 (MERGED 2026-07-10)**: delivery-guard epoch scoping by timestamp
+  comparison — the attempt-scoping precedent this sweep's T1.2 deferral leans on; its
+  regression test is absorbed unchanged.
 
 ## Research
 
@@ -144,13 +147,11 @@ over-engineering; the win is that each *makes degradation loud*, not that they s
 
 ## Prerequisites
 
-No hard blockers — every task can proceed now. The one sequencing constraint (#1979 owns
-the delivery guard) is encoded as Task 2's Gate, which is the **single source of truth**:
-Task 2 does NOT touch the delivery-guard code regardless of #1979's merge state, so there is
-no "wait for #1979 to merge" gate that could block Task 2 indefinitely. If a merge check is
-ever needed, use merged-PR evidence, not issue-closed:
-`gh issue view 1979 --json closedByPullRequestsReferences -q '.closedByPullRequestsReferences[].state' | grep -qi MERGED`
-(issue-closed does not imply the delivery-guard fix merged).
+No hard blockers — every task can proceed now. The former #1979 sequencing constraint is
+resolved: **PR #2006 merged 2026-07-10 07:41 (issue #1979 CLOSED)**, landing the delivery
+guard's epoch scoping as a timestamp comparison (`response_delivered_at >= started_at`).
+Task 2's Gate remains the single source of truth and is now simply: do not refactor the
+just-landed guard; absorb its regression test unchanged.
 
 ## Solution
 
@@ -159,7 +160,9 @@ ever needed, use merged-PR evidence, not issue-closed:
 - **`ExitReason` StrEnum (T1.1)**: every member declares `is_clean` / `wrapup_eligible` /
   `is_anomaly`; the frozensets become derivations; role-driver failures become
   `TurnFailure(reason, detail)`. Telemetry string values unchanged.
-- **`SessionEvidence` (T1.2) — field-set-precise, per-caller parameterized**: the callers
+- **Liveness leaf helpers (T1.2) — field-set-precise, per-caller parameterized** (two bare
+  functions in `liveness.py`, NOT a wrapper class — cycle-3 CONCERN: no task scopes a
+  `SessionEvidence` class and none should exist): the callers
   do NOT share one leaf; they read **different presence field-sets** and must keep doing so.
   Verified in code: `session_health` reads `turn_count`/`log_path`/`claude_session_uuid`
   plus the `*_at` triple via the *already-shared* `derive_sdk_ever_output`
@@ -184,16 +187,20 @@ ever needed, use merged-PR evidence, not issue-closed:
   `stall_classifier._has_demonstrable_progress(...) is False`; (b) an in-grace-window session
   still reads live through `session_health` post-refactor.
 - **Attempt-scoping (T1.2) — durable field DEFERRED**: this sweep lands the pure
-  predicate-consolidation only. The durable `attempt_generation` schema field is **deferred**
-  to whichever of #1979 (OPEN/unmerged) or #1927 (schema diet, may own the name) settles the
-  field name first — this hygiene sweep adds no durable schema field, no migration, and does
-  not touch the delivery guard (#1979 owns it). #1979's in-flight fix already generalizes
-  attempt-scoping on the one guard it owns; the fleet-wide generation field rides that work.
+  predicate-consolidation only. #1979 shipped via **PR #2006** as timestamp epoch scoping
+  (`response_delivered_at >= started_at`) — no durable field was introduced, so the deferral
+  venue for any future `attempt_generation`-style field is **#1927 (schema diet) alone**.
+  This sweep adds no durable schema field, no migration, and does not refactor the
+  just-landed guard; if other sticky signals need scoping later, extend the landed
+  timestamp-epoch pattern first.
 - **`ArtifactEnvelope` (T1.3)**: stamped `{generated_at, commit, generated_by, runs,
-  degraded, max_age_days, max_commit_distance}`; one `staleness(envelope)` shared by gate
-  and reflection; degraded writes stamped (the persisted artifact carries `degraded`/`runs`,
-  the surface the gate reads later); provenance fixed; reflection registered via the update
-  path; `flaky` decay added. **Strict-freshness sequencing (deadlock guard):**
+  degraded}` — **provenance and state only; NO threshold fields** (cycle-3 CONCERN:
+  `max_age_days`/`max_commit_distance` in the artifact would duplicate the gate's module
+  constants `STALENESS_THRESHOLD`/`STALE_COMMIT_DISTANCE` and create a drift surface;
+  `staleness(envelope)` reads the constants, never the envelope). One `staleness()` shared
+  by gate and reflection; degraded writes stamped (the persisted artifact carries
+  `degraded`/`runs`, the surface the gate reads later); provenance fixed; reflection
+  registered via the update path; `flaky` decay added. **Strict-freshness sequencing (deadlock guard):**
   `/do-merge --strict-freshness` (stale/degraded ⇒ refuse to gate) is wired in **strictly
   after** a confirmed committed `runs >= 2` artifact exists — the regen task lands first and
   fails **loudly** (non-zero, no write) rather than silently persisting another degraded
@@ -220,8 +227,9 @@ ever needed, use merged-PR evidence, not issue-closed:
 ### Flow
 
 Producer mints `ExitReason.PM_USER` → classification derived from the enum →
-executor/telemetry consume one vocabulary. Health check asks `SessionEvidence.has_started`
-→ same answer everywhere. `refresh_test_baseline` stamps envelope → gate + reflection call
+executor/telemetry consume one vocabulary. Health check and both forks read the shared
+liveness leaves (`derive_sdk_ever_output` / `has_demonstrable_activity`) → same presence
+answer everywhere, per-caller freshness. `refresh_test_baseline` stamps envelope → gate + reflection call
 one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
 `find_affected` → `(results, meta)` → caller branches on `meta.degraded`.
 
@@ -317,8 +325,8 @@ one `staleness()` → `/do-merge --strict-freshness` refuses or proceeds loudly.
 - Generalizing `ArtifactEnvelope` to every JSON file in `data/`: scope is the merge-gate
   baseline + impact-finder index only; others adopt it when next touched.
 - Unifying the telemetry timeline with `session_events`: out of scope (program T3.4).
-- Touching the delivery guard while #1979 is in flight: hard sequencing rule, not a
-  judgment call.
+- Refactoring the just-landed delivery-guard epoch scoping (PR #2006): the guard is done;
+  absorb its regression test, nothing more.
 
 ## Risks
 
@@ -364,14 +372,15 @@ mutable state is written by the consolidation.
 
 - [SEPARATE-SLUG #2003] Workstream A (run ownership, merge enforcement, PR resolution) —
   concurrent, disjoint pipeline.
-- [SEPARATE-SLUG #1927 / #1979] The durable `attempt_generation` (or equivalently-named)
-  AgentSession field — deferred entirely to whichever settles the name first. This sweep
-  adds no durable schema field.
+- [SEPARATE-SLUG #1927] The durable `attempt_generation` (or equivalently-named)
+  AgentSession field — deferred entirely to the schema diet (#1979 shipped via PR #2006
+  with timestamp epoch scoping, no field, so #1927 is the sole remaining venue). This
+  sweep adds no durable schema field.
 - [SEPARATE-SLUG #1925] `HarnessResult` / harness return-shape changes (program T2.4).
 - [SEPARATE-SLUG #1926] Deletion/pruning of liveness machinery, watchdogs, or the
   stall-classifier taxonomy — this plan unifies what exists; #1926 decides what dies.
-- [ORDERED] Delivery-guard changes — blocked until #1979's in-flight PR merges (its build
-  owns that surface).
+- [SEPARATE-SLUG #1927] Refactoring the delivery guard's landed epoch scoping (PR #2006) —
+  absorbed as-is; any evolution of it belongs to the schema-diet/liveness follow-ups.
 
 ## Update System
 
@@ -391,9 +400,16 @@ mutable state is written by the consolidation.
   `scripts/` files this sweep touches or creates (`_baseline_common.py`, `baseline_gate.py`,
   `refresh_test_baseline.py`, `update/reflection_register.py`) adopt S110/S112 now (they carry
   the exact envelope/degraded-write code this sweep hardens).
-- **No Popoto migration** — the durable `attempt_generation` field is deferred to
-  #1979/#1927, so this sweep adds no schema field and needs no migration. No other
-  update-system changes required.
+- **No Popoto migration** — the durable `attempt_generation` field is deferred to #1927,
+  so this sweep adds no schema field and needs no migration.
+- **Fleet rollout of `--strict-freshness` (cycle-3 CONCERN)**: `data/main_test_baseline.json`
+  is gitignored and per-machine — Task 4's regen fixes only the machine it runs on. Ship the
+  strict flag OFF-by-default in the gate script; the `/do-merge` addendum passes it, and the
+  addendum change lands in a follow-up commit only after the update path gives every machine
+  a regen: add a `refresh_test_baseline` invocation (or a first-strict-run "stale baseline —
+  run scripts/refresh_test_baseline.py" refusal message with the exact command) to
+  `scripts/update/run.py`'s post-update steps. A machine that hasn't regenerated gets a
+  named, actionable refusal, never a silent mis-block.
 
 ## Agent Integration
 
@@ -428,9 +444,11 @@ through the `find_affected_docs` wrapper the agent actually calls.
       log_path/uuid/stdout presence)
 - [ ] A parity test asserts an in-grace-window session still reads live through
       `session_health` post-refactor (grace semantics preserved, not flattened)
-- [ ] Durable `attempt_generation` field is NOT added this sweep (deferred to #1979/#1927);
-      the fleet-wide attempt-scoping test rides that follow-up. #1979's own regression test
-      stays green when its PR merges
+- [ ] Durable `attempt_generation` field is NOT added this sweep (deferred to #1927);
+      `tests/unit/test_delivery_guard_resume_epoch.py` (landed with PR #2006) passes
+      unmodified
+- [ ] `has_demonstrable_activity(turn_count="3")` reads True through BOTH forks
+      (type-coercion parity, cycle-3 BLOCKER 1)
 - [ ] `baseline_gate --strict-freshness` refuses on stale/degraded envelopes;
       `refresh_test_baseline.py` stamps `degraded` and correct provenance; reflection
       registered by the update path; `flaky` entries decay
@@ -493,14 +511,23 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - **Assigned To**: signals-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Gate**: do NOT touch the delivery guard (owned by #1979, OPEN). No durable
-  `attempt_generation` field this sweep (deferred to #1979/#1927).
+- **Gate**: the delivery guard is epoch-scoped as of PR #2006 (merged; #1979 CLOSED) —
+  do NOT refactor the just-landed guard; absorb `tests/unit/test_delivery_guard_resume_epoch.py`
+  unchanged. No durable `attempt_generation` field this sweep (deferred to #1927, the sole
+  remaining venue). `session_health.py` call sites shifted +16 lines post-#2006
+  (:1008/:1169/:1352/:2223).
 - Reuse `derive_sdk_ever_output` as session_health's leaf (already wired); add one
   `has_demonstrable_activity(entry, *, freshness_window=None)` in liveness.py reading only
   `{turn_count, last_tool_use_at}`; point both `_has_demonstrable_progress` forks at it
   (stall passes `IDLE_SUSPECT_SECS`, crash passes `None`); do NOT widen crash/stall presence
   fields (B1); add the init-only-reads-False test for both forks + the in-grace-window parity
   test; fix #1983's 3 failures
+- **Type-coercion parity (cycle-3 BLOCKER 1)**: `has_demonstrable_activity` ports
+  crash_signature's numeric-string `turn_count` branch (`isinstance(turn_count, str)` →
+  `int(turn_count) > 0`, `except (TypeError, ValueError)` guarded) — the stall fork is
+  int-only today; an int-only shared helper would silently regress a string-`turn_count`
+  session to NON_RESUMABLE_DETERMINISTIC in the crash extractor. Regression test:
+  `turn_count="3"` asserts True through BOTH forks
 
 ### 3. ArtifactEnvelope + strict freshness + reflection registration
 - **Task ID**: build-envelope
@@ -537,14 +564,26 @@ through the `find_affected_docs` wrapper the agent actually calls.
 - **Parallel**: true
 - **Subtask 5a (T1.4, lands first if T1.5 stalls):** `(results, meta)` + full in-PR
   call-site migration (no shim). **Subtask 5b (T1.8):** `_assert_distinct` at import. 5a+5b
-  are low-risk and can be committed/validated independent of 5c. **Subtask 5c (T1.5):** ruff
-  S110/S112 (scoped to `agent/ bridge/ tools/ worker/ monitoring/` + the four touched
-  `scripts/` files) + triage pass + allowlist; delete the string-scan guard. If 5c's triage
-  balloons past review budget (Risk 1), 5a+5b ship in their own commit/PR checkpoint first.
+  are low-risk, touch files disjoint from Tasks 1-2, and commit/validate independent of the
+  lint triage (moved to Task 5.5 — cycle-3 BLOCKER 2).
+
+### 5.5. Silent-failure lint triage (T1.5)
+- **Task ID**: build-lint-triage
+- **Depends On**: build-session-evidence
+- **Validates**: `python -m ruff check .` with S110/S112 active; allowlist review
+- **Assigned To**: loudness-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Sequenced AFTER build-session-evidence (cycle-3 BLOCKER 2): the triage sweeps
+  `session_stall_classifier.py`, `crash_signature.py`, and `session_executor.py` — the same
+  files Tasks 1-2 rewrite; concurrent edits are a same-file write collision.
+- ruff S110/S112 (scoped to `agent/ bridge/ tools/ worker/ monitoring/` + the four touched
+  `scripts/` files) + triage pass + allowlist; delete the string-scan guard. If the triage
+  balloons past review budget (Risk 1), 5a+5b have already shipped in their own checkpoint.
 
 ### 6. Validation
 - **Task ID**: validate-sweep
-- **Depends On**: build-session-evidence, build-expiry-contract, build-loudness
+- **Depends On**: build-session-evidence, build-expiry-contract, build-loudness, build-lint-triage
 - **Assigned To**: sweep-validator
 - **Agent Type**: validator
 - **Parallel**: false
@@ -607,8 +646,19 @@ through the `find_affected_docs` wrapper the agent actually calls.
 ### Cycle 3 (2026-07-10, war room re-run at 08:27Z) — Verdict: NEEDS REVISION (2 blockers)
 
 Cycle-2 resolutions verified as holding (field-set-precise leaf, subtask 3a generalization,
-Task-5 split, `scripts/` lint scope, dropped shim, Prerequisites/Gate single-source). New
-findings below are unresolved; the revision pass addresses them.
+Task-5 split, `scripts/` lint scope, dropped shim, Prerequisites/Gate single-source).
+
+**Revision 3 (2026-07-10, post-cycle-3) resolved every finding below:** BLOCKER 1 →
+type-coercion parity ported into `has_demonstrable_activity` + `turn_count="3"` both-forks
+regression test (Task 2, Success Criteria). BLOCKER 2 → lint triage split into Task 5.5
+(`build-lint-triage`, Depends On build-session-evidence); 5a/5b stay parallel on disjoint
+files; validate-sweep depends updated. CONCERN fleet-rollout → strict flag off-by-default,
+addendum lands after the update path ships per-machine regen (Update System). CONCERN
+constants-drift → envelope carries provenance/state only, `staleness()` reads the gate's
+module constants. CONCERN naming → "liveness leaf helpers", two bare functions, no
+`SessionEvidence` class anywhere. CONCERN #1979 ground truth → all references updated
+(Prerequisites, T1.2 deferral to #1927 alone, Rabbit Holes, No-Gos, Success Criteria,
+Prior Art gains PR #2006). NIT → line drift noted in Task 2 (+16 lines post-#2006).
 
 | Severity | Critic | Finding | Suggested Resolution (Implementation Note) |
 |----------|--------|---------|--------------------------------------------|
