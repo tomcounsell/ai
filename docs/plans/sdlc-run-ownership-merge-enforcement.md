@@ -114,8 +114,12 @@ wrong layer (skill prose ≠ enforcement choke point), each patch layering on th
   does not exist today — only `pr_url`); `_process_holder_token()` and `SDLC_HOLDER_TOKEN`
   are deleted; state-mutating `sdlc-tool` subcommands gain a required `--run-id`; the
   merge-guard hook's contract changes from "auth file exists" to "predicate passes".
-- **Coupling:** decreases — skill bodies stop carrying ownership state; router terminal
-  rows stop duplicating the merge predicate.
+- **Coupling:** decreases at the enforcement layer — router terminal rows stop duplicating
+  the merge predicate. Stated precisely (cycle-2 CONCERN 4): `--run-id` is still
+  prompt-carried within a supervision run, but with fail-loud semantics (a missing flag is
+  a named error, never a silent new identity) and a bounded, documented recovery path
+  (re-`ensure_session`, ≤300s TTL wait) — versus the env seam's silent split-identity and
+  the run file's unbounded staleness.
 - **Data ownership:** run identity is minted by the lock contest in `ensure_session`
   (single minting site) and mirrored to the record for inspection; PR number lives on the
   session record (single writer: `/do-build`).
@@ -190,12 +194,32 @@ router schedules `/do-merge` → merge-guard hook evaluates the terminal predica
   named error (structural fail-loud, vs the env seam's silent new-token minting).
   `touch_issue_lock()` compares the supplied run_id against the lock holder on every
   mutation (fresh live check, per the #1954 design preference).
-- Lock/record consistency (critique CONCERN 1): after `session.save()` in the acquire
-  path, `ensure_session` re-reads the record and asserts `active_run_id` matches the lock
-  payload; on mismatch or save failure it releases the lock (`DEL`) so a crash between the
-  two writes cannot wedge the issue for the 300s TTL. The peek path flags a lock whose
-  run_id matches no live session (`orphaned_lock: true` in its JSON) instead of reporting
-  a healthy foreign owner.
+- **All `touch_issue_lock()` call sites flip together — including the two non-CLI renewal
+  paths** (cycle-2 BLOCKER): `tools/_sdlc_utils.py:399` (`renew_issue_lock_for_session`,
+  wired into `sdlc_stage_marker.write_marker()`) and `agent/session_executor.py:232`
+  (`_tick_issue_lock_renewal`, the worker's 60s heartbeat renewal) currently pass
+  `session_id` positionally and rely on the process-global token for comparison. Under the
+  run_id contract each must source the identity from `agent_session.active_run_id` —
+  renewal is reading back the identity this same process's `ensure_session` established,
+  not adopting a foreign one, so it does not violate the no-adopt rule. Each call site
+  gets a regression test asserting a lock acquired with run_id X is still renewable past
+  the 300s TTL by the same session object; `_tick_issue_lock_renewal` additionally logs a
+  warning when renewal returns not-owner instead of staying fire-and-forget.
+- **run_id loss recovery (supervisor side):** if a local supervisor loses its run_id
+  (context compaction, crash of the driving session), there is deliberately no
+  adopt-from-record shortcut. The documented recovery is: re-run `session-ensure`; while
+  the old lock is live it returns `ISSUE_LOCKED` (bounded by the 300s TTL since nothing
+  renews the orphaned run's lock), after which a fresh contest mints a new run_id. Bounded
+  and loud, versus the env seam's silent split-identity behavior.
+- Lock/record consistency (cycle-1 CONCERN 1, refined by cycle-2 CONCERN 2): after
+  `session.save()` in the acquire path, `ensure_session` re-reads the record and asserts
+  `active_run_id` matches the lock payload; on mismatch or save failure it releases the
+  lock via **compare-and-delete** (delete only if the lock value still equals our run_id —
+  the standard Lua release pattern), never a raw `DEL`, so a delayed cleanup can never
+  delete a successor's freshly acquired lock. Scope claim stated precisely: the readback
+  covers the save-failure branch; a true process death inside the window is bounded by the
+  300s TTL and surfaced by the peek path flagging a lock whose run_id matches no live
+  session (`orphaned_lock: true`) instead of reporting a healthy foreign owner.
 - Stale-owner takeover keeps the existing lock TTL semantics: an expired lock is claimable
   by the next fresh candidate; no takeover reads `active_run_id` as authority.
 - One idempotent migration registers both new fields (`active_run_id`, `pr_number`) —
@@ -210,12 +234,19 @@ router schedules `/do-merge` → merge-guard hook evaluates the terminal predica
   verdict predates it (prefer the `REVIEW_CONTEXT head_sha=` trailer comparison; commit
   date as fallback). A bare `"APPROVED" in verdict_text` check is explicitly insufficient
   (critique BLOCKER 2). Skill and hook both consume the helper so they cannot drift.
-- Hook posture: fail-closed on predicate-evaluation errors. The auth file survives only as
-  an explicit break-glass override — must contain `override: <reason>`; empty/legacy files
-  block. Every accepted override emits
+- Hook posture with an explicit discriminator (cycle-2 CONCERN 3 — "foreign-repo skip" and
+  "fail-closed on errors" are different observable conditions and must be told apart
+  BEFORE evaluating): (1) **substrate absent** — no `docs/sdlc/do-merge.md` addendum in
+  the target repo, or `sdlc-tool` unresolvable — is detected up front as a repo property;
+  groups b/c skip with a logged notice, group a still enforces. (2) **substrate present
+  but a predicate call raises / exits non-zero / returns malformed output** — fail closed.
+  The detection is ordered (probe substrate first, then evaluate), so an evaluation error
+  in a substrate-present repo can never be misread as "foreign repo". The auth file
+  survives only as an explicit break-glass override — must contain `override: <reason>`;
+  empty/legacy files block. Every accepted override emits
   `record_metric("merge_guard.override_used", {"pr_number", "reason"})` so uses surface on
-  the dashboard, not just in grep-able logs (critique CONCERN 2). Both branches are
-  test-covered (see Failure Path Test Strategy).
+  the dashboard, not just in grep-able logs. Both branches are test-covered (see Failure
+  Path Test Strategy).
 - Lock fail-open on *Redis* errors is preserved (advisory lock, per #1954 design), but each
   fail-open site logs the swallowed error class explicitly (cf. #1868's not-found vs
   transient distinction).
@@ -258,6 +289,11 @@ router schedules `/do-merge` → merge-guard hook evaluates the terminal predica
       `run_id`
 - [ ] `tests/unit/test_sdlc_dispatch.py`, `test_sdlc_next_skill.py` — UPDATE: dispatch
       records carry `run_id`; `branch_exists` canonical-shape fix (or removal)
+- [ ] `tests/unit/test_sdlc_utils.py` — UPDATE: `renew_issue_lock_for_session` sources
+      `active_run_id`; new renewal-past-TTL regression test
+- [ ] `tests/unit/test_session_executor_tick_backstop.py` (or sibling) — UPDATE:
+      `_tick_issue_lock_renewal` sources `active_run_id`, warns on not-owner; renewal
+      regression test
 - [ ] `tests/unit/test_sdlc_router.py`, `test_sdlc_router_decision.py`,
       `test_sdlc_skill_md_parity.py` — UPDATE: row 10b deletion
 - [ ] `tests/unit/test_do_merge_docs_gate.py` — UPDATE: gate logic moves into the shared
@@ -290,12 +326,13 @@ are dashboard-visible, not grep-only.
 
 ### Risk 2: Mixed-version window during rollout (old skill bodies still exporting SDLC_HOLDER_TOKEN)
 **Impact:** an in-flight supervision run at deploy time could see ISSUE_LOCKED.
-**Mitigation:** hard cutover, no legacy alias (critique CONCERN 3 — an alias with a
+**Mitigation:** hard cutover, no legacy alias (cycle-1 CONCERN 3 — an alias with a
 permanent Verification exclusion is an unremovable bridge). Deploy runbook sequences
 "merge → `./scripts/valor-service.sh worker-restart`"; the worker is a single process, so
-no session survives the restart boundary to present a stale token. Local supervision runs
-re-`ensure_session` on their next call and acquire normally; the 300s lock TTL bounds any
-residual overlap.
+no session survives the restart boundary to present a stale token. An in-flight local
+supervision run fails loudly at its next state-mutating call (missing/foreign run
+identity) and restarts its run via `session-ensure` — a named error and a bounded
+re-entry, not a silent continue; the 300s lock TTL bounds any residual overlap.
 
 ### Risk 3: Hook predicate drifts from `/do-merge` skill checks
 **Impact:** the #1944 class recurs with the roles reversed (hook stricter/looser than gate).
@@ -342,9 +379,9 @@ which is why the ladder keeps its read-only recovery rungs (single *writer*, not
   sequenced later in the program plan; this plan does not touch verdict freshness logic.
 - [SEPARATE-SLUG #1629] Durable stage-state artifact / event-sourced markers (T3.4) —
   explicitly deferred; `run_id` lands on the existing record shape.
-- [SEPARATE-SLUG #1927] AgentSession field renames beyond adding `active_run_id` — the
-  schema diet owns naming; this plan adds one field with a precision name and otherwise
-  leaves the schema alone.
+- [SEPARATE-SLUG #1927] AgentSession field renames beyond adding `active_run_id` and
+  `pr_number` — the schema diet owns naming; this plan adds two fields with precision
+  names and otherwise leaves the schema alone.
 
 ## Update System
 
@@ -436,8 +473,13 @@ subprocesses with no `SDLC_HOLDER_TOKEN` in the environment (the #1971 scenario,
 - Delete `_process_holder_token` and the env seam entirely (hard cutover); add `--run-id`
   to state-mutating `sdlc-tool` subcommands (missing = named non-zero error);
   `session-ensure` emits run_id in JSON output
-- Post-save readback assertion + lock release on mismatch; peek path reports
-  `orphaned_lock`; `touch_issue_lock` comparison; dispatch records carry run_id
+- Post-save readback assertion + compare-and-delete lock release on mismatch; peek path
+  reports `orphaned_lock`; `touch_issue_lock` comparison; dispatch records carry run_id
+- **Flip the two non-CLI renewal call sites** to source identity from
+  `agent_session.active_run_id`: `tools/_sdlc_utils.py:399` (`renew_issue_lock_for_session`)
+  and `agent/session_executor.py:232` (`_tick_issue_lock_renewal`, add not-owner warning
+  log); regression test per site: lock acquired with run_id X renewable past 300s TTL by
+  the same session object
 
 ### 2. Skill-body ownership cleanup
 - **Task ID**: build-skill-bodies
@@ -516,6 +558,8 @@ subprocesses with no `SDLC_HOLDER_TOKEN` in the environment (the #1971 scenario,
 | Dead branch shape gone | `grep -n "session/sdlc-" tools/sdlc_next_skill.py \| wc -l` | match count == 0 |
 | Row 10b deleted | `grep -n "_rule_stage_states_unavailable_pr_open\|row 10b" agent/sdlc_router.py \| wc -l` | match count == 0 |
 | Two-subprocess ownership | `pytest tests/unit/test_session_lifecycle.py -k run_identity -q` | exit code 0 |
+| Renewal call sites flipped | `pytest tests/unit/ -k "lock_renewal" -q` | exit code 0 |
+| No session_id passed to lock renewal | `grep -n "touch_issue_lock(issue_number, session_id" tools/ agent/ -r \| wc -l` | match count == 0 |
 | Stale approval blocked | `pytest tests/unit/test_do_merge_docs_gate.py -k stale_verdict -q` | exit code 0 |
 | Override path covered | `pytest tests/unit/ -k merge_guard_override -q` | exit code 0 |
 
@@ -533,6 +577,17 @@ War room run 2026-07-10 (FULL depth — doctrine paths: `.claude/hooks/`, `agent
 | CONCERN | History & Consistency | "PR number lives on the session record (single writer: /do-build)" assumes a field that does not exist: `AgentSession` has `pr_url` but no `pr_number` (the rung at `tools/sdlc_stage_query.py:425` is dead — `getattr(session, "pr_number", None)` always None). A second schema field + migration is required but Architectural Impact / Update System account only for `active_run_id`. | REVISED: `pr_number = IntField(null=True)` added to the plan; single migration registers both fields; stale "primary rung" comment fix scoped in Task 4; Architectural Impact + Update System updated. | Either add `pr_number = IntField(null=True)` to AgentSession with its own idempotent migration (mirror the `active_run_id` pattern in `scripts/update/migrations.py`) and fix the stale "primary rung" comment at `tools/sdlc_stage_query.py:422-424`, or rewrite the plan language to target the existing `_pr_number` meta-key mechanism (the de-facto working path). |
 | NIT | Structural checks | Verification rows using `grep -c ... == 0` are exit-code traps: `grep -c` prints 0 but exits 1 on zero matches, so a harness checking exit codes reads success as failure. | REVISED: all zero-match rows converted to `grep … \| wc -l` shapes. | — |
 | NIT | Structural checks | Tasks 5-7 (validate-workstream, document-feature, validate-all) carry no `Validates` line / validation command; they lean on the Verification table implicitly. | REVISED: Validates lines added to tasks 5-7. | — |
+
+### Cycle 2 (2026-07-10, against revision 1 — verdict NEEDS REVISION, 1 blocker; both cycle-1 blockers verified FIXED)
+
+| Severity | Critic | Finding | Addressed By |
+|----------|--------|---------|--------------|
+| BLOCKER | Risk & Robustness + History & Consistency | Two non-CLI `touch_issue_lock()` renewal call sites (`tools/_sdlc_utils.py:399` `renew_issue_lock_for_session`; `agent/session_executor.py:232` `_tick_issue_lock_renewal`, fire-and-forget) pass `session_id` positionally and are unnamed in the plan — under the run_id contract they silently mismatch, the 300s TTL lapses mid-session, and a second supervisor can win the lock out from under a running eng session (#1915 class, reintroduced by this plan's own change). | REVISED (rev 3): both call sites named in Technical Approach + Task 1; each sources identity from `agent_session.active_run_id` (read-back of own established identity, not foreign adoption); `_tick_issue_lock_renewal` warns on not-owner; per-site renewal-past-TTL regression tests; new Verification rows "Renewal call sites flipped" + "No session_id passed to lock renewal"; Test Impact rows added. |
+| CONCERN | Risk & Robustness | Crash-window release specs raw `DEL` (can delete a successor's fresh lock); post-save readback cannot cover true process death — "no 300s wedge" overreaches. | REVISED (rev 3): compare-and-delete (Lua release pattern) replaces `DEL`; scope claim corrected — readback covers save-failure; process death is TTL-bounded + `orphaned_lock`-flagged. |
+| CONCERN | Risk & Robustness | "Fail-closed on predicate errors" vs "foreign-repo skip" had no discriminator for the same observable signal. | REVISED (rev 3): ordered detection — substrate probed first as a repo property (addendum present / sdlc-tool resolvable); only substrate-present evaluation failures fail closed. |
+| CONCERN | Scope & Value | "Skill bodies stop carrying ownership state" overstated; a supervisor that loses its run_id has no self-recovery once adopt-from-record is removed. | REVISED (rev 3): claim restated precisely (prompt-carried within a run, fail-loud); documented bounded recovery — re-`ensure_session`, ≤300s TTL wait, fresh mint. |
+| NIT | History & Consistency | No-Gos #1927 bullet said "one field" after `pr_number` was added. | REVISED (rev 3): "two fields". |
+| NIT | Scope & Value | Risk 2 claimed in-flight forks "acquire normally" post-cutover. | REVISED (rev 3): reworded — fails loudly at next mutating call, bounded re-entry via `session-ensure`. |
 
 ---
 
