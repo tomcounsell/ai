@@ -17,8 +17,15 @@ behavior:
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestDispatchRecordEnsures:
@@ -33,7 +40,7 @@ class TestDispatchRecordEnsures:
         find_mock = MagicMock(return_value=session)
 
         args = SimpleNamespace(
-            session_id=None, issue_number=1671, skill="/do-build", pr_number=None
+            session_id=None, issue_number=1671, skill="/do-build", pr_number=None, run_id="run-1671"
         )
 
         with (
@@ -68,13 +75,13 @@ class TestDispatchRecordEnsures:
 
         captured = {}
 
-        def _capture(session, skill, pr_number=None):
+        def _capture(session, skill, pr_number=None, run_id=None):
             captured["session"] = session
             captured["skill"] = skill
             return True
 
         args = SimpleNamespace(
-            session_id=None, issue_number=1671, skill="/do-build", pr_number=None
+            session_id=None, issue_number=1671, skill="/do-build", pr_number=None, run_id="run-1671"
         )
 
         with (
@@ -102,12 +109,12 @@ class TestDispatchRecordEnsures:
 
         captured = {}
 
-        def _capture(session, skill, pr_number=None):
+        def _capture(session, skill, pr_number=None, run_id=None):
             captured["session"] = session
             return True
 
         args = SimpleNamespace(
-            session_id=None, issue_number=1671, skill="/do-build", pr_number=None
+            session_id=None, issue_number=1671, skill="/do-build", pr_number=None, run_id="run-1671"
         )
 
         mock_as = MagicMock()
@@ -187,34 +194,44 @@ class TestParseIssueNumberFromUrl:
 
 
 class TestRecordDispatchIssueLock:
-    """Issue #1954: record_dispatch_for_session() calls touch_issue_lock()
-    DIRECTLY (not via ensure_session()) before writing the dispatch event,
-    deriving issue_number by parsing session.issue_url. This must hold for
-    the continuing-session path too, where find_session(ensure=True)'s Step-2
+    """Issues #1954/#2003: record_dispatch_for_session() calls
+    touch_issue_lock() DIRECTLY (not via ensure_session()) before writing the
+    dispatch event, deriving issue_number by parsing session.issue_url and
+    comparing ownership by the caller's run_id. This must hold for the
+    continuing-session path too, where find_session(ensure=True)'s Step-2
     short-circuit never calls ensure_session()."""
 
-    def _lock_result(self, acquired: bool, owner_session_id=None):
+    def _lock_result(self, acquired: bool, owner_session_id=None, owner_run_id=None):
         from models.session_lifecycle import IssueLockResult
 
-        return IssueLockResult(acquired=acquired, owner_session_id=owner_session_id)
+        return IssueLockResult(
+            acquired=acquired,
+            owner_session_id=owner_session_id,
+            owner_run_id=owner_run_id,
+        )
 
-    def test_refuses_and_returns_false_when_lock_held_by_different_session(self):
+    def test_refuses_and_returns_false_when_lock_held_by_foreign_run(self):
         from tools.sdlc_dispatch import record_dispatch_for_session
 
         session = MagicMock()
         session.issue_url = "https://github.com/tomcounsell/ai/issues/3001"
         session.session_id = "sdlc-local-3001"
 
-        lock_mock = MagicMock(return_value=self._lock_result(False, "other-live-session"))
+        lock_mock = MagicMock(
+            return_value=self._lock_result(
+                False, owner_session_id="other-live-session", owner_run_id="foreign-run"
+            )
+        )
 
         with patch("models.session_lifecycle.touch_issue_lock", lock_mock):
-            ok = record_dispatch_for_session(session, skill="/do-build")
+            ok = record_dispatch_for_session(session, skill="/do-build", run_id="run-mine")
 
         assert ok is False
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, kwargs = lock_mock.call_args
         assert args[0] == 3001
-        assert args[1] == "sdlc-local-3001"
+        assert args[1] == "run-mine"
+        assert kwargs.get("session_id") == "sdlc-local-3001"
 
     def test_continuing_session_derives_issue_number_from_issue_url(self):
         """The continuing-session path: no prior ensure_session() call, session
@@ -226,19 +243,21 @@ class TestRecordDispatchIssueLock:
         session.issue_url = "https://github.com/tomcounsell/ai/issues/3002"
         session.session_id = "sdlc-local-3002"
 
-        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-3002"))
+        lock_mock = MagicMock(
+            return_value=self._lock_result(True, "sdlc-local-3002", owner_run_id="run-mine")
+        )
 
         with (
             patch("models.session_lifecycle.touch_issue_lock", lock_mock),
             patch("tools.stage_states_helpers.update_stage_states", return_value=True),
         ):
-            ok = record_dispatch_for_session(session, skill="/do-build")
+            ok = record_dispatch_for_session(session, skill="/do-build", run_id="run-mine")
 
         assert ok is True
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, _ = lock_mock.call_args
         assert args[0] == 3002
-        assert args[1] == "sdlc-local-3002"
+        assert args[1] == "run-mine"
 
     def test_no_lock_call_when_session_has_no_issue_url(self):
         """A session with no parseable issue number must not attempt a lock
@@ -261,15 +280,89 @@ class TestRecordDispatchIssueLock:
         assert ok is True
         lock_mock.assert_not_called()
 
+    def test_refuses_without_any_run_identity(self):
+        """An issue-scoped write with NO run identity (no explicit run_id, no
+        active_run_id on the record) is refused without ever touching the
+        lock -- an identity-less caller must never mutate (#2003)."""
+        from tools.sdlc_dispatch import record_dispatch_for_session
+
+        session = MagicMock()
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/3003"
+        session.session_id = "sdlc-local-3003"
+        session.active_run_id = None
+
+        lock_mock = MagicMock()
+        write_mock = MagicMock(return_value=True)
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("tools.stage_states_helpers.update_stage_states", write_mock),
+        ):
+            ok = record_dispatch_for_session(session, skill="/do-build")
+
+        assert ok is False
+        lock_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_falls_back_to_session_active_run_id_for_in_process_callers(self):
+        """With no explicit run_id, the identity falls back to
+        session.active_run_id -- the read-back of this process's own
+        established identity, never foreign adoption."""
+        from tools.sdlc_dispatch import record_dispatch_for_session
+
+        session = MagicMock()
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/3004"
+        session.session_id = "sdlc-local-3004"
+        session.active_run_id = "own-established-run"
+
+        lock_mock = MagicMock(
+            return_value=self._lock_result(True, "sdlc-local-3004", "own-established-run")
+        )
+
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("tools.stage_states_helpers.update_stage_states", return_value=True),
+        ):
+            ok = record_dispatch_for_session(session, skill="/do-build")
+
+        assert ok is True
+        args, _ = lock_mock.call_args
+        assert args[1] == "own-established-run"
+
+    def test_dispatch_record_carries_run_id(self):
+        """Dispatch history entries carry the run identity (#2003)."""
+        from tools.sdlc_dispatch import record_dispatch_for_session
+
+        session = MagicMock()
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/3005"
+        session.session_id = "sdlc-local-3005"
+
+        captured = {}
+
+        def _fake_update(sess, apply_fn):
+            captured["states"] = apply_fn({})
+            return True
+
+        with (
+            patch(
+                "models.session_lifecycle.touch_issue_lock",
+                return_value=self._lock_result(True, "sdlc-local-3005", "run-z"),
+            ),
+            patch("tools.stage_states_helpers.update_stage_states", side_effect=_fake_update),
+        ):
+            ok = record_dispatch_for_session(session, skill="/do-build", run_id="run-z")
+
+        assert ok is True
+        history = captured["states"]["_sdlc_dispatches"]
+        assert history[-1]["run_id"] == "run-z"
+        assert history[-1]["skill"] == "/do-build"
+
     def test_cli_record_renews_lock_via_record_dispatch_for_session(self):
-        """Issue #1954 Task 4: the `dispatch record` CLI subcommand's existing
-        Task-3 wiring (record_dispatch_for_session() calling touch_issue_lock()
-        directly) already satisfies "dispatch record renews the lock" -- no
-        separate/additional CLI-layer call is added. This exercises the CLI
-        entry point (_cli_record) end-to-end through the unmocked
-        record_dispatch_for_session() to confirm the renewal fires as a side
-        effect of the subcommand, not just of the lower-level helper in
-        isolation."""
+        """The `dispatch record` CLI subcommand's wiring
+        (record_dispatch_for_session() calling touch_issue_lock() directly)
+        satisfies "dispatch record renews the lock" -- keyed by the CLI's
+        --run-id. Exercises the CLI entry point (_cli_record) end-to-end
+        through the unmocked record_dispatch_for_session()."""
         from tools import sdlc_dispatch
 
         session = MagicMock(name="issue_session")
@@ -277,10 +370,14 @@ class TestRecordDispatchIssueLock:
         session.session_id = "sdlc-local-1954"
 
         find_mock = MagicMock(return_value=session)
-        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-1954"))
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-1954", "run-1954"))
 
         args = SimpleNamespace(
-            session_id=None, issue_number=1954, skill="/do-build", pr_number=None
+            session_id=None,
+            issue_number=1954,
+            skill="/do-build",
+            pr_number=None,
+            run_id="run-1954",
         )
 
         with (
@@ -292,15 +389,14 @@ class TestRecordDispatchIssueLock:
 
         assert result["ok"] is True
         lock_mock.assert_called_once()
-        args_called = lock_mock.call_args.args
+        args_called, _ = lock_mock.call_args
         assert args_called[0] == 1954
-        assert args_called[1] == "sdlc-local-1954"
+        assert args_called[1] == "run-1954"
 
-    def test_two_sessions_same_issue_second_refused(self, monkeypatch):
+    def test_two_runs_same_issue_second_refused(self):
         """End-to-end (real Redis, no mocking of touch_issue_lock): two
-        record_dispatch_for_session() calls for the same issue from distinct
-        simulated processes -- the second is refused."""
-        import models.session_lifecycle as session_lifecycle
+        record_dispatch_for_session() calls for the same issue presenting
+        DISTINCT run_ids -- the second is refused."""
         from tools.sdlc_dispatch import record_dispatch_for_session
 
         session_a = MagicMock()
@@ -311,34 +407,36 @@ class TestRecordDispatchIssueLock:
         session_b.issue_url = "https://github.com/tomcounsell/ai/issues/3050"
         session_b.session_id = "sdlc-local-3050"
 
-        monkeypatch.setattr(session_lifecycle, "_process_holder_token", lambda: "proc-A")
         with patch("tools.stage_states_helpers.update_stage_states", return_value=True):
-            ok_a = record_dispatch_for_session(session_a, skill="/do-build")
+            ok_a = record_dispatch_for_session(session_a, skill="/do-build", run_id="proc-A-run")
         assert ok_a is True
 
-        monkeypatch.setattr(session_lifecycle, "_process_holder_token", lambda: "proc-B")
         with patch("tools.stage_states_helpers.update_stage_states", return_value=True):
-            ok_b = record_dispatch_for_session(session_b, skill="/do-build")
+            ok_b = record_dispatch_for_session(session_b, skill="/do-build", run_id="proc-B-run")
         assert ok_b is False
 
 
 class TestCliRecordIssueLockedShape:
-    """Issue #1954 gap fix: `_cli_record()` disambiguates a False result from
-    ``record_dispatch_for_session()`` -- issue-lock contention vs. any other
-    write failure -- via a read-only ``touch_issue_lock(peek=True)`` check,
-    so the CLI's returned dict matches the ISSUE_LOCKED shape SKILL.md
-    already documents for `sdlc-tool dispatch record`."""
+    """Issue #1954 gap fix (extended by #2003): `_cli_record()` disambiguates
+    a False result from ``record_dispatch_for_session()`` -- issue-lock
+    contention vs. any other write failure -- via a read-only
+    ``touch_issue_lock(peek=True)`` check keyed by the CLI's --run-id, so the
+    CLI's returned dict matches the ISSUE_LOCKED shape SKILL.md documents."""
 
-    def _lock_result(self, acquired: bool, owner_session_id=None):
+    def _lock_result(self, acquired: bool, owner_session_id=None, owner_run_id=None):
         from models.session_lifecycle import IssueLockResult
 
-        return IssueLockResult(acquired=acquired, owner_session_id=owner_session_id)
+        return IssueLockResult(
+            acquired=acquired,
+            owner_session_id=owner_session_id,
+            owner_run_id=owner_run_id,
+        )
 
     def test_lock_contention_surfaces_reason_and_owner(self):
-        """record_dispatch_for_session() refuses because a different live
-        session holds the lock -- _cli_record's dict must carry
-        reason=ISSUE_LOCKED and the correct owner_session_id, alongside the
-        existing ok/history_length keys."""
+        """record_dispatch_for_session() refuses because a foreign run holds
+        the lock -- _cli_record's dict must carry reason=ISSUE_LOCKED with
+        the owning run_id AND session_id, alongside the existing
+        ok/history_length keys."""
         from tools import sdlc_dispatch
 
         session = MagicMock(name="issue_session")
@@ -350,10 +448,18 @@ class TestCliRecordIssueLockedShape:
         # record_dispatch_for_session() (mutating attempt), once inside the
         # CLI's post-failure peek. Both return the same "held elsewhere"
         # result for this contended-issue scenario.
-        lock_mock = MagicMock(return_value=self._lock_result(False, "other-live-session"))
+        lock_mock = MagicMock(
+            return_value=self._lock_result(
+                False, owner_session_id="other-live-session", owner_run_id="foreign-run"
+            )
+        )
 
         args = SimpleNamespace(
-            session_id=None, issue_number=4001, skill="/do-build", pr_number=None
+            session_id=None,
+            issue_number=4001,
+            skill="/do-build",
+            pr_number=None,
+            run_id="run-4001",
         )
 
         with (
@@ -364,6 +470,7 @@ class TestCliRecordIssueLockedShape:
 
         assert result["ok"] is False
         assert result["reason"] == "ISSUE_LOCKED"
+        assert result["owner_run_id"] == "foreign-run"
         assert result["owner_session_id"] == "other-live-session"
         assert lock_mock.call_count == 2
 
@@ -382,10 +489,14 @@ class TestCliRecordIssueLockedShape:
         find_mock = MagicMock(return_value=session)
         # The lock itself is free/ours (acquired=True) both times; the write
         # fails for an unrelated reason (update_stage_states returns False).
-        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-4002"))
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-4002", "run-4002"))
 
         args = SimpleNamespace(
-            session_id=None, issue_number=4002, skill="/do-build", pr_number=None
+            session_id=None,
+            issue_number=4002,
+            skill="/do-build",
+            pr_number=None,
+            run_id="run-4002",
         )
 
         with (
@@ -398,3 +509,94 @@ class TestCliRecordIssueLockedShape:
         assert result == {"ok": False, "history_length": 0}
         assert "reason" not in result
         assert "owner_session_id" not in result
+
+
+def _isolated_subprocess_env():
+    """Env for CLI subprocesses: Redis isolated to the per-worker test db.
+
+    The autouse redis_test_db fixture patches the IN-PROCESS popoto client;
+    a subprocess re-resolves REDIS_URL at import, so point it explicitly at
+    the same test db -- unit tests must never touch production Redis.
+    """
+    import popoto.redis_db as rdb
+
+    kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
+    host = kwargs.get("host") or "localhost"
+    port = kwargs.get("port") or 6379
+    db = kwargs.get("db", 1)
+    return {**os.environ, "REDIS_URL": f"redis://{host}:{port}/{db}"}
+
+
+class TestRunIdRequiredFlag:
+    """Issue #2003: every state-MUTATING sdlc-tool subcommand exits non-zero
+    with the NAMED error RUN_ID_REQUIRED when --run-id is missing -- no mint,
+    no adopt, no session resolution. Read-only subcommands take no run-id.
+    One subprocess test per mutating subcommand."""
+
+    @pytest.mark.parametrize(
+        ("module", "argv"),
+        [
+            (
+                "tools.sdlc_dispatch",
+                ["record", "--skill", "/do-build", "--issue-number", "999999"],
+            ),
+            (
+                "tools.sdlc_verdict",
+                [
+                    "record",
+                    "--stage",
+                    "CRITIQUE",
+                    "--verdict",
+                    "READY TO BUILD",
+                    "--issue-number",
+                    "999999",
+                ],
+            ),
+            (
+                "tools.sdlc_stage_marker",
+                ["--stage", "DOCS", "--status", "completed", "--issue-number", "999999"],
+            ),
+            (
+                "tools.sdlc_meta_set",
+                ["--key", "plan_revising", "--value", "true", "--issue-number", "999999"],
+            ),
+        ],
+        ids=["dispatch-record", "verdict-record", "stage-marker", "meta-set"],
+    )
+    def test_missing_run_id_is_named_nonzero_error(self, module, argv):
+        proc = subprocess.run(
+            [sys.executable, "-m", module, *argv],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=_isolated_subprocess_env(),
+            timeout=60,
+        )
+        assert proc.returncode != 0, f"{module} must exit non-zero without --run-id"
+        combined = proc.stdout + proc.stderr
+        assert "RUN_ID_REQUIRED" in combined, (
+            f"{module} must name the error RUN_ID_REQUIRED; got: {combined!r}"
+        )
+
+    @pytest.mark.parametrize(
+        ("module", "argv"),
+        [
+            ("tools.sdlc_dispatch", ["get", "--issue-number", "999999"]),
+            (
+                "tools.sdlc_verdict",
+                ["get", "--stage", "CRITIQUE", "--issue-number", "999999"],
+            ),
+        ],
+        ids=["dispatch-get", "verdict-get"],
+    )
+    def test_read_only_subcommands_need_no_run_id(self, module, argv):
+        proc = subprocess.run(
+            [sys.executable, "-m", module, *argv],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=_isolated_subprocess_env(),
+            timeout=60,
+        )
+        combined = proc.stdout + proc.stderr
+        assert "RUN_ID_REQUIRED" not in combined
