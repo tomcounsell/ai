@@ -269,28 +269,40 @@ class TestLookupPrNumber:
     def test_issue_search_primary_path(self):
         from tools.sdlc_stage_query import _lookup_pr_number
 
-        with patch("tools.sdlc_stage_query._gh_pr_list", return_value=55) as gh:
+        # The validated issue-search helper returns a PR whose body references
+        # the issue; the branch-head fallback must not be consulted.
+        with (
+            patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=55) as search,
+            patch("tools.sdlc_stage_query._gh_pr_list") as gh,
+        ):
             assert _lookup_pr_number(145, slug="some_slug") == 55
-        # First call is the issue-number search.
-        first_args = gh.call_args_list[0].args[0]
-        assert "--search" in first_args and "#145" in first_args
+        search.assert_called_once()
+        assert search.call_args.args[0] == 145
+        gh.assert_not_called()
 
     def test_branch_head_fallback_when_issue_search_empty(self):
         from tools.sdlc_stage_query import _lookup_pr_number
 
-        # Issue search returns None, branch-head returns 88.
-        with patch("tools.sdlc_stage_query._gh_pr_list", side_effect=[None, 88]) as gh:
+        # Validated issue search returns None; branch-head returns 88.
+        with (
+            patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=None),
+            patch("tools.sdlc_stage_query._gh_pr_list", return_value=88) as gh,
+        ):
             assert _lookup_pr_number(145, slug="my_slug") == 88
-        branch_args = gh.call_args_list[1].args[0]
+        branch_args = gh.call_args_list[0].args[0]
         assert "--head" in branch_args and "session/my_slug" in branch_args
 
     def test_no_slug_no_branch_fallback(self):
         from tools.sdlc_stage_query import _lookup_pr_number
 
-        # Only the issue search runs (returns None); no branch-head attempt.
-        with patch("tools.sdlc_stage_query._gh_pr_list", side_effect=[None]) as gh:
+        # Only the validated issue search runs (returns None); no branch-head attempt.
+        with (
+            patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=None) as search,
+            patch("tools.sdlc_stage_query._gh_pr_list") as gh,
+        ):
             assert _lookup_pr_number(145, slug=None) is None
-        assert gh.call_count == 1
+        search.assert_called_once()
+        gh.assert_not_called()
 
     def test_gh_failure_returns_none(self):
         from tools.sdlc_stage_query import _gh_pr_list
@@ -298,6 +310,91 @@ class TestLookupPrNumber:
         # subprocess raises -> None, never propagates.
         with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("boom")):
             assert _gh_pr_list(["--head", "session/x"]) is None
+
+    def test_issue_1987_false_match_returns_none(self):
+        """Regression #1987: a fuzzy hit whose body references a *different*
+        issue must not be trusted; with no slug fallback the result is None."""
+        from tools.sdlc_stage_query import _lookup_pr_number
+
+        # Search surfaces PR #1984 (body: "Closes #1967") for issue 1950.
+        proc = MagicMock(
+            returncode=0, stdout=json.dumps([{"number": 1984, "body": "Closes #1967"}])
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc):
+            assert _lookup_pr_number(1950, slug=None) is None
+
+    def test_issue_search_validated_hit_returned(self):
+        from tools.sdlc_stage_query import _gh_pr_search_issue_ref
+
+        proc = MagicMock(returncode=0, stdout=json.dumps([{"number": 77, "body": "Closes #1950"}]))
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc):
+            assert _gh_pr_search_issue_ref(1950) == 77
+
+    def test_issue_search_returns_first_validating_candidate(self):
+        from tools.sdlc_stage_query import _gh_pr_search_issue_ref
+
+        # Only the second candidate's body references the issue.
+        proc = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {"number": 10, "body": "Closes #1967"},
+                    {"number": 20, "body": "Fixes #1950"},
+                ]
+            ),
+        )
+        with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc):
+            assert _gh_pr_search_issue_ref(1950) == 20
+
+    def test_issue_search_empty_or_malformed_returns_none(self):
+        from tools.sdlc_stage_query import _gh_pr_search_issue_ref
+
+        # Empty list, non-list, and missing/None body all resolve to None.
+        for stdout in ("[]", json.dumps({"not": "a list"}), json.dumps([{"number": 5}])):
+            proc = MagicMock(returncode=0, stdout=stdout)
+            with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc):
+                assert _gh_pr_search_issue_ref(1950) is None
+
+    def test_issue_search_subprocess_error_returns_none(self):
+        from tools.sdlc_stage_query import _gh_pr_search_issue_ref
+
+        with patch("tools.sdlc_stage_query.subprocess.run", side_effect=OSError("boom")):
+            assert _gh_pr_search_issue_ref(1950) is None
+
+
+class TestBodyReferencesIssue:
+    """#1987: closing-keyword body validation with word-boundary matching."""
+
+    def test_word_boundary_prevents_prefix_match(self):
+        from tools.sdlc_stage_query import _body_references_issue
+
+        # #195 must NOT match a body that says "Closes #1950".
+        assert _body_references_issue("Closes #1950", 195) is False
+
+    def test_closing_keyword_variants_match(self):
+        from tools.sdlc_stage_query import _body_references_issue
+
+        for body in (
+            "Closes #1950",
+            "closes #1950",
+            "Closed #1950",
+            "Fixes #1950",
+            "Fix #1950",
+            "Fixed #1950",
+            "Resolves #1950",
+            "Resolve #1950",
+            "Resolved #1950",
+            "Closed: #1950",
+            "This PR fixes #1950 finally.",
+        ):
+            assert _body_references_issue(body, 1950) is True, body
+
+    def test_bare_mention_and_empty_do_not_match(self):
+        from tools.sdlc_stage_query import _body_references_issue
+
+        assert _body_references_issue("See #1950 for context", 1950) is False
+        assert _body_references_issue("", 1950) is False
+        assert _body_references_issue(None, 1950) is False
 
 
 class TestCLIOutput:
