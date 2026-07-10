@@ -320,7 +320,7 @@ Issue survey verdicts → **Phase 1 PR** (fixes + hygiene) → open questions an
 
 ## Success Criteria
 
-- [ ] Phase 1: 3 issues closed with evidence comments (#1721/#1541/#1336), 4 issues edited (#1968/#1802/#1267/#1818), ceded items cross-linked (#1979 shipped via PR #2006, #1983 → #2004, #1855 → #1926)
+- [x] Phase 1: 3 issues closed with evidence comments (#1721/#1541/#1336), 4 issues edited (#1968/#1802/#1267/#1818), ceded items cross-linked (#1979 shipped via PR #2006, #1983 → #2004, #1855 → #1926) — completed 2026-07-10, #1999 closed
 - [ ] Phase 2: golden argv test proves extraction is behavior-preserving; PM routing driven by `--json-schema` with regex fallback; resume-id behavior empirically recorded and capture-at-init simplified or alarm-fitted accordingly; runner imports no claude-specific parsing outside `harness/claude.py`
 - [ ] Phase 3: a dev-lane-flagged eng session completes real dev work on codex end-to-end (incl. process-restart resume via persisted thread_id) on a provisioned machine; absent binary/auth fails fast with an actionable message; top-level sessions cannot reach codex; fallback-removal follow-up issue filed
 - [ ] Tests pass (`/do-test`)
