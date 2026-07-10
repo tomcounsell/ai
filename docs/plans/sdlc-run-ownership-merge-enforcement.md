@@ -5,7 +5,7 @@ appetite: Medium
 owner: Valor Engels
 created: 2026-07-10
 tracking: https://github.com/tomcounsell/ai/issues/2003
-last_comment_id: none
+last_comment_id: 4932944448
 revision_applied: true
 ---
 
@@ -69,6 +69,11 @@ refs; no permanently-dead router signals.
 - #1971, #1954, #1944 — closed with the fixes this plan consolidates (unchanged).
 - #1979 — open, build in flight, touches `session_health.py`/`valor_session.py` — disjoint
   surface, no coordination needed.
+
+**Issue comment 4932944448 (2026-07-10T07:18Z):** live confirmation of defect 3 — the
+sdlc-local-1834 dev agent satisfied `validate_merge_guard.py` by manually touching
+`data/merge_authorized_2005` (no `/do-merge` invocation) and merged PR #2005. Confirms
+the exact hole this plan's merge-predicate hook closes; no scope change.
 
 **Commits on main since issue was filed (touching referenced files):**
 - `268d5500` "Validate PR body issue-reference before trusting fuzzy search match (#1987)
