@@ -116,7 +116,27 @@ target-version = "py311"
 exclude = [".claude/worktrees"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
+select = ["E", "F", "I", "N", "W", "UP", "S110", "S112"]
+
+# S110/S112 (silent try-except-pass/continue) scoping for the resilience sweep
+# (#2004, T1.5). In scope: agent/, bridge/, tools/, worker/, monitoring/, plus
+# the four scripts files this sweep touches. Everything else is ignored via the
+# negated glob below (per-file-ignores can only ignore, so scope is expressed
+# as "ignore everything OUTSIDE the sweep paths"). Per #2004 OQ1, scripts/
+# files not touched by this sweep adopt S110/S112 when next touched: delete
+# their ignore coverage by adding them to the negated glob's allow-list.
+[tool.ruff.lint.per-file-ignores]
+"!{agent/**,bridge/**,tools/**,worker/**,monitoring/**,scripts/_baseline_common.py,scripts/baseline_gate.py,scripts/refresh_test_baseline.py,scripts/update/reflection_register.py}" = [
+    "S110",
+    "S112",
+]
+# tools/sdlc_*.py and tools/_sdlc_utils.py are owned by the concurrent
+# sdlc-run-ownership-merge-enforcement plan — off-limits to this sweep, so
+# their silent-except sites are allowlisted here instead of edited (#2004).
+"tools/sdlc_*.py" = ["S110", "S112"]
+"tools/_sdlc_utils.py" = ["S110", "S112"]
+# In-package test helpers follow the same policy as tests/ (out of scope).
+"tools/**/tests/*" = ["S110", "S112"]
 
 [tool.mypy]
 python_version = "3.11"

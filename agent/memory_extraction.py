@@ -1135,7 +1135,7 @@ async def detect_outcomes_async(
                         results = Memory.query.filter(memory_id=key)
                         if results:
                             memories.append(results[0])
-                    except Exception:
+                    except Exception:  # noqa: S112 -- memory ops silent by design
                         continue
 
             if memories:

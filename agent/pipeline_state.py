@@ -144,7 +144,7 @@ def _record_stage_metric(metric_name: str, stage: str) -> None:
         from analytics.collector import record_metric
 
         record_metric(metric_name, 1, {"stage": stage})
-    except Exception:
+    except Exception:  # noqa: S110 -- optional analytics telemetry
         pass
 
 

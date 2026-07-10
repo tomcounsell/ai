@@ -238,7 +238,7 @@ def _imap_fallback_fetch(limit: int, search: str | None, since_ts: float | None)
     finally:
         try:
             conn.logout()
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort IMAP logout
             pass
 
     return results

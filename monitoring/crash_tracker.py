@@ -117,7 +117,7 @@ def log_event(event_type: str, reason: str | None = None) -> CrashEvent:
             1,
             {"commit_sha": sha, "reason": reason},
         )
-    except Exception:
+    except Exception:  # noqa: S110 -- optional analytics telemetry
         pass
 
     return event

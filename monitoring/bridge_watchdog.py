@@ -613,7 +613,7 @@ def clear_lock_files() -> int:
                 f.unlink()
                 cleared += 1
                 logger.info(f"Cleared lock file: {f.name}")
-            except Exception:
+            except Exception:  # noqa: S110 -- best-effort lock-file cleanup
                 pass
     return cleared
 
@@ -748,7 +748,7 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
         # Remove recovery lock
         try:
             RECOVERY_LOCK.unlink()
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort recovery-lock removal
             pass
 
     return False
@@ -776,7 +776,7 @@ def check_update_release_signals() -> list[str]:
             staged_ts = 0.0
             try:
                 staged_ts = float(json.loads(UPDATE_PENDING_REPORT.read_text()).get("staged_ts", 0))
-            except Exception:  # swallow-ok: unreadable staged ts falls back to mtime
+            except Exception:  # noqa: S110 -- unreadable staged ts falls back to mtime
                 pass
             if staged_ts <= 0:
                 # Unreadable staged timestamp — fall back to file mtime.
@@ -826,7 +826,7 @@ def run_health_check() -> bool:
             else:
                 logger.warning("Stale recovery lock, removing")
                 RECOVERY_LOCK.unlink()
-        except Exception:
+        except Exception:  # noqa: S110 -- unreadable lock treated as absent
             pass
 
     # Planned-restart suppression (issue #1898, Decision 19): remote-update.sh
@@ -913,7 +913,7 @@ def main():
             from bridge.hibernation import is_hibernating
 
             hibernating = is_hibernating()
-        except Exception:
+        except Exception:  # noqa: S110 -- CLI diagnostic; defaults False
             pass
         print(f"Hibernating: {hibernating}")
         if hibernating:

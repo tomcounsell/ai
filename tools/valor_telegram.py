@@ -85,7 +85,7 @@ def resolve_chat(name: str, *, strict: bool = False) -> str | None:
     except AmbiguousChatError:
         # Intentionally propagate — strict-mode callers must disambiguate.
         raise
-    except Exception:
+    except Exception:  # noqa: S110 -- ladder falls through to DM path
         # Other failures (Redis down, etc.) fall through to the DM path.
         pass
 
@@ -95,7 +95,7 @@ def resolve_chat(name: str, *, strict: bool = False) -> str | None:
         user_id = resolve_username(name)
         if user_id:
             return str(user_id)
-    except Exception:
+    except Exception:  # noqa: S110 -- ladder returns None; caller handles
         pass
 
     return None

@@ -1127,7 +1127,7 @@ def _resolve_working_dir_for_parent(parent: AgentSession) -> str:
         wd = pc.get("working_directory") if isinstance(pc, dict) else None
         if wd:
             return str(wd)
-    except Exception:
+    except Exception:  # noqa: S110 -- resolution ladder; next source tried
         pass
     try:
         from bridge.routing import load_config as _load_projects_config  # noqa: PLC0415
@@ -1138,7 +1138,7 @@ def _resolve_working_dir_for_parent(parent: AgentSession) -> str:
         wd = cfg.get("working_directory")
         if wd:
             return str(wd)
-    except Exception:
+    except Exception:  # noqa: S110 -- resolution ladder; falls to cwd
         pass
     return os.getcwd()
 

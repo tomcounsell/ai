@@ -186,7 +186,7 @@ def check_and_inject(
             try:
                 if bloom_field.might_exist(Memory, keyword):
                     bloom_hits += 1
-            except Exception:
+            except Exception:  # noqa: S112 -- memory ops silent by design
                 continue
 
         # Deja vu: no bloom hits but significant keyword count
@@ -287,7 +287,7 @@ def check_and_inject(
                 # Mark as accessed
                 try:
                     record.confirm_access()
-                except Exception:
+                except Exception:  # noqa: S110 -- memory ops silent by design
                     pass
 
         if not thoughts:

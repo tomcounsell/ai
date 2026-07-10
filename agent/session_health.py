@@ -261,7 +261,7 @@ def _filter_hydrated_sessions(sessions: Iterable) -> list[AgentSession]:
                     if isinstance(getattr(s, f, None), str):
                         suspicious = True
                         break
-                except Exception:
+                except Exception:  # noqa: S110 -- defensive attr probe on phantom
                     pass
         if suspicious:
             logger.warning(
@@ -696,7 +696,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 )
                 try:
                     entry.delete()
-                except Exception:
+                except Exception:  # noqa: S110 -- best-effort delete; re-swept next startup
                     pass
         elif is_local:
             # Local PM/teammate (or legacy session_type=None) session. A live human CLI
@@ -738,7 +738,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 )
                 try:
                     entry.delete()
-                except Exception:
+                except Exception:  # noqa: S110 -- best-effort delete; re-swept next startup
                     pass
         else:
             logger.warning(
@@ -772,7 +772,7 @@ def _recover_interrupted_agent_sessions_startup() -> int:
                 )
                 try:
                     entry.delete()
-                except Exception:
+                except Exception:  # noqa: S110 -- best-effort delete; re-swept next startup
                     pass
 
     logger.warning(
@@ -1822,7 +1822,7 @@ async def _deliver_tool_timeout_degraded_notice(
             from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
 
             _R2.incr(f"{project_key}:session-health:tool_timeout_degraded_delivered")
-        except Exception:
+        except Exception:  # noqa: S110 -- optional telemetry counter
             pass
     return sent
 
@@ -2004,7 +2004,7 @@ def flush_deferred_self_draft_sync(session: "AgentSession", status: str | None =
         try:
             project_key = getattr(source, "project_key", None) or "unknown"
             _R.incr(f"{project_key}:session-health:deferred_self_draft_completed_flush")
-        except Exception:
+        except Exception:  # noqa: S110 -- optional telemetry counter
             pass
 
     except Exception as _err:
@@ -2115,7 +2115,7 @@ async def _deliver_deferred_self_draft_fallback(
             from popoto.redis_db import POPOTO_REDIS_DB as _R2  # noqa: PLC0415
 
             _R2.incr(f"{project_key}:session-health:deferred_self_draft_fallback_delivered")
-        except Exception:
+        except Exception:  # noqa: S110 -- optional telemetry counter
             pass
 
     except Exception as _err:
@@ -2230,7 +2230,7 @@ async def _apply_recovery_transition(
                 "(claude_session_uuid set, sdk_ever_output=False)",
                 getattr(entry, "agent_session_id", "?"),
             )
-    except Exception:
+    except Exception:  # noqa: S110 -- optional telemetry counter
         pass
 
     # Guard: if response was already delivered, finalize instead of recovering
@@ -2460,8 +2460,12 @@ async def _apply_recovery_transition(
                 from agent.steering import reset_self_draft_attempts as _reset_attempts
 
                 _reset_attempts(entry.session_id)
-            except Exception:
-                pass
+            except Exception as _reset_err:
+                logger.debug(
+                    "[session-health] self-draft counter reset failed for %s: %s",
+                    entry.session_id,
+                    _reset_err,
+                )
     except Exception as _tel_err:
         logger.debug("[session-health] telemetry emit failed (non-fatal): %s", _tel_err)
 
@@ -2605,7 +2609,7 @@ async def _apply_recovery_transition(
                         _R.incr(
                             f"{entry.project_key}:session-health:tool_timeout_steering_injected"
                         )
-                    except Exception:
+                    except Exception:  # noqa: S110 -- optional telemetry counter
                         pass
                 except Exception as _steer_err:
                     logger.warning(
@@ -4564,7 +4568,7 @@ def cleanup_corrupted_agent_sessions() -> dict[str, int]:
                 if mtime < cutoff:
                     jsonl_file.unlink()
                     stale_count += 1
-            except Exception:
+            except Exception:  # noqa: S110 -- best-effort retention sweep
                 pass
         if stale_count:
             logger.info(

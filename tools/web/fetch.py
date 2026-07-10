@@ -1,9 +1,12 @@
 """URL fetching with provider fallback chain."""
 
 import asyncio
+import logging
 
 from tools.web.providers import firecrawl, httpx_fallback, tavily
 from tools.web.types import FetchResult
+
+logger = logging.getLogger(__name__)
 
 
 async def fetch(url: str, **kwargs) -> FetchResult | None:
@@ -43,8 +46,9 @@ async def fetch(url: str, **kwargs) -> FetchResult | None:
             result = await provider.fetch(url, **kwargs)
             if result:
                 return result
-        except Exception:
-            # Provider failed, try next
+        except Exception as e:
+            # Provider failed — try next.
+            logger.debug("fetch provider %s failed for %s: %s", provider.__name__, url, e)
             continue
 
     # All providers failed

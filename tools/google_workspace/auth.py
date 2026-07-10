@@ -108,7 +108,7 @@ def _get_machine_name() -> str:
             name = result.stdout.strip()
             # Make filesystem-safe: lowercase, replace spaces with hyphens
             return name.lower().replace(" ", "-")
-    except Exception:
+    except Exception:  # noqa: S110 -- falls back to hostname
         pass
     return platform.node().split(".")[0].lower()
 

@@ -90,7 +90,7 @@ def drop_orphan_noise(event, hint):
         if any(_ORPHAN_NOISE_SUBSTRING in text for text in candidates):
             logger.debug("Sentry event dropped: Popoto orphan-index noise")
             return None
-    except Exception:
+    except Exception:  # noqa: S110 -- filter must never suppress events
         # Filter crash must never suppress real errors.
         pass
     return event

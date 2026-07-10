@@ -662,7 +662,7 @@ def _append_outbound_chat_log(message: dict, msg_id: int | None) -> None:
                 if candidates:
                     candidates.sort(key=lambda s: s.created_at or 0, reverse=True)
                     session = candidates[0]
-            except Exception:
+            except Exception:  # noqa: S110 -- miss handled by session-None branch
                 pass
 
         if session is None:
@@ -879,8 +879,9 @@ async def process_outbox(telegram_client) -> int:
                                 timestamp=utc_now(),
                                 message_type="pm_direct",
                             )
-                        except Exception:
-                            pass  # Non-fatal: history storage is best-effort
+                        except Exception as e:
+                            # Non-fatal: history storage is best-effort.
+                            logger.debug("Relay history store_message failed: %s", e)
                 else:
                     # Bounded retry: increment attempt counter, dead-letter if exhausted
                     attempts = message.get("_relay_attempts", 0) + 1

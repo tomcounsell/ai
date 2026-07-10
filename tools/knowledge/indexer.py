@@ -233,9 +233,9 @@ def _cleanup_orphan_chunks() -> int:
                         try:
                             chunk.delete()
                             orphan_count += 1
-                        except Exception:
+                        except Exception:  # noqa: S110 -- best-effort orphan-chunk delete
                             pass
-            except Exception:
+            except Exception:  # noqa: S110 -- best-effort orphan sweep
                 pass
 
         if orphan_count > 0:
@@ -375,7 +375,7 @@ def _create_companion_memories(file_path: str, project_key: str, scope: str, con
                     generate_title_async(
                         chunk_record.memory_id, strip_private(memory_content[:500])
                     )
-                except Exception:
+                except Exception:  # noqa: S110 -- memory title-gen silent by design
                     pass
     else:
         # Single memory for small documents
@@ -404,7 +404,7 @@ def _create_companion_memories(file_path: str, project_key: str, scope: str, con
                 )
 
                 generate_title_async(single_record.memory_id, strip_private(memory_content[:500]))
-            except Exception:
+            except Exception:  # noqa: S110 -- memory title-gen silent by design
                 pass
 
     logger.debug(f"Created companion memories for: {file_path}")
@@ -456,7 +456,7 @@ def _delete_companion_memories(file_path: str) -> None:
             if mem.reference == reference:
                 try:
                     mem.delete()
-                except Exception:
+                except Exception:  # noqa: S110 -- best-effort cleanup; outer logs debug
                     pass
     except Exception as e:
         logger.debug(f"Companion memory cleanup error (non-fatal): {e}")

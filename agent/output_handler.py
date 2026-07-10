@@ -124,7 +124,7 @@ class FileOutputHandler:
         try:
             with open(log_path, "a") as f:
                 f.write(entry)
-        except Exception:
+        except Exception:  # noqa: S110 -- file-output reactions best-effort
             pass  # Reactions are best-effort for file output
 
 
@@ -450,8 +450,9 @@ class TelegramRelayOutputHandler:
                         from agent.steering import reset_self_draft_attempts
 
                         reset_self_draft_attempts(session_id)
-                    except Exception:
-                        pass  # counter reset is best-effort; never blocks delivery
+                    except Exception as e:
+                        # Counter reset is best-effort; never blocks delivery.
+                        logger.debug("self-draft counter reset failed for %s: %s", session_id, e)
 
             # ── Persist routing fields to session ──
             # Write context_summary and expectations back to the AgentSession
@@ -840,9 +841,9 @@ class TelegramRelayOutputHandler:
                     session_id,
                 )
                 return False
-        except Exception:
-            # peek failed, continue with budget check
-            pass
+        except Exception as e:
+            # Peek failed — continue with budget check.
+            logger.debug("steering peek failed for %s: %s", session_id, e)
 
         # Attempt budget: prevent infinite steering loops when the agent's
         # self-draft also fails validation repeatedly.
@@ -862,10 +863,12 @@ class TelegramRelayOutputHandler:
                     SELF_DRAFT_MAX_ATTEMPTS,
                 )
                 return False
-        except Exception:
-            # bump failed — proceed without budget enforcement rather than
-            # blocking delivery entirely
-            pass
+        except Exception as e:
+            # Bump failed — proceed without budget enforcement rather than
+            # blocking delivery entirely.
+            logger.warning(
+                "self-draft attempt bump failed for %s; budget unenforced: %s", session_id, e
+            )
 
         try:
             from agent.steering import push_steering_message

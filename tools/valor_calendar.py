@@ -385,7 +385,7 @@ def find_todays_event(
             event = service.events().get(calendarId=calendar_id, eventId=cached_id).execute()
             if event and event.get("status") != "cancelled" and _starts_today(event, now):
                 return event
-        except Exception:
+        except Exception:  # noqa: S110 -- stale cache falls through to search
             # Event was deleted or ID is stale; fall through to search
             pass
 

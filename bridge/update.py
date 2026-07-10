@@ -96,7 +96,7 @@ def _get_machine_name() -> str:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except Exception:
+    except Exception:  # noqa: S110 -- falls back to hostname
         pass
     return platform.node().split(".")[0]
 
@@ -170,8 +170,8 @@ async def handle_update_command(tg_client, event):
     logger.info(f"[update] /update received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("[update] set_reaction failed (non-fatal): %s", e)
 
     # Check for running sessions (affects restart behavior)
     running_count, _ = _get_running_sessions_info()
@@ -197,7 +197,7 @@ async def handle_update_command(tg_client, event):
                 f"{machine} - ⏳ updating — if this update restarts the bridge, "
                 "confirmation will follow from the fresh bridge",
             )
-        except Exception:  # swallow-ok: interim notice best-effort, never blocks update
+        except Exception:  # noqa: S110 -- interim notice best-effort, never blocks update
             pass
 
     # Export the originating chat context so a bridge-relevant run can stage
@@ -387,7 +387,7 @@ async def run_boot_release_check(tg_client) -> None:
         logger.warning(f"[update] boot release self-check failed (non-fatal): {e}")
     try:
         (_PROJECT_DIR / "data" / "update-restart-in-progress").unlink(missing_ok=True)
-    except Exception:  # swallow-ok: marker cleanup best-effort, TTL covers misses
+    except Exception:  # noqa: S110 -- marker cleanup best-effort, TTL covers misses
         pass
 
     # Step 2: conditional pending-report flush.
@@ -460,8 +460,8 @@ async def handle_force_update_command(tg_client, event):
     logger.info(f"[update] /update --force received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "🔥")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("[update] set_reaction failed (non-fatal): %s", e)
 
     steps = []
 
@@ -477,13 +477,13 @@ async def handle_force_update_command(tg_client, event):
         for entry in pending or []:
             try:
                 entry.delete()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[update] force-flush failed to delete pending session: %s", e)
         for entry in running or []:
             try:
                 entry.delete()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("[update] force-flush failed to delete running session: %s", e)
 
         steps.append(f"Flushed queue: {pending_count} pending, {running_count} running")
     except Exception as e:

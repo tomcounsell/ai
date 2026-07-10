@@ -923,7 +923,7 @@ class SessionRunner:
                 self._killpg(pgid, 0)
             except ProcessLookupError:
                 return True, pgid  # group gone → confirmed dead
-            except Exception:  # noqa: BLE001 — cannot probe; keep polling to the cap
+            except Exception:  # noqa: BLE001, S110 — cannot probe; keep polling to the cap
                 pass
             if time.monotonic() >= deadline:
                 return False, pgid

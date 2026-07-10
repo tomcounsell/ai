@@ -278,7 +278,7 @@ class HealthChecker:
                     1,
                     {"component": check.component, "status": check.status.value},
                 )
-        except Exception:
+        except Exception:  # noqa: S110 -- optional analytics telemetry
             pass
 
         return OverallHealth(

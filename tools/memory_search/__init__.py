@@ -264,7 +264,7 @@ def save(
             from tools.memory_search.title_generator import generate_title_async
 
             generate_title_async(record.memory_id, strip_private(content))
-        except Exception:
+        except Exception:  # noqa: S110 -- title-gen never blocks writer
             pass  # Title-gen never blocks or crashes the writer.
 
         return {

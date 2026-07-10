@@ -893,7 +893,7 @@ async def _notify_healthcheck_watchdog(handle: "_ListenerPubsubHandle") -> None:
             finally:
                 try:
                     probe_conn.close()
-                except Exception:
+                except Exception:  # noqa: S110 -- best-effort probe cleanup
                     pass
         except Exception as e:
             logger.warning(
@@ -1065,16 +1065,16 @@ async def _session_notify_listener() -> None:
                 if pubsub is not None:
                     try:
                         pubsub.unsubscribe()
-                    except Exception:
+                    except Exception:  # noqa: S110 -- best-effort pubsub teardown
                         pass
                     try:
                         pubsub.close()
-                    except Exception:
+                    except Exception:  # noqa: S110 -- best-effort pubsub teardown
                         pass
                 if conn is not None:
                     try:
                         conn.close()
-                    except Exception:
+                    except Exception:  # noqa: S110 -- best-effort connection teardown
                         pass
                 # Signal the coroutine side to restart
                 loop.call_soon_threadsafe(notify_queue.put_nowait, None)
@@ -1102,7 +1102,7 @@ async def _session_notify_listener() -> None:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: S110 -- awaiting cancelled task
                 pass
 
         except Exception as e:
@@ -1111,7 +1111,7 @@ async def _session_notify_listener() -> None:
             watchdog_task.cancel()
             try:
                 await watchdog_task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # noqa: S110 -- cancelled task
                 pass
 
         await asyncio.sleep(5)
@@ -1938,7 +1938,7 @@ async def _worker_loop(
                         session.log_lifecycle_transition(
                             "running", "worker cancelled — startup recovery will re-queue"
                         )
-                    except Exception:
+                    except Exception:  # noqa: S110 -- lifecycle audit log is best-effort
                         pass
                     # Do NOT call _complete_agent_session here — leave session in `running`
                     # state so _recover_interrupted_agent_sessions_startup() can re-queue it
@@ -2035,7 +2035,7 @@ async def _worker_loop(
                     try:
                         target = "failed" if session_failed else "completed"
                         session.log_lifecycle_transition(target, "worker finally block")
-                    except Exception:
+                    except Exception:  # noqa: S110 -- lifecycle audit log is best-effort
                         pass
                     # Fix 3: Always save diagnostic snapshot before deleting Redis record
                     try:

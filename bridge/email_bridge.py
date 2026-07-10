@@ -1096,8 +1096,8 @@ def _query_non_terminal_sessions(project_key: str) -> list:
         try:
             batch = list(AgentSession.query.filter(project_key=project_key, status=status))
             sessions.extend(batch)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("[email] coalesce query failed for status=%s: %s", status, e)
     # Filter by age (Python-side, since Popoto may not support gte on float fields)
     sessions = [s for s in sessions if (getattr(s, "created_at", 0) or 0) >= min_created_at]
     return sessions
@@ -1190,7 +1190,7 @@ def _unmark_seen_sync(imap_config: dict, uid: bytes) -> None:
     finally:
         try:
             conn.logout()
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort IMAP logout
             pass
 
 
@@ -1574,7 +1574,7 @@ async def _poll_imap(imap_config: dict, known_senders: list[str]) -> list[tuple[
         finally:
             try:
                 conn.logout()
-            except Exception:
+            except Exception:  # noqa: S110 -- best-effort IMAP logout
                 pass
 
     return await asyncio.to_thread(_fetch_unseen)

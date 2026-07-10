@@ -164,8 +164,8 @@ def replay_dead_letter(session_id: str) -> bool:
             payload["retry_count"] = payload.get("retry_count", 0) + 1
             payload["last_retry_error"] = str(e)
             r.set(key, json.dumps(payload))
-        except Exception:
-            pass
+        except Exception as bookkeeping_err:
+            logger.debug(f"[email] Dead letter retry-count update failed: {bookkeeping_err}")
         logger.error(f"[email] Dead letter replay failed for {session_id}: {e}")
         return False
 

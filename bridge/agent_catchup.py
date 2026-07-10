@@ -354,7 +354,7 @@ async def read_thread(client, entity, lookback: timedelta | None = None) -> list
                 reply_to_msg_id = getattr(reply_header, "reply_to_msg_id", None)
                 if reply_to_msg_id is not None:
                     reply_to_sender = id_to_sender.get(reply_to_msg_id)
-        except Exception:
+        except Exception:  # noqa: S110 -- best-effort reply-context parse
             pass
 
         id_to_sender[m.id] = sender_name

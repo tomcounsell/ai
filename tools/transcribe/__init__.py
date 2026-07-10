@@ -299,7 +299,7 @@ def _transcribe_openai(
                 error_detail = e.response.json().get("error", {}).get("message", "")
                 if error_detail:
                     error_msg = error_detail
-            except Exception:
+            except Exception:  # noqa: S110 -- generic error message still returned
                 pass
         return {"error": f"API request failed: {error_msg}"}
     except Exception as e:

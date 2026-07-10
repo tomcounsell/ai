@@ -129,8 +129,10 @@ class CircuitBreaker:
                     if self._on_close:
                         try:
                             self._on_close()
-                        except Exception:
-                            pass
+                        except Exception as cb_err:
+                            logger.warning(
+                                "Circuit '%s' on_close callback raised: %s", self.name, cb_err
+                            )
 
     async def record_failure(self, error: Exception | None = None) -> None:
         """Record a failed request. Opens circuit if threshold exceeded."""
@@ -174,8 +176,10 @@ class CircuitBreaker:
                     if self._on_open:
                         try:
                             self._on_open()
-                        except Exception:
-                            pass
+                        except Exception as cb_err:
+                            logger.warning(
+                                "Circuit '%s' on_open callback raised: %s", self.name, cb_err
+                            )
 
     async def reset(self) -> None:
         """Manually reset circuit to CLOSED state."""
