@@ -1,0 +1,59 @@
+# .understandignore — active exclusions for the ai (Valor Engels) repo
+# Built-in defaults also exclude: node_modules/, .git/, dist/, build/, *.lock, *.min.js
+
+# --- Runtime / generated (gitignored) ---
+logs/
+data/
+.venv/
+venv/
+.worktrees/
+telegram_sessions/
+transcriptions/
+generated_images/
+tmp/
+temp/
+.tmp/
+.critique-runs/
+.playwright-cli/
+.pytest_cache/
+.mypy_cache/
+.opencode/
+.zed/
+
+# --- Tooling caches / vendored plugin content (not this project's source) ---
+.claude/plugins/
+.claude/worktrees/
+.claude/skills-global/
+.claude/scheduled_tasks.lock
+
+# --- Binary / data blobs ---
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.session
+*.session-journal
+*.pkl
+*.pickle
+*.parquet
+*.csv
+*.wav
+*.m4a
+*.ogg
+*.mp3
+*.pdf
+*.zip
+*.dump
+*.rdb
+*.pyc
+*.log
+
+# --- Scoped OUT for this run: core application code only ---
+docs/
+tests/
+scripts/
+.claude/
+.github/
+.githooks/
+wiki/
