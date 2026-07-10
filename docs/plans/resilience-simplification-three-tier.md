@@ -57,13 +57,13 @@ confirmed facts — so future fixes land as structure, not scar tissue.
       `crash_signature._has_demonstrable_progress`) call these. Presence-vs-freshness becomes
       an explicit parameter, not a forked function. **Scope addition from open-issue review:**
       evidence must be *attempt-scoped* — #1979 showed a sticky `response_delivered_at`
-      from a prior attempt force-finalizing a resumed session mid-run. **#1979's targeted
-      fix is in flight (being built as of 2026-07-10) — it lands first and owns the
-      delivery-guard change.** T1.2 then generalizes: an `attempt_id` (or generation counter
-      bumped on resume/requeue) that every "did X happen during this run" guard compares
-      against, replacing per-field clearing conventions so the *class* can't recur on the
-      next sticky field. Do not touch the delivery guard until #1979's PR merges; absorb its
-      regression test unchanged. Fix the 3 pre-existing `test_session_heartbeat_progress.py`
+      from a prior attempt force-finalizing a resumed session mid-run. **#1979 SHIPPED
+      (PR #2006, merged 2026-07-10 07:41): the delivery guard is now epoch-scoped by
+      timestamp comparison (`response_delivered_at >= started_at`), no new field.** T1.2
+      generalizes that landed pattern: extend the same run-epoch anchor to the other
+      sticky per-run signals so the *class* can't recur on the next field, rather than
+      introducing a parallel counter concept. Absorb `test_delivery_guard_resume_epoch.py`
+      unchanged; do not refactor the just-landed guard. Fix the 3 pre-existing `test_session_heartbeat_progress.py`
       failures (open #1983) as part of this item — they pin the exact predicates being
       unified. *Prevents: #1962, #1917, the #1979 class.*
 - [ ] **T1.3 `ArtifactEnvelope`** in `scripts/_baseline_common.py`: writers stamp
