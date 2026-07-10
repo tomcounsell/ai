@@ -54,6 +54,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -119,21 +120,28 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
             pass
 
     # Check whether the issue-specific session branch already exists (informs Row 5).
-    # Uses `session/sdlc-{issue_number}` — the canonical branch name for SDLC work.
-    # Checking just "session/" would always be True in this repo due to many active
-    # session/ branches; we must check for the issue-specific pattern.
+    # Canonical branch shape is `session/{slug}` where the slug is the plan
+    # filename stem (#1915 slug-wins ownership; an issue-number-derived branch
+    # form is fabricated — this repo never creates one). Without a resolvable
+    # plan/slug we cannot affirm existence, so branch_exists stays False (#2003).
     if issue_number:
+        context["branch_exists"] = False
         try:
-            import subprocess
+            from tools._sdlc_utils import find_plan_path
 
-            proc2 = subprocess.run(
-                ["git", "branch", "-a"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            branch_names = proc2.stdout if proc2.returncode == 0 else ""
-            context["branch_exists"] = f"session/sdlc-{issue_number}" in branch_names
+            plan_path = find_plan_path(issue_number)
+            if plan_path is not None:
+                slug = Path(plan_path).stem
+                import subprocess
+
+                proc2 = subprocess.run(
+                    ["git", "branch", "-a"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                branch_names = proc2.stdout if proc2.returncode == 0 else ""
+                context["branch_exists"] = f"session/{slug}" in branch_names
         except Exception:
             context["branch_exists"] = False
 

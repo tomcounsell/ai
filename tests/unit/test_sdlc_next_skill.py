@@ -103,6 +103,79 @@ def test_build_context_uses_body_hash_not_full_bytes(tmp_path, monkeypatch):
     assert ctx_before["current_plan_hash"] == ctx_after["current_plan_hash"]
 
 
+class TestBranchExistsCanonicalShape:
+    """branch_exists must check the canonical `session/{slug}` branch shape (#2003).
+
+    The repo NEVER creates `session/sdlc-{N}` branches (that shape is
+    "fabricated" per tools/sdlc_stage_query.py) — the slug comes from the plan
+    filename stem. Without a resolvable plan/slug, existence cannot be
+    affirmed and branch_exists must be False.
+    """
+
+    @staticmethod
+    def _fake_git(stdout: str):
+        def _run(cmd, **kwargs):
+            proc = MagicMock()
+            if cmd[:2] == ["git", "branch"]:
+                proc.returncode = 0
+                proc.stdout = stdout
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        return _run
+
+    def test_true_when_canonical_slug_branch_exists(self, tmp_path, monkeypatch):
+        plan = tmp_path / "my-feature-slug.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan)
+        monkeypatch.setattr(
+            "subprocess.run",
+            self._fake_git("  main\n  session/my-feature-slug\n"),
+        )
+
+        context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
+
+        assert context["branch_exists"] is True
+
+    def test_false_when_only_fabricated_shape_present(self, tmp_path, monkeypatch):
+        """A `session/sdlc-{N}` branch must NOT count — that shape is never created."""
+        plan = tmp_path / "my-feature-slug.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan)
+        monkeypatch.setattr(
+            "subprocess.run",
+            self._fake_git("  main\n  session/sdlc-2003\n"),
+        )
+
+        context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
+
+        assert context["branch_exists"] is False
+
+    def test_false_when_no_plan_resolvable(self, monkeypatch):
+        """No plan → no slug → cannot affirm existence → False (never sdlc-{N})."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr(
+            "subprocess.run",
+            self._fake_git("  main\n  session/sdlc-2003\n  session/other-slug\n"),
+        )
+
+        context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
+
+        assert context["branch_exists"] is False
+
+    def test_false_when_branch_absent(self, tmp_path, monkeypatch):
+        plan = tmp_path / "my-feature-slug.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan)
+        monkeypatch.setattr("subprocess.run", self._fake_git("  main\n"))
+
+        context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=2003)
+
+        assert context["branch_exists"] is False
+
+
 def test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan(monkeypatch):
     """CLI smoke test (#1932 fix b3): sdlc-tool next-skill's decide() must emit a
     PR-stage skill, not /do-plan, for the warm-G5-cache + open-PR +
