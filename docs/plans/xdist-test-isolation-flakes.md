@@ -51,6 +51,8 @@ Two instances are root-caused at plan time, and they share a single upstream mec
 
 **Active plans in `docs/plans/` overlapping this area:** `concurrent_pytest_coordination.md` (#1967, status Complete) is adjacent but non-overlapping — it addresses cross-run oversubscription and sentinel collisions, not the `_POPOTO_MODULE_CACHE` staleness or the `agent.hooks` eviction. No coordination needed.
 
+**Re-validated at HEAD `d1c66fa4`** (plan-validation pass, same day): 7 commits landed on main since baseline `ac608db4`; none touched `tests/conftest.py`, the two failing tests, or `agent/hooks/`. Every cited reference re-confirmed exact — `_POPOTO_MODULE_CACHE_KEY: int` / `cur = len(_sys.modules)` at conftest.py:168/177, dotted `setattr` at `test_teammate_write_restriction.py:59-60`, budget test at `test_tool_budget_enforcement.py:234`. No new drift; disposition holds.
+
 **Notes:** Instance #1's file path in the issue body is stale (unit→integration); all references corrected here. The bug is still live on `ac608db4` (owner reproduced the class on clean main today); a naive serial two-file repro passes, confirming the flake is xdist-worker-composition / `len(sys.modules)`-collision sensitive rather than a plain import-order bug.
 
 ## Prior Art
