@@ -571,6 +571,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             "services reloaded automatically"
         )
 
+    # Step 1.56: Remove launchd jobs for features that have been fully deleted
+    # from the codebase (see service.OBSOLETE_SERVICE_SUFFIXES). Without this,
+    # a removed feature's plist keeps loading and failing on every machine that
+    # was provisioned before the removal. Runs unconditionally (like Step 1.55)
+    # since dead-job cleanup is self-healing hygiene, not a service mutation.
+    obsolete_removed = service.remove_obsolete_services()
+    for label in obsolete_removed:
+        log(f"Removed obsolete launchd job {label} (feature deleted from codebase)", v, always=True)
+
     # Step 1.6: Verify .env symlink
     log("Verifying .env symlink...", v)
     result.env_sync_result = env_sync.sync_env_from_vault(project_dir)

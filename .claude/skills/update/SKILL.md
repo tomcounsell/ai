@@ -41,6 +41,8 @@ After running, report the result. List every warning or error clearly.
 
 **Log rotation:** every `--full` run installs the user-space LaunchAgent `com.valor.log-rotate.plist` (content-idempotent, no sudo) which rotates any `logs/*.log` over 10 MB every 30 minutes. A stale root-era `/etc/newsyslog.d/valor.conf` is removed via non-interactive `sudo -n rm`; if sudo needs a password, cleanup is skipped with a warning and retried next run.
 
+**Obsolete launchd-job sweep (Step 1.56):** every run boots out and deletes LaunchAgents for features that have been fully removed from the codebase, so a deleted feature's plist doesn't keep loading and failing on already-provisioned machines forever. The list of removed jobs lives in `scripts/update/service.py::OBSOLETE_SERVICE_SUFFIXES` — this is the launchd analog of `RENAMED_REMOVALS` in `hardlinks.py`: **when you delete a launchd-backed feature (its install script + code), add its label suffix there** so `/update` cleans up the stale job on every machine. The sweep is idempotent and fail-soft (a machine that never had the job is a no-op); removals are logged and reported in the run summary. Runs unconditionally alongside the plist-PATH heal (Step 1.55), not gated on the service-restart step.
+
 **Session cleanup (Step 5.5):** corrupted sessions are deleted and indexes rebuilt; running/pending sessions older than 120 min with no live process transition to `killed`; terminal sessions are preserved for reflections (which handles its own 90-day expiry).
 
 ### Agent-Judgment Catchup (strictly last step)

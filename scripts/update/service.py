@@ -17,6 +17,69 @@ logger = logging.getLogger(__name__)
 # com.valor for the canonical fork; downstream forks override via SERVICE_LABEL_PREFIX.
 SERVICE_PREFIX = os.environ.get("SERVICE_LABEL_PREFIX", "com.valor")
 
+# Launchd job SUFFIXES for features that have been fully removed from the
+# codebase. Their plists linger on every already-provisioned machine forever
+# (launchd keeps loading and failing them) because nothing else deletes them —
+# the per-job "remove stale plist" gates in install_nightly_tests /
+# install_reflection_worker only cover role-gated jobs that still EXIST, not
+# jobs whose install script and code are gone. This is the launchd analog of
+# RENAMED_REMOVALS in hardlinks.py: when you delete a launchd-backed feature,
+# add its suffix here so `/update` boots it out and removes its plist on every
+# machine. Full labels are built with SERVICE_PREFIX so downstream forks are
+# covered too. Suffix only (no "com.valor." prefix, no ".plist").
+OBSOLETE_SERVICE_SUFFIXES: list[str] = [
+    # issue_poller.py deleted in commit 71190e8a7 ("Remove deprecated issue
+    # poller feature entirely"); the com.valor.issue-poller LaunchAgent kept
+    # firing every 300s and failing "No such file or directory" on every
+    # already-provisioned machine.
+    "issue-poller",
+]
+
+
+def remove_obsolete_services() -> list[str]:
+    """Boot out and delete launchd jobs for fully-removed features.
+
+    Idempotent and fail-soft: for each label in OBSOLETE_SERVICE_SUFFIXES,
+    bootout the job if it is currently loaded, then unlink its plist if present.
+    A machine that never had the job (or already cleaned it) is a no-op. Per-job
+    failures are swallowed and logged so one wedged job never aborts the sweep.
+
+    Returns the list of full labels that were actually removed (loaded job
+    booted out OR plist deleted) — empty when nothing needed cleanup.
+    """
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    uid = os.getuid()
+    try:
+        launchctl_list = run_cmd(["launchctl", "list"]).stdout or ""
+    except Exception:
+        launchctl_list = ""
+
+    removed: list[str] = []
+    for suffix in OBSOLETE_SERVICE_SUFFIXES:
+        label = f"{SERVICE_PREFIX}.{suffix}"
+        plist_path = launch_agents / f"{label}.plist"
+        acted = False
+
+        if label in launchctl_list:
+            try:
+                run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
+                acted = True
+            except Exception as exc:
+                logger.warning("remove_obsolete_services: bootout %s failed: %s", label, exc)
+
+        if plist_path.exists():
+            try:
+                plist_path.unlink()
+                acted = True
+            except Exception as exc:
+                logger.warning("remove_obsolete_services: unlink %s failed: %s", plist_path, exc)
+
+        if acted:
+            logger.info("remove_obsolete_services: removed obsolete launchd job %s", label)
+            removed.append(label)
+
+    return removed
+
 
 @dataclass
 class ServiceStatus:
