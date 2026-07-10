@@ -54,18 +54,18 @@ ordering).
 
 `pr_number` is now both settable and recoverable:
 
-- **Primary:** `sdlc-tool meta-set --key pr_number --value N` whitelists
-  `pr_number` (coerced to a positive `int`; non-positive/non-numeric values
-  exit 2). `_compute_meta` (`tools/sdlc_stage_query.py`) reads `_pr_number`
-  from `stage_states` as a resolution source.
-- **Fallback:** `_lookup_pr_number` falls back to a branch-head search
+- **Single writer (#2003 T1.7):** `sdlc-tool meta-set --key pr_number --value N`
+  writes the `AgentSession.pr_number` FIELD (coerced to a positive `int`;
+  non-positive/non-numeric values exit 2). `/do-build` invokes it at PR
+  creation; the same command is the out-of-band operator recovery path.
+- **Read-only recovery:** `_lookup_pr` falls back to a branch-head search
   (`gh pr list --head session/{slug} --state open`) when the issue-number
   search returns nothing. The slug is resolved from the PM session; the search
   uses the canonical SDLC branch shape `session/{slug}` (never a fabricated
   `session/sdlc-{n}` form this repo does not create).
 
-Resolution order in `_compute_meta`: `session.pr_number` → `_pr_number` meta
-key → `gh` lookup (issue-search then branch-head).
+Resolution order in `_compute_meta`: `session.pr_number` field → `gh` lookup
+(validated issue-search then branch-head). The recovery rungs never write.
 
 ### D5 — G4 self-clears + operator escape hatch
 
@@ -87,10 +87,13 @@ fix this:
 `.claude/skills-global/do-merge/SKILL.md` is a portable skill that performs the
 deterministic merge gate: verify PR state (OPEN / mergeable / CI-green /
 `mergeStateStatus == CLEAN`) → verify REVIEW `APPROVED` → verify the body links
-the tracking issue → create the authorization file `data/merge_authorized_{pr}`
-the merge-guard hook requires → squash-merge → delete the auth file. It defers
-repo-specific gate detail (shape classification, stale-review filter,
-lockfile/full-suite gates) to `docs/sdlc/do-merge.md`.
+the tracking issue → authorize and squash-merge. In this repo, authorization is
+the live merge predicate the merge-guard hook evaluates
+(`tools/merge_predicate.py`, issue #2003) — the skill no longer creates an
+authorization file on the happy path; a repo whose merge-guard hook still
+gates on file existence gets that behavior instead, per the repo-context file.
+It defers repo-specific gate detail (shape classification, stale-review
+filter, lockfile/full-suite gates) to `docs/sdlc/do-merge.md`.
 
 The skill auto-deploys: `scripts/update/hardlinks.py::_sync_skills` discovers
 any `skills-global/*/SKILL.md` directory and hardlinks it to `~/.claude/skills/`
@@ -151,7 +154,7 @@ forward.
   (revision_applied-stripped, used by G5 — D8).
 - `tools/sdlc_next_skill.py` — `current_plan_hash` context key uses `compute_plan_body_hash` (D8).
 - `tools/sdlc_stage_query.py` — `_compute_meta` pr_number resolution + live
-  snapshot (D4, D5), `_lookup_pr_number` branch-head fallback (D4).
+  snapshot (D4, D5), `_lookup_pr` branch-head fallback (D4).
 - `tools/sdlc_meta_set.py` — `pr_number` whitelist + int coercion (D4).
 - `tools/sdlc_dispatch.py` — `dispatch reset` subcommand (D5).
 - `tools/sdlc_stage_marker.py` — tri-state degradation probe (D7).

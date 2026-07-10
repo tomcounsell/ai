@@ -195,6 +195,49 @@ def _tick_backstop_check_compaction(
         )
 
 
+def _fetch_live_active_run_id(agent_session: AgentSession | None) -> str | None:
+    """Re-fetch ``active_run_id`` from Redis for the renewal tick (#2003 cycle-3).
+
+    The executor's ``agent_session`` object is a snapshot fetched ONCE at
+    session start -- BEFORE the session-ensure subprocess (spawned inside the
+    ``claude -p`` turn) writes ``active_run_id`` to the record. Popoto objects
+    do not lazily re-read Redis, so reading the snapshot attribute is
+    permanently stale: ``None`` on fresh runs (renewal would skip forever and
+    the lock lapses mid-stage, reopening the #1915 takeover window), or the
+    PREVIOUS run's id on resumed sessions (a lapsed lock would be SET-NX
+    re-acquired under a dead identity and renewed every tick, wedging the
+    live run's own calls behind ISSUE_LOCKED until a worker restart).
+
+    One indexed Popoto query per 60s tick -- never raw Redis. Returns ``None``
+    (skip renewal this tick) when the record is gone, carries no run_id, or
+    the fetch fails; the next tick retries.
+    """
+    sid = getattr(agent_session, "session_id", None)
+    if not sid:
+        return None
+    try:
+        rows = list(AgentSession.query.filter(session_id=sid))
+    except Exception as exc:
+        logger.debug(
+            "[%s] issue-lock renewal: active_run_id re-fetch failed (%s: %s) -- skipping this tick",
+            sid,
+            type(exc).__name__,
+            exc,
+        )
+        return None
+    # Prefer the eng-typed record (mirrors the resolution the SDLC tools use).
+    for row in rows:
+        if getattr(row, "session_type", None) == "eng":
+            rid = getattr(row, "active_run_id", None)
+            if rid:
+                return rid
+    for row in rows:
+        rid = getattr(row, "active_run_id", None)
+        if rid:
+            return rid
+    return None
+
+
 def _tick_issue_lock_renewal(
     session: AgentSession,
     agent_session: AgentSession | None,
@@ -214,6 +257,19 @@ def _tick_issue_lock_renewal(
     (truthy) ``agent_session.issue_number`` -- non-eng sessions and eng
     sessions with no associated issue never touch the lock.
 
+    Run identity (issue #2003, cycle-2 BLOCKER): renewal is keyed by the
+    session record's ``active_run_id`` -- the read-back of the identity this
+    pipeline's own ``ensure_session()`` established, never a foreign
+    adoption. Cycle-3 BLOCKER 2: the value is RE-FETCHED from Redis on every
+    tick via :func:`_fetch_live_active_run_id` -- the executor's in-memory
+    ``agent_session`` snapshot predates the session-ensure subprocess write
+    and would be permanently stale (None on fresh runs, the previous run's
+    id on resumed runs). A record with no live ``active_run_id`` skips
+    renewal: an identity-less tick must never extend or mint a lock. When
+    renewal comes back not-owner, a WARNING is logged (no longer
+    fire-and-forget) so an out-from-under takeover is visible before the
+    TTL lapses.
+
     Best-effort and side-effect-only: never raises, returns nothing. A
     Redis hiccup or missing field never blocks the heartbeat loop.
     """
@@ -225,11 +281,30 @@ def _tick_issue_lock_renewal(
     if not issue_number:
         return
 
+    run_id = _fetch_live_active_run_id(agent_session)
+    if not run_id:
+        logger.debug(
+            "[%s] issue-lock renewal skipped: no live active_run_id on the session record",
+            getattr(session, "session_id", "<unknown>"),
+        )
+        return
+
     try:
         from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
         session_id = getattr(session, "session_id", None) or ""
-        touch_issue_lock(issue_number, session_id, ttl=ISSUE_LOCK_TTL_SECONDS)
+        result = touch_issue_lock(
+            issue_number, run_id, session_id=session_id, ttl=ISSUE_LOCK_TTL_SECONDS
+        )
+        if not result.acquired:
+            logger.warning(
+                "[%s] issue-lock renewal for issue #%s returned not-owner: lock held "
+                "by a foreign run (run_id=%s, session=%s)",
+                getattr(session, "session_id", "<unknown>"),
+                issue_number,
+                result.owner_run_id,
+                result.owner_session_id,
+            )
     except Exception as exc:  # noqa: BLE001 - renewal must never crash the heartbeat loop
         logger.debug(
             "[%s] issue-lock renewal failed (non-fatal): %s",

@@ -32,10 +32,21 @@ class TestEnsureSession:
         mock_session = MagicMock()
         mock_session.session_id = "sdlc-local-941"
 
-        with patch("tools._sdlc_utils.find_session_by_issue", return_value=mock_session):
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [mock_session]  # post-save readback
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=mock_session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
             result = ensure_session(issue_number=941)
 
-        assert result == {"session_id": "sdlc-local-941", "created": False}
+        assert result["session_id"] == "sdlc-local-941"
+        assert result["created"] is False
+        # ensure_session mints and emits the run identity (#2003), mirrored
+        # to the session record.
+        assert result["run_id"]
+        assert mock_session.active_run_id == result["run_id"]
 
     def test_creates_new_session(self):
         from tools.sdlc_session_ensure import ensure_session
@@ -44,7 +55,9 @@ class TestEnsureSession:
         mock_new_session.session_id = "sdlc-local-942"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        # First filter call: idempotent existing-by-id check (none). Second:
+        # the post-save run_id readback (the just-created session).
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -57,7 +70,10 @@ class TestEnsureSession:
                 issue_url="https://github.com/tomcounsell/ai/issues/942",
             )
 
-        assert result == {"session_id": "sdlc-local-942", "created": True}
+        assert result["session_id"] == "sdlc-local-942"
+        assert result["created"] is True
+        assert result["run_id"]
+        assert mock_new_session.active_run_id == result["run_id"]
         mock_as.create_local.assert_called_once()
 
     def test_idempotent_by_session_id(self):
@@ -76,7 +92,9 @@ class TestEnsureSession:
         ):
             result = ensure_session(issue_number=943)
 
-        assert result == {"session_id": "sdlc-local-943", "created": False}
+        assert result["session_id"] == "sdlc-local-943"
+        assert result["created"] is False
+        assert result["run_id"]
 
     def test_returns_empty_for_invalid_issue_number(self):
         from tools.sdlc_session_ensure import ensure_session
@@ -103,7 +121,7 @@ class TestEnsureSession:
         mock_new_session.session_id = "sdlc-local-944"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -116,7 +134,9 @@ class TestEnsureSession:
         ):
             result = ensure_session(issue_number=944)
 
-        assert result == {"session_id": "sdlc-local-944", "created": True}
+        assert result["session_id"] == "sdlc-local-944"
+        assert result["created"] is True
+        assert result["run_id"]
 
     def test_project_key_resolution_error_returns_empty(self):
         """#1158: on ProjectKeyResolutionError, ensure_session returns {} and
@@ -227,16 +247,19 @@ class TestBridgeShortCircuit:
         # find_session_by_issue must NOT be called on the owning short-circuit path.
         fsbi = MagicMock()
 
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [bridge_session]  # post-save readback
+
         with (
             patch("tools._sdlc_utils.find_session", return_value=bridge_session),
             patch("tools._sdlc_utils.find_session_by_issue", fsbi),
+            patch("models.agent_session.AgentSession", mock_as),
         ):
             result = ensure_session(issue_number=1140)
 
-        assert result == {
-            "session_id": "tg_valor_-1003449100931_691",
-            "created": False,
-        }
+        assert result["session_id"] == "tg_valor_-1003449100931_691"
+        assert result["created"] is False
+        assert result["run_id"]
         fsbi.assert_not_called()
 
     def test_non_owning_env_session_prefers_existing_issue_session(self, monkeypatch):
@@ -260,6 +283,7 @@ class TestBridgeShortCircuit:
         issue_session.session_id = "sdlc-local-1171"
 
         mock_as = MagicMock()  # create_local must NOT be called (no duplicate).
+        mock_as.query.filter.return_value = [issue_session]  # post-save readback
 
         with (
             patch("tools._sdlc_utils.find_session", return_value=env_session),
@@ -268,7 +292,9 @@ class TestBridgeShortCircuit:
         ):
             result = ensure_session(issue_number=1171)
 
-        assert result == {"session_id": "sdlc-local-1171", "created": False}
+        assert result["session_id"] == "sdlc-local-1171"
+        assert result["created"] is False
+        assert result["run_id"]
         # No new session fabricated when an issue-scoped one already exists.
         mock_as.create_local.assert_not_called()
 
@@ -291,7 +317,7 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1172"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -305,7 +331,9 @@ class TestBridgeShortCircuit:
             result = ensure_session(issue_number=1172)
 
         # Created the issue-scoped session; did NOT return the env session.
-        assert result == {"session_id": "sdlc-local-1172", "created": True}
+        assert result["session_id"] == "sdlc-local-1172"
+        assert result["created"] is True
+        assert result["run_id"]
 
     def test_short_circuit_falls_through_when_env_session_missing(self, monkeypatch):
         """Env var set but no live session — fall through to legacy create path."""
@@ -318,7 +346,7 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1141"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -329,7 +357,9 @@ class TestBridgeShortCircuit:
         ):
             result = ensure_session(issue_number=1141)
 
-        assert result == {"session_id": "sdlc-local-1141", "created": True}
+        assert result["session_id"] == "sdlc-local-1141"
+        assert result["created"] is True
+        assert result["run_id"]
 
     def test_empty_env_var_does_not_short_circuit(self, monkeypatch):
         """Empty-string env var behaves identically to unset."""
@@ -342,7 +372,7 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1142"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         find_session_mock = MagicMock()
@@ -354,7 +384,9 @@ class TestBridgeShortCircuit:
         ):
             result = ensure_session(issue_number=1142)
 
-        assert result == {"session_id": "sdlc-local-1142", "created": True}
+        assert result["session_id"] == "sdlc-local-1142"
+        assert result["created"] is True
+        assert result["run_id"]
         # find_session should NOT be called when env vars are empty
         find_session_mock.assert_not_called()
 
@@ -379,7 +411,7 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1143"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -391,7 +423,9 @@ class TestBridgeShortCircuit:
             result = ensure_session(issue_number=1143)
 
         # Must NOT return the dev session id; must fall through to create.
-        assert result == {"session_id": "sdlc-local-1143", "created": True}
+        assert result["session_id"] == "sdlc-local-1143"
+        assert result["created"] is True
+        assert result["run_id"]
 
     def test_short_circuit_falls_through_for_terminal_status_eng_session(self, monkeypatch):
         """Env points at a terminal-status PM session (AD1) — fall through."""
@@ -400,23 +434,32 @@ class TestBridgeShortCircuit:
         monkeypatch.setenv("VALOR_SESSION_ID", "completed_pm_id")
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
-        for terminal_status in (
-            "completed",
-            "failed",
-            "killed",
-            "abandoned",
-            "cancelled",
+        for offset, terminal_status in enumerate(
+            (
+                "completed",
+                "failed",
+                "killed",
+                "abandoned",
+                "cancelled",
+            )
         ):
+            # Distinct issue number per iteration: each successful
+            # ensure_session acquires a LIVE issue lock in the test Redis db
+            # (#2003), so re-running the same issue within one test would hit
+            # the deliberate no-adopt ISSUE_LOCKED path.
+            issue_number = 11440 + offset
+            local_id = f"sdlc-local-{issue_number}"
+
             terminal_session = MagicMock()
             terminal_session.session_id = "completed_pm_id"
             terminal_session.session_type = "eng"
             terminal_session.status = terminal_status
 
             mock_new_session = MagicMock()
-            mock_new_session.session_id = "sdlc-local-1144"
+            mock_new_session.session_id = local_id
 
             mock_as = MagicMock()
-            mock_as.query.filter.return_value = []
+            mock_as.query.filter.side_effect = [[], [mock_new_session]]
             mock_as.create_local.return_value = mock_new_session
 
             with (
@@ -425,14 +468,15 @@ class TestBridgeShortCircuit:
                 patch("models.agent_session.AgentSession", mock_as),
                 patch("models.session_lifecycle.transition_status"),
             ):
-                result = ensure_session(issue_number=1144)
+                result = ensure_session(issue_number=issue_number)
 
             # Must fall through and create a fresh session; not reuse the
             # terminal-status bridge session.
-            assert result == {
-                "session_id": "sdlc-local-1144",
-                "created": True,
-            }, f"failed for terminal status {terminal_status!r}"
+            assert result["session_id"] == local_id, (
+                f"failed for terminal status {terminal_status!r}"
+            )
+            assert result["created"] is True
+            assert result["run_id"]
 
     def test_short_circuit_degrades_on_find_session_error(self, monkeypatch):
         """Redis error during env lookup falls through without crashing."""
@@ -445,7 +489,7 @@ class TestBridgeShortCircuit:
         mock_new_session.session_id = "sdlc-local-1145"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -460,7 +504,9 @@ class TestBridgeShortCircuit:
             result = ensure_session(issue_number=1145)
 
         # Degrades gracefully to the create path.
-        assert result == {"session_id": "sdlc-local-1145", "created": True}
+        assert result["session_id"] == "sdlc-local-1145"
+        assert result["created"] is True
+        assert result["run_id"]
 
 
 def _make_orphan_session(
@@ -818,7 +864,7 @@ class TestCreateLocalMessageText:
         mock_new_session.session_id = "sdlc-local-1741"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         with (
@@ -828,7 +874,8 @@ class TestCreateLocalMessageText:
         ):
             result = ensure_session(issue_number=1741)
 
-        assert result == {"session_id": "sdlc-local-1741", "created": True}
+        assert result["session_id"] == "sdlc-local-1741"
+        assert result["created"] is True
         mock_as.create_local.assert_called_once()
         _, kwargs = mock_as.create_local.call_args
         assert "message_text" in kwargs, "create_local was not called with message_text kwarg"
@@ -908,20 +955,33 @@ class TestCreateLocalMessageText:
 
 
 class TestIssueLockWiring:
-    """Issue #1954: touch_issue_lock() must be called from ALL FIVE return
-    points of ensure_session() -- the 4 early-return branches (env-owns-issue,
-    env-diverges-but-issue-owned, find_session_by_issue match, idempotent
-    existing_by_id match) plus the final create-and-claim path -- via one
-    shared local helper, so no branch can skip it.
+    """Issues #1954/#2003: every return point of ensure_session() -- the 4
+    early-return branches (env-owns-issue, env-diverges-but-issue-owned,
+    find_session_by_issue match, idempotent existing_by_id match) plus the
+    final create-and-claim path -- goes through one shared helper that mints
+    a FRESH run_id candidate, contests the issue lock, and binds the winner
+    to the session record. No branch can skip the contest, and there is NO
+    adopt-from-record branch.
     """
 
     @staticmethod
-    def _lock_result(acquired: bool, owner_session_id: str | None = None):
+    def _lock_result(acquired: bool, owner_session_id=None, owner_run_id=None):
         from models.session_lifecycle import IssueLockResult
 
-        return IssueLockResult(acquired=acquired, owner_session_id=owner_session_id)
+        return IssueLockResult(
+            acquired=acquired,
+            owner_session_id=owner_session_id,
+            owner_run_id=owner_run_id,
+        )
 
-    def test_touch_lock_on_env_owns_issue_return(self, monkeypatch):
+    @staticmethod
+    def _readback_as(session):
+        """Mock AgentSession whose readback query returns the bound session."""
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        return mock_as
+
+    def test_mint_on_env_owns_issue_return(self, monkeypatch):
         """Return point 1: env session owns the issue (true no-op short-circuit)."""
         from tools.sdlc_session_ensure import ensure_session
 
@@ -939,16 +999,22 @@ class TestIssueLockWiring:
         with (
             patch("tools._sdlc_utils.find_session", return_value=bridge_session),
             patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("models.agent_session.AgentSession", self._readback_as(bridge_session)),
         ):
             result = ensure_session(issue_number=2001)
 
-        assert result == {"session_id": "tg_valor_-100_691", "created": False}
+        assert result["session_id"] == "tg_valor_-100_691"
+        assert result["created"] is False
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, kwargs = lock_mock.call_args
         assert args[0] == 2001
-        assert args[1] == "tg_valor_-100_691"
+        # A FRESH uuid-hex candidate is minted per top-level call and emitted.
+        assert isinstance(args[1], str) and len(args[1]) == 32
+        assert result["run_id"] == args[1]
+        assert kwargs.get("session_id") == "tg_valor_-100_691"
+        assert bridge_session.active_run_id == args[1]
 
-    def test_touch_lock_on_env_diverges_but_issue_owned_return(self, monkeypatch):
+    def test_mint_on_env_diverges_but_issue_owned_return(self, monkeypatch):
         """Return point 2: env session diverges; an existing issue-scoped
         session is preferred (C1, #1671)."""
         from tools.sdlc_session_ensure import ensure_session
@@ -971,16 +1037,19 @@ class TestIssueLockWiring:
             patch("tools._sdlc_utils.find_session", return_value=env_session),
             patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session),
             patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("models.agent_session.AgentSession", self._readback_as(issue_session)),
         ):
             result = ensure_session(issue_number=2002)
 
-        assert result == {"session_id": "sdlc-local-2002", "created": False}
+        assert result["session_id"] == "sdlc-local-2002"
+        assert result["created"] is False
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, kwargs = lock_mock.call_args
         assert args[0] == 2002
-        assert args[1] == "sdlc-local-2002"
+        assert result["run_id"] == args[1]
+        assert kwargs.get("session_id") == "sdlc-local-2002"
 
-    def test_touch_lock_on_find_session_by_issue_match_return(self):
+    def test_mint_on_find_session_by_issue_match_return(self):
         """Return point 3: the main issue-based lookup (no env var)."""
         from tools.sdlc_session_ensure import ensure_session
 
@@ -992,16 +1061,19 @@ class TestIssueLockWiring:
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=existing),
             patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("models.agent_session.AgentSession", self._readback_as(existing)),
         ):
             result = ensure_session(issue_number=2003)
 
-        assert result == {"session_id": "sdlc-local-2003", "created": False}
+        assert result["session_id"] == "sdlc-local-2003"
+        assert result["created"] is False
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, kwargs = lock_mock.call_args
         assert args[0] == 2003
-        assert args[1] == "sdlc-local-2003"
+        assert result["run_id"] == args[1]
+        assert kwargs.get("session_id") == "sdlc-local-2003"
 
-    def test_touch_lock_on_idempotent_existing_by_id_return(self):
+    def test_mint_on_idempotent_existing_by_id_return(self):
         """Return point 4: a session with sdlc-local-{N} already exists (no
         find_session_by_issue hit, matched by deterministic id instead)."""
         from tools.sdlc_session_ensure import ensure_session
@@ -1021,13 +1093,14 @@ class TestIssueLockWiring:
         ):
             result = ensure_session(issue_number=2004)
 
-        assert result == {"session_id": "sdlc-local-2004", "created": False}
+        assert result["session_id"] == "sdlc-local-2004"
+        assert result["created"] is False
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, _ = lock_mock.call_args
         assert args[0] == 2004
-        assert args[1] == "sdlc-local-2004"
+        assert result["run_id"] == args[1]
 
-    def test_touch_lock_on_create_and_claim_return(self):
+    def test_mint_on_create_and_claim_return(self):
         """Return point 5: the final create-and-claim path (cold start)."""
         from tools.sdlc_session_ensure import ensure_session
 
@@ -1035,7 +1108,7 @@ class TestIssueLockWiring:
         mock_new_session.session_id = "sdlc-local-2005"
 
         mock_as = MagicMock()
-        mock_as.query.filter.return_value = []
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
         mock_as.create_local.return_value = mock_new_session
 
         lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2005"))
@@ -1048,11 +1121,12 @@ class TestIssueLockWiring:
         ):
             result = ensure_session(issue_number=2005)
 
-        assert result == {"session_id": "sdlc-local-2005", "created": True}
+        assert result["session_id"] == "sdlc-local-2005"
+        assert result["created"] is True
         lock_mock.assert_called_once()
-        args = lock_mock.call_args.args
+        args, _ = lock_mock.call_args
         assert args[0] == 2005
-        assert args[1] == "sdlc-local-2005"
+        assert result["run_id"] == args[1]
         # issue_number is written ONCE, only on this creation path.
         _, kwargs = mock_as.create_local.call_args
         assert kwargs.get("issue_number") == 2005
@@ -1065,7 +1139,7 @@ class TestIssueLockWiring:
         existing = MagicMock()
         existing.session_id = "sdlc-local-2006"
 
-        mock_as = MagicMock()  # create_local must never be called on this path.
+        mock_as = self._readback_as(existing)  # create_local must never be called.
 
         with (
             patch("tools._sdlc_utils.find_session_by_issue", return_value=existing),
@@ -1077,13 +1151,14 @@ class TestIssueLockWiring:
         ):
             result = ensure_session(issue_number=2006)
 
-        assert result == {"session_id": "sdlc-local-2006", "created": False}
+        assert result["session_id"] == "sdlc-local-2006"
+        assert result["created"] is False
         mock_as.create_local.assert_not_called()
 
-    def test_blocked_shape_returned_when_lock_held_by_different_session(self):
-        """When touch_issue_lock() reports contention, ensure_session() must
-        propagate the blocked signal rather than silently returning the
-        session as if nothing happened."""
+    def test_blocked_shape_includes_owning_run_id(self):
+        """When touch_issue_lock() reports a foreign live holder,
+        ensure_session() propagates ISSUE_LOCKED with BOTH the owning run_id
+        and session_id -- never silently returning the session."""
         from tools.sdlc_session_ensure import ensure_session
 
         mock_new_session = MagicMock()
@@ -1099,7 +1174,11 @@ class TestIssueLockWiring:
             patch("models.session_lifecycle.transition_status"),
             patch(
                 "models.session_lifecycle.touch_issue_lock",
-                return_value=self._lock_result(False, "sdlc-local-2007-other-owner"),
+                return_value=self._lock_result(
+                    False,
+                    owner_session_id="sdlc-local-2007-other-owner",
+                    owner_run_id="foreign-run-hex",
+                ),
             ),
         ):
             result = ensure_session(issue_number=2007)
@@ -1107,56 +1186,268 @@ class TestIssueLockWiring:
         assert result == {
             "blocked": True,
             "reason": "ISSUE_LOCKED",
+            "owner_run_id": "foreign-run-hex",
             "owner_session_id": "sdlc-local-2007-other-owner",
+            # Cycle-3 nit: the refusal carries the orphan signal (from the
+            # follow-up peek; the mocked lock reports not-orphaned).
+            "orphaned_lock": False,
         }
 
-    def test_two_processes_distinct_holder_tokens_detect_contention(self, monkeypatch):
-        """The round-2 critique regression case: two independently-resolved
-        ensure_session() calls for the SAME issue -- simulating two different
-        OS processes via distinct holder_tokens -- both resolve the identical
-        deterministic sdlc-local-{N} session_id. Ownership must be compared by
-        holder_token, not session_id, so the second call is correctly blocked
-        rather than both succeeding. Exercises the REAL touch_issue_lock()
-        against the test Redis db (no mocking of the lock itself).
-        """
-        import models.session_lifecycle as session_lifecycle
+    def test_no_adopt_from_record_second_call_blocked(self):
+        """The #2003 cycle-1 BLOCKER regression: a second top-level
+        ensure_session() for the SAME issue while the incumbent's lock is
+        LIVE must be ISSUE_LOCKED -- even though the shared session record
+        already carries the incumbent's active_run_id. There is NO
+        adopt-from-record branch. Exercises the REAL touch_issue_lock()
+        against the test Redis db (no mocking of the lock itself)."""
         from tools.sdlc_session_ensure import ensure_session
 
         issue_number = 2050
         local_session_id = f"sdlc-local-{issue_number}"
 
-        mock_new_session = MagicMock()
-        mock_new_session.session_id = local_session_id
+        session = MagicMock()
+        session.session_id = local_session_id
 
-        # Simulated Process A: fresh key, must acquire.
-        monkeypatch.setattr(session_lifecycle, "_process_holder_token", lambda: "process-A-token")
-        mock_as_a = MagicMock()
-        mock_as_a.query.filter.return_value = []
-        mock_as_a.create_local.return_value = mock_new_session
+        # Call A: fresh key, must acquire and bind its run_id to the record.
         with (
-            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
-            patch("models.agent_session.AgentSession", mock_as_a),
-            patch("models.session_lifecycle.transition_status"),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
         ):
             result_a = ensure_session(issue_number=issue_number)
 
-        assert result_a == {"session_id": local_session_id, "created": True}
+        assert result_a["created"] is False
+        run_id_a = result_a["run_id"]
+        assert run_id_a
+        assert session.active_run_id == run_id_a
 
-        # Simulated Process B: distinct holder_token, same deterministic
-        # session_id -- must be blocked, not silently succeed.
-        monkeypatch.setattr(session_lifecycle, "_process_holder_token", lambda: "process-B-token")
-        mock_as_b = MagicMock()
-        mock_as_b.query.filter.return_value = []
-        mock_as_b.create_local.return_value = mock_new_session
+        # Call B: same record (active_run_id == run_id_a is VISIBLE on it),
+        # but the live lock decides -- fresh candidate loses, no adoption.
         with (
-            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
-            patch("models.agent_session.AgentSession", mock_as_b),
-            patch("models.session_lifecycle.transition_status"),
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
         ):
             result_b = ensure_session(issue_number=issue_number)
 
-        assert result_b == {
-            "blocked": True,
-            "reason": "ISSUE_LOCKED",
-            "owner_session_id": local_session_id,
-        }
+        assert result_b["blocked"] is True
+        assert result_b["reason"] == "ISSUE_LOCKED"
+        assert result_b["owner_run_id"] == run_id_a
+        assert result_b["owner_session_id"] == local_session_id
+
+    def test_save_failure_releases_lock_next_caller_acquires_immediately(self):
+        """Race 3 (cycle-2 CONCERN 2): a save failure after lock acquire
+        releases the lock via COMPARE-AND-DELETE -- the next caller acquires
+        immediately instead of waiting out the 300s TTL. Real Redis."""
+        import popoto.redis_db as rdb
+
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2051
+
+        broken = MagicMock()
+        broken.session_id = f"sdlc-local-{issue_number}"
+        broken.save.side_effect = RuntimeError("redis save exploded")
+
+        with patch("tools._sdlc_utils.find_session_by_issue", return_value=broken):
+            result = ensure_session(issue_number=issue_number)
+
+        assert result.get("error") == "RUN_BIND_FAILED"
+        # Lock released: key gone from the test Redis db.
+        assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is None
+
+        # Next caller acquires immediately -- no 300s wedge.
+        healthy = MagicMock()
+        healthy.session_id = f"sdlc-local-{issue_number}"
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=healthy),
+            patch("models.agent_session.AgentSession", self._readback_as(healthy)),
+        ):
+            result2 = ensure_session(issue_number=issue_number)
+
+        assert result2["run_id"]
+        assert result2["session_id"] == f"sdlc-local-{issue_number}"
+
+    def test_readback_mismatch_releases_lock(self):
+        """Post-save readback mismatch (the record does not carry the lock's
+        run_id) releases the lock and surfaces the error. Real Redis."""
+        import popoto.redis_db as rdb
+
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2052
+
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+
+        stale = MagicMock()
+        stale.session_id = f"sdlc-local-{issue_number}"
+        stale.active_run_id = "some-other-run-entirely"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [stale]  # readback sees a stale value
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            result = ensure_session(issue_number=issue_number)
+
+        assert result.get("error") == "RUN_BIND_FAILED"
+        assert rdb.POPOTO_REDIS_DB.get(f"session:issuelock:{issue_number}") is None
+
+    def test_orphaned_lock_flagged_on_peek(self):
+        """A lock whose run_id matches no live session's active_run_id is
+        reported orphaned_lock=True by the peek path. Real Redis lock; the
+        live-session scan sees an empty test db."""
+        from models.session_lifecycle import touch_issue_lock
+
+        issue_number = 2053
+        acquired = touch_issue_lock(issue_number, "ghost-run", session_id="sdlc-local-2053")
+        assert acquired.acquired is True
+
+        peek = touch_issue_lock(issue_number, None, session_id="sdlc-local-2053", peek=True)
+        assert peek.acquired is False
+        assert peek.owner_run_id == "ghost-run"
+        assert peek.orphaned_lock is True
+
+    def test_legacy_record_without_active_run_id_never_crashes(self):
+        """A legacy session record with no active_run_id (pre-#2003 rows)
+        contests the lock normally -- reads never crash on the missing
+        field, and the fresh mint binds onto it."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        legacy = MagicMock()
+        legacy.session_id = "sdlc-local-2054"
+        legacy.active_run_id = None  # legacy row: field absent/None
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=legacy),
+            patch("models.agent_session.AgentSession", self._readback_as(legacy)),
+        ):
+            result = ensure_session(issue_number=2054)
+
+        assert result["session_id"] == "sdlc-local-2054"
+        assert result["run_id"]
+        assert legacy.active_run_id == result["run_id"]
+
+
+class TestVerifiedRunIdReuse:
+    """#2003 cycle-3 BLOCKER 1: the per-stage /sdlc router re-runs
+    session-ensure at every stage boundary while its OWN prior stage's lock
+    is still live (the stage's completion marker renews it to the full TTL).
+    A bare re-ensure mints a fresh candidate, loses SET NX to itself, and
+    self-wedges the pipeline. --reuse-run-id is the escape: a claim the
+    caller already carries is verified against the live lock (owner match)
+    or, on a free lock, against the record mirror -- and only then honored.
+    No-adopt stays intact for foreign/stale claims.
+    """
+
+    @staticmethod
+    def _readback_as(session):
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [session]
+        return mock_as
+
+    def test_consecutive_stage_reuse_survives_own_live_lock(self):
+        """The judge-mandated regression: ensure -> stage-completion renewal
+        -> second ensure WITHIN the TTL. With --reuse-run-id the second
+        ensure returns the SAME run_id instead of wedging on ISSUE_LOCKED.
+        Real Redis lock throughout."""
+        from tools._sdlc_utils import renew_issue_lock_for_session
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2060
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.issue_number = issue_number
+
+        # Stage N: first ensure mints run_id A.
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result_a = ensure_session(issue_number=issue_number)
+        run_id_a = result_a["run_id"]
+        assert run_id_a
+
+        # Stage N's final `stage-marker --status completed` renews the lock
+        # to the full TTL (the exact write_marker side effect).
+        renew_issue_lock_for_session(session, run_id=run_id_a)
+
+        # Stage N+1: the router re-ensures seconds later, carrying the
+        # conversation's run_id. Must NOT wedge; must return the same id.
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result_b = ensure_session(issue_number=issue_number, reuse_run_id=run_id_a)
+
+        assert result_b.get("blocked") is None, result_b
+        assert result_b["run_id"] == run_id_a
+        assert result_b["session_id"] == f"sdlc-local-{issue_number}"
+
+    def test_reuse_with_wrong_id_against_live_lock_still_blocked(self):
+        """An unverifiable claim while a foreign lock is live falls through
+        to the fresh-mint contest and stays ISSUE_LOCKED (no adopt)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2061
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result_a = ensure_session(issue_number=issue_number)
+        run_id_a = result_a["run_id"]
+
+        intruder = MagicMock()
+        intruder.session_id = f"sdlc-local-{issue_number}"
+        intruder.active_run_id = None
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=intruder),
+            patch("models.agent_session.AgentSession", self._readback_as(intruder)),
+        ):
+            result_b = ensure_session(issue_number=issue_number, reuse_run_id="bogus-claim")
+
+        assert result_b["blocked"] is True
+        assert result_b["reason"] == "ISSUE_LOCKED"
+        assert result_b["owner_run_id"] == run_id_a
+        assert "orphaned_lock" in result_b
+
+    def test_reuse_on_free_lock_with_record_match_reacquires_same_id(self):
+        """TTL lapsed but the record mirror corroborates the claim: the
+        ensure re-acquires under the SAME run_id (lossless recovery)."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2062
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.active_run_id = "aabbccdd" * 4  # prior mint, mirrored on the record
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result = ensure_session(issue_number=issue_number, reuse_run_id="aabbccdd" * 4)
+
+        assert result["run_id"] == "aabbccdd" * 4
+
+    def test_reuse_on_free_lock_with_record_mismatch_mints_fresh(self):
+        """A claim the record does NOT corroborate is ignored on a free
+        lock: fresh mint, never claim-echo."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        issue_number = 2063
+        session = MagicMock()
+        session.session_id = f"sdlc-local-{issue_number}"
+        session.active_run_id = "11112222" * 4
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=session),
+            patch("models.agent_session.AgentSession", self._readback_as(session)),
+        ):
+            result = ensure_session(issue_number=issue_number, reuse_run_id="deadbeef" * 4)
+
+        assert result["run_id"] != "deadbeef" * 4
+        assert len(result["run_id"]) == 32

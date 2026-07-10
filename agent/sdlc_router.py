@@ -24,7 +24,7 @@ The algorithm:
     3. If no rule matches, return ``Blocked(reason="no matching rule")``.
 
 The ``DISPATCH_RULES`` ordering mirrors the documented row numbers
-(1, 2, 2b, 2c, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 8c, 8d, 9, 10, 10b). Each rule
+(1, 2, 2b, 2c, 3, 4a, 4b, 4c, 5, 6, 7, 8, 8b, 8c, 8d, 9, 10). Each rule
 carries a ``row_id`` string for traceability in parity tests.
 """
 
@@ -661,7 +661,7 @@ def evaluate_guards(
 
 
 # ---------------------------------------------------------------------------
-# Dispatch table (Rows 1–10b from SKILL.md)
+# Dispatch table (Rows 1–10 from SKILL.md)
 # ---------------------------------------------------------------------------
 
 
@@ -905,7 +905,7 @@ def _rule_critique_in_progress_no_verdict(stage_states: dict, meta: dict, contex
     disjoint.
 
     Narrowly gated so it cannot fire when:
-      - a PR exists (defer to G3 / PR-stage rows 7-10b)
+      - a PR exists (defer to G3 / PR-stage rows 7-10)
       - any critique verdict IS recorded (let rows 2b/3/4a handle it)
       - CRITIQUE is not in_progress (None/pending → row 2; completed/failed → other rows)
 
@@ -1103,13 +1103,6 @@ def _rule_ready_to_merge(stage_states: dict, meta: dict, context: dict) -> bool:
     return _stages_completed(stage_states, needed)
 
 
-def _rule_stage_states_unavailable_pr_open(stage_states: dict, meta: dict, context: dict) -> bool:
-    """stage_states unavailable AND an open PR exists for this issue."""
-    if meta.get("pr_number") and not stage_states:
-        return True
-    return False
-
-
 # Attach human-readable state strings as docstrings — the parity test uses
 # these to cross-check SKILL.md row state cells. Keep in sync with SKILL.md.
 _rule_no_plan.__doc__ = "No plan exists"
@@ -1148,10 +1141,6 @@ _rule_ready_to_merge.__doc__ = (
     "AND all display stages show completed in stage_states "
     "(or stage_states unavailable), ready to merge"
 )
-_rule_stage_states_unavailable_pr_open.__doc__ = (
-    "stage_states unavailable AND an open PR exists for this issue"
-)
-
 
 DISPATCH_RULES: list[DispatchRule] = [
     DispatchRule(
@@ -1282,15 +1271,6 @@ DISPATCH_RULES: list[DispatchRule] = [
         skill=SKILL_DO_MERGE,
         reason="Execute programmatic merge gate",
     ),
-    DispatchRule(
-        row_id="10b",
-        state_predicate=_rule_stage_states_unavailable_pr_open,
-        skill=SKILL_DO_MERGE,
-        reason=(
-            "Fallback: if stage_states cannot confirm stages but an open PR "
-            "exists after DOCS, dispatch merge"
-        ),
-    ),
 ]
 
 
@@ -1410,12 +1390,10 @@ def record_dispatch(
         now: Optional timestamp for testability. Defaults to current UTC.
         pr_number: Optional PR number from the caller's ``_meta`` dict. Passed
             into ``build_stage_snapshot`` so the snapshot's ``pr_number`` field
-            reflects the live PR state. If omitted, the snapshot falls back
-            to ``stage_states.get("_pr_number")`` for callers that mirror the
-            PR number into ``stage_states`` directly; otherwise it is ``None``.
-            Explicit pass-through is preferred because ``sdlc_stage_query``
-            puts the PR number into ``_meta.pr_number`` rather than
-            mirroring it into ``stage_states``.
+            reflects the live PR state. If omitted, the snapshot's
+            ``pr_number`` is ``None`` — the explicit argument is the sole
+            provenance (``sdlc_stage_query`` resolves the PR number from the
+            ``AgentSession.pr_number`` field into ``_meta.pr_number``).
 
     Returns:
         The mutated stage_states dict.
@@ -1424,11 +1402,7 @@ def record_dispatch(
     # Build a snapshot from a stage_states view that EXCLUDES the history
     # list itself, otherwise the counter would never match across invocations.
     view = {k: v for k, v in stage_states.items() if k != "_sdlc_dispatches"}
-    # Resolve the pr_number: explicit argument wins, else fall back to any
-    # mirrored value in stage_states (opt-in convention for callers that
-    # prefer to keep PR context alongside stage_states).
-    resolved_pr_number = pr_number if pr_number is not None else stage_states.get("_pr_number")
-    snapshot = build_stage_snapshot(view, meta={"pr_number": resolved_pr_number})
+    snapshot = build_stage_snapshot(view, meta={"pr_number": pr_number})
 
     history = stage_states.setdefault("_sdlc_dispatches", [])
     if not isinstance(history, list):

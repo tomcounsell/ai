@@ -8,99 +8,70 @@ generic steps as follows:
 
 - **PR-number resolution (Variables).** When PR_ARG is empty, recover it from
   pipeline state: `sdlc-tool stage-query --issue-number N` → `_meta.pr_number`.
-- **Step 0 stage marker.** Probe the substrate and write the in_progress marker:
+- **Step 0 stage marker.** Probe the substrate and write the in_progress marker.
+  `{run_id}` is the run identity emitted by the invoking supervisor's
+  `sdlc-tool session-ensure` output (issue #2003) — stage-marker is
+  state-mutating and requires it:
   ```bash
-  sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number}
+  sdlc-tool stage-marker --stage MERGE --status in_progress --issue-number {issue_number} --run-id {run_id}
   ```
   Parse the JSON: `{"status": "in_progress"}` → substrate present, proceed;
   `{"status": "degraded", ...}` → announce "running in degraded mode (state not
   persisted)" and proceed (the gate depends only on `gh`); non-zero exit →
   report the stderr diagnostic and proceed.
-- **Step 2 recorded REVIEW verdict (authority over `gh reviewDecision`).** Read
-  the recorded verdict instead of GitHub's native decision:
+- **Steps 1–3 deterministic gate — the shared merge predicate.** Evaluate the
+  single deterministic predicate. It is the SAME helper the merge-guard hook
+  enforces at the choke point, so skill and hook cannot drift (#1944 class):
   ```bash
-  sdlc-tool verdict get --stage REVIEW --issue-number {issue_number}
+  python -m tools.merge_predicate --pr-number {PR} --json
   ```
-  The verdict text must contain `APPROVED` (case-insensitive). A
-  `CHANGES REQUESTED` / `NEEDS REVISION` verdict, or no verdict at all, FAILS —
-  route back to `/do-pr-review` or `/do-patch`. In degraded mode the tool may
-  return no data; if approval cannot be confirmed, FAIL closed.
-- **Step 2b — Verify DOCS Stage Completed.** Step 2b mirrors the Step 2
-  REVIEW-verdict gate, applied to the DOCS stage. It reads `stages.DOCS` from
-  `sdlc-tool stage-query` and PASSes on `completed`. It hard-FAILs closed on
-  `in_progress` only, because that is the sole affirmative "DOCS unfinished"
-  signal (reachable only via a real `start_stage` call, the cuttlefish #577
-  incident shape), and routes back to `/do-docs` without creating the
-  authorization file. A `pending` status (DOCS never started, indistinguishable
-  from a legitimate skip) and an empty `stages` map (session reaped/orphan-cleaned,
-  per spike-2) both degrade to the pre-existing file-existence check rather than a
-  false refusal. The slug is derived from the PR head-ref because bypass-path
-  operators (raw `gh pr merge`, cross-machine) commonly run from `main` or a
-  detached HEAD, where the current branch is a wrong value. `2>/dev/null` is
-  deliberately omitted from the `stage-query` call so a substrate fault surfaces in
-  the merge log; only stdout is parsed for the status.
+  Output shape: `{"allowed": bool, "failed_checks": [...], "substrate_present":
+  bool, "notes": [...]}`; exit 0 iff allowed. One call covers all three check
+  groups:
+  - **(a) PR state**: OPEN, MERGEABLE, mergeStateStatus CLEAN, CI green
+    (FAILURE/ERROR fail; pending is not-green), and a word-boundary
+    `Closes/Fixes/Resolves #N` issue link in the body.
+  - **(b) DOCS stage gate** (the #1944 Step 2b semantics): `stages.DOCS ==
+    completed` passes; `in_progress` hard-fails (the sole affirmative "DOCS
+    unfinished" signal — cuttlefish #577 shape); `pending`/empty stages degrade
+    to a `docs/features/{slug}.md` existence check, slug derived from the PR
+    head ref (main/master/HEAD/empty → no usable slug → FAIL).
+  - **(c) REVIEW verdict freshness** (#2003 BLOCKER 2): a recorded verdict must
+    exist, contain `APPROVED` (case-insensitive), and be fresh against the PR's
+    latest commit — via the `REVIEW_CONTEXT head_sha=` trailer when present,
+    else recorded-at timestamp vs latest-commit committer date. A stale
+    APPROVED verdict FAILS with `REVIEW verdict predates PR head commit`.
+
+  `allowed: false` → report every `failed_checks` leg, emit `GATES_FAILED`,
+  and route back (`/do-docs` for the DOCS leg, `/do-pr-review`/`/do-patch` for
+  verdict legs). Do NOT re-implement any of these checks inline in this file —
+  the helper is the single source; the parity test
+  (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
+- **Step 4 merge-authorization guard.** The merge-guard hook
+  (`.claude/hooks/validators/validate_merge_guard.py`) evaluates the SAME live
+  predicate (`tools.merge_predicate`) when the merge command runs. On the happy
+  path `/do-merge` does NOT create or delete any authorization file — the hook
+  allows the merge because the predicate passes. The
+  `data/merge_authorized_{PR}` file survives only as an explicit **break-glass
+  override** for a human operator when the substrate is down: it must contain a
+  line `override: <reason>` (non-empty reason). Empty or legacy touch-files are
+  ignored (treated as absent). Every accepted override is logged at WARNING and
+  emits the `merge_guard.override_used` metric, so uses surface on the
+  dashboard. Delete the override file immediately after use.
+- **Step 5 completion marker.** Same run identity as Step 0:
   ```bash
-  # Derive the slug from the PR's head ref (authoritative on every path), NOT the
-  # current branch — a raw `gh pr merge`/cross-machine operator commonly runs from
-  # `main` or a detached HEAD, where `git rev-parse --abbrev-ref HEAD` yields
-  # `main`/`HEAD` and would false-FAIL a `docs/features/main.md` lookup. Fall back to
-  # the current branch only if the PR head-ref lookup is unavailable, and treat
-  # main/master/HEAD/empty as "no usable slug".
-  SLUG=$(gh pr view {PR} --json headRefName -q .headRefName 2>/dev/null | sed 's|^session/||')
-  [ -z "$SLUG" ] && SLUG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^session/||')
-  case "$SLUG" in main|master|HEAD|"") SLUG="" ;; esac
-  DOCS_STATUS=$(sdlc-tool stage-query --issue-number {issue_number} \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('stages',{}).get('DOCS',''))")
-  case "$DOCS_STATUS" in
-    completed)
-      echo "DOCS_GATE: PASS — DOCS stage completed" ;;
-    in_progress)
-      # Affirmative "DOCS unfinished" signal — only reachable via an actual
-      # start_stage call, so a genuinely started-but-stalled DOCS stage (the
-      # cuttlefish #577 incident shape). Fail closed.
-      echo "DOCS_GATE: FAIL — DOCS stage is 'in_progress', not completed"
-      echo "GATES_FAILED" ;;   # route back to /do-docs; do NOT create the auth file
-    *)
-      # pending (DOCS never started — the DEFAULT status for a stage with no marker,
-      # e.g. a docs-free trivial PR before #1799's skip-as-completed ships) OR empty
-      # stages (session reaped/orphan-cleaned, spike-2, so the marker is unreadable).
-      # In NEITHER case can we AFFIRM 'unfinished': a never-started DOCS is
-      # indistinguishable from a legitimate skip, and a reaped session hides a
-      # possibly-completed run. Degrade to the pre-existing file-existence
-      # Documentation Gate rather than false-refuse a merge whose DOCS truly
-      # completed or was legitimately skipped.
-      if [ -n "$SLUG" ] && [ -f "docs/features/${SLUG}.md" ]; then
-        echo "DOCS_GATE: PASS (degraded) — DOCS marker not authoritative (status='${DOCS_STATUS:-<empty>}'); docs/features/${SLUG}.md present"
-      else
-        echo "DOCS_GATE: FAIL — DOCS marker not authoritative (status='${DOCS_STATUS:-<empty>}') AND docs/features/${SLUG:-<no-slug>}.md absent"
-        echo "GATES_FAILED"
-      fi ;;
-  esac
-  ```
-- **Step 4 merge-authorization guard.** `gh pr merge` is blocked by the
-  merge-guard hook (`.claude/hooks/validators/validate_merge_guard.py`) unless an
-  authorization file exists. Create it immediately before the merge and delete it
-  immediately after (success or failure):
-  ```bash
-  touch data/merge_authorized_{PR}    # before `gh pr merge {PR} --squash`
-  rm -f data/merge_authorized_{PR}    # immediately after, every path
-  ```
-  A copy-pasted `touch data/merge_authorized_{PR}` without the full gate defeats
-  the entire mechanism.
-- **Step 5 completion marker.**
-  ```bash
-  sdlc-tool stage-marker --stage MERGE --status completed --issue-number {issue_number}
+  sdlc-tool stage-marker --stage MERGE --status completed --issue-number {issue_number} --run-id {run_id}
   ```
 
 ## Documentation Gate
 
-The authoritative check is now DOCS *stage completion* via Step 2b above: PASS
-when `stages.DOCS == completed`, hard-FAIL closed when it is `in_progress`. When
-the marker is unreadable (session reaped, empty `stages`) or the stage never
-started (`pending`), the gate degrades to verifying `docs/features/{slug}.md`
-exists (the previous behavior), now retained as the degraded fallback rather than
-a separate, weaker check. Present ⇒ PASS (degraded); absent ⇒ FAIL, missing
-feature docs block the merge.
+The authoritative check is DOCS *stage completion*, evaluated as group (b) of
+the shared predicate (`tools/merge_predicate.py`): PASS when `stages.DOCS ==
+completed`, hard-FAIL closed when it is `in_progress`. When the marker is
+unreadable (session reaped, empty `stages`) or the stage never started
+(`pending`), the gate degrades to verifying `docs/features/{slug}.md` exists —
+retained as the degraded fallback rather than a separate, weaker check.
+Present ⇒ PASS (degraded); absent ⇒ FAIL, missing feature docs block the merge.
 
 ## Ruff Gates
 
@@ -223,64 +194,27 @@ if [ -n "$SHA" ]; then
 fi
 ```
 
-The Shape Classification block MUST precede the Structured Review Comment Check
+The Shape Classification block MUST precede the Lockfile and Full Suite gates
 so `$SHAPE` / `$CACHED_VERDICT` are available downstream. A per-SHA verdict
 cache (`data/pr_shape_verdict_cache.json`, gitignored) lets an unchanged tree
 skip the full pytest re-run on the same baseline.
 
-### Structured Review Comment Check
+### Review Verdict Freshness (moved into the shared predicate)
 
-Scan **both** issue comments AND PR review submissions for the most recent
-`## Review:` body. Stale reviews are filtered by comparing each entry's
-timestamp against the PR's latest commit `committer.date` (NOT the author
-date) — entries predating the latest commit are dropped as stale (a
-force-push would have superseded them).
-
-```bash
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-LATEST_COMMIT_DATE=$(gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1].commit.committer.date' 2>/dev/null)
-if [ -z "$LATEST_COMMIT_DATE" ]; then
-  echo "REVIEW_COMMENT: FAIL — could not fetch latest commit date for review filter"
-  echo "Diagnose: gh api repos/$REPO/pulls/$ARGUMENTS/commits --jq '.[-1]'"
-  echo "GATES_FAILED"
-  exit 1
-fi
-```
-
-On a transient API failure (`LATEST_COMMIT_DATE` empty) the gate FAILS with the
-diagnostic above rather than silently regressing to unfiltered behavior — a
-silent fallback would defeat the exact stale-Approved-after-force-push bug this
-filter prevents.
-
-**Safe-shape exemption:** when no current review exists but a prior
-`## Review: Approved` exists AND the diff between the approval-commit and HEAD
-classifies as a safe shape, the prior approval is re-admitted. The
-approval-commit SHA is extracted from the
-`<!-- REVIEW_CONTEXT head_sha=... -->` trailer `/do-pr-review` emits:
-
-```bash
-APPROVAL_COMMIT_SHA=$(echo "$PRIOR_BODY" | grep -oE 'REVIEW_CONTEXT head_sha=[a-f0-9]{40}' | sed 's/REVIEW_CONTEXT head_sha=//' | tail -1)
-if [ -z "$APPROVAL_COMMIT_SHA" ]; then
-  echo "REVIEW_COMMENT: SKIP — prior approval has no REVIEW_CONTEXT trailer; fresh review required." >&2
-else
-  git cat-file -e "$APPROVAL_COMMIT_SHA" 2>/dev/null || git fetch origin "$APPROVAL_COMMIT_SHA" 2>/dev/null || {
-    echo "REVIEW_COMMENT: SKIP — approval SHA not fetchable; fresh review required." >&2
-    APPROVAL_COMMIT_SHA=""
-  }
-fi
-if [ -n "$APPROVAL_COMMIT_SHA" ]; then
-  HEAD_SHA=$(git rev-parse HEAD)
-  DIFF_SHAPE=$(python -m scripts.pr_shape_classify --diff-from "$APPROVAL_COMMIT_SHA" --diff-to "$HEAD_SHA" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('shape','feature'))")
-  case " docs-only lockfile-only small-patch " in
-    *" $DIFF_SHAPE "*) echo "REVIEW_COMMENT: PASS — prior approval preserved (post-approval diff is $DIFF_SHAPE)";;
-    *) echo "REVIEW_COMMENT: SKIP — post-approval diff is $DIFF_SHAPE (not a safe shape); fresh review required." >&2;;
-  esac
-fi
-```
-
-Only `docs-only lockfile-only small-patch` post-approval diffs re-admit the
-prior approval; `feature`/`mixed` shapes still require a fresh review. A prior
-approval body without the trailer fails closed (SKIP → fresh review required).
+The stale-approval protection (#1932/#1941 class — an APPROVED verdict left
+over from before a force-push or new commits) is enforced as group (c) of the
+shared predicate (`python -m tools.merge_predicate --pr-number {PR} --json`,
+already run in Steps 1–3 above): the recorded REVIEW verdict must be APPROVED
+AND fresh against the PR's latest commit, preferring the
+`<!-- REVIEW_CONTEXT head_sha=... -->` trailer `/do-pr-review` emits (exact
+head-SHA match) and falling back to recorded-at timestamp vs the latest
+commit's `committer.date`. Missing latest-commit data fails closed — a silent
+fallback would defeat the exact stale-Approved-after-force-push bug this check
+prevents. Do not re-implement the filter inline here; the same check runs in
+the merge-guard hook, so a stale approval that slips past the skill still
+blocks at the choke point. A stale-but-safe diff (docs-only re-push after
+approval) needs a fresh review or a matching-trailer re-record — the predicate
+does not re-admit prior approvals by diff shape.
 
 ### Lockfile Sync Check
 

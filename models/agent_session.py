@@ -200,6 +200,24 @@ class AgentSession(Model):
     # lock this field mirrors for human-readable dashboard/CLI display.
     issue_number = IntField(null=True)
 
+    # === SDLC run identity + PR number mirror (issue #2003) ===
+    # active_run_id: the uuid-hex identity of the pipeline run that currently
+    # owns this session's issue lock. Minted EXCLUSIVELY by
+    # tools/sdlc_session_ensure.ensure_session() when it wins the lock contest
+    # (SET NX on session:issuelock:{N}); mirrored here for inspection and for
+    # the two in-process renewal paths (tools/_sdlc_utils.
+    # renew_issue_lock_for_session, agent/session_executor.
+    # _tick_issue_lock_renewal) that read BACK the identity their own
+    # ensure_session established. Never a source of adoption: a foreign
+    # process must not read this field to impersonate the incumbent — the
+    # lock payload, not this mirror, decides ownership.
+    # pr_number: the PR opened for this session's work. Single writer is
+    # /do-build at PR creation; read-only recovery rungs live in
+    # tools/sdlc_stage_query. Both fields are nullable additive — no
+    # backfill needed (Popoto lazy-load descriptor healing covers them).
+    active_run_id = Field(null=True)
+    pr_number = IntField(null=True)
+
     # === Claude Code identity mapping ===
     # IndexedField so the PreCompact hook's 3-per-fire lookups
     # (`AgentSession.query.filter(claude_session_uuid=...)` in

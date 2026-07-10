@@ -128,7 +128,13 @@ def test_every_dispatch_rule_has_documented_predicate():
 
 
 def test_dispatch_rules_cover_expected_row_ids():
-    """DISPATCH_RULES must cover the canonical row set (1–10b)."""
+    """DISPATCH_RULES must cover the canonical row set (1–10).
+
+    Row 10b (stage_states-unavailable merge fallback) was deleted in #2003 —
+    it actively weakened the "never merge unfinished work" invariant. Merge
+    enforcement lives in the merge-guard hook via ``tools.merge_predicate``;
+    rows 9/10 and G6 remain scheduling-only.
+    """
     expected = {
         "1",
         "2",
@@ -147,7 +153,6 @@ def test_dispatch_rules_cover_expected_row_ids():
         "8d",
         "9",
         "10",
-        "10b",
     }
     actual = {r.row_id for r in DISPATCH_RULES}
     missing = expected - actual

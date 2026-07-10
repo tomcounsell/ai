@@ -282,6 +282,25 @@ class TestSnapshotAndCounter:
         # FIFO-bounded to MAX_DISPATCH_HISTORY (10)
         assert len(states["_sdlc_dispatches"]) == 10
 
+    def test_record_dispatch_ignores_stale_pr_number_key(self):
+        """#2003 hard cutover: `sdlc-tool meta-set --key pr_number` writes the
+        AgentSession.pr_number field (single writer); nothing writes a
+        `_pr_number` stage_states key anymore, so record_dispatch must not
+        read one. A stale mirrored key is inert -- pr_number comes only from
+        the explicit argument."""
+        states: dict = {"PLAN": "completed", "_pr_number": 777}
+        record_dispatch(states, SKILL_DO_PR_REVIEW)
+        snapshot = states["_sdlc_dispatches"][-1]["stage_snapshot"]
+        assert snapshot["pr_number"] is None
+
+    def test_record_dispatch_uses_explicit_pr_number_arg(self):
+        """The explicit pr_number argument is the sole provenance for the
+        snapshot's pr_number field."""
+        states: dict = {"PLAN": "completed"}
+        record_dispatch(states, SKILL_DO_PR_REVIEW, pr_number=42)
+        snapshot = states["_sdlc_dispatches"][-1]["stage_snapshot"]
+        assert snapshot["pr_number"] == 42
+
     def test_compute_same_stage_count_counts_same_skill_runs(self):
         states: dict = {}
         record_dispatch(states, SKILL_DO_PR_REVIEW)
@@ -632,7 +651,7 @@ def test_g6_does_not_fire_without_pr_number():
     """G6 is silent when no PR exists."""
     meta = {k: v for k, v in _g6_happy_meta().items() if k != "pr_number"}
     result = decide_next_dispatch(_g6_happy_states(), meta)
-    # G6 must not fire — result may be Dispatch (row 10/10b) or Blocked
+    # G6 must not fire — result may be Dispatch (row 10) or Blocked
     if isinstance(result, Dispatch):
         assert result.row_id != "G6"
     # Blocked is also acceptable (no pr_number + all stages done = ambiguous state)

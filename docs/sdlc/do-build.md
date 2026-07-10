@@ -13,8 +13,17 @@ session is only a last-resort fallback). A forked build subagent must still pass
 **Step 0 substrate probe / BUILD in_progress marker:**
 
 ```bash
-sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number}
+sdlc-tool stage-marker --stage BUILD --status in_progress --issue-number {issue_number} --run-id {run_id}
 ```
+
+Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+carries `--run-id {run_id}` — the run_id is supplied by the invoking supervisor
+(`/do-sdlc` or `/sdlc` carries it from `session-ensure`). When this skill is
+invoked standalone (no supervisor), run
+`sdlc-tool session-ensure --issue-number {issue_number}` once at the start and
+use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
+stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
+take no run-id.
 
 Parse the JSON: `in_progress` → substrate present; `degraded` → announce "running
 in degraded mode (state not persisted)" and continue (the build never depends on
@@ -60,11 +69,22 @@ PLAN_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
 git -C "$PLAN_REPO" fetch origin main 2>/dev/null || true
 PLAN_REL=$(python -c "import os; print(os.path.relpath('$PLAN_PATH', '$PLAN_REPO'))")
 PLAN_HASH=$(git -C "$PLAN_REPO" log -1 --format=%H origin/main -- "$PLAN_REL")
-sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool meta-set --key plan_hash_at_build_start --value "$PLAN_HASH" --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
 # Before PR: re-read CURRENT_HASH; if STORED_HASH non-empty and differs, abort
-# (plan revised mid-build) and `sdlc-tool stage-marker --stage BUILD --status failed`.
+# (plan revised mid-build) and `sdlc-tool stage-marker --stage BUILD --status failed --run-id {run_id}`.
 STORED_HASH=$(sdlc-tool stage-query --issue-number {issue_number} | python -c "import sys,json; print(json.load(sys.stdin).get('_meta',{}).get('plan_hash_at_build_start') or '')")
 ```
+
+**PR number recording (single writer).** Immediately after `gh pr create`
+succeeds, record the PR number on the session record:
+
+```bash
+sdlc-tool meta-set --key pr_number --value {PR} --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
+```
+
+This command is the single writer of `AgentSession.pr_number`; the read-only
+recovery rungs (validated gh search, `session/{slug}` branch-head fallback)
+live in `stage-query` and never write.
 
 **Build validators (Step 14) and verification parser (Step 5.1):**
 

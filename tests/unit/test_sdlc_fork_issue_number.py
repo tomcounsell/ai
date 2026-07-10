@@ -411,6 +411,9 @@ class TestIssuePrecedenceOverEnvSession:
             tech_debt=None,
             judges_json=None,
             consensus_json=None,
+            # #2003: verdict record is state-mutating and requires a run
+            # identity; the CLI parser always populates args.run_id.
+            run_id="run-1731",
         )
         base.update(kw)
         return SimpleNamespace(**base)

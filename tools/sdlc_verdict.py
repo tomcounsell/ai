@@ -13,10 +13,15 @@ Two entry points:
    ``.claude/skills/do-pr-review/SKILL.md``)::
 
        python -m tools.sdlc_verdict record --stage CRITIQUE \\
-           --verdict "NEEDS REVISION" --issue-number 1040
+           --verdict "NEEDS REVISION" --issue-number 1040 --run-id <hex>
        python -m tools.sdlc_verdict record --stage REVIEW \\
-           --verdict "CHANGES REQUESTED" --blockers 2 --issue-number 1040
+           --verdict "CHANGES REQUESTED" --blockers 2 --issue-number 1040 --run-id <hex>
        python -m tools.sdlc_verdict get --stage CRITIQUE --issue-number 1040
+
+   ``record`` is state-mutating and REQUIRES ``--run-id`` (issue #2003) — the
+   run identity emitted by ``sdlc-tool session-ensure``. Missing flag is a
+   named non-zero error (``RUN_ID_REQUIRED``); a foreign run_id refuses the
+   write with an ``ISSUE_LOCKED`` diagnostic. ``get`` takes no run-id.
 
 2. Python API (called from ``agent/pipeline_state.classify_outcome()``)::
 
@@ -409,7 +414,14 @@ def get_verdict(session, stage: str) -> dict:
 
 
 def _cli_record(args) -> dict:
-    session = _find_session(session_id=args.session_id, issue_number=args.issue_number, ensure=True)
+    # caller_run_id gates the cold-state auto-ensure (#2003 cycle-3): a
+    # run_id-carrying write that resolves no session must not mint one.
+    session = _find_session(
+        session_id=args.session_id,
+        issue_number=args.issue_number,
+        ensure=True,
+        caller_run_id=args.run_id,
+    )
     if session is None:
         return {}
     # Ownership guard: when --issue-number N is passed, the resolved session must
@@ -419,6 +431,18 @@ def _cli_record(args) -> dict:
         raise OwnershipError(
             f"Recorder ownership guard: session '{session_id_val}' does not own"
             f" issue #{args.issue_number}; refusing write to prevent divert"
+        )
+    # Run-identity gate (issue #2003): a foreign run holding the issue lock
+    # refuses the write with the ISSUE_LOCKED shape. Peek-only -- verdict
+    # record never renews the lock (#1954 scope-narrowing preserved).
+    from tools._sdlc_utils import check_run_ownership
+
+    conflict = check_run_ownership(session, args.run_id, issue_number=args.issue_number)
+    if conflict is not None:
+        raise OwnershipError(
+            f"ISSUE_LOCKED: issue lock held by a foreign run "
+            f"(run_id={conflict.get('owner_run_id')}, "
+            f"session={conflict.get('owner_session_id')}); refusing verdict write"
         )
     judges = None
     consensus = None
@@ -487,7 +511,16 @@ def main() -> None:
             "agent.sdlc_review_consensus.compute_consensus."
         ),
     )
-    rec.set_defaults(func=_cli_record)
+    rec.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        help=(
+            "Run identity emitted by `sdlc-tool session-ensure` (issue #2003). "
+            "REQUIRED for this state-mutating subcommand; missing -> RUN_ID_REQUIRED."
+        ),
+    )
+    rec.set_defaults(func=_cli_record, requires_run_id=True)
 
     gt = subparsers.add_parser("get", help="Retrieve a verdict")
     gt.add_argument("--stage", required=True, help="CRITIQUE or REVIEW")
@@ -496,6 +529,17 @@ def main() -> None:
     gt.set_defaults(func=_cli_get)
 
     args = parser.parse_args()
+
+    # Run-identity gate (issue #2003): a state-mutating call without --run-id
+    # exits non-zero with a NAMED error -- no mint, no adopt.
+    if getattr(args, "requires_run_id", False) and not getattr(args, "run_id", None):
+        print(
+            "sdlc_verdict: RUN_ID_REQUIRED — state-mutating calls must pass "
+            "--run-id (emitted by `sdlc-tool session-ensure`).",
+            file=sys.stderr,
+        )
+        print(json.dumps({"error": "RUN_ID_REQUIRED"}))
+        sys.exit(2)
 
     failed = False
     try:

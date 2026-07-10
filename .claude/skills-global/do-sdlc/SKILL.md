@@ -63,22 +63,20 @@ SDLC_REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null ||
 # repo's plans live. Set once and exported for the lifetime of the supervision loop.
 SDLC_TARGET_REPO=$(git rev-parse --show-toplevel 2>/dev/null || echo "")
 export SDLC_TARGET_REPO
-# SDLC_HOLDER_TOKEN (issue #1971): ONE shared issue-lock ownership token for this whole
-# supervision run. /do-sdlc drives the #1954 issue lock through many short-lived `sdlc-tool`
-# subprocesses; each is a fresh OS process, so without a shared token every call mints its
-# own and the run blocks ITSELF (next-skill sees session-ensure's lock as foreign). Persist
-# it to a gitignored file because shell env does not survive across separate tool calls —
-# every state-mutating `sdlc-tool` call below re-exports it from this file. The standalone
-# worker never sets this var (keeps its own random per-process token), so the real
-# worker-vs-local guard is preserved.
-SDLC_RUN_DIR="${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run"
-mkdir -p "$SDLC_RUN_DIR"
-python3 -c 'import uuid;print(uuid.uuid4().hex)' > "$SDLC_RUN_DIR/holder_{issue_number}"
-export SDLC_HOLDER_TOKEN=$(cat "$SDLC_RUN_DIR/holder_{issue_number}")
+# Run identity (issue #2003): `session-ensure` is the EXCLUSIVE minting site for the
+# run_id — one uuid-hex identity for this whole supervision run, minted by winning the
+# issue lock and emitted in the JSON output. No env vars, no run files: every
+# state-mutating `sdlc-tool` call in Step 3 passes it back explicitly via
+# `--run-id {run_id}`. The standalone worker threads its own run_id in-process, so the
+# real worker-vs-local guard is preserved.
 sdlc-tool session-ensure --issue-number {issue_number} --issue-url "https://github.com/$SDLC_REPO/issues/{issue_number}" 2>/dev/null || true
 ```
 
-Idempotent — reuses the existing `sdlc-local-{N}` session on re-runs. **Every `sdlc-tool` state call in Step 3 below MUST re-export `SDLC_HOLDER_TOKEN` from the run file first** (shown inline), or that call self-blocks on the issue lock.
+Read the JSON from the tool result and **record the `run_id`** (`{"session_id": ..., "created": ..., "run_id": "<hex>"}`) — carry it through every iteration of the Step 3 loop. Reuses the existing `sdlc-local-{N}` session on re-runs. The ownership contract:
+
+- **Every state-mutating `sdlc-tool` call** (`dispatch record`, `stage-marker`, `verdict record`, `meta-set`) **MUST pass `--run-id {run_id}` explicitly.** A missing flag is a named non-zero error (`RUN_ID_REQUIRED`) — the call never mints or adopts an identity.
+- A foreign run_id (another live run owns the issue lock) yields `ISSUE_LOCKED` with the owning `run_id`/`session_id` — treat it like a router block: stop and report.
+- **Recovery after run_id loss** (context compaction, restarted supervisor): re-run the `session-ensure` above. While the old lock is live it returns `ISSUE_LOCKED` (bounded by the ≤300s lock TTL, since nothing renews the orphaned run's lock); after the TTL lapses a fresh contest mints a new run_id. **If you still have the run_id**, add `--reuse-run-id {run_id}` to recover immediately under the same identity — the tool verifies the claim against the live lock (or, on a free lock, the session record) and never adopts an unverified one.
 
 ## Step 3: Supervision Loop
 
@@ -87,9 +85,10 @@ Repeat the following cycle. **Iteration cap: 15 dispatches** (a happy path is 8 
 ### 3a. Ask the router
 
 ```bash
-export SDLC_HOLDER_TOKEN=$(cat "${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run/holder_{issue_number}")
 sdlc-tool next-skill --issue-number {issue_number}
 ```
+
+(Read-only — `next-skill` takes no `--run-id`.)
 
 Interpret the JSON from the tool result:
 
@@ -101,8 +100,7 @@ Interpret the JSON from the tool result:
 ### 3b. Record the dispatch
 
 ```bash
-export SDLC_HOLDER_TOKEN=$(cat "${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run/holder_{issue_number}")
-sdlc-tool dispatch record --skill {skill} --issue-number {issue_number}
+sdlc-tool dispatch record --skill {skill} --issue-number {issue_number} --run-id {run_id}
 # include --pr-number {pr} once a PR exists (review/patch/docs/merge stages)
 ```
 
@@ -123,6 +121,7 @@ Context:
 - PR: {#pr or "none yet"}
 - Plan: {docs/plans/{slug}.md or "none yet"}
 - Prior stage outcome: {one-line summary, or "None — first stage"}
+- Run identity: {run_id} — pass --run-id {run_id} on every state-mutating sdlc-tool call (stage-marker, verdict record, meta-set, dispatch record); read-only calls take none.
 
 When done, report back (this is data for the supervisor, not prose for a human):
 - outcome: success | failure
@@ -131,15 +130,14 @@ When done, report back (this is data for the supervisor, not prose for a human):
 - failures: test failures, blockers, or errors verbatim if any
 ```
 
-Carry forward context between iterations: once BUILD reports a PR number, include it in every subsequent prompt and in `dispatch record --pr-number`.
+Carry forward context between iterations: the `run_id` goes into every stage prompt, and once BUILD reports a PR number, include it in every subsequent prompt and in `dispatch record --pr-number`.
 
 ### 3d. Backfill stage markers (TEST and PATCH only)
 
 `/do-test` and `/do-patch` do not write their own stage markers — on the bridge, the worker's dev-completion handler does it. Locally, the supervisor must:
 
 ```bash
-export SDLC_HOLDER_TOKEN=$(cat "${AI_REPO_ROOT:-$HOME/src/ai}/data/.sdlc_run/holder_{issue_number}")
-sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_number} 2>/dev/null || true
+sdlc-tool stage-marker --stage TEST --status completed --issue-number {issue_number} --run-id {run_id} 2>/dev/null || true
 # or --status failed, per the subagent's report
 ```
 

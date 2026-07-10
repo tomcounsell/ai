@@ -87,7 +87,7 @@ Verdicts stored in `stage_states._verdicts[stage]["verdict"]` are always in cano
 | `latest_critique_verdict` | `str \| null` | Normalized critique verdict, e.g. `"NEEDS REVISION"` |
 | `latest_review_verdict` | `str \| null` | Normalized review verdict, e.g. `"APPROVED"` |
 | `revision_applied` | `bool` | Whether `revision_applied` frontmatter flag is set on the plan |
-| `pr_number` | `int \| null` | Open PR number for this issue, if any |
+| `pr_number` | `int \| null` | PR number for this issue, if any -- see PR-number resolution below |
 | `pr_merge_state` | `str \| null` | `mergeStateStatus` from `gh pr view` (e.g. `"CLEAN"`) |
 | `ci_all_passing` | `bool \| null` | `True` when all CI status checks are `SUCCESS` |
 | `same_stage_dispatch_count` | `int` | Consecutive dispatches to the same stage without state change |
@@ -96,6 +96,20 @@ Verdicts stored in `stage_states._verdicts[stage]["verdict"]` are always in cano
 | `issue_number` | `int \| null` | Resolved issue number (added #1640) |
 
 `plan_exists` and `issue_number` are computed by `_compute_meta()` in `tools/sdlc_stage_query.py`. They allow the router's `_rule_no_plan` to distinguish a genuine bootstrap (`PLAN=="ready"` with no plan file) from a completed plan whose status string survived a Redis flush.
+
+### PR-number resolution: single writer, read-only recovery ladder (issue #2003)
+
+`AgentSession.pr_number` (`IntField(null=True)`) is a real schema field with exactly one writer: `sdlc-tool meta-set --key pr_number --value {PR} --run-id {run_id}`, invoked by `/do-build` at PR creation (see `docs/sdlc/do-build.md`). `meta-set` requires `--run-id` on this state-mutating write (`RUN_ID_REQUIRED` if omitted) and is gated by the issue-ownership lock -- a foreign run holding the issue cannot write another run's PR number.
+
+`_compute_meta()`'s resolution ladder, in order:
+
+1. **`session.pr_number` field** -- the single-writer value, when present.
+2. **Validated `gh` search** (`_lookup_pr`, PR #1998) -- a fuzzy search result is trusted only when the PR body contains a word-boundary `Closes/Fixes/Resolves #{N}` reference to this issue, closing the false-match class #1987 exposed.
+3. **Branch-head fallback** (`gh pr list --head session/{slug}`) -- recovers a PR whose creation crashed before the `meta-set` write landed (Race 2: PR created but the process dies before `pr_number` is saved). Uses the canonical `session/{slug}` branch shape.
+
+These are read-only *recovery* rungs, not additional writers -- the field stays single-writer; the ladder exists so a lost write is still recoverable from live GitHub state. The stale "primary rung" comment that used to describe a dead `getattr(session, "pr_number", None)` no-op (from before the field existed) has been corrected to describe the real field-backed write.
+
+`tools/sdlc_next_skill.py`'s `branch_exists` context signal (Row 5) checks the same canonical `session/{slug}` shape -- it used to check a fabricated `session/sdlc-{issue_number}` form this repo never creates, which meant the signal was permanently `False`. It resolves `True`/`False` when a slug is available; when no slug can be resolved at the call site it stays `False` rather than guessing.
 
 ## Key Files
 
@@ -106,6 +120,7 @@ Verdicts stored in `stage_states._verdicts[stage]["verdict"]` are always in cano
 | `tools/sdlc_session_ensure.py` | Create/find local SDLC sessions |
 | `tools/_sdlc_utils.py` | Shared `find_session_by_issue()` and `normalize_verdict()` helpers |
 | `tools/sdlc_verdict.py` | Record/read verdicts; normalizes at write boundary |
+| `tools/sdlc_meta_set.py` | Single writer of `AgentSession.pr_number` (`meta-set --key pr_number`) |
 | `agent/pipeline_state.py` | `PipelineStateMachine` reads/writes `stage_states` |
 
 ## Bridge vs Local

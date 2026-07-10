@@ -45,9 +45,19 @@ If NO issue or PR number was provided (just a feature description), invoke `/do-
 
 ## Step 1.5: Session Tracking
 
-No explicit session-ensure call is needed: since #1558, every `sdlc-tool` state *write* (`dispatch record`, `verdict record`, `meta-set`, `stage-marker`) auto-ensures the tracking session via `find_session(..., ensure=True)`. Two rules that DO matter:
+Run session-ensure once at the start of the stage. **If this conversation already carries a `run_id` for this issue** (minted by an earlier stage of this same pipeline run), pass it back so the tool reuses it instead of minting fresh — a bare re-ensure would lose the SET NX contest to your own prior stage's still-live lock and self-block:
+
+```bash
+# First stage of the run (no run_id in the conversation yet):
+sdlc-tool session-ensure --issue-number {issue_number}
+# Every subsequent stage (reuse the run_id from the earlier ensure):
+sdlc-tool session-ensure --issue-number {issue_number} --reuse-run-id {run_id}
+```
+
+`session-ensure` is the EXCLUSIVE minting site for the run identity (issue #2003): the JSON output carries a `run_id` (`{"session_id": ..., "created": ..., "run_id": "<hex>"}`) that every state-mutating `sdlc-tool` call must pass back explicitly. `--reuse-run-id` is verified, never adopted blindly: the tool honors the claim only when the live lock's owner matches it (or the lock is free and the session record corroborates it), and a foreign live holder still returns `ISSUE_LOCKED`. Three rules that DO matter:
 
 - **Pass `--issue-number` to every `sdlc-tool` invocation.** It is the authoritative session selector.
+- **Pass `--run-id {run_id}` to every state *write*** (`dispatch record`, `verdict record`, `meta-set`, `stage-marker`). A missing flag is a named non-zero error (`RUN_ID_REQUIRED`) — no mint, no adopt. Read-only subcommands (`stage-query`, `next-skill`, `verdict get`, `dispatch get`) take no run-id. Recovery after run_id loss: re-run `session-ensure` (returns `ISSUE_LOCKED` until the ≤300s lock TTL lapses, then mints fresh; with `--reuse-run-id {run_id}` it recovers immediately when the lock is still yours).
 - **Do NOT export `AGENT_SESSION_ID`** — env vars do not persist across Claude Code bash blocks.
 
 ## Step 2: Assess Current State
@@ -162,7 +172,7 @@ For the DOCS stage completion check, re-read the `sdlc-tool stage-query` output 
 
 **G7 blocks build while plan revision is in flight.** The lock is set by `/do-plan-critique` (Step 5.6) when the verdict requires a revision pass, cleared by `/do-plan` (Phase 4, Step 2b) after pushing the revision, and self-heals when `revision_applied: true` is in the plan frontmatter. Gated on `pr_number is None` so an already-shipped PR is never blocked.
 
-**ISSUE_LOCKED (not a G-guard, issue #1954):** `sdlc-tool next-skill` checks the issue-level ownership lock *before* evaluating G1-G7, and short-circuits to `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_session_id": ...}` if a different live session already holds the lock for this issue. `ensure_session` surfaces the same `{"blocked": true, ...}` shape at its own call site. `dispatch record`'s CLI wrapper surfaces the lock differently: on a failed write it peeks the lock and, if contention caused the failure, merges `reason`/`owner_session_id` into its existing `{"ok": false, "history_length": N}` result (never `blocked`) — see `_cli_record()` in `tools/sdlc_dispatch.py`. Treat either shape exactly like a G1-G7 block: surface the `reason` and `owner_session_id` to the human, do not loop, and do not attempt to route around it by guessing an alternative skill.
+**ISSUE_LOCKED (not a G-guard, issues #1954/#2003):** `sdlc-tool next-skill` checks the issue-level ownership lock *before* evaluating G1-G7, and short-circuits to `{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": ..., "owner_session_id": ..., "orphaned_lock": ...}` if a foreign run holds the lock for this issue. Ownership is keyed by `run_id` (minted only by `session-ensure`, carried via `--run-id`), never by session_id or process identity. `ensure_session` surfaces the same `{"blocked": true, ...}` shape at its own call site. `dispatch record`'s CLI wrapper surfaces the lock differently: on a failed write it peeks the lock and, if contention caused the failure, merges `reason`/`owner_run_id`/`owner_session_id` into its existing `{"ok": false, "history_length": N}` result (never `blocked`) — see `_cli_record()` in `tools/sdlc_dispatch.py`. `orphaned_lock: true` means the owning run died before its next renewal — the lock frees itself within the ≤300s TTL. **Self-owned continue path:** if `owner_run_id` equals a `run_id` this conversation minted earlier for this issue, the lock is YOURS — this is not a block. Re-run `sdlc-tool session-ensure --issue-number {N} --reuse-run-id {run_id}` (Step 1.5) and continue the stage under that run_id. Only a FOREIGN `owner_run_id` is a hard block: surface the `reason` and owner identifiers to the human, do not loop, and do not attempt to route around it by guessing an alternative skill — exactly like a G1-G7 block.
 
 **Known gap — stale REVIEW verdict after PATCH (issue #1932 / PR #1941):** G3 and G6 above key off `_verdicts["REVIEW"]` containing `APPROVED`, not off whether that verdict was recorded *after* the most recent PATCH commit. Before PR #1941's router fix (and for any similar gap not yet caught), `next-skill` can propose `/do-merge` on a stale pre-patch `APPROVED`/`CHANGES REQUESTED` verdict because nothing forces a fresh `/do-pr-review` after `/do-patch` resolves REVIEW findings. Before trusting a router-proposed `/do-merge`, verify with `sdlc-tool verdict get --stage REVIEW --issue-number {N}` that the recorded verdict is `APPROVED` and postdates the patch commit; if not, manually dispatch `/do-pr-review` first.
 
@@ -170,12 +180,12 @@ Record every dispatch decision via `sdlc-tool dispatch record` BEFORE invoking t
 
 ```bash
 # Record a dispatch event (call BEFORE invoking the sub-skill)
-sdlc-tool dispatch record --skill /do-build --issue-number {issue_number}
+sdlc-tool dispatch record --skill /do-build --issue-number {issue_number} --run-id {run_id}
 
 # Record with PR context (for review/patch/merge stages)
-sdlc-tool dispatch record --skill /do-pr-review --issue-number {issue_number} --pr-number {pr_number}
+sdlc-tool dispatch record --skill /do-pr-review --issue-number {issue_number} --pr-number {pr_number} --run-id {run_id}
 
-# Inspect the dispatch history (debug G4 state)
+# Inspect the dispatch history (debug G4 state; read-only, no --run-id)
 sdlc-tool dispatch get --issue-number {issue_number}
 ```
 
@@ -221,7 +231,7 @@ Blocked:
 
 Blocked (issue-level ownership lock -- not a G-guard, see Step 3.5):
 ```json
-{"blocked": true, "reason": "ISSUE_LOCKED", "owner_session_id": "..."}
+{"blocked": true, "reason": "ISSUE_LOCKED", "owner_run_id": "...", "owner_session_id": "...", "orphaned_lock": false}
 ```
 
 **How to use the output:**

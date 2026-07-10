@@ -163,7 +163,8 @@ class TestVerdictAndDispatchLoudExit:
             "def boom(*a, **kw): raise RuntimeError('redis down')\n"
             "sdlc_verdict._find_session = boom\n"
             "sys.argv = ['sdlc_verdict', 'record', '--stage', 'CRITIQUE', "
-            "'--verdict', 'NEEDS REVISION', '--session-id', '__nope__']\n"
+            "'--verdict', 'NEEDS REVISION', '--session-id', '__nope__', "
+            f"'--run-id', '{'a' * 32}']\n"
             "sdlc_verdict.main()\n"
         )
         result = subprocess.run(
@@ -212,7 +213,7 @@ class TestVerdictAndDispatchLoudExit:
             "def boom(*a, **kw): raise RuntimeError('redis down')\n"
             "sdlc_dispatch._find_session = boom\n"
             "sys.argv = ['sdlc_dispatch', 'record', '--skill', '/do-build', "
-            "'--session-id', '__nope__']\n"
+            f"'--session-id', '__nope__', '--run-id', '{'a' * 32}']\n"
             "sdlc_dispatch.main()\n"
         )
         result = subprocess.run(

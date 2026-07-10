@@ -54,6 +54,7 @@ import argparse
 import json
 import logging
 import sys
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -119,21 +120,28 @@ def _build_context(proposed_skill: str | None, issue_number: int | None) -> dict
             pass
 
     # Check whether the issue-specific session branch already exists (informs Row 5).
-    # Uses `session/sdlc-{issue_number}` — the canonical branch name for SDLC work.
-    # Checking just "session/" would always be True in this repo due to many active
-    # session/ branches; we must check for the issue-specific pattern.
+    # Canonical branch shape is `session/{slug}` where the slug is the plan
+    # filename stem (#1915 slug-wins ownership; an issue-number-derived branch
+    # form is fabricated — this repo never creates one). Without a resolvable
+    # plan/slug we cannot affirm existence, so branch_exists stays False (#2003).
     if issue_number:
+        context["branch_exists"] = False
         try:
-            import subprocess
+            from tools._sdlc_utils import find_plan_path
 
-            proc2 = subprocess.run(
-                ["git", "branch", "-a"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            branch_names = proc2.stdout if proc2.returncode == 0 else ""
-            context["branch_exists"] = f"session/sdlc-{issue_number}" in branch_names
+            plan_path = find_plan_path(issue_number)
+            if plan_path is not None:
+                slug = Path(plan_path).stem
+                import subprocess
+
+                proc2 = subprocess.run(
+                    ["git", "branch", "-a"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                branch_names = proc2.stdout if proc2.returncode == 0 else ""
+                context["branch_exists"] = f"session/{slug}" in branch_names
         except Exception:
             context["branch_exists"] = False
 
@@ -174,13 +182,34 @@ def decide(
         if issue_number:
             from models.session_lifecycle import touch_issue_lock
 
-            lock_result = touch_issue_lock(issue_number, session_id or "", peek=True)
+            # Run-identity peek (issue #2003, minimal call-site update): this
+            # read-only pre-check compares the lock against the CURRENT
+            # legitimate run's identity, read back from the issue session's
+            # active_run_id mirror (read-only -- peek never mutates or adopts).
+            # When they match, the lock belongs to the run driving this
+            # pipeline and next-skill proceeds; a mismatch (crash window /
+            # foreign takeover mid-write) blocks with the owner surfaced.
+            peek_run_id = None
+            try:
+                from tools._sdlc_utils import find_session_by_issue
+
+                issue_session = find_session_by_issue(issue_number)
+                if issue_session is not None:
+                    peek_run_id = getattr(issue_session, "active_run_id", None)
+            except Exception:
+                peek_run_id = None
+
+            lock_result = touch_issue_lock(
+                issue_number, peek_run_id, session_id=session_id or "", peek=True
+            )
             if not lock_result.acquired:
                 return {
                     "blocked": True,
                     "reason": "ISSUE_LOCKED",
                     "guard_id": "ISSUE_LOCK",
+                    "owner_run_id": lock_result.owner_run_id,
                     "owner_session_id": lock_result.owner_session_id,
+                    "orphaned_lock": lock_result.orphaned_lock,
                 }
 
         enriched = _resolve_enriched(issue_number, session_id)

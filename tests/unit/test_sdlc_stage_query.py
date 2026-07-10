@@ -264,10 +264,10 @@ class TestFindSessionById:
 
 
 class TestLookupPrNumber:
-    """D4: _lookup_pr_number issue-search primary + branch-head fallback."""
+    """D4: _lookup_pr issue-search primary + branch-head fallback."""
 
     def test_issue_search_primary_path(self):
-        from tools.sdlc_stage_query import _lookup_pr_number
+        from tools.sdlc_stage_query import _lookup_pr
 
         # The validated issue-search helper returns a PR whose body references
         # the issue; the branch-head fallback must not be consulted.
@@ -275,32 +275,32 @@ class TestLookupPrNumber:
             patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=55) as search,
             patch("tools.sdlc_stage_query._gh_pr_list") as gh,
         ):
-            assert _lookup_pr_number(145, slug="some_slug") == 55
+            assert _lookup_pr(145, slug="some_slug") == 55
         search.assert_called_once()
         assert search.call_args.args[0] == 145
         gh.assert_not_called()
 
     def test_branch_head_fallback_when_issue_search_empty(self):
-        from tools.sdlc_stage_query import _lookup_pr_number
+        from tools.sdlc_stage_query import _lookup_pr
 
         # Validated issue search returns None; branch-head returns 88.
         with (
             patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=None),
             patch("tools.sdlc_stage_query._gh_pr_list", return_value=88) as gh,
         ):
-            assert _lookup_pr_number(145, slug="my_slug") == 88
+            assert _lookup_pr(145, slug="my_slug") == 88
         branch_args = gh.call_args_list[0].args[0]
         assert "--head" in branch_args and "session/my_slug" in branch_args
 
     def test_no_slug_no_branch_fallback(self):
-        from tools.sdlc_stage_query import _lookup_pr_number
+        from tools.sdlc_stage_query import _lookup_pr
 
         # Only the validated issue search runs (returns None); no branch-head attempt.
         with (
             patch("tools.sdlc_stage_query._gh_pr_search_issue_ref", return_value=None) as search,
             patch("tools.sdlc_stage_query._gh_pr_list") as gh,
         ):
-            assert _lookup_pr_number(145, slug=None) is None
+            assert _lookup_pr(145, slug=None) is None
         search.assert_called_once()
         gh.assert_not_called()
 
@@ -314,14 +314,14 @@ class TestLookupPrNumber:
     def test_issue_1987_false_match_returns_none(self):
         """Regression #1987: a fuzzy hit whose body references a *different*
         issue must not be trusted; with no slug fallback the result is None."""
-        from tools.sdlc_stage_query import _lookup_pr_number
+        from tools.sdlc_stage_query import _lookup_pr
 
         # Search surfaces PR #1984 (body: "Closes #1967") for issue 1950.
         proc = MagicMock(
             returncode=0, stdout=json.dumps([{"number": 1984, "body": "Closes #1967"}])
         )
         with patch("tools.sdlc_stage_query.subprocess.run", return_value=proc):
-            assert _lookup_pr_number(1950, slug=None) is None
+            assert _lookup_pr(1950, slug=None) is None
 
     def test_issue_search_validated_hit_returned(self):
         from tools.sdlc_stage_query import _gh_pr_search_issue_ref
@@ -451,7 +451,7 @@ class TestEnrichedPayload:
         mock_session.pr_number = 42
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                     result = query_enriched(session_id="sid")
 
@@ -496,7 +496,7 @@ class TestEnrichedPayload:
         mock_session.pr_number = None
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                     result = query_enriched(session_id="sid")
 
@@ -507,25 +507,44 @@ class TestEnrichedPayload:
 
         assert _critique_verdict_is_stale(result["stages"]) is True
 
-    def test_pr_number_resolved_from_meta_key(self):
-        """D4: _compute_meta resolves pr_number from the _pr_number meta key."""
+    def test_pr_number_resolved_from_session_field(self):
+        """#2003 T1.7: the AgentSession.pr_number FIELD is the first rung —
+        when set, the read-only recovery rungs (gh lookup) are never needed."""
+        from tools.sdlc_stage_query import query_enriched
+
+        mock_session = MagicMock()
+        mock_session.stage_states = json.dumps({"ISSUE": "completed", "PLAN": "completed"})
+        mock_session.pr_number = 777
+        mock_session.slug = None
+
+        with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None) as lookup:
+                with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
+                    result = query_enriched(session_id="sid")
+
+        assert result["_meta"]["pr_number"] == 777
+        lookup.assert_not_called()
+
+    def test_pr_number_meta_rung_deleted(self):
+        """#2003 T1.7 hard cutover: a stale `_pr_number` stage_states key is
+        IGNORED — resolution goes session field → gh recovery rungs only."""
         from tools.sdlc_stage_query import query_enriched
 
         mock_session = MagicMock()
         mock_session.stage_states = json.dumps(
             {"ISSUE": "completed", "PLAN": "completed", "_pr_number": 777}
         )
-        mock_session.pr_number = None  # no session attribute
+        mock_session.pr_number = None  # field unset → falls through to gh lookup
         mock_session.slug = None
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            # gh lookup must NOT be needed — the meta key wins.
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None) as lookup:
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=555) as lookup:
                 with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                     result = query_enriched(session_id="sid")
 
-        assert result["_meta"]["pr_number"] == 777
-        lookup.assert_not_called()
+        # The legacy meta key must not win; the recovery ladder resolves 555.
+        assert result["_meta"]["pr_number"] == 555
+        lookup.assert_called_once()
 
     def test_defaults_when_session_missing(self):
         from tools.sdlc_stage_query import query_enriched
@@ -649,7 +668,7 @@ class TestEnrichedPayload:
         mock_session.pr_number = None
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
                     "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
                 ):
@@ -667,7 +686,7 @@ class TestEnrichedPayload:
         mock_session.pr_number = None
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
                     "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
                 ):
@@ -688,7 +707,7 @@ class TestEnrichedPayload:
         mock_session.pr_number = None
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
                     "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
                 ):
@@ -706,7 +725,7 @@ class TestEnrichedPayload:
         mock_session.pr_number = None
 
         with patch("tools.sdlc_stage_query._find_session_by_id", return_value=mock_session):
-            with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+            with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                 with patch(
                     "tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)
                 ):
@@ -918,7 +937,7 @@ class TestResolveTargetRepo:
 
         with patch("tools.sdlc_stage_query._resolve_target_repo", side_effect=fake_resolve):
             with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
-                with patch("tools.sdlc_stage_query._lookup_pr_number", return_value=None):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
                     with patch("tools.sdlc_stage_query._find_plan_path", return_value=None):
                         from tools.sdlc_stage_query import _compute_meta
 

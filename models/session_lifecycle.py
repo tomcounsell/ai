@@ -24,7 +24,6 @@ import logging
 import os
 import socket
 import time
-import uuid
 from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
@@ -768,7 +767,7 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
         return True
 
 
-# ── Issue-level SDLC ownership lock (issue #1954) ───────────────────────
+# ── Issue-level SDLC ownership lock (issues #1954, #2003) ───────────────
 #
 # Two independent SDLC entry points -- a local CLI session and the
 # standalone worker process -- can each resolve the IDENTICAL deterministic
@@ -776,66 +775,91 @@ def claim_pending_run(session_id: str, worker_id: str, ttl: int = RUN_CLAIM_TTL_
 # ownership were compared by session_id, the lock would be a no-op: both
 # live processes would see "I already own this" and duplicate SDLC work
 # would proceed unchecked -- the root cause of the #1915 duplicate-PR
-# incident. Ownership is therefore compared by a per-process
-# ``holder_token`` (see _process_holder_token()), never by session_id.
-# session_id is carried in the stored payload for human-readable display
-# only -- it must never be used to decide ownership.
+# incident. Ownership is therefore compared by a per-RUN ``run_id`` (issue
+# #2003): one uuid-hex identity per logical pipeline run, minted exclusively
+# by ``tools.sdlc_session_ensure.ensure_session()`` when it wins the SET NX
+# contest, and passed EXPLICITLY to every state-mutating call (``--run-id``
+# on the sdlc-tool CLIs; ``AgentSession.active_run_id`` read-back on the two
+# in-process renewal paths). session_id is carried in the stored payload for
+# human-readable display only -- it must never be used to decide ownership.
 #
 # Modeled directly on claim_pending_run() above: same plain (non-Popoto-
 # managed) SET NX EX Redis idiom, same fail-open behavior on Redis errors.
+# The lock key is NOT Popoto-managed, so raw Redis GET/SET/EXPIRE/EVAL here
+# is fine and already the established pattern.
 
 ISSUE_LOCK_TTL_SECONDS = int(os.environ.get("ISSUE_LOCK_TTL_SECONDS", "300"))
 
-_holder_token: str | None = None
-
-
-def _process_holder_token() -> str:
-    """Return this process's lock-ownership token.
-
-    Resolution order, cached in a module-level variable for the remainder of
-    the process's lifetime:
-
-    1. ``SDLC_HOLDER_TOKEN`` env var, when set to a non-empty value. This is
-       the shared-ownership seam (issue #1971): a local ``/do-sdlc``
-       supervisor drives the router through many short-lived ``sdlc-tool``
-       subprocesses, each a fresh OS process. Without a shared token, process
-       B (``next-skill``) sees process A's (``session-ensure``) lock as
-       foreign and blocks the supervisor against itself. The supervisor mints
-       ONE token per run and exports it so all its subprocesses present one
-       consistent owner. The standalone worker calls ``touch_issue_lock()``
-       in-process (one stable token for its lifetime) and never sets this
-       var, so the real worker-vs-local guard (#1954 / #1915) is preserved.
-    2. Otherwise a random ``uuid4`` -- unique per OS process.
-
-    This token -- not session_id -- is the unit of comparison for issue-lock
-    ownership; see the module note above for why session_id cannot be used.
-    """
-    global _holder_token
-    if _holder_token is None:
-        _holder_token = os.environ.get("SDLC_HOLDER_TOKEN") or uuid.uuid4().hex
-    return _holder_token
+# Compare-and-delete release (issue #2003, cycle-2 CONCERN 2): delete the
+# lock key only if its value is still byte-identical to the payload we read
+# (which carries our run_id). The standard Lua release pattern -- a raw DEL
+# could race a successor's fresh acquisition and delete THEIR lock.
+_RELEASE_IF_VALUE_MATCHES_LUA = (
+    "if redis.call('get', KEYS[1]) == ARGV[1] then "
+    "return redis.call('del', KEYS[1]) else return 0 end"
+)
 
 
 class IssueLockResult(NamedTuple):
     """Result of touch_issue_lock().
 
     Attributes:
-        acquired: True if this process holds (or now holds, after this
-            call) the lock.
+        acquired: True if the supplied run_id holds (or now holds, after
+            this call) the lock.
         owner_session_id: The session_id recorded in the lock payload --
             for human-readable display/logging only. NEVER compare this to
             a caller's own session_id to determine ownership: two
             independent live processes can resolve the identical
             deterministic session_id for the same issue.
+        owner_run_id: The run_id recorded in the lock payload. This IS the
+            unit of ownership comparison.
+        orphaned_lock: Peek-only signal -- True when the lock is held by a
+            run_id that matches no live (non-terminal) session's
+            ``active_run_id``, i.e. the owning run died between acquiring
+            the lock and its next renewal. Bounded by the lock TTL.
     """
 
     acquired: bool
     owner_session_id: str | None
+    owner_run_id: str | None = None
+    orphaned_lock: bool = False
+
+
+def _run_id_has_live_session(run_id: str | None) -> bool:
+    """Return True when any live (non-terminal) session carries this run_id.
+
+    Used by the peek path to flag orphaned locks (issue #2003, Race 3): a
+    lock whose run_id matches no live session's ``active_run_id`` was left
+    behind by a run that died inside the acquire→save crash window (or after
+    its record was finalized). Fails toward True (NOT orphaned) on any
+    error, so a Redis/ORM hiccup never mislabels a healthy owner as a ghost.
+    """
+    if not run_id:
+        return False
+    try:
+        from models.agent_session import AgentSession
+
+        for s in AgentSession.query.filter(session_type="eng"):
+            if getattr(s, "active_run_id", None) != run_id:
+                continue
+            if getattr(s, "status", None) not in TERMINAL_STATUSES:
+                return True
+        return False
+    except Exception as e:
+        logger.debug(
+            "[session-lifecycle] orphan check for run_id=%s failed (%s: %s) -- "
+            "assuming not orphaned",
+            run_id,
+            type(e).__name__,
+            e,
+        )
+        return True
 
 
 def touch_issue_lock(
     issue_number: int | None,
-    session_id: str,
+    run_id: str | None,
+    session_id: str = "",
     ttl: int = ISSUE_LOCK_TTL_SECONDS,
     peek: bool = False,
 ) -> IssueLockResult:
@@ -843,49 +867,60 @@ def touch_issue_lock(
 
     Backed by a plain (non-Popoto-managed) Redis key
     ``session:issuelock:{issue_number}`` holding a JSON payload
-    ``{"holder_token", "session_id", "pid", "hostname"}``. Ownership is
-    determined SOLELY by comparing ``holder_token`` against this process's
-    own token (``_process_holder_token()``) -- never by session_id, since
-    two independent processes can resolve the identical deterministic
-    session_id for the same issue (see module note above; issue #1954,
-    incident #1915).
+    ``{"run_id", "session_id", "pid", "hostname"}``. Ownership is decided
+    SOLELY by comparing the supplied ``run_id`` against the lock payload's
+    ``run_id`` -- a fresh live check on every mutation -- never by
+    session_id, since two independent processes can resolve the identical
+    deterministic session_id for the same issue (see module note above;
+    issues #1954/#2003, incident #1915).
 
-    Behavior:
-    - No existing key: ``SET NX EX`` claims it. Returns ``acquired=True``.
-    - Existing key, same holder_token (this process already owns it):
-      renews via ``EXPIRE``. Returns ``acquired=True``.
-    - Existing key, different holder_token: another live process owns it.
-      Returns ``acquired=False``, with the *other* process's session_id
-      surfaced for human-readable logging only.
+    Behavior (non-peek):
+    - No ``run_id`` supplied: never mutates. Minting is exclusive to
+      ``ensure_session`` -- a mutation call without an identity must not
+      SET NX its way into ownership. Reports the current holder
+      (``acquired=False`` when a lock exists, ``True`` when free).
+    - No existing key: ``SET NX EX`` claims it carrying ``run_id``.
+      Returns ``acquired=True``.
+    - Existing key, same run_id: renews via ``EXPIRE``. ``acquired=True``.
+    - Existing key, different run_id: a foreign run owns it. Returns
+      ``acquired=False`` with the owner's run_id + session_id surfaced.
     - Malformed/legacy (non-JSON) value: treated as a foreign, non-matching
       holder -- fails toward "not acquired". Never raises on ``json.loads``.
     - Race: the ``SET NX`` fails because the key existed, but by the time
       of the follow-up ``GET`` the key has since expired -- treated as
       free; this attempt succeeds (``acquired=True``).
 
+    Stale-owner takeover keeps TTL semantics: an expired lock is claimable
+    by the next fresh candidate; no takeover reads ``active_run_id`` as
+    authority.
+
     Args:
         issue_number: The GitHub issue number this lock guards. Falsy
             (``None`` or ``0``) is a no-op: fails open (``acquired=True``)
             without touching Redis, mirroring how other call sites in this
             module guard an absent identity.
+        run_id: The caller's run identity -- the unit of ownership
+            comparison. Minted only by ``ensure_session``; carried
+            explicitly by every state-mutating caller.
         session_id: The caller's session_id, stored in the payload for
             display purposes only.
         ttl: Lock TTL in seconds. Defaults to ``ISSUE_LOCK_TTL_SECONDS``.
-        peek: If True, reports the current lock state (same holder_token
+        peek: If True, reports the current lock state (same run_id
             comparison) WITHOUT acquiring, renewing, or otherwise mutating
             the lock. An unheld key is reported as ``acquired=True``
-            (nothing blocking), ``owner_session_id=None``.
+            (nothing blocking). A held key whose run_id matches no live
+            session's ``active_run_id`` additionally reports
+            ``orphaned_lock=True``.
 
     Fails OPEN (returns ``acquired=True``) on any Redis exception -- mirrors
     ``claim_pending_run()``'s existing fail-open behavior: a Redis hiccup
     degrades to no cross-process protection rather than wedging the SDLC
-    pipeline.
+    pipeline. Each fail-open logs the swallowed error CLASS explicitly.
     """
     if not issue_number:
         return IssueLockResult(acquired=True, owner_session_id=None)
 
     key = f"session:issuelock:{issue_number}"
-    token = _process_holder_token()
 
     try:
         from popoto.redis_db import POPOTO_REDIS_DB as _R
@@ -898,13 +933,40 @@ def touch_issue_lock(
                 payload = json.loads(raw)
             except (TypeError, ValueError):
                 return IssueLockResult(acquired=False, owner_session_id=None)
-            if payload.get("holder_token") == token:
-                return IssueLockResult(acquired=True, owner_session_id=payload.get("session_id"))
-            return IssueLockResult(acquired=False, owner_session_id=payload.get("session_id"))
+            owner_run_id = payload.get("run_id")
+            owner_session_id = payload.get("session_id")
+            if run_id and owner_run_id == run_id:
+                return IssueLockResult(
+                    acquired=True,
+                    owner_session_id=owner_session_id,
+                    owner_run_id=owner_run_id,
+                )
+            return IssueLockResult(
+                acquired=False,
+                owner_session_id=owner_session_id,
+                owner_run_id=owner_run_id,
+                orphaned_lock=not _run_id_has_live_session(owner_run_id),
+            )
+
+        if not run_id:
+            # Mutation attempted with no identity: never mint (that is
+            # ensure_session's exclusive job) -- report the current holder.
+            raw = _R.get(key)
+            if raw is None:
+                return IssueLockResult(acquired=True, owner_session_id=None)
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                return IssueLockResult(acquired=False, owner_session_id=None)
+            return IssueLockResult(
+                acquired=False,
+                owner_session_id=payload.get("session_id"),
+                owner_run_id=payload.get("run_id"),
+            )
 
         value = json.dumps(
             {
-                "holder_token": token,
+                "run_id": run_id,
                 "session_id": session_id,
                 "pid": os.getpid(),
                 "hostname": socket.gethostname(),
@@ -912,14 +974,14 @@ def touch_issue_lock(
         )
         acquired = _R.set(key, value, nx=True, ex=ttl)
         if acquired:
-            return IssueLockResult(acquired=True, owner_session_id=session_id)
+            return IssueLockResult(acquired=True, owner_session_id=session_id, owner_run_id=run_id)
 
         raw = _R.get(key)
         if raw is None:
             # Key existed at SET-NX time but expired before this follow-up
             # GET (race window) -- nothing blocks us now; treat this
             # attempt as a successful acquisition.
-            return IssueLockResult(acquired=True, owner_session_id=session_id)
+            return IssueLockResult(acquired=True, owner_session_id=session_id, owner_run_id=run_id)
         try:
             payload = json.loads(raw)
         except (TypeError, ValueError):
@@ -930,18 +992,67 @@ def touch_issue_lock(
             )
             return IssueLockResult(acquired=False, owner_session_id=None)
 
-        if payload.get("holder_token") == token:
+        if payload.get("run_id") == run_id:
             _R.expire(key, ttl)
-            return IssueLockResult(acquired=True, owner_session_id=payload.get("session_id"))
+            return IssueLockResult(
+                acquired=True,
+                owner_session_id=payload.get("session_id"),
+                owner_run_id=run_id,
+            )
 
-        return IssueLockResult(acquired=False, owner_session_id=payload.get("session_id"))
+        return IssueLockResult(
+            acquired=False,
+            owner_session_id=payload.get("session_id"),
+            owner_run_id=payload.get("run_id"),
+        )
     except Exception as e:
         logger.warning(
-            "[session-lifecycle] issue-lock acquisition failed for issue=%s (failing open): %s",
+            "[session-lifecycle] issue-lock acquisition failed for issue=%s "
+            "(failing open; error class %s): %s",
             issue_number,
+            type(e).__name__,
             e,
         )
-        return IssueLockResult(acquired=True, owner_session_id=session_id)
+        return IssueLockResult(acquired=True, owner_session_id=session_id, owner_run_id=run_id)
+
+
+def release_issue_lock(issue_number: int | None, run_id: str | None) -> bool:
+    """Release the issue lock via COMPARE-AND-DELETE, never a raw DEL.
+
+    Deletes ``session:issuelock:{issue_number}`` only if the stored payload
+    still carries ``run_id`` (Lua value-compare release pattern -- issue
+    #2003, cycle-2 CONCERN 2). A delayed cleanup can therefore never delete
+    a successor's freshly acquired lock.
+
+    Returns True if the lock was deleted, False otherwise (not held, held by
+    a different run, or Redis error -- errors log the swallowed class and
+    fail toward "not released").
+    """
+    if not issue_number or not run_id:
+        return False
+
+    key = f"session:issuelock:{issue_number}"
+    try:
+        from popoto.redis_db import POPOTO_REDIS_DB as _R
+
+        raw = _R.get(key)
+        if raw is None:
+            return False
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+        if payload.get("run_id") != run_id:
+            return False
+        return bool(_R.eval(_RELEASE_IF_VALUE_MATCHES_LUA, 1, key, raw))
+    except Exception as e:
+        logger.warning(
+            "[session-lifecycle] issue-lock release failed for issue=%s (error class %s): %s",
+            issue_number,
+            type(e).__name__,
+            e,
+        )
+        return False
 
 
 def _finalize_parent_sync(

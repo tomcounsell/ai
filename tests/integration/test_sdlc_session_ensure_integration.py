@@ -86,8 +86,10 @@ def test_bridge_short_circuit_produces_no_duplicate(monkeypatch, cleanup_test_se
     result = ensure_session(issue_number=9999)
 
     # The short-circuit must return the bridge session id and NOT create a new
-    # sdlc-local-9999 record.
-    assert result == {"session_id": bridge_session_id, "created": False}
+    # sdlc-local-9999 record. It also mints the run identity (#2003).
+    assert result["session_id"] == bridge_session_id
+    assert result["created"] is False
+    assert result["run_id"]
 
     # Confirm via direct Popoto query: the duplicate zombie must not exist.
     zombie = list(AgentSession.query.filter(session_id="sdlc-local-9999"))

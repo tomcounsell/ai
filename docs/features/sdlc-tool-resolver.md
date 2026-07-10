@@ -245,7 +245,7 @@ The bridge sets `cwd = target project's worktree` when spawning a PM session. Th
 
 ### Solution: `_resolve_target_repo()` in `tools/_sdlc_utils.py`
 
-`_resolve_target_repo()` returns an `owner/name` slug (e.g. `tomcounsell/ai`) or `None`. It is called **exactly once per `_compute_meta` invocation** in `tools/sdlc_stage_query.py`; the resolved slug is threaded as the `repo=` keyword argument into both `_fetch_pr_merge_state` and `_gh_pr_list` (via `_lookup_pr_number`). Neither callee calls `_resolve_target_repo` itself — resolution happens once at the top of `_compute_meta`.
+`_resolve_target_repo()` returns an `owner/name` slug (e.g. `tomcounsell/ai`) or `None`. It is called **exactly once per `_compute_meta` invocation** in `tools/sdlc_stage_query.py`; the resolved slug is threaded as the `repo=` keyword argument into both `_fetch_pr_merge_state` and `_gh_pr_list` (via `_lookup_pr`). Neither callee calls `_resolve_target_repo` itself — resolution happens once at the top of `_compute_meta`.
 
 ### Resolution ladder
 

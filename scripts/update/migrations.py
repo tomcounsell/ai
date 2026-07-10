@@ -205,6 +205,30 @@ def _migrate_confirm_issue_number_field_readable(project_dir: Path) -> str | Non
         return str(e)
 
 
+def _migrate_confirm_run_identity_fields_readable(project_dir: Path) -> str | None:
+    """Confirm AgentSession.active_run_id + pr_number (issue #2003) read on legacy rows.
+
+    One idempotent migration registering BOTH new nullable fields (Popoto
+    rule: additive nullable fields need no backfill). Mirrors
+    ``_migrate_confirm_issue_number_field_readable``: a read-only probe over a
+    small sample of existing records proving Popoto's lazy-load descriptor
+    healing resolves cleanly for rows written before the fields existed.
+    Writes nothing. Returns None on success, error string on failure.
+    """
+    try:
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from models.agent_session import AgentSession
+
+        for session in list(AgentSession.query.all())[:5]:
+            _ = session.active_run_id  # noqa: B018 -- read-only healing probe
+            _ = session.pr_number  # noqa: B018 -- read-only healing probe
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing.
 
@@ -249,6 +273,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_issue_number_field_readable": (
         _migrate_confirm_issue_number_field_readable,
         "Confirm AgentSession.issue_number (issue #1954) reads cleanly on legacy rows",
+    ),
+    "confirm_run_identity_fields_readable": (
+        _migrate_confirm_run_identity_fields_readable,
+        "Confirm AgentSession.active_run_id + pr_number (issue #2003) read cleanly on legacy rows",
     ),
 }
 

@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 """
-Merge guard: blocks direct `g h  p r  m e r g e` calls that bypass the /do-merge gate.
+Merge guard: blocks direct `g h  p r  m e r g e` calls unless the live merge
+predicate passes (issue #2003).
 
-The /do-merge skill is the authorization mechanism -- it runs the gate checks
-(TEST, REVIEW, DOCS, lockfile, full suite, plan completion) and, if they all
-pass, creates a short-lived authorization file that this hook checks before
-allowing the merge. This prevents any caller from skipping the gate and
-directly invoking the merge command.
+Enforcement contract (replaces the pre-#2003 "auth file exists" check, which
+proved someone created a file, not that the gate ran — see the PR #2005
+bypass incident):
 
-Gate flow (works the same for autonomous PM sessions and humans):
-1. /do-merge is invoked with a PR number
-2. /do-merge runs all gate checks
-3. If all gates pass, /do-merge creates data/merge_authorized_{pr_number}
-4. /do-merge calls the merge command -- this hook sees the auth file
-   and allows the call through
-5. /do-merge cleans up the authorization file after the merge
+1. A detected real merge command with a PR number FIRST checks the
+   break-glass override file ``data/merge_authorized_{pr}``: if it exists AND
+   contains a line matching ``override: <reason>`` (non-empty reason), the
+   merge is ALLOWED, logged at WARNING, and a ``merge_guard.override_used``
+   metric is emitted. An empty or legacy-format file (no ``override:`` line)
+   is treated as ABSENT — it never authorizes anything.
+2. With no valid override, the hook evaluates the shared terminal merge
+   predicate (``tools.merge_predicate.evaluate_merge_predicate``) — the same
+   helper the /do-merge skill consumes, so hook and skill cannot drift. The
+   predicate covers PR state (OPEN/MERGEABLE/CLEAN/CI-green/issue link), the
+   DOCS stage gate, and REVIEW-verdict freshness against the PR head commit.
+3. Predicate allowed → ALLOW silently. Predicate failed → BLOCK, naming the
+   exact failed leg(s). Predicate evaluation raises → BLOCK (fail-closed)
+   with an actionable message.
+4. A merge command with no extractable PR number → BLOCK with the generic
+   /do-merge message (the predicate cannot be evaluated without a PR number).
 
-This hook does NOT require human-in-the-loop. It requires that the gate ran
-and passed. A PM session that runs /do-merge is a fully valid authorizer.
+/do-merge no longer creates/deletes the auth file on the happy path — the
+hook allows the merge because the predicate passes live. This hook does NOT
+require human-in-the-loop; it requires the predicate to hold.
 
 Exit codes:
 - 0: Always (Claude Code hook protocol)
@@ -46,18 +55,120 @@ _HELP_FLAG_RE = re.compile(r"(?:^|\s)--help(?:\s|$)")
 # Extract PR number from the merge command
 _PR_NUMBER_RE = re.compile(r"\bgh\s+pr\s+" + "merge" + r"\s+(\d+)")
 
-# Authorization files live in data/ relative to project root
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+# Repo root (hook lives at .claude/hooks/validators/) and the break-glass
+# override directory.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DATA_DIR = _REPO_ROOT / "data"
+
+# Break-glass override format: a line containing `override: <reason>` with a
+# non-empty reason. Anything else (empty file, legacy touch-file content) is
+# treated as absent.
+_OVERRIDE_LINE_RE = re.compile(r"override:\s*(\S[^\n]*)")
+
+# Cross-repo flag on the merge command (#2003 cycle-3 TD1). `gh` accepts
+# `-R/--repo OWNER/REPO` (also `HOST/OWNER/REPO` and full URLs), in which
+# case the PR number in the command belongs to a DIFFERENT repository —
+# evaluating the predicate here would judge the LOCAL repo's PR of the same
+# number. Foreign repos are never evaluable from this checkout: block with a
+# named message instead of mis-evaluating.
+_REPO_FLAG_RE = re.compile(r"(?:^|\s)(?:-R|--repo)(?:=|\s+)(\S+)")
 
 
-def _is_authorized(command: str) -> bool:
-    """Check if a merge authorization file exists for the PR number in the command."""
-    match = _PR_NUMBER_RE.search(command)
-    if not match:
-        return False
-    pr_number = match.group(1)
+def _normalize_repo_slug(value: str) -> str | None:
+    """Reduce a -R/--repo value (or git remote URL) to lowercase OWNER/REPO.
+
+    Accepts ``OWNER/REPO``, ``HOST/OWNER/REPO``, ``https://host/owner/repo``,
+    and ``git@host:owner/repo.git`` forms. Returns None when no owner/repo
+    tail is extractable.
+    """
+    v = value.strip().strip("'\"")
+    v = re.sub(r"^(?:https?://|ssh://)?(?:git@)?", "", v)
+    v = v.replace(":", "/")
+    if v.endswith(".git"):
+        v = v[: -len(".git")]
+    parts = [p for p in v.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return f"{parts[-2]}/{parts[-1]}".lower()
+
+
+def _local_repo_slug() -> str | None:
+    """OWNER/REPO of this checkout's origin remote, or None when unresolvable."""
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        return _normalize_repo_slug(proc.stdout.strip())
+    except Exception:
+        return None
+
+
+def _read_override(pr_number: int) -> tuple[str, str | None]:
+    """Classify the override file for a PR.
+
+    Returns ``(status, reason)`` where status is one of:
+    - ``"absent"``: no file
+    - ``"valid"``: file contains an ``override: <reason>`` line (reason returned)
+    - ``"invalid"``: file exists but has no override line (empty/legacy format)
+    """
     auth_file = _DATA_DIR / f"merge_authorized_{pr_number}"
-    return auth_file.exists()
+    if not auth_file.exists():
+        return "absent", None
+    try:
+        content = auth_file.read_text()
+    except OSError:
+        return "invalid", None
+    match = _OVERRIDE_LINE_RE.search(content)
+    if match:
+        return "valid", match.group(1).strip()
+    return "invalid", None
+
+
+def _load_metric_recorder():
+    """Lazily import analytics.collector.record_metric. Raises on failure."""
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from analytics.collector import record_metric
+
+    return record_metric
+
+
+def _emit_override_metric(pr_number: int, reason: str) -> None:
+    """Emit ``merge_guard.override_used``. Metric failure never crashes the hook."""
+    try:
+        recorder = _load_metric_recorder()
+        recorder(
+            "merge_guard.override_used",
+            1,
+            dimensions={"pr_number": str(pr_number), "reason": reason},
+        )
+    except Exception as exc:
+        logger.warning("merge_guard: override metric emission failed: %s", exc)
+
+
+def _evaluate_predicate(pr_number: int):
+    """Evaluate the shared merge predicate. Raises on import/eval failure.
+
+    Imports via sys.path insertion of the repo root — robust to hooks running
+    with cwd anywhere in the repo. ``tools.merge_predicate`` is stdlib-only at
+    module level, so the import works under any interpreter.
+    """
+    if str(_REPO_ROOT) not in sys.path:
+        sys.path.insert(0, str(_REPO_ROOT))
+    from tools.merge_predicate import evaluate_merge_predicate
+
+    return evaluate_merge_predicate(pr_number)
+
+
+def _block(reason: str) -> None:
+    print(json.dumps({"decision": "block", "reason": reason}))
 
 
 # --- Command tokenizer (item 7 of sdlc-1155) ------------------------------
@@ -474,25 +585,77 @@ def main() -> None:
     if stripped.startswith(("echo ", "echo\t", "printf ")):
         return
 
-    if _merge_cmd_in_command(command):
-        if _command_has_help_flag(command):
-            return
-        if _is_authorized(command):
-            return
-        print(
-            json.dumps(
-                {
-                    "decision": "block",
-                    "reason": (
-                        "Direct merge call is blocked -- run /do-merge first. "
-                        "/do-merge runs the gate checks and, if they pass, "
-                        "authorizes this merge automatically. You do NOT need "
-                        "human approval; you need the gate to have run. "
-                        "Invoke: /do-merge {pr_number}"
-                    ),
-                }
+    if not _merge_cmd_in_command(command):
+        return
+    if _command_has_help_flag(command):
+        return
+
+    # Cross-repo guard (#2003 cycle-3 TD1): a -R/--repo flag means the PR
+    # number belongs to ANOTHER repository — the predicate below would judge
+    # this repo's PR of the same number. Never evaluate foreign repos here.
+    repo_flag = _REPO_FLAG_RE.search(command)
+    if repo_flag:
+        target = _normalize_repo_slug(repo_flag.group(1))
+        local = _local_repo_slug()
+        if target is None or local is None or target != local:
+            _block(
+                "Cross-repo merge not evaluable here: this command targets"
+                f" '{repo_flag.group(1)}' via -R/--repo, but the merge-guard"
+                " hook evaluates the live merge predicate against THIS"
+                f" repository only ({local or 'origin unresolvable'})."
+                " Run the merge from a checkout of the target repository so"
+                " its own merge gate applies."
             )
+            return
+
+    match = _PR_NUMBER_RE.search(command)
+    if not match:
+        # Fail-closed: without a PR number the predicate cannot be evaluated.
+        _block(
+            "Direct merge call is blocked -- run /do-merge first. "
+            "/do-merge drives the gate; the merge-guard hook evaluates the "
+            "live merge predicate and could not extract a PR number from "
+            "this command. Invoke: /do-merge {pr_number}"
         )
+        return
+    pr_number = int(match.group(1))
+
+    override_status, override_reason = _read_override(pr_number)
+    if override_status == "valid":
+        logger.warning(
+            "merge_guard: break-glass override accepted for PR #%s (reason: %s)",
+            pr_number,
+            override_reason,
+        )
+        _emit_override_metric(pr_number, override_reason or "")
+        return
+
+    override_note = ""
+    if override_status == "invalid":
+        override_note = (
+            f" Note: data/merge_authorized_{pr_number} exists but has no"
+            " 'override: <reason>' line — empty/legacy auth files are treated"
+            " as absent and authorize nothing."
+        )
+
+    remediation = (
+        f" Run /do-merge {pr_number} to drive the gate, or break-glass:"
+        f" write 'override: <reason>' to data/merge_authorized_{pr_number}."
+    )
+
+    try:
+        result = _evaluate_predicate(pr_number)
+    except Exception as exc:
+        _block(
+            "Merge blocked (fail-closed): merge-predicate evaluation failed"
+            f" ({exc.__class__.__name__}: {exc})." + remediation + override_note
+        )
+        return
+
+    if result.allowed:
+        return
+    legs = "; ".join(result.failed_checks) or "unspecified predicate failure"
+    _block(f"Merge blocked — failed predicate check(s): {legs}." + remediation + override_note)
 
 
 if __name__ == "__main__":

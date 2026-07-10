@@ -15,12 +15,21 @@ sections below — this section adds the invocations not covered there.
 **Start-of-skill stage marker (in_progress).** Write at the very start, before triage:
 
 ```bash
-sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number "$ISSUE_NUMBER"
+sdlc-tool stage-marker --stage CRITIQUE --status in_progress --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 ```
 
 `ISSUE_NUMBER` MUST be assigned unconditionally (never `${ISSUE_NUMBER:-…}`) and
 asserted to be a positive integer before any recorder call — a stale inherited
 value would divert recorder writes to the wrong session (#1731).
+
+Run identity (#2003): every state-mutating `sdlc-tool` call in this addendum
+carries `--run-id "$RUN_ID"` — supplied by the invoking supervisor (`/do-sdlc`
+or `/sdlc` carries it from `session-ensure`). When this skill is invoked
+standalone (no supervisor), run
+`sdlc-tool session-ensure --issue-number "$ISSUE_NUMBER"` once at the start and
+use the emitted `run_id` (`ISSUE_LOCKED` means another live run owns the issue —
+stop and report). Read-only calls (`stage-query`, `verdict get`, `next-skill`)
+take no run-id.
 
 **Step 2b crash-resume probe.** Before triage/roster freeze, check for a reusable
 incomplete run dir:
@@ -53,7 +62,7 @@ Then write the frozen roster manifest (`_roster.json`): LITE →
 `revision_applied` is not already `true`:
 
 ```bash
-sdlc-tool meta-set --key plan_revising --value true --issue-number "$ISSUE_NUMBER"
+sdlc-tool meta-set --key plan_revising --value true --issue-number "$ISSUE_NUMBER" --run-id "$RUN_ID"
 ```
 
 This activates the SDLC router guard G7 (blocks `/do-build` until `/do-plan`
@@ -129,8 +138,8 @@ through the normal Step 5.5 path, then sets the `plan_revising` lock (Step 5.6).
 ### Step 5.5 — mandatory finalize (unchanged from #1654)
 
 **Step 5.5 is mandatory and reached on every exit path.** Every verdict (READY TO BUILD, NEEDS REVISION, MAJOR REWORK, or CRITIQUE INCOMPLETE) flows through a single self-contained block that:
-1. Records the verdict via `sdlc-tool verdict record --stage CRITIQUE` so the router's G1/G5 guards can consume it.
-2. On a READY TO BUILD verdict ONLY, writes the completion stage-marker (`sdlc-tool stage-marker --stage CRITIQUE --status completed`) **co-located in the same block** so the verdict and marker can never desync.
+1. Records the verdict via `sdlc-tool verdict record --stage CRITIQUE ... --run-id "$RUN_ID"` so the router's G1/G5 guards can consume it.
+2. On a READY TO BUILD verdict ONLY, writes the completion stage-marker (`sdlc-tool stage-marker --stage CRITIQUE --status completed ... --run-id "$RUN_ID"`) **co-located in the same block** so the verdict and marker can never desync.
 
 ### Context: prior fixes
 

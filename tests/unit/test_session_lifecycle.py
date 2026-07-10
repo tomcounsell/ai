@@ -8,6 +8,9 @@ Tests cover:
 - finalize_session() validation (None session, non-terminal status)
 """
 
+import json
+import os
+import subprocess
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +23,8 @@ from models.session_lifecycle import (
     finalize_session,
     transition_status,
 )
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _make_session(session_id="test-session-lc", status="running", project_key="test"):
@@ -519,74 +524,67 @@ class TestGenericCasStillGovernsWaitingForChildren:
 
 
 # ===================================================================
-# touch_issue_lock — issue-level SDLC ownership lock (issue #1954)
+# touch_issue_lock — issue-level SDLC ownership lock (issues #1954/#2003)
 # ===================================================================
 
 
 class TestTouchIssueLock:
-    """Tests for touch_issue_lock() and the per-process holder_token.
+    """Tests for touch_issue_lock() under the run_id ownership model (#2003).
 
     Unlike claim_pending_run's real-Redis tests, these mock Redis SET/GET/
     EXPIRE directly: the tests need to control the exact stored JSON payload
-    to simulate a foreign holder_token cheaply, including the critical
-    round-2 regression case (identical session_id, different holder_token)
-    that a real second Redis client couldn't easily reproduce in-process.
+    to simulate a foreign run_id cheaply, including the critical regression
+    case (identical session_id, different run_id) that a real second Redis
+    client couldn't easily reproduce in-process.
     """
-
-    def setup_method(self):
-        import models.session_lifecycle as lifecycle_module
-
-        # Reset the per-process holder-token cache so every test controls
-        # its own token value deterministically via _process_holder_token().
-        lifecycle_module._holder_token = None
 
     def test_acquire_when_key_does_not_exist(self):
         from models.session_lifecycle import touch_issue_lock
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = True
-            result = touch_issue_lock(1954, "sdlc-local-1954")
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
 
         assert result.acquired is True
         assert result.owner_session_id == "sdlc-local-1954"
+        assert result.owner_run_id == "run-a"
         mock_redis.set.assert_called_once()
         _args, kwargs = mock_redis.set.call_args
         assert _args[0] == "session:issuelock:1954"
         assert kwargs.get("nx") is True
+        payload = json.loads(_args[1])
+        assert payload["run_id"] == "run-a"
+        assert payload["session_id"] == "sdlc-local-1954"
 
-    def test_renew_by_same_process_owner(self):
-        """Same process calling again (same holder_token) renews via EXPIRE."""
-        import json
+    def test_renew_by_same_run_id(self):
+        """Same run calling again (same run_id, any process) renews via EXPIRE."""
+        from models.session_lifecycle import touch_issue_lock
 
-        from models.session_lifecycle import _process_holder_token, touch_issue_lock
-
-        token = _process_holder_token()
         stored = json.dumps(
-            {"holder_token": token, "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+            {"run_id": "run-a", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
         )
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = False  # NX fails -- key already exists
             mock_redis.get.return_value = stored
-            result = touch_issue_lock(1954, "sdlc-local-1954")
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
 
         assert result.acquired is True
         assert result.owner_session_id == "sdlc-local-1954"
+        assert result.owner_run_id == "run-a"
         mock_redis.expire.assert_called_once()
 
-    def test_reject_by_different_process_same_session_id(self):
-        """Critical round-2 regression: SAME session_id string, DIFFERENT
-        holder_token. Both a local CLI session and the worker resolve the
-        identical deterministic session_id for the same issue -- comparing
-        by session_id would make the lock a no-op. Ownership must be
-        decided by holder_token alone."""
-        import json
-
+    def test_reject_foreign_run_same_session_id(self):
+        """Critical regression: SAME session_id string, DIFFERENT run_id.
+        Both a local CLI run and the worker resolve the identical
+        deterministic session_id for the same issue -- comparing by
+        session_id would make the lock a no-op. Ownership must be decided
+        by run_id alone."""
         from models.session_lifecycle import touch_issue_lock
 
         stored = json.dumps(
             {
-                "holder_token": "foreign-token-abc",
+                "run_id": "foreign-run-abc",
                 "session_id": "sdlc-local-1954",
                 "pid": 999,
                 "hostname": "other-host",
@@ -596,20 +594,19 @@ class TestTouchIssueLock:
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = False
             mock_redis.get.return_value = stored
-            result = touch_issue_lock(1954, "sdlc-local-1954")
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954")
 
         assert result.acquired is False
         assert result.owner_session_id == "sdlc-local-1954"
+        assert result.owner_run_id == "foreign-run-abc"
         mock_redis.expire.assert_not_called()
 
-    def test_reject_by_non_owner_different_session_and_token(self):
-        import json
-
+    def test_reject_by_non_owner_different_session_and_run(self):
         from models.session_lifecycle import touch_issue_lock
 
         stored = json.dumps(
             {
-                "holder_token": "foreign-token",
+                "run_id": "foreign-run",
                 "session_id": "worker-session-1954",
                 "pid": 42,
                 "hostname": "worker-host",
@@ -619,12 +616,43 @@ class TestTouchIssueLock:
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = False
             mock_redis.get.return_value = stored
-            result = touch_issue_lock(1954, "sdlc-local-1954")
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954")
 
         assert result.acquired is False
         assert result.owner_session_id == "worker-session-1954"
+        assert result.owner_run_id == "foreign-run"
 
-    def test_fail_open_on_redis_exception(self, caplog):
+    def test_mutation_without_run_id_never_mints(self):
+        """A mutation call with no run_id must never SET NX (minting is
+        exclusive to ensure_session) -- it reports the current holder."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {"run_id": "incumbent-run", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, None, session_id="sdlc-local-1954")
+
+        assert result.acquired is False
+        assert result.owner_run_id == "incumbent-run"
+        mock_redis.set.assert_not_called()
+        mock_redis.expire.assert_not_called()
+
+    def test_mutation_without_run_id_on_free_lock_does_not_mint(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = None
+            result = touch_issue_lock(1954, None, session_id="sdlc-local-1954")
+
+        assert result.acquired is True  # nothing blocking, but...
+        mock_redis.set.assert_not_called()  # ...nothing was minted either
+
+    def test_fail_open_on_redis_exception_names_error_class(self, caplog):
+        """Redis-error fail-open (advisory lock) must log the swallowed error
+        CLASS explicitly alongside the open behavior."""
         import logging
 
         from models.session_lifecycle import touch_issue_lock
@@ -632,10 +660,11 @@ class TestTouchIssueLock:
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.side_effect = RuntimeError("redis down")
             with caplog.at_level(logging.WARNING):
-                result = touch_issue_lock(1954, "sdlc-local-1954")
+                result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
 
         assert result.acquired is True
         assert any("failing open" in r.message for r in caplog.records)
+        assert any("RuntimeError" in r.message for r in caplog.records)
 
     def test_malformed_legacy_value_treated_as_foreign(self):
         """A non-JSON stored value (malformed or legacy) must never raise --
@@ -645,7 +674,7 @@ class TestTouchIssueLock:
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = False
             mock_redis.get.return_value = "not-json-legacy-value"
-            result = touch_issue_lock(1954, "sdlc-local-1954")
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
 
         assert result.acquired is False
 
@@ -657,7 +686,7 @@ class TestTouchIssueLock:
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = False
             mock_redis.get.return_value = None
-            result = touch_issue_lock(1954, "sdlc-local-1954")
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
 
         assert result.acquired is True
 
@@ -666,21 +695,35 @@ class TestTouchIssueLock:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.get.return_value = None
-            result = touch_issue_lock(1954, "sdlc-local-1954", peek=True)
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954", peek=True)
 
         assert result.acquired is True
         assert result.owner_session_id is None
         mock_redis.set.assert_not_called()
         mock_redis.expire.assert_not_called()
 
-    def test_peek_reports_foreign_holder_without_mutating(self):
-        import json
+    def test_peek_same_run_id_reports_acquired(self):
+        from models.session_lifecycle import touch_issue_lock
 
+        stored = json.dumps(
+            {"run_id": "run-a", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is True
+        assert result.owner_run_id == "run-a"
+        mock_redis.set.assert_not_called()
+        mock_redis.expire.assert_not_called()
+
+    def test_peek_reports_foreign_holder_without_mutating(self):
         from models.session_lifecycle import touch_issue_lock
 
         stored = json.dumps(
             {
-                "holder_token": "foreign-token",
+                "run_id": "foreign-run",
                 "session_id": "worker-session-1954",
                 "pid": 42,
                 "hostname": "worker-host",
@@ -689,19 +732,65 @@ class TestTouchIssueLock:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.get.return_value = stored
-            result = touch_issue_lock(1954, "sdlc-local-1954", peek=True)
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
 
         assert result.acquired is False
         assert result.owner_session_id == "worker-session-1954"
+        assert result.owner_run_id == "foreign-run"
         mock_redis.set.assert_not_called()
         mock_redis.expire.assert_not_called()
+
+    def test_peek_flags_orphaned_lock_when_no_live_session_carries_run_id(self):
+        """A held lock whose run_id matches no live session's active_run_id
+        is a ghost (acquire->save crash window) -- flagged orphaned_lock."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {"run_id": "ghost-run", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+        )
+
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []  # no live session carries ghost-run
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is True
+
+    def test_peek_does_not_flag_orphan_when_live_session_carries_run_id(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {"run_id": "live-run", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+        )
+
+        live = MagicMock()
+        live.active_run_id = "live-run"
+        live.status = "running"
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = [live]
+
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.orphaned_lock is False
 
     def test_guard_falsy_issue_number_is_noop_fail_open(self):
         from models.session_lifecycle import touch_issue_lock
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
-            result_none = touch_issue_lock(None, "sdlc-local-x")
-            result_zero = touch_issue_lock(0, "sdlc-local-x")
+            result_none = touch_issue_lock(None, "run-x", session_id="sdlc-local-x")
+            result_zero = touch_issue_lock(0, "run-x", session_id="sdlc-local-x")
 
         assert result_none.acquired is True
         assert result_zero.acquired is True
@@ -713,53 +802,147 @@ class TestTouchIssueLock:
 
         with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
             mock_redis.set.return_value = True
-            touch_issue_lock(1954, "sdlc-local-1954")
+            touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
 
         _args, kwargs = mock_redis.set.call_args
         assert kwargs.get("ex") == ISSUE_LOCK_TTL_SECONDS
 
 
-class TestProcessHolderToken:
-    """Tests for _process_holder_token() -- the per-process lock identity."""
+class TestReleaseIssueLock:
+    """Tests for release_issue_lock() -- the COMPARE-AND-DELETE release
+    (issue #2003, cycle-2 CONCERN 2). Never a raw DEL."""
 
-    def setup_method(self):
-        import models.session_lifecycle as lifecycle_module
+    def test_releases_when_run_id_matches(self):
+        from models.session_lifecycle import release_issue_lock
 
-        lifecycle_module._holder_token = None
+        stored = json.dumps(
+            {"run_id": "run-a", "session_id": "sdlc-local-2003", "pid": 1, "hostname": "h"}
+        )
 
-    def test_stable_across_calls_within_process(self):
-        from models.session_lifecycle import _process_holder_token
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            mock_redis.eval.return_value = 1
+            released = release_issue_lock(2003, "run-a")
 
-        first = _process_holder_token()
-        second = _process_holder_token()
-        assert first == second
-        assert isinstance(first, str) and len(first) > 0
+        assert released is True
+        # Compare-and-delete goes through Lua eval with the exact raw value,
+        # never a bare DEL.
+        mock_redis.eval.assert_called_once()
+        eval_args = mock_redis.eval.call_args.args
+        assert eval_args[1] == 1
+        assert eval_args[2] == "session:issuelock:2003"
+        assert eval_args[3] == stored
+        mock_redis.delete.assert_not_called()
 
-    def test_env_seam_shares_token_across_processes(self, monkeypatch):
-        """SDLC_HOLDER_TOKEN (issue #1971): when set, it IS the token, so
-        every `sdlc-tool` subprocess a /do-sdlc run spawns presents one
-        consistent owner instead of self-blocking on the #1954 lock."""
-        from models.session_lifecycle import _process_holder_token
+    def test_refuses_release_of_foreign_lock(self):
+        from models.session_lifecycle import release_issue_lock
 
-        monkeypatch.setenv("SDLC_HOLDER_TOKEN", "shared-run-token-xyz")
-        assert _process_holder_token() == "shared-run-token-xyz"
+        stored = json.dumps(
+            {"run_id": "successor-run", "session_id": "sdlc-local-2003", "pid": 2, "hostname": "h"}
+        )
 
-    def test_env_seam_absent_falls_back_to_random_token(self, monkeypatch):
-        """Worker parity: with no env var the token is a random uuid, so the
-        standalone worker keeps its per-process identity and the real
-        worker-vs-local guard stays intact."""
-        from models.session_lifecycle import _process_holder_token
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            released = release_issue_lock(2003, "run-a")
 
-        monkeypatch.delenv("SDLC_HOLDER_TOKEN", raising=False)
-        token = _process_holder_token()
-        assert isinstance(token, str) and len(token) == 32  # uuid4().hex
+        assert released is False
+        mock_redis.eval.assert_not_called()
+        mock_redis.delete.assert_not_called()
 
-    def test_env_seam_empty_value_ignored(self, monkeypatch):
-        """An empty SDLC_HOLDER_TOKEN must not become an empty owner token --
-        it falls through to a random uuid."""
-        from models.session_lifecycle import _process_holder_token
+    def test_missing_key_returns_false(self):
+        from models.session_lifecycle import release_issue_lock
 
-        monkeypatch.setenv("SDLC_HOLDER_TOKEN", "")
-        token = _process_holder_token()
-        assert token  # non-empty
-        assert len(token) == 32
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = None
+            released = release_issue_lock(2003, "run-a")
+
+        assert released is False
+        mock_redis.eval.assert_not_called()
+
+    def test_redis_error_fails_safe_and_names_error_class(self, caplog):
+        import logging
+
+        from models.session_lifecycle import release_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.side_effect = RuntimeError("redis down")
+            with caplog.at_level(logging.WARNING):
+                released = release_issue_lock(2003, "run-a")
+
+        assert released is False
+        assert any("RuntimeError" in r.message for r in caplog.records)
+
+    def test_falsy_args_are_noop(self):
+        from models.session_lifecycle import release_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            assert release_issue_lock(None, "run-a") is False
+            assert release_issue_lock(2003, None) is False
+
+        mock_redis.get.assert_not_called()
+
+
+_SUBPROCESS_LOCK_SCRIPT = (
+    "import sys, json\n"
+    "from models.session_lifecycle import touch_issue_lock\n"
+    "mode, issue, run_id, session_id = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]\n"
+    "res = touch_issue_lock(issue, run_id, session_id=session_id, peek=(mode == 'peek'))\n"
+    "print(json.dumps({'acquired': res.acquired, 'owner_run_id': res.owner_run_id}))\n"
+)
+
+
+class TestRunIdentityAcrossProcesses:
+    """The #1971 scenario, inverted (issue #2003): two SEPARATE OS processes
+    sharing one run_id via explicit passing are the SAME owner -- with no
+    SDLC_HOLDER_TOKEN in the environment (that seam is deleted). Runs the
+    REAL touch_issue_lock() in real subprocesses against the per-worker test
+    Redis db (REDIS_URL injection)."""
+
+    @staticmethod
+    def _subprocess_env():
+        import popoto.redis_db as rdb
+
+        kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
+        host = kwargs.get("host") or "localhost"
+        port = kwargs.get("port") or 6379
+        db = kwargs.get("db", 1)
+        env = {**os.environ, "REDIS_URL": f"redis://{host}:{port}/{db}"}
+        env.pop("SDLC_HOLDER_TOKEN", None)  # the env seam is GONE -- prove it
+        return env
+
+    def _run_lock_subprocess(self, mode, issue, run_id, session_id):
+        proc = subprocess.run(
+            [sys.executable, "-c", _SUBPROCESS_LOCK_SCRIPT, mode, str(issue), run_id, session_id],
+            capture_output=True,
+            text=True,
+            cwd=REPO_ROOT,
+            env=self._subprocess_env(),
+            timeout=60,
+        )
+        assert proc.returncode == 0, f"subprocess failed: {proc.stderr}"
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
+    def test_run_identity_two_subprocesses_share_one_run_id(self):
+        """Process A acquires with run_id R; process B (a fresh OS process,
+        same R passed explicitly) peeks AND renews as the same owner."""
+        run_id = "shared-run-identity-2003"
+
+        result_a = self._run_lock_subprocess("acquire", 62003, run_id, "sdlc-local-62003")
+        assert result_a["acquired"] is True
+
+        result_b_peek = self._run_lock_subprocess("peek", 62003, run_id, "sdlc-local-62003")
+        assert result_b_peek["acquired"] is True
+        assert result_b_peek["owner_run_id"] == run_id
+
+        result_b_renew = self._run_lock_subprocess("acquire", 62003, run_id, "sdlc-local-62003")
+        assert result_b_renew["acquired"] is True
+
+    def test_run_identity_foreign_run_id_blocked_across_processes(self):
+        """A second process presenting a DIFFERENT run_id is a foreign run --
+        blocked, with the incumbent's run_id surfaced."""
+        result_a = self._run_lock_subprocess("acquire", 62004, "incumbent-run", "sdlc-local-62004")
+        assert result_a["acquired"] is True
+
+        result_b = self._run_lock_subprocess("acquire", 62004, "intruder-run", "sdlc-local-62004")
+        assert result_b["acquired"] is False
+        assert result_b["owner_run_id"] == "incumbent-run"

@@ -46,7 +46,17 @@ SDLC_TOOL = shutil.which("sdlc-tool")
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
-    """Run sdlc-tool in a clean env with the worktree as AI_REPO_ROOT."""
+    """Run sdlc-tool in a clean env with the worktree as AI_REPO_ROOT.
+
+    Redis is isolated to the per-worker test db via REDIS_URL (#2003: writes
+    now include the issue lock and active_run_id — tests must never touch
+    production Redis), matching the in-process autouse fixture so subprocess
+    writes and in-process teardown see the SAME db. SDLC_HOLDER_TOKEN is
+    stripped: the env seam is deleted — run identity travels via --run-id.
+    """
+    import popoto.redis_db as rdb
+
+    kwargs = rdb.POPOTO_REDIS_DB.connection_pool.connection_kwargs
     env = {
         **os.environ,
         # Force the clean-env local-create path: no bridge session injected.
@@ -54,7 +64,12 @@ def _run(*args: str) -> subprocess.CompletedProcess:
         "AGENT_SESSION_ID": "",
         # Point the dispatcher at THIS checkout so we exercise the modified code.
         "AI_REPO_ROOT": str(REPO_ROOT),
+        "REDIS_URL": (
+            f"redis://{kwargs.get('host') or 'localhost'}:"
+            f"{kwargs.get('port') or 6379}/{kwargs.get('db', 1)}"
+        ),
     }
+    env.pop("SDLC_HOLDER_TOKEN", None)
     return subprocess.run(
         [SDLC_TOOL, *args],
         capture_output=True,
@@ -84,6 +99,25 @@ class TestSessionlessRoundTrip:
         # Pre-clean in case a prior run left a stale local session.
         _delete_local_session()
         try:
+            # #2003: session-ensure is the exclusive run_id minting site. It
+            # runs as its OWN subprocess; the verdict record below is a
+            # SECOND process presenting the same run_id explicitly — the
+            # #1971 scenario inverted, with no SDLC_HOLDER_TOKEN in the env.
+            ens = _run("session-ensure", "--issue-number", str(ISSUE_NUMBER))
+            assert ens.returncode == 0, f"session-ensure failed: {ens.stderr}"
+            ens_json = json.loads(ens.stdout.strip())
+            # If the environment cannot resolve a project_key (e.g. no
+            # projects.json in CI), ensure_session returns {} and the write
+            # degrades to a no-op. In that case the whole round-trip is
+            # un-exercisable; skip rather than fail.
+            if not ens_json or ens_json.get("blocked"):
+                pytest.skip(
+                    "Environment could not auto-ensure a session (no project "
+                    "context) — sessionless persistence not exercisable here."
+                )
+            run_id = ens_json["run_id"]
+            assert run_id, ens_json
+
             rec = _run(
                 "verdict",
                 "record",
@@ -93,18 +127,11 @@ class TestSessionlessRoundTrip:
                 "READY TO BUILD",
                 "--issue-number",
                 str(ISSUE_NUMBER),
+                "--run-id",
+                run_id,
             )
             assert rec.returncode == 0, f"record failed: {rec.stderr}"
             rec_json = json.loads(rec.stdout.strip())
-            # If the environment cannot resolve a project_key (e.g. no
-            # projects.json in CI), ensure_session returns {} and the write
-            # degrades to a no-op. In that case the whole round-trip is
-            # un-exercisable; skip rather than fail.
-            if rec_json == {}:
-                pytest.skip(
-                    "Environment could not auto-ensure a session (no project "
-                    "context) — sessionless persistence not exercisable here."
-                )
             assert rec_json.get("verdict") == "READY TO BUILD", rec_json
 
             # DISTINCT process reads it back from Redis.

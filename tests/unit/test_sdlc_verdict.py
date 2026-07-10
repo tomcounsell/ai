@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -188,6 +188,7 @@ class TestCliRecordEnsure:
             tech_debt=None,
             judges_json=None,
             consensus_json=None,
+            run_id="run-test",
         )
         base.update(kw)
         return SimpleNamespace(**base)
@@ -202,7 +203,9 @@ class TestCliRecordEnsure:
             result = _cli_record(self._args())
 
         assert result["verdict"] == "READY TO BUILD"
-        find_mock.assert_called_once_with(session_id=None, issue_number=1558, ensure=True)
+        find_mock.assert_called_once_with(
+            session_id=None, issue_number=1558, ensure=True, caller_run_id="run-test"
+        )
 
     def test_cli_get_stays_ensure_false(self, fake_session_reload_patched):
         from tools.sdlc_verdict import _cli_get, _cli_record
@@ -240,6 +243,7 @@ class TestConvergenceUnderDivergentEnv:
             tech_debt=None,
             judges_json=None,
             consensus_json=None,
+            run_id="run-test",
         )
         base.update(kw)
         return SimpleNamespace(**base)
@@ -367,6 +371,7 @@ class TestOwnershipGate:
             tech_debt=None,
             judges_json=None,
             consensus_json=None,
+            run_id="run-test",
         )
         base.update(kw)
         return SimpleNamespace(**base)
@@ -427,6 +432,8 @@ class TestOwnershipGate:
                     "READY TO BUILD",
                     "--issue-number",
                     "42",
+                    "--run-id",
+                    "run-42",
                 ]
                 main()
 
@@ -485,6 +492,37 @@ class TestOwnershipGate:
 
         # Without an issue_number, the gate is skipped, write succeeds.
         assert result.get("verdict") == "READY TO BUILD"
+
+    def test_foreign_run_id_raises_issue_locked(self):
+        """#2003: a foreign run holding the issue lock refuses the verdict
+        write with an ISSUE_LOCKED diagnostic (raised as OwnershipError so
+        main() exits 1)."""
+        from models.session_lifecycle import IssueLockResult
+        from tools.sdlc_verdict import OwnershipError, _cli_record
+
+        session = self._owning_session(42, via="issue_url")
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+
+        with (
+            patch("tools.sdlc_verdict._find_session", return_value=session),
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+        ):
+            with pytest.raises(OwnershipError) as exc_info:
+                _cli_record(self._args(issue_number=42, run_id="intruder-run"))
+
+        err = str(exc_info.value)
+        assert "ISSUE_LOCKED" in err
+        assert "foreign-run" in err
+        # The lock touch was peek-only -- verdict record never renews.
+        for call in mock_touch.call_args_list:
+            assert call.kwargs.get("peek") is True
 
 
 class TestComputePlanBodyHash:

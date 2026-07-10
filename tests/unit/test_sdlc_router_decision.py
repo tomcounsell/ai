@@ -328,21 +328,28 @@ class TestRow10ReadyToMerge:
         assert result.row_id == "10"
 
 
-class TestRow10bStageStatesUnavailable:
-    def test_empty_states_pr_open_falls_through_to_earlier_rows(self):
-        # Row 10b is a fallback — it ranks below Row 7 (PR exists, no review)
-        # because without stage_states we can't confirm docs are done. When
-        # only ``pr_number`` is known, the safest dispatch is /do-pr-review so
-        # the reviewer can drive the pipeline forward.
+class TestStageStatesUnavailableNoMergeDispatch:
+    """Row 10b deleted (#2003): stage_states-unavailable + open PR must never
+    fall back to dispatching /do-merge. Enforcement of the merge predicate
+    lives in the merge-guard hook (tools.merge_predicate); the router only
+    schedules merge via row 10 (all stages confirmed completed) or G6.
+    """
+
+    def test_row_10b_removed_from_dispatch_rules(self):
+        assert "10b" not in {r.row_id for r in DISPATCH_RULES}
+
+    def test_empty_states_pr_open_routes_to_review_not_merge(self):
+        # Without stage_states we cannot confirm docs/review are done, so the
+        # safest dispatch is /do-pr-review — never merge.
         result = decide_next_dispatch({}, {"pr_number": 1234})
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_PR_REVIEW
         assert result.row_id == "7"
 
-    def test_empty_states_pr_open_with_review_completed_dispatches_merge(self):
-        # Row 10b's purpose: once the pipeline has clearly advanced past
-        # review (via last_dispatched_skill history), dispatch merge. Here we
-        # emulate that by surfacing a prior /do-docs dispatch in meta.
+    def test_empty_states_past_docs_never_dispatches_merge(self):
+        # Pre-#2003 this state could reach row 10b's merge fallback. Now the
+        # router must either dispatch a non-merge skill or report Blocked —
+        # stage_states-unavailable is never sufficient evidence to merge.
         result = decide_next_dispatch(
             {},
             {
@@ -351,10 +358,10 @@ class TestRow10bStageStatesUnavailable:
                 "last_dispatched_skill": SKILL_DO_DOCS,
             },
         )
-        # Even here, without explicit DOCS="completed" we err on the side of
-        # running review again — Row 10b stays a pure fallback that fires
-        # only when no earlier rule matches.
-        assert isinstance(result, Dispatch)
+        if isinstance(result, Dispatch):
+            assert result.skill != SKILL_DO_MERGE
+        else:
+            assert isinstance(result, Blocked)
 
 
 class TestNoMatchingRule:
