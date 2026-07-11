@@ -828,6 +828,13 @@ class TestMarkSupersededTerminalGuard:
 
     With the kwarg removed, transition_status() uses its default (reject_from_terminal=True),
     so completed->superseded transitions are rejected by the terminal guard.
+
+    _mark_superseded() itself was later deleted entirely (teammate-cold-start-finalize-gap,
+    Defect A) and replaced by the module-level _delete_stale_terminal_duplicates() helper,
+    which reconciles stale terminal duplicates via ORM ``instance.delete()`` rather than a
+    transition_status() "supersede" call — see that helper's docstring for why. The structural
+    test below now guards the successor helper for the same #730 invariant: the source must
+    never reintroduce a completed->superseded transition_status() override.
     """
 
     def test_completed_to_superseded_is_now_rejected(self):
@@ -844,20 +851,28 @@ class TestMarkSupersededTerminalGuard:
         # Session status must be unchanged
         assert session.status == "completed"
 
-    def test_mark_superseded_kwarg_removed_from_source(self):
-        """Structural test: reject_from_terminal=False is gone from _mark_superseded()."""
+    def test_mark_superseded_removed_and_no_reintroduced_override(self):
+        """Structural test: _mark_superseded() is gone, and no reject_from_terminal=False
+        override has been reintroduced anywhere in agent_session_queue.py (its successor,
+        _delete_stale_terminal_duplicates(), reconciles via delete rather than transition)."""
         from pathlib import Path
 
         queue_path = Path(__file__).parent.parent.parent / "agent" / "agent_session_queue.py"
         content = queue_path.read_text()
 
-        # Find the _mark_superseded function block
-        start = content.find("def _mark_superseded()")
-        assert start != -1, "_mark_superseded() function not found in agent_session_queue.py"
-
-        # Isolate function body up to the next await call
-        func_block = content[start : start + 600]
-        assert "reject_from_terminal=False" not in func_block, (
-            "_mark_superseded() must not pass reject_from_terminal=False to "
-            "transition_status() — this override was removed by #730 as defense-in-depth."
+        assert "def _mark_superseded(" not in content, (
+            "_mark_superseded() was deleted entirely by the teammate-cold-start-finalize-gap "
+            "fix (replaced by _delete_stale_terminal_duplicates()) — it must not be "
+            "reintroduced."
+        )
+        assert "def _delete_stale_terminal_duplicates(" in content, (
+            "_delete_stale_terminal_duplicates() is the successor to _mark_superseded() and "
+            "must exist as the terminal-duplicate reconciliation path."
+        )
+        assert "reject_from_terminal=False" not in content, (
+            "No code path in agent_session_queue.py may pass reject_from_terminal=False to "
+            "transition_status() — this override was removed by #730 as defense-in-depth and "
+            "must not be reintroduced by any successor (e.g. "
+            "_delete_stale_terminal_duplicates(), which deletes stale terminal duplicates "
+            "instead of transitioning them)."
         )

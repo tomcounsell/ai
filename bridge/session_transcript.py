@@ -268,7 +268,6 @@ def complete_transcript(
         ``_finalize_parent_sync`` or the completion runner, whichever fires
         after the last child terminates (issue #1156).
     """
-    from models.agent_session import AgentSession
 
     # Write completion marker to transcript
     log_path = _transcript_path(session_id)
@@ -291,11 +290,24 @@ def complete_transcript(
             TERMINAL_STATUSES,
             StatusConflictError,
             finalize_session,
+            get_authoritative_session,
         )
 
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if sessions:
-            s = sessions[0]
+        # Migrated from blind list(...)[0] selection (Defect B, #2007): with
+        # divergent-status duplicate records for one session_id, sessions[0]
+        # could be a stale terminal record, causing finalize_session to hit the
+        # reject-from-terminal guard or idempotency skip while the real
+        # `running` record was never finalized. get_authoritative_session
+        # prefers the running record, then falls back to most recent.
+        s = get_authoritative_session(session_id)
+        if s is None:
+            logger.warning(
+                "[transcript] No AgentSession record found for %s during "
+                "complete_transcript(status=%s) — nothing to finalize.",
+                session_id,
+                status,
+            )
+        else:
             if summary:
                 s.summary = summary
                 s.save()  # persist summary before finalize (finalize does its own save)

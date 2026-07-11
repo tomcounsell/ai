@@ -354,6 +354,89 @@ it applies specifically to the duplicate-message dedup scan, not to the
 [Kill-is-Terminal Invariant](#kill-is-terminal-invariant) or any other
 terminal-status check in this document.
 
+## Divergent Duplicate Records — Pop-Loop Spin and Phantom Running (issue #2007)
+
+Distinct from the message-level dedup above, this is about two `AgentSession`
+records sharing one `session_id` in divergent statuses: one non-terminal
+(`pending` or `running`) carrying the real work, alongside a stale terminal
+record (`failed`, `killed`, `abandoned`, `completed`, or `cancelled`) left
+over from an earlier attempt. Two consumers assumed a single record per
+`session_id` and mishandled the pair.
+
+### The failure mode
+
+**Pop-loop spin.** `_pop_agent_session()` transitions the `pending` record
+toward `running` and CAS-re-reads on disk. Index/tie-break ambiguity between
+the two records can resolve to the stale terminal one, so the transition
+fails with `StatusConflictError`. The pop loop's handler logged a WARNING,
+released the slot, and `continue`d — no counter, no escalation — so the same
+`session_id` re-popped and re-conflicted every tick, forever.
+
+**Phantom running.** `complete_transcript()` (`bridge/session_transcript.py`)
+selected the record to finalize with a blind `list(...)[0]`. With a
+divergent pair present, `[0]` could land on the stale terminal record.
+`finalize_session()` correctly refused to re-transition it (the
+[Kill-is-Terminal Invariant](#kill-is-terminal-invariant) guard-swallowed it
+or idempotency-skipped it), and the real `running` record — the one that had
+actually delivered its reply and run its cleanup — was never finalized. It
+stayed `running` forever with a stale heartbeat, invisible to every
+live-process check, until a human killed it manually.
+
+### Root cause
+
+Divergent duplicates were created because `enqueue_agent_session`'s
+duplicate-record guard (formerly `_mark_superseded`) was a documented no-op.
+It only ever attempted a `completed -> superseded` transition, and #730 had
+already forbidden re-activating or re-transitioning a terminal record (see
+the Kill-is-Terminal Invariant above), so that transition was guard-rejected
+every time. Every divergent record — including stale `failed`/`killed`/
+`abandoned` ones entirely outside its narrow scope — survived indefinitely.
+
+### The fix
+
+**Reconcile by deletion, not by re-activation.**
+`_delete_stale_terminal_duplicates(session_id)` in
+`agent/agent_session_queue.py` replaces `_mark_superseded`. It deletes every
+terminal-status duplicate for a `session_id` via ORM `instance.delete()`,
+skipping any duplicate that has child sessions (`get_child_sessions()`) so a
+parent link is never orphaned, and never touching `running`/`pending`
+records. It runs at enqueue time, before the new `pending` record is
+created, so a divergent pair is never born in the first place. The pop
+loop's escalation (below) reuses this exact helper, so both consumers apply
+identical semantics.
+
+**Bounded, self-terminating pop-loop escalation.** `_worker_loop` tracks a
+loop-local conflict count per `session_id`, keyed off
+`StatusConflictError.session_id` (the exception already carries this
+attribute). At a primary threshold it calls
+`_delete_stale_terminal_duplicates()` unconditionally, every tick,
+idempotent and ungated — a transient failure just retries — while the ERROR
+log for this escalation fires once, not per tick. Deleting the stale
+terminal duplicate resolves the ambiguity, so the `pending` record pops
+cleanly on the next tick with its undelivered work intact. Only as a bounded
+last resort, at a higher threshold reached solely when the terminal
+duplicate has children and can't be deleted, does the loop cancel the stuck
+`pending` record itself, writing `cancel_reason="conflict_escalation"`
+(`agent/cancel_reason.py`) for operator visibility. That marker is
+short-lived and best-effort; the durable record of the cancellation is the
+`finalize_session(..., reason=...)` call, which lands in the `LIFECYCLE`
+transition log.
+
+**Guaranteed terminal finalize on the completion exit.**
+`complete_transcript()` now selects the record to finalize via
+`get_authoritative_session()` — the same running-preferring tie-break
+pattern described in [Worker Completion — Redis
+Re-read](#worker-completion--redis-re-read) above — instead of the blind
+`[0]`. The load-bearing fix for phantom running, though, is an unconditional
+completion-exit guard in `agent/session_executor.py`, placed after the
+entire `if agent_session: / else:` completion block closes so it covers
+both exits, including the case where the `agent_session` lookup returned
+`None`. It re-reads the authoritative session and, if still `running`,
+calls `finalize_session()`, treating a `StatusConflictError` from a racing
+concurrent finalizer as success. Every non-deferred completion path now
+reaches a terminal status regardless of what `complete_transcript()` did
+upstream.
+
 ## Stall Reaction Dedup Reset (issue #1313)
 
 When `monitoring/session_watchdog.py::check_stalled_sessions` queues a user-visible ⏳ reaction for a stalled session (see [Bridge Self-Healing § 4a](bridge-self-healing.md#4a-user-visible-stall-alerts-monitoringsession_watchdogpy-issue-1313)), it claims the dedup key `watchdog:stall_reaction_applied:{session_id}` so the reaction is queued at most once per stall period.

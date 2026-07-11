@@ -9,20 +9,27 @@ Also tests Redis pop lock acquisition and contention behavior.
 Also tests sustainability throttle guards in _pop_agent_session.
 """
 
+import asyncio
+import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import agent.agent_session_queue as asq
 from agent.agent_session_queue import (
     _AGENT_SESSION_FIELDS,
     _acquire_pop_lock,
     _complete_agent_session,
     _extract_agent_session_fields,
     _pop_agent_session,
+    _push_agent_session,
     _release_pop_lock,
+    _worker_loop,
 )
 from models.agent_session import AgentSession
+from models.session_lifecycle import StatusConflictError
 
 
 def _make_session(**overrides) -> AgentSession:
@@ -1037,3 +1044,111 @@ class TestCallbackResolutionTransportKeyed:
         # Should resolve to email_h, not generic
         assert send_cb.__self__ is email_h
         assert react_cb.__self__ is email_h
+
+
+# ---------------------------------------------------------------------------
+# Defect A (#2007) additions: reconciler failure isolation + pop-loop
+# conflict-counter robustness on an unknown/empty session_id.
+#
+# The main Defect A regression coverage (basic delete, child-guard skip +
+# new pending still created, primary/last-resort pop-loop escalation,
+# StatusConflictError.session_id population) lives in
+# tests/unit/test_teammate_cold_start_finalize.py. These two tests cover the
+# narrower failure-path gaps from the plan's Failure Path Test Strategy that
+# are specific to this file's existing scope (_push_agent_session reconcile
+# try/except, and the pop-loop counter's tolerance of a degenerate key).
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileStaleTerminalDuplicatesFailureIsolation:
+    """The enqueue-time reconciler's except Exception (agent_session_queue.py
+    ~330) must never block new record creation — a reconciliation failure
+    logs a WARNING and the push proceeds."""
+
+    @pytest.mark.asyncio
+    async def test_reconcile_failure_logs_warning_and_still_creates_new_pending(
+        self, redis_test_db, caplog
+    ):
+        sid = f"reconcile-fail-{uuid.uuid4().hex[:10]}"
+        AgentSession.create(
+            session_id=sid,
+            session_type="teammate",
+            project_key="reconcile-fail",
+            working_dir="/tmp",
+            status="failed",
+            chat_id="chat-reconcile-fail",
+            message_text="stale, but the reconciler will explode before deleting it",
+            sender_name="tester",
+            created_at=datetime.now(tz=UTC),
+            turn_count=0,
+            tool_call_count=0,
+        )
+
+        def _boom(_session_id):
+            raise RuntimeError("simulated Redis hiccup during reconciliation")
+
+        caplog.set_level(logging.WARNING, logger="agent.agent_session_queue")
+        with patch(
+            "agent.agent_session_queue._delete_stale_terminal_duplicates",
+            side_effect=_boom,
+        ):
+            await _push_agent_session(
+                project_key="reconcile-fail",
+                session_id=sid,
+                working_dir="/tmp",
+                message_text="new pending work",
+                sender_name="tester",
+                chat_id="chat-reconcile-fail",
+                telegram_message_id=1,
+                session_type="teammate",
+            )
+
+        warning_logs = [
+            r.getMessage()
+            for r in caplog.records
+            if "Failed to reconcile stale terminal duplicates" in r.getMessage()
+        ]
+        assert warning_logs, "expected a WARNING when the reconciler raises"
+
+        records = list(AgentSession.query.filter(session_id=sid))
+        statuses = sorted(s.status for s in records)
+        # The reconciler blew up before deleting anything, but the new
+        # pending record must still have been created.
+        assert statuses == ["failed", "pending"]
+
+
+class TestPopLoopConflictCounterDegenerateSessionId:
+    """The loop-local conflict counter in _worker_loop must tolerate an
+    unknown/empty StatusConflictError.session_id without raising KeyError."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_worker_loop_state(self):
+        asq._session_state._shutdown_requested = False
+        original_registry = asq._session_state._slot_registry
+        asq._session_state._slot_registry = None
+        yield
+        asq._session_state._shutdown_requested = False
+        asq._session_state._slot_registry = original_registry
+
+    @pytest.mark.asyncio
+    async def test_empty_session_id_does_not_raise_keyerror(self):
+        worker_key = f"wk-degenerate-{uuid.uuid4().hex[:10]}"
+        calls = {"n": 0}
+
+        def pop_side_effect(*_a, **_k):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                asq._session_state._shutdown_requested = True
+            # session_id="" mirrors the "?" / empty fallback the raise site
+            # uses when no real session_id is available (session_lifecycle.py).
+            raise StatusConflictError("", "pending", "failed", reason="degenerate session_id")
+
+        event = asyncio.Event()
+        with patch(
+            "agent.agent_session_queue._pop_agent_session",
+            new=AsyncMock(side_effect=pop_side_effect),
+        ):
+            # Must not raise KeyError (or any other exception) out of the loop.
+            await _worker_loop(worker_key, event)
+
+        assert calls["n"] == 2

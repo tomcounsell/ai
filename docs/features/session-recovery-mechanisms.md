@@ -192,7 +192,7 @@ The `transition_status()` function in `models/session_lifecycle.py` now has a `r
 |--------|-----------|--------|
 | `.claude/hooks/user_prompt_submit.py` | `completed->running` | User types new prompt into a completed local session |
 
-Note: `_mark_superseded()` previously passed `reject_from_terminal=False` to convert `completed->superseded`. This override was removed by PR #730 as defense-in-depth — `completed` sessions now remain in their terminal state rather than being re-activated as `superseded`.
+Note: `_mark_superseded()` previously passed `reject_from_terminal=False` to convert `completed->superseded`. This override was removed by PR #730 as defense-in-depth — `completed` sessions now remain in their terminal state rather than being re-activated as `superseded`. `_mark_superseded()` itself was later deleted entirely and replaced by `_delete_stale_terminal_duplicates()`, which reconciles divergent duplicate records via ORM delete rather than a `transition_status()` override — see [Session Lifecycle: Divergent Duplicate Records](session-lifecycle.md#divergent-duplicate-records--pop-loop-spin-and-phantom-running-issue-2007) for the current mechanism.
 
 All other callers use the default `reject_from_terminal=True`.
 
@@ -309,7 +309,7 @@ All mechanisms are covered by `tests/unit/test_recovery_respawn_safety.py`:
 | `TestIntakePathTerminalGuard::test_guard_falls_back_gracefully_on_exception` | intake path | Guard failure is non-fatal |
 | `TestIntakePathTerminalGuard::test_guard_present_in_telegram_bridge` | intake path | Structural: guard code present in bridge |
 | `TestMarkSupersededTerminalGuard::test_completed_to_superseded_is_now_rejected` | _mark_superseded defense-in-depth | completed→superseded now rejected |
-| `TestMarkSupersededTerminalGuard::test_mark_superseded_kwarg_removed_from_source` | _mark_superseded defense-in-depth | Structural: override kwarg absent from source |
+| `TestMarkSupersededTerminalGuard::test_mark_superseded_removed_and_no_reintroduced_override` | _mark_superseded defense-in-depth | Structural: `_mark_superseded()` deleted entirely (replaced by `_delete_stale_terminal_duplicates()`, see [Session Lifecycle](session-lifecycle.md)); override never reintroduced anywhere in `agent_session_queue.py` |
 
 Additional coverage in `tests/unit/test_health_check_recovery_finalization.py` (issue #917):
 
