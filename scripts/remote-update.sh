@@ -122,7 +122,7 @@ fi
 # non-pipefail subshell so a missing npm or a transient install failure
 # cannot abort the parent update script.
 if [ -f "$PROJECT_DIR/package.json" ] && command -v npm >/dev/null 2>&1; then
-    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --only=prod ) || echo "[update] npm ci failed (non-fatal); continuing"
+    ( set +o pipefail; cd "$PROJECT_DIR" && npm ci --omit=dev ) || echo "[update] npm ci failed (non-fatal); continuing"
 fi
 
 # ── Run update in cron mode ──────────────────────────────────────────
