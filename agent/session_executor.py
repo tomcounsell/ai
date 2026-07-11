@@ -119,82 +119,6 @@ def _resolve_session_model(session: AgentSession | None) -> str | None:
     return fallback or None
 
 
-def _tick_backstop_check_compaction(
-    session: AgentSession,
-    agent_session: AgentSession | None,
-) -> None:
-    """SDK-tick backstop for missed PreCompact hook events (issue #1127).
-
-    The primary compaction signal is the PreCompact hook
-    (``agent/hooks/pre_compact.py``), which writes
-    ``AgentSession.last_compaction_ts``. But hooks can fail: the SDK may skip
-    a hook under internal error conditions, a hook may be deregistered by an
-    unrelated code path, or a PreCompact event may fire so close to subprocess
-    termination that the hook's async task never completes.
-
-    This backstop detects compaction from the executor side by watching for a
-    *drop* in ``ResultMessage.num_turns`` across consecutive ticks. A turn-
-    count drop is the SDK's observable signature of a compaction that rewrote
-    the conversation history. On detection, we arm the 30s nudge guard by
-    writing ``last_compaction_ts`` + bumping ``compaction_skipped_count`` via
-    a partial save. We do NOT attempt a recovery-path JSONL snapshot — the
-    hook is the only place snapshots are taken.
-
-    All failures are swallowed. The backstop MUST NOT crash the executor.
-    """
-    try:
-        import time as _time
-
-        from agent.sdk_client import get_turn_count
-
-        if not session or not getattr(session, "session_id", None):
-            return
-        current_count = get_turn_count(session.session_id)
-        if current_count is None:
-            return  # No ResultMessage seen yet for this session — nothing to compare
-        prior_count = getattr(session, "_last_observed_message_count", None)
-        # Always update the tracker before early-returning so the next tick
-        # has a baseline to compare against.
-        session._last_observed_message_count = current_count
-        if prior_count is None or current_count >= prior_count:
-            return  # Steady or increasing — no compaction detected
-        # Drop observed — backstop-detected compaction.
-        if agent_session is None:
-            logger.warning(
-                "pre_compact hook appears to have missed a compaction for %s — "
-                "backstop detected num_turns drop %s -> %s but no AgentSession "
-                "available to arm the guard",
-                session.session_id,
-                prior_count,
-                current_count,
-            )
-            return
-        try:
-            agent_session.last_compaction_ts = _time.time()
-            current_skipped = int(getattr(agent_session, "compaction_skipped_count", 0) or 0)
-            agent_session.compaction_skipped_count = current_skipped + 1
-            agent_session.save(update_fields=["last_compaction_ts", "compaction_skipped_count"])
-            logger.warning(
-                "pre_compact hook appears to have missed a compaction for %s "
-                "(num_turns %s -> %s) — backstop armed nudge guard",
-                session.session_id,
-                prior_count,
-                current_count,
-            )
-        except Exception as exc:  # noqa: BLE001 - backstop must never crash executor
-            logger.warning(
-                "pre_compact backstop: AgentSession save failed for %s: %s",
-                session.session_id,
-                exc,
-            )
-    except Exception as exc:  # noqa: BLE001 - outer guard for any unexpected failure
-        logger.warning(
-            "pre_compact backstop: unexpected failure for %s: %s",
-            getattr(session, "session_id", "<unknown>"),
-            exc,
-        )
-
-
 def _fetch_live_active_run_id(agent_session: AgentSession | None) -> str | None:
     """Re-fetch ``active_run_id`` from Redis for the renewal tick (#2003 cycle-3).
 
@@ -329,8 +253,6 @@ def _capture_turn_count(session_id: str) -> int | None:
     The in-scope executor ``session`` object is a *different* instance than the
     one ``sdk_client`` persists ``turn_count`` onto (``sdk_client.py:2573-2584``),
     so its in-memory ``session.turn_count`` is stale (typically ``0``). The
-    in-memory ``get_turn_count()`` tracker is also already cleared by the harness
-    ``finally`` (``sdk_client.py:1932``) by the time finalization runs here. The
     durable, timing-independent source is the persisted ``AgentSession`` record —
     re-fetch the newest by ``session_id`` (the ``sdk_client.py:2573-2576``
     newest-by-``created_at`` pattern). Returns ``None`` on any failure so the
@@ -1344,9 +1266,12 @@ async def _execute_agent_session(session: AgentSession) -> None:
             nonlocal agent_session  # Re-read from Redis for fresh stage data
 
             from agent.health_check import is_session_unhealthy
-            from agent.sdk_client import get_stop_reason
 
-            stop_reason = get_stop_reason(session.session_id) if session.session_id else None
+            # stop_reason was an SDK-loop-only concept (ResultMessage.stop_reason,
+            # populated by the now-deleted ValorAgent query loop) -- the CLI
+            # harness path never populated it, so this was already always None
+            # in production before the SDK path was removed (plan #2000 Task 2.2).
+            stop_reason = None
 
             # Re-read agent_session from Redis for fresh status.  The in-memory
             # copy was loaded with status="running" at session start and is stale
@@ -1381,12 +1306,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"[{session.project_key}] Watchdog flagged session "
                     f"unhealthy: {unhealthy_reason}"
                 )
-
-            # SDK-tick backstop for missed PreCompact hooks (issue #1127).
-            # Runs BEFORE the delivery-action decision so a backstop-detected
-            # compaction arms `last_compaction_ts` and the subsequent
-            # `determine_delivery_action` call sees the freshly-armed guard.
-            _tick_backstop_check_compaction(session, agent_session)
 
             # Resolve session type and classification for PM auto-continue
             _session_type = getattr(agent_session, "session_type", None) if agent_session else None
@@ -1443,9 +1362,6 @@ async def _execute_agent_session(session: AgentSession) -> None:
                 # The next SDK idle tick naturally re-invokes this callback;
                 # if the 30s window has expired, the normal nudge flow fires;
                 # if real SDK output arrived first, it routes via `"deliver"`.
-                # Uses local `import time as _time` matching the pattern in
-                # `_tick_backstop_check_compaction` for consistency across the
-                # two compaction-guard call sites (#1127 review nit).
                 try:
                     import time as _time
 

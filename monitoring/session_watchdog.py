@@ -81,9 +81,6 @@ ABANDON_THRESHOLD = 1800  # 30 minutes silent = auto-abandon
 STALL_THRESHOLD_PENDING = 300  # 5 minutes
 STALL_THRESHOLD_RUNNING = 2700  # 45 minutes
 # STALL_TIMEOUT_SECONDS env var overrides the default active session stall threshold
-# Note: activity-based stall detection (SDK_INACTIVITY_TIMEOUT_SECONDS in sdk_client.py)
-# takes precedence for sessions with activity tracking. This threshold is a fallback
-# for sessions without activity data.
 STALL_THRESHOLD_ACTIVE = int(os.environ.get("STALL_TIMEOUT_SECONDS", 600))  # 10 min default
 
 STALL_THRESHOLDS = {
@@ -368,22 +365,15 @@ def check_stalled_sessions() -> list[dict]:
                     _to_timestamp(session.started_at) or _to_timestamp(session.created_at) or now
                 )
 
-                # For active sessions, use updated_at as reference
+                # For active sessions, use updated_at as reference. (The
+                # in-memory sdk_client activity tracker this used to
+                # cross-check was SDK-loop-only -- populated exclusively by
+                # the now-deleted ValorAgent query loop, never by the CLI
+                # harness path -- so it was already a permanent no-op for
+                # every CLI-harness production session before its removal;
+                # plan #2000 Task 2.2.)
                 if status_val == "active":
                     updated_at_ts = _to_timestamp(session.updated_at)
-
-                    # Also check in-memory activity tracking from sdk_client,
-                    # which is updated on every tool call and log output.
-                    # Use whichever timestamp is more recent.
-                    try:
-                        from agent.sdk_client import get_session_updated_at
-
-                        inmem_activity = get_session_updated_at(session_id)
-                        if inmem_activity is not None:
-                            if updated_at_ts is None or inmem_activity > updated_at_ts:
-                                updated_at_ts = inmem_activity
-                    except ImportError:
-                        pass
 
                     if updated_at_ts is not None:
                         # If updated_at is recent, session is not stalled
