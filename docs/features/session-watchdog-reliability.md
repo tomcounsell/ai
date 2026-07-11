@@ -107,14 +107,17 @@ detection paths — they extend the actuator surface.
    process. A soft-threshold alert triggers a `token_alert` steer when
    cumulative tokens cross `TOKEN_ALERT_THRESHOLD` on a running session.
 
-3. **Worker-internal idle SDK-client teardown.** A new
-   `worker/idle_sweeper.py` task runs inside the worker process,
-   snapshots `agent.sdk_client._active_clients`, and proactively closes
+3. **Worker-internal idle SDK-client teardown — retired in #2000.** A
+   `worker/idle_sweeper.py` task used to run inside the worker process,
+   snapshotting `agent.sdk_client._active_clients` and proactively closing
    persistent SDK clients on dormant / paused / paused_circuit sessions
-   whose `updated_at` age exceeds `IDLE_TEARDOWN_THRESHOLD` (default 24h).
-   This sits well inside the ~48h Anthropic silent-death window (#1104).
-   The session-watchdog process is intentionally NOT involved — the
-   registry is worker-process-local.
+   whose `updated_at` age exceeded `IDLE_TEARDOWN_THRESHOLD` (default 24h),
+   well inside the ~48h Anthropic silent-death window (#1104). Every
+   production session now runs a short-lived `claude -p` subprocess per
+   turn (the harness path), which never populates a persistent-client
+   registry, so the sweeper and the `_active_clients` registry it
+   inspected were deleted wholesale in #2000 — see
+   [HarnessAdapter Seam](harness-adapter.md).
 
 ## Related
 

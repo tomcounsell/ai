@@ -32,6 +32,10 @@ How sessions transition between states via the consolidated lifecycle module (`m
 
 Of the 9 non-terminal states, most render with distinct glyphs in the dashboard row template (`ui/templates/_partials/sessions_table.html`) — including specific glyphs for `paused` (⏸), `paused_circuit` (⛌), `superseded` (→), `waiting_for_children`, `running`, `pending`, `dormant`, and `active`. `paused_budget` has no dedicated glyph yet — it falls through to the template's default branch and renders as plain status text. Non-terminal rows additionally surface a row-level freshness chip (age since `last_evidence_at`) and a ghost badge when the harness PID probe reports a dead process. See [Dashboard — Liveness Signals](dashboard.md#liveness-signals).
 
+### Resume Handle (`claude_session_uuid` generalization, #2000)
+
+`AgentSession.claude_session_uuid` is the field the `failed`/`killed` resumability note above and [Simple Resume](#simple-resume-d3-four-scalars) below both depend on. Its *meaning* generalized from "the Claude Agent SDK's session id" to "the harness's opaque resume handle" as part of #2000's HarnessAdapter seam — the field name itself was deliberately kept unchanged (no migration; every existing reader/writer, dashboard query, and `valor-session resume` call site continues to work against the same key). Concretely: before #2000 the value was captured by the now-deleted `ValorAgent`/`get_agent_response_sdk` SDK path; today it is captured by `ClaudeHarnessAdapter`'s `session.started{handle}` normalized `TurnEvent` (see [HarnessAdapter Seam § Resume-Handle Contract](harness-adapter.md#resume-handle-contract-race-1)) and persisted on first sight by the runner, preserving the persist-at-init contract (Race 1) through the seam. A same-PR empirical finding (Task 2.1) also established that plain `--resume` reuses the session id on claude 2.1.207 rather than forking it, which simplified the `_claude_session_id` reassignment in `role_driver.py` to assert-and-alarm — see [HarnessAdapter Seam § Resume-Id Stability](harness-adapter.md#resume-id-stability-task-21-empirical-finding).
+
 ## Lifecycle Module
 
 All session status mutations go through `models/session_lifecycle.py`. Direct `.status =` mutations outside this module are prohibited.
@@ -583,6 +587,7 @@ neutralizes the `Session not found` symptom regardless of phantom source.
 
 ## Related
 
+- [HarnessAdapter Seam](harness-adapter.md) -- the resume-handle contract `claude_session_uuid` generalized to, and the claude adapter that emits it
 - [Agent Session Queue Reliability](agent-session-queue.md) -- KeyField index fixes and delete-and-recreate pattern
 - [Agent Session Health Monitor](agent-session-health-monitor.md) -- Stuck session detection
 - [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) -- Structured LIFECYCLE logging at every state transition

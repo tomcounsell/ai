@@ -8,15 +8,22 @@ own turn via the harness's agent mechanism; the parent ``-p`` process blocks
 until the subagent finishes, so an eng turn containing a full Dev build is
 legitimately long. There is no relay loop, no pool, no idle scraping.
 
-Routing is the simplified regex table (:mod:`agent.session_runner.router`):
+Routing is schema-first (plan #2000 Task 2.3, :mod:`agent.session_runner.
+router`): ``_classify_turn`` prefers the claude harness's ``--json-schema``-
+validated ``structured_output`` (``{route, message, file_paths?}``) on
+``HeadlessTurnOutcome``, falling back to the legacy prefix-regex parse only
+when it is absent or invalid (emitting ``schema_routing_fallback``
+telemetry). Either way the classification collapses to the same table:
 
-- ``[/user]``      → deliver via the adapter's user callback, exit ``pm_user``
-- ``[/complete]``  → deliver the summary, exit ``pm_complete`` (wrap-up guard
-  backstops an empty delivery)
+- ``route: "user"``      → deliver via the adapter's user callback (with any
+  ``file_paths``), exit ``pm_user``
+- ``route: "complete"``  → deliver the summary (with any ``file_paths``),
+  exit ``pm_complete`` (wrap-up guard backstops an empty delivery)
 - needs_human edge on an unroutable turn → deliver the PM's text, exit
-  ``pm_needs_human`` (distinct from a real ``[/user]`` answer, see below)
-- anything else    → continue (bounded compliance nudge, then the wrap-up
-  guard — never an infinite loop)
+  ``pm_needs_human`` (distinct from a real ``user``-routed answer, see below)
+- anything else (``route: "continue"``, legacy ``[/dev]``, unknown) →
+  continue (bounded compliance nudge, then the wrap-up guard — never an
+  infinite loop)
 
 Steer-preempt (D4): a per-turn watcher polls the steering list; on a
 substantive steer it terminates the in-flight turn's process group
@@ -63,10 +70,15 @@ from agent.session_runner.role_driver import (
     HeadlessTurnOutcome,
 )
 from agent.session_runner.router import (
+    SCHEMA_ROUTING_FALLBACK_EVENT,
+    SCHEMA_ROUTING_FALLBACK_METRIC,
+    SCHEMA_ROUTING_TURN_METRIC,
     WRAPUP_ELIGIBLE_EXIT_REASONS,
+    ClassificationResult,
     ExitReason,
     classify_pm_prefix,
     truncate_exit_message,
+    validate_structured_route,
 )
 from agent.session_runner.transcript_tailer import last_assistant_text
 
@@ -1115,14 +1127,57 @@ class SessionRunner:
 
     # -- Routing (simplified table) -------------------------------------------
 
+    def _classify_turn(self, outcome: HeadlessTurnOutcome) -> ClassificationResult:
+        """Schema-first classification with a telemetered regex fallback.
+
+        Prefers ``outcome.structured_output`` (validated by the claude
+        harness's ``--json-schema``, plan #2000 Task 2.3); falls back to the
+        prefix-regex parse when absent/invalid, emitting
+        :data:`~agent.session_runner.router.SCHEMA_ROUTING_FALLBACK_EVENT`
+        session telemetry AND the paired analytics counters
+        (:func:`_record_schema_routing_metric`) that feed the fallback-rate
+        alert threshold (``monitoring/schema_routing_alert.py``). Both paths
+        record the turn-volume counter — a healthy schema path is ~0%
+        fallback, not 0 recorded turns.
+        """
+        classification = validate_structured_route(outcome.structured_output)
+        if classification is not None:
+            self._record_schema_routing_metric(fallback=False)
+            return classification
+
+        self._record_schema_routing_metric(fallback=True)
+        self._record_telemetry(
+            {
+                "type": SCHEMA_ROUTING_FALLBACK_EVENT,
+                "raw_first_line": (outcome.reply_text or "").splitlines()[0][:200]
+                if outcome.reply_text
+                else "",
+            }
+        )
+        return classify_pm_prefix(outcome.reply_text)
+
+    def _record_schema_routing_metric(self, *, fallback: bool) -> None:
+        """Best-effort analytics counters for the schema-routing fallback-rate
+        alert (plan #2000 Task 2.3). Fail-silent — analytics must never
+        affect routing.
+        """
+        try:
+            from analytics.collector import record_metric  # noqa: PLC0415
+
+            record_metric(SCHEMA_ROUTING_TURN_METRIC, 1.0)
+            if fallback:
+                record_metric(SCHEMA_ROUTING_FALLBACK_METRIC, 1.0)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[runner] schema-routing metric record failed: %s", e)
+
     def _route_turn(self, outcome: HeadlessTurnOutcome) -> _RouteDecision:
         """Route one completed PM turn: [/user] deliver, [/complete] wrap, else continue."""
         text = outcome.reply_text
-        classification = classify_pm_prefix(text)
+        classification = self._classify_turn(outcome)
         miss = classification.compliance_miss
 
         if classification.destination == "user" and classification.payload:
-            self._adapter.on_user_payload(classification.payload)
+            self._adapter.on_user_payload(classification.payload, classification.file_paths)
             return _RouteDecision(
                 should_break=True, exit_reason=ExitReason.PM_USER, compliance_miss=miss
             )
@@ -1130,7 +1185,7 @@ class SessionRunner:
         if classification.destination == "complete":
             payload = classification.payload or ""
             if payload:
-                self._adapter.on_complete_payload(payload)
+                self._adapter.on_complete_payload(payload, classification.file_paths)
             return _RouteDecision(
                 should_break=True, exit_reason=ExitReason.PM_COMPLETE, compliance_miss=miss
             )
@@ -1167,12 +1222,14 @@ class SessionRunner:
             outcome = await self._driver.run_turn(PM_WRAPUP_PROMPT.format(seed=seed))
             text = (outcome.reply_text or "").strip()
             if text:
-                classification = classify_pm_prefix(text)
+                classification = self._classify_turn(outcome)
                 if classification.destination == "user" and classification.payload:
-                    self._adapter.on_user_payload(classification.payload)
+                    self._adapter.on_user_payload(classification.payload, classification.file_paths)
                     summary.exit_reason = ExitReason.PM_USER
                 elif classification.destination == "complete" and classification.payload:
-                    self._adapter.on_complete_payload(classification.payload)
+                    self._adapter.on_complete_payload(
+                        classification.payload, classification.file_paths
+                    )
                     summary.exit_reason = ExitReason.PM_COMPLETE
                 else:
                     # Non-empty but prefix-less: deliver directly (relaxed

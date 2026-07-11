@@ -13,12 +13,12 @@ This approach ensures ad-hoc conversations never pollute each other's tasks, whi
 
 ### Task List ID Injection
 
-The bridge injects `CLAUDE_CODE_TASK_LIST_ID` into the environment when spawning Claude Code via the SDK client:
+The bridge injects `CLAUDE_CODE_TASK_LIST_ID` into the environment when spawning Claude Code via the harness:
 
 - **Tier 1**: `CLAUDE_CODE_TASK_LIST_ID=thread-{chat_id}-{root_message_id}` for Telegram sessions, or `session-{session_id}` for local Claude Code sessions.
 - **Tier 2**: `CLAUDE_CODE_TASK_LIST_ID={slug}` when a work item slug is assigned via `/do-plan`.
 
-The env var is set in `ValorAgent._create_options()` and passed through `get_agent_response_sdk()`.
+The env var is set on the `_harness_env` dict built in `agent/session_executor.py` (see [Harness Abstraction § Session Environment Injection](harness-abstraction.md#session-environment-injection-issue-1148)). The prior `ValorAgent._create_options()` / `get_agent_response_sdk()` injection site was deleted in #2000 along with the rest of the dead SDK path.
 
 **Important distinction:** `CLAUDE_CODE_TASK_LIST_ID` scopes **sub-agent Task storage** (`~/.claude/tasks/{id}/`) used by `TaskCreate`/`TaskList`/`TaskUpdate` when spawned via the `Task` tool. It does **not** affect `TodoWrite`, which is scoped by Claude Code's internal session ID automatically. In practice, this means:
 

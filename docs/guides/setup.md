@@ -280,16 +280,16 @@ rm data/valor_bridge.session
 python bridge/telegram_bridge.py
 ```
 
-### SDK Errors
+### Harness Errors
 
 Check the logs:
 ```bash
 tail -f logs/bridge.log
 ```
 
-Test the SDK directly:
+Test the harness import directly (the `ValorAgent` SDK path was deleted in #2000):
 ```python
-python3 -c "from agent import ValorAgent; print('SDK OK')"
+python3 -c "from agent import get_response_via_harness; print('Harness OK')"
 ```
 
 ## Next Steps

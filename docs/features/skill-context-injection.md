@@ -13,7 +13,7 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 
 ### Part 1: SDLC Environment Variable Injection
 
-`agent/sdk_client.py` extracts session fields from `AgentSession` (via Redis) and injects them as `SDLC_*` environment variables before spawning the Claude Code subprocess.
+`agent/sdk_client.py::_extract_sdlc_env_vars()` extracts session fields from `AgentSession` (via Redis) and builds `SDLC_*` environment variables intended for injection before spawning the Claude Code subprocess.
 
 | Variable | Source Field | Example |
 |----------|-------------|---------|
@@ -22,7 +22,7 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 | `SDLC_SLUG` | `AgentSession.slug` | `my-feature` |
 | `SDLC_PLAN_PATH` | `AgentSession.plan_url` | `docs/plans/my-feature.md` |
 | `SDLC_ISSUE_NUMBER` | `AgentSession.issue_url` | `415` |
-| `SDLC_REPO` | `ValorAgent.gh_repo` | `tomcounsell/ai` |
+| `SDLC_REPO` | `gh_repo` (project github config) | `tomcounsell/ai` |
 
 **Key behaviors:**
 - Variables are only set when the corresponding field is non-None and a valid string (`isinstance(str)` guard)
@@ -31,7 +31,7 @@ Skills are static Markdown templates with placeholder variables like `{pr_number
 - `SDLC_REPO` complements `GH_REPO`, it does not replace it
 - `SDLC_ISSUE_NUMBER` is injected from `AgentSession.issue_url` and is reliable for **read-only context** (e.g. fetching the issue body for context). For **recorder calls** (`sdlc-tool verdict record`, `stage-marker`), skills must resolve `ISSUE_NUMBER` from `$ARGUMENTS` or PR-body extraction as the primary source; `$SDLC_ISSUE_NUMBER` is a last-resort fallback only and must be guarded with a positive-integer check before use (#1731).
 
-**Implementation:** `_extract_sdlc_env_vars()` in `agent/sdk_client.py`, called from `_create_options()` after the existing `GH_REPO` injection block.
+**Known gap (#2039):** `_extract_sdlc_env_vars()` was previously called from `ValorAgent`'s option-assembly method, which #2000 deleted along with the rest of the dead SDK path. No equivalent call was added to the harness path's env construction (`agent/session_executor.py`'s `_harness_env` dict), so as of this PR the function has no production caller and these env vars are **not currently injected**. Skills should rely on `$ARGUMENTS`, PR-body extraction, and `gh` calls until #2039 rewires the injection.
 
 ### Part 2: Observer Nudge Feedback Enrichment
 

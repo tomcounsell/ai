@@ -1,8 +1,16 @@
-"""Behavioral tests for cross-repo GH_REPO env var injection (issue #375).
+"""Behavioral tests for cross-repo GH_REPO/GITHUB header injection (issue #375).
 
-These tests verify that the GH_REPO environment variable is correctly set
-in the subprocess environment for cross-repo SDLC requests, replacing the
-unreliable approach of relying on LLM markdown instructions.
+These tests verify that cross-repo SDLC requests carry the target repo
+identity through to the harness, replacing the unreliable approach of
+relying on LLM markdown instructions.
+
+The ValorAgent._create_options() GH_REPO *env var* injection tests that
+used to live here were removed (plan #2000 Task 2.2 dead-SDK-path
+deletion): GH_REPO env injection was ValorAgent-only with zero occurrences
+anywhere in the codebase outside that (now-deleted) class. The CLI-harness
+path's real, live cross-repo mechanism is build_harness_turn_input()'s
+``GITHUB: org/repo`` message header (TestBuildHarnessTurnInputGhRepo below),
+which was already covered and is unaffected by the deletion.
 """
 
 from pathlib import Path
@@ -12,38 +20,6 @@ import pytest
 
 # AI_REPO_ROOT as defined in sdk_client.py
 AI_REPO_ROOT = str(Path(__file__).parent.parent.parent)
-
-
-class TestValorAgentGhRepo:
-    """Test GH_REPO env var injection in ValorAgent._create_options()."""
-
-    def _make_agent(self, gh_repo=None):
-        """Create a ValorAgent with minimal config for testing."""
-        with patch("agent.sdk_client.load_system_prompt", return_value="test prompt"):
-            from agent.sdk_client import ValorAgent
-
-            return ValorAgent(
-                working_dir=AI_REPO_ROOT,
-                gh_repo=gh_repo,
-            )
-
-    def test_gh_repo_set_in_env_when_provided(self):
-        """GH_REPO should appear in env dict when gh_repo is a valid org/repo string."""
-        agent = self._make_agent(gh_repo="tomcounsell/popoto")
-        options = agent._create_options()
-        assert options.env.get("GH_REPO") == "tomcounsell/popoto"
-
-    def test_gh_repo_not_set_when_none(self):
-        """GH_REPO should NOT appear in env dict when gh_repo is None (default)."""
-        agent = self._make_agent(gh_repo=None)
-        options = agent._create_options()
-        assert "GH_REPO" not in options.env
-
-    def test_gh_repo_not_set_when_empty_string(self):
-        """GH_REPO should NOT appear in env dict when gh_repo is an empty string."""
-        agent = self._make_agent(gh_repo="")
-        options = agent._create_options()
-        assert "GH_REPO" not in options.env
 
 
 class TestBuildHarnessTurnInputGhRepo:

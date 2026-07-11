@@ -423,31 +423,12 @@ class TestSessionFieldsIncludesParentSessionId:
 
 
 # ===================================================================
-# ValorAgent agent_session_id injection
+# ValorAgent agent_session_id injection: TestValorAgentSessionIdInjection
+# was removed here (plan #2000 Task 2.2 dead-SDK-path deletion). The real,
+# live CLI-harness AGENT_SESSION_ID injection (agent/session_executor.py)
+# already has its own coverage in
+# tests/unit/test_session_executor_runner_dispatch.py.
 # ===================================================================
-
-
-class TestValorAgentSessionIdInjection:
-    """Test that AGENT_SESSION_ID is injected into the env."""
-
-    @patch("agent.sdk_client.load_system_prompt", return_value="test prompt")
-    def test_agent_session_id_in_create_options_env(self, mock_prompt):
-        from agent.sdk_client import ValorAgent
-
-        agent = ValorAgent(
-            working_dir="/tmp/test",
-            agent_session_id="test-session-123",
-        )
-        options = agent._create_options(session_id="test-session")
-        assert options.env.get("AGENT_SESSION_ID") == "test-session-123"
-
-    @patch("agent.sdk_client.load_system_prompt", return_value="test prompt")
-    def test_no_agent_session_id_when_not_set(self, mock_prompt):
-        from agent.sdk_client import ValorAgent
-
-        agent = ValorAgent(working_dir="/tmp/test")
-        options = agent._create_options(session_id="test-session")
-        assert "AGENT_SESSION_ID" not in options.env
 
 
 # ===================================================================

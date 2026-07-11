@@ -272,7 +272,7 @@ class TestHarnessModelArgvInjection:
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             _stub_subprocess(mock_exec)
 
-            with caplog.at_level(logging.INFO, logger="agent.sdk_client"):
+            with caplog.at_level(logging.INFO, logger="agent.session_runner.harness.claude"):
                 await get_response_via_harness(
                     message="hi",
                     working_dir="/tmp/test",

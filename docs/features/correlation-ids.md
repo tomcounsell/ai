@@ -13,13 +13,13 @@ Every message journey through the system now carries a shared `correlation_id` -
 3. **Propagation path**:
    - `bridge/telegram_bridge.py` generates the ID and passes it to `enqueue_agent_session()`
    - `agent/agent_session_queue.py` stores it in the AgentSession via `_push_agent_session()` and reads it back in `_execute_agent_session()` for use as a log prefix
-   - `agent/sdk_client.py` receives it via `get_agent_response_sdk()` and uses it as the log prefix (replacing the internally-generated `request_id`)
+   - `agent/session_executor.py` reads `session.correlation_id` and threads it into session-event payloads for tracing (replacing the internally-generated `request_id`); the `get_agent_response_sdk()` call site described here was deleted in #2000 along with the rest of the dead SDK path
    - `bridge/session_transcript.py` includes it in the transcript file header
    - `bridge/session_logs.py` receives it via `extra_context` in snapshot metadata
 
 4. **Auto-continue inheritance**: The `correlation_id` is listed in `_AGENT_SESSION_FIELDS`, so it is automatically preserved across the delete-and-recreate pattern used by `_enqueue_continuation()`. Continuation sessions inherit the parent's correlation_id.
 
-5. **Fallback**: If `get_agent_response_sdk()` is called without a correlation_id (e.g., direct SDK usage outside the bridge), it generates one locally to ensure all SDK log lines still have a tracing prefix.
+5. **Fallback**: Non-bridge callers without a correlation_id fall back to a locally-generated ID so log lines still carry a tracing prefix.
 
 ## Usage for Debugging
 

@@ -144,7 +144,7 @@ A second layer of SDLC enforcement operates at the Claude Agent SDK level, indep
 
 ### System Prompt Injection (SDLC_WORKFLOW)
 
-Every agent session started by `ValorAgent` receives the mandatory pipeline rules injected into the system prompt. The rules are hardcoded in `agent/sdk_client.py` as the `SDLC_WORKFLOW` constant -- not in persona segment files or any config file. This prevents accidental removal via persona doc edits.
+Every agent session receives the mandatory pipeline rules injected into the system prompt. Note: this section predates #2000, which deleted `ValorAgent` (the SDK-era class formerly named here) along with the rest of the dead Claude Agent SDK path; the `SDLC_WORKFLOW` constant it describes was itself already removed independently in #356 (2026-03-11). Flagged for a separate documentation-accuracy pass — see the tracking issue linked from this PR's docs cascade.
 
 The system prompt structure assembled by `load_system_prompt()`:
 

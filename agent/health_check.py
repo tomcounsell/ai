@@ -493,15 +493,18 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
     Returns a hook result dict if steering action was taken, None otherwise.
     This runs on EVERY tool call (lightweight Redis LPOP).
 
-    Delivery paths:
-    - SDK-harness sessions: messages are injected mid-turn via client.interrupt()+query().
-    - CLI-harness sessions (no active SDK client): messages are re-pushed to the Redis
-      steering list (agent.steering) via _repush_messages(), with a WARNING log. The
-      worker's turn-boundary drain (pop_all_steering_messages) picks them up on the
-      next turn. By the time this branch runs, every remaining message is guaranteed
-      non-abort — the loop above already returned early for any abort message.
-    - Abort signals: always delivered via hookSpecificOutput additionalContext regardless
-      of harness type.
+    This is the sole steering-injection/delivery path for every CLI-harness
+    (production) session, NOT a liveness check (plan #2000 Critique Results
+    BLOCKER finding). Delivery paths:
+    - Every remaining message (guaranteed non-abort — the loop above already
+      returned early for any abort message) is re-pushed to the Redis
+      steering list (agent.steering) via _repush_messages(), with a WARNING
+      log. The worker's turn-boundary drain (pop_all_steering_messages)
+      picks it up on the next turn. This used to be an `else` fallback
+      behind a now-deleted SDK-client in-process injection arm (plan #2000
+      Task 2.2 dead-SDK-path deletion) — it is the unconditional body now.
+    - Abort signals: always delivered via hookSpecificOutput additionalContext
+      regardless of harness type.
     """
     from agent.steering import pop_all_steering_messages
 
@@ -527,43 +530,19 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
                 },
             }
 
-    # Combine all steering messages into one injection
-    parts = []
-    for msg in messages:
-        sender = msg.get("sender", "supervisor")
-        text = msg.get("text", "")
-        target = msg.get("target_agent")
-        prefix = f"[{sender}]"
-        if target:
-            prefix = f"[{sender} -> @{target}]"
-        parts.append(f"{prefix}: {text}")
-
-    combined = "\n".join(parts)
     logger.info(f"[steering] Injecting {len(messages)} message(s) into session {session_id}")
 
-    # Get the active SDK client and inject the steering message
+    # Re-push every remaining message (guaranteed non-abort — see docstring)
+    # to the Redis steering list so the worker's turn-boundary drain picks
+    # it up on the next turn. This is the live production steering path for
+    # every CLI-harness session (plan #2000 Critique Results BLOCKER).
     try:
-        from agent.sdk_client import get_active_client
-
-        client = get_active_client(session_id)
-        if client:
-            await client.interrupt()
-            await client.query(
-                f"STEERING MESSAGE FROM SUPERVISOR (mid-execution update):\n\n{combined}"
-            )
-            logger.info(f"[steering] Successfully injected into session {session_id}")
-        else:
-            # No active SDK client (CLI-harness session or SDK client not yet
-            # registered). Re-push every remaining message (guaranteed non-abort —
-            # see docstring) to the Redis steering list so the worker's
-            # turn-boundary drain picks it up on the next turn.
-            logger.warning(
-                f"[steering] No active client for {session_id} (CLI harness?); "
-                f"re-pushing {len(messages)} message(s) to Redis list"
-            )
-            _repush_messages(session_id, messages)
+        logger.warning(
+            f"[steering] Re-pushing {len(messages)} message(s) to Redis list for {session_id}"
+        )
+        _repush_messages(session_id, messages)
     except Exception as e:
-        logger.error(f"[steering] Failed to inject message: {e} — re-pushing to preserve")
+        logger.error(f"[steering] Failed to re-push message(s): {e} — re-pushing to preserve")
         # Re-push so messages aren't lost on injection failure
         _repush_messages(session_id, messages)
 

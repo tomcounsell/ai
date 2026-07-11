@@ -137,7 +137,8 @@ The worker's startup sequence is deterministic:
 | 5 | `_ensure_worker(worker_key)` for each pending session | Kick per-worker-key loops for queued sessions |
 | 6 | `_agent_session_health_loop()` | Background task: periodic session health checks, orphan detection (safety net) |
 | 7 | `_session_notify_listener()` | Background task: subscribe to `valor:sessions:new` pub/sub, wake worker on new session (~1s pickup) |
-| 8 | `run_idle_sweep()` | Background task: proactively tears down idle persistent Claude SDK clients on dormant/paused sessions before the ~48h Anthropic silent-death window (issue #1128). See [Worker-Internal Idle Sweeper](#worker-internal-idle-sweeper-issue-1128). |
+
+Step 8 (the idle sweeper, issue #1128) was retired in #2000 — see [Worker-Internal Idle Sweeper](#worker-internal-idle-sweeper-issue-1128) below.
 
 ### Worker-Process Sentry (issue #1877)
 
@@ -272,55 +273,18 @@ agent.session_executor INFO [<cid|project>] Resolved persona for session=<sid>: 
 
 If `project["email"]["persona"]` is set but neither the requested overlay nor the fallback can be loaded, the resolver emits an `ERROR [persona-load-failed]` line — the harness will run with no system prompt and reply in the default voice, so the operator should review the queued `email:outbox:` payload before SMTP relay. See [email-bridge.md](email-bridge.md#persona-resolution-for-email-spawned-sessions) for the full rule.
 
-### Worker-Internal Idle Sweeper (issue #1128)
+### Worker-Internal Idle Sweeper (issue #1128) — Retired in #2000
 
-The **worker process** owns the `_active_clients` registry at
-`remove line number or verify exact location exists`, which maps `session_id → ClaudeSDKClient` for
-interactive chat sessions (the SDK-path). These persistent SDK
-connections die silently after ~48h of idle (fleet-ops finding #1104),
-so the worker spawns an idle-sweeper background task
-(`use correct Python reference syntax (`.` not `::`)`) to proactively tear down
-clients well before that window.
-
-```
-worker/__main__.py startup
-    |
-    v
-supervise("idle-sweeper", run_idle_sweep)   # respawns on unexpected death
-    |                                        # (see Worker Fault Containment #1816)
-    v
-loop every IDLE_SWEEP_INTERVAL seconds:
-    _sweep_once()
-      |
-      |-- snapshot = list(_active_clients.items())
-      |-- for (session_id, client) in snapshot:
-      |     load AgentSession.filter(session_id=session_id)
-      |     if status in {dormant, paused, paused_circuit}
-      |        AND updated_at age > IDLE_TEARDOWN_THRESHOLD:
-      |          await client.close()    -- idempotent
-      |          _active_clients.pop(session_id, None)
-      |          AgentSession.sdk_connection_torn_down_at = now
-      |          save(update_fields=["sdk_connection_torn_down_at"])
-      v
-cancel on worker SIGTERM shutdown
-```
-
-**Process locality** is the load-bearing design choice: the
-session-watchdog process (`monitoring/session_watchdog.py`) does NOT
-share memory with the worker, so it cannot reach `_active_clients`. The
-teardown MUST run inside the worker process. The watchdog remains
-responsible for repetition / error-cascade / token-alert detection and
-steering (see [Session Watchdog](session-watchdog.md)) but does not
-touch the SDK-client registry.
-
-**Harness-path sessions** (all production PM / Dev / Teammate work) are
-unaffected — `_run_harness_subprocess` spawns a short-lived `claude -p`
-subprocess per turn, leaving nothing in `_active_clients` to go stale.
-The sweeper is a no-op for harness-path sessions.
-
-**Configuration.** Defaults are generous (sweep every 30 min, tear down
-at 24h dormant); tune via env vars — see the [Session Watchdog env-var
-table](session-watchdog.md#configuration).
+The worker used to own an `_active_clients` registry mapping `session_id → ClaudeSDKClient` for
+the persistent-connection SDK path, and ran an idle-sweeper background task
+(`worker/idle_sweeper.py::run_idle_sweep`, supervised in `worker/__main__.py`) to proactively
+tear down those connections before Anthropic's ~48h silent-death window (fleet-ops finding
+#1104). Every production session (PM / Dev / Teammate) has run through the harness path — a
+short-lived `claude -p` subprocess per turn — for some time, which never populated
+`_active_clients`, so the sweeper was already a permanent no-op there. #2000 deleted the
+sweeper, its `worker/__main__.py` supervision wiring, and the `_active_clients` registry
+wholesale, along with the rest of the dead Claude Agent SDK path (see
+[HarnessAdapter Seam](harness-adapter.md)). There is nothing left to sweep on the harness path.
 
 ## Worker Key Routing (issues #831, #1085)
 

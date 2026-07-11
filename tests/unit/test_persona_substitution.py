@@ -1,16 +1,21 @@
-"""Unit tests for load_persona_prompt substitutions and CUSTOMER_ID env injection.
+"""Unit tests for load_persona_prompt substitutions.
 
 Tests cover:
 - _SafeFormatDict: missing keys preserved as {key}
 - load_persona_prompt(substitutions=...) applies substitutions
 - load_persona_prompt(substitutions=None) backward-compatible
-- ValorAgent._create_options injects CUSTOMER_ID when set
-- ValorAgent._create_options does NOT inject CUSTOMER_ID when None
+
+The ValorAgent._create_options CUSTOMER_ID env-var injection tests that used
+to live here were removed (plan #2000 Task 2.2 dead-SDK-path deletion):
+CUSTOMER_ID was ValorAgent-only env injection with zero occurrences anywhere
+in the codebase outside that (now-deleted) class -- there is no CLI-harness
+equivalent to re-test against, so this was genuinely dead functionality, not
+relocated functionality.
 """
 
 from unittest.mock import patch
 
-from agent.sdk_client import ValorAgent, _SafeFormatDict, load_persona_prompt
+from agent.sdk_client import _SafeFormatDict, load_persona_prompt
 
 # ---------------------------------------------------------------------------
 # _SafeFormatDict
@@ -104,39 +109,3 @@ def test_load_persona_prompt_unreferenced_braces_preserved(tmp_path):
 
     assert "cust-99" in result
     assert "{other_key}" in result
-
-
-# ---------------------------------------------------------------------------
-# ValorAgent._create_options CUSTOMER_ID injection
-# ---------------------------------------------------------------------------
-
-
-def _make_agent(customer_id=None):
-    """Create a ValorAgent with customer_id set, mocking filesystem checks."""
-    with patch("agent.sdk_client.validate_workspace", side_effect=lambda p, *a, **kw: p):
-        agent = ValorAgent(
-            working_dir="/tmp",
-            system_prompt="test prompt",
-            customer_id=customer_id,
-        )
-    return agent
-
-
-def test_valor_agent_customer_id_injected_in_env():
-    """CUSTOMER_ID env var is set when customer_id is provided."""
-    agent = _make_agent(customer_id="cust-42")
-    with patch("agent.sdk_client._get_prior_session_uuid", return_value=None):
-        with patch("agent.sdk_client.build_hooks_config", return_value={}):
-            with patch("agent.sdk_client.get_agent_definitions", return_value={}):
-                options = agent._create_options(session_id=None)
-    assert options.env.get("CUSTOMER_ID") == "cust-42"
-
-
-def test_valor_agent_no_customer_id_no_env_var():
-    """CUSTOMER_ID env var is absent when customer_id is None."""
-    agent = _make_agent(customer_id=None)
-    with patch("agent.sdk_client._get_prior_session_uuid", return_value=None):
-        with patch("agent.sdk_client.build_hooks_config", return_value={}):
-            with patch("agent.sdk_client.get_agent_definitions", return_value={}):
-                options = agent._create_options(session_id=None)
-    assert "CUSTOMER_ID" not in options.env

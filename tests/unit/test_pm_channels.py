@@ -133,11 +133,11 @@ class TestEngModeContextEnrichment:
     async def test_eng_mode_no_github_header(self):
         """Eng mode projects skip SDLC classification, so no GITHUB header is injected.
 
-        When project mode is 'eng', get_agent_response_sdk forces classification
-        to 'question' before calling build_harness_turn_input. The GITHUB header is
-        only injected for SDLC cross-repo calls, so eng-mode projects never see it.
-        This test verifies that behavior by passing classification='question' as the
-        SDK would.
+        When project mode is 'eng', the caller forces classification to
+        'question' before calling build_harness_turn_input. The GITHUB header
+        is only injected for SDLC cross-repo calls, so eng-mode projects
+        never see it. This test verifies that behavior by passing
+        classification='question' directly, as an eng-mode caller would.
         """
         eng_project = {
             "name": "Eng: Cuttlefish",
@@ -159,7 +159,7 @@ class TestEngModeContextEnrichment:
                 task_list_id=None,
                 session_type="eng",
                 sender_id=123,
-                # Eng mode: get_agent_response_sdk forces 'question' when mode='eng'
+                # Eng mode: the caller forces 'question' when mode='eng'
                 classification="question",
                 is_cross_repo=True,
             )

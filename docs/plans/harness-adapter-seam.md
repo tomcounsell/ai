@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: feature
 appetite: Large
 owner: Valor Engels
@@ -119,6 +119,19 @@ The issue framing ("only two legacy tests reference it") is **understated**. Gro
 - **The two named tests only reference the dead symbol in comments:** `test_pm_channels.py:136,162`
   and `test_error_summary_enforcement.py:40` mention `get_agent_response_sdk` in prose comments, not
   imports/calls — comment cleanup only.
+
+**Build-time scope correction (Task 2.2, 2026-07-12):** the plan's "drop the whole `claude-agent-sdk`
+dependency" framing is **too broad**. `claude_agent_sdk` (the installed package) has genuine live
+consumers **outside** the dead `ValorAgent`/`get_agent_response_sdk` path: `agent/health_check.py`,
+`agent/hooks/{__init__,post_tool_use,pre_tool_use,pre_compact,stop}.py`, and
+`agent/agent_definitions.py` all import SDK hook-config types (`HookContext`, `HookMatcher`,
+`AgentDefinition`, `PostToolUseHookInput`, `PreToolUseHookInput`, `PreCompactHookInput`,
+`StopHookInput`) that are unrelated to the persistent-`ClaudeSDKClient` substrate being deleted here —
+these are Claude Code's own hook-registration types, consumed regardless of which harness drives a
+turn. **Corrected scope:** delete the `claude_agent_sdk` import **from `agent/sdk_client.py` only**
+(confirmed clean — zero references remain there); the `claude-agent-sdk==0.2.116` **dependency stays**
+in `pyproject.toml` because the hook-type consumers still need it. Every place below that says "drop
+the `claude-agent-sdk` dependency" or "claude-agent-sdk dep dropped" is superseded by this correction.
 This drift does not change the premise; it enlarges Test Impact and adds three prod-couple edits.
 The plan scopes to the **real** blast radius below.
 
@@ -186,6 +199,119 @@ this machine). The runtime-semantics probes remain **build-time gates** (Task 2.
   self-contained once those three couplers are pruned.
 - **Confidence**: high.
 
+### Task 2.1 empirical results (2026-07-11/12, claude 2.1.207)
+
+**Method**: live shell execution of `claude -p` (not code-reading) on this machine, claude CLI
+**2.1.207** (plan's spikes were recorded against 2.1.204 help-text; re-verified live). Both spike-1
+and spike-2 hypotheses are **confirmed**, with one important runtime-mechanics correction to spike-1's
+open question (where the validated object lands and how invalid output surfaces). Neither probe
+invalidates the plan's approach — no STOP triggered.
+
+#### Probe A: `--json-schema` under `--output-format stream-json`
+
+Schema used: `{"type":"object","properties":{"route":{"type":"string","enum":["user","complete","continue"]},"message":{"type":"string"}},"required":["route","message"]}`.
+
+**Mechanism — this is a synthetic tool call, not inline text.** The CLI injects a synthetic
+`StructuredOutput` tool into the tool list (visible in the `system/init` event's `"tools"` array) when
+`--json-schema` is passed. The model must emit a `tool_use` block naming it; the CLI validates the
+tool's `input` against the schema out-of-band, and closes the tool_use with a synthetic `tool_result`.
+Observed on a valid run:
+
+```json
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01HRmQ4vRzRCcHpTJDPEMv3g","name":"StructuredOutput","input":{"route":"complete","message":"probe ok"}}]}, ...}
+{"type":"user","message":{"content":[{"tool_use_id":"toolu_01HRmQ4vRzRCcHpTJDPEMv3g","type":"tool_result","content":"Structured output provided successfully"}]}, ...}
+```
+
+**Where the validated object lands**: the terminal `result` event (`{"type":"result","subtype":"success",...}`)
+carries a top-level **`structured_output`** key with the parsed, schema-validated object, alongside the
+usual `result` key holding the same object JSON-stringified:
+
+```json
+{"type":"result","subtype":"success","is_error":false,"result":"{\"route\":\"complete\",\"message\":\"probe ok\"}","stop_reason":"tool_use","structured_output":{"route":"complete","message":"probe ok"},"terminal_reason":"completed", ...}
+```
+
+This confirms the adapter's `TurnResult.structured_output` should be sourced from `result.structured_output`
+on the terminal event — not scraped from assistant-text content.
+
+**Invalid-output behavior — three sub-cases probed, all against a live CLI, not simulated:**
+
+1. **Model-chosen invalid enum value** (asked the model to deliberately set `route:"banana"`): the model
+   *itself* refused (safety/instruction-following behavior, not a CLI mechanism) and self-corrected to a
+   valid value before calling the tool. Inconclusive for CLI-level enforcement by itself — see (2).
+2. **Genuinely unsatisfiable schema** (`minProperties: 5` + `additionalProperties: false` on a
+   2-property schema — no object can ever validate): the CLI performed **real JSON-Schema validation on
+   the tool_use input** and rejected it with an `is_error:true` tool_result fed back to the model:
+   `"Output does not match required schema: root: must NOT have fewer than 5 properties"`, then
+   `"...must NOT have additional properties"` on the model's retry. After the model gave up (explained in
+   prose why the schema was impossible instead of calling the tool again), the CLI injected exactly
+   **one synthetic compliance nudge** as an `isSynthetic:true` user turn:
+   `"[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now."`
+   The model tried once more, failed validation again, then gave up for good. **The process still exited
+   with `subtype:"success"`, `is_error:false`, `stop_reason:"end_turn"` — and the terminal `result` event
+   had no `structured_output` key at all** (present in every valid run, absent here).
+3. **Model refuses to call the tool at all** (instructed to answer in plain prose only): the CLI fired
+   the same single `[structured-output-enforce] ... Call this tool now.` synthetic nudge once, the model
+   repeated its refusal, and the CLI then terminated normally: `subtype:"success"`, `is_error:false`,
+   `stop_reason:"end_turn"`, `result:"I refuse to use the StructuredOutput tool."`, **no `structured_output`
+   key**.
+
+**Conclusion — the concrete fallback-detection signal for the runner**: neither process exit code nor
+`is_error` distinguishes schema success from schema failure — both are `is_error:false` and the process
+exits 0 either way. **The adapter/router must detect schema-validation failure by checking whether the
+terminal `result` event's `structured_output` key is present.** If present, route on it. If absent, fall
+back to prefix-regex on `result.result` (the final text) exactly as the plan's Risk 1 / Solution
+"Schema routing" section describes, and emit `schema_routing_fallback` telemetry. This also means the CLI
+itself already implements a one-shot internal compliance nudge (`[structured-output-enforce]`) *before*
+giving up — the runner's own compliance-nudge backstop only needs to trigger after the terminal
+`structured_output`-absent signal, not duplicate the CLI's internal retry.
+
+**`--include-partial-messages` interaction** (secondary, verified): adding this flag emits a long run of
+`{"type":"stream_event","event":{...raw Anthropic streaming deltas...}}` events between `init` and
+`result` — `message_start`, `content_block_start`/`delta`/`stop` (including `input_json_delta` chunks
+that incrementally build the `StructuredOutput` tool's `input` JSON), `message_delta`, `message_stop`.
+The terminal `result` event's `structured_output` field is unaffected — same shape, same location. No
+interaction risk: partial-message streaming is additive telemetry only, safe to normalize into
+`TurnEvent`s or ignore.
+
+#### Probe B: `--resume` session-id stability (two-turn, then extended to three + a fork control)
+
+Turn 1 (no `--resume`): `claude -p --output-format stream-json "Say the single word: ping"` →
+`init.session_id` = `result.session_id` = **`1e7048ef-9ea2-49e4-b225-eee31f298200`**.
+
+Turn 2 (`claude -p --resume 1e7048ef-9ea2-49e4-b225-eee31f298200 ...`, no `--fork-session`): both
+`init.session_id` and `result.session_id` on the second turn were **identical**:
+`1e7048ef-9ea2-49e4-b225-eee31f298200`. **Confirmed: default `--resume` reuses the id, does not fork.**
+
+Turn 3 (repeated `--resume` on the same original id a second time, a third independent process): still
+identical: `1e7048ef-9ea2-49e4-b225-eee31f298200`. Stability holds across repeated resumes, not just a
+single one.
+
+Turn 4 (control: `claude -p --resume 1e7048ef-9ea2-49e4-b225-eee31f298200 --fork-session ...`): produced
+a **new, different** session id: `18f40925-f4af-4e7f-8089-9e1a204f1565`, distinct from the original.
+This confirms `--fork-session` is the only path that forks; plain `--resume` is stable.
+
+`claude --help` exact text on 2.1.207 (unchanged from the 2.1.204 wording the plan's spike-2 cited):
+
+```
+--fork-session                        When resuming, create a new session ID
+                                      instead of reusing the original (use
+                                      with --resume or --continue)
+```
+
+**Conclusion**: spike-2's hypothesis is **empirically confirmed, not just help-text-inferred**. The
+`_claude_session_id` reassignment in `_handle_init` (`role_driver.py:238-257`) is compensating for
+behavior that does not occur under plain `--resume` on this CLI version. Per the plan's Technical
+Approach, this clears Task 2.2 to simplify that reassignment to **assert-and-alarm** (log + Sentry keyed
+to persisted `claude_version` if an observed id ever differs from the expected one), while leaving
+`self._transcript_path` retargeted unconditionally on every init event (the separate, still-valid
+mid-turn-preempt rationale — untouched by this finding).
+
+**No STOP triggered.** Both probes support the plan's approach as designed:
+- Schema routing is usable as planned, with the refinement that fallback detection keys on
+  `structured_output` presence/absence in the terminal event, not on exit code or `is_error`.
+- Resume-id is stable under plain `--resume`, confirming capture-at-init's `_claude_session_id` half can
+  be simplified to assert-and-alarm.
+
 ## Data Flow
 
 Target flow after this PR (today's flow is identical minus the seam and with prefix-token routing at
@@ -210,7 +336,9 @@ step 5):
 
 ## Architectural Impact
 
-- **New dependencies**: none. **Removed dependency**: `claude-agent-sdk==0.2.116` (`pyproject.toml:9`).
+- **New dependencies**: none. **Removed**: the `claude_agent_sdk` import from `agent/sdk_client.py`
+  only. **Dependency kept**: `claude-agent-sdk==0.2.116` (`pyproject.toml:9`) stays — live hook-type
+  consumers outside the deleted path (see Freshness Check build-time scope correction).
 - **Interface changes**: `get_response_via_harness` (the free function) becomes
   `ClaudeHarnessAdapter.run_turn`; `get_agent_response_sdk`, `ValorAgent`, `get_active_client`,
   `get_all_active_sessions`, and `run_idle_sweep` are **deleted**. `agent/__init__.py` exports shrink.
@@ -241,10 +369,10 @@ extracted path, and it absorbs the seam + `TurnResult` + schema routing + a whol
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| claude CLI ≥ 2.1.x with `--json-schema` | `claude --help \| grep -q -- --json-schema` | schema routing |
+| claude CLI ≥ 2.1.x with `--json-schema` | `case "$(claude --help)" in *--json-schema*) exit 0;; *) exit 1;; esac` | schema routing |
 | #1999 (Phase 1) merged | `gh issue view 1999 --json state -q .state` → CLOSED | resume/liveness baseline |
 | #2004 (`ExitReason` StrEnum) merged | `grep -q "class ExitReason" agent/session_runner/router.py` | one exit-reason taxonomy |
-| Heartbeat suite green (entry gate) | `pytest tests/unit/test_session_heartbeat_progress.py -q` | regression baseline |
+| Heartbeat suite green (entry gate) | `pytest tests/integration/test_session_heartbeat_progress.py -q` | regression baseline |
 
 Run via `python scripts/check_prerequisites.py docs/plans/harness-adapter-seam.md`.
 
@@ -269,8 +397,9 @@ Run via `python scripts/check_prerequisites.py docs/plans/harness-adapter-seam.m
   flowing onto the canonical outbox path. #1802 is confirmed and closed at this PR's merge.
 - **Dead SDK path deletion**: remove `ValorAgent`, `get_agent_response_sdk`, `_active_clients` +
   `get_active_client`/`get_all_active_sessions`, `worker/idle_sweeper.py` (and its `worker/__main__.py`
-  wiring), the `claude_agent_sdk` import, and the `claude-agent-sdk` dependency. Prune the
-  `agent/health_check.py` `get_active_client` branch and `agent/__init__.py` exports.
+  wiring), and the `claude_agent_sdk` import from `agent/sdk_client.py` (the dependency itself stays —
+  see build-time scope correction). Prune the `agent/health_check.py` `get_active_client` branch and
+  `agent/__init__.py` exports.
 
 ### Flow
 
@@ -311,9 +440,10 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
   `_active_clients` machinery (59, 1771, 2012 and the num_turns/stop_reason scratch state that only the
   SDK loop wrote — verify each is SDK-only before removing).
 - Delete `worker/idle_sweeper.py` and remove its supervision block in `worker/__main__.py:906-916`.
-- Remove the `claude_agent_sdk` import (36-42) once no in-file references remain (verified: the kept
-  harness path uses no SDK types); drop `claude-agent-sdk==0.2.116` from `pyproject.toml:9` and update
-  the `mcp>=1.8.0` comment at `:10` (mcp stays — used by `mcp_servers/`).
+- Remove the `claude_agent_sdk` import (36-42) once no in-file references remain in `sdk_client.py`
+  (verified: the kept harness path uses no SDK types). Per the build-time scope correction, the
+  `claude-agent-sdk==0.2.116` dependency in `pyproject.toml:9` **stays** — `agent/health_check.py` and
+  `agent/hooks/*.py` still import SDK hook-config types. No `pyproject.toml` edit needed here.
 - In `agent/health_check.py::_handle_steering` (the sole steering-injection/delivery path for all
   CLI-harness production sessions, NOT a liveness check), delete **only** the dead `if client:` SDK arm
   (the `get_active_client(session_id)` call + its `from agent.sdk_client import get_active_client`
@@ -512,10 +642,10 @@ removed atomically in the same PR.
 
 - **No update-script changes required for this phase** — the seam extraction, SDK deletion, and schema
   routing are internal; existing launchd plists and env are untouched.
-- **Dependency change to propagate:** dropping `claude-agent-sdk==0.2.116` from `pyproject.toml` means
-  `/update` (`scripts/remote-update.sh` → `pip install`/`uv sync`) will uninstall it on the next run on
-  every machine. No action needed beyond the pyproject edit — the standard dependency-sync step handles
-  removal. State in the PR that the dep is dropped so operators expect the uninstall.
+- **Dependency change to propagate:** none. Per the build-time scope correction (Freshness Check), the
+  `claude-agent-sdk==0.2.116` dependency in `pyproject.toml` **stays** — `agent/health_check.py` and
+  `agent/hooks/*.py` still import SDK hook-config types outside the deleted path. Only the
+  `claude_agent_sdk` import inside `agent/sdk_client.py` is removed; no `/update` action needed.
 - **Popoto migration:** none. No model fields are added or removed (`claude_session_uuid` keeps its name,
   meaning generalized to "resume handle"). No `MIGRATIONS` entry required; state this in the PR.
 
@@ -553,21 +683,23 @@ removed atomically in the same PR.
 
 ## Success Criteria
 
-- [ ] `agent/session_runner/harness/{base,claude,events}.py` exist; the golden argv/env test proves the
+- [x] `agent/session_runner/harness/{base,claude,events}.py` exist; the golden argv/env test proves the
   extraction is byte-identical, and behavioral-parity fixtures prove the final argv string (first-turn +
   resume), `_store_claude_session_uuid` firing, and the #1980 retry-without-`--resume` branch are all
   preserved.
-- [ ] `TurnResult` is the runner's return type; `exit_reason` uses #2004's `ExitReason` StrEnum (no
+- [x] `TurnResult` is the runner's return type; `exit_reason` uses #2004's `ExitReason` StrEnum (no
   parallel taxonomy); the "no raw exit-reason literals outside router" verification still passes.
-- [ ] PM routing driven by `--json-schema` with prefix-regex fallback emitting `schema_routing_fallback`
+- [x] PM routing driven by `--json-schema` with prefix-regex fallback emitting `schema_routing_fallback`
   telemetry, and an alert threshold fires when the fallback rate exceeds 5% over a rolling 1h window;
   `[/user]` teaching absent from `prime-pm-role.md`.
-- [ ] `file_paths` carried through the schema onto the canonical delivery path; #1802 verified and closed
+- [x] `file_paths` carried through the schema onto the canonical delivery path; #1802 verified and closed
   at merge.
-- [ ] The dead SDK path is gone: `ValorAgent`, `get_agent_response_sdk`, `_active_clients` (+ accessors),
-  `worker/idle_sweeper.py` and its wiring, the `claude_agent_sdk` import, and the `claude-agent-sdk`
-  dependency are all deleted; no dangling references (grep gates green).
-- [ ] Resume-id behavior empirically recorded; the `_claude_session_id` reassignment simplified to
+- [x] The dead SDK path is gone: `ValorAgent`, `get_agent_response_sdk`, `_active_clients` (+ accessors),
+  `worker/idle_sweeper.py` and its wiring, and the `claude_agent_sdk` import from `agent/sdk_client.py`
+  are all deleted; no dangling references (grep gates green). The `claude-agent-sdk` **dependency
+  itself stays** in `pyproject.toml` (build-time scope correction: live hook-type consumers outside
+  this path).
+- [x] Resume-id behavior empirically recorded; the `_claude_session_id` reassignment simplified to
   assert-and-alarm (or kept if forked), while `_transcript_path` is still set on every init event
   (mid-turn-preempt retargeting preserved).
 - [ ] A live eng session completes a real turn end-to-end through the adapter with schema routing on this
@@ -625,7 +757,8 @@ removed atomically in the same PR.
 - **Delete the dead SDK path in the same PR:** `ValorAgent` (1511-2338), `get_agent_response_sdk`
   (3355-end), `_active_clients` + `get_active_client`/`get_all_active_sessions` (59, 656, 666, 1771,
   2012), `worker/idle_sweeper.py` + its `worker/__main__.py:906-916` wiring; remove the `claude_agent_sdk`
-  import (36-42) and drop `claude-agent-sdk==0.2.116` from `pyproject.toml:9` (update the `mcp` comment).
+  import (36-42) from `agent/sdk_client.py` only — the `claude-agent-sdk==0.2.116` dependency in
+  `pyproject.toml:9` stays (build-time scope correction: hook-type consumers outside this path).
   In `agent/health_check.py::_handle_steering`, delete ONLY the dead `if client:` SDK arm + the
   `get_active_client` import/call — **KEEP the `else` Redis re-push body** (the live CLI-harness
   steering fallback) as the unconditional body. Shrink the `agent/__init__.py` exports. Scrub the stale
@@ -688,7 +821,7 @@ removed atomically in the same PR.
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Heartbeat suite green (entry gate) | `pytest tests/unit/test_session_heartbeat_progress.py -q` | exit code 0 |
+| Heartbeat suite green (entry gate) | `pytest tests/integration/test_session_heartbeat_progress.py -q` | exit code 0 |
 | Golden argv test exists | `pytest tests/unit/session_runner/test_harness_argv_golden.py -q` | exit code 0 |
 | Schema routing test exists | `pytest tests/unit/session_runner/test_schema_routing.py -q` | exit code 0 |
 | No prefix-token teaching in PM prime | `grep -c "\[/user\]" .claude/commands/roles/prime-pm-role.md` | match count == 0 |
@@ -698,8 +831,8 @@ removed atomically in the same PR.
 | No SDK-response symbol refs (real or stale name) | `grep -rn "get_agent_response_sdk\|get_response_via_sdk" agent/ worker/ --include="*.py"` | match count == 0 |
 | _active_clients registry deleted | `grep -rn "_active_clients" agent/ worker/ --include="*.py"` | match count == 0 |
 | idle_sweeper deleted | `test -f worker/idle_sweeper.py && echo present \|\| echo gone` | output contains gone |
-| claude_agent_sdk import gone | `grep -rn "import claude_agent_sdk\|from claude_agent_sdk" agent/ worker/ bridge/ tools/ --include="*.py"` | match count == 0 |
-| claude-agent-sdk dep dropped | `grep -c "claude-agent-sdk" pyproject.toml` | match count == 0 |
+| claude_agent_sdk import gone from sdk_client.py | `grep -c "claude_agent_sdk" agent/sdk_client.py` | match count == 0 |
+| claude-agent-sdk dependency retained (build-time scope correction — live hook-type consumers) | `grep -c "claude-agent-sdk" pyproject.toml` | match count == 2 (dep line + mcp comment) |
 | No dangling get_active_client callers | `grep -rn "get_active_client\|get_all_active_sessions" agent/ worker/ bridge/ tools/ --include="*.py" \| grep -vc "session_runner/harness/"` | match count == 0 |
 
 ## Critique Results

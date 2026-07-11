@@ -1,9 +1,11 @@
 """Headless role driver: one ``claude -p`` subprocess per turn, per role.
 
 :class:`HeadlessRoleDriver` runs a role (pm / dev / teammate) headlessly via
-the preserved harness (:func:`agent.sdk_client.get_response_via_harness`).
-Turn-end is reconciled from two protocol signals: a ``TURN_END`` hook
-envelope (the ``Stop`` hook, via :class:`~agent.session_runner.hook_edge.HookEdgeConsumer`)
+the :class:`~agent.session_runner.harness.claude.ClaudeHarnessAdapter`
+(plan #2000 Task 2.2; the adapter wraps the preserved
+:func:`agent.sdk_client.get_response_via_harness` harness). Turn-end is
+reconciled from two protocol signals: a ``TURN_END`` hook envelope (the
+``Stop`` hook, via :class:`~agent.session_runner.hook_edge.HookEdgeConsumer`)
 when it lands, else the subprocess ``result`` / clean exit — a real,
 well-defined boundary for a single-shot invocation. There is no idle
 scraping and no PTY anywhere (protocol, not paint — see the package
@@ -24,8 +26,11 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from agent.session_runner.harness import events as harness_events
+from agent.session_runner.harness.base import TurnEvent, TurnRequest
+from agent.session_runner.harness.claude import ClaudeHarnessAdapter
 from agent.session_runner.hook_edge import (
     COMPACTION,
     NEEDS_HUMAN,
@@ -33,7 +38,7 @@ from agent.session_runner.hook_edge import (
     HookEdge,
     HookEdgeConsumer,
 )
-from agent.session_runner.router import ExitReason, TurnFailure
+from agent.session_runner.router import PM_TURN_JSON_SCHEMA, ExitReason, TurnFailure
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -133,6 +138,12 @@ class HeadlessTurnOutcome:
     :class:`~agent.session_runner.router.TurnFailure` otherwise — a structured
     ``ExitReason`` plus free-form detail (feeds the runner's exit
     classification; ``str(failure)`` is the legacy wire format).
+
+    ``structured_output`` (plan #2000 Task 2.3) mirrors
+    :attr:`~agent.session_runner.harness.base.TurnResult.structured_output`
+    verbatim — ``None`` when the schema-validated ``StructuredOutput`` tool
+    call is absent (no schema requested, or the CLI's own validation gave
+    up). The runner's router treats ``None`` as the fallback-to-regex signal.
     """
 
     reply_text: str = ""
@@ -142,6 +153,7 @@ class HeadlessTurnOutcome:
     transcript_path: str | None = None
     needs_human: HookEdge | None = None
     compaction: HookEdge | None = None
+    structured_output: dict[str, Any] | None = None
     failure: TurnFailure | None = None
     hung: bool = False
     metered: bool = True
@@ -150,7 +162,8 @@ class HeadlessTurnOutcome:
 class HeadlessRoleDriver:
     """Drives one role headlessly: one ``claude -p`` subprocess per turn.
 
-    Reuses :func:`agent.sdk_client.get_response_via_harness` for all subprocess
+    Drives the turn through :class:`~agent.session_runner.harness.claude.
+    ClaudeHarnessAdapter` (plan #2000 Task 2.2), which owns all subprocess
     handling (argv assembly, stale-UUID retry, stream-json parsing, single
     metered token accumulation). This driver adds only: persona priming
     (first turn), --resume continuation (later turns), turn-end
@@ -211,10 +224,13 @@ class HeadlessRoleDriver:
         if self._consumer is None and edge_file:
             self._consumer = HookEdgeConsumer(edge_file, session_id=None)
         # The current claude session UUID: seeded from persisted resume
-        # scalars (seed_resume), then updated by capture-at-init on every
-        # turn (each ``--resume`` invocation forks to a NEW session id — the
-        # freshest id is always the next resume target; Race 5). Drives
-        # --resume on later turns.
+        # scalars (seed_resume), then adopted by capture-at-init on every
+        # turn (Race 5). Historically every ``--resume`` was assumed to fork
+        # a NEW session id; plan #2000 Task 2.1's live probe (claude 2.1.207)
+        # confirmed plain ``--resume`` REUSES the id instead. The id is still
+        # adopted here each turn (a future CLI regressing to fork behavior
+        # keeps working); ``_handle_init`` now asserts-and-alarms on drift
+        # rather than silently expecting it. Drives --resume on later turns.
         self._claude_session_id: str | None = None
         self._transcript_path: str | None = None
         self._primed = False
@@ -236,18 +252,50 @@ class HeadlessRoleDriver:
         self._resume_seeded = True
 
     def _handle_init(self, data: dict) -> None:
-        """Capture-at-init (Race 5): adopt the new invocation's session id.
+        """Capture-at-init (Race 5): two independent rationales, one guard each.
 
         Fires the moment the stream-json ``system/init`` event is parsed —
-        BEFORE the turn's ``result`` — so a preempted/killed turn's partial
-        transcript is the resume target, never the stale pre-turn uuid.
+        BEFORE the turn's ``result``. Two assignments happen here, and they
+        are NOT collapsed behind one guard (plan #2000 Definitions,
+        "Capture-at-init"):
+
+        1. ``self._transcript_path`` is retargeted UNCONDITIONALLY on every
+           init event — mid-turn-preempt safety: a preempted/killed turn's
+           *partial* transcript must be the resume target, never the stale
+           pre-turn uuid. This rationale is independent of resume-id
+           behavior and is untouched by the finding below.
+        2. ``self._claude_session_id`` is still adopted from the observed id
+           every turn (so a future CLI that resumes forking behavior keeps
+           working), but a mismatch against the previously-expected id is
+           now assert-and-alarm: plan #2000 Task 2.1's live probe (claude
+           2.1.207) empirically confirmed plain ``--resume`` REUSES the
+           session id rather than forking it, so a drift is now an anomaly
+           worth an error-level log (Sentry capture) keyed to the session's
+           persisted ``claude_version``, not silent expectation.
+
         Never raises.
         """
         try:
             sid = data.get("session_id")
             if sid:
-                self._claude_session_id = str(sid)
-                self._transcript_path = _headless_transcript_path(self.working_dir, str(sid))
+                sid = str(sid)
+                expected = self._claude_session_id
+                if expected is not None and expected != sid:
+                    logger.error(
+                        "[role-driver] claude session id drift on --resume: "
+                        "expected %s, observed %s (role=%s, session_id=%s) — "
+                        "plain --resume was expected to be stable (plan #2000 "
+                        "Task 2.1 probe, claude 2.1.207); adopting the new id "
+                        "and continuing",
+                        expected,
+                        sid,
+                        self.role,
+                        self.session_id,
+                    )
+                self._claude_session_id = sid
+                # Mid-turn-preempt safety (independent rationale, see
+                # docstring point 1): always retarget, regardless of drift.
+                self._transcript_path = _headless_transcript_path(self.working_dir, sid)
         except Exception:  # noqa: BLE001
             logger.debug("[role-driver] init-event capture failed", exc_info=True)
         if self._on_init is not None:
@@ -345,6 +393,27 @@ class HeadlessRoleDriver:
         body = _read_prime_body(self.role, self.project_root)
         return (message, body or None)
 
+    def _dispatch_turn_event(self, event: TurnEvent) -> None:
+        """Translate one normalized :class:`TurnEvent` into this driver's
+        pre-seam callback surface (plan #2000 Task 2.2).
+
+        ``SESSION_STARTED`` calls :meth:`_handle_init` with the raw init
+        event dict exactly as the pre-extraction ``on_init`` callback did
+        (preserving capture-at-init timing, Race 1/5). The others fan out
+        to the caller-supplied 0/1-arg observers unchanged.
+        """
+        if event.type == harness_events.SESSION_STARTED:
+            self._handle_init(event.data.get("raw", {}))
+        elif event.type == harness_events.TURN_SPAWNED:
+            if self._on_spawn is not None:
+                self._on_spawn(event.data.get("pid"))
+        elif event.type == harness_events.TURN_EXITED:
+            if self._on_exit is not None:
+                self._on_exit()
+        elif event.type == harness_events.ITEM_STDOUT:
+            if self._on_stdout_event is not None:
+                self._on_stdout_event()
+
     # -- Public per-turn API ----------------------------------------------
     async def run_turn(self, message: str) -> HeadlessTurnOutcome:
         """Run one headless turn end-to-end and return a classified outcome."""
@@ -352,11 +421,10 @@ class HeadlessRoleDriver:
 
         from agent.sdk_client import HarnessThinkingBlockCorruptionError  # noqa: PLC0415
 
-        harness_fn = self._harness_fn
-        if harness_fn is None:
-            from agent.sdk_client import get_response_via_harness  # noqa: PLC0415
-
-            harness_fn = get_response_via_harness
+        # Injectable per-call (not cached at __init__) so tests that
+        # reassign `driver._harness_fn` between turns (e.g. Race 4 coverage)
+        # keep working through the adapter seam unchanged.
+        adapter = ClaudeHarnessAdapter(harness_fn=self._harness_fn)
 
         turn_message, system_prompt = self._prime_args(message)
         prior_uuid = self._claude_session_id  # None on first turn
@@ -373,38 +441,49 @@ class HeadlessRoleDriver:
         # Race 4: drain stale edges BEFORE spawning this turn's subprocess.
         snapshot_ts = self._snapshot_edges()
 
-        # Exit-status capture (residual #1916): the harness reports each
-        # subprocess's (returncode, result_event_fired); the LAST invocation
-        # (a stale-UUID fallback retry supersedes the primary) is the turn's
-        # authoritative exit shape.
-        exit_statuses: list[tuple[int | None, bool]] = []
-
         outcome = HeadlessTurnOutcome()
         try:
-            reply = await asyncio.wait_for(
-                harness_fn(
-                    turn_message,
-                    self.working_dir,
-                    env=self.env,
-                    prior_uuid=prior_uuid,
-                    session_id=self.session_id,
-                    full_context_message=full_context_message,
-                    model=self.model,
-                    system_prompt=system_prompt,
-                    settings_path=self.settings_path,
-                    metered=True,
-                    role=self.role,
-                    # Own process group (Race 2 + D4): the preempt watcher
-                    # signals the whole subprocess tree via killpg, and the
-                    # worker orphan sweep reaps survivors after a crash.
-                    start_new_session=True,
-                    on_sdk_started=self._on_spawn,
-                    on_sdk_finished=self._on_exit,
-                    on_stdout_event=self._on_stdout_event,
-                    on_init=self._handle_init,
-                    on_exit_status=lambda rc, fired: exit_statuses.append((rc, fired)),
+            turn_result = await asyncio.wait_for(
+                adapter.run_turn(
+                    TurnRequest(
+                        message=turn_message,
+                        working_dir=self.working_dir,
+                        env=self.env,
+                        prior_uuid=prior_uuid,
+                        session_id=self.session_id,
+                        full_context_message=full_context_message,
+                        model=self.model,
+                        system_prompt=system_prompt,
+                        settings_path=self.settings_path,
+                        metered=True,
+                        role=self.role,
+                        # Own process group (Race 2 + D4): the preempt watcher
+                        # signals the whole subprocess tree via killpg, and the
+                        # worker orphan sweep reaps survivors after a crash.
+                        start_new_session=True,
+                        # Schema-first routing (plan #2000 Task 2.3): every
+                        # top-level role turn (pm/teammate) requests a
+                        # schema-validated StructuredOutput tool call. The
+                        # runner's router prefers it; absence (schema
+                        # validation failure) demotes to the prefix-regex
+                        # fallback.
+                        json_schema=PM_TURN_JSON_SCHEMA,
+                    ),
+                    on_event=self._dispatch_turn_event,
                 ),
                 timeout=self.turn_timeout_s,
+            )
+            reply = turn_result.final_text
+            # Exit-status capture (residual #1916): the harness reports each
+            # subprocess's (returncode, result_event_fired); the LAST
+            # invocation (a stale-UUID fallback retry supersedes the
+            # primary) is the turn's authoritative exit shape. `None` means
+            # the adapter never received an exit-status callback at all
+            # (distinct from "received one with fired=False").
+            exit_statuses: list[tuple[int | None, bool]] = (
+                [(turn_result.returncode, turn_result.result_event_fired)]
+                if turn_result.result_event_fired is not None
+                else []
             )
         except TimeoutError:
             # Hung subprocess: no result, no Stop within the bounded wait.
@@ -439,6 +518,10 @@ class HeadlessRoleDriver:
             return outcome
 
         outcome.reply_text = reply
+        # Schema-first routing (plan #2000 Task 2.3): pass the harness's
+        # structured_output straight through — None on schema-validation
+        # failure (the router's fallback-to-regex signal).
+        outcome.structured_output = turn_result.structured_output
 
         # Capture the new claude session UUID (stored as a side effect by
         # get_response_via_harness) for --resume and resume-scalar persistence.

@@ -196,15 +196,14 @@ behavior itself is toggleable:
 | `WATCHDOG_AUTO_STEER_ENABLED` | Toggle auto-steer on/off | on |
 | `WATCHDOG_STALL_REACTION_ENABLED` | Toggle user-visible ⏳ reaction on stall (issue #1313) | on |
 | `WATCHDOG_TOKEN_TRACKING_ENABLED` | Toggle per-session token accumulation | on |
-| `WATCHDOG_IDLE_TEARDOWN_ENABLED` | Toggle worker idle-sweeper | on |
 | `WATCHDOG_TOKEN_ALERT_THRESHOLD` | Soft-threshold tokens | 5000000 |
 | `WATCHDOG_TOKEN_ALERT_COOLDOWN` | Token-alert cooldown (s) | 3600 |
 | `WATCHDOG_STEER_COOLDOWN` | Repetition/cascade cooldown (s) | 900 |
-| `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS` | Dormancy age to trigger SDK teardown | 86400 |
-| `WATCHDOG_IDLE_SWEEP_INTERVAL` | Seconds between sweeper ticks | 1800 |
 
 Falsy values (case-insensitive `"0"`, `"false"`, `"no"`) disable the
 gated feature. Any other value — including unset — means enabled.
+
+**Retired in #2000:** `WATCHDOG_IDLE_TEARDOWN_ENABLED`, `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS`, and `WATCHDOG_IDLE_SWEEP_INTERVAL` gated the worker idle-sweeper, which was deleted wholesale along with the rest of the dead Claude Agent SDK path — see [HarnessAdapter Seam](harness-adapter.md).
 
 ## Integration
 
@@ -226,26 +225,19 @@ The session watchdog is complementary — it catches sessions that go *silent* (
 
 **Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active with no recent activity). For active sessions, stall detection is activity-based: the watchdog checks both the Redis `updated_at` field and in-memory timestamps from `sdk_client.get_session_last_activity()`, using whichever is more recent. Sessions producing tool calls or log output are never interrupted regardless of total runtime. See [Session Watchdog Reliability](session-watchdog-reliability.md) for the activity-based detection system and [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for logging details.
 
-## Process-Locality Contract (issue #1128)
+## Process-Locality Contract (issue #1128) — idle-sweeper half retired in #2000
 
-The session-watchdog process (`monitoring/session_watchdog.py`) and the
-**worker-internal idle sweeper** (`worker/idle_sweeper.py`) are two
-separate actuators that share nothing but `AgentSession` records and the
-steering queue — both Redis-backed.
+The session-watchdog process (`monitoring/session_watchdog.py`) owns repetition / error-cascade
+/ token-threshold detection and their steering actuation, reading `AgentSession` tokens (never
+writing them).
 
-- **Watchdog process**: owns repetition / error-cascade / token-threshold
-  detection AND their steering actuation. Reads `AgentSession` tokens
-  (never writes them). Never imports `agent.sdk_client._active_clients`
-  — the registry is worker-process-local.
-- **Worker process**: owns the `_active_clients` registry and the idle
-  sweeper. The sweeper proactively tears down persistent SDK clients on
-  dormant / paused / paused_circuit sessions whose `updated_at` age
-  exceeds `WATCHDOG_IDLE_TEARDOWN_THRESHOLD_SECONDS` (default 24h), well
-  inside the ~48h Anthropic silent-death window.
-
-See `worker/idle_sweeper.py` docstring and
-[bridge-worker-architecture.md](bridge-worker-architecture.md) for the
-full topology.
+This section previously also described a **worker-internal idle sweeper** (`worker/idle_sweeper.py`)
+that owned a process-local `_active_clients` registry and proactively tore down persistent SDK
+clients on dormant / paused / paused_circuit sessions. That sweeper and the registry it
+inspected were deleted wholesale in #2000 along with the rest of the dead Claude Agent SDK path
+— every production session now runs a short-lived `claude -p` subprocess per turn, which never
+populates a persistent-client registry. See [HarnessAdapter Seam](harness-adapter.md) and
+[bridge-worker-architecture.md](bridge-worker-architecture.md) for the current topology.
 
 ## Files
 
@@ -257,8 +249,6 @@ full topology.
 | `agent/agent_session_queue.py` | Nudge loop checks `is_session_unhealthy()` before auto-continuing |
 | `agent/sdk_client.py` | `accumulate_session_tokens` helper (SDK + harness path writers) |
 | `agent/steering.py` | `push_steering_message` with `sender="watchdog"` attribution |
-| `worker/idle_sweeper.py` | Worker-internal idle SDK client teardown (issue #1128) |
-| `worker/__main__.py` | Starts the idle sweeper alongside reflection + notify tasks |
 | `models/agent_session.py` | `watchdog_unhealthy`, token fields, `sdk_connection_torn_down_at` |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
 | `tests/unit/test_session_watchdog.py` | Detection + steer-actuator assertions |
@@ -268,7 +258,6 @@ full topology.
 | `tests/integration/test_watchdog_to_bridge.py` | End-to-end: watchdog outbox write → bridge relay drain (issue #1313) |
 | `tests/unit/test_session_token_accumulator.py` | `accumulate_session_tokens` end-to-end |
 | `tests/unit/test_harness_token_capture.py` | Harness-path B3 fix (usage + cost from `result` event) |
-| `tests/unit/test_worker_idle_sweeper.py` | Worker-internal idle teardown |
 | `tests/unit/test_health_check.py` | PostToolUse health check |
 | `tests/unit/test_transcript_liveness.py` | Transcript mtime check |
 | `docs/plans/session-watchdog.md` | Original plan document |

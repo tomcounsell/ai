@@ -136,6 +136,7 @@ class TestGetResponseViaHarness:
                 _stderr,
                 num_turns,
                 tool_call_count,
+                _structured_output,
             ) = await _run_harness_subprocess(["claude", "-p"], "/tmp", {})
 
         assert result_text == "Done."
@@ -524,7 +525,7 @@ class TestHarnessResume:
         uuid = "483d0525-8d68-474e-9f1e-89cadd91e263"
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_exec.return_value = self._mock_proc(self._make_result_stdout())
-            budget_patch = "agent.sdk_client._apply_context_budget"
+            budget_patch = "agent.session_runner.harness.claude._apply_context_budget"
             with patch(budget_patch, side_effect=lambda m, **kw: m) as mock_budget:
                 with patch("agent.sdk_client._store_claude_session_uuid"):
                     await get_response_via_harness(
@@ -542,7 +543,7 @@ class TestHarnessResume:
 
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_exec.return_value = self._mock_proc(self._make_result_stdout())
-            budget_patch = "agent.sdk_client._apply_context_budget"
+            budget_patch = "agent.session_runner.harness.claude._apply_context_budget"
             with patch(budget_patch, side_effect=lambda m, **kw: m) as mock_budget:
                 await get_response_via_harness(
                     message="test",
@@ -691,7 +692,7 @@ class TestHarnessResume:
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_exec.return_value = self._mock_proc(self._make_result_stdout())
             with patch("agent.sdk_client._store_claude_session_uuid"):
-                with patch("agent.sdk_client.logger") as mock_logger:
+                with patch("agent.session_runner.harness.claude.logger") as mock_logger:
                     await get_response_via_harness(
                         message="test",
                         working_dir="/tmp",
@@ -727,7 +728,7 @@ class TestHarnessResume:
 
         with patch("asyncio.create_subprocess_exec", side_effect=mock_exec):
             with patch("agent.sdk_client._store_claude_session_uuid"):
-                with patch("agent.sdk_client.logger") as mock_logger:
+                with patch("agent.session_runner.harness.claude.logger") as mock_logger:
                     await get_response_via_harness(
                         message="test",
                         working_dir="/tmp",

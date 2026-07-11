@@ -36,8 +36,9 @@ class TestSdkClientErrorCapture:
             captured_calls.append({"session_id": session_id, "status": status, "summary": summary})
 
         # We test the crash guard pattern directly by simulating the catch block logic
-        # from sdk_client.py lines 1254-1269. This avoids mocking the entire
-        # get_agent_response_sdk (legacy) function which has deep dependencies.
+        # that used to live in get_agent_response_sdk (deleted, plan #2000 Task 2.2 --
+        # the dead Claude Agent SDK path). The same crash-guard shape is preserved on
+        # the surviving get_response_via_harness path.
         error = ConnectionError("Redis connection refused on port 6379")
 
         # Simulate the crash guard logic
