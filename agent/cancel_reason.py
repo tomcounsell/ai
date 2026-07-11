@@ -13,10 +13,21 @@ transient reason to a raw Redis key that the winning send site reads.
 Convention:
   * Key: ``cancel-reason:{session_id}`` in ``POPOTO_REDIS_DB`` (the same raw-Redis
     access pattern the ``interrupted-sent:{session_id}`` dedup key already uses).
-  * Values: ``"no_resume"`` is the only value any caller writes — the killer
-    finalized the session terminal and nothing will resume automatically. Every
-    non-terminal path (re-queue, plain worker shutdown, an unpredicted-terminal
-    escalation before its re-stamp) writes nothing, leaving the key absent.
+  * Values: ``"no_resume"`` is the value read by every ``== "no_resume"``
+    consumer — the killer finalized the session terminal and nothing will
+    resume automatically. Every non-terminal path (re-queue, plain worker
+    shutdown, an unpredicted-terminal escalation before its re-stamp) writes
+    nothing, leaving the key absent.
+    A second value, ``"conflict_escalation"``, is written by the pop-loop's
+    bounded ``StatusConflictError`` escalation
+    (``agent_session_queue.py::_cancel_stuck_pending_on_conflict``) purely as
+    a short-lived, best-effort operator-visibility marker — it is never read
+    back by any ``== "no_resume"`` consumer and is inert to them. It is NOT a
+    durable audit trail: it shares this key's 180s TTL, so it is gone long
+    before an operator investigating an escalation minutes later would find
+    it. The durable record of an escalation-cancel is the ``reason=`` string
+    passed to ``finalize_session(...)`` at that same call site, which lands
+    in the ``LIFECYCLE`` transition log.
   * TTL: 180 seconds. **The TTL is the sole cleanup mechanism** — there is no
     destructive pop or delete anywhere. This is load-bearing: both interrupt send
     sites race a single-winner ``interrupted-sent`` SET-NX dedup, and a destructive
@@ -57,10 +68,14 @@ def set_cancel_reason(session_id: str, kind: str, ttl: int = 180) -> None:
 
     Args:
         session_id: The session being cancelled.
-        kind: the only value any caller writes post-inversion is
-            ``"no_resume"`` (terminal, nothing resumes automatically). The
+        kind: the value read by every ``== "no_resume"`` consumer is
+            ``"no_resume"`` (terminal, nothing resumes automatically). A
+            second value, ``"conflict_escalation"``, is written by the
+            pop-loop's bounded escalation as a short-lived, best-effort
+            operator-visibility marker only — see the module docstring for
+            why that write does not make this key a durable audit trail. The
             function keeps a generic string signature so callers are free to
-            write other values, but no call site in this repo does.
+            write other values.
         ttl: Key lifetime in seconds. The TTL is the only reclaimer — no code
             ever deletes the key.
     """
@@ -83,13 +98,17 @@ def get_cancel_reason(session_id: str) -> str | None:
     branch that won the ``interrupted-sent`` dedup, so a non-sending site cannot
     influence what the sender reads.
 
-    The signal set is now binary: ``"no_resume"`` present means a killer owns
-    the terminal exit narrative and the terminal no-resume copy should be
-    delivered; absent (or any other value) means silence.
+    Every ``== "no_resume"`` consumer treats the signal as binary:
+    ``"no_resume"`` present means a killer owns the terminal exit narrative
+    and the terminal no-resume copy should be delivered; absent (or any
+    other value, including ``"conflict_escalation"``) means silence to those
+    consumers.
 
     Returns:
-        ``"no_resume"`` if set, else ``None`` (or another value, though no call
-        site in this repo writes anything besides ``"no_resume"``).
+        Whatever was last written for ``session_id`` within its 180s TTL
+        (``"no_resume"`` or ``"conflict_escalation"``), else ``None``. Only
+        ``"no_resume"`` is meaningful to the ``== "no_resume"`` consumers —
+        see the module docstring for the other value's narrower purpose.
     """
     if not session_id:
         return None

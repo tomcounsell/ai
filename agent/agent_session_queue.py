@@ -1400,6 +1400,11 @@ def _cancel_stuck_pending_on_conflict(session_id: str) -> bool:
         try:
             # Written before finalize (agent/cancel_reason.py convention) so
             # any reader that inspects the signal after the cancel sees it.
+            # Short-lived, best-effort marker only (180s TTL) — not read by
+            # any `== "no_resume"` consumer and NOT the durable record of
+            # this escalation-cancel. The durable record is the `reason=`
+            # string passed to finalize_session() below, which lands in the
+            # LIFECYCLE transition log.
             set_cancel_reason(session_id, "conflict_escalation")
             finalize_session(
                 stuck,
