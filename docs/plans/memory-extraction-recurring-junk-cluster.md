@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-11
 tracking: https://github.com/tomcounsell/ai/issues/2016
 last_comment_id:
+revision_applied: true
 ---
 
 # Memory Extraction: Recurring Junk Cluster (agent-id-cluster ebe79d3b)
@@ -105,7 +106,7 @@ No relevant external findings — this is purely internal (Python parsing logic,
 ## Architectural Impact
 
 - **New dependencies**: none.
-- **Interface changes**: none to public signatures. `_parse_categorized_observations` gains an internal per-observation filter in its JSON branch; `_dup_check` gains a closed-issue-window check. Both are internal.
+- **Interface changes**: none to public signatures. `_parse_categorized_observations` gains an internal type guard + per-observation filter in its JSON branch; `_find_open_audit_issue` (renamed `_find_recent_audit_issue`) gains a closed-issue-window check and returns open-OR-recently-closed hits. Both are internal; the caller contract (positive-int/`-1` ⇒ suppress, `None` ⇒ file) is unchanged.
 - **Coupling**: reduces the latent coupling/asymmetry between save-time and audit-time junk predicates by making them agree.
 - **Data ownership**: unchanged; still Popoto `Memory` records.
 - **Reversibility**: fully reversible — both changes are localized guard additions; revert restores prior behavior.
@@ -131,41 +132,64 @@ No relevant external findings — this is purely internal (Python parsing logic,
 
 ### Key Elements
 
-- **Per-record save-time filter (JSON branch)**: In `_parse_categorized_observations`, run every parsed observation value through `_looks_like_refusal` (and keep the existing `_is_scoping_boilerplate` check) before appending — the exact predicate the audit applies per-record. This makes save-time and audit-time agree, closing the shrapnel-in-valid-JSON vector.
-- **Closed-issue suppression window (audit dup-check)**: In `_dup_check`, treat a matching-title-prefix issue that is OPEN **or** CLOSED within a bounded window (default 30 days) as a duplicate, suppressing re-filing. This makes "close the issue to stop re-filing" actually true for the window, while still re-surfacing a genuinely persistent anomaly afterward.
-- **Truthful guidance text**: update the audit's issue-body template so its "close to suppress" note matches the new behavior (names the window).
+- **Type guard + per-record save-time filter (JSON branch)**: In `_parse_categorized_observations`, first coerce-guard each observation value with `if not isinstance(observation, str): continue` (a dict/list value would otherwise raise `AttributeError` inside `_is_scoping_boilerplate`/`_looks_like_refusal`, which the surrounding `except (JSONDecodeError, TypeError)` does **not** catch — crashing the whole batch and losing every real observation in it). Then run every parsed observation value through `_looks_like_refusal` (keeping the existing `_is_scoping_boilerplate` check) before appending — the exact predicate the audit applies per-record. This makes save-time and audit-time agree, closing the shrapnel-in-valid-JSON vector. A `logger.debug` line records each Fix-A drop (category + preview) so an over-drop of a legitimate observation is diagnosable rather than silent.
+- **Closed-issue suppression window (audit dedup)**: `_find_open_audit_issue` is restructured to scan **all** matching-title-prefix issues (open and closed) and return a positive issue number when any match is OPEN **or** CLOSED within a bounded window (default **14 days**), so acknowledging (closing) the cluster issue suppresses re-filing for the window. When the only matches are closed **beyond** the window, it returns `None` (⇒ file), so a genuinely persistent anomaly re-surfaces after the window. The `-1` `gh`-failure sentinel is preserved. Caller contract at `_file_anomaly_issue` (L605-610) is unchanged and already correct: a positive int **or** `-1` suppresses filing; `None` files.
+- **Truthful guidance text**: update the audit's issue-body template so its "close to suppress" note matches the new behavior (names the 14-day window).
+
+**Why Fix B is justified (grounded, not speculative):** the basis is the demonstrated 3× wasted-filing history — #1497 → #1786 → #1931 were each closed in good faith, and the open-only dedup re-filed anyway. That is a real closed-issue-dedup defect with concrete past harm, not a hypothetical "future/legacy producer" concern. Note explicitly that Fix B changes re-file behavior for **every** memory-audit signal that flows through `_find_open_audit_issue`/`_file_anomaly_issue`, not only the ebe79d3b cluster — acknowledging (closing) any memory-audit issue now suppresses its re-file for 14 days. This is intended and desirable (closing an audit issue should mean something), and it is safe because the title prefix is per-signal.
 
 ### Flow
 
-Session ends → Haiku extraction → **JSON branch filters each observation with `_looks_like_refusal`** → shrapnel dropped, only real observations saved → audit finds nothing to supersede from this vector → no issue filed.
+Session ends → Haiku extraction → **JSON branch type-guards then filters each observation with `_looks_like_refusal`** → shrapnel dropped (with a debug-log breadcrumb), only real observations saved → audit finds nothing to supersede from this vector → no issue filed.
 
-Independently: audit detects a real anomaly → **dup-check consults open + recently-closed issues** → if acknowledged (closed) within the window, suppress; else file.
+Independently: audit detects a real anomaly → **`_find_open_audit_issue` consults open + recently-closed issues** → if acknowledged (closed) within the 14-day window, return the number (suppress); else return `None` (file).
 
 ### Technical Approach
 
-- **Fix A** (`agent/memory_extraction.py`, JSON branch ~626-643): add `if _looks_like_refusal(observation): continue` alongside the existing length and `_is_scoping_boilerplate` guards. Frame it as the invariant "all parse paths apply the audit's per-record predicate"; the line-based fallback already satisfies it.
-- **Fix B** (`reflections/memory/memory_quality_audit.py` `_dup_check` ~558-586): change the `gh issue list` to `--state all` (or add a second closed-state query), parse `closedAt`, and return a duplicate hit when a matching-prefix issue is open, or closed within `CLUSTER_REFILE_SUPPRESSION_DAYS` (new constant, default 30). Preserve the `-1` failure sentinel semantics.
-- **Fix B text** (`memory_quality_audit.py` issue-body template ~114): reword the "close to suppress" line to state the window explicitly.
+- **Fix A** (`agent/memory_extraction.py`, JSON branch, loop at L626-643, `observation = item.get("observation", "")` at L630):
+  1. Immediately after L630, add `if not isinstance(observation, str): continue` — **before** the `len(observation) < 10` check at L631. This closes a pre-existing latent crash: a JSON observation value that is a dict/list (not a string) reaches `_is_scoping_boilerplate(observation)` (`.lower()`) and, after this fix, `_looks_like_refusal(observation)` (`.strip()`), both of which raise `AttributeError`. That is **not** caught by the surrounding `except (JSONDecodeError, TypeError)` at L651, so the whole batch aborts and every real observation is lost. The type guard makes the plan's "`_looks_like_refusal` is pure and total" claim actually hold.
+  2. After the `_is_scoping_boilerplate` guard (L635-636) and before the `results.append(...)` at L643, add:
+     ```python
+     if _looks_like_refusal(observation):
+         logger.debug(
+             "Fix A (#2016) dropped JSON-branch observation: category=%s preview=%r",
+             category, observation[:60],
+         )
+         continue
+     ```
+     `_parse_categorized_observations(raw_text)` takes only `raw_text` — `agent_id`/`session_id` are **not** in scope here (verified against the signature at L589), so the log records category + a 60-char preview only, not the agent_id. Frame it as the invariant "all parse paths apply the audit's per-record predicate"; the line-based fallback (L662) already satisfies it. The debug line makes an over-drop of a legitimate observation diagnosable (this silent-drop blind spot is what kept the cluster misdiagnosed four times).
+- **Fix B** (`reflections/memory/memory_quality_audit.py` `_find_open_audit_issue`, L541-586) — **loop restructuring, not a one-line `--state` swap.** The current loop returns the FIRST title-prefix match and short-circuits on `--state open`, so a naive "change `--state all` + read `closedAt`" would return a stale-closed sibling (#1497/#1786/#1931) and suppress filing **forever** (a silent 5th recurrence, strictly worse than today). Required end-state:
+  1. Add module constant `CLUSTER_REFILE_SUPPRESSION_DAYS = 14`.
+  2. Change `gh issue list --state open` → `--state all`; extend `--json` from `number,title` to `number,title,state,closedAt` (`state` is required because `gh` emits an empty/zero `closedAt` for open issues).
+  3. Scan **all** returned issues (no early return on first match). For each title-prefix match:
+     - If `state == "OPEN"` (or `closedAt` empty/missing) → this is an open dup → return `issue["number"]` (positive int ⇒ suppress).
+     - If closed: guard empty `closedAt`; parse tz-aware with `datetime.fromisoformat(closed_at.replace("Z", "+00:00"))` and compare against `datetime.now(timezone.utc)` (**never** naive `datetime.now()`). If `(now - closed_at) <= timedelta(days=CLUSTER_REFILE_SUPPRESSION_DAYS)` → in-window closed dup → return `issue["number"]` (positive int ⇒ suppress).
+     - Otherwise (closed beyond window) → not a suppressing dup; keep scanning.
+  4. After the loop, if no open-or-in-window match was found → return `None` (⇒ caller files). An in-window closed match MUST return a **positive int**, never `None` (which files) and never `-1` (which misroutes to the gh-failure branch).
+  5. Preserve the `-1` sentinel on `gh` failure. Caller contract (`_file_anomaly_issue` L605-610) already handles positive-int-or-`-1` ⇒ suppress, `None` ⇒ file — no caller change needed.
+  - **Naming decision:** rename `_find_open_audit_issue` → `_find_recent_audit_issue`, since it now returns open-OR-recently-closed hits and the old name is semantically stale. Update the single caller at L605 and the test anchors that patch it (`test_reflections_memory.py` L1148, L1171, L1210, L1258). (If the builder judges the rename churn not worth it, keeping the old name is acceptable **only** with an updated docstring; the behavioral contract above is the hard requirement.)
+- **Fix B text** (`memory_quality_audit.py` issue-body template ~L114): reword the "close to suppress" line to state the 14-day window explicitly ("closing this issue suppresses re-filing for 14 days; it will re-surface if the anomaly persists past then").
 - Keep both changes narrow and behavior-preserving outside the targeted vectors (no new false-drops of legitimate observations; no suppression of genuinely-new distinct anomalies).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] `_dup_check` already wraps `gh` in try/except returning the `-1` sentinel — add/keep a test asserting the sentinel path still suppresses filing when `gh` fails after the `--state all` change.
-- [ ] The JSON-branch filter addition introduces no new exception handler; `_looks_like_refusal` is pure and total. State "no new exception handlers in scope" for Fix A.
+- [ ] `_find_open_audit_issue`/`_find_recent_audit_issue` already wraps `gh` in try/except returning the `-1` sentinel — add/keep a test asserting the sentinel path still suppresses filing when `gh` fails after the `--state all` change.
+- [ ] Fix A's `_looks_like_refusal(observation)` and the existing `_is_scoping_boilerplate(observation)` are only reached **after** the new `isinstance(observation, str)` type guard, so no `AttributeError` can escape the JSON branch. With the type guard in place, `_looks_like_refusal` is pure and total for its input, so Fix A adds no new exception handler. Add a test: a JSON item whose `observation` value is a dict/list → the batch does not raise and the non-string item is skipped while sibling string observations survive.
 
 ### Empty/Invalid Input Handling
-- [ ] Confirm `_looks_like_refusal("")` returns False (existing behavior) so the new JSON-branch guard never drops empty-but-already-length-checked values incorrectly; the `len(observation) < 10` guard runs first regardless.
+- [ ] Confirm `_looks_like_refusal("")` returns False (existing behavior) so the new JSON-branch guard never drops empty-but-already-length-checked values incorrectly; the `isinstance` guard and the `len(observation) < 10` guard both run first regardless.
 - [ ] Add a test: valid JSON with a shrapnel-shaped observation value → JSON branch returns it filtered out (empty or remaining real observations only).
+- [ ] Add a test: valid JSON with a non-string `observation` value (dict/list) alongside a legitimate string observation → no exception, non-string dropped, string kept.
 
 ### Error State Rendering
 - [ ] No user-visible UI surface. The observable outputs are (a) a Memory record not being saved and (b) a GitHub issue not being filed — both asserted directly in tests. State "no user-facing render path" and rely on the record-count / filing assertions.
 
 ## Test Impact
 
-- [ ] `tests/unit/test_memory_extraction.py::TestParseCategorizedObservations` (~381+) — UPDATE: add a case asserting a valid-JSON observation whose value matches `_JSON_SHRAPNEL_RE` (e.g. `"category": "decision"`) is dropped by the JSON branch; add a case asserting a valid-JSON observation containing a refusal phrase is dropped. Keep existing passing cases as regression guards (legitimate observations must still parse).
-- [ ] `tests/unit/test_reflections_memory.py::test_files_new_issue_when_no_open_dup` (line 1171) — UPDATE: the dup-check now queries `--state all`; adjust the mock so this "no dup" case has no matching-prefix issue in any state, preserving the assertion that a new issue is filed.
-- [ ] `tests/unit/test_reflections_memory.py` (dup-check suite) — ADD (via this plan's build): `test_suppresses_refile_when_recently_closed` (closed within window → no file) and `test_refiles_when_closed_beyond_window` (closed older than window → files). Not a disposition on an existing test, but recorded here for the builder.
+- [ ] `tests/unit/test_memory_extraction.py::TestParseCategorizedObservations` (~381+) — UPDATE: add a case asserting a valid-JSON observation whose value matches `_JSON_SHRAPNEL_RE` (e.g. `"category": "decision"`) is dropped by the JSON branch; add a case asserting a valid-JSON observation containing a refusal phrase is dropped; add a case asserting a valid-JSON item whose `observation` value is a dict/list is skipped without raising while a sibling string observation survives (Concern 1 type-guard). Keep existing passing cases as regression guards (legitimate observations must still parse).
+- [ ] `tests/unit/test_reflections_memory.py::test_files_new_issue_when_no_open_dup` (line 1171) — **NO CHANGE / regression guard only.** This test **patches `_find_open_audit_issue` itself** (the function is replaced with a mock returning `None`), so the internal `--state all`/`closedAt` change is invisible to it and there is **no `gh` mock to adjust**. It continues to assert that a `None` return ⇒ a new issue is filed. If the function is renamed to `_find_recent_audit_issue`, update the patch **target path** at the test's anchors (L1148, L1171, L1210, L1258) to the new name; otherwise leave untouched.
+- [ ] `tests/unit/test_reflections_memory.py` (dedup suite) — ADD (via this plan's build): `test_suppresses_refile_when_recently_closed` (matching-prefix issue closed within 14 days → returns positive int ⇒ no file) and `test_refiles_when_closed_beyond_window` (closed older than 14 days → returns `None` ⇒ files). These must **patch `asyncio.create_subprocess_exec`** (not `_find_open_audit_issue`) so the real branch runs — the mock returns JSON containing `number`, `title`, `state`, and `closedAt` so the window comparison is exercised end-to-end. Not a disposition on an existing test, but recorded here for the builder.
 
 No other existing tests are affected — the changes are additive guards; legitimate-observation parsing and open-dup suppression behavior are preserved, which the retained existing cases assert.
 
@@ -183,8 +207,8 @@ No other existing tests are affected — the changes are additive guards; legiti
 **Mitigation:** Reuse the **exact** predicate the audit already applies per-record — parity means we drop only what the audit would supersede anyway (no net new loss). The patterns are narrow, full-phrase, and guarded by existing narrowness tests (`TestRefusalPatternsNarrowness`, `TestScopingMarkersNarrowness`). Add a regression case with a legitimate code-ish observation that must survive.
 
 ### Risk 2: Closed-issue window hides a genuinely-recurring distinct problem
-**Impact:** If a different real regression reuses the same title prefix, a 30-day window could mask it.
-**Mitigation:** The window is bounded (re-surfaces after 30 days if still occurring); Fix A independently removes the producing vector so no new junk should arise; the dup-check keys on the audit-controlled title prefix which is specific to one agent_id cluster.
+**Impact:** If a different real regression reuses the same title prefix, or Fix A itself regresses, the suppression window could mask it for the window's duration.
+**Mitigation:** The window is **14 days**, deliberately set **below** the cluster's own observed inter-arrival cadence (4 filings in 7 weeks ≈ one per ~2 weeks). This is a historical basis, not the overconfident "Fix A removed the vector so we can suppress blindly" premise that mis-closed #1786/#1931 — a regressed Fix A re-surfaces within one natural cycle rather than being hidden longer than the anomaly's own period. The window is bounded (re-surfaces after 14 days if still occurring); the dedup keys on the audit-controlled title prefix, which — verified against `memory_quality_audit.py:350`, `signal_name = f"agent-id-cluster-{aid_suffix}"` — is specific to one agent_id cluster, so a distinct cluster carries a distinct prefix and is not masked.
 
 ## Race Conditions
 
@@ -211,13 +235,13 @@ No agent integration required. This is a bridge-and-reflection-internal change: 
 
 ### Inline Documentation
 - [ ] Comment the new JSON-branch guard tying it to this issue and the whole-text-vs-per-record asymmetry it closes.
-- [ ] Comment the `_dup_check` window logic and the new constant, referencing #2016 and the #1497/#1786/#1931 recurrence history.
+- [ ] Comment the `_find_open_audit_issue` (renamed `_find_recent_audit_issue`) window logic and the new constant, referencing #2016 and the #1497/#1786/#1931 recurrence history.
 
 ## Success Criteria
 
 - [ ] JSON-branch of `_parse_categorized_observations` drops shrapnel-shaped and refusal-phrase observation values (new unit tests pass).
 - [ ] A legitimate observation that resembles code/config still parses and is saved (regression test passes).
-- [ ] `_dup_check` suppresses re-filing when a matching-prefix issue was closed within `CLUSTER_REFILE_SUPPRESSION_DAYS`; re-files when closed beyond the window (new unit tests pass).
+- [ ] `_find_open_audit_issue` (renamed `_find_recent_audit_issue`) suppresses re-filing when a matching-prefix issue was closed within `CLUSTER_REFILE_SUPPRESSION_DAYS` (14 days); re-files when closed beyond the window (new unit tests pass).
 - [ ] Audit issue-body "close to suppress" guidance text matches the implemented window behavior.
 - [ ] Existing `TestParseCategorizedObservations`, refusal/scoping narrowness tests, and `test_files_new_issue_when_no_open_dup` still pass.
 - [ ] Tests pass (`/do-test`).
@@ -257,21 +281,22 @@ Lead agent orchestrates; deploys a builder + validator pair and a documentarian.
 - **Assigned To**: `junk-cluster-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- In `_parse_categorized_observations` JSON branch (~626-643), add `if _looks_like_refusal(observation): continue` beside the existing length and `_is_scoping_boilerplate` guards.
-- Add unit cases: shrapnel-shaped observation value dropped; refusal-phrase observation value dropped; legitimate code-ish observation preserved.
-- Comment the guard referencing #2016 and the asymmetry it closes.
+- In `_parse_categorized_observations` JSON branch, after `observation = item.get("observation", "")` (L630) and **before** the `len < 10` check, add `if not isinstance(observation, str): continue` (Concern 1 — prevents an `AttributeError` on a dict/list value that the surrounding `except (JSONDecodeError, TypeError)` would not catch, which would crash the whole batch).
+- After the `_is_scoping_boilerplate` guard and before `results.append(...)`, add `if _looks_like_refusal(observation): continue` preceded by a `logger.debug("Fix A (#2016) dropped JSON-branch observation: category=%s preview=%r", category, observation[:60])` (Concern 5 — the drop must not be silent; `agent_id`/`session_id` are not in scope in this function, so log category + preview only).
+- Add unit cases: shrapnel-shaped observation value dropped; refusal-phrase observation value dropped; non-string (dict/list) observation value skipped without raising while a sibling string survives; legitimate code-ish observation preserved.
+- Comment the guards referencing #2016 and the whole-text-vs-per-record asymmetry they close.
 
 ### 2. Fix B — closed-issue dedup window
 - **Task ID**: build-audit-dedup
 - **Depends On**: none
-- **Validates**: `tests/unit/test_reflections_memory.py` dup-check suite
+- **Validates**: `tests/unit/test_reflections_memory.py` dedup suite
 - **Assigned To**: `junk-cluster-builder`
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `CLUSTER_REFILE_SUPPRESSION_DAYS = 30` constant.
-- Change `_dup_check` `gh issue list` to `--state all`, request `closedAt`, and return a dup hit for open issues or issues closed within the window; preserve the `-1` sentinel on `gh` failure.
-- Update the issue-body "close to suppress" guidance text to name the window.
-- Update `test_files_new_issue_when_no_open_dup` mock for `--state all`; add `test_suppresses_refile_when_recently_closed` and `test_refiles_when_closed_beyond_window`.
+- Add `CLUSTER_REFILE_SUPPRESSION_DAYS = 14` constant (Concern 2 — below the ~2-week observed inter-arrival so a regressed Fix A re-surfaces within one cycle).
+- Restructure `_find_open_audit_issue` (rename to `_find_recent_audit_issue`; update caller L605 and test patch anchors L1148/1171/1210/1258): change `gh issue list` to `--state all`, extend `--json` to `number,title,state,closedAt`, scan **all** matches (no early return on first), and return a **positive int** when a match is open (`state == "OPEN"` or empty `closedAt`) OR closed within the window; return `None` when the only matches are closed beyond the window; preserve `-1` on `gh` failure. Guard empty `closedAt`; parse tz-aware (`datetime.fromisoformat(s.replace("Z","+00:00"))`) and compare to `datetime.now(timezone.utc)`. (BLOCKER — a naive first-match return would suppress filing forever on a stale-closed sibling.)
+- Update the issue-body "close to suppress" guidance text to name the 14-day window.
+- Add `test_suppresses_refile_when_recently_closed` and `test_refiles_when_closed_beyond_window`, both patching `asyncio.create_subprocess_exec` (returning JSON with `state`+`closedAt`) to exercise the real branch (Concern 3). Leave `test_files_new_issue_when_no_open_dup` behavior unchanged — it patches the function itself and needs no `gh` mock; only update its patch target path if the function is renamed.
 
 ### 3. Validation
 - **Task ID**: validate-all
@@ -312,14 +337,26 @@ Lead agent orchestrates; deploys a builder + validator pair and a documentarian.
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+**Verdict: NEEDS REVISION** (1 blocker, 5 concerns, 1 nit) — FULL war room (Risk & Robustness, Scope & Value, History & Consistency), run 2026-07-11. **Revision applied 2026-07-11** — all findings resolved (see below); `revision_applied: true`.
+
+| Severity | Critic | Finding | Resolution |
+|----------|--------|---------|------------|
+| BLOCKER | Risk & Robustness (Adversary) | `--state all` first-match return would suppress filing forever on a stale-closed sibling (#1497/#1786/#1931). | Technical Approach Fix B rewritten as a full loop restructuring: scan **all** matches; return a positive int only when open OR closed-within-window; return `None` when only closed-beyond-window; add `state`+`closedAt` to `--json`; guard empty `closedAt`; parse tz-aware and compare to `datetime.now(timezone.utc)`. Caller contract documented. |
+| CONCERN | Risk & Robustness (Skeptic) | Non-string `observation` value → `AttributeError` uncaught by `except (JSONDecodeError, TypeError)` → whole batch lost. | Fix A adds `if not isinstance(observation, str): continue` immediately after `observation = item.get(...)`, before the length check. Test + Failure-Path coverage added. |
+| CONCERN | History & Consistency (Archaeologist) | 30-day window exceeds the cluster's ~2-week recurrence cadence; a regressed Fix A hidden longer than its natural period. | `CLUSTER_REFILE_SUPPRESSION_DAYS` set to **14** everywhere (Solution, Technical Approach, Risks, Steps). Resolves Open Question #2. |
+| CONCERN | History & Consistency (Consistency) | Test Impact told the builder to adjust a `gh` mock on `test_files_new_issue_when_no_open_dup`, but that test patches the function itself — no mock to adjust. | Test Impact corrected: that test needs no `--state` change; new coverage routed to `test_suppresses_refile_when_recently_closed` / `test_refiles_when_closed_beyond_window`, which patch `asyncio.create_subprocess_exec`. |
+| CONCERN | History & Consistency (Consistency) | Plan named `_dup_check`; real symbol is `_find_open_audit_issue`. | Global replace to `_find_open_audit_issue` in all symbol references; explicit rename decision to `_find_recent_audit_issue` recorded, with caller (L605) and test anchors (L1148/1171/1210/1258). In-window closed match returns a positive int. |
+| CONCERN | Risk & Robustness (Operator) | Fix A's silent `continue` drop emits no log — the blind spot behind four misdiagnoses. | Fix A adds a `logger.debug` (category + preview) before the `continue`; `agent_id`/`session_id` confirmed out of scope in `_parse_categorized_observations(raw_text)`, so log category/preview only. |
+| NIT | Scope & Value (User) | Fix B leaned on speculative "future/legacy producer" framing. | Reframed around the demonstrated 3× wasted-filing history (#1497/#1786/#1931); noted explicitly that Fix B changes re-file behavior for **every** memory-audit signal, not only ebe79d3b. |
+
+*Investigated and cleared (not a defect):* Scope & Value flagged that Fix B might mask a distinct new cluster if `signal_name` were a shared signal-type. Verified against `memory_quality_audit.py:350` — `signal_name = f"agent-id-cluster-{aid_suffix}"` is cluster-specific, so the title prefix uniquely identifies one agent_id cluster.
 
 ---
 
-## Open Questions
+## Resolved Decisions
 
-1. **Version-skew (residual uncertainty from recon):** could the producing dev machine be running an older `_REFUSAL_PATTERNS`/parser than the auditing machine, such that the audit supersedes records the local extractor legitimately couldn't recognize? Fix A closes the structural gap regardless, so the plan does not depend on the answer — but if version-skew is real, an additional "audit and producer share a version" invariant might be worth a separate note. Confirm we are content to ship Fix A + Fix B without chasing this.
-2. **Suppression window length:** is 30 days the right `CLUSTER_REFILE_SUPPRESSION_DAYS`? Shorter (e.g. 14) re-surfaces faster if a fix regresses; longer stays quieter. Default proposed: 30.
-3. **Scope confirmation:** should this plan own both the producing-defect fix (A) and the churn fix (B), or split B into its own issue? Recommendation: keep both — they are small, related, and B alone would keep the store dirty while A alone would leave the churn mechanism latent for any future/legacy producer.
+All prior open questions are decided; nothing blocks build.
+
+1. **Version-skew (residual recon uncertainty):** **Resolved — ship Fix A + Fix B without chasing it.** Fix A closes the structural gap regardless of producer version, and Fix B on the auditor stops the churn regardless of which version produced the records. No "audit and producer share a version" invariant is added; a cross-machine version-skew concern, if it ever proves real, is a separate issue.
+2. **Suppression window length:** **Resolved — `CLUSTER_REFILE_SUPPRESSION_DAYS = 14`.** Chosen on a historical basis: below the cluster's observed ~2-week inter-arrival (4 filings in 7 weeks), so a regressed Fix A re-surfaces within one natural cycle rather than being hidden.
+3. **Scope (own both A and B, or split):** **Resolved — keep both in this plan.** They are small and related; B alone leaves the store dirty, A alone leaves the churn mechanism latent. The demonstrated 3× wasted-filing history is sufficient standalone justification for B.
