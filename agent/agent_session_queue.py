@@ -300,35 +300,29 @@ async def _push_agent_session(
     if extra_context_overrides:
         extra_context.update(extra_context_overrides)
 
-    # Mark old completed records as superseded to prevent duplicate-record ambiguity
+    # Reconcile stale terminal duplicates before creating the new pending record,
+    # so a divergent (terminal, pending) pair is never born (Defect A / spike-3).
+    # This used to be "_mark_superseded", which attempted
+    # transition_status(completed→superseded, reject_from_terminal=False) —
+    # (#730) that override was intentionally removed to stop terminal records
+    # being re-activated, so the old body silently reconciled nothing (every
+    # divergent duplicate, including stale failed/killed/abandoned ones,
+    # survived). Delete the stale terminal records instead — never
+    # re-transition them. Child-guarded and shared with the pop-loop
+    # escalation via _delete_stale_terminal_duplicates(). ORM-only, never raw
+    # Redis. Kept inside this try/except so a reconciliation failure (Race 2:
+    # a concurrent reconciler already deleted the record) never blocks the
+    # new record's creation below.
     try:
-
-        def _mark_superseded():
-            from models.session_lifecycle import transition_status
-
-            old_completed = [
-                s
-                for s in AgentSession.query.filter(session_id=session_id)
-                if s.status == "completed"
-            ]
-            for old in old_completed:
-                transition_status(
-                    old,
-                    "superseded",
-                    reason=f"superseded by new session for {session_id}",
-                    # (#730) The reject_from_terminal override was intentionally removed.
-                    # Terminal sessions must not be re-activated. The guard in
-                    # transition_status() will reject completed→superseded transitions,
-                    # leaving the completed record intact and preventing worker re-activation.
-                )
-                logger.info(
-                    f"Marked old completed session {old.id} as superseded "
-                    f"for session_id={session_id}"
-                )
-
-        await asyncio.to_thread(_mark_superseded)
+        deleted_count = await asyncio.to_thread(_delete_stale_terminal_duplicates, session_id)
+        if deleted_count:
+            logger.info(
+                "Reconciled %d stale terminal duplicate(s) for session_id=%s",
+                deleted_count,
+                session_id,
+            )
     except Exception as e:
-        logger.warning(f"Failed to mark old sessions as superseded for {session_id}: {e}")
+        logger.warning(f"Failed to reconcile stale terminal duplicates for {session_id}: {e}")
 
     await AgentSession.async_create(
         project_key=project_key,
@@ -1287,6 +1281,78 @@ def _resolve_callbacks(
         send_cb = _send_callbacks.get(project_key)
         react_cb = _reaction_callbacks.get(project_key)
     return send_cb, react_cb
+
+
+def _delete_stale_terminal_duplicates(session_id: str) -> int:
+    """Delete every terminal-status ``AgentSession`` duplicate for ``session_id``.
+
+    Reconciles divergent duplicate records (e.g. a stale ``failed``/``killed``/
+    ``abandoned``/``completed``/``cancelled`` record alongside a legitimate
+    ``pending``/``running`` one) by removing the stale terminal record via ORM
+    ``instance.delete()``. Never touches ``running``/``pending`` records —
+    ``TERMINAL_STATUSES`` excludes both, so this function structurally cannot
+    reach them.
+
+    Child-guarded (Risk 1): skips deleting any duplicate for which
+    ``get_child_sessions()`` returns a non-empty list, so a parent-of-children
+    is never orphaned. That residual case (a terminal duplicate that cannot be
+    deleted) is left for the pop-loop's last-resort escalation to handle.
+
+    Deliberately does NOT use ``transition_status(..., reject_from_terminal=False)``
+    to "supersede" the duplicate — #730 removed that override specifically to
+    stop terminal records from being re-activated, and a ``completed→superseded``
+    transition is guard-rejected regardless. Deleting the stale record (rather
+    than re-transitioning it) respects that constraint.
+
+    Race 2 tolerant: each delete is individually wrapped, so a losing writer's
+    ``instance.delete()`` racing a concurrent reconciler for the same
+    ``session_id`` (two re-enqueues interleaving, or the enqueue-time
+    reconciler racing the pop-loop escalation) on an already-deleted record is
+    a caught, non-fatal no-op.
+
+    Shared by both ``enqueue_agent_session`` (the primary, enqueue-time
+    reconciliation) and the pop-loop's bounded ``StatusConflictError``
+    escalation (agent_session_queue.py ``_worker_loop``), so both consumers
+    apply identical child-guard + delete semantics.
+
+    Returns:
+        Count of records actually deleted.
+    """
+    deleted = 0
+    duplicates = [
+        s for s in AgentSession.query.filter(session_id=session_id) if s.status in TERMINAL_STATUSES
+    ]
+    for dup in duplicates:
+        if dup.get_child_sessions():
+            logger.info(
+                "[reconcile] Skipping delete of terminal duplicate %s "
+                "(session_id=%s, status=%s) — has child sessions",
+                dup.id,
+                session_id,
+                dup.status,
+            )
+            continue
+        try:
+            dup.delete()
+            deleted += 1
+            logger.info(
+                "[reconcile] Deleted stale terminal duplicate %s (session_id=%s, status=%s)",
+                dup.id,
+                session_id,
+                dup.status,
+            )
+        except Exception as exc:
+            # Race 2: a concurrent reconciler (another enqueue, or the
+            # pop-loop escalation) may have already deleted this record.
+            # A losing writer's delete on an already-gone record is a
+            # caught, non-fatal no-op.
+            logger.debug(
+                "[reconcile] Delete of terminal duplicate %s already gone "
+                "or failed (non-fatal): %s",
+                dup.id,
+                exc,
+            )
+    return deleted
 
 
 async def enqueue_agent_session(
