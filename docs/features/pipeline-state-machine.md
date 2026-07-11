@@ -18,7 +18,14 @@ Stage status is set programmatically at the points where transitions actually ha
 
 A single eng session (`SessionType.ENG`, engineer persona) both orchestrates and executes the pipeline: it dispatches one stage skill at a time, and the hooks above advance the state machine at each skill's invoke/return boundary. There is no separate worker post-completion handler that classifies an outcome and routes to `complete_stage()`/`fail_stage()`. The previous PM/Dev split and its `_handle_dev_session_completion()` handler were removed when the roles merged into the single eng session (PR #1691).
 
-State is persisted as a JSON dict on `AgentSession.stage_states` -- one Redis field, no history parsing.
+State is persisted as a JSON dict. As of issue #2012, both hooks resolve their
+backing store via `agent.pipeline_state.resolve_pipeline_state_machine(session)`:
+when the session's `active_run_id` holds a live per-issue lease with a pinned
+`target_repo`, they write/read the issue-keyed `PipelineLedger` via
+`PipelineStateMachine.for_issue(target_repo, issue_number)`; otherwise they fall
+back to the session-keyed `AgentSession.stage_states` field described below.
+See [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md) for why
+the ledger is the durable primary and the session field is now a fallback.
 
 ## Production Lifecycle
 
