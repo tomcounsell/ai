@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: chore
-appetite: Large
+appetite: Small
 owner: Valor Engels
 created: 2026-07-11
 tracking: https://github.com/tomcounsell/ai/issues/1926
 last_comment_id: none
+revision_applied: true
 ---
 
 # Post-teardown scar-tissue removal: happy-path liveness + Sentry reporting + removed-defenses ledger
@@ -23,11 +24,21 @@ under protocol-driven headless execution** — the harness now emits a structure
 the protocol, not by scraping a PTY master fd.
 
 **Current behavior:**
-Dead PTY-era rationale still ships in the codebase (e.g. the `worker_watchdog`
-U-state "kill the PTY master fds" narrative), and the reporting-layer taxonomies
-(`session_stall_classifier`, `crash_signature`) still enumerate classes that no
-longer occur. There is no single written record of *what each removed defense
-guarded against*, so a future targeted fix has no map back to the gotcha.
+The reporting-layer taxonomies (`session_stall_classifier`, `crash_signature`)
+still enumerate classes that no longer occur under headless execution. There is no
+single written record of *what each removed defense guarded against*, so a future
+targeted fix has no map back to the gotcha.
+
+**Scope correction from critique (verified against `main`):** the earlier premise
+that `monitoring/worker_watchdog.py` carries a PTY-specific "kill the PTY master
+fds" narrative is FALSE. `grep -ni "pty|master fd" monitoring/worker_watchdog.py`
+returns nothing. The file's only U-state text (docstring lines ~10-21, 231-236,
+and the W4 log at ~287) is the generic issue-#1767 rationale for the W1-W5
+verified-kill ladder — a hung-worker mechanism that is **substrate-agnostic and
+explicitly KEPT** by this plan. A `claude -p` subprocess can still wedge in
+uninterruptible sleep on a blocking syscall exactly as any process can, so that
+rationale stays. The watchdog therefore needs **no deletion**, only a confirmation
+that no PTY-specific text exists.
 
 **Desired outcome:**
 Keep the happy path plus Sentry error reporting. Trim PTY-era rationale and
@@ -37,6 +48,21 @@ every deletion, add one entry to a **removed-defenses ledger**
 that when a matching Sentry issue reappears we re-apply a *targeted* fix — never
 the old blanket machinery. Make explicit, evidence-grounded keep-vs-cut calls on
 the three "review, don't blindly delete" surfaces.
+
+Two folded-in scope items resolve open holds on the same recovery surface:
+- **Closes #1855** — delete the `FEATURES__STALL_RECOVERY_ENABLED` flag
+  (`config/settings.py:310`, sole read site `reflections/stall_advisory.py:316`).
+  Per operator decision (Tom, 2026-07-02), stall recovery is THE behavior, not a
+  dry-run-gated feature: the flag and its dry-run branch are removed so actuation
+  is unconditional. The budgets/guards (consec-observation threshold, run +
+  per-session kill budgets, Race-1 re-read) remain as the real safety mechanism.
+- **Closes #1868** — the slot-lease reap Phase-2 in `agent/session_health.py`
+  (`_reap_slot_leases`, ~lines 3046-3073) treats `AgentSession.get_by_id(owner) is
+  None` as "owner terminal → reclaim," but `get_by_id` swallows transient Redis
+  lookup errors and also returns `None` on failure, so a read blip can spuriously
+  reclaim a live session's semaphore permit. Fix: distinguish confirmed-absent
+  from lookup-error and reclaim only on the former (preserving the deliberate
+  "genuinely-deleted record is reclaimable" behavior).
 
 ## Freshness Check
 
@@ -63,7 +89,10 @@ the three "review, don't blindly delete" surfaces.
 - `agent/output_router.py:39` `MAX_NUDGE_COUNT = 50` — still present and still
   wired live via `session_executor.send_to_chat -> route_session_output`.
 - `monitoring/worker_watchdog.py::recover()` (lines 219-306) — kill ladder
-  (W1-W5) and U-state fd narrative (docstring 8-21, 231-236) present as described.
+  (W1-W5) present as described. Re-verified during this revision: the docstring
+  (lines ~10-21, 231-236) and W4 log (~287) carry only the generic issue-#1767
+  U-state rationale, **not** any PTY-master-fd narrative (`grep -ni "pty|master fd"`
+  returns 0). This rationale is KEPT — it justifies a substrate-agnostic mechanism.
 - `monitoring/bridge_watchdog.py::execute_recovery` (line 675), `revert_last_commit`
   (line 636) — 5-level ladder + revert present as described.
 
@@ -111,6 +140,14 @@ predicted.
   `session_stall_classifier` and `crash_signature` already import.
 - **`b92d9a44`** — Fixed the `_confirm_subprocess_dead` string-pid TypeError
   (the VALOR-E1/D0 defect). Already on main.
+- **#1768 / PR #1773** — Shipped the stall-recovery gate ladder (consec-observation
+  counter, kill budgets, Race-1 re-read, kill + valor-catchup re-enqueue) gated by
+  `stall_recovery_enabled` (default False / dry-run). #1855 removes that gate.
+- **#1855** (OPEN, folded in) — Operator decision (Tom, 2026-07-02) to remove the
+  `FEATURES__STALL_RECOVERY_ENABLED` flag so recovery is one always-on path.
+- **#1868** (OPEN, folded in) — REVIEW follow-up of PR #1867 (#1820 slot-lease
+  ownership): the reap Phase-2 must distinguish `get_by_id` not-found from a
+  transient lookup error before reclaiming a permit.
 - No prior attempt has written a removed-defenses ledger; this is greenfield for
   that artifact.
 
@@ -185,14 +222,23 @@ watchdog PTY rationale — plus documentation of the keep decisions on (5)/(6).
 
 ## Appetite
 
-**Size:** Large
+**Size:** Small
 
-**Team:** Solo dev (fanned to builders), PM check-ins, 1 code reviewer.
+**Right-sizing (critique #4):** the actual diff surface is small. After the
+watchdog scope correction (no PTY narrative to delete — confirmation only), the
+real edits are: prune two pure reporting modules (`session_stall_classifier.py`,
+`crash_signature.py`) to observed classes, a possible subtraction-only residual
+trim in `session_health.py`, update their two test files, author one new doc
+(`docs/removed-defenses.md`), and touch three existing docs. That is a
+single-developer change, not a four-builder fan-out. Team is a solo dev with one
+reviewer; no worktree fan-out is warranted.
+
+**Team:** Solo dev, PM check-in, 1 code reviewer.
 
 **Interactions:**
-- PM check-ins: 2-3 (keep-vs-cut sign-off on the nudge counter; overlap
+- PM check-ins: 1-2 (keep-vs-cut sign-off on the nudge counter; overlap
   coordination with the resilience program plan)
-- Review rounds: 1 (code review + cruft audit on a deletion-heavy diff)
+- Review rounds: 1 (code review + cruft audit on a deletion diff)
 
 ## Prerequisites
 
@@ -206,49 +252,85 @@ watchdog PTY rationale — plus documentation of the keep decisions on (5)/(6).
 ### Key Elements
 
 - **Removed-defenses ledger (`docs/removed-defenses.md`)**: the durable artifact.
-  One entry per deleted/trimmed defense: what it guarded against, why it's dead
-  under headless, and the Sentry signature that would justify a targeted re-apply.
-- **Worker watchdog PTY-rationale trim**: delete the dead "kill the PTY master
-  fds / cross-process fd close" U-state *narrative* and any PTY-master-read code
-  branches in `monitoring/worker_watchdog.py`; **keep** the SIGTERM->SIGKILL->
-  bootout kill ladder (W1-W3) and launchd-respawn fallback, re-justified for
-  headless subprocesses.
+  One entry per defense removed **in THIS PR** (plus a clearly-labeled reference
+  block for the #1930-era classes that motivated the ledger): what it guarded
+  against, why it's dead under headless, and the Sentry signature that would
+  justify a targeted re-apply. See critique #5 note under Technical Approach.
+- **Worker watchdog: confirmation, no deletion**: `monitoring/worker_watchdog.py`
+  carries no PTY-specific narrative (verified: `grep -ni "pty|master fd"` == 0).
+  Its U-state text is the generic issue-#1767 hung-worker rationale for the
+  W1-W5 verified-kill ladder, which is substrate-agnostic and **KEPT unchanged**.
+  This is a no-op/confirmation surface, not a trim. No ledger entry originates here.
 - **Stall-classifier taxonomy prune**: reduce `session_stall_classifier.py` to the
   classes actually observed post-cutover (never-started, idle/turn-timeout);
   delete unobserved corroboration branches. Module stays pure read-only reporting.
 - **Crash-signature library prune**: reduce `crash_signature.py` normalization to
   the event shapes that occur under headless (`status_transition`,
   `idle_gap` bucketing, never-started); drop PTY-only signature classes.
+  **KEEP carve-out (critique #3):** the `ceiling` / `ceiling_timeout` signature
+  class (`crash_signature.py` lines ~296-297, 329-330) is a live headless
+  classification prefix for budget-ceiling startup failures, NOT PTY scar tissue.
+  It is explicitly retained — do not prune it.
 - **Residual liveness inference trim**: in `session_health.py`, remove any
   remaining duplicated multi-field liveness inference that `derive_sdk_ever_output`
   already centralizes (no new signal, no wider spread — a subtraction only).
-- **Keep decisions, documented**: `bridge_watchdog.py` 5-level ladder +
-  revert-commit KEPT (bridge-process resilience, orthogonal to PTY); the 50-cap
-  nudge counter KEPT as a runaway backstop (recommendation below).
+- **Stall-recovery flag deletion (closes #1855)**: remove
+  `stall_recovery_enabled` from `config/settings.py`, delete the sole read site's
+  dry-run branch (`reflections/stall_advisory.py:316`, step 6) so kill+catchup
+  actuation is unconditional, drop `FEATURES__STALL_RECOVERY_ENABLED=false` from
+  `.env.example`. Budgets/guards untouched. Ledger entry: the dry-run gate was
+  PTY-era caution scaffolding; the guard that matters is the budget ladder, kept.
+- **Slot-lease reap transient-error fix (closes #1868)**: in
+  `agent/session_health.py::_reap_slot_leases` Phase 2, reclaim a lease only when
+  the owner is confirmed absent/terminal, never on a swallowed `get_by_id` lookup
+  error. Surface the "not found vs lookup error" distinction (reap-local probe or
+  `get_by_id` error semantics in `models/agent_session.py`). Not a deletion — a
+  targeted correctness fix on the recovery surface, so no ledger entry.
+- **Keep decisions, documented**: `worker_watchdog.py` W1-W5 kill ladder + its
+  U-state rationale KEPT (substrate-agnostic hung-worker recovery, issue #1767);
+  `bridge_watchdog.py` 5-level ladder + revert-commit KEPT (bridge-process
+  resilience, orthogonal to PTY); the 50-cap nudge counter KEPT as a runaway
+  backstop (recommendation below); the `ceiling`/`ceiling_timeout` crash-signature
+  class KEPT (live headless budget-ceiling prefix).
 
 ### Flow
 
 Deletion PR journey:
-`main (headless, post-#1930)` → trim PTY-dead rationale + prune taxonomies →
-write ledger entry per deletion → keep-decisions documented → narrow tests green →
-cruft audit confirms no half-migrations → merge.
+`main (headless, post-#1930)` → confirm watchdog clean + prune taxonomies →
+delete stall-recovery flag (always-on) + fix slot-lease reap → write ledger entry
+per deletion → keep-decisions documented → narrow tests green → cruft audit
+confirms no half-migrations → merge.
+
+**Implementation PR body must carry** `Closes #1926`, `Closes #1855`, and
+`Closes #1868`, and note the overlap coordination with
+`resilience-simplification-three-tier.md` so the program plan can subtract what
+this PR ships.
 
 ### Technical Approach
 
 - **Ledger-first discipline:** no deletion lands without its ledger entry in the
   same commit. The ledger is the compensating control for aggressive cutting.
+- **Ledger seeds from THIS PR's diff (critique #5):** the ledger's primary entries
+  are the taxonomy/signature classes THIS PR actually removes, sourced from this
+  PR's own diff — one entry per pruned class. The #1930-era classes (pty-pool,
+  granite-container, deadman, executor-guard empty-container-message) were deleted
+  by an already-shipped PR; they appear in the ledger only as a clearly-labeled
+  "Baseline: removed by #1930 teardown" reference block for historical map-back,
+  NOT counted as deletions this PR performs. Do not present already-shipped work
+  as this PR's deletions.
 - **Trim, don't gut, the reporting modules:** `session_stall_classifier` and
   `crash_signature` remain — they are already pure, side-effect-free, and import
   the authoritative liveness leaf. The change removes *enum members / verdict
   reasons / signature classes* that map to PTY-era events with zero post-cutover
-  occurrences, plus their now-dead threshold constants.
-- **Watchdog: narrative vs mechanism split.** The PTY-fd U-state *reasoning* is
-  dead (headless subprocesses are ordinary killable children, not PTY masters in
-  uninterruptible sleep). The *kill ladder mechanism* (escalating signals +
-  bootout + launchd respawn) is substrate-agnostic and stays. Rewrite the
-  docstrings/comments to the headless status quo (NO_LEGACY_CODE: no "previously
-  PTY..." archaeology in the code — that lives in the ledger).
-- **No parallel-run artifacts:** fully delete; describe only the new status quo.
+  occurrences, plus their now-dead threshold constants. The `ceiling` /
+  `ceiling_timeout` prefix is a live headless class and is retained (critique #3).
+- **Watchdog: confirmation only, no edit.** `worker_watchdog.py` has no PTY-fd
+  narrative to remove (verified 0 matches). Its U-state text is generic #1767
+  hung-worker rationale for a KEPT mechanism; a headless `claude -p` subprocess can
+  still block in uninterruptible sleep, so the rationale is accurate and stays.
+  The watchdog surface is a no-op — verify no PTY-specific text exists and move on.
+- **No parallel-run artifacts:** fully delete pruned classes; describe only the
+  new status quo.
 
 ### Keep-vs-Cut Recommendations (issue-mandated, evidence-grounded)
 
@@ -268,15 +350,20 @@ control-flow trace that is out of scope here. **Open decision flagged for the PM
 retiring the whole bridge nudge loop in favor of the steering list as the single
 inbound channel. This PR keeps the counter and documents the reasoning.
 
-**(2) worker_watchdog U-state W3-W5 fd-table narrative — RECOMMENDATION: TRIM the narrative, KEEP the kill ladder.**
-Rationale: the U-state ("uninterruptible sleep" from a blocking PTY-master read
-that cross-process fd-close cannot free) is a PTY-substrate phenomenon —
-telemetry confirms W4/W5 "kill the PTY master fds" (VALOR-B7/B8) stopped firing at
-the cutover. Headless `claude -p` subprocesses are ordinary process-group leaders
-reaped by the runner's SIGTERM->SIGKILL->`killpg`. So the fd-table narrative and
-any PTY-master-read escalation branches are dead and get trimmed + ledgered. The
-**kill ladder itself** (W1 SIGTERM, W2 SIGKILL, W3 bootout, launchd respawn) is
-substrate-agnostic worker resilience and **stays**, re-justified for headless.
+**(2) worker_watchdog U-state kill ladder — RECOMMENDATION: KEEP unchanged (no narrative to trim).**
+Corrected against `main` during this revision (critique #1): the premise that
+`worker_watchdog.py` carries a "kill the PTY master fds" narrative is FALSE —
+`grep -ni "pty|master fd" monitoring/worker_watchdog.py` returns 0. The only
+U-state text (docstring lines ~10-21, 231-236; W4 log ~287) is the generic
+issue-#1767 rationale for the W1-W5 verified-kill ladder: it explains why, against
+a process wedged in uninterruptible sleep on a blocking syscall, SIGKILL queues and
+the ladder escalates to bootout + a loud operator signal. That mechanism is
+**substrate-agnostic** — a headless `claude -p` subprocess can wedge in U-state on
+a hung fd/device exactly as any process can — so both the ladder AND its rationale
+are KEPT verbatim. There is nothing PTY-specific to delete here. The VALOR-B7/B8
+"kill the PTY master fds" telemetry that stopped at cutover was the *former PTY
+pool's* fd-close path (deleted by #1930), not text in this watchdog. This surface
+is a confirmation grep, not an edit.
 
 **(3) stall classifier as pure reporting — RECOMMENDATION: KEEP as pure reporting, PRUNE taxonomy.**
 Rationale: it is already zero-write and import-isolated from the kill/recovery
@@ -296,9 +383,9 @@ change beyond a ledger note explaining why it is explicitly retained.
   window still returns `healthy` (observable, not swallowed).
 - [ ] `crash_signature.extract_signature` retains its `-> unclassifiable` fallback
   after the prune; test asserts an empty/garbage trace yields the sentinel.
-- [ ] `worker_watchdog` kill-ladder branches retain observable logging on each
-  rung after the narrative trim; test asserts the SIGKILL rung logs when SIGTERM
-  fails to reap (no silent swallow).
+- [ ] `worker_watchdog` kill-ladder branches are unchanged by this PR (no edit);
+  their existing tests remain green as a regression guard, asserting the SIGKILL
+  rung logs when SIGTERM fails to reap (no silent swallow).
 
 ### Empty/Invalid Input Handling
 - [ ] Classifier + signature extractor tested with empty `events=[]`, `None`
@@ -308,9 +395,10 @@ change beyond a ledger note explaining why it is explicitly retained.
   is kept).
 
 ### Error State Rendering
-- [ ] No new user-visible surface. The watchdog Sentry-report path must still fire
-  on the kept kill-ladder rungs; test asserts a Sentry capture (or the log the
-  reporter reads) is emitted when the ladder reaches its terminal rung.
+- [ ] No new user-visible surface. The watchdog Sentry-report path is untouched
+  and still fires on the kept kill-ladder rungs; its existing test asserting a
+  Sentry capture (or the log the reporter reads) at the terminal rung stays green
+  unedited.
 
 ## Test Impact
 
@@ -318,12 +406,16 @@ change beyond a ledger note explaining why it is explicitly retained.
   pruned verdict reasons / threshold constants; keep never-started + idle-timeout
   + fail-soft cases. (Exact file located at build time via
   `grep -rl session_stall_classifier tests/`.)
-- [ ] `tests/**/test_crash_signature*.py` — UPDATE: drop cases asserting
-  PTY-only signature classes; keep `status_transition` / `idle_gap` bucketing /
-  never-started / unclassifiable cases.
-- [ ] `tests/**/test_worker_watchdog*.py` — UPDATE: delete assertions on the
-  removed U-state fd narrative / PTY-master-read branches; keep kill-ladder
-  (SIGTERM->SIGKILL->bootout->respawn) assertions.
+- [ ] `tests/**/test_crash_signature*.py` (e.g. `tests/unit/test_crash_signature_library.py`)
+  — UPDATE: drop cases asserting PTY-only signature classes; keep
+  `status_transition` / `idle_gap` bucketing / never-started / unclassifiable
+  cases AND the `ceiling` / `ceiling_timeout` prefix cases (that class is kept —
+  critique #3).
+- [ ] `tests/**/test_worker_watchdog*.py` — VERIFY UNCHANGED (regression guard):
+  the watchdog is not edited (no PTY narrative exists to remove), so these must
+  continue to pass without edits, preserving the kill-ladder
+  (SIGTERM->SIGKILL->bootout->respawn) assertions. If any edit is needed here, the
+  scope correction is wrong — stop and escalate.
 - [ ] `tests/**/test_output_router*.py` — VERIFY UNCHANGED (regression guard): the
   50-cap counter is kept, so these must continue to pass without edits. If any
   edit is needed, the keep-decision is wrong — stop and escalate.
@@ -332,6 +424,13 @@ change beyond a ledger note explaining why it is explicitly retained.
   touch `_confirm_subprocess_dead` tests (that bug is already fixed on main).
 - [ ] Import-isolation guard tests (classifier/signature must not import
   `session_health`) — VERIFY UNCHANGED; the prune must not add the forbidden import.
+- [ ] `tests/**/*stall_advisory*.py` — UPDATE (closes #1855): flip every dry-run
+  assertion (`WOULD kill`, `dry_run` outcome, `stall_recovery_enabled=False`
+  branch) to unconditional-actuation assertions. Any test that patches or sets
+  `stall_recovery_enabled` must have that removed — the flag no longer exists.
+- [ ] `tests/**/*session_health*` reap tests — UPDATE/ADD (closes #1868): add a
+  case asserting a transient `get_by_id` lookup error does NOT reclaim the lease,
+  while a confirmed-absent owner still does. Existing reclaim-on-terminal cases stay.
 
 Exact test files and cases are enumerated by the builder from `grep` at build
 start; the dispositions above are binding.
@@ -364,11 +463,13 @@ signature to watch. Reporting modules keep their `unclassifiable`/`healthy`
 fallbacks, so an unforeseen shape degrades to a safe default plus a generic
 Sentry event rather than a crash.
 
-### Risk 2: Trimming a worker_watchdog branch that the kill ladder still needs.
-**Impact:** A worker fails to be reaped in some edge case.
-**Mitigation:** Split strictly along narrative-vs-mechanism. Only PTY-master-read
-/ fd-close *rationale and branches* are removed; every signal-delivery rung stays.
-Tests assert the full SIGTERM->SIGKILL->bootout->respawn sequence post-trim.
+### Risk 2: Wrongly editing worker_watchdog under the old (false) premise.
+**Impact:** Deleting a live kill-ladder rung or its accurate U-state rationale,
+weakening hung-worker recovery.
+**Mitigation:** The watchdog is confirmed to hold no PTY-specific text, so this PR
+makes ZERO watchdog edits. `test_worker_watchdog*` must pass unedited as a
+regression guard; any required edit there means the scope correction is wrong and
+the builder stops and escalates.
 
 ### Risk 3: The kept 50-cap counter turns out to be genuinely vestigial.
 **Impact:** Dead code remains (violates NO_LEGACY_CODE if truly unreachable).
@@ -379,11 +480,18 @@ separate, evidence-driven follow-up rather than a blind delete now.
 
 ## Race Conditions
 
-No new race conditions introduced — this plan is subtractive (removing rationale,
-taxonomy members, and dead branches) plus one additive doc. The kept kill ladder's
-existing PID-reuse caveat and `run_in_executor` offload (already documented in
-`_confirm_subprocess_dead`) are unchanged. The reporting modules are already
-zero-write and race-free by construction.
+No new race conditions introduced. The taxonomy/rationale work is subtractive
+(removing taxonomy members and dead branches) plus one additive doc. The kept kill
+ladder's existing PID-reuse caveat and `run_in_executor` offload (already
+documented in `_confirm_subprocess_dead`) are unchanged, and the reporting modules
+are already zero-write and race-free by construction.
+
+The #1868 slot-lease reap fix *closes* an existing race window rather than opening
+one: today a transient `get_by_id` read blip during a 300s reap tick can reclaim a
+live session's permit (semaphore over-admission). The fix reclaims only on a
+confirmed-absent owner, tightening the guard. The #1855 flag deletion changes no
+timing — it removes a boolean branch; the consec-observation counter, kill
+budgets, and Race-1 re-read guard that order the actuation are all preserved.
 
 ## No-Gos (Out of Scope)
 
@@ -400,12 +508,17 @@ zero-write and race-free by construction.
 
 ## Update System
 
-No update system changes required — this feature is purely internal (deletion of
-dead rationale + taxonomy prune + one new doc). No new dependencies, config files,
-or migration steps. No Popoto model changes (the kept `auto_continue_count` field
-is untouched), so `scripts/update/migrations.py` needs no new migration. The
-`/update` skill propagates the code changes automatically on the next run; the new
-`docs/removed-defenses.md` ships as an ordinary tracked file.
+No migration or `scripts/update/run.py` changes required — no new dependencies,
+config files, or Popoto model changes (the kept `auto_continue_count` field is
+untouched). The `/update` skill propagates the code changes automatically on the
+next run; the new `docs/removed-defenses.md` ships as an ordinary tracked file.
+
+One env-var cleanup note (closes #1855): `FEATURES__STALL_RECOVERY_ENABLED` is
+removed from `.env.example` and from `config/settings.py`. Machines that set it in
+their per-machine `~/Desktop/Valor/.env` should delete the line. Leaving it set is
+harmless (pydantic-settings ignores unknown `FEATURES__*` keys), but per the
+no-legacy policy the docs and example are updated so no machine re-adds it. No
+automated migration is warranted for a harmless stale env line.
 
 ## Agent Integration
 
@@ -424,161 +537,186 @@ surface.
   per deletion: (a) the defense, (b) the gotcha it guarded against, (c) why it is
   dead under headless, (d) the Sentry signature that would justify a targeted
   re-apply. This is the load-bearing deliverable.
-- [ ] Update `docs/features/bridge-worker-architecture.md` — reflect the trimmed
-  worker_watchdog narrative and the headless liveness status quo (describe only
-  the new status quo; no PTY archaeology in the doc body — that lives in the
-  ledger).
+- [ ] Update `docs/features/bridge-worker-architecture.md` — reflect the headless
+  liveness status quo and the pruned reporting taxonomies (describe only the new
+  status quo; no PTY archaeology in the doc body — that lives in the ledger). Note
+  the worker_watchdog kill ladder is unchanged.
 - [ ] Update `docs/features/bridge-self-healing.md` — re-state the watchdog fleet
-  section: bridge 5-level ladder KEPT, worker kill ladder KEPT (re-justified),
-  U-state PTY-fd narrative REMOVED.
+  section: bridge 5-level ladder KEPT, worker W1-W5 kill ladder KEPT (unchanged,
+  substrate-agnostic). No watchdog narrative is removed by this PR.
 - [ ] Add a `docs/removed-defenses.md` entry to `docs/features/README.md` index
   table (or the appropriate index) so the ledger is discoverable.
+- [ ] Update the stall-advisory feature doc (`docs/features/` coverage of
+  `reflections/stall_advisory.py`, e.g. the resilience/stall-recovery doc) to
+  describe recovery as always-on: remove the `FEATURES__STALL_RECOVERY_ENABLED`
+  dry-run description; the budgets/guards are the safety mechanism (closes #1855).
 
 ### External Documentation Site
 - No external docs site changes (internal system docs only).
 
 ### Inline Documentation
-- [ ] Rewrite `monitoring/worker_watchdog.py` docstrings/comments to the headless
-  status quo (remove PTY-master-fd rationale).
+- [ ] `monitoring/worker_watchdog.py` — no change (its U-state text is generic
+  #1767 rationale for a KEPT mechanism, not PTY archaeology). Confirm only.
 - [ ] Prune stale threshold-constant comments in `session_stall_classifier.py` /
-  `crash_signature.py` for any removed class.
+  `crash_signature.py` for any removed class; leave the `ceiling` prefix comments.
 
 ## Success Criteria
 
 - [ ] `docs/removed-defenses.md` exists with one entry per deletion, each naming
   the guarded gotcha + the Sentry signature to watch for re-apply.
-- [ ] `monitoring/worker_watchdog.py` contains no PTY-master-fd / U-state fd-close
-  rationale; the SIGTERM->SIGKILL->bootout->respawn kill ladder remains and its
-  tests pass.
+- [ ] `monitoring/worker_watchdog.py` contains no PTY-master-fd narrative
+  (`grep -ni "pty|master fd"` == 0, already true); the W1-W5 kill ladder and its
+  generic #1767 U-state rationale remain unchanged and its tests pass unedited.
 - [ ] `session_stall_classifier.py` and `crash_signature.py` enumerate only
-  post-cutover-observed classes; both remain pure (zero writes) and neither
-  imports `session_health` (isolation guard still green).
+  post-cutover-observed classes (retaining the kept `ceiling`/`ceiling_timeout`
+  prefix); both remain pure (zero writes) and neither has a real
+  `from agent.session_health` / `import session_health` statement (isolation guard
+  still green — anchored grep, see Verification).
 - [ ] `agent/output_router.py` `MAX_NUDGE_COUNT` and `AgentSession.auto_continue_count`
   are unchanged (kept-with-rationale); `test_output_router*` passes without edits.
+- [ ] `FEATURES__STALL_RECOVERY_ENABLED` / `stall_recovery_enabled` removed from
+  `config/settings.py`, `reflections/stall_advisory.py`, and `.env.example`; stall
+  recovery actuates unconditionally; stall-advisory tests green (closes #1855).
+- [ ] `_reap_slot_leases` reclaims only on confirmed-absent owner, never on a
+  transient `get_by_id` lookup error; a regression test proves it (closes #1868).
 - [ ] No commented-out code, no "previously PTY" archaeology in code bodies, no
   parallel-run artifacts (cruft audit clean).
 - [ ] Narrow-scope tests pass (`/do-test` on the touched files).
 - [ ] Documentation updated (`/do-docs`).
-- [ ] `grep -rn "master fd\|pty master\|uninterruptible sleep" monitoring/ agent/`
-  returns no code-body matches (rationale fully removed).
+- [ ] `grep -rniE "pty master|master fd" monitoring/ agent/` returns no matches
+  (no PTY-fd archaeology in code bodies). Note: `uninterruptible sleep` is
+  deliberately NOT in this grep — it is kept #1767 rationale for the retained
+  worker_watchdog ladder.
 
 ## Team Orchestration
 
-The lead (Dev) orchestrates; builders execute disjoint file sets in the single
-`session/dev-a1552d0a` worktree so commits never interleave.
+Right-sized for a small diff (critique #4): a single dev does the code prune and
+doc work in-place on the base branch — no worktree fan-out, no watchdog builder
+(that surface is a confirmation grep, not an edit). One reviewer closes the loop.
 
 ### Team Members
 
-- **Builder (watchdog-trim)**
-  - Name: `watchdog-builder`
-  - Role: Trim PTY-fd U-state narrative in `monitoring/worker_watchdog.py`; keep + re-justify the kill ladder. Update `worker_watchdog` tests.
+- **Builder (taxonomy-prune + ledger + docs)**
+  - Name: `scar-builder`
+  - Role: Prune `session_stall_classifier.py` + `crash_signature.py` to observed classes (KEEP the `ceiling`/`ceiling_timeout` prefix); subtraction-only residual liveness-inference trim in `session_health.py` if any remains; update the two affected test files. Delete the `FEATURES__STALL_RECOVERY_ENABLED` flag making stall recovery always-on (closes #1855). Fix the slot-lease reap transient-error reclaim (closes #1868). Author `docs/removed-defenses.md` and update `bridge-worker-architecture.md`, `bridge-self-healing.md`, feature index. Confirm (grep) the watchdog carries no PTY narrative — no watchdog edit.
   - Agent Type: builder
-  - Domain: async/subprocess-signals
-  - Resume: true
-
-- **Builder (taxonomy-prune)**
-  - Name: `taxonomy-builder`
-  - Role: Prune `session_stall_classifier.py` + `crash_signature.py` to observed classes; residual liveness-inference trim in `session_health.py`. Update their tests.
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (ledger+docs)**
-  - Name: `ledger-builder`
-  - Role: Author `docs/removed-defenses.md`; update `bridge-worker-architecture.md`, `bridge-self-healing.md`, feature index.
-  - Agent Type: documentarian
   - Resume: true
 
 - **Reviewer**
   - Name: `scar-reviewer`
-  - Role: Cruft audit (no half-migrations / commented code / PTY archaeology) + correctness on a deletion-heavy diff.
+  - Role: Cruft audit (no half-migrations / commented code / PTY archaeology) + correctness on the deletion diff; confirm `test_output_router*` and `test_worker_watchdog*` pass UNEDITED.
   - Agent Type: code-reviewer
   - Resume: true
 
 ### Available Agent Types
 
-Tier 1 builders + `documentarian` + `code-reviewer` (+ `cruft-auditor` for the
-deletion diff).
+Tier 1 `builder` + `code-reviewer` (+ `cruft-auditor` for the deletion diff).
 
 ## Step by Step Tasks
 
-### 1. Author the removed-defenses ledger scaffold
-- **Task ID**: build-ledger-scaffold
+### 1. Confirm watchdog carries no PTY narrative (no edit)
+- **Task ID**: confirm-watchdog-clean
 - **Depends On**: none
-- **Validates**: `test -f docs/removed-defenses.md`
-- **Assigned To**: ledger-builder
-- **Agent Type**: documentarian
-- **Parallel**: true
-- Create `docs/removed-defenses.md` with the entry template (defense / gotcha /
-  why-dead-under-headless / Sentry-signature-to-watch) and the PTY-teardown
-  baseline entries already deleted by #1930 (from telemetry: pty-pool,
-  granite-container, deadman, executor-guard empty-container-message).
-
-### 2. Trim worker_watchdog PTY narrative, keep kill ladder
-- **Task ID**: build-watchdog-trim
-- **Depends On**: none
-- **Validates**: `tests/**/test_worker_watchdog*.py`; `grep -rn "master fd\|uninterruptible sleep" monitoring/` returns nothing
-- **Assigned To**: watchdog-builder
+- **Validates**: `grep -niE "pty master|master fd" monitoring/worker_watchdog.py` returns nothing (already true)
+- **Assigned To**: scar-builder
 - **Agent Type**: builder
-- **Domain**: async/subprocess-signals — signal delivery, process groups, killpg
-- **Parallel**: true
-- Remove the U-state fd-close rationale (docstring 8-21, 231-236) and any
-  PTY-master-read escalation branches; keep W1-W3 kill ladder + launchd respawn,
-  re-justified for headless. Add the ledger entry (append to `docs/removed-defenses.md`).
+- **Parallel**: false
+- Confirmation only. `monitoring/worker_watchdog.py` has no PTY-fd narrative; its
+  U-state text is generic #1767 rationale for the KEPT W1-W5 kill ladder. Make NO
+  edit to the watchdog and NO ledger entry from it. If a PTY-specific string is
+  found, stop and escalate — the scope correction would be wrong.
 
-### 3. Prune reporting taxonomies + residual liveness inference
+### 2. Prune reporting taxonomies + residual liveness inference
 - **Task ID**: build-taxonomy-prune
 - **Depends On**: none
-- **Validates**: `tests/**/test_session_stall_classifier*.py`, `tests/**/test_crash_signature*.py`, isolation-guard tests
-- **Assigned To**: taxonomy-builder
+- **Validates**: `tests/**/test_session_stall_classifier*.py`, `tests/unit/test_crash_signature_library.py`, anchored isolation grep (Verification table)
+- **Assigned To**: scar-builder
 - **Agent Type**: builder
-- **Parallel**: true
+- **Parallel**: false
 - Prune `session_stall_classifier.py` + `crash_signature.py` to observed classes;
-  remove dead threshold constants; trim residual duplicate liveness inference in
-  `session_health.py` (subtraction only, no wider spread). Add ledger entries.
+  remove dead threshold constants; **KEEP the `ceiling`/`ceiling_timeout` prefix
+  (lines ~296-297, 329-330) — live headless class, not scar tissue.** Trim residual
+  duplicate liveness inference in `session_health.py` only if any remains
+  (subtraction only, no wider spread). Update the two affected test files.
 
-### 4. Validate builds (narrow tests)
-- **Task ID**: validate-builds
-- **Depends On**: build-watchdog-trim, build-taxonomy-prune, build-ledger-scaffold
-- **Assigned To**: scar-reviewer
-- **Agent Type**: validator
+### 3. Author the removed-defenses ledger + docs
+- **Task ID**: build-ledger-docs
+- **Depends On**: build-taxonomy-prune
+- **Validates**: `test -f docs/removed-defenses.md`
+- **Assigned To**: scar-builder
+- **Agent Type**: builder
 - **Parallel**: false
-- Run only the touched test files. Confirm `test_output_router*` passes UNEDITED
-  (keep-decision guard). Confirm isolation guard green.
+- Create `docs/removed-defenses.md` with the entry template (defense / gotcha /
+  why-dead-under-headless / Sentry-signature-to-watch). Primary entries = the
+  taxonomy/signature classes THIS PR removed (seed from this PR's own diff —
+  critique #5). Add a clearly-labeled "Baseline: removed by #1930 teardown"
+  reference block for pty-pool / granite-container / deadman / executor-guard
+  empty-container-message — historical map-back, NOT this PR's deletions. Update
+  `bridge-worker-architecture.md`, `bridge-self-healing.md`, and the feature index.
 
-### 5. Documentation cascade
-- **Task ID**: document-feature
-- **Depends On**: validate-builds
-- **Assigned To**: ledger-builder
-- **Agent Type**: documentarian
+### 4. Delete FEATURES__STALL_RECOVERY_ENABLED flag (closes #1855)
+- **Task ID**: build-stall-flag-delete
+- **Depends On**: none
+- **Validates**: `grep -rn "stall_recovery_enabled\|STALL_RECOVERY_ENABLED" config/ reflections/ .env.example` returns nothing; `tests/**/*stall_advisory*` green
+- **Assigned To**: scar-builder
+- **Agent Type**: builder
 - **Parallel**: false
-- Finalize `docs/removed-defenses.md`; update `bridge-worker-architecture.md`,
-  `bridge-self-healing.md`, feature index.
+- Remove the `stall_recovery_enabled` Field from `config/settings.py` (lines
+  ~310-319); delete the step-6 dry-run branch at `reflections/stall_advisory.py:316`
+  so actuation is unconditional; update the `_maybe_recover` docstring (drop the
+  "flag off (default) -> dry_run" rung and the module-header flag mention); remove
+  `FEATURES__STALL_RECOVERY_ENABLED=false` from `.env.example`. Keep all budgets/
+  guards. Flip dry-run test assertions to actuation assertions. Add a ledger entry.
+
+### 5. Fix slot-lease reap transient-error reclaim (closes #1868)
+- **Task ID**: build-slot-lease-fix
+- **Depends On**: none
+- **Validates**: `tests/**/*session_health*` / reap tests green; a new test asserts a lookup-error owner is NOT reclaimed
+- **Assigned To**: scar-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- In `agent/session_health.py::_reap_slot_leases` Phase 2 (~3046-3073), reclaim
+  only on a confirmed-absent/terminal owner; never on a transient `get_by_id`
+  lookup error. Surface the not-found-vs-error distinction (reap-local probe or
+  `models/agent_session.py::get_by_id` error semantics). Preserve the deliberate
+  "genuinely-deleted record is reclaimable" path. Add a regression test for the
+  transient-error case.
 
 ### 6. Cruft audit + final review
 - **Task ID**: validate-all
-- **Depends On**: document-feature
+- **Depends On**: build-ledger-docs, build-stall-flag-delete, build-slot-lease-fix
 - **Assigned To**: scar-reviewer
 - **Agent Type**: code-reviewer
 - **Parallel**: false
-- No commented-out code, no PTY archaeology in code bodies, no half-migrations.
-  Verify all success criteria + the anti-criteria greps.
+- Run only the touched test files. Confirm `test_output_router*` AND
+  `test_worker_watchdog*` pass UNEDITED (keep-decision guards). Confirm anchored
+  isolation grep green, `ceiling_timeout` retained, and no residual
+  `stall_recovery_enabled` reference. No commented-out code, no PTY archaeology in
+  code bodies, no half-migrations. Verify all success criteria + the anti-criteria
+  greps.
 
 ## Verification
 
 | Check | Command | Expected |
 |-------|---------|----------|
 | Ledger exists | `test -f docs/removed-defenses.md && echo ok` | output contains ok |
-| No PTY-fd rationale in code | `grep -rn "pty master\|master fd\|uninterruptible sleep" monitoring/ agent/` | match count == 0 |
+| No PTY-fd archaeology in code | `grep -rniE "pty master\|master fd" monitoring/ agent/` | match count == 0 |
 | Nudge counter kept | `grep -c "MAX_NUDGE_COUNT = 50" agent/output_router.py` | output contains 1 |
-| Classifier stays pure (no session_health import) | `grep -c "import session_health\|from agent.session_health" agent/session_stall_classifier.py agent/crash_signature.py` | match count == 0 |
+| `ceiling` signature class kept | `grep -c "ceiling_timeout" agent/crash_signature.py` | output >= 1 |
+| Classifier stays pure (no real session_health import) | `grep -cE "^[[:space:]]*(from agent\.session_health\|import session_health)" agent/session_stall_classifier.py agent/crash_signature.py` | match count == 0 (anchored to real import statements; the plain substring self-matches the classifier's isolation docstring) |
+| Stall flag deleted (#1855) | `grep -rn "stall_recovery_enabled\|STALL_RECOVERY_ENABLED" config/ reflections/ .env.example` | match count == 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Narrow tests pass | `pytest tests/ -k "worker_watchdog or session_stall_classifier or crash_signature or output_router" -q` | exit code 0 |
+| Narrow tests pass | `pytest tests/ -k "worker_watchdog or session_stall_classifier or crash_signature or output_router or stall_advisory or session_health" -q` | exit code 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| BLOCKER | war-room | Watchdog PTY-narrative trim targets nonexistent code; success-criterion grep for "uninterruptible sleep" strips rationale for a KEPT mechanism | Re-scoped watchdog to a confirmation no-op | Verified `grep -ni "pty\|master fd" monitoring/worker_watchdog.py` == 0; the only U-state text is generic #1767 rationale for the kept W1-W5 ladder. Greps now check only `pty master\|master fd`; "uninterruptible sleep" dropped. Task 1, Solution, Keep-vs-Cut (2), Success Criteria, Verification, Test Impact, Risk 2, Docs all updated. |
+| BLOCKER | war-room | Isolation-guard grep self-matches classifier docstring → false merge-gate failure | Anchored the grep to real import statements | Verification now uses `grep -cE "^[[:space:]]*(from agent\.session_health\|import session_health)"`, verified == 0 against current code. |
+| CONCERN | war-room | `ceiling`/`ceiling_timeout` crash-signature class is deliberately kept | Explicit KEEP carve-out | Called out in Solution, Task 2, Test Impact, Success Criteria, and a new Verification row `grep -c "ceiling_timeout"` >= 1. |
+| CONCERN | war-room | Large appetite + four-builder team over-sizes a small deletion surface | Right-sized to Small, solo builder + reviewer | Appetite Small; Team Orchestration collapsed to one `scar-builder` + one reviewer; no worktree fan-out. |
+| CONCERN | war-room | Ledger should seed from THIS PR's diff, not #1930's shipped work | Ledger-seed discipline documented | Technical Approach + Task 3: primary entries from this PR's own diff; #1930 classes only as a labeled "Baseline: removed by #1930" reference block. |
 
 ---
 
