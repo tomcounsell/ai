@@ -48,6 +48,8 @@ from pathlib import Path
 
 from tools._sdlc_utils import _resolve_target_repo
 from tools._sdlc_utils import find_plan_path as _find_plan_path
+from tools._sdlc_utils import is_pipeline_ledger as _is_pipeline_ledger
+from tools._sdlc_utils import resolve_target_repo_for_read as _resolve_target_repo_for_read
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +120,14 @@ def _find_session_by_issue(issue_number: int):
 
 
 def _load_raw_states(session) -> dict:
-    """Return the full stage_states dict, including underscore metadata."""
+    """Return the full stage_states dict, including underscore metadata.
+
+    ``session`` may be an ``AgentSession`` (field ``stage_states``) or a
+    ``PipelineLedger`` (field ``stage_states_json`` -- issue #2012 task 2).
+    """
     try:
-        raw = session.stage_states
+        field = "stage_states_json" if _is_pipeline_ledger(session) else "stage_states"
+        raw = getattr(session, field, None)
         if not raw:
             return {}
         if isinstance(raw, str):
@@ -512,6 +519,49 @@ def _default_meta() -> dict:
     }
 
 
+def _resolve_issue_record(issue_number: int):
+    """Resolve the record to read for ``issue_number`` -- issue-keyed
+    PipelineLedger first, with a retained session fallback for pre-cutover
+    records (issue #2012 task 2, reader side).
+
+    Resolution:
+
+    1. ``_resolve_target_repo_for_read()`` -- lease-first (peek, no run_id
+       claim), env-fallback. If this resolves to ``None`` at all, returns
+       ``None`` immediately: this is the defined empty-ledger outcome
+       (Risk 5) -- never touch a phantom ``PipelineLedger[(None, issue)]``
+       key, and never fall back to a session either (a caller who genuinely
+       cannot resolve a repo has no coherent issue-keyed context to read).
+    2. If a ``target_repo`` DOES resolve: load
+       ``PipelineLedger.get_or_create(target_repo, issue_number)``. If it
+       carries any recorded stage state, return it.
+    3. Ledger resolved but empty (never written, or pre-cutover) -- retained
+       cold-path session fallback via ``find_session_by_issue()``: the belt
+       for issues whose work started before this migration and whose
+       ``AgentSession`` still carries the old data, or a session created
+       between a migration backfill run and this deploy.
+
+    Returns the ``PipelineLedger``, the fallback ``AgentSession``, or
+    ``None`` if nothing resolves. Never raises.
+    """
+    target_repo = _resolve_target_repo_for_read(issue_number)
+    if not target_repo:
+        return None
+
+    ledger = None
+    try:
+        from agent.pipeline_ledger import PipelineLedger
+
+        ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+    except Exception as e:
+        logger.debug(f"_resolve_issue_record: ledger load failed for issue #{issue_number}: {e}")
+
+    if ledger is not None and _load_raw_states(ledger):
+        return ledger
+
+    return _find_session_by_issue(issue_number)
+
+
 def query_stage_states(
     session_id: str | None = None,
     issue_number: int | None = None,
@@ -528,7 +578,7 @@ def query_stage_states(
         session = _find_session_by_id(session_id)
 
     if session is None and issue_number is not None:
-        session = _find_session_by_issue(issue_number)
+        session = _resolve_issue_record(issue_number)
 
     if session is None:
         return {}
@@ -552,13 +602,13 @@ def query_enriched(
                       same_stage_dispatch_count, last_dispatched_skill}
         }
 
-    If no session is found, returns ``{"stages": {}, "_meta": {...defaults}}``.
+    If no session/ledger is found, returns ``{"stages": {}, "_meta": {...defaults}}``.
     """
     session = None
     if session_id:
         session = _find_session_by_id(session_id)
     if session is None and issue_number is not None:
-        session = _find_session_by_issue(issue_number)
+        session = _resolve_issue_record(issue_number)
 
     if session is None:
         return {"stages": {}, "_meta": _default_meta()}

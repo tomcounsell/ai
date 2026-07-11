@@ -774,14 +774,99 @@ def _safe_nullable_int(val) -> int | None:
         return None
 
 
-def _session_to_pipeline(session) -> PipelineProgress:
-    """Convert an AgentSession instance to a PipelineProgress model.
+def _derive_issue_number(session) -> int | None:
+    """Best-effort issue number for a session: the write-once mirror field
+    set by ``ensure_session()``, falling back to parsing ``issue_url``.
 
-    Routes stage reads through PipelineStateMachine.get_display_progress()
-    for sessions with stage_states data (canonical stored-state path).
-    Falls back to _parse_stage_states() if PipelineStateMachine raises.
+    ``isinstance(..., int)`` rather than a bare truthiness check: a
+    ``MagicMock()`` (used pervasively as an AgentSession double throughout
+    this test suite) auto-vivifies ANY attribute access, including
+    ``issue_number`` -- a truthiness check would treat that auto-vivified
+    mock as a real (garbage) issue number and go on to mint a spurious
+    ``PipelineLedger`` record keyed on its repr. Never raises.
     """
-    slug = _safe_str(session.slug) or ""
+    issue_number = getattr(session, "issue_number", None)
+    if isinstance(issue_number, int) and issue_number > 0:
+        return issue_number
+    try:
+        from tools._sdlc_utils import _parse_issue_number_from_url
+
+        return _parse_issue_number_from_url(getattr(session, "issue_url", None))
+    except Exception:
+        return None
+
+
+def _resolve_issue_ledger(issue_number: int | None):
+    """Resolve the ``(target_repo, ledger)`` pair for ``issue_number`` --
+    lease-first (peek, no run_id claim) with an env-fallback (issue #2012
+    task 2, reader side). Returns ``(None, None)`` when ``issue_number`` is
+    falsy or ``target_repo`` cannot be resolved at all -- the defined
+    empty-ledger outcome (Risk 5): never touch a phantom
+    ``PipelineLedger[(None, issue)]`` key. Never raises."""
+    if not issue_number:
+        return None, None
+    try:
+        from agent.pipeline_ledger import PipelineLedger
+        from tools._sdlc_utils import resolve_target_repo_for_read
+
+        target_repo = resolve_target_repo_for_read(issue_number)
+        if not target_repo:
+            return None, None
+        return target_repo, PipelineLedger.get_or_create(target_repo, issue_number)
+    except Exception as e:
+        logger.debug(f"_resolve_issue_ledger failed for issue #{issue_number}: {e}")
+        return None, None
+
+
+def _ledger_has_data(ledger) -> bool:
+    """True iff ``ledger`` carries any recorded stage state -- distinguishes
+    a genuinely-written record from a freshly-created, still-empty
+    ``PipelineLedger.get_or_create()`` result. Never raises."""
+    if ledger is None:
+        return False
+    try:
+        raw = getattr(ledger, "stage_states_json", None)
+        return bool(raw) and bool(json.loads(raw))
+    except Exception:
+        return False
+
+
+def _session_has_stage_data(session) -> bool:
+    """True iff this session's own ``stage_states`` is populated, OR its
+    issue has recorded data in the issue-keyed ``PipelineLedger`` (issue
+    #2012 task 2). A takeover session whose writes all landed on the
+    ledger (never on this particular session's ``stage_states`` field)
+    must not be filtered out of dashboard listings that gate on "has this
+    session recorded any SDLC progress"."""
+    if session.stage_states:
+        return True
+    _, ledger = _resolve_issue_ledger(_derive_issue_number(session))
+    return _ledger_has_data(ledger)
+
+
+def _resolve_display_stages(session) -> list[StageState]:
+    """Resolve stage display data for the dashboard.
+
+    Issue-keyed ledger first, with a retained session-state fallback (issue
+    #2012 task 2) -- mirrors the reader resolution in
+    ``tools/sdlc_stage_query.py``: route through
+    ``PipelineStateMachine.for_issue()`` ONLY when the ledger carries
+    actual recorded data. Otherwise falls back to the existing
+    session-keyed ``PipelineStateMachine(session)`` read (or
+    ``_parse_stage_states()`` on exception) -- byte-identical to
+    pre-#2012 behavior for issues the ledger hasn't been written to yet.
+    """
+    issue_number = _derive_issue_number(session)
+    target_repo, ledger = _resolve_issue_ledger(issue_number)
+    if _ledger_has_data(ledger):
+        try:
+            from agent.pipeline_state import PipelineStateMachine
+
+            sm = PipelineStateMachine.for_issue(target_repo, issue_number)
+            progress = sm.get_display_progress()
+            return [StageState(name=name, status=status) for name, status in progress.items()]
+        except Exception:
+            pass  # fall through to the session-keyed path below -- never crash the dashboard
 
     if session.stage_states:
         try:
@@ -789,12 +874,22 @@ def _session_to_pipeline(session) -> PipelineProgress:
 
             sm = PipelineStateMachine(session)
             progress = sm.get_display_progress()
-            stages = [StageState(name=name, status=status) for name, status in progress.items()]
+            return [StageState(name=name, status=status) for name, status in progress.items()]
         except Exception:
             # Fallback to direct parse if state machine fails
-            stages = _parse_stage_states(session.stage_states)
-    else:
-        stages = []
+            return _parse_stage_states(session.stage_states)
+    return []
+
+
+def _session_to_pipeline(session) -> PipelineProgress:
+    """Convert an AgentSession instance to a PipelineProgress model.
+
+    Routes stage reads through ``_resolve_display_stages()`` (issue-keyed
+    ledger first, session-state fallback -- issue #2012 task 2).
+    """
+    slug = _safe_str(session.slug) or ""
+
+    stages = _resolve_display_stages(session)
 
     history_list = session.history if isinstance(session.history, list) else None
     events = _parse_history(history_list)
@@ -1143,7 +1238,7 @@ def get_recent_completions(limit: int = 25, page: int = 1) -> list[PipelineProgr
 
     completed = []
     for session in all_sessions:
-        if not session.stage_states:
+        if not _session_has_stage_data(session):
             continue
         if session.status not in ("completed", "failed"):
             continue

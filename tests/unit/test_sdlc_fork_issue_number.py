@@ -418,42 +418,39 @@ class TestIssuePrecedenceOverEnvSession:
         base.update(kw)
         return SimpleNamespace(**base)
 
-    def test_verdict_lands_on_issue_session_despite_divergent_env(self, monkeypatch) -> None:
-        """A forked-style verdict record with --issue-number N lands on sdlc-local-{N}
-        even when VALOR_SESSION_ID points at a different (parent's) session.
+    def test_verdict_lands_on_issue_ledger_despite_divergent_env(self, monkeypatch) -> None:
+        """A forked-style verdict record with --issue-number N lands on the
+        issue-keyed PipelineLedger regardless of VALOR_SESSION_ID pointing
+        at a different (parent's) session.
 
-        This is the direct regression guard for the 'latched onto #1724' divert (#1731).
-        The #1671/#1672 precedence in find_session() is the mechanism that makes this work.
+        This is the direct regression guard for the 'latched onto #1724' divert (#1731),
+        rebuilt for issue #2012 task 2: ``_cli_record`` no longer resolves ANY
+        session (env-var or otherwise) -- authorization is decided solely by
+        the run_id-keyed issue lease, so a divergent VALOR_SESSION_ID cannot
+        divert the write even in principle.
         """
         from unittest.mock import MagicMock, patch
 
-        from tools import _sdlc_utils
+        from models.session_lifecycle import IssueLockResult
         from tools.sdlc_verdict import _cli_record
 
         # Env var mimics a stale inherited parent-session id (e.g. the do-sdlc
-        # supervisor's own session that the forked subagent inherited).
+        # supervisor's own session that the forked subagent inherited). The
+        # lease-based write path must never consult this.
         monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-1724")  # stale from prior run
         monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
 
-        # The issue-scoped session (what sdlc-local-1731 or the owning PM session would be).
-        issue_session = MagicMock(name="sdlc-local-1731")
-        issue_session.session_id = "sdlc-local-1731"
-        issue_session.session_type = "eng"
-        issue_session.stage_states = "{}"
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=True, owner_session_id="s", owner_run_id="run-1731", target_repo="o/r"
+            )
+        )
 
-        def _fake_save():
-            pass
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            recorded = _cli_record(self._args())
 
-        issue_session.save = _fake_save
-
-        # Patch find_session_by_issue to return the issue-scoped session (simulates
-        # the actual Redis lookup finding sdlc-local-1731).
-        with patch.object(_sdlc_utils, "find_session_by_issue", return_value=issue_session):
-            with patch("tools.stage_states_helpers._reload_session", return_value=issue_session):
-                # Record a verdict with --issue-number 1731 under divergent env.
-                recorded = _cli_record(self._args())
-
-        # The verdict must land on the issue session, NOT on "parent-pm-1724".
+        # The verdict must land on the issue-keyed ledger, unaffected by
+        # "parent-pm-1724".
         assert recorded.get("verdict") == "READY TO BUILD (NO CONCERNS)", (
             f"Expected 'READY TO BUILD (NO CONCERNS)', got: {recorded}"
         )

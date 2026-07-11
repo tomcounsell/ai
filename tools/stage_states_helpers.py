@@ -53,30 +53,39 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RETRIES = 3
 
 
-def _load_states(session: AgentSession) -> dict:
-    """Load ``stage_states`` from a session as a plain dict.
+def _load_states(record, field: str = "stage_states") -> dict:
+    """Load the JSON stage-state blob from ``field`` on ``record`` as a plain dict.
 
-    Returns an empty dict if the field is missing or malformed.
+    Returns an empty dict if the field is missing or malformed. ``record`` is
+    historically always an ``AgentSession`` (``field="stage_states"``, the
+    default); issue #2012 widens this to also accept a ``PipelineLedger``
+    instance via ``field="stage_states_json"``.
     """
-    raw = getattr(session, "stage_states", None)
+    raw = getattr(record, field, None)
     if not raw:
         return {}
     if isinstance(raw, dict):
-        # Copy so caller can safely mutate without touching the session
+        # Copy so caller can safely mutate without touching the record
         return dict(raw)
     if isinstance(raw, str):
         try:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             logger.debug(
-                "update_stage_states: malformed stage_states JSON on session "
-                f"{getattr(session, 'session_id', '?')}, treating as empty"
+                f"update_stage_states: malformed {field} JSON on record "
+                f"{_record_label(record)}, treating as empty"
             )
             return {}
         if isinstance(data, dict):
             return data
         return {}
     return {}
+
+
+def _record_label(record) -> str:
+    """Human-readable identifier of ``record`` for logs -- session_id for an
+    AgentSession, ledger_key for a PipelineLedger, ``"?"`` otherwise."""
+    return str(getattr(record, "session_id", None) or getattr(record, "ledger_key", None) or "?")
 
 
 def _reload_session(session: AgentSession):
@@ -104,6 +113,27 @@ def _reload_session(session: AgentSession):
         return session
 
 
+def _reload_ledger(ledger):
+    """Reload a ``PipelineLedger`` from Redis to get the latest ``stage_states_json``.
+
+    Mirrors ``_reload_session`` for the issue-keyed ledger backing store
+    (issue #2012). Returns the refreshed ledger, or the original on any
+    failure (never raises) so a Redis hiccup degrades to "retry against the
+    stale copy" rather than crashing the write.
+    """
+    try:
+        from agent.pipeline_ledger import PipelineLedger
+
+        ledger_key = getattr(ledger, "ledger_key", None)
+        if not ledger_key:
+            return ledger
+        fresh = PipelineLedger.load(ledger_key=ledger_key)
+        return fresh if fresh is not None else ledger
+    except Exception as e:
+        logger.debug(f"update_stage_states: ledger reload failed: {e}")
+        return ledger
+
+
 def _record_exhaustion_metric(session_id: str, update_fn_name: str) -> None:
     """Best-effort metric emit on retry exhaustion."""
     try:
@@ -122,27 +152,43 @@ def update_stage_states(
     session: AgentSession,
     update_fn: Callable[[dict], dict],
     max_retries: int = DEFAULT_MAX_RETRIES,
+    field: str = "stage_states",
+    reload_fn: Callable[[object], object] | None = None,
 ) -> bool:
-    """Apply ``update_fn`` to ``session.stage_states`` with optimistic retry.
+    """Apply ``update_fn`` to a JSON stage-state blob with optimistic retry.
 
-    Loads the current ``stage_states``, applies ``update_fn`` to a copy, writes
-    the result back, and verifies the write by reloading and comparing. If the
+    Loads the current blob, applies ``update_fn`` to a copy, writes the
+    result back, and verifies the write by reloading and comparing. If the
     post-save reload differs from the locally applied dict, the write is
     assumed to have been clobbered by a concurrent writer and is retried up to
     ``max_retries`` times.
 
     Args:
-        session: The AgentSession to modify. Must be a live, saveable model.
-        update_fn: Callable taking the current ``stage_states`` dict and
+        session: The record to modify. Historically always an
+            ``AgentSession`` (``field="stage_states"``, the default); issue
+            #2012 widens this to also accept a ``PipelineLedger`` instance by
+            passing ``field="stage_states_json"`` (and, if the default
+            reload doesn't fit, a ledger-aware ``reload_fn``). Must be a
+            live, saveable Popoto model.
+        update_fn: Callable taking the current stage-state dict and
             returning the updated dict. Must be idempotent / deterministic
             for retry safety — it is re-invoked on every retry with the
             freshly-reloaded state.
         max_retries: Maximum number of attempts before giving up. Default is
             ``DEFAULT_MAX_RETRIES`` (3). Values <1 are coerced to 1.
+        field: The attribute name holding the JSON stage-state blob.
+            Defaults to ``"stage_states"`` (the ``AgentSession`` field).
+            Ledger callers pass ``"stage_states_json"``.
+        reload_fn: Callable that reloads ``session`` from its backing store
+            by key, returning a fresh instance (or the original on
+            failure). Defaults to the ``AgentSession``-specific
+            ``_reload_session`` when ``field == "stage_states"`` (preserving
+            byte-identical behavior for every existing caller), else the
+            ``PipelineLedger``-specific ``_reload_ledger``.
 
     Returns:
         ``True`` if the update was successfully written and verified.
-        ``False`` if retries were exhausted, the session was unsavable, or
+        ``False`` if retries were exhausted, the record was unsavable, or
         any other failure occurred. Exhaustion emits a WARNING and increments
         the ``sdlc_stage_states_retry_exhausted_total`` metric when analytics
         is available.
@@ -153,14 +199,16 @@ def update_stage_states(
     """
     if max_retries < 1:
         max_retries = 1
+    if reload_fn is None:
+        reload_fn = _reload_session if field == "stage_states" else _reload_ledger
 
-    session_id = getattr(session, "session_id", "?")
+    record_label = _record_label(session)
     update_fn_name = getattr(update_fn, "__name__", repr(update_fn))
-    current_session = session
+    current_record = session
 
     for attempt in range(1, max_retries + 1):
         try:
-            before = _load_states(current_session)
+            before = _load_states(current_record, field)
             # Apply update to a copy so update_fn mutations don't leak if the
             # save fails.
             snapshot = json.loads(json.dumps(before))
@@ -168,38 +216,38 @@ def update_stage_states(
             if not isinstance(updated, dict):
                 logger.debug(
                     f"update_stage_states: update_fn {update_fn_name} "
-                    f"returned non-dict on session {session_id}; aborting"
+                    f"returned non-dict on record {record_label}; aborting"
                 )
                 return False
 
             # Persist as JSON string (same shape as PipelineStateMachine._save).
             serialized = json.dumps(updated)
-            current_session.stage_states = serialized
-            current_session.save()
+            setattr(current_record, field, serialized)
+            current_record.save()
 
             # Verify by reloading
-            verify_session = _reload_session(current_session)
-            verify_states = _load_states(verify_session)
+            verify_record = reload_fn(current_record)
+            verify_states = _load_states(verify_record, field)
 
             if verify_states == updated:
                 return True
 
             logger.debug(
-                f"update_stage_states: verify mismatch on session {session_id} "
+                f"update_stage_states: verify mismatch on record {record_label} "
                 f"attempt {attempt}/{max_retries} — retrying with reloaded state"
             )
-            current_session = verify_session
+            current_record = verify_record
         except Exception as e:
             logger.debug(
                 f"update_stage_states: attempt {attempt}/{max_retries} "
-                f"failed on session {session_id}: {e}"
+                f"failed on record {record_label}: {e}"
             )
-            current_session = _reload_session(current_session)
+            current_record = reload_fn(current_record)
 
     logger.warning(
         f"update_stage_states: retries exhausted after {max_retries} attempts "
-        f"(session_id={session_id}, update_fn={update_fn_name}). "
+        f"(record={record_label}, update_fn={update_fn_name}). "
         f"Write may be lost."
     )
-    _record_exhaustion_metric(session_id=session_id, update_fn_name=update_fn_name)
+    _record_exhaustion_metric(session_id=record_label, update_fn_name=update_fn_name)
     return False

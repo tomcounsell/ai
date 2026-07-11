@@ -171,10 +171,10 @@ class TestGracefulFailure:
         assert record["verdict"] == "NEEDS REVISION"
 
 
-class TestCliRecordEnsure:
-    """#1558: `verdict record` resolves through find_session(..., ensure=True)
-    so a sessionless-but-issue-numbered record auto-creates a PM session and the
-    verdict round-trips via `verdict get` (which stays ensure=False)."""
+class TestCliRecordLease:
+    """Issue #2012 task 2: `verdict record` writes the issue-keyed
+    PipelineLedger, authorized SOLELY by the run_id-keyed issue lease --
+    there is no session left to resolve or auto-ensure."""
 
     def _args(self, **kw):
         from types import SimpleNamespace
@@ -193,81 +193,148 @@ class TestCliRecordEnsure:
         base.update(kw)
         return SimpleNamespace(**base)
 
-    def test_cli_record_passes_ensure_true(self, fake_session_reload_patched):
+    def _lock_result(self, **kw):
+        from models.session_lifecycle import IssueLockResult
+
+        base = dict(acquired=True, owner_session_id="s", owner_run_id="run-test", target_repo="o/r")
+        base.update(kw)
+        return IssueLockResult(**base)
+
+    def test_cli_record_writes_via_ledger_with_valid_lease(self):
         from tools.sdlc_verdict import _cli_record
 
-        session = fake_session_reload_patched
-        # Ownership guard: the session must own issue 1558 for the write to proceed.
-        session.issue_url = "https://github.com/x/y/issues/1558"
-        with patch("tools.sdlc_verdict._find_session", return_value=session) as find_mock:
+        mock_touch = MagicMock(return_value=self._lock_result())
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
             result = _cli_record(self._args())
 
         assert result["verdict"] == "READY TO BUILD"
-        find_mock.assert_called_once_with(
-            session_id=None, issue_number=1558, ensure=True, caller_run_id="run-test"
-        )
+        # Two lock touches: the read-only peek, then the non-peek
+        # revalidation immediately before the write (Risk 5 TOCTOU close).
+        assert mock_touch.call_count == 2
+        peek_calls = [c for c in mock_touch.call_args_list if c.kwargs.get("peek")]
+        revalidate_calls = [c for c in mock_touch.call_args_list if not c.kwargs.get("peek")]
+        assert len(peek_calls) == 1
+        assert len(revalidate_calls) == 1
+        assert revalidate_calls[0].kwargs.get("target_repo") == "o/r"
 
-    def test_cli_get_stays_ensure_false(self, fake_session_reload_patched):
+    def test_cli_get_reads_back_the_recorded_ledger_verdict(self):
         from tools.sdlc_verdict import _cli_get, _cli_record
 
-        session = fake_session_reload_patched
-        # Ownership guard: the session must own issue 1558 for the write to proceed.
-        session.issue_url = "https://github.com/x/y/issues/1558"
-        # Record first so the get round-trips against the same in-memory session.
-        with patch("tools.sdlc_verdict._find_session", return_value=session):
+        mock_touch = MagicMock(return_value=self._lock_result())
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
             _cli_record(self._args())
-
-        with patch("tools.sdlc_verdict._find_session", return_value=session) as get_find_mock:
             got = _cli_get(self._args())
 
         assert got["verdict"] == "READY TO BUILD"
-        # get must NOT pass ensure (reads stay pure).
-        _, kwargs = get_find_mock.call_args
-        assert "ensure" not in kwargs or kwargs.get("ensure") is False
+
+    def test_missing_run_id_or_issue_number_raises_lease_absent(self):
+        from tools.sdlc_verdict import OwnershipError, _cli_record
+
+        with pytest.raises(OwnershipError, match="LEASE_ABSENT"):
+            _cli_record(self._args(run_id=None))
+
+    def test_unheld_lease_raises_lease_absent(self):
+        from tools.sdlc_verdict import OwnershipError, _cli_record
+
+        mock_touch = MagicMock(return_value=self._lock_result(owner_run_id=None, target_repo=None))
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            with pytest.raises(OwnershipError, match="LEASE_ABSENT"):
+                _cli_record(self._args())
+
+    def test_target_repo_missing_raises_and_never_writes(self):
+        """Risk 5 (writer side): a valid lease with no pinned target_repo
+        must hard-fail and never write a PipelineLedger record."""
+        from tools.sdlc_verdict import OwnershipError, _cli_record
+
+        mock_touch = MagicMock(return_value=self._lock_result(target_repo=None))
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
+        ):
+            with pytest.raises(OwnershipError, match="TARGET_REPO_MISSING"):
+                _cli_record(self._args())
+
+        mock_get_or_create.assert_not_called()
 
 
-class TestConvergenceUnderDivergentEnv:
-    """#1671/#1672: a verdict recorded with --issue-number N under a divergent
-    VALOR_SESSION_ID lands on the issue-scoped session and is readable via the
-    issue-number read path. This is the direct regression for the skew."""
+class TestForeignRunIdRefused:
+    """#2003/#2012: a foreign run holding the issue lock refuses the verdict
+    write with an ISSUE_LOCKED diagnostic (raised as OwnershipError so
+    main() exits 1). No session is ever resolved in this path."""
 
     def _args(self, **kw):
         from types import SimpleNamespace
 
         base = dict(
             session_id=None,
-            issue_number=1672,
+            issue_number=42,
             stage="CRITIQUE",
-            verdict="NEEDS REVISION",
+            verdict="READY TO BUILD",
             blockers=None,
             tech_debt=None,
             judges_json=None,
             consensus_json=None,
-            run_id="run-test",
+            run_id="intruder-run",
         )
         base.update(kw)
         return SimpleNamespace(**base)
 
-    def test_verdict_lands_on_issue_session_not_env(self, fake_session_reload_patched, monkeypatch):
-        from tools.sdlc_verdict import _cli_get, _cli_record
+    def test_foreign_run_id_raises_issue_locked(self):
+        from models.session_lifecycle import IssueLockResult
+        from tools.sdlc_verdict import OwnershipError, _cli_record
 
-        # Env var points at a DIFFERENT session (the #1671 forked-subagent case).
-        monkeypatch.setenv("VALOR_SESSION_ID", "parent-pm-divergent")
-        monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
 
-        issue_session = fake_session_reload_patched  # the sdlc-local-1672 session
-        # Ownership guard: give the session an issue_url that passes predicate 1.
-        issue_session.issue_url = "https://github.com/x/y/issues/1672"
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            with pytest.raises(OwnershipError) as exc_info:
+                _cli_record(self._args())
 
-        # The REAL _find_session runs (not mocked). Its issue-first pass resolves
-        # find_session_by_issue, which returns the issue session — NOT the env one.
-        with patch("tools._sdlc_utils.find_session_by_issue", return_value=issue_session):
-            recorded = _cli_record(self._args())
-            # Read-after-write through the same issue-number path converges.
-            got = _cli_get(self._args())
+        err = str(exc_info.value)
+        assert "ISSUE_LOCKED" in err
+        assert "foreign-run" in err
+        # Only the read-only peek fires -- no write is ever attempted.
+        for call in mock_touch.call_args_list:
+            assert call.kwargs.get("peek") is True
 
-        assert recorded["verdict"] == "NEEDS REVISION"
-        assert got["verdict"] == "NEEDS REVISION"
+    def test_main_exits_1_with_issue_locked_diagnostic(self, capsys):
+        import sys
+
+        from models.session_lifecycle import IssueLockResult
+        from tools.sdlc_verdict import main
+
+        mock_touch = MagicMock(
+            return_value=IssueLockResult(
+                acquired=False,
+                owner_session_id="other-session",
+                owner_run_id="foreign-run",
+            )
+        )
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            with pytest.raises(SystemExit) as exc_info:
+                sys.argv = [
+                    "sdlc-verdict",
+                    "record",
+                    "--stage",
+                    "CRITIQUE",
+                    "--verdict",
+                    "READY TO BUILD",
+                    "--issue-number",
+                    "42",
+                    "--run-id",
+                    "intruder-run",
+                ]
+                main()
+
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "ISSUE_LOCKED" in captured.err
+        assert "foreign-run" in captured.err
 
 
 class TestCrossVendorJudgeRoundTrip:
@@ -349,180 +416,6 @@ class TestNormalizeVerdict:
         assert record["verdict"] == "CHANGES REQUESTED"
         data = json.loads(session.stage_states)
         assert data["_verdicts"]["REVIEW"]["verdict"] == "CHANGES REQUESTED"
-
-
-class TestOwnershipGate:
-    """Tests for the ownership guard in _cli_record / main().
-
-    The guard fires when --issue-number N is passed but the resolved session
-    does not own issue N (via any of the three predicates). It raises
-    OwnershipError, which main() catches, writes to stderr, and exits 1.
-    """
-
-    def _args(self, issue_number=42, **kw):
-        from types import SimpleNamespace
-
-        base = dict(
-            session_id=None,
-            issue_number=issue_number,
-            stage="CRITIQUE",
-            verdict="READY TO BUILD",
-            blockers=None,
-            tech_debt=None,
-            judges_json=None,
-            consensus_json=None,
-            run_id="run-test",
-        )
-        base.update(kw)
-        return SimpleNamespace(**base)
-
-    def _owning_session(self, issue_number=42, via="issue_url"):
-        """Build a _FakeSession that owns the given issue number."""
-        if via == "issue_url":
-            return _FakeSession(
-                session_id="other-session",
-                issue_url=f"https://github.com/x/y/issues/{issue_number}",
-            )
-        elif via == "session_id":
-            return _FakeSession(session_id=f"sdlc-local-{issue_number}")
-        elif via == "message_text":
-            return _FakeSession(
-                session_id="other-session",
-                issue_url=None,
-                message_text=f"SDLC issue #{issue_number} needs fixing",
-            )
-        raise ValueError(via)
-
-    def _non_owning_session(self):
-        """Build a _FakeSession that does NOT own issue 42."""
-        return _FakeSession(
-            session_id="different-session",
-            issue_url="https://github.com/x/y/issues/99",
-            message_text="working on issue 99",
-        )
-
-    def test_explicit_issue_non_owning_session_raises_ownership_error(self):
-        """Non-owning session with --issue-number N raises OwnershipError."""
-        from tools.sdlc_verdict import OwnershipError, _cli_record
-
-        session = self._non_owning_session()
-        with patch("tools.sdlc_verdict._find_session", return_value=session):
-            with pytest.raises(OwnershipError) as exc_info:
-                _cli_record(self._args(issue_number=42))
-
-        err = str(exc_info.value)
-        assert "42" in err
-        assert "different-session" in err
-
-    def test_explicit_issue_non_owning_session_main_exits_1(self, capsys):
-        """main() with non-owning session exits 1 and writes issue + session to stderr."""
-        import sys
-
-        from tools.sdlc_verdict import main
-
-        session = self._non_owning_session()
-        with patch("tools.sdlc_verdict._find_session", return_value=session):
-            with pytest.raises(SystemExit) as exc_info:
-                sys.argv = [
-                    "sdlc-verdict",
-                    "record",
-                    "--stage",
-                    "CRITIQUE",
-                    "--verdict",
-                    "READY TO BUILD",
-                    "--issue-number",
-                    "42",
-                    "--run-id",
-                    "run-42",
-                ]
-                main()
-
-        assert exc_info.value.code == 1
-        captured = capsys.readouterr()
-        assert "42" in captured.err
-        assert "different-session" in captured.err
-
-    def test_explicit_issue_owning_via_issue_url_succeeds(self, fake_session_reload_patched):
-        """Session owning via issue_url → _cli_record returns the verdict record."""
-        from tools.sdlc_verdict import _cli_record
-
-        # Override with an owning session (predicate 1).
-        session = self._owning_session(42, via="issue_url")
-        # Patch _reload_session so verification passes in-memory.
-        with (
-            patch("tools.sdlc_verdict._find_session", return_value=session),
-            patch("tools.stage_states_helpers._reload_session", return_value=session),
-        ):
-            result = _cli_record(self._args(issue_number=42))
-
-        assert result.get("verdict") == "READY TO BUILD"
-
-    def test_explicit_issue_owning_via_message_text_succeeds(self):
-        """CRITICAL: predicate 3 (message_text) passes the ownership gate.
-
-        This proves the third predicate is evaluated — a session with no issue_url
-        and a non-matching session_id but a message_text containing 'issue #42'
-        is permitted to write.
-        """
-        from tools.sdlc_verdict import _cli_record
-
-        session = self._owning_session(42, via="message_text")
-        # Predicate 3: session_id doesn't match sdlc-local-42, issue_url=None,
-        # but message_text contains 'issue #42' — must NOT raise OwnershipError.
-        with (
-            patch("tools.sdlc_verdict._find_session", return_value=session),
-            patch("tools.stage_states_helpers._reload_session", return_value=session),
-        ):
-            result = _cli_record(self._args(issue_number=42))
-
-        assert result.get("verdict") == "READY TO BUILD"
-
-    def test_no_issue_number_gate_not_triggered(self, fake_session_reload_patched):
-        """Without --issue-number, the ownership gate is not triggered.
-
-        A non-owning session is still allowed to write when no issue number is passed.
-        """
-        from tools.sdlc_verdict import _cli_record
-
-        session = fake_session_reload_patched  # session_id="fake-1", no issue_url
-        # Pass issue_number=None — gate must be bypassed entirely.
-        args = self._args(issue_number=None)
-        with patch("tools.sdlc_verdict._find_session", return_value=session):
-            result = _cli_record(args)
-
-        # Without an issue_number, the gate is skipped, write succeeds.
-        assert result.get("verdict") == "READY TO BUILD"
-
-    def test_foreign_run_id_raises_issue_locked(self):
-        """#2003: a foreign run holding the issue lock refuses the verdict
-        write with an ISSUE_LOCKED diagnostic (raised as OwnershipError so
-        main() exits 1)."""
-        from models.session_lifecycle import IssueLockResult
-        from tools.sdlc_verdict import OwnershipError, _cli_record
-
-        session = self._owning_session(42, via="issue_url")
-
-        mock_touch = MagicMock(
-            return_value=IssueLockResult(
-                acquired=False,
-                owner_session_id="other-session",
-                owner_run_id="foreign-run",
-            )
-        )
-
-        with (
-            patch("tools.sdlc_verdict._find_session", return_value=session),
-            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
-        ):
-            with pytest.raises(OwnershipError) as exc_info:
-                _cli_record(self._args(issue_number=42, run_id="intruder-run"))
-
-        err = str(exc_info.value)
-        assert "ISSUE_LOCKED" in err
-        assert "foreign-run" in err
-        # The lock touch was peek-only -- verdict record never renews.
-        for call in mock_touch.call_args_list:
-            assert call.kwargs.get("peek") is True
 
 
 class TestComputePlanBodyHash:

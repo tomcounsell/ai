@@ -1131,6 +1131,63 @@ class TestIssueLockWiring:
         _, kwargs = mock_as.create_local.call_args
         assert kwargs.get("issue_number") == 2005
 
+    def test_acquire_run_lock_and_bind_pins_target_repo_from_resolver(self):
+        """Issue #2012: target_repo is resolved exactly once, in
+        _acquire_run_lock_and_bind, and passed through to every
+        touch_issue_lock call -- never re-resolved per write downstream."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-2006"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2006"))
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("tools._sdlc_utils._resolve_target_repo", return_value="tomcounsell/ai"),
+        ):
+            ensure_session(issue_number=2006)
+
+        lock_mock.assert_called_once()
+        _args, kwargs = lock_mock.call_args
+        assert kwargs.get("target_repo") == "tomcounsell/ai"
+
+    def test_acquire_run_lock_and_bind_passes_through_none_target_repo(self):
+        """A resolver miss (None) must not block lock acquisition -- it is
+        passed through as-is; downstream degradation is the ledger writer's
+        job, not this function's."""
+        from tools.sdlc_session_ensure import ensure_session
+
+        mock_new_session = MagicMock()
+        mock_new_session.session_id = "sdlc-local-2007"
+
+        mock_as = MagicMock()
+        mock_as.query.filter.side_effect = [[], [mock_new_session]]
+        mock_as.create_local.return_value = mock_new_session
+
+        lock_mock = MagicMock(return_value=self._lock_result(True, "sdlc-local-2007"))
+
+        with (
+            patch("tools._sdlc_utils.find_session_by_issue", return_value=None),
+            patch("models.agent_session.AgentSession", mock_as),
+            patch("models.session_lifecycle.transition_status"),
+            patch("models.session_lifecycle.touch_issue_lock", lock_mock),
+            patch("tools._sdlc_utils._resolve_target_repo", return_value=None),
+        ):
+            result = ensure_session(issue_number=2007)
+
+        assert result["session_id"] == "sdlc-local-2007"
+        lock_mock.assert_called_once()
+        _args, kwargs = lock_mock.call_args
+        assert kwargs.get("target_repo") is None
+
     def test_issue_number_not_rewritten_on_continuing_session_returns(self):
         """The 4 early-return (continuing-session) branches must NEVER write
         issue_number -- it is a write-once mirror field set only at creation."""

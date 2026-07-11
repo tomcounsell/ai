@@ -1,10 +1,19 @@
 # SDLC Issue Ownership Lock
 
 Redis-backed mutual-exclusion lock (issue #1954, run-identity model added by
-issue #2003) preventing two independent SDLC entry points -- a local CLI
+issue #2003, doubles as the issue-keyed ledger's write-lease as of issue
+#2012) preventing two independent SDLC entry points -- a local CLI
 session driving `/do-sdlc`/`/sdlc`, and the standalone worker process driving
 the same issue through the headless PM+dev runner -- from concurrently
 driving pipeline work on the same GitHub issue.
+
+**Write-lease unification (issue #2012).** The lock does double duty as of
+issue #2012: it is no longer only an ownership mutex, it is also the sole
+write authority over the durable, issue-keyed `PipelineLedger` (see
+[`docs/features/sdlc-issue-keyed-stage-ledger.md`](sdlc-issue-keyed-stage-ledger.md)).
+The lock payload gained a `target_repo` field so the ledger's composite key
+`(target_repo, issue_number)` never needs to be re-resolved per write/read --
+see "The `target_repo` Field" below.
 
 ## Problem Solved
 
@@ -63,17 +72,32 @@ Gated this way: `sdlc-tool dispatch record`, `sdlc-tool stage-marker`, and `sdlc
 **Stored payload** (JSON):
 
 ```json
-{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "hostname": "worker-1"}
+{"run_id": "a1b2c3...", "session_id": "sdlc-local-1954", "pid": 42317, "hostname": "worker-1", "target_repo": "owner/repo"}
 ```
 
-Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `session_id`/`pid`/`hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue.
+Ownership is decided **solely** by comparing the caller's `run_id` against the payload's `run_id` -- a fresh live check on every mutation. `session_id`/`pid`/`hostname` ride along purely for human-readable display (`owner_session_id` in `IssueLockResult` and in the blocked-dispatch JSON shape) -- they are never compared for ownership, because two independent live processes can resolve the identical deterministic `session_id` (`sdlc-local-{issue_number}`) for the same issue. `target_repo` (issue #2012) rides along for a different purpose: it is the single authoritative source the issue-keyed `PipelineLedger`'s writers and readers use to assemble their `(target_repo, issue_number)` key, so no writer or reader needs to shell out to `gh repo view` per call.
+
+### The `target_repo` Field (issue #2012)
+
+`touch_issue_lock()` gained a `target_repo: str | None = None` parameter, and `IssueLockResult` gained a matching `target_repo` field. Both exist to support the ledger write-lease unification above, not the ownership decision itself -- ownership is still decided solely by `run_id` comparison.
+
+**Where it's pinned.** `tools/sdlc_session_ensure.py::_acquire_run_lock_and_bind()` is the ONE place `target_repo` is resolved for this purpose: it calls `tools/_sdlc_utils.py::_resolve_target_repo()` (the `GH_REPO` env → `SDLC_TARGET_REPO`-as-cwd → git-toplevel resolution ladder, set authoritatively by `sdk_client.py`) exactly once per `ensure_session()` call, then passes the result into every `touch_issue_lock()` call it makes for that call -- both the acquiring call and the follow-up orphan-peek. This is the one place the process env is trustworthy regardless of a takeover session's foreign slug or cwd; writers and readers downstream never re-resolve it themselves. A `None` resolution is passed through as-is -- lock acquisition is never blocked on repo resolution; a missing pinned repo becomes an *observable* degradation downstream in the ledger's writers/readers (see the sibling doc's Risk 5 section), not a blocker here.
+
+**Self-healing renewal.** The same-owner renewal branch inside `touch_issue_lock()` (`models/session_lifecycle.py`, around the `payload.get("run_id") == run_id` check) used to be a bare `_R.expire(key, ttl)` -- it only extended the TTL and never touched the payload. Under the issue-keyed ledger's hard-fail write design, a lock that predates `target_repo` pinning and simply keeps renewing forever would *never* gain the field, hard-failing every stage write across the cutover. The fix: same-owner renewal now re-`SET`s the **full** payload -- spreading the existing payload (`{**payload, "target_repo": ...}`, never reconstructing a subset, so `pid`/`hostname` survive untouched) and overriding only `target_repo` with the caller's freshly-resolved value when given, else falling back to whatever the payload already carried. A lock acquired before this deploy therefore self-heals and gains `target_repo` on its very next renewal tick -- no separate backfill of live locks is needed (the `PipelineLedger` migration, described in the sibling doc, is a one-time data lift, unrelated to this in-place lock self-heal).
+
+**Read access.** Both writers and readers of the issue-keyed ledger read `target_repo` from the lease rather than resolving it themselves:
+
+- Writers (`sdlc-tool stage-marker`, `verdict record`, `meta-set`, `dispatch record`) call `tools/_sdlc_utils.py::resolve_ledger_lease(issue_number, run_id)`, which peeks the lock, confirms `run_id` is the live owner, and returns the pinned `target_repo`.
+- Readers (`stage-query`, `verdict get`, `dispatch get`, the dashboard) call `tools/_sdlc_utils.py::resolve_target_repo_for_read(issue_number)`, which peeks the lock with `run_id=None` (any live lease's pinned value is visible regardless of who holds it) and falls back to `_resolve_target_repo()`'s env-first ladder only when no live lease exists at all (a cold read after TTL lapse).
+
+Neither side ever assembles a `PipelineLedger` key with a `None` repo component -- see the ledger doc's Risk 5 discussion for the full writer/reader guard contract.
 
 ### Behavior
 
 | Scenario | Result |
 |---|---|
 | No existing key, caller supplies a `run_id` | `SET NX EX` claims it. `acquired=True`. |
-| Existing key, same `run_id` | Renews via `EXPIRE`. `acquired=True`. |
+| Existing key, same `run_id` | Renews by re-`SET`ting the full payload (self-healing `target_repo` pin, issue #2012 -- see above), not a bare `EXPIRE`. `acquired=True`. |
 | Existing key, different `run_id` | A foreign live run owns it. `acquired=False`, with the owner's `run_id`/`session_id` surfaced for display. |
 | Mutation call with **no `run_id` supplied at all** | Never mints or acquires -- reports the current holder (`acquired=True` if the key is unheld, `False` with the owner surfaced if held). Minting is exclusive to `ensure_session`. |
 | Malformed/unparseable (non-JSON) existing value | Treated as a foreign, non-matching holder. `acquired=False`, `owner_run_id=None`. Never raises on `json.loads`. |
@@ -195,7 +219,8 @@ The deploy runbook pairs the merge with an immediate worker restart: `./scripts/
 | `models/session_lifecycle.py` | `touch_issue_lock()`, `release_issue_lock()`, `_run_id_has_live_session()`, `IssueLockResult`, `ISSUE_LOCK_TTL_SECONDS` |
 | `models/agent_session.py` | `issue_number` mirror field; `active_run_id` field |
 | `tools/sdlc_session_ensure.py` | `ensure_session()`'s return-point wiring; `_acquire_run_lock_and_bind()` (exclusive run_id mint site) |
-| `tools/_sdlc_utils.py` | `find_session_by_issue(include_terminal=...)`, `renew_issue_lock_for_session()`, `check_run_ownership()` |
+| `tools/_sdlc_utils.py` | `find_session_by_issue(include_terminal=...)`, `renew_issue_lock_for_session()`, `check_run_ownership()`, `resolve_ledger_lease()`/`revalidate_ledger_lease()` (writer lease checks, issue #2012), `resolve_target_repo_for_read()` (reader lease-first repo resolution, issue #2012) |
+| `agent/pipeline_ledger.py` | `PipelineLedger` -- the durable, issue-keyed record this lock's `target_repo` field authorizes writes to (issue #2012; see [`docs/features/sdlc-issue-keyed-stage-ledger.md`](sdlc-issue-keyed-stage-ledger.md)) |
 | `tools/sdlc_dispatch.py` | `record_dispatch_for_session()`'s direct lock call; `_peek_issue_lock_conflict()` + `_cli_record()`'s post-failure disambiguation; `--run-id` CLI flag |
 | `tools/sdlc_stage_marker.py` | `--run-id` CLI flag; ownership guard + renewal call |
 | `tools/sdlc_verdict.py` | `--run-id` CLI flag on `verdict record`; ownership guard (no renewal) |

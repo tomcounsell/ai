@@ -152,18 +152,20 @@ class TestVerdictAndDispatchLoudExit:
     def test_verdict_record_exit_1_on_inner_raise(self, monkeypatch):
         """Force the inner CLI handler to raise and assert exit 1.
 
-        We patch ``tools._sdlc_utils.find_session`` (re-exported into
-        ``tools.sdlc_verdict`` as ``_find_session``) so the patch survives
-        the argparse ``set_defaults(func=_cli_record)`` capture — the
-        ``args.func`` reference still resolves into our patched helper.
+        Issue #2012 task 2: ``_cli_record`` resolves the issue-keyed lease
+        via ``tools._sdlc_utils.resolve_ledger_lease`` (called as a local
+        import inside ``_cli_record``, so patching the source module's
+        attribute is what the local import picks up at call time) instead
+        of resolving a session -- patch that to force the raise.
         """
         harness = (
             "import sys\n"
             "from tools import sdlc_verdict\n"
+            "import tools._sdlc_utils as _u\n"
             "def boom(*a, **kw): raise RuntimeError('redis down')\n"
-            "sdlc_verdict._find_session = boom\n"
+            "_u.resolve_ledger_lease = boom\n"
             "sys.argv = ['sdlc_verdict', 'record', '--stage', 'CRITIQUE', "
-            "'--verdict', 'NEEDS REVISION', '--session-id', '__nope__', "
+            "'--verdict', 'NEEDS REVISION', '--issue-number', '999999', "
             f"'--run-id', '{'a' * 32}']\n"
             "sdlc_verdict.main()\n"
         )
@@ -205,15 +207,18 @@ class TestVerdictAndDispatchLoudExit:
     def test_dispatch_record_exit_1_on_inner_raise(self):
         """Force the inner CLI handler to raise and assert exit 1.
 
-        Same monkeypatch pattern as the verdict test.
+        Same monkeypatch pattern as the verdict test — issue #2012 task 2
+        re-points ``_cli_record`` at ``resolve_ledger_lease`` instead of a
+        session resolver.
         """
         harness = (
             "import sys\n"
             "from tools import sdlc_dispatch\n"
             "def boom(*a, **kw): raise RuntimeError('redis down')\n"
-            "sdlc_dispatch._find_session = boom\n"
+            "sdlc_dispatch.resolve_ledger_lease = boom\n"
             "sys.argv = ['sdlc_dispatch', 'record', '--skill', '/do-build', "
-            f"'--session-id', '__nope__', '--run-id', '{'a' * 32}']\n"
+            "'--issue-number', '999999', "
+            f"'--run-id', '{'a' * 32}']\n"
             "sdlc_dispatch.main()\n"
         )
         result = subprocess.run(

@@ -13,18 +13,31 @@ logger = logging.getLogger(__name__)
 def _complete_pipeline_stage(session_id: str) -> None:
     """Complete the currently in_progress pipeline stage for a session.
 
-    Loads the parent AgentSession from Redis, creates a PipelineStateMachine,
-    reads the current in_progress stage via current_stage(), and calls
-    complete_stage(). This is the counterpart to _start_pipeline_stage() in
-    pre_tool_use.py, called when the Skill tool completes.
+    Loads the parent AgentSession from Redis, resolves the backing state
+    machine via ``agent.pipeline_state.resolve_pipeline_state_machine`` --
+    which prefers the durable, issue-keyed ``PipelineLedger`` when the
+    session's per-issue run_id lease confirms ownership and a target_repo is
+    pinned (issue #2012 follow-up), falling back to the original
+    session-keyed ``PipelineStateMachine(session)`` path otherwise -- reads
+    the current in_progress stage via ``current_stage()``, and calls
+    ``complete_stage()``. This is the counterpart to _start_pipeline_stage()
+    in pre_tool_use.py, called when the Skill tool completes.
+
+    Resolving the same lease at the same acquire-time pin is what lets this
+    see the in_progress stage a DIFFERENT session's ``_start_pipeline_stage``
+    call just wrote via the ledger (a driver->takeover handoff mid skill
+    invoke/return) -- both hooks land on the identical
+    ``(target_repo, issue_number)`` ledger key rather than each session's own
+    (possibly empty) session-keyed store.
 
     Avoids storing state between pre and post hooks by reading current_stage()
-    directly from Redis rather than requiring the stage name to be passed.
+    directly from the resolved backing store rather than requiring the stage
+    name to be passed.
 
     Failures are logged but never raised -- this must not block the PM session.
     """
     try:
-        from agent.pipeline_state import PipelineStateMachine
+        from agent.pipeline_state import resolve_pipeline_state_machine
         from models.agent_session import AgentSession
 
         parent_sessions = list(AgentSession.query.filter(session_id=session_id))
@@ -35,17 +48,21 @@ def _complete_pipeline_stage(session_id: str) -> None:
             return
 
         parent = parent_sessions[0]
-        sm = PipelineStateMachine(parent)
+        sm, used_ledger, detail = resolve_pipeline_state_machine(parent)
+        if not used_ledger:
+            logger.debug(f"[post_tool_use] {detail} for session {session_id}")
         stage = sm.current_stage()
         if not stage:
             logger.debug(
-                f"[post_tool_use] No in_progress stage for session {session_id}, "
+                f"[post_tool_use] No in_progress stage for session {session_id} ({detail}), "
                 "skipping complete_stage"
             )
             return
 
         sm.complete_stage(stage)
-        logger.info(f"[post_tool_use] Completed pipeline stage {stage} on session {session_id}")
+        logger.info(
+            f"[post_tool_use] Completed pipeline stage {stage} on session {session_id} ({detail})"
+        )
     except Exception as e:
         logger.warning(
             f"[post_tool_use] Failed to complete pipeline stage on session {session_id}: {e}"

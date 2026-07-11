@@ -557,8 +557,14 @@ class TestTouchIssueLock:
         assert payload["session_id"] == "sdlc-local-1954"
 
     def test_renew_by_same_run_id(self):
-        """Same run calling again (same run_id, any process) renews via EXPIRE."""
-        from models.session_lifecycle import touch_issue_lock
+        """Same run calling again (same run_id, any process) renews.
+
+        Self-healing renewal (BLOCKER round-2, issue #2012): renewal is a
+        full payload re-SET, never a bare EXPIRE -- see
+        test_renewal_self_heals_legacy_payload_missing_target_repo below for
+        the regression this replaces guarding against.
+        """
+        from models.session_lifecycle import ISSUE_LOCK_TTL_SECONDS, touch_issue_lock
 
         stored = json.dumps(
             {"run_id": "run-a", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
@@ -572,7 +578,21 @@ class TestTouchIssueLock:
         assert result.acquired is True
         assert result.owner_session_id == "sdlc-local-1954"
         assert result.owner_run_id == "run-a"
-        mock_redis.expire.assert_called_once()
+        # Renewal re-SETs the full payload (never a bare EXPIRE) so a legacy
+        # payload missing target_repo can self-heal on its next renewal tick.
+        # set() is called twice: once for the initial SET-NX attempt (which
+        # fails, hence the mocked return_value=False below) and once for the
+        # renewal itself -- call_args below grabs the latter (most recent).
+        mock_redis.expire.assert_not_called()
+        assert mock_redis.set.call_count == 2
+        _args, _kwargs = mock_redis.set.call_args
+        assert _args[0] == "session:issuelock:1954"
+        renewed_payload = json.loads(_args[1])
+        assert renewed_payload["run_id"] == "run-a"
+        assert renewed_payload["session_id"] == "sdlc-local-1954"
+        assert renewed_payload["pid"] == 1
+        assert renewed_payload["hostname"] == "h"
+        assert _kwargs.get("ex") == ISSUE_LOCK_TTL_SECONDS
 
     def test_reject_foreign_run_same_session_id(self):
         """Critical regression: SAME session_id string, DIFFERENT run_id.
@@ -806,6 +826,177 @@ class TestTouchIssueLock:
 
         _args, kwargs = mock_redis.set.call_args
         assert kwargs.get("ex") == ISSUE_LOCK_TTL_SECONDS
+
+
+class TestTouchIssueLockTargetRepoPinning:
+    """Tests for target_repo pinning on the issue lock payload (issue #2012).
+
+    target_repo is resolved ONCE at lease-acquire time by the caller
+    (_acquire_run_lock_and_bind) and passed into touch_issue_lock so every
+    subsequent writer/reader of the issue-keyed PipelineLedger reads it from
+    the lease instead of re-resolving via `gh repo view` per write.
+    """
+
+    def test_fresh_acquire_pins_target_repo_in_payload(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = True  # SET NX succeeds -- fresh acquire
+            result = touch_issue_lock(
+                1954,
+                "run-a",
+                session_id="sdlc-local-1954",
+                target_repo="tomcounsell/ai",
+            )
+
+        assert result.acquired is True
+        assert result.target_repo == "tomcounsell/ai"
+        _args, _kwargs = mock_redis.set.call_args
+        payload = json.loads(_args[1])
+        assert payload["target_repo"] == "tomcounsell/ai"
+
+    def test_reacquire_after_expiry_pins_target_repo(self):
+        """Key existed at SET-NX time but expired before the follow-up GET
+        (race window) -- this attempt succeeds and still pins target_repo."""
+        from models.session_lifecycle import touch_issue_lock
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False  # NX fails
+            mock_redis.get.return_value = None  # but key has since expired
+            result = touch_issue_lock(
+                1954,
+                "run-a",
+                session_id="sdlc-local-1954",
+                target_repo="tomcounsell/ai",
+            )
+
+        assert result.acquired is True
+        assert result.target_repo == "tomcounsell/ai"
+
+    def test_peek_reports_pinned_target_repo_for_same_owner(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-1954",
+                "pid": 1,
+                "hostname": "h",
+                "target_repo": "tomcounsell/ai",
+            }
+        )
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is True
+        assert result.target_repo == "tomcounsell/ai"
+
+    def test_peek_reports_pinned_target_repo_for_foreign_owner(self):
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-1954",
+                "pid": 1,
+                "hostname": "h",
+                "target_repo": "tomcounsell/ai",
+            }
+        )
+        mock_as = MagicMock()
+        mock_as.query.filter.return_value = []
+        with (
+            patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis,
+            patch("models.agent_session.AgentSession", mock_as),
+        ):
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-b", session_id="sdlc-local-1954", peek=True)
+
+        assert result.acquired is False
+        assert result.target_repo == "tomcounsell/ai"
+
+    def test_renewal_self_heals_legacy_payload_missing_target_repo(self):
+        """BLOCKER round-2 fix: a legacy payload (pre-#2012, no target_repo)
+        gains the field on its next same-owner renewal instead of never --
+        a bare EXPIRE would have left it permanently absent."""
+        from models.session_lifecycle import touch_issue_lock
+
+        legacy_stored = json.dumps(
+            {"run_id": "run-a", "session_id": "sdlc-local-1954", "pid": 1, "hostname": "h"}
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False  # NX fails -- key already exists
+            mock_redis.get.return_value = legacy_stored
+            result = touch_issue_lock(
+                1954,
+                "run-a",
+                session_id="sdlc-local-1954",
+                target_repo="tomcounsell/ai",
+            )
+
+        assert result.acquired is True
+        assert result.target_repo == "tomcounsell/ai"
+        mock_redis.expire.assert_not_called()
+        _args, _kwargs = mock_redis.set.call_args
+        renewed_payload = json.loads(_args[1])
+        assert renewed_payload["target_repo"] == "tomcounsell/ai"
+
+    def test_renewal_preserves_pid_and_hostname_from_original_payload(self):
+        """Regression guard for the 'never reconstruct a subset' fix-note:
+        renewal must spread the existing payload, not hand-rebuild it --
+        a hand-rebuilt subset would silently drop pid/hostname."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-1954",
+                "pid": 4242,
+                "hostname": "original-host",
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = stored
+            touch_issue_lock(
+                1954,
+                "run-a",
+                session_id="sdlc-local-1954",
+                target_repo="tomcounsell/ai",
+            )
+
+        _args, _kwargs = mock_redis.set.call_args
+        renewed_payload = json.loads(_args[1])
+        assert renewed_payload["pid"] == 4242
+        assert renewed_payload["hostname"] == "original-host"
+
+    def test_renewal_without_target_repo_arg_preserves_existing_pinned_value(self):
+        """A renewal call that doesn't pass target_repo (e.g. a caller that
+        only peeked previously) must not blank out an already-pinned value."""
+        from models.session_lifecycle import touch_issue_lock
+
+        stored = json.dumps(
+            {
+                "run_id": "run-a",
+                "session_id": "sdlc-local-1954",
+                "pid": 1,
+                "hostname": "h",
+                "target_repo": "tomcounsell/ai",
+            }
+        )
+
+        with patch("popoto.redis_db.POPOTO_REDIS_DB") as mock_redis:
+            mock_redis.set.return_value = False
+            mock_redis.get.return_value = stored
+            result = touch_issue_lock(1954, "run-a", session_id="sdlc-local-1954")
+
+        assert result.target_repo == "tomcounsell/ai"
+        _args, _kwargs = mock_redis.set.call_args
+        renewed_payload = json.loads(_args[1])
+        assert renewed_payload["target_repo"] == "tomcounsell/ai"
 
 
 class TestReleaseIssueLock:

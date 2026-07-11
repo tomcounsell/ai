@@ -10,7 +10,7 @@ Without stage handoff, each Dev session starts with only the plan document and i
 
 ## How It Works
 
-Two execution paths write stage tracking records: the **worker post-completion path** (for eng sessions created via `valor_session create --role eng`) and the **Skill path** (for PM Skill tool calls). Both write to `AgentSession.stage_states` via `PipelineStateMachine`, enabling the dashboard to show real progress for all session types.
+Two execution paths write stage tracking records: the **worker post-completion path** (for eng sessions created via `valor_session create --role eng`) and the **Skill path** (for PM Skill tool calls). Both resolve their backing store via `agent.pipeline_state.resolve_pipeline_state_machine()` (issue #2012), which prefers the durable, issue-keyed `PipelineLedger` when the session's run_id lease confirms ownership and a `target_repo` is pinned, falling back to the original session-keyed `AgentSession.stage_states`/`PipelineStateMachine` otherwise — enabling the dashboard to show real progress for all session types, including across a driver→takeover handoff. See `docs/features/sdlc-issue-keyed-stage-ledger.md`.
 
 ### Skill Tool Path (PM Sessions)
 
@@ -51,7 +51,7 @@ All errors are swallowed with `logger.warning` — hooks never crash the PM sess
 Stage completion is recorded *in-session* when an SDLC skill returns, not by any worker post-completion handler. The `post_tool_use` hook (`agent/hooks/post_tool_use.py`) detects the returning `Skill` tool call and calls `_complete_pipeline_stage(session_id)`:
 
 1. Loads the Eng session's `AgentSession` from Redis by `session_id`
-2. Builds a `PipelineStateMachine` and reads the current `in_progress` stage via `current_stage()`
+2. Resolves the backing state machine via `resolve_pipeline_state_machine()` (ledger-first, session-keyed fallback) and reads the current `in_progress` stage via `current_stage()`
 3. Calls `complete_stage(stage)` to advance the pipeline state machine
 4. Avoids storing state between the pre and post hooks — the in_progress stage is read back from Redis directly
 5. All operations are wrapped in try/except — failures are logged and never crash the session

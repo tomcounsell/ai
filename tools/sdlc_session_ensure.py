@@ -145,6 +145,19 @@ def _acquire_run_lock_and_bind(
     (``release_issue_lock`` -- never a raw DEL, cycle-2 CONCERN 2) so the
     next caller acquires immediately instead of waiting out the 300s TTL.
 
+    Target-repo pinning (issue #2012): this is the ONE place ``target_repo``
+    is resolved for the issue-keyed ``PipelineLedger`` -- the process env
+    (``GH_REPO``/``SDLC_TARGET_REPO``, set authoritatively by
+    ``sdk_client.py``) is trustworthy here regardless of a takeover
+    session's foreign slug or cwd. Resolved exactly once per call and
+    passed into every ``touch_issue_lock`` call below so the lock payload
+    carries it for every subsequent writer/reader to read from the lease
+    instead of re-resolving via ``gh repo view`` per write. A ``None``
+    resolution is passed through as-is -- lock acquisition is never blocked
+    on repo resolution; a missing pinned repo is handled downstream as an
+    observable degradation by the issue-keyed ledger's writers/readers, not
+    here.
+
     Args:
         issue_number: The issue whose lock is contested.
         session: The AgentSession object to bind the run_id onto.
@@ -159,14 +172,21 @@ def _acquire_run_lock_and_bind(
         release_issue_lock,
         touch_issue_lock,
     )
+    from tools._sdlc_utils import _resolve_target_repo
 
     session_id = getattr(session, "session_id", None) or ""
     candidate = uuid.uuid4().hex
     if reuse_run_id:
         candidate = _validated_reuse_candidate(issue_number, session, reuse_run_id) or candidate
 
+    target_repo = _resolve_target_repo()
+
     lock_result = touch_issue_lock(
-        issue_number, candidate, session_id=session_id, ttl=ISSUE_LOCK_TTL_SECONDS
+        issue_number,
+        candidate,
+        session_id=session_id,
+        ttl=ISSUE_LOCK_TTL_SECONDS,
+        target_repo=target_repo,
     )
     if not lock_result.acquired:
         logger.debug(
@@ -182,7 +202,11 @@ def _acquire_run_lock_and_bind(
         orphaned = False
         try:
             orphaned = touch_issue_lock(
-                issue_number, candidate, session_id=session_id, peek=True
+                issue_number,
+                candidate,
+                session_id=session_id,
+                peek=True,
+                target_repo=target_repo,
             ).orphaned_lock
         except Exception as peek_err:
             logger.debug(

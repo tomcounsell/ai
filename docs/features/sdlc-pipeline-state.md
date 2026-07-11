@@ -1,6 +1,6 @@
 # SDLC Pipeline State Tracking
 
-Stage progress for the SDLC pipeline is tracked in Redis via `PipelineStateMachine` on the Eng session's `stage_states` field.
+Stage progress for the SDLC pipeline is tracked in Redis via `PipelineStateMachine`. Since issue #2012, the durable primary store is the issue-keyed `PipelineLedger` (`(target_repo, issue_number)`, written via `PipelineStateMachine.for_issue()`) rather than the Eng session's `stage_states` field — the session field is now a fallback for callers with no live per-issue lease. See [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md) for the full write-lease/read-guard design.
 
 ## How It Works
 

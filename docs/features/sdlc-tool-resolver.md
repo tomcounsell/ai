@@ -87,7 +87,7 @@ With `revision_applied`-stripped plan hashing (see `sdlc-pipeline-portability.md
 
 ## Session resolution and write-path auto-ensure (`find_session(..., ensure=True)`)
 
-All `sdlc-tool` subcommands store/read pipeline state on a **PM `AgentSession`'s `stage_states`** in Redis — not in the plan file or git. They resolve that session through the shared resolver `find_session(session_id=None, issue_number=None, ensure=False)` in `tools/_sdlc_utils.py`.
+Since issue #2012, `sdlc-tool` subcommands store/read pipeline state primarily on the issue-keyed `PipelineLedger` (`(target_repo, issue_number)`, gated on the run_id issue lease) — not in the plan file or git, and no longer primarily on a PM `AgentSession`'s `stage_states`. A session lookup is still used for session-scoped concerns (routing/ownership, and the reader's pre-cutover fallback when a ledger is empty) via the shared resolver `find_session(session_id=None, issue_number=None, ensure=False)` in `tools/_sdlc_utils.py`. See [SDLC Issue-Keyed Stage Ledger](sdlc-issue-keyed-stage-ledger.md) for the ledger/lease design this section's session-resolution mechanics now sit underneath.
 
 ### Forked-skill issue-number passing — skill arg/env layer (issue #1731)
 

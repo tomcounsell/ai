@@ -10,7 +10,7 @@ AgentSession (Popoto/Redis)
     v
 ui/data/sdlc.py
     _session_to_pipeline()         # converts AgentSession -> PipelineProgress
-        PipelineStateMachine.get_display_progress()  # canonical stage read (falls back to _parse_stage_states)
+        _resolve_display_stages()  # issue-keyed PipelineLedger first, session-keyed fallback (issue #2012)
         _get_project_metadata()    # resolves project_key -> name + metadata
     |
     v
@@ -40,17 +40,17 @@ Browser (HTMX polling for live updates)
 
 Each session row displays a horizontal strip of SDLC stage indicators. The eight stages in pipeline order are: ISSUE, PLAN, CRITIQUE, BUILD, TEST, REVIEW, DOCS, MERGE.
 
-### Primary Source: `PipelineStateMachine.get_display_progress()`
+### Primary Source: `_resolve_display_stages()` — issue-keyed ledger first (issue #2012)
 
-`_session_to_pipeline()` routes stage reads through `PipelineStateMachine.get_display_progress()` (PR #747, issue #735) when `stage_states` are present. This makes the dashboard a direct consumer of the same canonical path used by the merge gate and the SDLC pipeline.
+`_session_to_pipeline()` routes stage reads through `_resolve_display_stages()`. That helper resolves the session's issue number and checks the durable, issue-keyed `PipelineLedger` (`agent/pipeline_ledger.py`) first via `PipelineStateMachine.for_issue()`: if the ledger carries recorded data (`_ledger_has_data()`), its `get_display_progress()` result wins. This is what keeps a takeover session's stage pills correct — the ledger survives the original driver session going terminal, whereas the session-keyed field below does not.
 
-The `AgentSession.stage_states` field (populated by the PipelineStateMachine since issue #492) is the authoritative source. `get_display_progress()` returns a dict mapping `DISPLAY_STAGES` (from `agent.pipeline_graph`) to their stored status strings. `_parse_stage_states()` is retained as a private fallback utility used when `PipelineStateMachine` construction fails.
+If the ledger has no data yet for that issue (pre-cutover records, or an issue the ledger hasn't been written to), `_resolve_display_stages()` falls back to the original session-keyed path: `PipelineStateMachine(session).get_display_progress()` when `session.stage_states` is set, or `_parse_stage_states()` if that construction fails. `get_display_progress()` returns a dict mapping `DISPLAY_STAGES` (from `agent.pipeline_graph`) to their stored status strings, ignoring internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count`.
 
-Internal metadata keys like `_patch_cycle_count` and `_critique_cycle_count` are safely ignored — `get_display_progress()` iterates over the canonical `DISPLAY_STAGES` list only.
+`get_recent_completions()` mirrors this: it gates on `_session_has_stage_data()` (true if the session's own `stage_states` is set OR the issue's ledger carries data) rather than `session.stage_states` alone, so a takeover session whose writes all landed on the ledger still shows up.
 
-### Routing Through PipelineStateMachine
+### No Artifact Inference
 
-Artifact inference was removed in PR #733 (issue #729). All sessions use the stored state path: `PipelineStateMachine(session).get_display_progress()` for sessions with `stage_states`, empty list for sessions without. The dashboard no longer checks plan files on disk, PR existence, or GitHub review state. `stage_states` is the single source of truth.
+Artifact inference was removed in PR #733 (issue #729) and stays removed under the ledger-first path — the dashboard never checks plan files on disk, PR existence, or GitHub review state. The stored state (ledger or session field) is the only source of stage data; see `docs/features/sdlc-issue-keyed-stage-ledger.md` for the ledger's read/write model.
 
 ### CSS Rendering
 
