@@ -128,26 +128,49 @@ not the class itself.
 - **New dependencies**: A new durable Popoto model (working name `PipelineLedger`)
   keyed by `(target_repo, issue_number)`. No external services.
 - **Lease payload change**: `touch_issue_lock`'s JSON payload gains a `target_repo`
-  field, resolved ONCE at lease-acquire in `_acquire_run_lock_and_bind`. This is the
+  field, resolved at lease-acquire in `_acquire_run_lock_and_bind`. This is the
   single authoritative source of the ledger key's repo component; writers read it from
-  the lease and never re-resolve. Backward-compatible: a legacy payload lacking the
-  field is handled by the writer's observable degradation path (see Risk 5).
+  the lease and never re-resolve. **Self-healing renewal (BLOCKER round-2 fix):** the
+  same-owner renewal branch (`models/session_lifecycle.py:995-996`) today is a bare
+  `_R.expire(key, ttl)` that never rewrites the payload — so a lock acquired before this
+  deploy that merely keeps renewing would *never* gain `target_repo`, and under the
+  hard-fail design every write would fail until the TTL lapsed and a fresh re-acquire ran
+  (re-deadlocking in-flight issues across cutover). The fix rewrites the payload on
+  renewal: same-owner renewal re-`SET`s the payload with the pinned `target_repo`
+  (re-resolved from the same authoritative env the caller uses at acquire), so any legacy
+  or pre-deploy payload self-heals on its next renewal tick — no separate lock backfill
+  needed. A payload still lacking `target_repo` before its first post-deploy renewal is
+  handled by the writer's observable degradation path (see Risk 5).
 - **Interface changes**: `PipelineStateMachine` gains an issue-keyed construction
   path (e.g. `PipelineStateMachine.for_issue(target_repo, issue_number)`) alongside
   or replacing the session-keyed `__init__(session)`. All `sdlc-tool` writers
   (`stage-marker`, `verdict`, `meta-set`, `dispatch`) and readers (`stage-query`,
   `verdict get`, `next-skill`) re-point at the issue-keyed record.
 - **Coupling**: *Decreases* coupling between the pipeline ledger and the executor
-  lifecycle. `find_session_by_issue()` demotes from state-integrity infrastructure
-  to a display/routing concern (dashboard, steering).
+  lifecycle. `find_session_by_issue()` demotes from state-integrity infrastructure to a
+  routing/ownership concern (`sdlc_session_ensure.py`, `sdlc_next_skill.py`,
+  `sdlc_dispatch.py`) plus the reader's cold-path session fallback in
+  `sdlc_stage_query.py`. It is NOT a dashboard caller (`grep find_session_by_issue ui/`
+  is empty).
 - **Data ownership**: The ledger's owner becomes the issue (per repo). The run_id
   lease (#1954/#2003) becomes the *write authority* over that ledger — unifying
   ownership and write authority, which answers open-question Q4.
-- **Reversibility**: Moderate. The migration (backfill live in-flight sessions'
-  `stage_states` into the issue-keyed store) is one-directional but idempotent.
-  Cutover is atomic — writers and readers move to the ledger in a single PR (no
-  session-side mirror; see Risk 2). Rollback is `git revert` of that PR plus the
-  migration's write-if-empty guard leaving the source `stage_states` untouched.
+- **Reversibility (honest, round-2 correction):** One-directional. The migration
+  backfills live in-flight `stage_states` into the ledger but writes nothing back; after
+  cutover, every stage/verdict write lands on the ledger ONLY and the session
+  `stage_states` is frozen at migration time. Consequences of `git revert`:
+  - **Reverted before any post-cutover ledger write** (immediate rollback, low-activity
+    window): clean. Readers fall back to the still-current `stage_states`; nothing was
+    lost because nothing new was written to the ledger.
+  - **Reverted after post-cutover ledger writes**: **lossy.** Progress written to the
+    ledger after cutover is invisible to the reverted session-keyed readers, because
+    `stage_states` is stale. Recovering that progress requires a reverse-backfill
+    (ledger → `stage_states`) — which this plan does NOT build (dropping the mirror is
+    exactly why post-cutover state lives only on the ledger; see Risk 2). Rollback after
+    real pipeline activity is therefore a manual, lossy operation, not a clean `git
+    revert`. Own this: the safe rollback window is "before the first post-cutover write."
+    Mitigate operationally by cutting over during a quiet window and validating fast, not
+    by pretending the revert is symmetric.
 
 ## Appetite
 
@@ -238,11 +261,14 @@ facts are directly observable in the source).
    — no session resolution required. On an invalid/absent lease, degrade *observably*
    (the write-drop condition that previously hid state loss no longer exists, because
    there is no session to fail to resolve).
-4. **Ledger read**: `/do-merge` gate calls `sdlc-tool stage-query --issue-number N`,
-   which reads `PipelineLedger[(target_repo, N)]` directly — resolving `target_repo`
-   from the live lease when present, else from env-first `_resolve_target_repo()`
-   (GH_REPO rung-0, authoritative in the gate's context). REVIEW verdict + `pr_number`
-   present regardless of which session (driver or takeover) wrote them.
+4. **Ledger read (guarded)**: `/do-merge` gate calls `sdlc-tool stage-query
+   --issue-number N`, which reads `PipelineLedger[(target_repo, N)]` directly — resolving
+   `target_repo` from the live lease (`touch_issue_lock` peek) when present, else from
+   env-first `_resolve_target_repo()` (GH_REPO rung-0, authoritative in the gate's
+   context) on a cold read. If that resolution returns `None`, the reader does NOT key
+   `(None, N)`; it takes the defined empty-ledger path (reconstruct-or-refuse with an
+   actionable reason, per AC #2). On a successful resolution, REVIEW verdict + `pr_number`
+   are present regardless of which session (driver or takeover) wrote them.
 5. **Output**: MERGE gate's shared predicate evaluates REVIEW freshness against PR
    head and merges, or refuses with an actionable `GATES_FAILED` reason.
 
@@ -297,11 +323,19 @@ REVIEW verdict + pr_number present → merge decision made.
   (`session:issuelock:{issue_number}`, `models/session_lifecycle.py:967`). Writers read
   `target_repo` FROM the lease (a peek of the lock payload) and never call
   `_resolve_target_repo()` themselves — no per-write `gh repo view` (10s timeout), no
-  `None:{issue}` phantom key. Lock renewal (same-owner `EXPIRE`) preserves the pinned
-  value; a re-acquire after TTL lapse re-resolves under the same authoritative env, so
-  the value is stable across the issue's lifetime. This single pin also dissolves the
-  writer-vs-writer key divergence (all writers read the one pinned value) and the
-  migration mis-key concern (the backfill keys off the same pinned value).
+  `None:{issue}` phantom key. **Renewal must self-heal, not bare-`EXPIRE` (BLOCKER
+  round-2 fix):** the same-owner renewal branch in `touch_issue_lock`
+  (`models/session_lifecycle.py:995-996`) currently calls only `_R.expire(key, ttl)`,
+  which never rewrites the payload — so a lock acquired before this change that keeps
+  renewing would never acquire `target_repo`, and under the hard-fail write design every
+  stage write would fail until the TTL lapsed and a fresh re-acquire ran. That would
+  re-deadlock in-flight issues across cutover. The renewal branch is changed to re-`SET`
+  the payload (preserving `run_id`/`session_id`, re-pinning `target_repo` resolved from
+  the same authoritative env the caller uses at acquire) so any legacy/pre-deploy payload
+  self-heals on its next renewal tick. A re-acquire after TTL lapse re-resolves under the
+  same authoritative env, so the value is stable across the issue's lifetime. This single
+  pin also dissolves the writer-vs-writer key divergence (all writers read the one pinned
+  value) and the migration mis-key concern (the backfill keys off the same pinned value).
 - **State machine**: Add `PipelineStateMachine.for_issue(target_repo, issue_number)`
   that loads/saves the ledger record. Preserve the existing `StageStates` Pydantic
   validation and the `_load_preserved_metadata()` merge-on-save protocol verbatim
@@ -314,17 +348,40 @@ REVIEW verdict + pr_number present → merge decision made.
   session to fail to resolve. A lease held but missing a pinned `target_repo`
   (legacy/expired payload) is an observable hard-fail (stderr + non-zero exit), never a
   `None:{issue}` write (Risk 5).
-- **Readers**: `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`, and the
-  `/do-merge` gate (`docs/sdlc/do-merge.md` predicate) read the ledger directly,
-  keying on the lease-pinned `target_repo` when a lease is live, else env-first
-  `_resolve_target_repo()` (GH_REPO rung-0) for cold reads after TTL lapse — the two
-  sources agree because both derive from the same `GH_REPO` for the issue's repo.
-- **`find_session_by_issue()` demotion**: keep it for dashboard (`ui/data/sdlc.py`)
-  and steering routing only; remove it from state-integrity read/write paths.
+- **Readers (with a guarded cold path — BLOCKER round-2 fix)**:
+  `tools/sdlc_stage_query.py`, `tools/sdlc_next_skill.py`, and the `/do-merge` gate
+  (`docs/sdlc/do-merge.md` predicate) read the ledger directly. The reader resolves the
+  key's repo component with the SAME precedence as the writers: **lease-pinned
+  `target_repo` first** (a `touch_issue_lock(..., peek=True)` peek — the peek mode already
+  exists), falling back to env-first `_resolve_target_repo()` (GH_REPO rung-0) ONLY when
+  no live lease exists (cold read after TTL lapse). The round-1 fix pinned the writers but
+  left `_compute_meta` (`tools/sdlc_stage_query.py:412`) calling `_resolve_target_repo()`
+  unconditionally — the exact env-first heuristic this plan names as the bug. That path
+  can return `None`, which would key `PipelineLedger[(None, issue)]`, read an empty ledger,
+  and make `/do-merge` refuse a genuinely mergeable PR — #2012 resurrected on the READ
+  side. Guard it symmetrically with the writers: **a reader that resolves `target_repo`
+  to `None` does NOT read `(None, issue)`** — it yields the defined empty-ledger outcome
+  (AC #2: reconstruct via cold-start fallback or refuse with an actionable
+  `GATES_FAILED` reason, logged), never a silent stall against a phantom key. When a
+  lease is live, reader and writer key identically because both read the one pinned value;
+  on the cold path both derive from the same `GH_REPO`, so they agree. This reader guard
+  is covered by ACs #6/#7 and a dedicated test (below), not by AC #5's writer-only grep.
+- **`find_session_by_issue()` demotion (round-2 correction)**: its retained callers are
+  the routing/ownership path (`tools/sdlc_session_ensure.py`, `tools/sdlc_next_skill.py`,
+  `tools/sdlc_dispatch.py`) and the reader's cold-path *session* fallback
+  (`tools/sdlc_stage_query.py::_find_session_by_issue`) — NOT the dashboard. The earlier
+  claim that it was "retained for a dashboard caller (`ui/data/sdlc.py`)" is false:
+  `grep find_session_by_issue ui/` returns zero matches. The dashboard reads
+  `session.stage_states` and `PipelineStateMachine(session)` *directly by session*, so it
+  is re-pointed to the ledger (below) but never touches `find_session_by_issue`. The
+  demotion removes `find_session_by_issue` from state-integrity write paths; it stays for
+  routing/ownership and the reader's session fallback.
 - **No session-side mirror**: cut over writers, readers, dashboard, and steering to
-  the ledger atomically in one PR. Dropping the mirror avoids re-manufacturing the
-  Risk 2 split-brain (a mirror is a second source of truth that can disagree with the
-  ledger).
+  the ledger atomically in one PR. The dashboard re-point is real and required — it reads
+  the session-keyed `stage_states`/`PipelineStateMachine(session)` today
+  (`ui/data/sdlc.py:786-795`, `1146`), which goes stale the moment writes move to the
+  ledger. Dropping the mirror avoids re-manufacturing the Risk 2 split-brain (a mirror is
+  a second source of truth that can disagree with the ledger).
 - **Migration** (`scripts/update/migrations.py`, registered in `MIGRATIONS`):
   for each non-terminal AgentSession carrying a non-empty `stage_states` with a
   resolvable issue number AND an authoritatively-determined `target_repo` (from the
@@ -347,9 +404,17 @@ REVIEW verdict + pr_number present → merge decision made.
 - [ ] Test that a ledger write when the lease carries **no pinned `target_repo`**
   (legacy/expired payload, or resolver → `None`) hard-fails observably and NEVER
   assembles a `None:{issue}` key — assert no `PipelineLedger` record with a `None`
-  repo component is ever created (Risk 5).
+  repo component is ever created (Risk 5, writer side).
+- [ ] Test that a **READER** cold path resolving `target_repo` → `None` does NOT read
+  `PipelineLedger[(None, issue)]` — it takes the defined empty-ledger outcome
+  (reconstruct-or-refuse with an actionable reason), never a silent stall against a
+  phantom key (Risk 5, reader side — the BLOCKER round-2 gap AC #5's writer grep misses).
 - [ ] Test that `_acquire_run_lock_and_bind` pins `target_repo` into the lock payload
-  on acquisition, and that a same-owner renewal preserves it.
+  on acquisition.
+- [ ] Test that a **same-owner renewal self-heals** a legacy payload: given a lock whose
+  payload lacks `target_repo`, the next renewal re-`SET`s the payload WITH the pinned
+  `target_repo` (not a bare `EXPIRE`) — assert the payload gains the field after renewal
+  (BLOCKER round-2 fix; `models/session_lifecycle.py:995-996`).
 
 ### Empty/Invalid Input Handling
 - [ ] Test `for_issue()` with a `(repo, issue)` that has no ledger yet → returns an
@@ -392,8 +457,9 @@ the known-affected set from the current call-site map.
 ## Rabbit Holes
 
 - **Rewriting `find_session_by_issue()` from scratch.** It demotes to a
-  display/routing helper — leave its three passes intact for the dashboard; do not
-  redesign session resolution as part of this fix.
+  routing/ownership helper (session-ensure, next-skill, dispatch) plus the reader's
+  cold-path session fallback — leave its three passes intact; do not redesign session
+  resolution as part of this fix. (It is not a dashboard caller.)
 - **Unifying all five identities** (issue_number, session_id, run_id, slug, GitHub
   artifacts) into one scheme. Tempting, but out of scope — only the ledger key
   moves to the issue. The others stay as-is.
@@ -425,9 +491,13 @@ the known-affected set from the current call-site map.
 **Impact:** Over-strict lease checking refuses a valid takeover's writes, reproducing #2012 with a different cause.
 **Mitigation:** The lease semantics are already proven by #2003 (`session-ensure` claim-echo-with-proof). Takeover acquires the lease via the ordinary contest; the ledger write authority follows the same lock. Regression test the takeover path end-to-end.
 
-### Risk 5: A missing/unresolvable `target_repo` mints a `None:{issue}` phantom key
-**Impact:** A writer that cannot obtain a pinned `target_repo` (legacy lock payload, expired lease, or a resolver returning `None`) keys the ledger under `None:{issue}`, silently routing writes to a phantom record and reproducing #2012 with a new cause.
-**Mitigation:** `target_repo` is resolved once at lease-acquire under authoritative env and pinned on the lock payload, so the common path never hits `None`. Writers treat an absent pinned `target_repo` as an observable hard-fail (stderr diagnostic + non-zero exit), never assembling a key with a `None` component. A dedicated test asserts the `None:{issue}` write is impossible (the writer exits non-zero instead). Legacy payloads written before this change are refreshed on the next same-owner renewal, which re-pins the field.
+### Risk 5: A missing/unresolvable `target_repo` mints a `None:{issue}` phantom key (writer AND reader)
+**Impact:** A writer OR reader that cannot obtain a pinned `target_repo` (legacy lock payload, expired lease, or a resolver returning `None`) keys the ledger under `None:{issue}`, silently routing writes to a phantom record or reading an empty one — reproducing #2012 with a new cause. The round-1 fix guarded only the writers; the reader cold path (`_compute_meta` → `_resolve_target_repo()`) was left unguarded.
+**Mitigation:** `target_repo` is resolved at lease-acquire under authoritative env and pinned on the lock payload. Both sides read it from the lease first:
+- **Writers** treat an absent pinned `target_repo` as an observable hard-fail (stderr diagnostic + non-zero exit), never assembling a key with a `None` component.
+- **Readers** resolve lease-first, else env `_resolve_target_repo()`; a `None` result yields the defined empty-ledger outcome (AC #2 reconstruct-or-refuse), never a read against `(None, issue)`.
+- **Self-healing renewal** closes the legacy-payload gap: same-owner renewal re-`SET`s the lock payload with the re-pinned `target_repo` instead of a bare `EXPIRE` (`models/session_lifecycle.py:995-996`), so a lock that predates this change gains the field on its next renewal tick rather than never — without which a continuously-renewing in-flight lease would hard-fail every write across cutover.
+- Dedicated tests assert (a) the writer `None:{issue}` write is impossible (exits non-zero), (b) the reader never reads `(None, issue)`, and (c) renewal self-heals a legacy payload.
 
 ## Race Conditions
 
@@ -503,7 +573,8 @@ the known-affected set from the current call-site map.
 ### Inline Documentation
 - [ ] Docstrings on `PipelineLedger`, `PipelineStateMachine.for_issue()`, and the
   migration function explaining the keying and lease semantics.
-- [ ] Comment the `find_session_by_issue()` demotion (now display/routing only).
+- [ ] Comment the `find_session_by_issue()` demotion (now routing/ownership + reader
+  cold-path session fallback only; not a state-write or dashboard caller).
 
 ## Success Criteria
 
@@ -515,16 +586,26 @@ the known-affected set from the current call-site map.
   actionable reason — never a silent stall. (AC #2)
 - [ ] PR #2008 / issue #1997 is unblocked and merged via the runbook. (AC #3)
 - [ ] Regression test covering the terminal-driver + takeover-completes scenario. (AC #4)
-- [ ] `target_repo` is resolved once at lease-acquire and pinned on the lock payload;
-  no writer calls `_resolve_target_repo()` and no writer shells `gh repo view` per write
-  (grep confirms writers reference no repo resolver). (AC #5)
+- [ ] `target_repo` is resolved at lease-acquire and pinned on the lock payload; no
+  **writer** calls `_resolve_target_repo()` and no writer shells `gh repo view` per write
+  (grep confirms the four writer files reference no repo resolver). (AC #5 — writers only)
+- [ ] Same-owner lock renewal **self-heals** a legacy payload: renewal re-`SET`s the
+  payload with the pinned `target_repo` rather than a bare `EXPIRE`, so a lock predating
+  this change gains the field on its next renewal (tested). (AC #5b)
+- [ ] The **reader** resolves `target_repo` lease-first, falls back to env only on a cold
+  read, and NEVER reads `PipelineLedger[(None, issue)]`: a `None` resolution yields the
+  defined empty-ledger outcome (reconstruct-or-refuse), verified by test (AC #5's writer
+  grep does not cover this path). (AC #5c)
 - [ ] A writer with no pinned `target_repo` hard-fails observably; no `PipelineLedger`
-  record is ever keyed under a `None` repo component. (AC #6)
+  record is ever keyed under a `None` repo component (writer or reader). (AC #6)
 - [ ] Migration backfills live in-flight ledgers idempotently; re-running is a no-op.
 - [ ] `stage-marker`/`verdict`/`stage-query` CLI contracts unchanged (JSON shapes stable).
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
-- [ ] `find_session_by_issue` no longer referenced by any state-write path (grep confirms only dashboard/steering callers remain).
+- [ ] `find_session_by_issue` no longer referenced by any state-write path (grep confirms
+  only routing/ownership callers — `sdlc_session_ensure.py`, `sdlc_next_skill.py`,
+  `sdlc_dispatch.py` — and the reader's cold-path session fallback in `sdlc_stage_query.py`
+  remain; zero matches in `ui/`).
 
 ## Team Orchestration
 
@@ -576,7 +657,7 @@ The lead agent orchestrates; it does not build directly.
 - **Parallel**: false
 - Add `PipelineLedger` Popoto model keyed by `{target_repo}:{issue_number}`.
 - Add `PipelineStateMachine.for_issue(target_repo, issue_number)` reusing `StageStates` validation and the `_load_preserved_metadata` merge-on-save protocol.
-- Resolve `target_repo` ONCE in `_acquire_run_lock_and_bind` and pin it into the `touch_issue_lock` payload; renewal preserves it. Expose a lease-peek that returns the pinned `target_repo` for writers/readers to consume.
+- Resolve `target_repo` in `_acquire_run_lock_and_bind` and pin it into the `touch_issue_lock` payload. **Make renewal self-healing (BLOCKER round-2):** change the same-owner renewal branch (`models/session_lifecycle.py:995-996`) from a bare `_R.expire(key, ttl)` to a payload re-`SET` that re-pins `target_repo`, so legacy/pre-deploy payloads gain the field on their next renewal instead of never. Extend/reuse the existing `touch_issue_lock(..., peek=True)` lease-peek to return the pinned `target_repo` for writers AND readers to consume.
 
 ### 2. Re-point CLI writers/readers and the merge gate
 - **Task ID**: build-cli-repoint
@@ -586,7 +667,8 @@ The lead agent orchestrates; it does not build directly.
 - **Agent Type**: builder
 - **Parallel**: false
 - Switch `stage-marker`, `verdict`, `meta-set`, `dispatch`, `stage-query`, `next-skill` to the ledger, gated on the run_id write-lease. Writers read `target_repo` from the lease (never call `_resolve_target_repo()`); a missing pinned repo is an observable hard-fail, never a `None:{issue}` write.
-- Re-point the `/do-merge` predicate; remove the `PRESENT_NO_SESSION` quiet no-op from the issue-keyed path; demote `find_session_by_issue` to dashboard/steering only. Re-point the dashboard (`ui/data/sdlc.py`) and steering readers in this SAME PR (atomic cutover, no mirror).
+- **Guard the reader cold path (BLOCKER round-2):** `stage-query`/`_compute_meta` and the `/do-merge` predicate resolve `target_repo` lease-first (via the peek), fall back to env `_resolve_target_repo()` only on a cold read, and on a `None` result take the defined empty-ledger outcome (reconstruct-or-refuse) — NEVER a read against `PipelineLedger[(None, issue)]`.
+- Re-point the `/do-merge` predicate; remove the `PRESENT_NO_SESSION` quiet no-op from the issue-keyed path; demote `find_session_by_issue` to routing/ownership + reader cold-path fallback (it is NOT a dashboard caller). Re-point the dashboard (`ui/data/sdlc.py`, which reads `session.stage_states`/`PipelineStateMachine(session)` directly) and steering readers to the ledger in this SAME PR (atomic cutover, no mirror).
 
 ### 3. Migration backfill
 - **Task ID**: build-migration
@@ -643,6 +725,9 @@ The lead agent orchestrates; it does not build directly.
 | No state-write path uses find_session_by_issue | `grep -rn "find_session_by_issue" tools/sdlc_stage_marker.py tools/sdlc_verdict.py tools/sdlc_meta_set.py` | match count == 0 |
 | Writers never resolve repo per write | `grep -rn "_resolve_target_repo\|gh repo view" tools/sdlc_stage_marker.py tools/sdlc_verdict.py tools/sdlc_meta_set.py tools/sdlc_dispatch.py` | match count == 0 |
 | Lease payload pins target_repo | `grep -c "target_repo" models/session_lifecycle.py tools/sdlc_session_ensure.py` | output > 0 |
+| Renewal self-heals (not bare EXPIRE) | `pytest tests/unit -k "renewal and self_heal or renewal and target_repo" -q` | exit code 0 |
+| Reader guards None repo (no None-keyed read) | `pytest tests/unit -k "reader and (none_repo or cold_path)" -q` | exit code 0 |
+| find_session_by_issue not in ui/ | `grep -rc "find_session_by_issue" ui/` | match count == 0 |
 | Takeover regression present | `grep -rln "takeover" tests/ \| head -1` | exit code 0 |
 | Stage-query CLI contract stable | `sdlc-tool stage-query --issue-number 2012` | output contains stages |
 
@@ -653,10 +738,40 @@ The lead agent orchestrates; it does not build directly.
 | BLOCKER | 2 critics (cross-validated) | Key `{target_repo}:{issue}` re-introduces fragile per-write `target_repo` inference; only the reader (`sdlc_stage_query.py:412`) resolves it today, so re-pointed writers would newly shell `gh repo view` (10s timeout) and a `None` result mints a phantom `None:{issue}` key — reproducing #2012 | Technical Approach → Keying; Data Flow 2-4; Risk 5; spike-1 correction; tasks 1-2 | Resolve `target_repo` ONCE at lease-acquire in `_acquire_run_lock_and_bind`, pin on the `touch_issue_lock` payload; writers read from the lease, never re-resolve. Same pin dissolves writer-vs-writer divergence + migration mis-key. |
 | CONCERN | cross-validated | Optional session-side mirror re-manufactures the Risk 2 split-brain | Solution → Atomic cutover; Technical Approach → No session-side mirror; Risk 2; Reversibility | Mirror dropped; writers/readers/dashboard/steering cut over atomically in one PR. |
 | SCOPE | supervisor | Close Q2 (mirror) and Q3 (hotfix split) before build | Resolved-in-this-revision block; No-Gos; task 5 | Q2 → drop mirror. Q3 → split: unblock #2008 first, independent of the refactor, on unmodified main. |
+| BLOCKER (round 2) | re-critique | Legacy lock payloads never regain `target_repo` under EXPIRE-only renewal (`session_lifecycle.py:995-996`) — a continuously-renewing pre-deploy lease would hard-fail every write across cutover | Arch Impact → lease payload; Technical Approach → Keying; Risk 5; task 1; AC #5b; Failure Path tests | Self-healing renewal: same-owner renewal re-`SET`s the payload with the re-pinned `target_repo` instead of bare `EXPIRE`. |
+| BLOCKER (round 2) | re-critique | Reader cold path (`_compute_meta` → `_resolve_target_repo()` at `sdlc_stage_query.py:412`) is unguarded/untested; a `None` result keys `(None, issue)` → empty read → /do-merge refuses a mergeable PR (#2012 on the read side). AC #5 grep covered writers only | Technical Approach → Readers; Data Flow 4; Risk 5 (reader); AC #5c/#6; Failure Path reader test | Reader resolves lease-first, guards `None` into the defined empty-ledger outcome, never reads `(None, issue)`; ACs/tests extended to the reader. |
+| CONCERN (round 2) | re-critique | Phantom caller: plan claimed `find_session_by_issue` retained for a dashboard caller, but `ui/data/sdlc.py` has zero references | Arch Impact → Coupling; Technical Approach → demotion; Rabbit Holes; AC + Verification `find_session_by_issue not in ui/` | Corrected: retained callers are routing/ownership + reader cold-path fallback; dashboard reads `session.stage_states` directly and is re-pointed, but never calls `find_session_by_issue`. |
+| CONCERN (round 2) | re-critique | Rollback overclaimed — one-directional migration with no mirror loses post-cutover progress on `git revert` | Arch Impact → Reversibility | Stated honestly: clean revert only before the first post-cutover ledger write; after that, revert is manual + lossy (needs a reverse-backfill this plan does not build). |
 
 ---
 
-## Resolved in this revision (critique NEEDS REVISION)
+## Resolved in round-2 revision (re-critique NEEDS REVISION)
+
+- **BLOCKER — legacy lock payloads never regain `target_repo` under EXPIRE-only renewal.**
+  Resolved. Same-owner renewal is changed from a bare `_R.expire(key, ttl)`
+  (`models/session_lifecycle.py:995-996`) to a payload re-`SET` that re-pins `target_repo`,
+  so a lock predating this deploy self-heals on its next renewal tick rather than never —
+  no continuously-renewing in-flight lease hard-fails every write across cutover. See
+  Architectural Impact → lease payload, Technical Approach → Keying, Risk 5, task 1,
+  AC #5b.
+- **BLOCKER — reader cold-path `target_repo` inference unguarded/untested.** Resolved. The
+  reader (`_compute_meta`/`stage-query` and the `/do-merge` predicate) resolves
+  `target_repo` lease-first (peek), env-fallback only on a cold read, and a `None` result
+  yields the defined empty-ledger outcome — it NEVER reads `PipelineLedger[(None, issue)]`.
+  ACs/tests extended beyond AC #5's writer-only grep to cover the reader (AC #5c/#6,
+  Failure Path reader test). See Technical Approach → Readers, Data Flow 4, Risk 5.
+- **CONCERN — phantom dashboard caller of `find_session_by_issue`.** Corrected.
+  `ui/data/sdlc.py` has zero references; the retained callers are routing/ownership
+  (`sdlc_session_ensure.py`, `sdlc_next_skill.py`, `sdlc_dispatch.py`) plus the reader's
+  cold-path session fallback. The dashboard reads `session.stage_states` directly and is
+  re-pointed to the ledger, but never touches `find_session_by_issue`. AC grep + a new
+  `find_session_by_issue not in ui/` verification row corrected.
+- **CONCERN — rollback overclaimed.** Corrected. Reversibility is now stated honestly:
+  the migration is one-directional; `git revert` is clean only before the first
+  post-cutover ledger write. After real pipeline activity, revert is a manual, lossy
+  operation (post-cutover progress lives only on the ledger; no reverse-backfill is built).
+
+## Resolved in round-1 revision (critique NEEDS REVISION)
 
 - **BLOCKER — fragile per-write `target_repo` inference.** Resolved. `target_repo` is
   resolved ONCE at lease-acquire and pinned on the run_id lock payload; writers read it
