@@ -301,6 +301,72 @@ async def test_claude_session_id_capture(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Resume-id assert-and-alarm (plan #2000 Task 2.2 / Task 2.1 probe finding)
+# --------------------------------------------------------------------------
+
+
+async def test_resume_id_stable_across_turns_no_alarm(tmp_path, caplog):
+    """The now-expected case: --resume reuses the session id across turns.
+    No drift log fires."""
+    calls = []
+
+    async def _stable_harness(message, working_dir, **kwargs):
+        on_init = kwargs.get("on_init")
+        if on_init is not None:
+            on_init({"type": "system", "subtype": "init", "session_id": "stable-uuid"})
+        calls.append(message)
+        return "ok"
+
+    driver = HeadlessRoleDriver(
+        role="dev",
+        session_id="sess-stable",
+        working_dir=str(tmp_path),
+        prime_path=PRIME_PATH_SLASH,
+        harness_fn=_stable_harness,
+    )
+    with caplog.at_level("ERROR"):
+        await driver.run_turn("first")
+        await driver.run_turn("second")
+
+    assert driver.claude_session_id == "stable-uuid"
+    assert not any("claude session id drift" in r.message for r in caplog.records)
+
+
+async def test_resume_id_drift_logs_error_and_adopts_new_id(tmp_path, caplog):
+    """If a future CLI ever forks the session id under plain --resume (the
+    pre-#2000 assumption), the driver still adopts the new id (so --resume
+    keeps working) but now logs an error-level drift alarm instead of
+    silently expecting it."""
+
+    async def _forking_harness(message, working_dir, **kwargs):
+        on_init = kwargs.get("on_init")
+        sid = "uuid-turn-1" if "first" in message else "uuid-turn-2-forked"
+        if on_init is not None:
+            on_init({"type": "system", "subtype": "init", "session_id": sid})
+        return "ok"
+
+    driver = HeadlessRoleDriver(
+        role="dev",
+        session_id="sess-drift",
+        working_dir=str(tmp_path),
+        prime_path=PRIME_PATH_SLASH,
+        harness_fn=_forking_harness,
+    )
+    with caplog.at_level("ERROR"):
+        await driver.run_turn("first turn")
+        assert driver.claude_session_id == "uuid-turn-1"
+        await driver.run_turn("second turn")
+
+    # Still adopts the newly-observed id (resume must keep working even if
+    # a future CLI regresses to forking behavior).
+    assert driver.claude_session_id == "uuid-turn-2-forked"
+    assert driver.transcript_path.endswith("uuid-turn-2-forked.jsonl")
+    drift_records = [r for r in caplog.records if "claude session id drift" in r.message]
+    assert len(drift_records) == 1
+    assert drift_records[0].levelname == "ERROR"
+
+
+# --------------------------------------------------------------------------
 # Driver-seam: stdout stream drives liveness even in a toolless window
 # (issue #1935, CRITIQUE pass 1 Concern 4)
 # --------------------------------------------------------------------------
