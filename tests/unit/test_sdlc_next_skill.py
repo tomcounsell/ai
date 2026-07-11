@@ -10,12 +10,22 @@ revision_applied:) instead of compute_plan_hash, so writing
 
 Issue #1954: decide() peek-checks the issue-level SDLC ownership lock before
 any guard evaluation -- see TestIssueLockPreCheck below.
+
+Issue #1267: _build_context now also runs the stage-advance artifact
+verification gate (see TestStageArtifactVerification below) -- deterministic
+live-world checks on the top-3 claimed side-effects (PR opened, branch
+pushed, plan committed on main), reusing #2003's live-ref helper pattern.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from agent.sdlc_router import SKILL_DO_PLAN, SKILL_DO_PR_REVIEW, STATUS_COMPLETED
 from tools import sdlc_next_skill
@@ -374,3 +384,183 @@ class TestIssueLockPreCheck:
             "row_id": expected.row_id,
             "dispatched": True,
         }
+
+
+class TestStageArtifactVerification:
+    """Issue #1267: the stage-advance outcome verification gate.
+
+    ``_build_context`` verifies the top-3 claimed stage artifacts (PR opened,
+    branch pushed, plan committed on main) against the live world when
+    ``stage_states``/``meta`` are supplied, setting
+    ``stage_artifacts_verified``/``unverified_stage`` on a mismatch. This is
+    context-assembly ONLY -- no dispatch decision is made here (that is
+    ``guard_g8_artifact_verification`` in ``agent/sdlc_router.py``, see
+    ``tests/unit/test_sdlc_router_oscillation.py``).
+    """
+
+    @staticmethod
+    def _fake_gh_pr_state(state: str):
+        """Fake ``subprocess.run`` that answers ``gh pr view --json state``."""
+
+        def _run(cmd, **kwargs):
+            proc = MagicMock()
+            if cmd[:3] == ["gh", "pr", "view"]:
+                proc.returncode = 0
+                proc.stdout = json.dumps({"state": state})
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        return _run
+
+    def test_no_claimed_artifact_is_a_noop(self, monkeypatch):
+        """No stage claims completion → verification never runs a live check
+        and leaves stage_artifacts_verified/unverified_stage unset."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        run_mock = MagicMock()
+        monkeypatch.setattr("subprocess.run", run_mock)
+
+        stage_states = {"PLAN": "completed", "BUILD": "in_progress", "PATCH": "pending"}
+        meta: dict = {}
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=1267,
+            stage_states=stage_states,
+            meta=meta,
+        )
+
+        # PLAN claims completed but no plan is resolvable (no slug) -- the
+        # PLAN check itself no-ops without a slug; BUILD/PATCH are not
+        # claimed completed. No live check should have run at all.
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+        run_mock.assert_not_called()
+
+    def test_false_build_claim_sets_unverified_stage(self, monkeypatch, caplog):
+        """BUILD claims completed but the claimed PR is not OPEN live →
+        stage_artifacts_verified=False, unverified_stage='BUILD', and an
+        observable warning names the stage and the missing artifact."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("CLOSED"))
+
+        stage_states = {"BUILD": "completed"}
+        meta = {"pr_number": 555}
+
+        with caplog.at_level(logging.WARNING):
+            context = sdlc_next_skill._build_context(
+                proposed_skill=None,
+                issue_number=1267,
+                stage_states=stage_states,
+                meta=meta,
+            )
+
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "BUILD"
+        assert any(
+            "BUILD" in record.message and "555" in record.message for record in caplog.records
+        )
+
+    def test_true_build_claim_leaves_context_unset(self, monkeypatch):
+        """BUILD claims completed and the PR really is OPEN live → no-op
+        (advances normally, g8 never fires)."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("OPEN"))
+
+        stage_states = {"BUILD": "completed"}
+        meta = {"pr_number": 555}
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=1267,
+            stage_states=stage_states,
+            meta=meta,
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+
+    def test_fails_open_on_infra_error(self, monkeypatch, caplog):
+        """subprocess.TimeoutExpired/OSError from the gh/git call → advances
+        (stage_artifacts_verified stays unset/True) with a warning logged."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+
+        def _raise_timeout(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
+
+        monkeypatch.setattr("subprocess.run", _raise_timeout)
+
+        stage_states = {"BUILD": "completed"}
+        meta = {"pr_number": 555}
+
+        with caplog.at_level(logging.WARNING):
+            context = sdlc_next_skill._build_context(
+                proposed_skill=None,
+                issue_number=1267,
+                stage_states=stage_states,
+                meta=meta,
+            )
+
+        assert "stage_artifacts_verified" not in context
+        assert any("infra error" in record.message for record in caplog.records)
+
+    def test_fails_open_on_os_error(self, monkeypatch, caplog):
+        """OSError (e.g. gh binary missing) also fails open with a warning."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+
+        def _raise_os_error(cmd, **kwargs):
+            raise OSError("gh: command not found")
+
+        monkeypatch.setattr("subprocess.run", _raise_os_error)
+
+        stage_states = {"BUILD": "completed"}
+        meta = {"pr_number": 555}
+
+        with caplog.at_level(logging.WARNING):
+            context = sdlc_next_skill._build_context(
+                proposed_skill=None,
+                issue_number=1267,
+                stage_states=stage_states,
+                meta=meta,
+            )
+
+        assert "stage_artifacts_verified" not in context
+        assert any("infra error" in record.message for record in caplog.records)
+
+    def test_non_infra_exception_does_not_silently_advance(self, monkeypatch, caplog):
+        """A logic bug (TypeError from a malformed artifact spec) must NOT be
+        swallowed by the narrowed fail-open catch -- it surfaces (raises)
+        and is logged at error level, never silently advancing."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+
+        def _raise_type_error(cmd, **kwargs):
+            raise TypeError("malformed artifact spec")
+
+        monkeypatch.setattr("subprocess.run", _raise_type_error)
+
+        stage_states = {"BUILD": "completed"}
+        meta = {"pr_number": 555}
+
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(TypeError):
+                sdlc_next_skill._build_context(
+                    proposed_skill=None,
+                    issue_number=1267,
+                    stage_states=stage_states,
+                    meta=meta,
+                )
+
+        assert any("unexpected" in record.message.lower() for record in caplog.records)
+
+    def test_missing_stage_states_or_meta_skips_verification(self, monkeypatch):
+        """Legacy callers that only pass proposed_skill/issue_number (no
+        stage_states/meta) must not trigger verification at all."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        run_mock = MagicMock()
+        monkeypatch.setattr("subprocess.run", run_mock)
+
+        context = sdlc_next_skill._build_context(proposed_skill=None, issue_number=1267)
+
+        assert "stage_artifacts_verified" not in context
+        run_mock.assert_not_called()
