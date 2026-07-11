@@ -239,13 +239,13 @@ No agent integration required. This is a bridge-and-reflection-internal change: 
 
 ## Success Criteria
 
-- [ ] JSON-branch of `_parse_categorized_observations` drops shrapnel-shaped and refusal-phrase observation values (new unit tests pass).
-- [ ] A legitimate observation that resembles code/config still parses and is saved (regression test passes).
-- [ ] `_find_open_audit_issue` (renamed `_find_recent_audit_issue`) suppresses re-filing when a matching-prefix issue was closed within `CLUSTER_REFILE_SUPPRESSION_DAYS` (14 days); re-files when closed beyond the window (new unit tests pass).
-- [ ] Audit issue-body "close to suppress" guidance text matches the implemented window behavior.
-- [ ] Existing `TestParseCategorizedObservations`, refusal/scoping narrowness tests, and `test_files_new_issue_when_no_open_dup` still pass.
-- [ ] Tests pass (`/do-test`).
-- [ ] Documentation updated (`/do-docs`).
+- [x] JSON-branch of `_parse_categorized_observations` drops shrapnel-shaped and refusal-phrase observation values (new unit tests pass).
+- [x] A legitimate observation that resembles code/config still parses and is saved (regression test passes).
+- [x] `_find_open_audit_issue` (renamed `_find_recent_audit_issue`) suppresses re-filing when a matching-prefix issue was closed within `CLUSTER_REFILE_SUPPRESSION_DAYS` (14 days); re-files when closed beyond the window (new unit tests pass).
+- [x] Audit issue-body "close to suppress" guidance text matches the implemented window behavior.
+- [x] Existing `TestParseCategorizedObservations`, refusal/scoping narrowness tests, and `test_files_new_issue_when_no_open_dup` still pass.
+- [x] Tests pass (`/do-test`).
+- [x] Documentation updated (`/do-docs`).
 
 ## Team Orchestration
 
