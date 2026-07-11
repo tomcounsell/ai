@@ -239,7 +239,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -265,7 +265,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -298,7 +298,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -335,7 +335,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         oversize = "x" * 600_000
         caplog.set_level(logging.WARNING, logger="agent.sdk_client")
@@ -374,7 +374,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -415,7 +415,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -447,7 +447,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -483,7 +483,7 @@ class TestGetResponseViaHarnessSystemPrompt:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = cmd
-            return ("done", None, 0, None, None, None, 0, 0)
+            return ("done", None, 0, None, None, None, 0, 0, None)
 
         oversize = "x" * 600_000
         with patch(
@@ -532,7 +532,7 @@ async def test_pm_persona_overlay_present():
 
     async def fake_run(cmd, working_dir, proc_env, **_kw):
         captured["cmd"] = cmd
-        return ("done", None, 0, None, None, None, 0, 0)
+        return ("done", None, 0, None, None, None, 0, 0, None)
 
     with patch(
         "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -566,7 +566,7 @@ async def test_arg_max_guard_trips():
 
     async def fake_run(cmd, working_dir, proc_env, **_kw):
         captured["cmd"] = cmd
-        return ("done", None, 0, None, None, None, 0, 0)
+        return ("done", None, 0, None, None, None, 0, 0, None)
 
     oversize = "x" * 600_000
     with patch(

@@ -1,20 +1,32 @@
-"""PM-prefix routing and exit classification for the headless session runner.
+"""PM-turn routing and exit classification for the headless session runner.
 
-``classify_pm_prefix`` is a deterministic regex parse of the first line of the
-PM's turn text — the ``[/user]`` / ``[/complete]`` convention the PM persona
-is primed to follow. It is stateless and never an LLM call.
+Routing is **schema-first** (plan #2000 Task 2.3): the PM's terminal turn
+carries a ``--json-schema``-validated ``structured_output`` object
+(``{route, message, file_paths?}``) that :func:`validate_structured_route`
+turns directly into a :class:`ClassificationResult` — no text parsing.
+``classify_pm_prefix`` — a deterministic regex parse of the first line of
+the PM's turn text, the pre-schema ``[/user]`` / ``[/complete]`` convention
+— is demoted to a **fallback only**, used exactly when
+``structured_output`` is absent or fails :func:`validate_structured_route`
+(the CLI's own schema-validation failure signal — see
+``docs/plans/harness-adapter-seam.md`` "Task 2.1 empirical results"). The
+compliance nudge (``agent/session_runner/runner.py``) remains the final
+backstop when even the regex fallback misses. Both classifiers are
+stateless — no call history, no persona context, no LLM call.
 
-The input is the PM's turn text as parsed from the stream-json event stream
-(or the flush-safe JSONL transcript named by the ``Stop`` hook payload).
-Stream-json carries no ANSI escapes, so — unlike the retired PTY classifier —
-there is no escape-stripping step here.
+The regex-fallback input is the PM's turn text as parsed from the
+stream-json event stream (or the flush-safe JSONL transcript named by the
+``Stop`` hook payload). Stream-json carries no ANSI escapes, so — unlike
+the retired PTY classifier — there is no escape-stripping step here.
 
 The ``[/dev]`` token is retired: the PM spawns and continues its ``dev``
 subagent *inside* its own turn via the harness's agent mechanism (plan
 #1924, D1-amended), so there is no external Dev relay to route to. A legacy
-``[/dev]`` emission is still recognized defensively (the runner treats it as
-"continue", never as a delivery), and the ``[/dev:pi]``-style harness suffix
-is gone entirely — Dev runs on the claude harness only.
+``[/dev]`` emission is still recognized defensively by the regex fallback
+(the runner treats it as "continue", never as a delivery), and the
+``[/dev:pi]``-style harness suffix is gone entirely — Dev runs on the
+claude harness only. The schema's ``route`` enum has no ``"dev"`` member —
+a schema-validated turn can only ever route ``user``/``complete``/``continue``.
 
 This module also owns the exit-classification tables: which
 ``exit_reason`` values are clean, which trigger the wrap-up guard, and which
@@ -30,45 +42,126 @@ downstream.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
-# Prefix-token classification (deterministic regex parse)
+# Schema-first classification (plan #2000 Task 2.3)
 # ---------------------------------------------------------------------------
 
-# The prefix-token convention. The PM persona body primes the PM to begin
-# every output with one of these literal tokens on a line of its own. The
-# strict regex requires the token to be the entire content of its line (no
-# trailing text, allowed trailing whitespace). It is matched against the
-# **first non-empty line** of the PM's turn text using re.match. No harness
-# suffix is recognized — Dev runs on the claude harness only.
+# The PM turn schema, passed to the claude harness via ``--json-schema``
+# (``agent/session_runner/harness/claude.py``). The CLI validates the
+# model's ``StructuredOutput`` tool call against this schema out-of-band and
+# — on success only — attaches the parsed object as ``structured_output`` on
+# the terminal stream-json ``result`` event (Task 2.1 empirical finding).
+# ``route`` has no ``"dev"`` member: the dev subagent is spawned inline via
+# the Agent tool, never routed to externally (see module docstring).
+# ``file_paths`` is optional — closes #1802 (PM file-capable send path).
+PM_TURN_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "route": {"type": "string", "enum": ["user", "complete", "continue"]},
+        "message": {"type": "string"},
+        "file_paths": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["route", "message"],
+}
+
+# Analytics metric names for the schema-routing fallback-rate alert (plan
+# #2000 Task 2.3 "Schema routing" — a healthy schema path is ~0%; a
+# sustained breach means the schema contract has silently regressed).
+# Recorded via ``analytics.collector.record_metric`` by the runner on every
+# classified top-level turn; ``monitoring/schema_routing_alert.py`` queries
+# them for the rolling-window threshold check.
+SCHEMA_ROUTING_TURN_METRIC = "session_runner.pm_turn_routed"
+SCHEMA_ROUTING_FALLBACK_METRIC = "session_runner.schema_routing_fallback"
+
+# The session-telemetry event type emitted whenever routing falls back from
+# the schema to the prefix-regex classifier (observable, never silent).
+SCHEMA_ROUTING_FALLBACK_EVENT = "schema_routing_fallback"
+
+# ---------------------------------------------------------------------------
+# Prefix-token classification (deterministic regex parse — fallback only)
+# ---------------------------------------------------------------------------
+
+# The prefix-token convention. Demoted to a fallback (Task 2.3): only
+# consulted when the schema-validated ``structured_output`` is absent or
+# invalid. The strict regex requires the token to be the entire content of
+# its line (no trailing text, allowed trailing whitespace). It is matched
+# against the **first non-empty line** of the PM's turn text using re.match.
+# No harness suffix is recognized — Dev runs on the claude harness only.
 PREFIX_TOKEN_RE = re.compile(r"^\[/(dev|user|complete)\]\s*$")
 PREFIX_TOKEN_FALLBACK_RE = re.compile(r"\[/(dev|user|complete)\]")
 
 # Destination: where the routed output goes. "dev" is legacy-defensive only
-# (the runner continues the loop on it); "unknown" is a compliance miss.
-Destination = Literal["dev", "user", "complete", "unknown"]
+# (the runner continues the loop on it) and reachable only via the
+# prefix-regex fallback — the schema's ``route`` enum has no "dev" member.
+# "continue" is a deliberate schema decision (not a compliance miss);
+# "unknown" is a compliance miss (neither schema nor regex classified it).
+Destination = Literal["dev", "user", "complete", "continue", "unknown"]
 
 
 @dataclass
 class ClassificationResult:
     """The classifier's routing decision for a PM turn.
 
-    ``destination`` is the routing target. ``payload`` is the verbatim text
-    following the prefix token — for ``user``, the user-facing message; for
-    ``complete``, the trailing one-sentence summary; for ``unknown``, an
-    empty string (the runner surfaces a compliance miss).
+    ``destination`` is the routing target. ``payload`` is the user-facing
+    text — for ``user``, the user-facing message; for ``complete``, the
+    trailing one-sentence summary; for ``unknown``, an empty string (the
+    runner surfaces a compliance miss). ``file_paths`` is the schema's
+    optional attachment list (always ``[]`` on a regex-fallback result — the
+    prefix-token convention carries no file slot).
 
-    ``compliance_miss`` is True iff the PM turn text had no strict prefix
-    token on its first line.
+    ``compliance_miss`` is True iff neither the schema nor (on fallback) the
+    strict prefix regex classified the turn.
     """
 
     destination: Destination
     payload: str
     compliance_miss: bool
     raw_first_line: str
+    file_paths: list[str] = field(default_factory=list)
+
+
+def validate_structured_route(structured: dict[str, Any] | None) -> ClassificationResult | None:
+    """Build a :class:`ClassificationResult` from schema-validated PM output.
+
+    ``structured`` is :attr:`~agent.session_runner.harness.base.TurnResult.
+    structured_output` — present only when the claude CLI's own
+    ``--json-schema`` validation succeeded (Task 2.1 empirical finding: an
+    invalid/refused structured output surfaces as the key being ABSENT from
+    the terminal ``result`` event, not a malformed value). This function
+    still re-validates defensively (shape drift, a stubbed/faked
+    ``structured_output`` in tests) rather than trusting presence alone.
+
+    Returns ``None`` — never raises — when ``structured`` is absent or does
+    not match the expected shape; the caller falls back to
+    :func:`classify_pm_prefix` and should emit
+    :data:`SCHEMA_ROUTING_FALLBACK_EVENT` telemetry in that case.
+    """
+    if not isinstance(structured, dict):
+        return None
+    route = structured.get("route")
+    if route not in ("user", "complete", "continue"):
+        return None
+    message = structured.get("message")
+    if not isinstance(message, str):
+        return None
+    raw_file_paths = structured.get("file_paths")
+    if isinstance(raw_file_paths, list) and all(isinstance(p, str) for p in raw_file_paths):
+        file_paths = list(raw_file_paths)
+    else:
+        file_paths = []
+    payload = message.strip()
+    first_line = next((line for line in message.splitlines() if line.strip()), "")
+    return ClassificationResult(
+        destination=route,  # type: ignore[arg-type]
+        payload=payload,
+        compliance_miss=False,
+        raw_first_line=first_line,
+        file_paths=file_paths,
+    )
 
 
 def classify_pm_prefix(pm_text: str) -> ClassificationResult:

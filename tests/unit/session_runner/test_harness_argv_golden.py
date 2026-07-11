@@ -221,8 +221,9 @@ class TestStoreClaudeSessionUuidParity:
 
 
 def _make_fake_run_harness_subprocess(responses):
-    """Fake replacement for _run_harness_subprocess replaying an 8-tuple per
-    call, invoking on_exit_status faithfully (mirrors
+    """Fake replacement for _run_harness_subprocess replaying a 9-tuple per
+    call (plan #2000 Task 2.3 added structured_output at the end), invoking
+    on_exit_status faithfully (mirrors
     test_harness_stale_uuid_result_preservation.py's helper)."""
     state = {"i": 0, "calls": 0}
 
@@ -241,6 +242,7 @@ def _make_fake_run_harness_subprocess(responses):
             None,
             spec.get("num_turns", 0),
             spec.get("tool_calls", 0),
+            spec.get("structured_output"),
         )
 
     _fake.state = state  # type: ignore[attr-defined]

@@ -18,9 +18,10 @@ from the primary invocation's ``on_exit_status`` callback), NOT on
 returns a non-None string in BOTH the result-event branch (A) and the
 accumulated-partial-text branch (B). The tests below pin all four branches.
 
-``_run_harness_subprocess`` return tuple (8-tuple):
+``_run_harness_subprocess`` return tuple (9-tuple; plan #2000 Task 2.3 added
+``structured_output`` at the end):
     (result_text, session_id_from_harness, returncode, usage, cost_usd,
-     stderr_snippet, num_turns, tool_call_count)
+     stderr_snippet, num_turns, tool_call_count, structured_output)
 Its ``on_exit_status(returncode, result_event_fired)`` callback is the ONLY
 precise signal for "a result event fired." The fakes below invoke it faithfully.
 """
@@ -45,10 +46,11 @@ def _make_fake_run(responses):
     """Build a fake ``_run_harness_subprocess`` that replays ``responses``.
 
     Each item is a dict with keys: ``result_text``, ``returncode``, ``fired``,
-    and optional ``session_id`` / ``num_turns`` / ``tool_calls``. The fake
-    invokes the passed ``on_exit_status(returncode, fired)`` callback exactly as
-    the real helper does (``sdk_client.py`` line ~3089) before returning the
-    8-tuple. It records the number of invocations on ``.calls``.
+    and optional ``session_id`` / ``num_turns`` / ``tool_calls`` /
+    ``structured_output``. The fake invokes the passed
+    ``on_exit_status(returncode, fired)`` callback exactly as the real helper
+    does (``sdk_client.py`` line ~3089) before returning the 9-tuple. It
+    records the number of invocations on ``.calls``.
     """
     state = {"i": 0, "calls": 0}
 
@@ -69,6 +71,7 @@ def _make_fake_run(responses):
             None,  # stderr_snippet
             spec.get("num_turns", 0),
             spec.get("tool_calls", 0),
+            spec.get("structured_output"),
         )
 
     _fake.state = state  # type: ignore[attr-defined]

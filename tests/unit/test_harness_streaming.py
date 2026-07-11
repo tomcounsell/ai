@@ -136,6 +136,7 @@ class TestGetResponseViaHarness:
                 _stderr,
                 num_turns,
                 tool_call_count,
+                _structured_output,
             ) = await _run_harness_subprocess(["claude", "-p"], "/tmp", {})
 
         assert result_text == "Done."

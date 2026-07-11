@@ -106,7 +106,7 @@ class TestEngHarnessFullChain:
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = list(cmd)
             captured["proc_env"] = dict(proc_env)
-            return ("ok", None, 0, None, None, None, 0, 0)
+            return ("ok", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",
@@ -171,7 +171,7 @@ class TestEngHarnessFullChain:
 
         async def fake_run(cmd, working_dir, proc_env, **_kw):
             captured["cmd"] = list(cmd)
-            return ("ok", None, 0, None, None, None, 0, 0)
+            return ("ok", None, 0, None, None, None, 0, 0, None)
 
         with patch(
             "agent.session_runner.harness.claude._run_harness_subprocess",

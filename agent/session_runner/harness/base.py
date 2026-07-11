@@ -41,6 +41,11 @@ class TurnRequest:
     Mirrors the pre-extraction ``get_response_via_harness()`` keyword
     arguments 1:1 — this is a behavior-preserving extraction (plan #2000
     Task 2.2), not a redesign of the turn contract.
+
+    ``json_schema`` (plan #2000 Task 2.3) is passed through to the harness's
+    ``--json-schema`` flag when set; ``None`` (the default) omits the flag
+    entirely — non-role harness callers (message drafter, probes) are
+    unaffected.
     """
 
     message: str
@@ -56,6 +61,7 @@ class TurnRequest:
     role: str | None = None
     start_new_session: bool = False
     harness_cmd: list[str] | None = None
+    json_schema: dict[str, Any] | None = None
 
 
 @dataclass

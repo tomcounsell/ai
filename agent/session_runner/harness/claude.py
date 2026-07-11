@@ -31,6 +31,7 @@ import shutil
 import signal
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from agent.session_runner.harness import events as _events
 from agent.session_runner.harness.base import TurnEvent, TurnRequest, TurnResult
@@ -179,12 +180,14 @@ async def get_response_via_harness(
     metered: bool = False,
     role: str | None = None,
     start_new_session: bool = False,
+    json_schema: dict | None = None,
     on_sdk_started: Callable[[int], None] | None = None,
     on_sdk_finished: Callable[[], None] | None = None,
     on_stdout_event: Callable[[], None] | None = None,
     on_init: Callable[[dict], None] | None = None,
     on_exit_status: Callable[[int | None, bool], None] | None = None,
     on_usage: Callable[[dict | None, float | None], None] | None = None,
+    on_structured_output: Callable[[dict | None], None] | None = None,
 ) -> str:
     """Run a CLI harness (e.g. claude -p) and return the final result text.
 
@@ -193,6 +196,16 @@ async def get_response_via_harness(
     invocation's status is the turn's authoritative exit shape. The session
     runner's role driver uses it to classify a nonzero exit without a
     ``result`` event as a failed turn (residual #1916 surface).
+
+    ``json_schema`` (plan #2000 Task 2.3), when provided, is JSON-encoded
+    onto ``--json-schema`` in the subprocess argv, requesting a
+    schema-validated ``StructuredOutput`` tool call. ``on_structured_output``
+    fires once, after the LAST subprocess invocation (mirroring
+    ``result_text``'s own fallback-retry reassignment), with the parsed
+    object from the terminal ``result`` event's ``structured_output`` key —
+    or ``None`` when the key is absent (no schema requested, or the CLI's
+    own schema validation gave up; Task 2.1 empirical finding: neither exit
+    code nor ``is_error`` distinguishes the two, only key presence does).
 
     ``start_new_session=True`` spawns the subprocess in its own process
     group (session-runner role turns) so a preempt watcher can signal the
@@ -302,6 +315,14 @@ async def get_response_via_harness(
         harness_cmd.extend(["--settings", settings_path])
         logger.info(f"[harness] Using --settings {settings_path} for session_id={session_id}")
 
+    # Schema-first routing (plan #2000 Task 2.3): request a schema-validated
+    # StructuredOutput tool call. Applies to every subprocess invocation for
+    # this turn (primary + any fallback retry below share ``harness_cmd``),
+    # so a stale-UUID/image-dimension fallback still asks for the same
+    # structured shape.
+    if json_schema:
+        harness_cmd.extend(["--json-schema", json.dumps(json_schema)])
+
     # System prompt injection (issue #1148). Use --append-system-prompt
     # (NOT --system-prompt) so Claude Code's default tool-handling protocol is
     # preserved — the PM persona is additive guidance, not a full replacement.
@@ -391,9 +412,9 @@ async def get_response_via_harness(
         if on_exit_status is not None:
             on_exit_status(rc, fired)
 
-    # Call site 1 of 3 — primary harness invocation. 8-tuple unpack
+    # Call site 1 of 3 — primary harness invocation. 9-tuple unpack
     # (issue #1099 Mode 1 added stderr_snippet; issue #1245 added num_turns
-    # and tool_call_count).
+    # and tool_call_count; plan #2000 Task 2.3 added structured_output).
     (
         result_text,
         session_id_from_harness,
@@ -403,6 +424,7 @@ async def get_response_via_harness(
         stderr_snippet,
         this_num_turns,
         this_tool_call_count,
+        structured_output,
     ) = await _run_harness_subprocess(
         cmd,
         working_dir,
@@ -435,8 +457,9 @@ async def get_response_via_harness(
         if full_context_message is not None:
             fallback_msg = _apply_context_budget(full_context_message)
             fallback_cmd = harness_cmd + [fallback_msg]
-            # Call site 2 of 3 — image-dimension fallback. 8-tuple unpack
-            # (issue #1099 Mode 1 + issue #1245).
+            # Call site 2 of 3 — image-dimension fallback. 9-tuple unpack
+            # (issue #1099 Mode 1 + issue #1245; plan #2000 Task 2.3 added
+            # structured_output).
             (
                 result_text,
                 session_id_from_harness,
@@ -446,6 +469,7 @@ async def get_response_via_harness(
                 stderr_snippet,
                 this_num_turns,
                 this_tool_call_count,
+                structured_output,
             ) = await _run_harness_subprocess(
                 fallback_cmd,
                 working_dir,
@@ -500,8 +524,9 @@ async def get_response_via_harness(
                     f"[harness] Fallback budget: {original_len} → {len(fallback_msg)} chars"
                 )
             fallback_cmd = harness_cmd + [fallback_msg]
-            # Call site 3 of 3 — stale-UUID fallback. 8-tuple unpack
-            # (issue #1099 Mode 1 + issue #1245).
+            # Call site 3 of 3 — stale-UUID fallback. 9-tuple unpack
+            # (issue #1099 Mode 1 + issue #1245; plan #2000 Task 2.3 added
+            # structured_output).
             # We now DO capture the final returncode + stderr_snippet because the
             # Mode 1 sentinel check below inspects the LAST subprocess call's
             # exit state (both primary and fallback must fail to declare
@@ -515,6 +540,7 @@ async def get_response_via_harness(
                 stderr_snippet,
                 this_num_turns,
                 this_tool_call_count,
+                structured_output,
             ) = await _run_harness_subprocess(
                 fallback_cmd,
                 working_dir,
@@ -649,6 +675,16 @@ async def get_response_via_harness(
         except Exception as _cb_err:  # noqa: BLE001
             logger.warning("on_usage callback raised: %s", _cb_err)
 
+    # Schema-first routing (plan #2000 Task 2.3): fires once, after the LAST
+    # subprocess invocation — mirrors result_text's own fallback-retry
+    # reassignment, so a stale-UUID/image-dimension retry's structured
+    # output (or lack thereof) is what the caller sees.
+    if on_structured_output is not None:
+        try:
+            on_structured_output(structured_output)
+        except Exception as _cb_err:  # noqa: BLE001
+            logger.warning("on_structured_output callback raised: %s", _cb_err)
+
     if result_text is not None:
         return result_text
     return ""
@@ -676,6 +712,7 @@ async def _run_harness_subprocess(
     str | None,
     int,
     int,
+    dict | None,
 ]:
     """Execute a harness subprocess and parse stream-json output.
 
@@ -686,7 +723,7 @@ async def _run_harness_subprocess(
     surface). Callback exceptions are caught and logged.
 
     Returns ``(result_text, session_id_from_harness, returncode, usage, cost_usd,
-    stderr_snippet, num_turns, tool_call_count)``.
+    stderr_snippet, num_turns, tool_call_count, structured_output)``.
 
     * ``result_text``: parsed result string from the final `result` event, or
       accumulated text from stream events when no result event fires, or
@@ -714,10 +751,17 @@ async def _run_harness_subprocess(
     * ``tool_call_count``: count of ``tool_use`` content blocks observed
       across `assistant` events during this subprocess (issue #1245).
       Caller accumulates onto AgentSession.tool_call_count.
+    * ``structured_output``: the `result` event's ``structured_output``
+      dict (plan #2000 Task 2.3), present only when a schema was requested
+      (``--json-schema``) AND the CLI's own schema validation succeeded.
+      ``None`` when no schema was requested, or the CLI gave up after its
+      internal compliance-nudge retry (Task 2.1 empirical finding: this is
+      the ONLY reliable fallback-detection signal — exit code and
+      ``is_error`` do not change).
 
     On binary-not-found, returncode is None and result_text carries the
-    error message (usage, cost_usd, stderr_snippet are all None,
-    num_turns and tool_call_count are 0).
+    error message (usage, cost_usd, stderr_snippet, structured_output are
+    all None, num_turns and tool_call_count are 0).
 
     Optional callbacks (issue #1036, #1269):
         on_sdk_started(pid): fires once, immediately after the subprocess is
@@ -767,7 +811,7 @@ async def _run_harness_subprocess(
         )
     except FileNotFoundError as e:
         logger.error(f"Harness binary not found: {e}")
-        return (f"Error: CLI harness not found — {e}", None, None, None, None, None, 0, 0)
+        return (f"Error: CLI harness not found — {e}", None, None, None, None, None, 0, 0, None)
 
     # Fire SDK-started callback once the pid is known (#1036).
     if on_sdk_started is not None and proc.pid is not None:
@@ -779,6 +823,9 @@ async def _run_harness_subprocess(
     full_text = ""
     result_text = None
     session_id_from_harness = None
+    # Schema-first routing (plan #2000 Task 2.3): the `result` event's
+    # `structured_output` key, present only on a schema-validated success.
+    structured_output: dict | None = None
     _first_stdout_seen = False  # TTFT sentinel (issue #1227)
     # Token + cost fields extracted off the `result` event (issue #1128).
     # Mirrors the SDK path's `ResultMessage.usage` / `.total_cost_usd`
@@ -850,6 +897,13 @@ async def _run_harness_subprocess(
             if event_type == "result":
                 result_text = data.get("result", "")
                 session_id_from_harness = data.get("session_id")
+                # Schema-first routing (plan #2000 Task 2.3): present iff
+                # --json-schema was requested AND the CLI's own validation
+                # succeeded (Task 2.1 empirical finding — absence, not a
+                # malformed value, is the fallback-detection signal).
+                raw_structured = data.get("structured_output")
+                if isinstance(raw_structured, dict):
+                    structured_output = raw_structured
                 # Pillar A turn boundary (issue #1172). Bumps last_turn_at on
                 # the in-flight AgentSession so the dashboard can show how
                 # recently the SDK completed a turn. Best-effort, never raises.
@@ -1001,6 +1055,7 @@ async def _run_harness_subprocess(
             stderr_snippet,
             num_turns,
             tool_call_count,
+            structured_output,
         )
     if full_text:
         logger.warning(
@@ -1016,6 +1071,7 @@ async def _run_harness_subprocess(
             stderr_snippet,
             num_turns,
             tool_call_count,
+            structured_output,
         )
     logger.error("Harness exited without a result event and no accumulated text")
     return (
@@ -1027,6 +1083,7 @@ async def _run_harness_subprocess(
         stderr_snippet,
         num_turns,
         tool_call_count,
+        structured_output,
     )
 
 
@@ -1253,6 +1310,7 @@ class ClaudeHarnessAdapter:
         result_event_fired: bool | None = None
         usage: dict | None = None
         cost_usd: float | None = None
+        structured_output: dict[str, Any] | None = None
 
         def _emit(event_type: str, data: dict | None = None) -> None:
             evt = TurnEvent(type=event_type, data=data or {})
@@ -1288,6 +1346,10 @@ class ClaudeHarnessAdapter:
             usage = u
             cost_usd = c
 
+        def _on_structured_output(so: dict[str, Any] | None) -> None:
+            nonlocal structured_output
+            structured_output = so
+
         harness_fn = self._harness_fn
         if harness_fn is None:
             # Deferred import (not module-load-time): resolves whatever
@@ -1310,12 +1372,14 @@ class ClaudeHarnessAdapter:
             metered=request.metered,
             role=request.role,
             start_new_session=request.start_new_session,
+            json_schema=request.json_schema,
             on_sdk_started=_on_sdk_started,
             on_sdk_finished=_on_sdk_finished,
             on_stdout_event=_on_stdout_event,
             on_init=_on_init,
             on_exit_status=_on_exit_status,
             on_usage=_on_usage,
+            on_structured_output=_on_structured_output,
         )
 
         _emit(

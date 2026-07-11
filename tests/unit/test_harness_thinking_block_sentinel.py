@@ -9,7 +9,8 @@ These tests mock ``_run_harness_subprocess`` so they run instantly without a
 real claude CLI binary, API key, or network. The mock signature follows the
 6-tuple return introduced for issue #1099:
 ``(result_text, session_id, returncode, usage, cost_usd, stderr_snippet,
-num_turns, tool_call_count)`` — widened from 6 to 8 elements by issue #1245.
+num_turns, tool_call_count, structured_output)`` — widened from 6 to 8
+elements by issue #1245, then to 9 by plan #2000 Task 2.3.
 """
 
 import pytest
@@ -30,7 +31,7 @@ async def test_sentinel_in_stderr_with_nonzero_exit_raises(monkeypatch):
     )
 
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
-        return (None, None, 1, None, None, stderr_snippet, 0, 0)
+        return (None, None, 1, None, None, stderr_snippet, 0, 0, None)
 
     monkeypatch.setattr(
         "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
@@ -62,7 +63,7 @@ async def test_sentinel_message_is_user_facing(monkeypatch):
     stderr_snippet = f"{THINKING_BLOCK_SENTINEL} ... cannot be modified"
 
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
-        return (None, None, 1, None, None, stderr_snippet, 0, 0)
+        return (None, None, 1, None, None, stderr_snippet, 0, 0, None)
 
     monkeypatch.setattr(
         "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
@@ -91,7 +92,7 @@ async def test_healthy_run_no_sentinel_returns_normally(monkeypatch):
 
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         # returncode 0 — _run_harness_subprocess returns stderr_snippet=None.
-        return (expected, "uuid-1", 0, None, None, None, 0, 0)
+        return (expected, "uuid-1", 0, None, None, None, 0, 0, None)
 
     monkeypatch.setattr(
         "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
@@ -111,7 +112,7 @@ async def test_disable_env_var_skips_sentinel_check(monkeypatch):
     stderr_snippet = f"{THINKING_BLOCK_SENTINEL} ... cannot be modified"
 
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
-        return (None, None, 1, None, None, stderr_snippet, 0, 0)
+        return (None, None, 1, None, None, stderr_snippet, 0, 0, None)
 
     monkeypatch.setattr(
         "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
@@ -141,7 +142,7 @@ async def test_sentinel_no_raise_on_zero_exit(monkeypatch):
         # NOTE: stderr_snippet is None on returncode==0 paths in real code.
         # Pass None here to match the real contract — the test asserts the
         # detector is rc-gated regardless of stderr content.
-        return ("Healthy result.", "uuid-1", 0, None, None, None, 0, 0)
+        return ("Healthy result.", "uuid-1", 0, None, None, None, 0, 0, None)
 
     monkeypatch.setattr(
         "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
