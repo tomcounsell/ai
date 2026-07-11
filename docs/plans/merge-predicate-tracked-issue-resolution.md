@@ -1,11 +1,13 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-12
 tracking: https://github.com/tomcounsell/ai/issues/2034
 last_comment_id:
+revision_applied: true
+revision_applied_at: 2026-07-11T19:13:27Z
 ---
 
 # merge_predicate: resolve the SDLC-tracked issue, not the first Closes #N
@@ -106,36 +108,56 @@ Fallback: no session for slug (or ambiguous) → use first `Closes #N` from body
 
 **Scope fence (load-bearing):** the build touches **`tools/merge_predicate.py` and its test file ONLY**. It MUST NOT modify `agent/sdk_client.py`, `agent/session_runner/`, `agent/sdlc_router.py`, `models/agent_session.py`, or `tools/sdlc_stage_query.py` (other lanes / #2000 own those). No new `sdlc-tool` subcommand.
 
-1. **Add `_resolve_tracked_issue(head_ref: str, repo_root: Path) -> int | None`:**
-   - `slug = _derive_slug(head_ref)`; if empty (`main`/`master`/`HEAD`/empty), return `None`.
-   - Lazily import `from models.agent_session import AgentSession` inside a `try/except Exception` (mirrors the existing lazy-import fallback at lines 241-247). Any import or query failure returns `None` — never raises. This keeps the module stdlib-only at import time (bare hook interpreters degrade gracefully to body-parse).
-   - `sessions = list(AgentSession.query.filter(slug=slug).all())` (indexed KeyField lookup; precedent `reflections/sdlc_progress.py:198`).
-   - Collect the set of distinct non-null `issue_number` values across those sessions.
-     - Exactly one distinct value → return it (the tracked umbrella issue).
-     - Zero → return `None` (fall back to body parse).
-     - More than one distinct value → **ambiguous → return `None`** (fall back to body parse; refuse to guess which umbrella wins). This is the conservative branch; it is a defined, tested path.
+**Builder latitude (per critique concern #4):** this is a Small bug fix. The sole integration point is `evaluate_merge_predicate` at roughly `tools/merge_predicate.py:429-469`. The builder owns naming, exact signatures, control flow, and how the tracked/ambiguous/no-signal outcome is represented in code (a tri-state enum, a sentinel, a `(issue, ambiguous)` tuple — builder's call). The paragraphs below state the *required behavior*, not a literal diff. What is mandatory: group (a) still uses the raw `_extract_issue_number(body)` presence check; groups (b)/(c) key on the SDLC-tracked issue when one resolves; genuine ambiguity fails closed (below); and the guarded imports never raise into the merge-guard hook.
 
-2. **Wire preference in `evaluate_merge_predicate` (lines ~444-462):**
-   - After `pr, issue_number = _check_pr_state(...)` and `head_ref = (pr or {}).get("headRefName") or ""`, compute the effective issue only on the substrate branch:
+1. **Add a tracked-issue resolver (behavior contract, name at builder's discretion — e.g. `_resolve_tracked_issue(head_ref, repo_root)`):** it inspects the branch slug and returns one of three outcomes — a resolved tracked issue number, "no signal" (caller uses the body issue), or "ambiguous" (caller fails closed). Required behavior:
+   - `slug = _derive_slug(head_ref)`; if empty (`main`/`master`/`HEAD`/`None`/`session/`), outcome is **no signal** (single-issue PRs and non-substrate branches behave exactly as today).
+   - **Two explicit guards (per critique concern #3), not one broad wrapper:**
      ```
-     tracked = _resolve_tracked_issue(head_ref, root)
-     effective_issue = tracked if tracked is not None else issue_number
+     try:
+         from models.agent_session import AgentSession
+         from models.session_lifecycle import NON_TERMINAL_STATUSES
+         from config.project_key_resolver import resolve_project_key
+     except ImportError:
+         return <no signal>          # bare hook interpreter lacks repo deps → body-parse
+     try:
+         sessions = list(AgentSession.query.filter(slug=slug).all())
+     except Exception:
+         return <no signal>          # Redis/query outage degrades to body-parse, never crashes the hook
      ```
-   - Groups (b)/(c) run against `effective_issue`. When `tracked` is used and differs from the body issue, append a `note` recording the substitution (`"substrate checks keyed on SDLC-tracked issue #{tracked} (branch slug), not first Closes #{body}"`) for observability.
-   - The existing `elif issue_number is None:` guard becomes `elif effective_issue is None:` — groups (b)/(c) still skip with a note when neither source resolves.
+     The import guard is narrow (`ImportError` — the module genuinely absent); the query guard is broad (`Exception` — any runtime/Redis failure). This is the `reflections/sdlc_progress.py:190-205` shape, stated precisely rather than conflated with the `except ImportError`-only fallback elsewhere in this module.
+   - **Project-scope the candidate set (per critique concern #2):** compute `project = resolve_project_key(cwd=str(repo_root))` and keep only sessions whose `project_key == project`. A session in a different project (a cross-project slug collision) is discarded — treated identically to "no matching session". If `project` is `None` (projects.json unreadable / unresolvable), do **not** silently accept cross-project candidates: treat the whole lookup as **no signal** and emit a distinguishing note, since we cannot prove the slug belongs to this repo. `AgentSession` carries `project_key` (KeyField, `models/agent_session.py:143`) — no model change needed.
+   - **Filter to live sessions:** keep only sessions whose `status in NON_TERMINAL_STATUSES` (`models/session_lifecycle.py:72`), so a stale terminal session cannot pollute the distinct-issue set (precedent `reflections/sdlc_progress.py:201-205`).
+   - Collect the set of distinct non-null `issue_number` values across the surviving (project-scoped, live) sessions:
+     - **Exactly one** distinct value → outcome is that tracked umbrella issue.
+     - **Zero** → **no signal** (fall back to body parse; distinguishing note "no session found for slug {slug}").
+     - **More than one** distinct value → **ambiguous** (below). Do NOT return the body issue here — refuse to guess, and do not silently reuse the pre-fix first-match value.
+
+2. **Wire preference in `evaluate_merge_predicate` (~lines 444-462):**
+   - After `_check_pr_state(...)` yields the body `issue_number` and `head_ref` is available, consult the resolver and pick the effective issue for groups (b)/(c):
+     - **Tracked issue resolved** → groups (b)/(c) key on it. When it differs from the body issue, append a substitution `note` (e.g. `"substrate checks keyed on SDLC-tracked issue #{tracked} (branch slug), not first Closes #{body}"`) for observability.
+     - **No signal** → groups (b)/(c) key on the body `issue_number` exactly as today. Append a distinguishing note ("no session found for slug ..." vs "project unresolved for repo_root ...") so an on-call engineer can tell *which* no-signal path fired (per critique nit).
+     - **Ambiguous → FAIL CLOSED (per critique concern #1):** do not run groups (b)/(c) against a guessed issue. Instead append an explicit gate failure to `failed` — mirroring the existing `_check_pr_state` "PR body lacks a Closes/Fixes/Resolves #N issue link" append at `tools/merge_predicate.py:314-316` — e.g. `"tracked-issue lookup ambiguous: {N} distinct issues for branch slug '{slug}'; cannot determine which issue carries the SDLC substrate"`. This blocks the merge (fail-closed → human resolves or break-glass override), which is strictly safer than silently reverting to the first-match body issue this plan exists to eliminate. Ambiguity is a defined, tested outcome, not an incidental `None`.
+   - The `elif ... is None:` skip guard for groups (b)/(c) keys on the *effective* issue (the tracked issue when resolved, else the body issue): they still skip-with-note when neither the tracked lookup nor the body yields an issue. The ambiguous outcome does not reach this branch — it has already appended its own gate failure.
    - Group (a)'s "PR body lacks a Closes/Fixes/Resolves #N issue link" failure is untouched: it still triggers when `_extract_issue_number(body) is None`, independent of the tracked lookup.
 
-3. **Single-issue invariance:** for a normal single-issue PR, the session's `issue_number` equals the body's `Closes #N`, so `tracked == issue_number` → identical checks. If the session lookup fails (no Redis / bare interpreter), `tracked is None` → body issue used → identical to today. Both paths are covered by tests.
+3. **Single-issue invariance:** for a normal single-issue PR, the live session's `issue_number` equals the body's `Closes #N`, so the resolver returns that same issue → identical checks. If the session lookup fails (no Redis / bare interpreter / project unresolved), the outcome is no-signal → body issue used → identical to today. Both paths are covered by tests. The ambiguous fail-closed path is unreachable for a well-formed single-issue PR (one live session, one issue number).
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
-- [ ] The new `_resolve_tracked_issue` wraps the `AgentSession` import+query in `try/except Exception → return None`. Add a test that monkeypatches the import/query to raise and asserts the helper returns `None` (not a raise) AND the predicate falls back to the body issue (observable: groups b/c still run against the body issue).
-- [ ] No `except Exception: pass` silent-swallow — the except returns `None`, a defined fallback signal, and the substitution/fallback is surfaced via `notes`.
+- [ ] The resolver's query guard is exercised: monkeypatch the session query to raise and assert the helper degrades to the **no-signal** outcome (not a raise) AND the predicate falls back to the body issue (observable: groups b/c still run against the body issue). Cover the import-guard path too (simulate `AgentSession` import failure → no signal).
+- [ ] No `except Exception: pass` silent-swallow — each guard returns a defined outcome (no signal), and the fallback/substitution/ambiguity is surfaced via `notes` or a `failed` entry.
 
 ### Empty/Invalid Input Handling
-- [ ] `_resolve_tracked_issue("")`, `_resolve_tracked_issue("main")`, `_resolve_tracked_issue("session/")` all return `None` (no usable slug) — add direct unit tests.
-- [ ] `head_ref=None` path: `_derive_slug(None)` already handles this; assert `_resolve_tracked_issue` tolerates a `None`/empty head ref.
+- [ ] Empty/non-substrate head refs (`""`, `"main"`, `"session/"`, `None`) all resolve to **no signal** (no usable slug) — add direct unit tests; assert the helper tolerates a `None`/empty head ref via `_derive_slug`.
+
+### Ambiguity & Project-Scope Coverage (critique concerns #1, #2)
+- [ ] **Ambiguity fails closed:** two live, same-project sessions sharing the slug with *distinct* `issue_number`s → the predicate appends the explicit "tracked-issue lookup ambiguous" gate failure to `failed` and does NOT run groups (b)/(c) against a guessed issue. Assert the failure text names the slug and the distinct count.
+- [ ] **Terminal sessions don't pollute:** one live session (`issue_number=2029`) plus a terminal (e.g. `completed`) session carrying a different `issue_number` for the same slug → resolves to 2029, NOT ambiguous (the terminal one is filtered out before the distinct-issue set).
+- [ ] **Project scoping discards cross-project collisions:** a session with the matching slug but a *different* `project_key` than `resolve_project_key(repo_root)` is ignored → treated as no matching session (body fallback), never substituted. Assert groups (b)/(c) key on the body issue, not the foreign session's issue.
+- [ ] **Project unresolved → no signal:** monkeypatch `resolve_project_key` to return `None` → the whole lookup is no-signal (body fallback) with a distinguishing note, never accepting an unscoped candidate.
+- [ ] **Distinguishing notes:** assert the no-session note ("no session found for slug ...") and the project-unresolved note are distinct strings, so the fired path is verifiable from predicate output (critique nit).
 
 ### Error State Rendering
 - [ ] When groups (b)/(c) fail on the *tracked* issue (genuinely un-approved), the failed-check messages still name the leg. Assert a failing tracked-issue case produces the same named failures as today, not a swallowed pass.
@@ -192,14 +214,15 @@ No agent integration required — `tools/merge_predicate.py` is already reachabl
 - [ ] If no dedicated merge-predicate feature doc exists, add a short subsection to `docs/features/README.md`-indexed doc describing the tracked-issue resolution. (Confirm the exact target during build; the module docstring in `tools/merge_predicate.py` must also be updated to describe the new resolution order.)
 
 ### Inline Documentation
-- [ ] Docstring on `_resolve_tracked_issue` explaining slug→session→issue resolution, the ambiguity fallback, and the guarded import.
-- [ ] Update the module-level docstring's group (b)/(c) description to state they key on the tracked issue.
+- [ ] Docstring on the tracked-issue resolver explaining slug→(project-scoped, live)→session→issue resolution, the three outcomes (tracked / no-signal / ambiguous), the two guards, and the fail-closed ambiguity direction.
+- [ ] Update the module-level docstring's group (b)/(c) description to state they key on the SDLC-tracked issue derived from the branch slug, with first-`Closes` fallback and fail-closed on ambiguity.
 
 ## Success Criteria
 
-- [ ] `_resolve_tracked_issue` returns the umbrella `issue_number` for a `session/{slug}` head ref whose `AgentSession` carries it; returns `None` for no-slug, no-session, and ambiguous-multi-issue cases.
-- [ ] `evaluate_merge_predicate` keys groups (b)/(c) on the tracked issue when resolvable, else the body `Closes #N`; group (a) body-link presence check unchanged.
+- [ ] The resolver returns the umbrella `issue_number` for a `session/{slug}` head ref whose single live, same-project `AgentSession` carries it; yields **no signal** for no-slug, no-session, project-unresolved, and cross-project-only cases; yields **ambiguous** for >1 distinct `issue_number` among live same-project sessions.
+- [ ] `evaluate_merge_predicate` keys groups (b)/(c) on the tracked issue when resolved, else the body `Closes #N`; on **ambiguous** it appends an explicit fail-closed gate failure and does not guess; group (a) body-link presence check unchanged.
 - [ ] Regression test reproduces the PR #2033 shape (body `Closes #1871/#1267/#1760`, session slug → #2029) and asserts DOCS/REVIEW checks query #2029, not #1871.
+- [ ] Ambiguity, terminal-session filtering, and cross-project scoping each have a passing unit test (critique concerns #1, #2); no-session vs project-unresolved notes are distinct strings.
 - [ ] Single-issue-PR invariance test passes (tracked == body, and session-absent fallback == body).
 - [ ] Change is confined to `tools/merge_predicate.py` + `tests/unit/test_merge_predicate.py` (git diff touches no other source files).
 - [ ] Tests pass (`/do-test`)
@@ -230,11 +253,11 @@ No agent integration required — `tools/merge_predicate.py` is already reachabl
 - **Assigned To**: predicate-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- **Domain**: redis-popoto — read-only `AgentSession.query.filter(slug=...)`; never raw Redis; wrap import+query in `try/except Exception → return None`.
-- Add `_resolve_tracked_issue(head_ref, repo_root)` per Technical Approach (guarded lazy import, distinct-issue-set logic, ambiguity → None).
-- Wire `effective_issue` preference into `evaluate_merge_predicate`; update the `elif` guard; add the substitution `note`.
-- Update the module docstring (groups b/c key on tracked issue) and add the helper docstring.
-- Work in a dedicated slug worktree at `.worktrees/merge-predicate-tracked-issue-resolution/` on branch `session/merge-predicate-tracked-issue-resolution` — NOT the shared main checkout.
+- **Domain**: redis-popoto — read-only `AgentSession.query.filter(slug=...)`; never raw Redis. Guard the lazy imports (narrow `except ImportError`) and the query (broad `except Exception`) as two separate blocks per Technical Approach step 1; each degrades to the no-signal outcome, never raises.
+- Add the tracked-issue resolver per Technical Approach (name/signature at builder's discretion): two guards, project-scope via `resolve_project_key(cwd=repo_root)`, `NON_TERMINAL_STATUSES` filter, distinct-issue-set logic yielding tracked / no-signal / ambiguous.
+- Wire the effective-issue preference into `evaluate_merge_predicate` at its sole integration point (~`tools/merge_predicate.py:429-469`): tracked → key groups (b)/(c) on it with a substitution note; no-signal → body issue with a distinguishing note; ambiguous → append an explicit fail-closed gate failure (mirroring the `:314-316` append) and do not guess.
+- Update the module docstring (groups b/c key on tracked issue, fail-closed on ambiguity) and add the resolver docstring.
+- Build in the session worktree at `.worktrees/dev-186fff1e/` on branch `session/dev-186fff1e` (this session owns it) — NOT the shared main checkout.
 - Do NOT edit any file outside `tools/merge_predicate.py` and the new test.
 
 ### 2. Write regression + unit tests
@@ -245,9 +268,13 @@ No agent integration required — `tools/merge_predicate.py` is already reachabl
 - **Parallel**: false
 - Create `tests/unit/test_merge_predicate.py`:
   - Multi-issue-closure regression: body `Closes #1871/#1267/#1760`, monkeypatch `AgentSession.query.filter` (or the helper's session source) to yield a session with `slug` matching and `issue_number=2029`; assert `_check_docs_stage`/`_check_verdict_freshness` are called with `2029` (monkeypatch `_run_stage_query`/`_run_verdict_get` to record the issue arg).
-  - Single-issue invariance: body `Closes #42`, session `issue_number=42` → checks keyed on 42; and session-absent → falls back to 42.
-  - `_resolve_tracked_issue` unit cases: no-slug (`main`/empty/`session/`), no session, ambiguous multi-issue → all `None`; happy path → issue number.
-  - Guarded-import failure: patch the import to raise → helper returns `None`, predicate falls back to body issue.
+  - Single-issue invariance: body `Closes #42`, live same-project session `issue_number=42` → checks keyed on 42; and session-absent → falls back to 42.
+  - Resolver unit cases: no-slug (`main`/empty/`session/`) → no signal; no session → no signal; happy path → tracked issue number.
+  - **Ambiguity fails closed** (concern #1): two live same-project sessions, distinct `issue_number`s → predicate appends the "tracked-issue lookup ambiguous" gate failure; groups (b)/(c) are not keyed on a guessed issue.
+  - **Terminal-session filtering** (concern #1): a live `issue_number=2029` session plus a `completed` session with a different issue for the same slug → resolves to 2029, not ambiguous.
+  - **Project scoping** (concern #2): a matching-slug session with a foreign `project_key` is discarded → body fallback; and `resolve_project_key → None` → no signal with its distinguishing note.
+  - Guarded-import / query failure: patch the import (ImportError) and separately the query (Exception) to raise → resolver yields no signal, predicate falls back to body issue.
+  - Distinguishing notes: no-session note ≠ project-unresolved note (concern nit).
   - Group (a) unchanged: empty body → "PR body lacks a Closes/Fixes/Resolves #N issue link".
 
 ### 3. Validation
@@ -291,9 +318,15 @@ No agent integration required — `tools/merge_predicate.py` is already reachabl
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room), 2026-07-12. Verdict: READY TO BUILD (with concerns). 0 blockers, 4 concerns, 2 nits. -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
+| CONCERN | Risk & Robustness + History & Consistency | Ambiguous slug resolution (`>1` distinct `issue_number`, or a stale terminal session polluting the set) makes the resolver return `None`, so the effective issue silently falls back to the first-match body-parsed `issue_number` — the exact defect this plan fixes, for the umbrella case. | **RESOLVED — revision** (Technical Approach step 1/2, Failure Path "Ambiguity & Project-Scope Coverage", task 2) | Ambiguity is now a distinct tri-state outcome: filter to `NON_TERMINAL_STATUSES` before the distinct-issue set; on genuine ambiguity append an explicit fail-closed gate failure (mirrors `:314-316`) instead of reusing the body issue. Tested. |
+| CONCERN | Risk & Robustness | `AgentSession.query.filter(slug=slug)` has no repo/project scoping, so a cross-project slug collision could substitute a wrong (possibly APPROVED) `issue_number` — the wrong-allow direction. | **RESOLVED — revision** (Technical Approach step 1, task 2) | Candidate sessions are post-filtered by `project_key == resolve_project_key(cwd=repo_root)` (`config/project_key_resolver.py`); a project mismatch is treated as no matching session; `project=None` → no-signal (never accept unscoped). `AgentSession.project_key` exists — no model change. Tested. |
+| CONCERN | History & Consistency | The plan cited two different precedents for the guarded lazy import as if they were one (`except ImportError` only vs broad `except Exception`). | **RESOLVED — revision** (Technical Approach step 1) | Two explicit guards: narrow `except ImportError` around the imports, separate broad `except Exception` around the query — the `sdlc_progress.py:190-205` shape, stated precisely. |
+| CONCERN | Scope & Value | For a Small bug fix the plan over-specified the builder's implementation (exact signature, rename, literal `elif`). | **RESOLVED — revision** ("Builder latitude" note in Technical Approach; tasks reworded to behavior) | Added an explicit builder-latitude paragraph: sole integration point `~:429-469`, builder owns naming/control flow/outcome representation; only the required behavior (group-a presence, groups-b/c tracked keying, fail-closed ambiguity, non-raising guards) is mandated. |
+| NIT | Risk & Robustness | No `notes` entry distinguished the ambiguity path from the no-session path. | **RESOLVED — revision** (Technical Approach step 2, task 2) | Distinct notes: "no session found for slug ..." vs project-unresolved vs the ambiguous `failed` entry; tested as distinct strings. |
+| NIT | Scope & Value | The ambiguous-multi-issue branch may be theoretical; keep the cheap defensive branch but don't over-invest a real-world repro. | build | Synthetic-fixture unit test only (task 2) — no live repro. |
 
 ---
 
