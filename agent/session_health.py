@@ -465,13 +465,34 @@ def _check_tool_timeout(entry: AgentSession) -> tuple[str, str] | None:
     Returns ``None`` when:
       * ``current_tool_name`` is None / empty (no tool in flight).
       * ``last_tool_use_at`` is None (legacy session pre-Pillar A).
+      * ``last_tool_use_at`` predates the run's start anchor (stale pair carried
+        over from a prior run before a resume — epoch-scoped, see below).
       * ``last_tool_use_at`` is fresher than the tier budget.
+
+    Epoch scoping (#2002, mirroring the #1979 delivery-guard fix): the wedge
+    fields are only cleared on the ``reason_kind == "tool_timeout"`` requeue
+    path. Every other requeue path (worker-startup recovery, and the
+    ``no_progress``/``worker_dead`` branches of ``_apply_recovery_transition``)
+    leaves both fields set, so a session recovered mid-tool-call via one of
+    those paths still carries the prior run's ``current_tool_name`` /
+    ``last_tool_use_at`` after it resumes. Treat the pair as describing the
+    current run only when ``last_tool_use_at`` falls at or after the run's start
+    anchor (``started_at``, falling back to ``created_at``). Legacy rows with no
+    anchor at all preserve today's always-evaluate behavior — the exact fallback
+    ``_delivery_belongs_to_current_run`` chose.
     """
     tool_name = getattr(entry, "current_tool_name", None)
     if not tool_name or not isinstance(tool_name, str):
         return None
     last_at = getattr(entry, "last_tool_use_at", None)
     if not isinstance(last_at, datetime):
+        return None
+    # Epoch gate (#2002): stale wedge pair from a prior run must not fire on the
+    # first tick after a resume. No anchor at all ⇒ evaluate (legacy fallback,
+    # matching #1979); boundary ``last_tool_use_at == anchor`` counts as
+    # current-run via ``>=``.
+    anchor = _ts(getattr(entry, "started_at", None)) or _ts(getattr(entry, "created_at", None))
+    if anchor is not None and _ts(last_at) < anchor:
         return None
     tier = _classify_tool_tier(tool_name)
     budget = _tool_tier_budget(tier)
