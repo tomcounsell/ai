@@ -481,6 +481,105 @@ class TestStageArtifactVerification:
         assert "stage_artifacts_verified" not in context
         assert "unverified_stage" not in context
 
+    def test_true_build_claim_leaves_context_unset_when_merged(self, monkeypatch):
+        """#1267 g8 merged-pipeline misfire: BUILD claims completed and the
+        live PR state is MERGED (not OPEN) -> still a no-op. A merged PR is
+        the strongest possible proof the BUILD artifact was real; treating
+        it as unverified would re-dispatch /do-build forever on an issue
+        that already shipped."""
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: None)
+        monkeypatch.setattr("subprocess.run", self._fake_gh_pr_state("MERGED"))
+
+        stage_states = {"BUILD": "completed"}
+        meta = {"pr_number": 555}
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=1267,
+            stage_states=stage_states,
+            meta=meta,
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+
+    def test_patch_claim_skips_branch_check_when_pr_merged(self, monkeypatch, tmp_path):
+        """#1267 g8 merged-pipeline misfire: PATCH claims completed, the PR
+        is MERGED, and the branch has already been deleted (delete-branch-
+        on-merge policy) -> still a no-op. The branch-pushed check must not
+        even run once the PR's live state proves MERGED."""
+        plan_path = tmp_path / "my-slug.md"
+        plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan_path)
+
+        ls_remote_calls = []
+
+        def _fake_run(cmd, **kwargs):
+            proc = MagicMock()
+            if cmd[:3] == ["gh", "pr", "view"]:
+                proc.returncode = 0
+                proc.stdout = json.dumps({"state": "MERGED"})
+            elif cmd[:2] == ["git", "ls-remote"]:
+                ls_remote_calls.append(cmd)
+                proc.returncode = 0
+                proc.stdout = ""  # branch gone -- would fail if the check ran
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+
+        stage_states = {"PATCH": "completed"}
+        meta = {"pr_number": 555}
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=1267,
+            stage_states=stage_states,
+            meta=meta,
+        )
+
+        assert "stage_artifacts_verified" not in context
+        assert "unverified_stage" not in context
+        assert ls_remote_calls == [], "branch-pushed check must be skipped once PR is MERGED"
+
+    def test_patch_claim_still_checks_branch_when_pr_open(self, monkeypatch, tmp_path):
+        """A PATCH claim against a still-OPEN PR (not yet merged) must still
+        run the real branch-pushed live check -- the MERGED skip is scoped
+        strictly to state == "MERGED", not to "PR exists"."""
+        plan_path = tmp_path / "my-slug.md"
+        plan_path.write_text("---\nstatus: Ready\n---\n\n# Plan\n")
+        monkeypatch.setattr("tools._sdlc_utils.find_plan_path", lambda issue_number: plan_path)
+
+        def _fake_run(cmd, **kwargs):
+            proc = MagicMock()
+            if cmd[:3] == ["gh", "pr", "view"]:
+                proc.returncode = 0
+                proc.stdout = json.dumps({"state": "OPEN"})
+            elif cmd[:2] == ["git", "ls-remote"]:
+                proc.returncode = 0
+                proc.stdout = ""  # branch gone -- should fail verification
+            else:
+                proc.returncode = 1
+                proc.stdout = ""
+            return proc
+
+        monkeypatch.setattr("subprocess.run", _fake_run)
+
+        stage_states = {"PATCH": "completed"}
+        meta = {"pr_number": 555}
+
+        context = sdlc_next_skill._build_context(
+            proposed_skill=None,
+            issue_number=1267,
+            stage_states=stage_states,
+            meta=meta,
+        )
+
+        assert context["stage_artifacts_verified"] is False
+        assert context["unverified_stage"] == "PATCH"
+
     def test_fails_open_on_infra_error(self, monkeypatch, caplog):
         """subprocess.TimeoutExpired/OSError from the gh/git call → advances
         (stage_artifacts_verified stays unset/True) with a warning logged."""

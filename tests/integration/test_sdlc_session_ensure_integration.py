@@ -147,12 +147,43 @@ class TestStageArtifactVerificationGate:
             proc.returncode = 0
             json_arg = cmd[cmd.index("--json") + 1] if "--json" in cmd else ""
             if json_arg == "state":
-                # tools.sdlc_next_skill._check_pr_open's live check.
+                # tools.sdlc_next_skill._fetch_pr_state's live check.
                 proc.stdout = json.dumps({"state": "CLOSED"})
             else:
                 # tools.sdlc_stage_query._fetch_pr_merge_state's G6 check --
                 # unrelated to this test, answered harmlessly.
                 proc.stdout = json.dumps({"mergeStateStatus": "BLOCKED", "statusCheckRollup": []})
+        else:
+            proc.returncode = 1
+            proc.stdout = ""
+        return proc
+
+    @staticmethod
+    def _fake_gh_pr_view_merged(cmd, **kwargs):
+        """#1267 g8 merged-pipeline misfire: live GitHub says the PR is
+        MERGED (branch already deleted under a delete-branch-on-merge
+        policy) -- the polar opposite fixture of ``_fake_gh_pr_view`` above.
+        """
+        proc = MagicMock()
+        if cmd[:3] == ["gh", "pr", "view"]:
+            proc.returncode = 0
+            json_arg = cmd[cmd.index("--json") + 1] if "--json" in cmd else ""
+            if json_arg == "state":
+                # tools.sdlc_next_skill._fetch_pr_state's live check.
+                proc.stdout = json.dumps({"state": "MERGED"})
+            else:
+                # tools.sdlc_stage_query._fetch_pr_merge_state's G6 check --
+                # unrelated to this test (row 10 does not consult
+                # pr_merge_state), answered harmlessly.
+                proc.stdout = json.dumps({"mergeStateStatus": "UNKNOWN", "statusCheckRollup": []})
+        elif cmd[:2] == ["git", "ls-remote"]:
+            # The PATCH branch-pushed check must never even run here -- a
+            # MERGED PR short-circuits it. If it does run, answer "branch
+            # gone" (empty stdout) to prove the merged-state skip is load
+            # bearing, not accidentally passing because the branch is still
+            # present.
+            proc.returncode = 0
+            proc.stdout = ""
         else:
             proc.returncode = 1
             proc.stdout = ""
@@ -205,3 +236,49 @@ class TestStageArtifactVerificationGate:
         assert result.get("dispatched") is True, result
         assert result["skill"] == "/do-build", result
         assert result["row_id"] == "G8", result
+
+    def test_terminal_merged_pipeline_routes_to_merge_not_build(
+        self, monkeypatch, issue_number, cleanup_ledger
+    ):
+        """#1267 regression: a terminal MERGED pipeline must route to the
+        terminal ``/do-merge`` dispatch (row 10), never re-dispatch
+        ``/do-build`` via guard g8.
+
+        Before the fix, ``_verify_stage_artifacts_live`` treated "BUILD
+        artifact verified" as strictly ``state == "OPEN"``, so an already
+        MERGED PR (state MERGED, branch deleted) was flagged as an
+        unverified BUILD claim -- g8 fired and re-dispatched ``/do-build``
+        on an issue that had already shipped (duplicate-PR risk). This
+        drives the real ``tools.sdlc_next_skill.decide()`` path end-to-end
+        (real Redis ledger, real guard/dispatch-rule evaluation) with every
+        stage through DOCS marked completed and a live ``gh pr view``
+        response of MERGED.
+        """
+        from agent.pipeline_ledger import PipelineLedger
+        from tools import sdlc_next_skill
+
+        monkeypatch.setenv("GH_REPO", _G8_TEST_REPO_SLUG)
+        monkeypatch.setenv("VALOR_SESSION_ID", "")
+        monkeypatch.setenv("AGENT_SESSION_ID", "")
+        monkeypatch.setattr("subprocess.run", self._fake_gh_pr_view_merged)
+
+        ledger = PipelineLedger.get_or_create(_G8_TEST_REPO_SLUG, issue_number)
+        ledger.stage_states_json = json.dumps(
+            {
+                "ISSUE": "completed",
+                "PLAN": "completed",
+                "CRITIQUE": "completed",
+                "BUILD": "completed",
+                "TEST": "completed",
+                "REVIEW": "completed",
+                "DOCS": "completed",
+            }
+        )
+        ledger.pr_number = 918274
+        ledger.save()
+
+        result = sdlc_next_skill.decide(issue_number=issue_number)
+
+        assert result.get("dispatched") is True, result
+        assert result["skill"] == "/do-merge", result
+        assert result["row_id"] == "10", result

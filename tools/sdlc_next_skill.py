@@ -81,11 +81,14 @@ def _resolve_enriched(issue_number: int | None, session_id: str | None) -> dict:
         return {"stages": {}, "_meta": {}}
 
 
-def _check_pr_open(pr_number: int, repo: str | None = None) -> bool:
-    """Live-check (``gh pr view``) that ``pr_number`` exists and is OPEN.
+def _fetch_pr_state(pr_number: int, repo: str | None = None) -> str | None:
+    """Live-check (``gh pr view``) and return the PR's raw state string.
 
     Reuses the same ``gh pr view --json`` shape as
-    ``tools.sdlc_stage_query._fetch_pr_merge_state``. May raise
+    ``tools.sdlc_stage_query._fetch_pr_merge_state``. Returns ``None`` when
+    the call fails, the response is unparseable, or ``state`` is absent /
+    not a string -- callers must treat ``None`` as "could not determine",
+    never as evidence of a false claim. May raise
     ``subprocess.TimeoutExpired``/``SubprocessError``/``OSError`` on infra
     failure -- the caller (``_verify_stage_artifacts``) applies the narrowed
     fail-open catch, this helper does not swallow anything itself.
@@ -95,9 +98,10 @@ def _check_pr_open(pr_number: int, repo: str | None = None) -> bool:
         cmd = ["gh", "pr", "view", str(pr_number), "--repo", repo, "--json", "state"]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if proc.returncode != 0:
-        return False
+        return None
     data = json.loads(proc.stdout or "{}")
-    return data.get("state") == "OPEN"
+    state = data.get("state")
+    return state if isinstance(state, str) else None
 
 
 def _check_branch_pushed(slug: str) -> bool:
@@ -136,6 +140,18 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
     mismatch, returns ``{"stage_artifacts_verified": False,
     "unverified_stage": <STAGE>}`` -- one mismatch per call is enough to
     drive the ``g8`` re-dispatch guard; the same check runs again next tick.
+
+    #1267 merged-pipeline misfire: a PR that has already been merged is not
+    an "unverified" BUILD artifact -- it is the strongest possible proof the
+    artifact was real (a PR cannot merge without existing). Both the BUILD
+    check and the PATCH branch-pushed check treat ``state == "MERGED"`` as
+    verified: BUILD directly (state is OPEN or MERGED), and PATCH by
+    skipping the ``git ls-remote`` branch check entirely, since a
+    delete-branch-on-merge repo policy removes the remote ref as an expected
+    side effect of merging, not evidence of a fabricated PATCH claim. Without
+    this, a terminal merged pipeline would re-dispatch ``/do-build`` via
+    guard ``g8`` forever instead of routing to the terminal ``/do-merge``
+    (row 10) -- a duplicate-PR risk.
     """
     from tools._sdlc_utils import find_plan_path
 
@@ -152,18 +168,28 @@ def _verify_stage_artifacts_live(stage_states: dict, meta: dict, issue_number: i
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "PLAN"}
 
-    if stage_states.get("BUILD") == "completed":
-        pr_number = meta.get("pr_number")
-        repo = meta.get("_resolved_target_repo")
-        if not pr_number or not _check_pr_open(pr_number, repo=repo):
+    pr_number = meta.get("pr_number")
+    repo = meta.get("_resolved_target_repo")
+    build_claimed = stage_states.get("BUILD") == "completed"
+    patch_claimed = stage_states.get("PATCH") == "completed" and bool(slug)
+
+    # Resolve the live PR state at most once (used by both checks below) --
+    # only when a claim that needs it is actually present, so an unclaimed
+    # BUILD/PATCH stage still makes zero live calls (test_no_claimed_artifact_is_a_noop).
+    pr_state: str | None = None
+    if pr_number and (build_claimed or patch_claimed):
+        pr_state = _fetch_pr_state(pr_number, repo=repo)
+
+    if build_claimed:
+        if not pr_number or pr_state not in ("OPEN", "MERGED"):
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} BUILD claims completed "
-                f"but PR {pr_number!r} is not open"
+                f"but PR {pr_number!r} is not open or merged (state={pr_state!r})"
             )
             return {"stage_artifacts_verified": False, "unverified_stage": "BUILD"}
 
-    if stage_states.get("PATCH") == "completed" and slug:
-        if not _check_branch_pushed(slug):
+    if patch_claimed:
+        if pr_state != "MERGED" and not _check_branch_pushed(slug):
             logger.warning(
                 f"stage-artifact-verify: issue #{issue_number} PATCH claims completed "
                 f"but branch session/{slug} is not pushed"
