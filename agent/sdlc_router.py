@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from agent.pipeline_graph import MAX_CRITIQUE_CYCLES
+from agent.pipeline_graph import MAX_CRITIQUE_CYCLES, STAGE_TO_SKILL
 
 logger = logging.getLogger(__name__)
 
@@ -416,6 +416,59 @@ def guard_g4_oscillation(
     )
 
 
+def guard_g8_artifact_verification(
+    stage_states: dict, meta: dict, context: dict
+) -> Dispatch | Blocked | None:
+    """G8: re-dispatch when a claimed stage artifact fails live verification (#1267).
+
+    The router advances on stage-completion markers that the executing agent
+    *self-attests* (the ``<!-- OUTCOME {...} -->`` contract). Nothing upstream
+    of this guard independently confirmed the claimed load-bearing artifact —
+    a PR actually opened, a branch actually pushed, a plan actually committed
+    — exists in the world. The live verification itself runs in the next-skill
+    **context-assembly** path (``tools/sdlc_next_skill.py``, reusing #2003's
+    live-ref helpers) — deterministic, no LLM, and outside the router so the
+    router stays import-free of ``tools/`` (architectural constraint,
+    ``tests/unit/test_architectural_constraints.py``). This guard makes no
+    live calls itself; it only consumes the context flags that path sets:
+    ``context["stage_artifacts_verified"]`` / ``context["unverified_stage"]``.
+
+    Positioning is load-bearing: G8 is inserted into ``GUARDS`` immediately
+    after G4 (``guard_g4_oscillation``), NOT before it. On a persistently
+    false claim, G8 would re-dispatch the same stage's skill forever with
+    nothing to stop it — G4 is the loop-bound backstop, and because G4 is
+    evaluated first, it fires and returns ``Blocked`` once
+    ``same_stage_dispatch_count >= MAX_SAME_STAGE_DISPATCHES`` before G8 ever
+    gets a chance to re-dispatch again. The phase-1 false-claim policy is
+    therefore "silent re-dispatch, then escalate via the existing G4 cap" —
+    not an immediate Block on the first mismatch.
+
+    Fires ONLY when ``context["stage_artifacts_verified"] is False`` (an
+    explicit, verified mismatch). Absent/unset/``True`` is a no-op — this
+    mirrors the context-assembly contract that a stage with no claimed
+    artifact (or one that verified clean) never sets the flag to ``False``.
+    """
+    if context.get("stage_artifacts_verified") is not False:
+        return None
+
+    unverified_stage = context.get("unverified_stage")
+    skill = STAGE_TO_SKILL.get(unverified_stage) if unverified_stage else None
+    if skill is None:
+        # A mismatch was flagged but the stage can't be mapped to a skill —
+        # malformed context. Fail open (no dispatch decision here) rather
+        # than guessing at a re-dispatch target.
+        return None
+
+    return Dispatch(
+        skill=skill,
+        reason=(
+            f"G8: {unverified_stage} claims completed but its artifact failed "
+            f"live verification — re-dispatching {skill} rather than advancing"
+        ),
+        row_id="G8",
+    )
+
+
 def guard_g5_artifact_hash_cache(
     stage_states: dict, meta: dict, context: dict
 ) -> Dispatch | Blocked | None:
@@ -642,6 +695,7 @@ GUARDS: list[Callable[[dict, dict, dict], Dispatch | Blocked | None]] = [
     guard_g2_critique_cycle_cap,
     guard_g3_pr_lock,
     guard_g4_oscillation,
+    guard_g8_artifact_verification,
     guard_g5_artifact_hash_cache,
     guard_g6_terminal_merge_ready,
     guard_g7_plan_revising,
