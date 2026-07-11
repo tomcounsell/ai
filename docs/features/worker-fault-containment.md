@@ -47,7 +47,7 @@ Runner](headless-session-runner.md).
 - **Exponential backoff**: first respawn waits `base_backoff_s` (default 1 s), second `2×`, and so on (capped at `window_s / 2`). Restart timestamps are tracked in a rolling window.
 - **Storm cap**: exceeding `WORKER_SUPERVISOR_MAX_RESTARTS` (default 5) within `WORKER_SUPERVISOR_WINDOW_S` (default 300 s) triggers **`_self_kill()`**, which emits an all-thread Python stack dump via `faulthandler.dump_traceback(all_threads=True)` to stderr and then delivers `SIGKILL` to the process. This is the same seam used by the dead-man's-switch (#1815). SIGKILL replaced an earlier abort-based design that triggered the macOS crash reporter (a crash dialog plus a `Python-*.ips` file) on every recycle; SIGKILL is equally unswallowable but produces no dialog and no `.ips` file. `sys.exit(1)` is explicitly avoided — a `SystemExit` raised inside an asyncio done-callback is swallowed by the event loop's callback-exception handler, so the process would keep running and the cap would silently fail.
 - **Shutdown guard**: cancelled tasks and `_shutdown_requested=True` suppress respawn.
-- **Wrapped tasks**: `session-health-monitor`, `session-tool-timeout-monitor`, `reflection-scheduler`, `session-notify-listener`, `idle-sweeper` (the `granite-reprobe` task wrapped here was deleted along with Fix #1, D2).
+- **Wrapped tasks**: `session-health-monitor`, `session-tool-timeout-monitor`, `session-notify-listener` (the `granite-reprobe` task wrapped here was deleted along with Fix #1, D2; `reflection-scheduler` moved to its own subprocess per #1828; `idle-sweeper` was deleted wholesale in #2000 along with the rest of the dead Claude Agent SDK path — see [HarnessAdapter Seam](harness-adapter.md)).
 
 ## Deferred: Fix #5 → #1828
 

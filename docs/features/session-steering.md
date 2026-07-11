@@ -70,7 +70,7 @@ Worker loop
   → _execute_agent_session()
     → pop_all_steering_messages()           [Redis LPOP drain]
     → if messages: use first as turn input, re-push the rest
-    → get_agent_response_sdk(_turn_input, ...)
+    → get_response_via_harness(_turn_input, ...)  [agent/session_runner/harness/claude.py]
     → send_to_chat() callback
       → route_session_output()              [output_router.py]
         → determine_delivery_action()       [pure function]

@@ -57,40 +57,17 @@ This ensures the agent defaults to SDLC pipeline behavior for work requests rath
 
 ## Lazy Singleton Client
 
-The Anthropic client used for Haiku fallback classification is instantiated lazily via `_get_anthropic_client()` to avoid per-call overhead. The classify function itself is imported lazily inside `get_agent_response_sdk()` to prevent circular imports between `agent/` and `bridge/` modules.
+The Anthropic client used for Haiku fallback classification is instantiated lazily via `_get_anthropic_client()` to avoid per-call overhead. The classify function itself is imported lazily to prevent circular imports between `agent/` and `bridge/` modules.
 
 ## Cross-Repo `gh` Resolution
 
 When SDLC is invoked for a non-ai project (e.g., popoto), the worker runs with `cwd=ai/` (the orchestrator repo). All `gh` commands (issue view, pr list, etc.) resolve against the cwd repo by default, which causes cross-project SDLC work to silently target the wrong repository.
 
-### Primary Mechanism: `GH_REPO` Environment Variable
+### Live mechanism: `GITHUB:` context line in the harness turn input
 
-The `gh` CLI supports a `GH_REPO` environment variable that automatically applies to all commands in the subprocess. This is the deterministic fix -- it requires no LLM cooperation.
+`build_harness_turn_input()` (`agent/sdk_client.py`) injects a `GITHUB: org/repo` line into the enriched message text for cross-repo SDLC requests (classification is "sdlc", project key is not "valor", and project mode is not "pm"). Skills include instructions to parse this line and add `--repo org/repo` flags to `gh` commands.
 
-When `get_agent_response_sdk()` detects a cross-repo SDLC request (classification is "sdlc", project key is not "valor", and project mode is not "pm"), it:
-
-1. Extracts `github.org` and `github.repo` from the project config in `~/Desktop/Valor/projects.json`
-2. Passes `gh_repo="org/repo"` to `ValorAgent.__init__()`
-3. `ValorAgent._create_options()` sets `env["GH_REPO"] = self.gh_repo` in the subprocess environment
-
-All `gh` commands in the subprocess then automatically target the correct repository without needing explicit `--repo` flags.
-
-```python
-# In get_agent_response_sdk():
-is_cross_repo = project_key != "valor"
-if project_mode != "pm" and classification == "sdlc" and is_cross_repo:
-    _github_config = project.get("github", {})
-    _gh_org = _github_config.get("org", "")
-    _gh_name = _github_config.get("repo", "")
-    if _gh_org and _gh_name:
-        _gh_repo = f"{_gh_org}/{_gh_name}"
-
-agent = ValorAgent(..., gh_repo=_gh_repo)
-```
-
-### Safety Net: `GITHUB:` Context Line and `--repo` Instructions
-
-As a belt-and-suspenders fallback, the SDK client also injects a `GITHUB: org/repo` line into the enriched prompt text. Skills include instructions to parse this line and add `--repo` flags to `gh` commands. This is a secondary mechanism -- the `GH_REPO` env var is the primary fix.
+**Retired (#2000):** a `GH_REPO` subprocess environment-variable injection previously existed on `ValorAgent._create_options()` (the now-deleted SDK path). Confirmed at deletion time to have zero live occurrences anywhere outside that class — it was never wired into the CLI-harness path this system actually runs on, so the `GITHUB:` message header above has always been the sole live mechanism, not a secondary safety net.
 
 Skills with `--repo` instructions: `/sdlc`, `/do-issue`, `/do-plan`, `/do-pr-review`, `/do-docs`, `/do-patch`.
 

@@ -4,6 +4,8 @@
 
 **See also:** [Session Steering](session-steering.md) — canonical reference for the turn-boundary inbox model and parent-child steering
 
+> **Note:** The `client.interrupt()` / `client.query()` / `get_active_client()` mechanism described in the Architecture and Key Components sections below belonged to the persistent-`ClaudeSDKClient` SDK path, which was deleted wholesale in #2000 (see [HarnessAdapter Seam](harness-adapter.md)). Steering delivery today is exclusively the Redis-list turn-boundary drain described in [Session Steering](session-steering.md) — the worker pops the steering list and injects it as the next turn's input; there is no mid-turn `interrupt()` call. The high-level end-to-end flow (bridge → steering queue → agent adjusts) still holds; only the delivery mechanics below are out of date.
+
 ## Overview
 
 Mid-session steering allows a user to send a reply-to message in Telegram that gets injected into a currently running agent session, enabling real-time course correction without waiting for the agent to finish. This is distinct from creating a new session or resuming a completed session.
@@ -57,10 +59,10 @@ Bridge (telegram_bridge.py)
     |-- Match found? --> push_steering_message() --> Redis steering:{session_id}
     |-- No match? --> Fall through to session queue
     |
-Agent (health_check.py - PostToolUse hook)
-    |-- Every tool call: pop_steering_message()
-    |-- Message found? --> get_active_client() --> client.interrupt() + client.query()
-    |-- Abort? --> return {continue_: false}
+Worker (turn-boundary drain — see session-steering.md)
+    |-- pop_all_steering_messages() at the start of the next turn
+    |-- Message found? --> injected as the turn's input (get_response_via_harness)
+    |-- Abort keyword? --> session terminates
 ```
 
 ### Key Components
@@ -69,8 +71,7 @@ Agent (health_check.py - PostToolUse hook)
 |-----------|------|------|
 | Steering check | `bridge/telegram_bridge.py` | Routes reply-to messages to steering queue |
 | Steering queue | `agent/steering.py` | Redis list push/pop/clear operations |
-| PostToolUse hook | `agent/health_check.py` | Consumes steering messages on each tool call |
-| Client registry | `agent/sdk_client.py` | Stores active SDK clients for interrupt access |
+| Turn-boundary drain | `agent/session_runner/` | Worker pops the steering list at the start of the next turn (retired the PostToolUse-hook/`get_active_client()` SDK-era path, deleted in #2000) |
 
 ## Error Handling
 

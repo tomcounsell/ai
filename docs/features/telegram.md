@@ -15,7 +15,7 @@ Telegram Messages
        v
 +------------------+
 |   Core System    |  <-- Separate from interface
-|   (ValorAgent)   |
+| (session_runner)  |
 +------------------+
 ```
 

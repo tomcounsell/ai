@@ -45,12 +45,9 @@ The function never raises an exception. This is a deliberate design choice: a va
 
 ## Integration Points
 
-Validation runs at two points in the agent launch path, providing defense in depth:
+Validation runs at `agent/session_executor.py:980` (`validate_workspace(working_dir, allowed_root, is_worktree=is_wt)`), before the harness subprocess is spawned.
 
-1. **`_execute_agent_session()`** in `agent/agent_session_queue.py` — validates `session.working_dir` before any agent work begins
-2. **`ValorAgent.__init__()`** in `agent/sdk_client.py` — validates `working_dir` before storing it on the agent instance
-
-Both call `validate_workspace()` with the same `allowed_root`. The double-check is intentional: session queue validation catches problems early, while SDK client validation ensures safety even when `ValorAgent` is instantiated directly (e.g., in tests or alternate entry points).
+**Retired (#2000):** a second call site inside `ValorAgent.__init__()` used to double-check `working_dir` when the SDK-era agent class was instantiated directly (e.g. in tests or alternate entry points). That class was deleted wholesale along with the rest of the dead Claude Agent SDK path — there is only one live call site today.
 
 ### Worktree Detection
 

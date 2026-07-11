@@ -4,7 +4,7 @@
 
 ## Overview
 
-All session types (Eng, Teammate) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for historical compatibility, but all session types are unconditionally routed to `get_response_via_harness()` — the SDK path (`get_agent_response_sdk()`) is not exercised.
+All session types (Eng, Teammate) now execute via the CLI harness (`claude -p --output-format stream-json`). The original `DEV_SESSION_HARNESS` environment variable is preserved for historical compatibility, but all session types are unconditionally routed to `get_response_via_harness()`. The SDK path (`ValorAgent`, `get_agent_response_sdk()`) was deleted wholesale in #2000 — see [HarnessAdapter Seam](harness-adapter.md).
 
 **Phase 6 (end-to-end validation)** is complete — all session types run through the CLI harness in production.
 
@@ -72,7 +72,7 @@ When `DEV_SESSION_HARNESS` is set to a non-`sdk` value, the worker runs `verify_
 2. Runs a minimal test command (`claude -p --output-format stream-json "test"`)
 3. Verifies a `system` init event appears in the output
 4. Logs a warning if `apiKeySource` indicates API key billing (the point of the CLI harness is to use subscription billing)
-5. On failure: logs a warning but does not block startup -- sessions fall back to SDK
+5. On failure: logs a warning but does not block startup -- the health check is advisory only (there is no SDK fallback path since #2000)
 
 ### Security and Session Context
 
@@ -82,7 +82,7 @@ When `DEV_SESSION_HARNESS` is set to a non-`sdk` value, the worker runs `verify_
 
 ### Session Environment Injection (issue #1148)
 
-The harness path mirrors the env contract that the SDK-era `ValorAgent.env` builder provided. `agent/session_executor.py` constructs `_harness_env` with the following keys, scoped by session type:
+The harness path mirrors the env contract that the now-deleted SDK-era `ValorAgent.env` builder provided (removed in #2000). `agent/session_executor.py` constructs `_harness_env` with the following keys, scoped by session type:
 
 | Env Var | Scope | Source | Consumer |
 |---------|-------|--------|----------|

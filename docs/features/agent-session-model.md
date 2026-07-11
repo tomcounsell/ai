@@ -188,9 +188,9 @@ Only four fields change during continuation: `status` (reset to "pending"), `ini
 `model` (`Field(null=True)`) stores the Claude model alias (e.g. `"opus"`,
 `"sonnet"`, `"haiku"`) or full name (e.g. `"claude-opus-4-7"`) to use for this
 session. The value flows end-to-end to the `claude -p` subprocess via the
-CLI harness live path (not the dormant `ValorAgent → ClaudeAgentOptions` path
-from PR #909 — that wiring remains in place for unit-test fixtures but is
-unreachable in production).
+CLI harness live path. The `ValorAgent → ClaudeAgentOptions` path from PR #909
+was deleted wholesale in #2000 (see [HarnessAdapter Seam](harness-adapter.md));
+there is no parallel SDK path to select between anymore.
 
 ### Precedence Cascade (D1)
 
