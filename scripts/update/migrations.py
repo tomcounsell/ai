@@ -229,6 +229,154 @@ def _migrate_confirm_run_identity_fields_readable(project_dir: Path) -> str | No
         return str(e)
 
 
+def _migrate_backfill_pipeline_ledger(project_dir: Path) -> str | None:
+    """Backfill non-terminal AgentSession.stage_states into the issue-keyed PipelineLedger.
+
+    Issue #2012: the SDLC pipeline's stage/verdict/pr_number ledger moved
+    from the ephemeral, executor-keyed ``AgentSession.stage_states`` to the
+    durable, issue-keyed ``PipelineLedger`` (see ``agent/pipeline_ledger.py``
+    and ``PipelineStateMachine.for_issue()`` in ``agent/pipeline_state.py``).
+    This one-time backfill lifts any in-flight (non-terminal) session's
+    ``stage_states`` blob into the ledger record for its issue, so a
+    takeover after cutover reads the same progress the old session-keyed
+    path would have shown.
+
+    Scope is deliberately narrow (plan Open Question 2): only non-terminal
+    sessions carrying a non-empty ``stage_states`` blob are considered. This
+    is a live-issue lift, not a historical sweep -- terminal sessions'
+    ledgers, if ever needed, are reconstructible from durable signals
+    (verdicts/PR state), not from this migration.
+
+    Keying (Risk 1 mitigation): ``target_repo`` is taken from the session's
+    live issue lock (a ``peek`` of ``session:issuelock:{issue}``, which
+    carries the lease-pinned value the rest of the pipeline already trusts)
+    and, failing that, from the env-based ``_resolve_target_repo()`` ladder.
+    A session for which BOTH resolution paths fail is skipped with a logged
+    WARNING -- this migration never assembles a ``None:{issue}`` key.
+
+    Idempotency (Race 2 mitigation): a target ledger is backfilled only when
+    it is completely empty (``stage_states_json == "{}"`` and
+    ``pr_number is None``). Any ledger that already carries content --
+    whether from an earlier run of this same migration or from a live
+    writer that got there first -- is left untouched. This also means a
+    second run of this migration, or a run concurrent with a live writer,
+    is a safe no-op for every session it has already touched.
+
+    Uses ORM methods only (``AgentSession.query.all()``, ``PipelineLedger.
+    get_or_create()``, ``.save()``) -- no raw Redis. Returns ``None`` on
+    success (including "nothing to backfill"), an error string on
+    unexpected failure. Never raises.
+    """
+    try:
+        import logging
+        import sys
+
+        sys.path.insert(0, str(project_dir))
+        from agent.pipeline_ledger import PipelineLedger
+        from models.agent_session import AgentSession
+        from models.session_lifecycle import TERMINAL_STATUSES, touch_issue_lock
+        from tools._sdlc_utils import _resolve_target_repo
+
+        logger = logging.getLogger(__name__)
+
+        for session in AgentSession.query.all():
+            if getattr(session, "status", None) in TERMINAL_STATUSES:
+                continue
+
+            raw_stage_states = getattr(session, "stage_states", None)
+            if not raw_stage_states:
+                continue
+
+            issue_number = getattr(session, "issue_number", None)
+            if not issue_number:
+                continue
+
+            # Resolve target_repo: lease-pinned value first (authoritative,
+            # matches what live writers/readers use), env-based fallback second.
+            target_repo: str | None = None
+            try:
+                lock_result = touch_issue_lock(issue_number, run_id=None, peek=True)
+                target_repo = lock_result.target_repo
+            except Exception as e:  # swallow-ok: fall through to env resolution
+                logger.warning(
+                    "[migration:backfill_pipeline_ledger] issue lock peek failed for "
+                    f"issue={issue_number} ({type(e).__name__}: {e}); "
+                    "falling back to env resolution"
+                )
+
+            if not target_repo:
+                target_repo = _resolve_target_repo()
+
+            if not target_repo:
+                logger.warning(
+                    "[migration:backfill_pipeline_ledger] SKIP issue=%s session=%s -- "
+                    "target_repo unresolvable (no live lease, env resolution failed); "
+                    "never keying under None",
+                    issue_number,
+                    getattr(session, "session_id", "?"),
+                )
+                continue
+
+            ledger = PipelineLedger.get_or_create(target_repo, issue_number)
+
+            # Write-if-empty: read current ledger state and bail BEFORE any
+            # mutation if it already carries content (Risk 1 -- never
+            # overwrite a non-empty/newer ledger).
+            ledger_is_empty = ledger.stage_states_json in (None, "{}") and ledger.pr_number is None
+            if not ledger_is_empty:
+                logger.info(
+                    "[migration:backfill_pipeline_ledger] SKIP target_repo=%s issue=%s -- "
+                    "ledger already has content, not overwriting",
+                    target_repo,
+                    issue_number,
+                )
+                continue
+
+            try:
+                parsed = (
+                    json.loads(raw_stage_states)
+                    if isinstance(raw_stage_states, str)
+                    else raw_stage_states
+                )
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning(
+                    "[migration:backfill_pipeline_ledger] SKIP target_repo=%s issue=%s -- "
+                    "unparseable stage_states (%s: %s)",
+                    target_repo,
+                    issue_number,
+                    type(e).__name__,
+                    e,
+                )
+                continue
+
+            if not isinstance(parsed, dict):
+                logger.warning(
+                    "[migration:backfill_pipeline_ledger] SKIP target_repo=%s issue=%s -- "
+                    "stage_states did not parse to a dict",
+                    target_repo,
+                    issue_number,
+                )
+                continue
+
+            ledger.stage_states_json = json.dumps(parsed)
+            session_pr_number = getattr(session, "pr_number", None)
+            if session_pr_number:
+                ledger.pr_number = session_pr_number
+            ledger.save()
+
+            logger.info(
+                "[migration:backfill_pipeline_ledger] BACKFILLED target_repo=%s issue=%s "
+                "from session=%s",
+                target_repo,
+                issue_number,
+                getattr(session, "session_id", "?"),
+            )
+
+        return None
+    except Exception as e:
+        return str(e)
+
+
 def _migrate_create_sdlc_stubs(project_dir: Path) -> str | None:
     """Create docs/sdlc/ stub files if missing.
 
@@ -277,6 +425,10 @@ MIGRATIONS: dict[str, tuple[callable, str]] = {
     "confirm_run_identity_fields_readable": (
         _migrate_confirm_run_identity_fields_readable,
         "Confirm AgentSession.active_run_id + pr_number (issue #2003) read cleanly on legacy rows",
+    ),
+    "backfill_pipeline_ledger": (
+        _migrate_backfill_pipeline_ledger,
+        "Backfill non-terminal AgentSession.stage_states into the issue-keyed PipelineLedger",
     ),
 }
 
