@@ -1,16 +1,21 @@
 """
-Claude Agent SDK client wrapper for Valor.
+Persona/system-prompt composition and SDLC guardrails for Valor's headless
+sessions, plus the public re-export surface for the ``claude -p`` CLI
+harness (the real subprocess/argv/stream-json implementation lives in
+:mod:`agent.session_runner.harness.claude`; see plan #2000 Task 2.2).
 
-This module provides a wrapper around ClaudeSDKClient configured for Valor's use case:
-- Loads system prompt via the configurable persona system
-- Configures permission mode for autonomous operation
-- Handles session management
-- Extracts text response from message stream
+This module:
+- Loads system prompts via the configurable persona system
+  (``load_system_prompt`` / ``load_eng_system_prompt`` / ``compose_system_prompt``)
+- Enforces SDLC guardrails (``_check_no_direct_main_push``, WORKER_RULES)
+- Re-exports the extracted harness functions (``get_response_via_harness``,
+  ``verify_harness_health``, ``build_harness_turn_input``, and friends) so
+  existing non-runner callers are unaffected by the extraction
 
-Authentication strategy (subscription-first):
-    The SDK spawns Claude Code CLI as a subprocess. By NOT passing
-    ANTHROPIC_API_KEY in the env, the CLI falls back to OAuth/subscription
-    auth from `claude login` — using the Max plan instead of API credits.
+Authentication strategy (subscription-first, applies to the harness
+subprocess): the CLI is spawned WITHOUT ``ANTHROPIC_API_KEY`` in its env, so
+it falls back to OAuth/subscription auth from `claude login` — using the Max
+plan instead of API credits.
 
     If Anthropic patches this fallback, known alternatives:
     - CLIProxyAPI (github.com/luispater/CLIProxyAPI): HTTP proxy that swaps

@@ -902,18 +902,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
     # Start pub/sub listener — supervised; delivers ~1s session pickup vs 5-min health check.
     notify_task = supervise("session-notify-listener", _session_notify_listener)
 
-    # Start idle SDK-client sweeper (issue #1128) — supervised. Worker-internal because
-    # `_active_clients` is process-local — the session-watchdog (separate process)
-    # cannot reach the registry. See `worker/idle_sweeper.py`.
-    idle_sweep_task = None
-    try:
-        from worker.idle_sweeper import run_idle_sweep
-
-        idle_sweep_task = supervise("idle-sweeper", run_idle_sweep)
-        logger.info("Idle SDK-client sweeper started (supervised)")
-    except Exception as e:
-        logger.warning("Failed to start idle sweeper: %s", e)
-
     # Set up graceful shutdown
     shutdown_event = asyncio.Event()
 
@@ -1008,14 +996,6 @@ async def _run_worker(projects: dict, dry_run: bool = False) -> None:
 
     # (Reflection scheduler runs out-of-process — issue #1828 — so there is no
     # reflection task to cancel here.)
-
-    # Cancel idle-sweeper (issue #1128)
-    if idle_sweep_task is not None:
-        idle_sweep_task.cancel()
-        try:
-            await idle_sweep_task
-        except asyncio.CancelledError:
-            pass
 
     logger.info("Worker shutdown complete")
 

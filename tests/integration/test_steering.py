@@ -187,27 +187,6 @@ class TestSteeringQueue:
         assert before <= msg["timestamp"] <= after
 
 
-class TestClientRegistry:
-    """Tests for the SDK client registry in sdk_client.py."""
-
-    def test_get_active_client_empty(self):
-        from agent.sdk_client import get_active_client
-
-        assert get_active_client("nonexistent") is None
-
-    def test_get_all_active_sessions_empty(self):
-        from agent.sdk_client import get_all_active_sessions
-
-        # May have entries from other tests, but should be a dict
-        result = get_all_active_sessions()
-        assert isinstance(result, dict)
-
-    def test_registry_is_dict(self):
-        from agent.sdk_client import _active_clients
-
-        assert isinstance(_active_clients, dict)
-
-
 class TestBridgeSteeringCheck:
     """Tests for the bridge steering check status matching logic.
 
@@ -581,7 +560,15 @@ class TestPendingSessionSteering:
 
 
 class TestWatchdogSteering:
-    """Tests for steering integration in the watchdog hook."""
+    """Tests for steering integration in the watchdog hook.
+
+    ``_handle_steering`` is the sole steering-injection/delivery path for
+    every CLI-harness (production) session (plan #2000 Critique Results
+    BLOCKER finding) -- there is no more in-process SDK-client
+    interrupt()/query() arm (deleted, plan #2000 Task 2.2). Every non-abort
+    message is unconditionally re-pushed to the Redis steering list for the
+    worker's turn-boundary drain to pick up on the next turn.
+    """
 
     @pytest.mark.asyncio
     async def test_watchdog_returns_continue_when_no_steering(self):
@@ -612,128 +599,69 @@ class TestWatchdogSteering:
         assert "stop immediately" in hook_output["additionalContext"]
 
     @pytest.mark.asyncio
-    async def test_watchdog_injects_message(self):
-        """Watchdog should call interrupt+query when steering message exists."""
+    async def test_watchdog_repushes_message_to_redis_list(self):
+        """A steering message injected while a CLI-harness session runs
+        lands on the Redis steering list and is drained next turn (plan
+        #2000 Task 2.2 regression coverage -- the sole remaining delivery
+        path now that the SDK-client injection arm is gone)."""
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_inject"
+        session_id = "test_watchdog_repush"
         push_steering_message(session_id, "focus on OAuth", "Tom")
 
-        mock_client = AsyncMock()
-        with patch("agent.sdk_client.get_active_client", return_value=mock_client):
-            result = await _handle_steering(session_id)
-
-        assert result is not None
-        assert result["continue_"] is True
-        # Verify interrupt+query were actually called
-        mock_client.interrupt.assert_awaited_once()
-        mock_client.query.assert_awaited_once()
-        # Verify the query contained the steering text
-        query_arg = mock_client.query.call_args[0][0]
-        assert "focus on OAuth" in query_arg
-        assert "STEERING MESSAGE" in query_arg
-
-    @pytest.mark.asyncio
-    async def test_watchdog_handles_missing_client_session_found(self):
-        """No active client (CLI harness): the message is re-pushed to the Redis list.
-
-        Post-A1 the Redis steering list is the sole inbox — the model ListField is gone.
-        When the watchdog finds a pending steer but no active SDK client, it re-pushes
-        every (non-abort) message so the worker's turn-boundary drain picks it up on the
-        next turn. Whether the session exists in the DB no longer changes this behavior.
-        """
-        from datetime import UTC, datetime
-
-        from agent.health_check import _handle_steering
-        from models.agent_session import AgentSession
-
-        session_id = "test_watchdog_noclient_found"
-        session = AgentSession(
-            session_id=session_id,
-            project_key="test-steer",
-            status="running",
-            message_text="test task",
-            created_at=datetime.now(tz=UTC),
-        )
-        session.save()
-
-        push_steering_message(session_id, "focus on OAuth", "Tom")
-
-        with patch("agent.sdk_client.get_active_client", return_value=None):
-            result = await _handle_steering(session_id)
+        result = await _handle_steering(session_id)
 
         assert result is not None
         assert result["continue_"] is True
 
-        # Message re-pushed to the Redis steering list (the sole inbox post-A1).
         msg = pop_steering_message(session_id)
         assert msg is not None, "Message should have been re-pushed to the Redis list"
         assert msg["text"] == "focus on OAuth"
 
     @pytest.mark.asyncio
-    async def test_watchdog_handles_missing_client_session_not_found(self):
-        """If no active client and session not in DB, message is re-pushed to Redis list."""
+    async def test_watchdog_repushes_multiple_messages(self):
+        """Every remaining (non-abort) queued message is re-pushed together,
+        regardless of whether the session record exists in the DB."""
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_noclient_notfound"
-        push_steering_message(session_id, "fallback message", "Tom")
+        session_id = "test_watchdog_repush_multi"
+        push_steering_message(session_id, "first", "Tom")
+        push_steering_message(session_id, "second", "Tom")
 
-        with patch("agent.sdk_client.get_active_client", return_value=None):
-            result = await _handle_steering(session_id)
-
+        result = await _handle_steering(session_id)
         assert result is not None
         assert result["continue_"] is True
 
-        # Session not in DB: message should be re-pushed to Redis list (existing fallback)
-        msg = pop_steering_message(session_id)
-        assert msg is not None
-        assert msg["text"] == "fallback message"
+        messages = pop_all_steering_messages(session_id)
+        assert {m["text"] for m in messages} == {"first", "second"}
 
     @pytest.mark.asyncio
-    async def test_watchdog_repush_on_injection_failure(self):
-        """If SDK injection raises, messages are re-pushed to the Redis list (never lost).
-
-        Post-A1 there is no model-write path in the delivery branch; the failure mode
-        worth guarding is an active SDK client whose interrupt()/query() raises. The
-        watchdog must re-deposit the popped messages onto the Redis list so a steer is
-        preserved for the next turn instead of being silently dropped.
-        """
+    async def test_watchdog_repush_retries_once_on_redis_failure(self):
+        """If the primary re-push raises (e.g. a transient Redis error), the
+        except arm retries the re-push once rather than losing the message
+        or crashing the hook."""
+        import agent.health_check as hc
         from agent.health_check import _handle_steering
 
-        session_id = "test_watchdog_injection_fail"
+        session_id = "test_watchdog_repush_retry"
         push_steering_message(session_id, "update the tests", "Tom")
 
-        failing_client = AsyncMock()
-        failing_client.interrupt.side_effect = RuntimeError("interrupt failed")
+        real_repush = hc._repush_messages
+        call_count = {"n": 0}
 
-        with patch("agent.sdk_client.get_active_client", return_value=failing_client):
+        def _flaky_repush(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("redis hiccup")
+            return real_repush(*args, **kwargs)
+
+        with patch("agent.health_check._repush_messages", side_effect=_flaky_repush):
             result = await _handle_steering(session_id)
 
         assert result is not None
         assert result["continue_"] is True
+        assert call_count["n"] == 2, "the except arm must retry the re-push exactly once"
 
-        # After injection failure, the message must be re-pushed to the Redis list.
-        msg = pop_steering_message(session_id)
-        assert msg is not None
-        assert msg["text"] == "update the tests"
-
-    @pytest.mark.asyncio
-    async def test_watchdog_repushes_on_injection_failure(self):
-        """If interrupt succeeds but query throws, messages should be re-pushed."""
-        from agent.health_check import _handle_steering
-
-        session_id = "test_watchdog_inject_fail"
-        push_steering_message(session_id, "update the tests", "Tom")
-
-        mock_client = AsyncMock()
-        mock_client.query.side_effect = RuntimeError("connection lost")
-        with patch("agent.sdk_client.get_active_client", return_value=mock_client):
-            result = await _handle_steering(session_id)
-
-        assert result is not None
-        assert result["continue_"] is True
-
-        # Message should have been re-pushed after failure
         msg = pop_steering_message(session_id)
         assert msg is not None
         assert msg["text"] == "update the tests"
