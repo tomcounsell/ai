@@ -1,9 +1,11 @@
-"""Unit tests for tools.sdlc_meta_set CLI tool (issue #1302).
+"""Unit tests for tools.sdlc_meta_set CLI tool (issue #1302; re-pointed at the
+issue-keyed PipelineLedger by issue #2012 task 2).
 
 Tests cover:
-- Valid key sets stage_states["_<key>"] via update_stage_states()
+- Valid key sets stage_states_json["_<key>"] via update_stage_states()
 - Unknown key exits with code 2
-- Missing session is fail-soft (returns {})
+- Missing/foreign/repo-less lease hard-fails loudly (exit 1) -- there is no
+  session left to resolve
 - Bool coercion for plan_revising
 - String coercion for plan_hash_at_build_start
 - Whitelist enforcement
@@ -19,6 +21,14 @@ from unittest.mock import MagicMock, patch
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def _lock_result(**kw):
+    from models.session_lifecycle import IssueLockResult
+
+    base = dict(acquired=True, owner_session_id="s", owner_run_id="run-test", target_repo="o/r")
+    base.update(kw)
+    return IssueLockResult(**base)
+
+
 class TestMetaSetWriteMeta:
     """Tests for the write_meta() function."""
 
@@ -26,71 +36,54 @@ class TestMetaSetWriteMeta:
         """write_meta with plan_revising=True writes _plan_revising=True."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-        mock_session.session_type = "eng"
-
-        def fake_update_stage_states(session, update_fn, **kwargs):
+        def fake_update_stage_states(ledger, update_fn, **kwargs):
             # Simulate applying the update to an empty dict
             result = update_fn({})
             assert result.get("_plan_revising") is True
             return True
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch(
                 "tools.stage_states_helpers.update_stage_states",
                 side_effect=fake_update_stage_states,
             ),
         ):
-            result = write_meta(key="plan_revising", value="true")
+            result = write_meta(
+                key="plan_revising", value="true", issue_number=1, run_id="run-test"
+            )
 
         assert result == {"key": "plan_revising", "value": True}
 
-    def test_write_meta_never_renews_issue_lock(self):
-        """Issue #1954 scope-narrowing (preserved under #2003): meta-set fires
-        during PLAN/CRITIQUE-stage bookkeeping with no established recurrence
-        path through an in-progress BUILD/TEST/REVIEW stage, so it must NOT
-        renew/acquire the issue-level SDLC ownership lock. The only lock
-        touch allowed is the read-only ownership PEEK (#2003)."""
-        from models.session_lifecycle import IssueLockResult
+    def test_write_revalidates_lease_before_write(self):
+        """TOCTOU close (Risk 5): the write must call touch_issue_lock a
+        SECOND time (non-peek) with the resolved target_repo, immediately
+        before the actual mutation."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-        mock_session.session_type = "eng"
-
-        mock_touch = MagicMock(
-            return_value=IssueLockResult(
-                acquired=True, owner_session_id="s", owner_run_id="run-1954"
-            )
-        )
+        mock_touch = MagicMock(return_value=_lock_result(owner_run_id="run-1954"))
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
-            patch(
-                "tools.stage_states_helpers.update_stage_states",
-                return_value=True,
-            ),
             patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("tools.stage_states_helpers.update_stage_states", return_value=True),
         ):
             write_meta(key="plan_revising", value="true", issue_number=1954, run_id="run-1954")
 
-        # Every lock touch on this path must be peek-only -- never a
-        # mutating acquire/renew.
-        assert mock_touch.call_args_list, "ownership peek expected"
-        for call in mock_touch.call_args_list:
-            assert call.kwargs.get("peek") is True
+        assert mock_touch.call_count == 2
+        peek_calls = [c for c in mock_touch.call_args_list if c.kwargs.get("peek")]
+        revalidate_calls = [c for c in mock_touch.call_args_list if not c.kwargs.get("peek")]
+        assert len(peek_calls) == 1
+        assert len(revalidate_calls) == 1
+        args, kwargs = revalidate_calls[0]
+        assert args[0] == 1954
+        assert args[1] == "run-1954"
+        assert kwargs.get("target_repo") == "o/r"
 
     def test_write_meta_foreign_run_returns_issue_locked(self):
-        """#2003: a foreign run holding the issue lock refuses the meta write
-        with the ISSUE_LOCKED shape."""
+        """#2003/#2012: a foreign run holding the issue lock refuses the meta
+        write with the ISSUE_LOCKED shape."""
         from models.session_lifecycle import IssueLockResult
         from tools.sdlc_meta_set import write_meta
-
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-        mock_session.session_type = "eng"
 
         mock_touch = MagicMock(
             return_value=IssueLockResult(
@@ -102,9 +95,8 @@ class TestMetaSetWriteMeta:
         write_mock = MagicMock(return_value=True)
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
-            patch("tools.stage_states_helpers.update_stage_states", write_mock),
             patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("tools.stage_states_helpers.update_stage_states", write_mock),
         ):
             result = write_meta(
                 key="plan_revising", value="true", issue_number=1954, run_id="intruder-run"
@@ -115,27 +107,63 @@ class TestMetaSetWriteMeta:
         assert result["owner_session_id"] == "other-session"
         write_mock.assert_not_called()
 
+    def test_unheld_lease_returns_lease_absent(self):
+        """PRESENT_NO_SESSION's replacement: an unheld lock (no established
+        lease for this run_id at all) is now LOUD (a returned error shape),
+        not a quiet no-op."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_touch = MagicMock(return_value=_lock_result(owner_run_id=None, target_repo=None))
+        with patch("models.session_lifecycle.touch_issue_lock", mock_touch):
+            result = write_meta(
+                key="plan_revising", value="true", issue_number=1959, run_id="run-1959"
+            )
+
+        assert result["reason"] == "LEASE_ABSENT"
+
+    def test_missing_issue_number_or_run_id_returns_lease_absent(self):
+        from tools.sdlc_meta_set import write_meta
+
+        result = write_meta(key="plan_revising", value="true")
+        assert result["reason"] == "LEASE_ABSENT"
+
+    def test_target_repo_missing_returns_error_never_writes(self):
+        """Risk 5 (writer side): a valid lease with no pinned target_repo
+        must hard-fail and never construct a PipelineLedger key with a None
+        component."""
+        from tools.sdlc_meta_set import write_meta
+
+        mock_touch = MagicMock(return_value=_lock_result(owner_run_id="run-1", target_repo=None))
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", mock_touch),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
+        ):
+            result = write_meta(
+                key="plan_revising", value="true", issue_number=1960, run_id="run-1"
+            )
+
+        assert result["reason"] == "TARGET_REPO_MISSING"
+        mock_get_or_create.assert_not_called()
+
     def test_valid_bool_key_false_clears_value(self):
         """write_meta with plan_revising=false writes _plan_revising=False."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = '{"_plan_revising": true}'
-        mock_session.session_type = "eng"
-
-        def fake_update_stage_states(session, update_fn, **kwargs):
+        def fake_update_stage_states(ledger, update_fn, **kwargs):
             result = update_fn({"_plan_revising": True})
             assert result.get("_plan_revising") is False
             return True
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch(
                 "tools.stage_states_helpers.update_stage_states",
                 side_effect=fake_update_stage_states,
             ),
         ):
-            result = write_meta(key="plan_revising", value="false")
+            result = write_meta(
+                key="plan_revising", value="false", issue_number=1, run_id="run-test"
+            )
 
         assert result == {"key": "plan_revising", "value": False}
 
@@ -143,24 +171,23 @@ class TestMetaSetWriteMeta:
         """write_meta with plan_hash_at_build_start sets the string value."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-        mock_session.session_type = "eng"
         test_hash = "abc123def456"
 
-        def fake_update_stage_states(session, update_fn, **kwargs):
+        def fake_update_stage_states(ledger, update_fn, **kwargs):
             result = update_fn({})
             assert result.get("_plan_hash_at_build_start") == test_hash
             return True
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch(
                 "tools.stage_states_helpers.update_stage_states",
                 side_effect=fake_update_stage_states,
             ),
         ):
-            result = write_meta(key="plan_hash_at_build_start", value=test_hash)
+            result = write_meta(
+                key="plan_hash_at_build_start", value=test_hash, issue_number=1, run_id="run-test"
+            )
 
         assert result == {"key": "plan_hash_at_build_start", "value": test_hash}
 
@@ -171,27 +198,17 @@ class TestMetaSetWriteMeta:
         result = write_meta(key="nonexistent_key", value="anything")
         assert result == {}
 
-    def test_missing_session_returns_empty_dict(self):
-        """write_meta returns {} when no session can be found (fail-soft)."""
-        from tools.sdlc_meta_set import write_meta
-
-        with patch("tools.sdlc_meta_set.find_session", return_value=None):
-            result = write_meta(key="plan_revising", value="true")
-
-        assert result == {}
-
     def test_update_stage_states_failure_returns_empty_dict(self):
         """write_meta returns {} when update_stage_states returns False."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch("tools.stage_states_helpers.update_stage_states", return_value=False),
         ):
-            result = write_meta(key="plan_revising", value="true")
+            result = write_meta(
+                key="plan_revising", value="true", issue_number=1, run_id="run-test"
+            )
 
         assert result == {}
 
@@ -199,79 +216,75 @@ class TestMetaSetWriteMeta:
         """write_meta coerces '1'/'0' to True/False for bool keys."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-
-        def fake_update_true(session, update_fn, **kwargs):
+        def fake_update_true(ledger, update_fn, **kwargs):
             result = update_fn({})
             assert result["_plan_revising"] is True
             return True
 
-        def fake_update_false(session, update_fn, **kwargs):
+        def fake_update_false(ledger, update_fn, **kwargs):
             result = update_fn({})
             assert result["_plan_revising"] is False
             return True
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update_true),
         ):
-            r1 = write_meta(key="plan_revising", value="1")
+            r1 = write_meta(key="plan_revising", value="1", issue_number=1, run_id="run-test")
         assert r1["value"] is True
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
             patch("tools.stage_states_helpers.update_stage_states", side_effect=fake_update_false),
         ):
-            r2 = write_meta(key="plan_revising", value="0")
+            r2 = write_meta(key="plan_revising", value="0", issue_number=1, run_id="run-test")
         assert r2["value"] is False
 
     def test_invalid_bool_value_returns_empty_dict(self):
         """write_meta with an unrecognized bool value returns {} fail-soft."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-
-        with patch("tools.sdlc_meta_set.find_session", return_value=mock_session):
-            result = write_meta(key="plan_revising", value="not_a_bool")
-
+        result = write_meta(
+            key="plan_revising", value="not_a_bool", issue_number=1, run_id="run-test"
+        )
         assert result == {}
 
-    def test_pr_number_writes_session_field_not_meta_key(self):
-        """#2003 T1.7: `--key pr_number` writes the AgentSession.pr_number FIELD.
-
-        Single-writer contract: no `_pr_number` meta key is ever written to
-        stage_states — update_stage_states must not be called at all.
+    def test_pr_number_writes_ledger_field_not_meta_key(self):
+        """#2003 T1.7 / #2012: `--key pr_number` writes the PipelineLedger.pr_number
+        FIELD. Single-writer contract: no `_pr_number` meta key is ever
+        written to stage_states_json — update_stage_states must not be
+        called at all.
         """
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-        mock_session.pr_number = None
+        mock_ledger = MagicMock()
+        mock_ledger.pr_number = None
 
         with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session),
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=mock_ledger),
             patch("tools.stage_states_helpers.update_stage_states") as update_mock,
         ):
-            result = write_meta(key="pr_number", value="42")
+            result = write_meta(key="pr_number", value="42", issue_number=1, run_id="run-test")
 
         assert result == {"key": "pr_number", "value": 42}
-        assert mock_session.pr_number == 42
-        assert isinstance(mock_session.pr_number, int)
-        mock_session.save.assert_called_once()
+        assert mock_ledger.pr_number == 42
+        assert isinstance(mock_ledger.pr_number, int)
+        mock_ledger.save.assert_called_once()
         update_mock.assert_not_called()
 
     def test_pr_number_save_failure_returns_empty_dict(self):
-        """Field-write path fails soft: session.save() raising returns {}."""
+        """Field-write path fails soft: ledger.save() raising returns {}."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-        mock_session.save.side_effect = RuntimeError("redis down")
+        mock_ledger = MagicMock()
+        mock_ledger.save.side_effect = RuntimeError("redis down")
 
-        with patch("tools.sdlc_meta_set.find_session", return_value=mock_session):
-            result = write_meta(key="pr_number", value="42")
+        with (
+            patch("models.session_lifecycle.touch_issue_lock", return_value=_lock_result()),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create", return_value=mock_ledger),
+        ):
+            result = write_meta(key="pr_number", value="42", issue_number=1, run_id="run-test")
 
         assert result == {}
 
@@ -279,29 +292,8 @@ class TestMetaSetWriteMeta:
         """D4: non-numeric / non-positive pr_number is rejected by write_meta (fail-soft)."""
         from tools.sdlc_meta_set import write_meta
 
-        mock_session = MagicMock()
-        mock_session.stage_states = "{}"
-
-        with patch("tools.sdlc_meta_set.find_session", return_value=mock_session):
-            for bad in ("0", "-1", "abc", ""):
-                assert write_meta(key="pr_number", value=bad) == {}
-
-    def test_write_passes_ensure_true_to_resolver(self):
-        """write_meta resolves through find_session(..., ensure=True) so a
-        sessionless-but-issue-numbered write auto-creates a PM session (#1558)."""
-        from tools.sdlc_meta_set import write_meta
-
-        mock_session = MagicMock()
-        mock_session.session_type = "eng"
-
-        with (
-            patch("tools.sdlc_meta_set.find_session", return_value=mock_session) as find_mock,
-            patch("tools.stage_states_helpers.update_stage_states", return_value=True),
-        ):
-            result = write_meta(key="plan_revising", value="true", issue_number=1558)
-
-        assert result == {"key": "plan_revising", "value": True}
-        find_mock.assert_called_once_with(None, issue_number=1558, ensure=True, caller_run_id=None)
+        for bad in ("0", "-1", "abc", ""):
+            assert write_meta(key="pr_number", value=bad, issue_number=1, run_id="run-test") == {}
 
 
 class TestMetaSetWhitelist:
@@ -314,22 +306,22 @@ class TestMetaSetWhitelist:
         assert "plan_revising" in _KEY_REGISTRY
         assert "plan_hash_at_build_start" in _KEY_REGISTRY
         assert "pr_number" in _KEY_REGISTRY
-        # #2003 T1.7: pr_number is FIELD-backed (AgentSession.pr_number), not
+        # #2003 T1.7: pr_number is FIELD-backed (PipelineLedger.pr_number), not
         # a stage_states meta key — no leading underscore on the target.
         assert _KEY_REGISTRY["pr_number"] == ("pr_number", int)
 
     def test_whitelist_storage_targets_follow_convention(self):
         """Meta keys use the leading-underscore convention; field-backed keys
-        (currently only pr_number) name a real AgentSession attribute."""
-        from models.agent_session import AgentSession
+        (currently only pr_number) name a real PipelineLedger attribute."""
+        from agent.pipeline_ledger import PipelineLedger
         from tools.sdlc_meta_set import _KEY_REGISTRY
 
         for public_key, (target, _) in _KEY_REGISTRY.items():
             if target.startswith("_"):
                 continue  # stage_states meta key
-            assert hasattr(AgentSession, target), (
+            assert hasattr(PipelineLedger, target), (
                 f"Field-backed key {public_key!r} targets {target!r}, "
-                f"which is not an AgentSession attribute"
+                f"which is not a PipelineLedger attribute"
             )
 
     def test_do_build_addendum_documents_pr_number_writer(self):
@@ -390,10 +382,11 @@ class TestMetaSetCLI:
         )
         assert proc.returncode != 0
 
-    def test_no_session_no_issue_no_env_exits_0_with_empty_json(self):
-        """Genuinely sessionless (no --issue-number, no env) CLI write still
-        no-ops: exits 0 with {} output. Reads/writes never fabricate a session
-        when there is no issue context to attach state to (#1558)."""
+    def test_no_issue_number_exits_1_with_lease_absent(self):
+        """Issue #2012 task 2: this REPLACES the old fail-soft no-session
+        exit-0 contract. Genuinely lease-less (no --issue-number, no
+        established lease) CLI write now hard-fails LOUD: exit 1,
+        LEASE_ABSENT."""
         proc = subprocess.run(
             [
                 sys.executable,
@@ -405,22 +398,14 @@ class TestMetaSetCLI:
                 "true",
                 "--run-id",
                 "run-cli-test",
-                # NO --issue-number: no issue context → ensure guard returns None.
+                # NO --issue-number: no issue context → no ledger key.
             ],
             capture_output=True,
             text=True,
             cwd=str(REPO_ROOT),
-            env={
-                **__import__("os").environ,
-                # Remove session env vars so there is no resolvable session.
-                "VALOR_SESSION_ID": "",
-                "AGENT_SESSION_ID": "",
-            },
         )
-        # Fail-soft: should exit 0 with no fabricated session.
-        assert proc.returncode == 0
-        output = proc.stdout.strip()
-        assert output == "{}", f"Expected '{{}}' but got: {output!r}"
+        assert proc.returncode == 1
+        assert "LEASE_ABSENT" in proc.stderr
 
     def test_pr_number_invalid_value_exits_2(self):
         """D4: CLI exits 2 for an invalid pr_number value (known key, bad value)."""

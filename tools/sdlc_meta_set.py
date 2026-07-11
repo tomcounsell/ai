@@ -1,9 +1,10 @@
-"""CLI tool for writing SDLC pipeline metadata to a PM session.
+"""CLI tool for writing SDLC pipeline metadata to the issue-keyed PipelineLedger.
 
 Invoked by SDLC skills (do-plan-critique, do-plan, do-build) to set or clear
 plan-level metadata flags without depending on bridge hooks. Most keys land
-in the session's ``stage_states`` dict; field-backed keys write an
-``AgentSession`` attribute directly.
+in the ledger's ``stage_states_json`` dict; field-backed keys write a
+``PipelineLedger`` attribute directly (issue #2012 task 2 -- there is no
+session left in this path).
 
 Whitelisted keys and their types:
   plan_revising          bool   — set by critique on NEEDS REVISION / MAJOR REWORK /
@@ -12,7 +13,7 @@ Whitelisted keys and their types:
   plan_hash_at_build_start  str — git commit hash of the plan doc at build start.
                                   Recorded by do-build Step 7; verified at Step 21.
   pr_number               int  — FIELD-backed (#2003 T1.7): writes
-                                  ``AgentSession.pr_number`` via ``session.save()``.
+                                  ``PipelineLedger.pr_number`` via ``ledger.save()``.
                                   This command is the SINGLE writer of that field —
                                   /do-build invokes it at PR creation, and it is the
                                   out-of-band operator recovery path. ``_compute_meta``
@@ -35,23 +36,22 @@ Usage:
 Run identity (issue #2003): this tool is state-mutating and REQUIRES
 ``--run-id`` (the run identity emitted by ``sdlc-tool session-ensure``).
 Missing flag is a named non-zero error (``RUN_ID_REQUIRED``) — no mint, no
-adopt. A foreign run_id refuses the write with an ``ISSUE_LOCKED``
-diagnostic (exit 1).
+adopt. ``--issue-number`` is likewise REQUIRED for a real write: the ledger
+key is ``(target_repo, issue_number)`` and there is no session left to
+derive an issue number from.
 
-Environment variables (checked in order if --session-id not provided):
-    VALOR_SESSION_ID   — bridge-injected PM session ID
-    AGENT_SESSION_ID   — alternative session ID env var
-
-When no session ID is available (local Claude Code sessions), use --issue-number
-to resolve the session by GitHub issue number.
+Degradation contract (issue #2012 task 2 — rebuilt around the lease, not a
+session): a missing/foreign/repo-less lease is now LOUD (exit 1) — there is
+no session to fail to resolve to anymore, so silence is never correct.
 
 Exit codes:
-    0 — success, or fail-soft error (no session found, Redis down, etc.)
-    1 — issue lock held by a foreign run (ISSUE_LOCKED; write refused)
+    0 — success
+    1 — lease absent, foreign (ISSUE_LOCKED), or repo-less (TARGET_REPO_MISSING);
+        write refused
     2 — invalid arguments (unknown key, missing required args, missing --run-id)
 
 Output:
-    {} on error (no session found, write failed, etc.)
+    {} on a non-lease write failure (e.g. Redis hiccup on the actual write)
     {"key": "plan_revising", "value": true} on success
 """
 
@@ -62,7 +62,7 @@ import json
 import logging
 import sys
 
-from tools._sdlc_utils import check_run_ownership, find_session
+from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
 
 logger = logging.getLogger(__name__)
 
@@ -130,29 +130,35 @@ def write_meta(
     issue_number: int | None = None,
     run_id: str | None = None,
 ) -> dict:
-    """Write a whitelisted metadata key.
+    """Write a whitelisted metadata key to the issue-keyed PipelineLedger.
 
-    Meta keys go to ``stage_states["_<key>"]`` via ``update_stage_states()``;
-    field-backed keys (``pr_number``) write the ``AgentSession`` attribute
-    directly and ``session.save()`` (#2003 T1.7 single-writer).
+    Meta keys go to ``stage_states_json["_<key>"]`` via
+    ``update_stage_states()``; field-backed keys (``pr_number``) write the
+    ``PipelineLedger`` attribute directly and ``ledger.save()`` (#2003 T1.7
+    single-writer, re-pointed at the ledger by issue #2012 task 2).
 
-    Run identity (issue #2003): when the resolved session has an issue
-    context, the issue lock is peek-compared against ``run_id`` — a foreign
-    live holder refuses the write and returns the ``ISSUE_LOCKED`` shape.
-    Peek-only: meta-set never renews the lock (#1954 scope-narrowing
-    preserved).
+    There is no session in this path: authorization is decided SOLELY by
+    the run_id-keyed issue lease (``models.session_lifecycle.touch_issue_lock``).
+    A missing/foreign/repo-less lease all hard-fail loudly (returned as an
+    error-shaped dict; ``main()`` surfaces it via a non-zero exit) — there
+    is nothing left to silently no-op to.
 
     Args:
         key: Whitelisted key name (e.g., "plan_revising").
         value: Raw string value — will be coerced to the key's type.
-        session_id: Optional explicit session ID (falls back to env vars).
-        issue_number: Optional issue number for local session resolution.
+        session_id: Unused — accepted only for CLI-flag backward compat.
+        issue_number: The GitHub issue number. Required for a real write
+            (the ledger key is ``(target_repo, issue_number)``).
         run_id: The caller's run identity (the CLI's ``--run-id``).
 
     Returns:
-        Dict with key/value on success, an ``ISSUE_LOCKED``-shaped dict when
-        a foreign run holds the issue lock, empty dict on any other failure.
+        Dict with key/value on success, an error-shaped dict
+        (``{"reason": "LEASE_ABSENT"|"ISSUE_LOCKED"|"TARGET_REPO_MISSING", ...}``)
+        when the lease is missing/foreign/repo-less, empty dict on any other
+        (non-lease) write failure.
     """
+    del session_id  # unused -- CLI-flag backward compat only
+
     if key not in _KEY_REGISTRY:
         logger.debug(f"sdlc_meta_set: unknown key {key!r}")
         return {}
@@ -163,33 +169,44 @@ def write_meta(
         logger.debug(f"sdlc_meta_set: value coercion failed for key {key!r}: {e}")
         return {}
 
-    # caller_run_id gates the cold-state auto-ensure (#2003 cycle-3): a
-    # run_id-carrying write that resolves no session must not mint one.
-    session = find_session(session_id, issue_number=issue_number, ensure=True, caller_run_id=run_id)
-    if not session:
-        return {}
-
-    # Run-identity gate (issue #2003): refuse the write when a FOREIGN run
-    # holds the issue lock.
-    conflict = check_run_ownership(session, run_id, issue_number=issue_number)
-    if conflict is not None:
+    target_repo, lease_error = resolve_ledger_lease(issue_number, run_id)
+    if lease_error is not None:
         logger.debug(
-            "sdlc_meta_set: issue lock held by a foreign run (run_id=%s, session=%s) "
-            "-- refusing meta write",
-            conflict.get("owner_run_id"),
-            conflict.get("owner_session_id"),
+            "sdlc_meta_set: lease invalid for issue #%s (reason=%s) -- refusing meta write",
+            issue_number,
+            lease_error.get("reason"),
         )
-        return dict(conflict)
+        return dict(lease_error)
+    if not target_repo:
+        logger.debug(
+            "sdlc_meta_set: issue #%s lease has no pinned target_repo -- refusing meta write",
+            issue_number,
+        )
+        return {"reason": "TARGET_REPO_MISSING"}
 
+    from agent.pipeline_ledger import PipelineLedger
+
+    ledger = PipelineLedger.get_or_create(target_repo, issue_number)
     storage_target, _ = _KEY_REGISTRY[key]
 
-    # Field-backed keys (#2003 T1.7): write the AgentSession attribute
+    # TOCTOU close (Risk 5): re-validate the lease non-peek immediately
+    # before the actual write, never trusting the earlier peek across the
+    # gap between resolve and write.
+    if not revalidate_ledger_lease(issue_number, run_id, target_repo):
+        logger.debug(
+            "sdlc_meta_set: lease for issue #%s was taken by a foreign run between "
+            "resolve and write -- refusing meta write",
+            issue_number,
+        )
+        return {"reason": "ISSUE_LOCKED"}
+
+    # Field-backed keys (#2003 T1.7): write the PipelineLedger attribute
     # directly — ONE writer code path for both /do-build's PR-creation write
     # and out-of-band operator recovery. No stage_states meta key is written.
     if not storage_target.startswith("_"):
         try:
-            setattr(session, storage_target, coerced)
-            session.save()
+            setattr(ledger, storage_target, coerced)
+            ledger.save()
         except Exception as e:
             logger.debug(f"sdlc_meta_set: field write failed for key {key!r}: {e}")
             return {}
@@ -202,7 +219,7 @@ def write_meta(
     try:
         from tools.stage_states_helpers import update_stage_states
 
-        success = update_stage_states(session, _apply_update)
+        success = update_stage_states(ledger, _apply_update, field="stage_states_json")
         if not success:
             logger.debug(f"sdlc_meta_set: update_stage_states returned False for key {key!r}")
             return {}
@@ -302,7 +319,8 @@ def main() -> None:
         run_id=args.run_id,
     )
     print(json.dumps(result))
-    if result.get("reason") == "ISSUE_LOCKED":
+    reason = result.get("reason")
+    if reason == "ISSUE_LOCKED":
         # Foreign run holds the issue lock — loud so the caller sees the
         # refused write instead of a silent {} no-op.
         print(
@@ -312,7 +330,27 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    # Otherwise exit 0 (fail-soft: runtime errors return {} but don't crash the skill)
+    if reason == "LEASE_ABSENT":
+        # Issue #2012 task 2: this REPLACES the old fail-soft no-session
+        # exit 0 -- there is no session to fail to resolve to anymore, so
+        # silence is never correct.
+        print(
+            f"sdlc_meta_set: LEASE_ABSENT — no live issue lease for issue "
+            f"#{args.issue_number} owned by run_id={args.run_id!r}; run "
+            "`sdlc-tool session-ensure` first. Write refused.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if reason == "TARGET_REPO_MISSING":
+        print(
+            f"sdlc_meta_set: TARGET_REPO_MISSING — the issue lease for issue "
+            f"#{args.issue_number} has no pinned target_repo; refusing to write "
+            "a PipelineLedger record with a None key component.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Otherwise exit 0 (fail-soft: a genuine (non-lease) write failure returns
+    # {} but doesn't crash the skill)
     sys.exit(0)
 
 
