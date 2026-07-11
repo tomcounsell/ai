@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Bootstrap: ensure repo root is on sys.path
 _repo_root = Path(__file__).parent.parent.parent
 if str(_repo_root) not in sys.path:
@@ -1013,33 +1015,72 @@ class TestCmdReleaseHappyPath:
 
 
 # ---------------------------------------------------------------------------
-# model=None → not set in ClaudeAgentOptions
+# model=None → not set in the harness argv (plan #2000 Task 2.2: repointed
+# off ValorAgent's ClaudeAgentOptions -- dead, no production caller -- onto
+# get_response_via_harness's model kwarg, the live CLI-harness equivalent)
 # ---------------------------------------------------------------------------
 
 
+class _EmptyStdoutLines:
+    """Async iterator yielding nothing -- for tests that only assert argv."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+def _empty_stdout_lines() -> _EmptyStdoutLines:
+    return _EmptyStdoutLines()
+
+
 class TestModelNoneNotSetInOptions:
-    """Verify that model=None sessions do not override SDK/CLI defaults."""
+    """Verify that model=None sessions do not override the CLI's own default."""
 
-    def test_model_none_excluded_from_options_kwargs(self):
-        """When ValorAgent.model is None, 'model' key must not appear in options_kwargs."""
-        from agent.sdk_client import ValorAgent
+    @pytest.mark.asyncio
+    async def test_model_none_excluded_from_argv(self):
+        """When model=None, --model must not appear in the harness argv."""
+        from unittest.mock import AsyncMock, patch
 
-        agent = ValorAgent(model=None)
-        # ValorAgent._create_options only sets options_kwargs["model"] when self.model is truthy.
-        # Verify via the source condition: self.model is falsy when model=None so the SDK
-        # default is preserved (no override).
-        assert not agent.model, "model should be None/falsy when not specified"
-        # Call _create_options to ensure no exception is raised when model=None.
-        agent._create_options(session_id="test-session")
+        from agent.sdk_client import get_response_via_harness
 
-    def test_model_set_when_specified(self):
-        """When ValorAgent.model is non-None, it must be passed to ClaudeAgentOptions."""
-        from agent.sdk_client import ValorAgent
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            proc = AsyncMock()
+            proc.stdout = _empty_stdout_lines()
+            proc.stderr = AsyncMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            proc.pid = 1
+            mock_exec.return_value = proc
 
-        agent = ValorAgent(model="claude-opus-4-5")
-        assert agent.model == "claude-opus-4-5"
-        # _create_options should include model in kwargs (covered by live integration,
-        # but we verify the agent stores it correctly for dispatch).
+            await get_response_via_harness(message="hi", working_dir="/tmp", model=None)
+
+        assert "--model" not in mock_exec.call_args.args
+
+    @pytest.mark.asyncio
+    async def test_model_set_when_specified(self):
+        """When model is non-None, --model <value> is injected into the argv."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.sdk_client import get_response_via_harness
+
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            proc = AsyncMock()
+            proc.stdout = _empty_stdout_lines()
+            proc.stderr = AsyncMock()
+            proc.communicate = AsyncMock(return_value=(b"", b""))
+            proc.returncode = 0
+            proc.pid = 1
+            mock_exec.return_value = proc
+
+            await get_response_via_harness(
+                message="hi", working_dir="/tmp", model="claude-opus-4-5"
+            )
+
+        argv = mock_exec.call_args.args
+        assert "--model" in argv
+        assert argv[argv.index("--model") + 1] == "claude-opus-4-5"
 
 
 # ---------------------------------------------------------------------------
