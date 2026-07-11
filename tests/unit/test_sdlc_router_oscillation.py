@@ -733,3 +733,142 @@ def _states_with_plan() -> dict:
         "PLAN": "completed",
         "CRITIQUE": "pending",
     }
+
+
+# ---------------------------------------------------------------------------
+# G8 (#1267): artifact verification consumer, positioned in GUARDS after G4.
+# ---------------------------------------------------------------------------
+#
+# g8 never makes a live call itself -- it only consumes
+# context["stage_artifacts_verified"] / context["unverified_stage"], set by
+# the next-skill context-assembly path (tools/sdlc_next_skill.py, see
+# tests/unit/test_sdlc_next_skill.py::TestStageArtifactVerification). These
+# tests drive evaluate_guards()/decide_next_dispatch() directly with a
+# synthetic context, exercising the router-side guard-ordering contract in
+# isolation from the live gh/git calls.
+
+
+def test_g8_redispatches_same_stage_on_verified_mismatch():
+    """g8: stage_artifacts_verified=False + unverified_stage='BUILD' →
+    re-dispatch /do-build (the BUILD stage's own skill), row_id='G8'."""
+    result = decide_next_dispatch(
+        {"BUILD": "completed"},
+        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        context={"stage_artifacts_verified": False, "unverified_stage": "BUILD"},
+    )
+    assert isinstance(result, Dispatch)
+    assert result.row_id == "G8"
+    assert result.skill == SKILL_DO_BUILD
+
+
+def test_g8_silent_when_verified_true():
+    """g8 does not fire when stage_artifacts_verified is True (verified clean)."""
+    result = decide_next_dispatch(
+        {"BUILD": "completed"},
+        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        context={"stage_artifacts_verified": True, "unverified_stage": None},
+    )
+    assert isinstance(result, Dispatch)
+    assert result.row_id != "G8"
+
+
+def test_g8_silent_when_flag_absent():
+    """g8 does not fire when the context carries no verification flags at
+    all -- the no-claimed-artifact no-op contract from context assembly."""
+    result = decide_next_dispatch(
+        {"BUILD": "completed"},
+        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        context={},
+    )
+    assert isinstance(result, Dispatch)
+    assert result.row_id != "G8"
+
+
+def test_g8_existing_g5_g7_cases_stay_green_without_verification_flag():
+    """Existing G5/G7-adjacent dispatch cases are unaffected when no
+    verification context is supplied at all (the common CLI-path shape
+    before #1267's context.update() runs)."""
+    cached_hash = "sha256:g8-regression"
+    states = {
+        "PLAN": "completed",
+        "_verdicts": {
+            "CRITIQUE": {
+                "verdict": "NEEDS REVISION",
+                "artifact_hash": cached_hash,
+            }
+        },
+    }
+    result = decide_next_dispatch(
+        states,
+        {"latest_critique_verdict": "NEEDS REVISION"},
+        context={"current_plan_hash": cached_hash},
+    )
+    assert isinstance(result, Dispatch)
+    assert result.row_id == "G5"
+    assert result.skill == SKILL_DO_PLAN
+
+
+def test_g4_fires_before_g8_on_persistently_false_claim():
+    """The G4 cap bounds verification-driven re-dispatches (#1267 Concern 3).
+
+    With stage_artifacts_verified=False AND
+    same_stage_dispatch_count >= MAX_SAME_STAGE_DISPATCHES, G4 (positioned
+    before g8 in GUARDS) must fire FIRST and return Blocked -- a
+    persistently false claim escalates to a human rather than g8
+    re-dispatching the same stage forever.
+    """
+    result = decide_next_dispatch(
+        {"BUILD": "completed"},
+        {
+            "same_stage_dispatch_count": MAX_SAME_STAGE_DISPATCHES,
+            "last_dispatched_skill": SKILL_DO_BUILD,
+        },
+        context={"stage_artifacts_verified": False, "unverified_stage": "BUILD"},
+    )
+    assert isinstance(result, Blocked)
+    assert result.guard_id == "G4"
+
+
+def test_g4_does_not_yet_block_below_cap_so_g8_can_redispatch():
+    """Below the G4 cap, a verified-false claim reaches g8 and re-dispatches
+    (the bounded, non-immediate-Block phase-1 policy: silent re-dispatch,
+    then escalate via the existing G4 cap once the cap is reached)."""
+    result = decide_next_dispatch(
+        {"BUILD": "completed"},
+        {
+            "same_stage_dispatch_count": MAX_SAME_STAGE_DISPATCHES - 1,
+            "last_dispatched_skill": SKILL_DO_BUILD,
+        },
+        context={"stage_artifacts_verified": False, "unverified_stage": "BUILD"},
+    )
+    assert isinstance(result, Dispatch)
+    assert result.row_id == "G8"
+    assert result.skill == SKILL_DO_BUILD
+
+
+def test_g8_maps_patch_and_plan_stages_to_their_own_skills():
+    """g8 re-dispatches whatever stage was flagged, not just BUILD --
+    PATCH and PLAN map to their own skills per STAGE_TO_SKILL."""
+    for stage, expected_skill in (("PATCH", SKILL_DO_PATCH), ("PLAN", SKILL_DO_PLAN)):
+        result = decide_next_dispatch(
+            {stage: "completed"},
+            {"same_stage_dispatch_count": 0, "last_dispatched_skill": expected_skill},
+            context={"stage_artifacts_verified": False, "unverified_stage": stage},
+        )
+        assert isinstance(result, Dispatch), f"g8 failed to fire for {stage}"
+        assert result.row_id == "G8"
+        assert result.skill == expected_skill
+
+
+def test_g8_noop_on_malformed_unverified_stage():
+    """A mismatch flagged with an unmappable/garbage unverified_stage value
+    fails open (no dispatch decision from g8) rather than guessing a
+    re-dispatch target."""
+    result = decide_next_dispatch(
+        {"BUILD": "completed"},
+        {"same_stage_dispatch_count": 0, "last_dispatched_skill": SKILL_DO_BUILD},
+        context={"stage_artifacts_verified": False, "unverified_stage": "NOT_A_REAL_STAGE"},
+    )
+    # Falls through to normal dispatch table (g8 itself does not fire).
+    if isinstance(result, Dispatch):
+        assert result.row_id != "G8"
