@@ -1,11 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor Engels
 created: 2026-07-11
 tracking: https://github.com/tomcounsell/ai/issues/2002
 last_comment_id: none
+revision_applied: true
 ---
 
 # Tool-timeout guard run-scoping (epoch-scope current_tool_name/last_tool_use_at)
@@ -108,7 +109,12 @@ there is no failed fix to analyze.
    in `_apply_recovery_transition`) requeues the row `running -> pending`
    **without** clearing the two fields — they stay describing the prior run.
 3. **Resume**: worker picks the session back up, transitions `pending ->
-   running`, and stamps a fresh `started_at` for the new run. The stale
+   running`, and stamps a fresh `started_at` for the new run. This re-stamp is
+   the load-bearing premise of the whole fix and is verified in code: both
+   pickup paths run `chosen.started_at = datetime.now(tz=UTC)`
+   (`agent/session_pickup.py:463` and `:611`) immediately before the
+   `pending -> running` `transition_status`, so a resumed run's `started_at` is
+   always newer than a stale prior-run `last_tool_use_at`. The stale
    `current_tool_name`/`last_tool_use_at` are still present.
 4. **30s tool-timeout tick** (`_agent_session_tool_timeout_check`) reads the
    stale pair via `_check_tool_timeout(entry)` at `4098` **before the new run
@@ -179,6 +185,18 @@ budget as today → wedged past budget returns `(tier, reason)` → recovery fir
   anchor must not silently start firing or silently stop firing beyond today's
   behavior. Boundary `last_tool_use_at == anchor` counts as current-run (fire if
   over budget), matching `_delivery_belongs_to_current_run`'s `>=`.
+- **Stale-skip breadcrumb (keep the pure function pure).** The stale path returns
+  the same bare `None` as "no tool in flight" and "under budget", so a health
+  check that goes dark on a `started_at` regression would leave no trace. Do NOT
+  add logging inside `_check_tool_timeout` (it must stay side-effect-free). At the
+  caller near `agent/session_health.py:4098`, when `check is None` AND
+  `entry.current_tool_name` is set AND the pair is stale
+  (`anchor = _ts(started_at) or _ts(created_at)` is not `None` and
+  `_ts(last_tool_use_at) < anchor`), emit exactly one
+  `logger.debug("[session-health] tool-timeout stale-skip for %s (last_tool_use_at %s < anchor %s)", ...)`.
+  Reuse the same `_ts()` anchor expression as the gate so the caller and the pure
+  function cannot drift. This is a debug breadcrumb only — it changes no control
+  flow (the `continue` after `check is None` still fires).
 
 ## Failure Path Test Strategy
 
@@ -214,7 +232,11 @@ budget as today → wedged past budget returns `(tier, reason)` → recovery fir
   `started_at`/`created_at`, and add cases: (a) stale `last_tool_use_at` before
   anchor over budget → `None` (the bug); (b) fresh `last_tool_use_at` at/after
   anchor over budget → fires; (c) boundary equal timestamps → fires; (d)
-  no-anchor over budget → fires (legacy preserved).
+  no-anchor over budget → fires (legacy preserved); (e) **production-shape
+  resume case** mirroring `agent/session_pickup.py:463`/`:611`: `started_at =
+  datetime.now(tz=UTC)`, `last_tool_use_at` = a prior-run timestamp far past
+  budget → `_check_tool_timeout` returns `None` (proves the fix is not a no-op
+  under the exact state a real resume produces).
 - [ ] `tests/integration/test_session_health_tool_timeout.py` — UPDATE (additive,
   optional): add one end-to-end case proving the sub-loop does NOT call
   `_apply_recovery_transition` for a resumed session whose stale
@@ -319,7 +341,10 @@ already-documented pattern.
 ## Success Criteria
 
 - [ ] `_check_tool_timeout` returns `None` for an entry whose `last_tool_use_at`
-  predates its `started_at`/`created_at` anchor even when over budget (the bug).
+  predates its `started_at`/`created_at` anchor even when over budget (the bug),
+  including the production-shape resume case (`started_at = now`,
+  `last_tool_use_at` = prior-run over budget) mirroring
+  `agent/session_pickup.py:463`/`:611`.
 - [ ] `_check_tool_timeout` still fires for a fresh (>= anchor) over-budget entry
   and for a no-anchor over-budget entry (legacy preserved).
 - [ ] Boundary case `last_tool_use_at == anchor` fires (current-run, `>=`).
@@ -333,8 +358,9 @@ already-documented pattern.
 
 - **Builder (session-health)**
   - Name: sh-builder
-  - Role: Add the epoch gate to `_check_tool_timeout` and the additive unit
-    (and optional integration) tests.
+  - Role: Add the epoch gate to `_check_tool_timeout`, the caller-side stale-skip
+    debug breadcrumb (~`4098`), and the additive unit (and optional integration)
+    tests.
   - Agent Type: builder
   - Domain: async/concurrency (worker health loop). Paste the async/state-freshness
     rules from `DOMAIN_FRAMING.md` into the assignment.
@@ -361,9 +387,13 @@ already-documented pattern.
 - **Parallel**: false
 - Add the epoch comparison inside `_check_tool_timeout` (reuse `_ts()`; anchor =
   `_ts(started_at) or _ts(created_at)`; stale ⇒ `return None`; no-anchor ⇒ proceed).
-- Add unit cases (a)-(d) from Test Impact plus a naive-datetime anchored case.
+- Add unit cases (a)-(e) from Test Impact (including the production-shape resume
+  case) plus a naive-datetime anchored case.
 - Add the optional integration case asserting no `_apply_recovery_transition`
   call for a stale-pair resumed session.
+- Add the stale-skip `logger.debug` breadcrumb at the caller (~`4098`), gated on
+  `check is None` AND `current_tool_name` set AND stale pair — reusing the same
+  `_ts()` anchor expression as the gate. Keep `_check_tool_timeout` side-effect-free.
 - Update the `_check_tool_timeout` docstring and add the #2002/#1979 inline comment.
 
 ### 2. Validate
@@ -403,27 +433,40 @@ already-documented pattern.
 |-------|---------|----------|
 | Unit tests pass | `pytest tests/unit/test_session_health_tool_timeout.py -q` | exit code 0 |
 | Precedent tests still pass | `pytest tests/unit/test_delivery_guard_resume_epoch.py -q` | exit code 0 |
-| Epoch gate present | `grep -n "started_at" agent/session_health.py \| grep -i "tool"` | exit code 0 |
-| Read-site anchor reuse | `grep -c "_ts(" agent/session_health.py` | output > 1 |
+| Epoch gate present (behavioral) | `pytest tests/unit/test_session_health_tool_timeout.py -q -k "stale or anchor"` | exit code 0 |
+| Epoch gate present (delta) | `git diff main -- agent/session_health.py \| grep -c "^+.*started_at"` | output > 0 (new gate/comparison line added; file already has 30 `started_at` on main, so a whole-file count would be blind) |
+| Read-site anchor reuse (delta) | `git diff main -- agent/session_health.py \| grep -c "^+.*_ts("` | output > 0 |
 | Format clean | `python -m ruff format --check agent/session_health.py` | exit code 0 |
 | Lint clean | `python -m ruff check agent/session_health.py` | exit code 0 |
 | Clearing branch untouched | `git diff main -- agent/session_health.py \| grep -c "current_tool_name = None"` | match count == 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
+<!-- Populated by /do-plan-critique (war room, FULL depth). Verdict: READY TO BUILD (with concerns). -->
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| CONCERN | Risk & Robustness (Skeptic) | Data Flow step 3's load-bearing premise (resume re-stamps a fresh `started_at`) is stated without a source pointer. Verified TRUE during critique — the fix is NOT a no-op. | Cite the re-stamp source in Data Flow; add a production-shape unit case | Re-stamp confirmed at `agent/session_pickup.py:463` and `:611` — both pickup paths run `chosen.started_at = datetime.now(tz=UTC)` immediately before the pending→running `transition_status`, so a resumed run's `started_at` is always newer than a stale prior-run `last_tool_use_at`. Add a unit case mirroring production: `started_at`=now, `last_tool_use_at`=prior-run over budget → `_check_tool_timeout` returns `None`. |
+| CONCERN | Risk & Robustness (Operator) | The stale-suppression path collapses into the same bare `None` as "no tool in flight" / "under budget" (`session_health.py:458-483`), so a health check that goes dark on a `started_at` regression leaves no breadcrumb. | Add a debug log at the caller (not in the pure function) on the stale-skip path | Keep `_check_tool_timeout` pure. At the caller near `session_health.py:4098`, when `check is None` AND `current_tool_name` is set AND `_ts(last_tool_use_at) < (_ts(started_at) or _ts(created_at))`, emit one `logger.debug(...)`. Reuse the same `_ts()` anchor expression to avoid drift. |
+| CONCERN | Scope & Value + History & Consistency (agreement) | Verification row "Epoch gate present" (`grep -n "started_at" ... \| grep -i "tool"`) false-fails: no single code line carries both `started_at` and `tool` in a correct inline gate (anchor line has `started_at` not `tool`; comparison line has `tool` not `started_at`). Passes only if a comment incidentally holds both. | Replace the grep with a delta- or behavior-sensitive check | Use `grep -c "started_at" agent/session_health.py` expecting `>1` (precedent supplies one occurrence on main, the gate adds a second) — survives the inline-vs-named-helper choice in Open Question 1. Or gate behaviorally: `pytest tests/unit/test_session_health_tool_timeout.py -q -k "stale or anchor"`. |
+| NIT | History & Consistency | Verification row "Read-site anchor reuse" (`grep -c "_ts(" ...` expecting `>1`) already passes on baseline — `_delivery_belongs_to_current_run` alone has three `_ts(` calls — so it verifies nothing about the new gate. | Make it delta-sensitive | `git diff main -- agent/session_health.py \| grep -c "^+.*_ts("` expecting `>0`. |
+| NIT | Scope & Value | Both Open Questions are already resolved in the plan body (Q1 at Technical Approach: inline = smallest diff; Q2 at Documentation: co-locate with #1979 note), yet sit under "Open Questions" reading as unresolved. | Restate each as "Resolved: ..." or delete the section | — |
 
----
+### Revision Applied (2026-07-11)
 
-## Open Questions
-
-1. Inline comparison inside `_check_tool_timeout` vs. a named
-   `_tool_use_belongs_to_current_run(entry)` helper mirroring
-   `_delivery_belongs_to_current_run` — the plan allows either (smallest diff =
-   inline). Any preference for the named-helper symmetry?
-2. Documentation target: is there a canonical session-health/tool-timeout doc to
-   extend, or should the epoch-scoping note live alongside the #1979
-   delivery-guard note wherever that was documented?
+All five findings addressed:
+- **Skeptic CONCERN** — Data Flow step 3 now cites the re-stamp source
+  (`agent/session_pickup.py:463`/`:611`, verified in code); Test Impact and
+  Success Criteria add production-shape resume unit case (e).
+- **Operator CONCERN** — Technical Approach + build task add a caller-side
+  (`~4098`) `logger.debug` stale-skip breadcrumb, gated on `check is None` AND
+  `current_tool_name` set AND stale pair, reusing the gate's `_ts()` anchor
+  expression; `_check_tool_timeout` stays pure.
+- **Scope+History CONCERN** — the unmatchable `grep -n "started_at" ... | grep -i "tool"`
+  row is replaced by a behavioral pytest (`-k "stale or anchor"`) and a genuinely
+  diff-sensitive `git diff main ... grep -c "^+.*started_at"` (the whole-file
+  count is blind: main already has 30 `started_at` occurrences).
+- **History NIT** — "Read-site anchor reuse" row is now delta-sensitive
+  (`git diff main ... grep -c "^+.*_ts("`).
+- **Scope NIT** — resolved Open Questions section deleted. Resolutions live in the
+  plan body (Q1: inline gate = smallest diff, Technical Approach; Q2: co-locate the
+  epoch-scoping note with the #1979 delivery-guard note, Documentation).
