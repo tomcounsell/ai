@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Large
 owner: Valor Engels
@@ -73,7 +73,13 @@ state rather than trusting one cached/attested value:
 
 ## Freshness Check
 
-**Baseline commit:** `c52be651` (`main`, clean).
+**Baseline commit:** `9c559db4` (`main`, clean; re-verified at PLAN stage after the
+#1926 lane merged). Original recon ran against `c52be651`; the only commits since
+(`88345cc0`..`9c559db4`) are this plan's own commit plus the #1926/#2030 lane —
+**neither touched `agent/sdlc_router.py`** (`git log c52be651..HEAD -- agent/sdlc_router.py`
+returns nothing), so every cited line reference below still holds exactly
+(guard_g5=419, guard_g7=511, `GUARDS`=640, `_critique_verdict_is_stale`=841 all
+re-confirmed live).
 **Issues filed at:** #1871 2026-07-03, #1267 (reframed 2026-07-10), #1760 2026-06-22.
 **Disposition:** Minor drift — line numbers moved under #2003 (`2f324bff`) and the
 #1761 body-hash migration; all three root-cause claims still hold on current `main`.
@@ -119,10 +125,13 @@ state rather than trusting one cached/attested value:
 All are consistent with — and in the case of #2003, foundational to — this plan.
 
 **Active plans in `docs/plans/` overlapping this area:**
-- `post-teardown-scar-tissue-removal.md` (#1926, status Planning) — a **separate
-  concurrent lane**. It touches `agent/output_router.py` (the *bridge* nudge/deliver
-  router, `MAX_NUDGE_COUNT`), NOT `agent/sdlc_router.py` (the *SDLC dispatch*
-  router). Zero file overlap. This plan does not touch #1926's files or issue.
+- `post-teardown-scar-tissue-removal.md` (#1926) — **now merged as #2030
+  (`5ac64a8c`).** It touched `agent/output_router.py` (the *bridge* nudge/deliver
+  router, `MAX_NUDGE_COUNT`), stall-recovery, and slot-lease reap — NOT
+  `agent/sdlc_router.py` (the *SDLC dispatch* router). Zero file overlap, confirmed
+  post-merge (`git log c52be651..HEAD -- agent/sdlc_router.py` is empty). The
+  earlier "Overlap" disposition is resolved: the sibling lane landed cleanly and
+  this plan's target file is untouched.
 
 ## Prior Art
 
