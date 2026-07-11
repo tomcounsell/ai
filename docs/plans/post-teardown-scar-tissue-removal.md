@@ -62,14 +62,28 @@ Two folded-in scope items resolve open holds on the same recovery surface:
   "owner terminal → reclaim" via `if fresh is None or getattr(fresh, "status",
   None) in _TERMINAL_STATUSES: registry.reclaim(...)`. But `get_by_id`
   (`models/agent_session.py:1068`) swallows transient Redis lookup exceptions into
-  `return None` (lines 1090-1096) AND returns `None` for a genuine not-found (lines
-  1097-1098), so `None` alone cannot distinguish a read blip from a deleted record —
-  a lookup blip during a reap tick can spuriously reclaim a live session's semaphore
-  permit (over-admission). Fix: add an error-vs-absent signal and reclaim ONLY on a
-  confirmed-absent/terminal owner, preserving the deliberate "genuinely-deleted
-  record is reclaimable" behavior. The reap-local stale-check map already models
-  this exact distinction just above (lines 2852-2865: a lookup exception stores a
-  distinct `_ABSENT` sentinel, not `None`) — Phase 2 mirrors that pattern.
+  `return None` (its own `except Exception: logger.warning(...); return None` at
+  lines 1090-1096) AND returns `None` for a genuine not-found (lines 1097-1098), so
+  `None` alone cannot distinguish a read blip from a deleted record — a lookup blip
+  during a reap tick can spuriously reclaim a live session's semaphore permit
+  (over-admission).
+  **Why a call-site try/except cannot fix this (round-3 blocker):** because
+  `get_by_id` catches its OWN lookup exception internally and returns a plain
+  `None`, no exception ever escapes to a call-site `try/except`. Wrapping the
+  Phase-2 `get_by_id` call to store an `_ABSENT` sentinel on exception can NEVER
+  populate `_ABSENT` — every `None` (transient blip OR genuine not-found) still
+  reaches the `if fresh is None ... reclaim` branch, so the code would LOOK fixed
+  and behave identically to the bug. The reap-local stale-check map just above
+  (lines 2852-2865) inherits this exact defect: it wraps `get_by_id` too, so its
+  `_ABSENT` branch is ALREADY unreachable dead code — it is NOT a usable precedent.
+  **Fix (required):** relocate the error-vs-absent distinction INTO the lookup. Add
+  a raising sibling on the model — `AgentSession.get_by_id_strict(id)` — that lets
+  the `cls.query.filter` lookup exception PROPAGATE (returns the record or `None`
+  for a clean not-found; raises on a lookup error). Call THAT from
+  `_reap_slot_leases` Phase 2 and reclaim only on a confirmed-absent (`None` from a
+  clean lookup) or terminal owner; on a raised lookup error, SKIP the reclaim (leave
+  the live permit alone). Preserve the deliberate "genuinely-deleted record is
+  reclaimable" behavior.
   **Not the same code as `_drain_reclaim_requests`** (the request-driven drain
   defined ~line 3025): that function ALREADY implements the correct behavior (its
   docstring carries the `#1868 trap` note and it skips reclaim on both `None` and
@@ -218,11 +232,13 @@ watchdog PTY rationale — plus documentation of the keep decisions on (5)/(6).
 ## Architectural Impact
 
 - **New dependencies:** none.
-- **Interface changes:** none to public signatures. `derive_sdk_ever_output` /
+- **Interface changes:** no existing signatures change. `derive_sdk_ever_output` /
   `has_demonstrable_activity` remain the authoritative leaves. Removing enum
   members / verdict reasons from the reporting modules is an internal-taxonomy
   change; callers already branch only on `level in {healthy, suspect, stalled}`
-  and `resumable`.
+  and `resumable`. The #1868 fix adds ONE additive classmethod,
+  `AgentSession.get_by_id_strict` (a raising sibling of `get_by_id`) — behavior-only,
+  no field/schema change.
 - **Coupling:** decreases. Trimming dead PTY rationale and unobserved taxonomy
   classes reduces the surface that a future change must reason about. The single
   authoritative liveness signal (already owned by `session_runner`) is
@@ -279,10 +295,14 @@ reviewer; no worktree fan-out is warranted.
 - **Crash-signature library prune**: reduce `crash_signature.py` normalization to
   the event shapes that occur under headless (`status_transition`,
   `idle_gap` bucketing, never-started); drop PTY-only signature classes.
-  **KEEP carve-out (critique #3):** the `ceiling` / `ceiling_timeout` signature
-  class (`crash_signature.py` lines ~296-297, 329-330) is a live headless
-  classification prefix for budget-ceiling startup failures, NOT PTY scar tissue.
-  It is explicitly retained — do not prune it.
+  **KEEP carve-out (critique #3, corrected round-3):** the `ceiling` /
+  `ceiling_timeout` signature class (`crash_signature.py` lines ~296-297, 329-330)
+  is explicitly retained — but the rationale is corrected. It is NOT a "live
+  headless" prefix: per the extractor's own docstring (`crash_signature.py:184-185`),
+  nothing produces `startup_failure_kind` after the PTY teardown (#1924); the value
+  survives only in pre-cutover rows. The class is kept for BACKWARD-COMPATIBLE
+  classification of those pre-cutover records, not because headless execution still
+  emits it. Do not prune it — historical rows still classify through it.
 - **Residual liveness inference trim**: in `session_health.py`, remove any
   remaining duplicated multi-field liveness inference that `derive_sdk_ever_output`
   already centralizes (no new signal, no wider spread — a subtraction only).
@@ -301,20 +321,27 @@ reviewer; no worktree fan-out is warranted.
   `agent/session_health.py::_reap_slot_leases` **Phase 2 (~lines 2867-2895; the
   reclaim at 2874-2877)** — the AUTONOMOUS reaper, NOT `_drain_reclaim_requests`
   (which already handles this) — reclaim a lease only when the owner is confirmed
-  absent/terminal, never on a swallowed `get_by_id` lookup error. Because `get_by_id`
-  (`models/agent_session.py:1068`) collapses both a transient lookup exception and a
-  genuine not-found to `None`, the fix must surface the "not found vs lookup error"
-  distinction: wrap the Phase-2 `get_by_id` in a try/except that stores the same
-  `_ABSENT` sentinel the stale-check map above (lines 2852-2865) already uses, then
-  reclaim only on confirmed-`None`/terminal and SKIP on `_ABSENT`. Preserve the
-  deliberate "genuinely-deleted record is reclaimable" path. Not a deletion — a
-  targeted correctness fix on the recovery surface, so no ledger entry.
+  absent/terminal, never on a transient lookup error. Because the existing
+  `get_by_id` (`models/agent_session.py:1068`) CATCHES its own lookup exception and
+  returns a plain `None`, a call-site `try/except` around it is inert — no exception
+  escapes, so an `_ABSENT` sentinel can never be set (the stale-check map at lines
+  2852-2865 has this exact dead branch today). The fix must move the error-vs-absent
+  distinction INTO the lookup: add a raising sibling
+  `AgentSession.get_by_id_strict(id)` in `models/agent_session.py` (same body as
+  `get_by_id` — the input guard and the `len(results) > 1` warning — but WITHOUT the
+  `except Exception: return None` swallow, so a `cls.query.filter` lookup error
+  propagates; a clean not-found still returns `None`). Call `get_by_id_strict` from
+  Phase 2 and reclaim only on a confirmed-`None`/terminal owner; on a raised lookup
+  error, SKIP the reclaim so a live session's permit is never stripped by a read
+  blip. Preserve the deliberate "genuinely-deleted record is reclaimable" path. Not
+  a deletion — a targeted correctness fix on the recovery surface, so no ledger entry.
 - **Keep decisions, documented**: `worker_watchdog.py` W1-W5 kill ladder + its
   U-state rationale KEPT (substrate-agnostic hung-worker recovery, issue #1767);
   `bridge_watchdog.py` 5-level ladder + revert-commit KEPT (bridge-process
   resilience, orthogonal to PTY); the 50-cap nudge counter KEPT as a runaway
   backstop (recommendation below); the `ceiling`/`ceiling_timeout` crash-signature
-  class KEPT (live headless budget-ceiling prefix).
+  class KEPT (backward-compatible classification of pre-cutover rows; nothing
+  produces `startup_failure_kind` post-#1924 — see `crash_signature.py:184-185`).
 
 ### Flow
 
@@ -332,8 +359,13 @@ PR (all three are `Depends On: none`, so this ordering is free — no rebase cos
 2. **#1855 flag flip** (`FEATURES__STALL_RECOVERY_ENABLED` deletion + `ge=0`
    break-glass) — highest risk (first live actuation of kill+catchup); a targeted
    `git revert` of THIS commit restores dry-run without touching the other two.
-3. **#1868 slot-lease reap fix** (autonomous-reaper correctness) — a targeted
-   revert restores the prior reclaim logic independently.
+3. **#1868 slot-lease reap fix** (autonomous-reaper correctness — the new raising
+   `get_by_id_strict` lookup + its Phase-2 call site) — a targeted revert restores
+   the prior reclaim logic independently. **This correctness fix is bundled into
+   the scar-tissue-removal PR only for delivery efficiency (concern #1); it is fully
+   splittable at ZERO sequencing cost (`Depends On: none`) and lands as its own
+   commit — a reviewer can cherry-pick, revert, or split it out to a standalone PR
+   without touching the taxonomy prune or the #1855 flag flip.**
 Committing them separately means an operator can revert any ONE concern post-merge
 without dragging the other two back.
 
@@ -469,10 +501,16 @@ change beyond a ledger note explaining why it is explicitly retained.
   `skipped_run_budget` and kills nothing (the remaining no-deploy kill-switch).
 - [ ] `tests/**/*session_health*` reap tests — UPDATE/ADD (closes #1868): target
   the AUTONOMOUS `_reap_slot_leases` Phase-2 path (~2874-2877), NOT
-  `_drain_reclaim_requests` (already correct). Add a case asserting a transient
-  `get_by_id` lookup error (raises → `_ABSENT`) does NOT reclaim the lease, while a
-  confirmed-absent (`None`) or terminal-status owner still does. Existing
-  reclaim-on-terminal cases stay.
+  `_drain_reclaim_requests` (already correct). Add a case that mocks the UNDERLYING
+  `AgentSession.query.filter` (`models/agent_session.py:~1089`) to RAISE — NOT
+  `get_by_id`/`get_by_id_strict` themselves (mocking the helper would pass while the
+  real path stays broken) — and asserts the raised lookup error does NOT reclaim the
+  lease, while a confirmed-absent (clean `None`) or terminal-status owner still does.
+  Existing reclaim-on-terminal cases stay.
+- [ ] `tests/**/test_agent_session*.py` (the model's test module) — ADD (closes
+  #1868): a unit test for the new `AgentSession.get_by_id_strict` — mock
+  `cls.query.filter` to raise and assert it PROPAGATES (does not swallow to `None`),
+  and assert a clean not-found still returns `None`.
 
 Exact test files and cases are enumerated by the builder from `grep` at build
 start; the dispositions above are binding.
@@ -529,6 +567,18 @@ dashboard's recovery panel surfaces `_emit_recovery_event` records. If the first
 live actuation kills a session that was actually healthy, pull the break-glass
 below. Also watch Sentry for a post-merge spike in `StatusConflictError`
 (VALOR-DZ) or exit-143 events correlated with recovery actuation.
+**Post-merge validation rule (concern #2 — signal / window / owner):** within 48
+hours of merge, the shipping engineer (Valor Engels, else the on-call bridge
+operator) inspects the `session_events` recovery-audit stream and the
+`[stall-recovery]` worker logs for the FIRST `killed=True` actuation. VALIDATION
+PASSES when, for each such event, the killed session's last classification carried
+`consecutive_observations >= 3` AND a `catchup_invoked=True` re-enqueue landed (work
+preserved). VALIDATION FAILS — pull `FEATURES__STALL_RECOVERY_RUN_BUDGET=0`
+immediately — if any killed session had a fresh heartbeat (`last_stdout_at` within
+its turn-timeout window) at kill time, i.e. a healthy session was reaped. If NO
+actuation fires within 48h, extend the watch through the first weekly reflection
+cycle; sustained non-actuation is a PASS (dry-run parity). Record the outcome in the
+#1855 tracking-issue thread so the first-actuation result is auditable.
 **Break-glass (concern #5 NIT):** removing the flag deletes the only no-deploy
 kill-switch. To preserve one, this PR relaxes `stall_recovery_run_budget` from
 `ge=1` to `ge=0` (mirroring `crash_autoresume_*`'s "Set to 0 to disable" precedent,
@@ -564,12 +614,13 @@ are already zero-write and race-free by construction.
 
 The #1868 slot-lease reap fix *closes* an existing race window rather than opening
 one: today, in the AUTONOMOUS `_reap_slot_leases` Phase 2 (~2874-2877), a transient
-`get_by_id` read blip during a 300s reap tick returns `None` and is treated as
-terminal, reclaiming a live session's permit (semaphore over-admission). The fix
-reclaims only on a confirmed-absent (`None` from a clean lookup) or terminal owner
-and skips on the `_ABSENT` lookup-error sentinel, tightening the guard. (The
-request-driven `_drain_reclaim_requests` path already had this guard — the fix is
-confined to the autonomous reaper.) The #1855 flag deletion changes no timing — it
+read blip during a 300s reap tick makes the exception-swallowing `get_by_id` return
+`None`, which is treated as terminal, reclaiming a live session's permit (semaphore
+over-admission). The fix routes Phase 2 through the new raising `get_by_id_strict`,
+reclaims only on a confirmed-absent (`None` from a clean lookup) or terminal owner,
+and skips reclaim when the lookup RAISES, tightening the guard. (The request-driven
+`_drain_reclaim_requests` path already had this guard — the fix is confined to the
+autonomous reaper.) The #1855 flag deletion changes no timing — it
 removes a boolean branch; the consec-observation counter, kill budgets, and Race-1
 re-read guard that order the actuation are all preserved.
 
@@ -589,9 +640,12 @@ re-read guard that order the actuation are all preserved.
 ## Update System
 
 No migration or `scripts/update/run.py` changes required — no new dependencies,
-config files, or Popoto model changes (the kept `auto_continue_count` field is
-untouched). The `/update` skill propagates the code changes automatically on the
-next run; the new `docs/removed-defenses.md` ships as an ordinary tracked file.
+config files, or Popoto model field/schema changes (the kept `auto_continue_count`
+field is untouched). The #1868 fix adds a behavior-only classmethod
+(`AgentSession.get_by_id_strict`) — no new field, no index change — so no
+`migrations.py` entry is required. The `/update` skill propagates the code changes
+automatically on the next run; the new `docs/removed-defenses.md` ships as an
+ordinary tracked file.
 
 One env-var cleanup note (closes #1855): `FEATURES__STALL_RECOVERY_ENABLED` is
 removed from `.env.example` and from `config/settings.py`. Machines that set it in
@@ -670,10 +724,12 @@ surface.
   `FEATURES__STALL_RECOVERY_RUN_BUDGET=0` disables actuation (test asserts budget=0
   kills nothing); budgets otherwise hold conservative values (consec=3,
   run_budget=1, per_session=2).
-- [ ] `_reap_slot_leases` Phase 2 (the AUTONOMOUS reaper at ~2874-2877, NOT
-  `_drain_reclaim_requests`) reclaims only on a confirmed-absent/terminal owner,
-  never on a transient `get_by_id` lookup error; a regression test proves it
-  (closes #1868).
+- [ ] `AgentSession.get_by_id_strict` exists in `models/agent_session.py` and lets a
+  `cls.query.filter` lookup error PROPAGATE (a clean not-found still returns `None`);
+  `_reap_slot_leases` Phase 2 (the AUTONOMOUS reaper at ~2874-2877, NOT
+  `_drain_reclaim_requests`) calls it and reclaims only on a confirmed-absent/terminal
+  owner, never on a raised lookup error; a regression test that mocks the underlying
+  `cls.query.filter` to raise proves the live path is not reclaimed (closes #1868).
 - [ ] No commented-out code, no "previously PTY" archaeology in code bodies, no
   parallel-run artifacts (cruft audit clean).
 - [ ] Narrow-scope tests pass (`/do-test` on the touched files).
@@ -693,7 +749,7 @@ doc work in-place on the base branch — no worktree fan-out, no watchdog builde
 
 - **Builder (taxonomy-prune + ledger + docs)**
   - Name: `scar-builder`
-  - Role: Prune `session_stall_classifier.py` + `crash_signature.py` to observed classes (KEEP the `ceiling`/`ceiling_timeout` prefix); subtraction-only residual liveness-inference trim in `session_health.py` if any remains; update the two affected test files. Delete the `FEATURES__STALL_RECOVERY_ENABLED` flag making stall recovery always-on and relax `stall_recovery_run_budget` to `ge=0` as the break-glass (closes #1855). Fix the slot-lease reap transient-error reclaim in the AUTONOMOUS `_reap_slot_leases` Phase 2 at ~2874-2877 — NOT `_drain_reclaim_requests`, which is already correct (closes #1868). Author `docs/removed-defenses.md` and update `bridge-worker-architecture.md`, `bridge-self-healing.md`, feature index. Confirm (grep) the watchdog carries no PTY narrative — no watchdog edit. Land the three concerns as separate commits within the one PR.
+  - Role: Prune `session_stall_classifier.py` + `crash_signature.py` to observed classes (KEEP the `ceiling`/`ceiling_timeout` prefix); subtraction-only residual liveness-inference trim in `session_health.py` if any remains; update the two affected test files. Delete the `FEATURES__STALL_RECOVERY_ENABLED` flag making stall recovery always-on and relax `stall_recovery_run_budget` to `ge=0` as the break-glass (closes #1855). Fix the slot-lease reap transient-error reclaim in the AUTONOMOUS `_reap_slot_leases` Phase 2 at ~2874-2877 — NOT `_drain_reclaim_requests`, which is already correct — by adding a raising `AgentSession.get_by_id_strict` lookup and calling it from Phase 2 (a call-site try/except around the exception-swallowing `get_by_id` is inert), reclaiming only on confirmed-absent/terminal and skipping on a raised lookup error (closes #1868). Author `docs/removed-defenses.md` and update `bridge-worker-architecture.md`, `bridge-self-healing.md`, feature index. Confirm (grep) the watchdog carries no PTY narrative — no watchdog edit. Land the three concerns as separate commits within the one PR.
   - Agent Type: builder
   - Resume: true
 
@@ -784,17 +840,27 @@ Tier 1 `builder` + `code-reviewer` (+ `cruft-auditor` for the deletion diff).
 - In `agent/session_health.py::_reap_slot_leases` **Phase 2 (~lines 2867-2895; the
   reclaim decision at 2874-2877** — `if fresh is None or getattr(fresh, "status",
   None) in _TERMINAL_STATUSES: registry.reclaim(...)`), reclaim only on a
-  confirmed-absent/terminal owner; never on a transient `get_by_id` lookup error.
+  confirmed-absent/terminal owner; never on a transient lookup error.
   **Do NOT edit `_drain_reclaim_requests` (~line 3025): it already carries the
   `#1868 trap` fix — the buggy autonomous reaper is the one at ~2874-2877.**
-  `get_by_id` (`models/agent_session.py:1068`) returns `None` for BOTH a swallowed
-  lookup exception (lines 1090-1096) and a genuine not-found (lines 1097-1098), so
-  wrap the Phase-2 `get_by_id` in try/except and store the `_ABSENT` sentinel on
-  exception (mirroring the stale-check map at lines 2852-2865); reclaim only on
-  confirmed-`None`/terminal and SKIP on `_ABSENT`. Preserve the deliberate
-  "genuinely-deleted record is reclaimable" path. Land this as its OWN commit within
-  the PR (separate rollback profile — see Flow). Add a regression test for the
-  transient-error case.
+  **A call-site try/except around `get_by_id` will NOT work** — `get_by_id`
+  (`models/agent_session.py:1068`) catches its own lookup exception at lines
+  1090-1096 and returns a plain `None`, so nothing escapes to a wrapper and an
+  `_ABSENT` sentinel can never be set (the stale-check map at 2852-2865 carries this
+  dead branch today; do not copy it).
+  **Required fix — raising lookup:** add `AgentSession.get_by_id_strict(id)` to
+  `models/agent_session.py` — identical to `get_by_id` (keep the input guard and the
+  `len(results) > 1` warning) but WITHOUT the `except Exception: return None` swallow,
+  so a `cls.query.filter` lookup error propagates while a clean not-found still
+  returns `None`. Call `get_by_id_strict` from the Phase-2 loop; reclaim only on a
+  confirmed-`None`/terminal owner and let a raised lookup error SKIP the reclaim
+  (the surrounding try/except logs-and-continues, it must NOT reclaim). Preserve the
+  deliberate "genuinely-deleted record is reclaimable" path. Land this as its OWN
+  commit within the PR (separate rollback profile — see Flow). Add a regression test
+  that mocks the UNDERLYING `AgentSession.query.filter` (`models/agent_session.py:~1089`)
+  to raise — NOT `get_by_id`/`get_by_id_strict` themselves (mocking the helper would
+  pass while the real path stays broken) — asserting a raised lookup error does NOT
+  reclaim, while a clean `None` (not-found) or terminal-status owner still does.
 
 ### 6. Cruft audit + final review
 - **Task ID**: validate-all
@@ -860,6 +926,15 @@ grep -cE "^[[:space:]]*(from agent\.session_health|import session_health)" \
 | CONCERN | war-room | Three folded concerns have different rollback profiles; land as separate commits | Separate-commits guidance added to Flow + Tasks 4/5 | Flow now lists the 3-commit ordering (prune / #1855 / #1868), all `Depends On: none` so free; Tasks 4 and 5 each say "land as its OWN commit". |
 | CONCERN | war-room | Risk 1 mitigation overstates the evidence window ("zero over 14 days" is ~4-5 days post-#1930) | Restated the window honestly | Risk 1 now says the headless-clean signal is ~4-5 days (cutover 2026-07-07, plan 2026-07-11), short but decisive; the 14-day Sentry query spans the cutover. |
 | NIT | war-room | Removing the flag deletes the only no-deploy break-glass | Documented `FEATURES__STALL_RECOVERY_RUN_BUDGET=0` lever + made it real | This PR relaxes `stall_recovery_run_budget` from `ge=1` to `ge=0` (mirroring `crash_autoresume_*` "Set to 0 to disable" at `config/settings.py:289-300`); the existing run-budget gate (`stall_advisory.py:289`, `run_state["killed"] >= budget`) short-circuits to `skipped_run_budget` at 0. Documented in Risk 4, Solution, Task 4, Update System operator note, Success Criteria, new Verification row + test. |
+
+### Re-critique round 3 (2026-07-11)
+
+| Severity | Critic | Finding | Addressed By | Implementation Note |
+|----------|--------|---------|--------------|---------------------|
+| BLOCKER | war-room | The prescribed #1868 fix is INERT: wrapping the Phase-2 `get_by_id` call in try/except to store `_ABSENT` can never fire because `get_by_id` (`models/agent_session.py:1090-1096`) catches its OWN lookup exception and returns a plain `None`. No exception escapes to a call-site wrapper, so every `None` (blip or not-found) still hits the reclaim branch — the code would look fixed but behave identically to the bug. The cited precedent (stale-check map at 2852-2865) inherits the same defect: its `_ABSENT` branch is already unreachable. | Relocated the error-vs-absent distinction INTO the lookup | Verified against `main`: `get_by_id` swallows at 1090-1096 and returns `None`; the reap Phase-2 call at 2874 sits inside a try/except that only ever catches `registry.reclaim`. Fix now prescribes a raising sibling `AgentSession.get_by_id_strict(id)` (same body as `get_by_id` minus the `except Exception: return None` swallow — lookup error propagates, clean not-found still `None`), called from Phase 2; reclaim only on confirmed-`None`/terminal, SKIP on a raised error. Regression test must mock the UNDERLYING `cls.query.filter` (~1089) to raise, NOT `get_by_id`/`get_by_id_strict` (mocking the helper passes while the real path stays broken). Fixed in Problem, Solution, Task 5, Test Impact, Success Criteria, Race Conditions, Team Orchestration, Architectural Impact, Update System. |
+| CONCERN | war-room | The #1868 correctness fix is bundled into a scar-tissue-removal PR | Reaffirmed separate-commits guidance | Flow item 3 now states the fix is bundled only for delivery efficiency, is fully splittable at zero sequencing cost (`Depends On: none`), lands as its own commit, and can be cherry-picked/reverted/split to a standalone PR without touching the prune or the #1855 flip. |
+| CONCERN | war-room | First live actuation of stall-recovery lacks a concrete post-merge validation RULE/owner/window | Added a specific validation step | Risk 4 now carries a "Post-merge validation rule": signal = `session_events` recovery-audit stream + `[stall-recovery]` logs; window = 48h post-merge, extended through the first weekly reflection cycle if no actuation; owner = shipping engineer (else on-call bridge operator); PASS/FAIL rule keyed on `consecutive_observations >= 3` + `catchup_invoked=True` vs. a fresh-heartbeat kill; outcome recorded in the #1855 issue thread. |
+| CONCERN | war-room | `ceiling`/`ceiling_timeout` KEEP justification ("live headless classification prefix") contradicts `crash_signature.py:184-185`, which says nothing produces `startup_failure_kind` post-teardown | Reclassified the KEEP rationale | Verified `crash_signature.py:184-185` ("nothing produces `startup_failure_kind` after the PTY teardown, plan #1924; the value stays valid in old rows"). KEEP rationale now reads "kept for backward-compatible classification of pre-cutover rows," corrected in the Solution carve-out and the Keep-vs-Cut summary. |
 
 ---
 
