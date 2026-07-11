@@ -26,7 +26,7 @@ from agent.worktree_manager import (
     WORKTREES_DIR,
     validate_workspace,
 )
-from config.enums import SessionType
+from config.enums import ClassificationType, SessionType
 from config.settings import settings
 from models.agent_session import AgentSession
 from models.session_lifecycle import TERMINAL_STATUSES as _TERMINAL_STATUSES
@@ -1804,6 +1804,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
         # ``agent/sdk_client.py``. There is one execution transport and no
         # seam. See docs/features/headless-session-runner.md.
         from agent.sdk_client import (
+            _extract_sdlc_env_vars,
             _resolve_compose_args,
             _resolve_sentry_auth_token,
             build_harness_turn_input,
@@ -1818,6 +1819,19 @@ async def _execute_agent_session(session: AgentSession) -> None:
         _classification = (
             getattr(agent_session, "classification_type", None) if agent_session else None
         )
+        _is_cross_repo = project_key != "valor"
+
+        # Cross-repo GH_REPO resolution (issue #375), mirrored from the
+        # deleted ValorAgent path (main sdk_client.py ~line 3930) and from
+        # the identical org/repo lookup in build_harness_turn_input's
+        # cross-repo prefix injection (agent/session_runner/harness/claude.py).
+        _gh_repo: str | None = None
+        if _classification == ClassificationType.SDLC and _is_cross_repo and project_config:
+            _github_config = project_config.get("github", {})
+            _gh_org = _github_config.get("org", "")
+            _gh_name = _github_config.get("repo", "")
+            if _gh_org and _gh_name:
+                _gh_repo = f"{_gh_org}/{_gh_name}"
 
         _harness_input = await build_harness_turn_input(
             message=_turn_input,
@@ -1829,7 +1843,7 @@ async def _execute_agent_session(session: AgentSession) -> None:
             session_type=_session_type,
             sender_id=session.sender_id,
             classification=_classification,
-            is_cross_repo=(project_key != "valor"),
+            is_cross_repo=_is_cross_repo,
         )
 
         logger.info(
@@ -1864,6 +1878,19 @@ async def _execute_agent_session(session: AgentSession) -> None:
             _sentry_token = _resolve_sentry_auth_token()
             if _sentry_token:
                 _harness_env["SENTRY_AUTH_TOKEN"] = _sentry_token
+
+        # SDLC context injection: pre-resolve session fields (PR/branch/slug/
+        # plan/issue) as SDLC_* env vars so skills can reference $SDLC_PR_NUMBER
+        # etc. instead of guessing (issue #420). Restored call site after the
+        # ValorAgent deletion dropped it (issue #2039) — this is the sole point
+        # in the harness path where session.session_id (bridge session_id) and
+        # the resolved _gh_repo are both available before _harness_env reaches
+        # the subprocess env= via SessionRunner -> HeadlessRoleDriver. Applied
+        # last so it never clobbers the more-specific overrides set above, and
+        # env.update mirrors main's ValorAgent._create_options ordering.
+        _sdlc_env = _extract_sdlc_env_vars(session.session_id, _gh_repo)
+        if _sdlc_env:
+            _harness_env.update(_sdlc_env)
 
         # D1 precedence cascade: session.model > settings > codebase default.
         # Applied to the runner's PM subprocess; the Dev role runs as a

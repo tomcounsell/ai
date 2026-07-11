@@ -198,6 +198,45 @@ class TestExecutorRunnerWiring:
         assert runner.init_kwargs.get("session_type") == "eng"
 
     @pytest.mark.asyncio
+    async def test_runner_session_env_includes_sdlc_vars_for_pr_and_issue_session(
+        self, redis_test_db
+    ):
+        """Env-parity regression test (issue #2039): a session whose
+        AgentSession carries a PR URL and a tracking issue URL must have the
+        corresponding SDLC_* vars injected into the runner's ``session_env`` —
+        exactly as the deleted ``ValorAgent`` did via
+        ``_extract_sdlc_env_vars`` (main ``agent/sdk_client.py`` ~line 1665).
+
+        ``test_runner_receives_adapter_and_session_env`` above builds a bare
+        session with no PR/issue URLs, so it can never exercise this
+        conditional injection — that gap is exactly why the harness-seam
+        extraction silently dropped the call site. This test fails without
+        the fix (SDLC_* keys absent from ``session_env``) and passes with it.
+        """
+        # Deliberately leave slug/branch_name unset — a slug routes this eng
+        # session through the real worktree-provisioning + main-checkout
+        # guard (issue #887), which is orthogonal to what this test verifies.
+        session = _make_session(working_dir="/tmp")
+        session.status = "running"
+        session.pr_url = "https://github.com/tomcounsell/ai/pull/2038"
+        session.issue_url = "https://github.com/tomcounsell/ai/issues/2000"
+        session.save(update_fields=["status", "pr_url", "issue_url"])
+
+        with _patch_runner(), _patch_worktree():
+            await _execute_agent_session(session)
+
+        runner = FakeSessionRunner.instances[0]
+        env = runner.init_kwargs.get("session_env")
+        assert isinstance(env, dict)
+        assert env.get("SDLC_PR_NUMBER") == "2038"
+        assert env.get("SDLC_ISSUE_NUMBER") == "2000"
+        assert env.get("SDLC_TRACKING_ISSUE") == "2000"
+        # Non-SDLC vars from the earlier construction must still be present —
+        # the SDLC injection must never clobber them.
+        assert env.get("SESSION_TYPE") == "eng"
+        assert env.get("AGENT_SESSION_ID") == session.agent_session_id
+
+    @pytest.mark.asyncio
     async def test_fresh_session_passes_no_resume_context(self, redis_test_db):
         """A session with no persisted claude_session_uuid dispatches with
         resume=None (cold start; the runner primes)."""
