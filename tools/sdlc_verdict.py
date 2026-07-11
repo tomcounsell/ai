@@ -361,14 +361,15 @@ def record_verdict(
         return states
 
     try:
+        from tools._sdlc_utils import is_pipeline_ledger
         from tools.stage_states_helpers import update_stage_states
 
         # ``session`` may be an AgentSession (field="stage_states", the
         # historical shape) or a PipelineLedger (field="stage_states_json"
         # -- issue #2012 task 2, the CLI's issue-keyed write path). Detected
-        # by duck-typing on the ledger's distinguishing attribute so this
-        # single writer function serves both backing stores.
-        field = "stage_states_json" if hasattr(session, "ledger_key") else "stage_states"
+        # via isinstance so this single writer function serves both backing
+        # stores without misclassifying an unspecialized MagicMock() double.
+        field = "stage_states_json" if is_pipeline_ledger(session) else "stage_states"
         ok = update_stage_states(session, _apply, field=field)
     except Exception as e:
         logger.debug(f"sdlc_verdict: update_stage_states invocation failed: {e}")
@@ -393,7 +394,9 @@ def get_verdict(session, stage: str) -> dict:
         return {}
 
     try:
-        field = "stage_states_json" if hasattr(session, "ledger_key") else "stage_states"
+        from tools._sdlc_utils import is_pipeline_ledger
+
+        field = "stage_states_json" if is_pipeline_ledger(session) else "stage_states"
         raw = getattr(session, field, None)
         if not raw:
             return {}

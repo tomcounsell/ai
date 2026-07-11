@@ -399,10 +399,8 @@ def find_session(
 def _parse_issue_number_from_url(issue_url: str | None) -> int | None:
     """Extract the GitHub issue number from an ``issue_url``.
 
-    Mirrors ``tools.sdlc_dispatch._parse_issue_number_from_url`` (kept private
-    there too -- this is a small enough regex that a shared import wasn't
-    worth the coupling). Returns ``None`` if ``issue_url`` is falsy or does
-    not contain an ``issues/N`` segment. Never raises.
+    Returns ``None`` if ``issue_url`` is falsy or does not contain an
+    ``issues/N`` segment. Never raises.
     """
     if not issue_url:
         return None
@@ -420,13 +418,16 @@ def renew_issue_lock_for_session(session, run_id: str | None = None) -> None:
 
     Shared helper (issues #1954/#2003) for SDLC CLI subcommands that fire
     during an in-progress BUILD/TEST/REVIEW stage and therefore have an
-    established recurrence path to lean on for renewal -- currently wired
-    into ``sdlc_stage_marker.write_marker()`` only. ``sdlc_dispatch``'s
-    ``record`` subcommand does NOT call this helper: its underlying
-    ``record_dispatch_for_session()`` already calls ``touch_issue_lock()``
-    directly as part of its own contention-check-and-refuse logic, so wiring
-    this helper there too would touch the same Redis key twice per call for
-    no benefit.
+    established recurrence path to lean on for renewal. Issue #2012 task 2
+    re-points ``sdlc_stage_marker.write_marker()`` at the issue-keyed
+    ``PipelineLedger`` (via ``resolve_ledger_lease``/``revalidate_ledger_lease``,
+    which perform their own lease peek/renew), so this helper's session-keyed
+    callers have been removed; it is retained as a general-purpose utility
+    for any remaining session-keyed writer. ``sdlc_dispatch``'s ``record``
+    subcommand does NOT call this helper: its underlying write already
+    revalidates the lease directly as part of its own contention-check-and-
+    refuse logic, so wiring this helper there too would touch the same
+    Redis key twice per call for no benefit.
 
     Run identity (issue #2003, cycle-2 BLOCKER): renewal compares by run_id,
     never by session_id or process identity. The identity is the caller's
@@ -526,6 +527,27 @@ def check_run_ownership(
         "owner_session_id": result.owner_session_id,
         "orphaned_lock": result.orphaned_lock,
     }
+
+
+def is_pipeline_ledger(record) -> bool:
+    """Return True iff ``record`` is a ``PipelineLedger`` instance.
+
+    Shared by the writer/reader modules that accept EITHER an
+    ``AgentSession`` or a ``PipelineLedger`` (issue #2012 task 2) and need
+    to pick the right field (``stage_states`` vs ``stage_states_json``).
+    An ``isinstance`` check rather than duck-typing on an attribute name: a
+    bare ``MagicMock()`` (used pervasively as an AgentSession double
+    throughout this test suite) auto-vivifies ANY attribute access,
+    including ``ledger_key`` -- an attribute-presence check would
+    misclassify it as a ledger. ``isinstance`` correctly returns False for
+    an unspecialized mock. Never raises.
+    """
+    try:
+        from agent.pipeline_ledger import PipelineLedger
+
+        return isinstance(record, PipelineLedger)
+    except Exception:
+        return False
 
 
 def resolve_ledger_lease(issue_number: int, run_id: str | None) -> tuple[str | None, dict | None]:
