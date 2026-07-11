@@ -65,6 +65,39 @@ def _resolve_target_repo() -> str | None:
         return None
 
 
+def resolve_target_repo_for_read(issue_number: int | None) -> str | None:
+    """Resolve ``target_repo`` for a READ, lease-first with an env-first fallback.
+
+    Readers (``sdlc_stage_query``, ``sdlc_next_skill``, ``sdlc_verdict get``,
+    ``sdlc_dispatch get``/``reset`` -- issue #2012 task 2) never claim
+    ownership, so this peeks the issue lock with ``run_id=None``: a live
+    lease (held by ANY run) still surfaces its pinned ``target_repo`` even
+    though the peek itself always reports ``acquired=False`` for a None
+    caller identity. Only when no live lease exists at all (unheld/expired
+    lock, or a peek failure) does this fall back to ``_resolve_target_repo()``'s
+    env-first resolution -- the same ladder writers use at lease-acquire
+    time.
+
+    Returns ``None`` when neither source resolves anything. Callers MUST
+    treat that as the defined empty-ledger outcome (Risk 5, reader side):
+    never assemble a ``PipelineLedger`` key with a ``None`` component.
+    """
+    if issue_number:
+        try:
+            from models.session_lifecycle import touch_issue_lock
+
+            peek = touch_issue_lock(issue_number, None, peek=True)
+            if peek.target_repo:
+                return peek.target_repo
+        except Exception as e:
+            logger.debug(
+                "resolve_target_repo_for_read: peek failed for issue #%s: %s",
+                issue_number,
+                e,
+            )
+    return _resolve_target_repo()
+
+
 def _git_toplevel(cwd: Path | None = None) -> Path | None:
     """Return the git working-tree root for ``cwd`` (default: process cwd).
 

@@ -102,7 +102,6 @@ from pathlib import Path
 from tools._sdlc_utils import find_plan_path as _find_plan_path
 from tools._sdlc_utils import find_session as _find_session
 from tools._sdlc_utils import normalize_verdict
-from tools._sdlc_utils import session_owns_issue as _session_owns_issue
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +363,13 @@ def record_verdict(
     try:
         from tools.stage_states_helpers import update_stage_states
 
-        ok = update_stage_states(session, _apply)
+        # ``session`` may be an AgentSession (field="stage_states", the
+        # historical shape) or a PipelineLedger (field="stage_states_json"
+        # -- issue #2012 task 2, the CLI's issue-keyed write path). Detected
+        # by duck-typing on the ledger's distinguishing attribute so this
+        # single writer function serves both backing stores.
+        field = "stage_states_json" if hasattr(session, "ledger_key") else "stage_states"
+        ok = update_stage_states(session, _apply, field=field)
     except Exception as e:
         logger.debug(f"sdlc_verdict: update_stage_states invocation failed: {e}")
         return {}
@@ -377,6 +382,9 @@ def record_verdict(
 def get_verdict(session, stage: str) -> dict:
     """Read the most recent verdict record for a stage.
 
+    ``session`` may be an AgentSession or a PipelineLedger (issue #2012
+    task 2) -- detected the same way as :func:`record_verdict`.
+
     Returns ``{}`` if no verdict is recorded or on any error.
     """
     if stage not in _VERDICT_STAGES:
@@ -385,7 +393,8 @@ def get_verdict(session, stage: str) -> dict:
         return {}
 
     try:
-        raw = getattr(session, "stage_states", None)
+        field = "stage_states_json" if hasattr(session, "ledger_key") else "stage_states"
+        raw = getattr(session, field, None)
         if not raw:
             return {}
         if isinstance(raw, str):
@@ -414,36 +423,36 @@ def get_verdict(session, stage: str) -> dict:
 
 
 def _cli_record(args) -> dict:
-    # caller_run_id gates the cold-state auto-ensure (#2003 cycle-3): a
-    # run_id-carrying write that resolves no session must not mint one.
-    session = _find_session(
-        session_id=args.session_id,
-        issue_number=args.issue_number,
-        ensure=True,
-        caller_run_id=args.run_id,
-    )
-    if session is None:
-        return {}
-    # Ownership guard: when --issue-number N is passed, the resolved session must
-    # own issue N or we refuse the write to prevent a silent artifact divert.
-    if args.issue_number is not None and not _session_owns_issue(session, args.issue_number):
-        session_id_val = getattr(session, "session_id", "<unknown>")
-        raise OwnershipError(
-            f"Recorder ownership guard: session '{session_id_val}' does not own"
-            f" issue #{args.issue_number}; refusing write to prevent divert"
-        )
-    # Run-identity gate (issue #2003): a foreign run holding the issue lock
-    # refuses the write with the ISSUE_LOCKED shape. Peek-only -- verdict
-    # record never renews the lock (#1954 scope-narrowing preserved).
-    from tools._sdlc_utils import check_run_ownership
+    """Record a verdict against the issue-keyed PipelineLedger (issue #2012 task 2).
 
-    conflict = check_run_ownership(session, args.run_id, issue_number=args.issue_number)
-    if conflict is not None:
+    This is a WRITER: there is no session left to resolve, so the lease
+    for ``args.issue_number`` under ``args.run_id`` is the sole source of
+    authorization. Missing/foreign/repo-less leases all hard-fail loudly
+    via ``OwnershipError`` (caught by ``main()``, which prints the message
+    to stderr and exits 1) -- there is nothing left to silently no-op to.
+    """
+    from tools._sdlc_utils import resolve_ledger_lease, revalidate_ledger_lease
+
+    target_repo, lease_error = resolve_ledger_lease(args.issue_number, args.run_id)
+    if lease_error is not None:
+        reason = lease_error.get("reason", "LEASE_ABSENT")
+        if reason == "ISSUE_LOCKED":
+            raise OwnershipError(
+                f"ISSUE_LOCKED: issue lock held by a foreign run "
+                f"(run_id={lease_error.get('owner_run_id')}, "
+                f"session={lease_error.get('owner_session_id')}); refusing verdict write"
+            )
         raise OwnershipError(
-            f"ISSUE_LOCKED: issue lock held by a foreign run "
-            f"(run_id={conflict.get('owner_run_id')}, "
-            f"session={conflict.get('owner_session_id')}); refusing verdict write"
+            f"LEASE_ABSENT: no live issue lease for issue #{args.issue_number} "
+            f"owned by run_id={args.run_id!r}; run `sdlc-tool session-ensure` first."
         )
+    if not target_repo:
+        raise OwnershipError(
+            f"TARGET_REPO_MISSING: issue lease for issue #{args.issue_number} has no "
+            "pinned target_repo; refusing to write a PipelineLedger record with a "
+            "None key component."
+        )
+
     judges = None
     consensus = None
     if getattr(args, "judges_json", None):
@@ -458,8 +467,21 @@ def _cli_record(args) -> dict:
         except Exception as e:
             logger.debug(f"sdlc_verdict: --consensus-json decode failed: {e}")
             return {}
+
+    # TOCTOU close (Risk 5): re-validate the lease non-peek immediately
+    # before the actual write, never trusting the earlier peek across the
+    # gap between resolve and write.
+    if not revalidate_ledger_lease(args.issue_number, args.run_id, target_repo):
+        raise OwnershipError(
+            f"ISSUE_LOCKED: lease for issue #{args.issue_number} was taken by a "
+            "foreign run between resolve and write; refusing verdict write"
+        )
+
+    from agent.pipeline_ledger import PipelineLedger
+
+    ledger = PipelineLedger.get_or_create(target_repo, args.issue_number)
     return record_verdict(
-        session,
+        ledger,
         stage=args.stage.upper(),
         verdict=args.verdict,
         blockers=args.blockers,
@@ -471,6 +493,41 @@ def _cli_record(args) -> dict:
 
 
 def _cli_get(args) -> dict:
+    """Read a verdict — issue-keyed ledger first, with a retained session
+    fallback for pre-cutover records (issue #2012 task 2).
+
+    When ``--issue-number`` is given: resolves ``target_repo`` lease-first
+    (never claiming ownership -- reads don't carry a run_id). If no
+    target_repo resolves at all, returns the defined empty outcome ``{}``
+    without ever touching a phantom ``PipelineLedger[(None, issue)]`` key
+    (Risk 5, reader side). If a target_repo DOES resolve but the ledger has
+    no recorded verdict, falls back to the legacy
+    ``find_session_by_issue()`` session read -- the belt for issues whose
+    work started before this migration, or a session created between a
+    migration backfill run and this deploy.
+
+    Without ``--issue-number``, this stays the plain session lookup
+    (``--session-id`` / env-var resolution) -- unaffected by the ledger
+    migration since there's no issue number to key a ledger read on.
+    """
+    if args.issue_number is not None:
+        from tools._sdlc_utils import find_session_by_issue, resolve_target_repo_for_read
+
+        target_repo = resolve_target_repo_for_read(args.issue_number)
+        if target_repo:
+            from agent.pipeline_ledger import PipelineLedger
+
+            ledger = PipelineLedger.get_or_create(target_repo, args.issue_number)
+            record = get_verdict(ledger, args.stage.upper())
+            if record:
+                return record
+            # Ledger resolved but carries no verdict yet -- retained
+            # cold-path session fallback.
+            session = find_session_by_issue(args.issue_number)
+            if session is not None:
+                return get_verdict(session, args.stage.upper())
+        return {}
+
     session = _find_session(session_id=args.session_id, issue_number=args.issue_number)
     if session is None:
         return {}
