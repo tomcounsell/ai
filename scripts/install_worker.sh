@@ -10,6 +10,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/launchctl.sh"
+
 set -a
 # shellcheck disable=SC1091
 [ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
@@ -164,7 +167,11 @@ fi
 
 # Load new version
 echo "Loading $LABEL..."
-launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+# launchctl_bootstrap_fail_soft already prints a distinct WARNING line to
+# stderr on a genuine double-failure before returning non-zero; exit 1
+# propagates that as this script's failure (single-service install, no
+# "abort a batch" concern).
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
 
 # Install worker watchdog (checks heartbeat every 120s, kills hung worker so launchd restarts it)
 WATCHDOG_LABEL="${SERVICE_LABEL_PREFIX}.worker-watchdog"
@@ -202,7 +209,7 @@ cat > "$WATCHDOG_PLIST" << WATCHDOGEOF
 WATCHDOGEOF
 
 launchctl bootout "gui/$(id -u)/$WATCHDOG_LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$WATCHDOG_PLIST"
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WATCHDOG_PLIST" "$WATCHDOG_LABEL" || exit 1
 echo "Worker watchdog installed (checks heartbeat every 120s)"
 
 echo ""

@@ -347,20 +347,20 @@ management. No MCP server, `.mcp.json`, `pyproject.toml [project.scripts]`, or
 
 ## Success Criteria
 
-- [ ] `scripts/lib/launchctl.sh` exists exporting `launchctl_bootstrap_fail_soft`.
-- [ ] All three bare `launchctl bootstrap` calls in `valor-service.sh` (L390, L545, L721) route
+- [x] `scripts/lib/launchctl.sh` exists exporting `launchctl_bootstrap_fail_soft`.
+- [x] All three bare `launchctl bootstrap` calls in `valor-service.sh` (L390, L545, L721) route
       through the helper; `grep -n 'launchctl bootstrap' scripts/valor-service.sh` shows only the
       helper definition/call, no bare site.
-- [ ] All bare `launchctl bootstrap` calls in the five `install_*.sh` helpers route through the
+- [x] All bare `launchctl bootstrap` calls in the five `install_*.sh` helpers route through the
       helper.
-- [ ] A stubbed-`launchctl` harness test proves errno-5 EIO on `bootstrap` recovers via
+- [x] A stubbed-`launchctl` harness test proves errno-5 EIO on `bootstrap` recovers via
       `kickstart -k` and the run continues (does not abort).
-- [ ] A test proves a genuine bootstrap+kickstart double-failure emits the distinct `WARNING`
+- [x] A test proves a genuine bootstrap+kickstart double-failure emits the distinct `WARNING`
       line (failure is surfaced, not masked).
-- [ ] Happy-path (first-try bootstrap succeeds) invokes no `kickstart` — identical observable
+- [x] Happy-path (first-try bootstrap succeeds) invokes no `kickstart` — identical observable
       behavior to today.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 

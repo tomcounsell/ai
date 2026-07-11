@@ -46,7 +46,7 @@ is swallowed and logged as non-fatal.
 |------|---------|
 | `scripts/nightly_regression_tests.py` | Main script: runs the unit pytest suite, computes the failure delta, runs the TTFT gate, sends Telegram alerts, saves state |
 | `com.valor.nightly-tests.plist` | launchd plist template with `__PROJECT_DIR__`, `__HOME_DIR__`, `__SERVICE_LABEL__` placeholders |
-| `scripts/install_nightly_tests.sh` | Install script: bridge-role gated, substitutes placeholders, calls `launchctl bootstrap`; skips + removes stale plist on non-bridge machines |
+| `scripts/install_nightly_tests.sh` | Install script: bridge-role gated, substitutes placeholders, calls `launchctl_bootstrap_fail_soft` (fail-soft errno-5 recovery via `scripts/lib/launchctl.sh`, see bridge-self-healing.md Component 21); skips + removes stale plist on non-bridge machines |
 | `data/nightly_tests_last_run.json` | Unit suite delta state: `passed`, `failed`, `error`, `skipped`, `total`, `run_at` (gitignored) |
 | `logs/nightly_tests.log` | Per-run log with timestamps and counts |
 | `logs/nightly_tests_error.log` | Startup crash log (captured by launchd before `log()` fires) |

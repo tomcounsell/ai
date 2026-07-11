@@ -24,6 +24,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/launchctl.sh"
+
 set -a
 # shellcheck disable=SC1091
 [ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
@@ -227,7 +230,7 @@ if ! plutil -lint "$PLIST_DST" > /dev/null; then
 fi
 
 echo "Loading $LABEL..."
-launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
 
 echo ""
 echo "Email bridge service installed successfully."

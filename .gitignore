@@ -479,4 +479,9 @@ PROGRESS.md
 
 # Playwright CLI session snapshots
 .playwright-cli/
+
+# scripts/lib/ is a tracked shell-helper library, not a Python venv `lib/`
+# build artifact — un-ignore it from the generic `lib/` patterns above (#2013).
+!scripts/lib/
+!scripts/lib/**
 .claude/scheduled_tasks.lock

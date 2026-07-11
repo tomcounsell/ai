@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$PROJECT_DIR/.venv"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/launchctl.sh"
+
 # Source .env so SERVICE_LABEL_PREFIX (and other env vars) are available.
 # Failures are non-fatal — we fall back to defaults below.
 # Note: .env symlinks to ~/Desktop/Valor/.env (iCloud + TCC-protected). Direct source
@@ -387,7 +390,8 @@ bootstrap_plist_idempotent() {
 
     printf '%s' "$rendered" > "$plist_path"
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$plist_path"
+    launchctl_bootstrap_fail_soft "gui/$(id -u)" "$plist_path" "$label" \
+        || echo "WARNING: bootstrap_plist_idempotent: continuing despite failure for $label" >&2
 }
 
 has_bridge_role() {
@@ -542,7 +546,8 @@ PYEOF
     stop_bridge
 
     # Load the bridge service
-    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+    launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_PATH" "$PLIST_NAME" \
+        || echo "WARNING: bridge install: continuing despite bootstrap failure for $PLIST_NAME" >&2
 
     echo "Bridge service installed and started"
     echo "Bridge will auto-start on boot"
@@ -718,7 +723,8 @@ start_worker() {
             # exists. See issue #1407 and `scripts/install_worker.sh` for
             # the canonical pattern.
             launchctl bootout "gui/$(id -u)/$WORKER_PLIST_NAME" 2>/dev/null || true
-            launchctl bootstrap "gui/$(id -u)" "$WORKER_PLIST_PATH"
+            launchctl_bootstrap_fail_soft "gui/$(id -u)" "$WORKER_PLIST_PATH" "$WORKER_PLIST_NAME" \
+                || echo "WARNING: worker-start: continuing despite bootstrap failure for $WORKER_PLIST_NAME" >&2
         else
             launchctl kickstart "gui/$(id -u)/$WORKER_PLIST_NAME"
         fi
