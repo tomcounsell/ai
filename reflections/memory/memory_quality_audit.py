@@ -34,7 +34,7 @@ import os
 import re as _re
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agent.memory_extraction import _looks_like_refusal, extract_json_payload
 from config.models import OLLAMA_CLASSIFIER_MODEL
@@ -61,6 +61,13 @@ HTML_ESCAPE_WOW_RATIO_THRESHOLD = 2.0  # week-over-week ratio jump multiplier
 # Layer 3 — gemma classification budget
 LAYER3_SAMPLE_SIZE = 20
 LAYER3_MIN_SIGNAL_CLUSTER = 3  # # records with same anomaly_signal needed to file an issue
+
+# Dup-check suppression window (#2016): once a cluster issue is closed, suppress
+# re-filing for this many days. Closes the "audit re-files the instant it's
+# closed" gap from the recurrence history (#1497/#1786/#1931) — the previous
+# dup-check only matched `--state open`, so a closed issue no longer suppressed
+# anything and the very next daily run re-filed a fresh one.
+CLUSTER_REFILE_SUPPRESSION_DAYS = 14
 LAYER3_WALLCLOCK_BUDGET_S = 30  # hard cap; abort remaining records past this
 GEMMA_CALL_TIMEOUT_SEC = 10  # per-record asyncio.wait_for timeout (resolves critique C3)
 
@@ -111,7 +118,7 @@ ISSUE_BODY_TEMPLATE = """## Memory Health Audit Anomaly
 - Audit feature: #1231
 - Cleanup convention: `superseded_by="cleanup-junk-extraction"`
 
-If this is a known/expected condition, close the issue with a comment so future audits don't re-file (the dup-check matches title prefix `[memory-audit] {signal}`).
+If this is a known/expected condition, close the issue with a comment; re-filing is suppressed for 14 days (the dup-check matches title prefix `[memory-audit] {signal}`) and will re-surface if the anomaly persists past then.
 """  # noqa: E501
 
 # HTML-escape detection regex (resolves Layer 2 html-escape-rate signal)
@@ -538,8 +545,8 @@ async def _layer3_classify(extraction_records: list) -> tuple[list[dict], list[s
     return candidates, findings
 
 
-async def _find_open_audit_issue(signal_name: str) -> int | None:
-    """Return the issue number of an open audit issue for this signal, or None.
+async def _find_recent_audit_issue(signal_name: str) -> int | None:
+    """Return the issue number of an open-OR-recently-closed audit issue, or None.
 
     Resolves critique C4: title-prefix is the **sole** dup-check key. Labels
     are descriptive only and may be stripped or relabeled by an operator
@@ -552,6 +559,15 @@ async def _find_open_audit_issue(signal_name: str) -> int | None:
     worker event loop is not blocked by ``gh`` latency (matches the pattern in
     ``reflections/maintenance.py:244-265``).
 
+    Fix B (#2016): previously this only queried ``--state open``, so the
+    instant a cluster issue was closed, the very next daily run re-filed a
+    fresh one for the same anomaly (#1497/#1786/#1931). Now queries
+    ``--state all`` and treats a match as a duplicate if it is either OPEN, or
+    CLOSED within the last ``CLUSTER_REFILE_SUPPRESSION_DAYS`` days. A CLOSED
+    issue with a missing/empty ``closedAt`` (a data anomaly, not the normal
+    case) is NOT treated as a permanent suppression — scanning continues past
+    it rather than returning early, so it can never suppress refiling forever.
+
     Returns -1 sentinel on `gh` failure (treated as "duplicate exists" by callers
     to suppress filing for the run; better to skip than spam if search is broken).
     """
@@ -563,11 +579,11 @@ async def _find_open_audit_issue(signal_name: str) -> int | None:
             "issue",
             "list",
             "--state",
-            "open",
+            "all",
             "--search",
             search_query,
             "--json",
-            "number,title",
+            "number,title,state,closedAt",
             "--limit",
             "20",
             stdout=asyncio.subprocess.PIPE,
@@ -578,8 +594,22 @@ async def _find_open_audit_issue(signal_name: str) -> int | None:
             raise RuntimeError(f"gh exited {proc.returncode}")
         issues = json.loads(stdout.decode())
         for issue in issues:
-            if issue.get("title", "").startswith(title_prefix):
+            if not issue.get("title", "").startswith(title_prefix):
+                continue
+            state = issue.get("state", "")
+            closed_at = issue.get("closedAt") or ""
+            if state == "OPEN":
                 return issue["number"]
+            elif state == "CLOSED" and closed_at:
+                closed_dt = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+                if (datetime.now(UTC) - closed_dt) <= timedelta(
+                    days=CLUSTER_REFILE_SUPPRESSION_DAYS
+                ):
+                    return issue["number"]
+                # else: closed beyond the suppression window — keep scanning,
+                # do not return (older closures never suppress refiling).
+            # else: CLOSED with falsy closed_at (data anomaly), or any other
+            # state — keep scanning, do not suppress.
         return None
     except Exception as e:
         logger.warning(f"dup-check failed for {signal_name}, suppressing file: {e}")
@@ -602,7 +632,7 @@ async def _file_anomaly_issue(
     """
     title = f"[memory-audit] {signal_name}: {observed} (threshold {threshold})"
 
-    existing = await _find_open_audit_issue(signal_name)
+    existing = await _find_recent_audit_issue(signal_name)
     if existing is not None:
         # Either real dup (positive int) or sentinel (-1) — both suppress filing.
         if existing == -1:

@@ -675,6 +675,102 @@ class TestParseCategorizedObservations:
             "A pattern edit has accidentally widened to bare keywords."
         )
 
+    # --- Fix A (#2016): JSON branch per-record filtering, recurrence of
+    # #1497/#1786/#1931. The JSON branch previously applied _is_scoping_boilerplate
+    # but not _looks_like_refusal, and fetched/`.lower()`d category before
+    # type-guarding observation, letting shrapnel-shaped values and malformed
+    # items slip past save-time and get re-flagged by the audit a day later. ---
+
+    def test_json_branch_drops_shrapnel_shaped_observation(self):
+        """A JSON item whose observation value is itself JSON-shrapnel-shaped is dropped."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = json.dumps(
+            [
+                {"category": "decision", "observation": '"category": "decision"'},
+                {
+                    "category": "decision",
+                    "observation": "chose blue-green deployment over rolling updates",
+                },
+            ]
+        )
+        result = _parse_categorized_observations(raw)
+        contents = [c for c, _, _ in result]
+        assert all('"category"' not in c for c in contents)
+        assert any("blue-green" in c for c in contents)
+        assert len(result) == 1
+
+    def test_json_branch_drops_refusal_phrase_observation(self):
+        """A JSON item whose observation value contains a refusal phrase is dropped.
+
+        Note: a full-phrase refusal match anywhere in raw_text also trips the
+        whole-text short-circuit at the top of the function (pre-existing,
+        substring-based), so this batch empties entirely rather than dropping
+        just the offending item. The per-item filter added by Fix A is the
+        defensive belt-and-suspenders layer documented on that short-circuit
+        (direct/partial invocations that bypass the whole-text check still get
+        filtered). What matters here: the refusal text never survives into
+        the result.
+        """
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = json.dumps(
+            [
+                {
+                    "category": "pattern",
+                    "observation": "There is no agent session response to analyze.",
+                },
+                {
+                    "category": "pattern",
+                    "observation": "all Popoto models use safe_save as the primary entry point",
+                },
+            ]
+        )
+        result = _parse_categorized_observations(raw)
+        contents = [c for c, _, _ in result]
+        assert all("no agent session" not in c.lower() for c in contents)
+
+    def test_json_branch_skips_non_string_observation_without_raising(self):
+        """An item whose observation value is a dict/list is skipped; siblings survive."""
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = json.dumps(
+            [
+                {"category": "decision", "observation": {"nested": "not a string"}},
+                {
+                    "category": "decision",
+                    "observation": "chose blue-green deployment over rolling updates",
+                },
+            ]
+        )
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 1
+        assert "blue-green" in result[0][0]
+
+    def test_json_branch_skips_null_category_without_raising(self):
+        """An item whose category value is null is skipped without raising; siblings survive.
+
+        This is the re-critique ordering fix: category is fetched and .lower()'d
+        BEFORE observation is type-guarded in the original code. A null category
+        would raise AttributeError on .lower(), which the surrounding
+        except (json.JSONDecodeError, TypeError) does NOT catch — aborting the
+        whole batch instead of just skipping the malformed item.
+        """
+        from agent.memory_extraction import _parse_categorized_observations
+
+        raw = json.dumps(
+            [
+                {"category": None, "observation": "some observation text that is long enough"},
+                {
+                    "category": "decision",
+                    "observation": "chose blue-green deployment over rolling updates",
+                },
+            ]
+        )
+        result = _parse_categorized_observations(raw)
+        assert len(result) == 1
+        assert "blue-green" in result[0][0]
+
 
 class TestExtractJsonPayload:
     """Test agent/memory_extraction.py extract_json_payload() (issue #1212)."""

@@ -626,13 +626,45 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
                 for item in data:
                     if not isinstance(item, dict):
                         continue
-                    category = item.get("category", "").lower()
+                    # Fix A (#2016): type-guard BOTH fields before calling any
+                    # string method on either. category must be checked before
+                    # .lower() and observation before len()/_is_scoping_boilerplate/
+                    # _looks_like_refusal — a malformed item (e.g. category: null)
+                    # would otherwise raise AttributeError that the surrounding
+                    # except (json.JSONDecodeError, TypeError) does NOT catch,
+                    # aborting the whole batch. This closes the whole-text-vs-
+                    # per-record asymmetry: the line-based fallback below already
+                    # filters each line through _looks_like_refusal, but this JSON
+                    # branch previously let shrapnel-shaped observation values
+                    # through untouched, causing the same anomaly cluster to be
+                    # re-filed repeatedly by the audit (#1497/#1786/#1931).
+                    category_raw = item.get("category", "")
+                    if not isinstance(category_raw, str):
+                        continue
+                    category = category_raw.lower()
                     observation = item.get("observation", "")
+                    if not isinstance(observation, str):
+                        continue
                     if not observation or len(observation) < 10:
                         continue
                     # Fix 3 (#1822): drop session-scoping boilerplate echoed as
                     # an observation (e.g. "...scoped to ... (sdlc-local-96)...").
                     if _is_scoping_boilerplate(observation):
+                        continue
+                    # Fix A (#2016): apply the same per-record refusal/shrapnel
+                    # filter the line-based fallback already applies, so
+                    # JSON-shrapnel-shaped values (e.g. '"category": "decision"')
+                    # never get saved and later superseded by the audit.
+                    if _looks_like_refusal(observation):
+                        # NIT (#2016 re-critique): logger.info, not logger.debug —
+                        # debug is typically off in production, and that blind
+                        # spot is exactly what caused four historical
+                        # misdiagnoses of this recurring signal.
+                        logger.info(
+                            "Fix A (#2016) dropped JSON-branch observation: category=%s preview=%r",
+                            category,
+                            observation[:60],
+                        )
                         continue
                     importance = CATEGORY_IMPORTANCE.get(category, DEFAULT_CATEGORY_IMPORTANCE)
                     metadata = {

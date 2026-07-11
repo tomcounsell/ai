@@ -69,7 +69,7 @@ The runtime parser lives in `agent/reflection_schedule.py::compute_next_due()` a
 
 #### Migration from `interval:` (issue #1273)
 
-The legacy `interval: <int>` field has been replaced by `every: <int>s`. The migration is one-shot and idempotent:
+The `interval: <int>` field is now `every: <int>s`. The migration is one-shot and idempotent:
 
 - `scripts/migrate_reflections_yaml.py` rewrites `interval: N` → `every: Ns` in place. Running it on an already-migrated YAML is a no-op.
 - The `/update` skill invokes the migration on every pull (`scripts/update/run.py` Step 3.65) so machines that haven't migrated yet pick up the change automatically. The wrapper lives in `scripts/update/reflections_yaml.py`.
@@ -205,7 +205,7 @@ live in one code path.
 
 | Slot type | Surface scanned | Output channel | Consumer |
 |-----------|-----------------|----------------|----------|
-| `log_audit` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to the slot's `target_groups` (legacy default was `Dev: Valor`) | Engineer triage of error-rate spikes / regressions |
+| `log_audit` | Server logs (`logs/bridge.log`, etc.) per project | Telegram text summary to the slot's `target_groups` (previous default was `Dev: Valor`) | Engineer triage of error-rate spikes / regressions |
 | `daily_log` | System activity (commits, PRs, issues, sessions, Telegram decisions, memories, crashes, reflection runs) | Markdown day log written to `~/work-vault/AI Valor Engels System/daily-logs/{date}.md` (gated by per-slot `vault_writer: true`) plus a `~70-word` audio brief to the slot's first configured PM Telegram chat | Knowledge search ("what happened on day X?") + spoken executive update |
 
 **Why both exist:** they answer different questions. `log_audit` answers
@@ -249,7 +249,7 @@ by the time the slot runs at the next scheduler tick after 00:00 UTC.
 
 ### State Model (`models/reflection.py`)
 
-Each reflection gets a `Reflection` record in Redis tracking definition + last-run summary. Per-run history rows live separately in `ReflectionRun` (`models/reflection_run.py`) so the size of a Reflection record is bounded — the legacy 200-cap embedded `run_history` list is gone.
+Each reflection gets a `Reflection` record in Redis tracking definition + last-run summary. Per-run history rows live separately in `ReflectionRun` (`models/reflection_run.py`) so the size of a Reflection record is bounded — the previous 200-cap embedded `run_history` list is gone.
 
 | Field | Type | Purpose |
 |-------|------|---------|
@@ -260,8 +260,8 @@ Each reflection gets a `Reflection` record in Redis tracking definition + last-r
 | `auto_delete_after_run` | Field(bool) | One-shot self-clean on success (default false) |
 | `enabled` | Field(bool) | Whether the scheduler dispatches this reflection (default true) |
 | `last_run_summary` | DictField | `{timestamp, status, duration, error}` — fast dashboard read |
-| `ran_at` | FloatField | Unix timestamp of last execution start (legacy compat) |
-| `run_count` | IntField | Total number of executions (legacy compat) |
+| `ran_at` | FloatField | Unix timestamp of last execution start (kept for compatibility) |
+| `run_count` | IntField | Total number of executions (kept for compatibility) |
 | `last_status` | Field | `pending`, `running`, `success`, `error`, `skipped`, `stale_running` |
 | `last_error` | Field | Error message from last failure |
 | `last_duration` | FloatField | Duration of last run in seconds |
@@ -690,6 +690,7 @@ Prunes zero-access memories below the weak-forgetting threshold:
 - **Layer 2** — heuristic anomaly detection (no model). Four signals: `category-default-skew`, `importance-1.0-skew`, `agent-id-cluster`, `html-escape-rate`. Cross-threshold signals become candidates.
 - **Layer 3** — granite classification (`granite4.1:3b` via `OLLAMA_CLASSIFIER_MODEL`, fail-soft). Samples up to 20 last-24h records; 30s wallclock budget; 10s `GEMMA_CALL_TIMEOUT_SEC` per call. Verdicts grouped by anomaly_signal; signals with ≥3 matches become candidates. Fails soft if Ollama is unavailable.
 - **Issue surfacing** — Layer-2/3 candidates → `gh issue create --label memory --label investigation`, deduped via title-prefix search. Layer 0/1 never file issues.
+- **Cluster re-filing suppression (issue #2016)** — the dup-check (`_find_recent_audit_issue` in `reflections/memory/memory_quality_audit.py`) used to search only `--state open`, so closing an anomaly issue provided no protection: the very next daily run would re-file a fresh issue for the same signal. That produced a recurring pattern of the same cluster being opened, closed, and immediately re-opened (#1497, #1786, #1931). The dup-check now queries `gh issue list --state all`, and closing (acknowledging) a memory-audit anomaly issue suppresses re-filing of that same signal — matched by the `[memory-audit] {signal}:` title prefix — for `CLUSTER_REFILE_SUPPRESSION_DAYS = 14` days. A matching OPEN issue always suppresses, as before; a matching CLOSED issue suppresses only while inside the 14-day window. If the anomaly persists past the window, a fresh issue is filed on the next run.
 
 ### `embedding-orphan-sweep`
 
@@ -761,7 +762,7 @@ worker-role install gate, cutover ordering, and the `/dashboard.json`
 | `models/reflection_ignore.py` | ReflectionIgnore: auto-fix suppression with TTL-based expiry |
 | `models/pr_review_audit.py` | PRReviewAudit: PR review finding deduplication |
 | `models/reflections.py` | Re-export shim: `ReflectionIgnore`, `PRReviewAudit` |
-| `scripts/reflections_report.py` | GitHub issue creation module (legacy; was used by retired `daily_report`) |
+| `scripts/reflections_report.py` | GitHub issue creation module (was used by retired `daily_report`) |
 | `scripts/update/env_sync.py` | `sync_reflections_yaml()`: creates vault symlink on update |
 | `~/Desktop/Valor/projects.json` | Multi-repo project registry |
 | `~/Desktop/Valor/reflections.yaml` | Vault copy of the registry (canonical source) |

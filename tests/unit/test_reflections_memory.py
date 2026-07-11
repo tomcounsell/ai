@@ -8,8 +8,10 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1145,14 +1147,14 @@ def _make_fake_subproc(stdout: bytes = b"", returncode: int = 0):
 
 
 class TestDuplicateIssueDetection:
-    """Tests for _find_open_audit_issue dedup logic."""
+    """Tests for _find_recent_audit_issue dedup logic (open-OR-recently-closed, #2016)."""
 
     def test_skips_filing_when_open_issue_exists_for_same_signal(self):
         """Existing open issue with matching title prefix → skip filing."""
         from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         with patch(
-            "reflections.memory.memory_quality_audit._find_open_audit_issue",
+            "reflections.memory.memory_quality_audit._find_recent_audit_issue",
             new_callable=AsyncMock,
             return_value=42,
         ):
@@ -1169,13 +1171,13 @@ class TestDuplicateIssueDetection:
         assert filed is False
 
     def test_files_new_issue_when_no_open_dup(self):
-        """When _find_open_audit_issue returns None, _file_anomaly_issue invokes gh create."""
+        """When _find_recent_audit_issue returns None, _file_anomaly_issue invokes gh create."""
         from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         fake_proc = _make_fake_subproc(returncode=0)
         with (
             patch(
-                "reflections.memory.memory_quality_audit._find_open_audit_issue",
+                "reflections.memory.memory_quality_audit._find_recent_audit_issue",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -1207,11 +1209,11 @@ class TestDuplicateIssueDetection:
         assert "investigation" in cmd
 
     def test_gh_search_failure_suppresses_filing_for_run(self):
-        """When _find_open_audit_issue returns -1 (gh failed), _file_anomaly_issue skips."""
+        """When _find_recent_audit_issue returns -1 (gh failed), _file_anomaly_issue skips."""
         from reflections.memory.memory_quality_audit import _file_anomaly_issue
 
         with patch(
-            "reflections.memory.memory_quality_audit._find_open_audit_issue",
+            "reflections.memory.memory_quality_audit._find_recent_audit_issue",
             new_callable=AsyncMock,
             return_value=-1,
         ):
@@ -1233,7 +1235,7 @@ class TestDuplicateIssueDetection:
 
         with (
             patch(
-                "reflections.memory.memory_quality_audit._find_open_audit_issue",
+                "reflections.memory.memory_quality_audit._find_recent_audit_issue",
                 new_callable=AsyncMock,
                 return_value=None,
             ),
@@ -1255,13 +1257,13 @@ class TestDuplicateIssueDetection:
 
         assert filed is False
 
-    def test_find_open_audit_issue_uses_title_prefix_only_no_label_filter(self):
-        """_find_open_audit_issue dup-checks on title prefix only (resolves critique C4).
+    def test_find_recent_audit_issue_uses_title_prefix_only_no_label_filter(self):
+        """_find_recent_audit_issue dup-checks on title prefix only (resolves critique C4).
 
         Labels are descriptive but not part of the dup key — an operator who
-        relabels (or strips labels from) an open issue must not cause re-filing.
+        relabels (or strips labels from) an issue must not cause re-filing.
         """
-        from reflections.memory.memory_quality_audit import _find_open_audit_issue
+        from reflections.memory.memory_quality_audit import _find_recent_audit_issue
 
         fake_proc = _make_fake_subproc(stdout=b"[]", returncode=0)
         with patch(
@@ -1269,7 +1271,7 @@ class TestDuplicateIssueDetection:
             new_callable=AsyncMock,
             return_value=fake_proc,
         ) as mock_exec:
-            run_async(_find_open_audit_issue("category-default-skew"))
+            run_async(_find_recent_audit_issue("category-default-skew"))
 
             cmd = list(mock_exec.call_args.args)
             # The --label flag must not appear at all
@@ -1281,6 +1283,85 @@ class TestDuplicateIssueDetection:
             assert "label:" not in search_query
             # The structured title prefix is the sole dup-check key
             assert "[memory-audit] category-default-skew:" in search_query
+            # Fix B (#2016): queries all states (open + closed), not just open —
+            # the closed-within-window branch handles suppression semantics.
+            assert "--state" in cmd
+            state_idx = cmd.index("--state")
+            assert cmd[state_idx + 1] == "all"
+
+    def test_suppresses_refile_when_recently_closed(self):
+        """A matching-title-prefix issue closed within the suppression window is a dup."""
+        from reflections.memory.memory_quality_audit import _find_recent_audit_issue
+
+        recent_close = (datetime.now(UTC) - timedelta(days=3)).isoformat().replace("+00:00", "Z")
+        stdout = json.dumps(
+            [
+                {
+                    "number": 2020,
+                    "title": "[memory-audit] agent-id-cluster: 12 records (threshold 10)",
+                    "state": "CLOSED",
+                    "closedAt": recent_close,
+                }
+            ]
+        ).encode()
+        fake_proc = _make_fake_subproc(stdout=stdout, returncode=0)
+        with patch(
+            "reflections.memory.memory_quality_audit.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=fake_proc,
+        ):
+            result = run_async(_find_recent_audit_issue("agent-id-cluster"))
+
+        assert result == 2020
+
+    def test_refiles_when_closed_beyond_window(self):
+        """A matching-title-prefix issue closed beyond the suppression window is not a dup."""
+        from reflections.memory.memory_quality_audit import _find_recent_audit_issue
+
+        old_close = (datetime.now(UTC) - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+        stdout = json.dumps(
+            [
+                {
+                    "number": 2020,
+                    "title": "[memory-audit] agent-id-cluster: 12 records (threshold 10)",
+                    "state": "CLOSED",
+                    "closedAt": old_close,
+                }
+            ]
+        ).encode()
+        fake_proc = _make_fake_subproc(stdout=stdout, returncode=0)
+        with patch(
+            "reflections.memory.memory_quality_audit.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=fake_proc,
+        ):
+            result = run_async(_find_recent_audit_issue("agent-id-cluster"))
+
+        assert result is None
+
+    def test_closed_with_empty_closed_at_does_not_suppress_forever(self):
+        """A CLOSED issue with a missing/empty closedAt (data anomaly) never suppresses."""
+        from reflections.memory.memory_quality_audit import _find_recent_audit_issue
+
+        stdout = json.dumps(
+            [
+                {
+                    "number": 2020,
+                    "title": "[memory-audit] agent-id-cluster: 12 records (threshold 10)",
+                    "state": "CLOSED",
+                    "closedAt": "",
+                }
+            ]
+        ).encode()
+        fake_proc = _make_fake_subproc(stdout=stdout, returncode=0)
+        with patch(
+            "reflections.memory.memory_quality_audit.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=fake_proc,
+        ):
+            result = run_async(_find_recent_audit_issue("agent-id-cluster"))
+
+        assert result is None
 
 
 # ----------- Quiescence + result shape -----------
