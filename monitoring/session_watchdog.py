@@ -24,11 +24,11 @@ When issues are detected, the watchdog FIXES them automatically:
 
 NO ALERTS ARE SENT for recoverable stalls. Either retry, fix, or create an issue.
 
-**Process topology (issue #1128)**: This watchdog runs as a SEPARATE process
-from the worker. Idle SDK-client teardown is NOT implemented here because
-the `_active_clients` registry in `agent/sdk_client.py` is worker-process-
-local. Idle teardown lives in `worker/idle_sweeper.py`, co-located with
-the registry. The watchdog process must never import `_active_clients`.
+**Process topology**: This watchdog runs as a SEPARATE process from the
+worker. The `_active_clients` SDK-client registry and its idle-teardown
+sweeper (`worker/idle_sweeper.py`) were deleted (plan #2000 Task 2.2 --
+the CLI harness spawns a short-lived subprocess per turn and has no
+persistent client to go stale).
 """
 
 import asyncio

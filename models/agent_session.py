@@ -506,13 +506,14 @@ class AgentSession(Model):
     metered_cache_read_tokens = IntField(default=0)
     metered_cost_usd = FloatField(default=0.0)
 
-    # Set by the worker's idle sweeper (`worker/idle_sweeper.py`) when a
-    # dormant SDK-path session's persistent `ClaudeSDKClient` is proactively
-    # torn down before the ~48h Anthropic idle-kill window. On resume, a
-    # fresh client is rebuilt via `--resume` + stored UUID. Informational
-    # only — the sweeper pops the client from `_active_clients` as part of
-    # the teardown, so the field's presence (vs. None) is what operators
-    # use to audit how often teardown fires.
+    # Historical (issue #1128): was set by the worker's idle sweeper
+    # (`worker/idle_sweeper.py`) when a dormant SDK-path session's persistent
+    # `ClaudeSDKClient` was proactively torn down before the ~48h Anthropic
+    # idle-kill window. The sweeper and the SDK-client substrate it swept
+    # were both deleted (plan #2000 Task 2.2 -- the CLI harness has no
+    # persistent client to go stale). Field kept (no active writer) rather
+    # than migrated away, so historical records and any external readers of
+    # older data are unaffected.
     sdk_connection_torn_down_at = DatetimeField(null=True)
 
     # Last subprocess exit code from `_run_harness_subprocess` (issue #1099).

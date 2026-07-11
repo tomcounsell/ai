@@ -1402,7 +1402,7 @@ class TestResolveRootSessionId:
 class TestSteerChildDelivery:
     """Integration tests for steer_child.py → CLI-harness delivery path.
 
-    These tests use real AgentSession objects (no mock of get_active_client or
+    These tests use real AgentSession objects (no mock of
     push_steering_message) to verify the end-to-end steering delivery path.
     """
 
