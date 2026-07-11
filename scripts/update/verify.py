@@ -1230,16 +1230,18 @@ def check_sdlc_tool(project_dir: Path) -> ToolCheck:
 def check_machine_identity(project_dir: Path) -> dict:
     """Verify this machine's identity against projects.json config.
 
-    Reads ComputerName via scutil, matches against the 'machine' field
-    in ~/Desktop/Valor/projects.json, and returns the matched projects.
+    Reads ComputerName via :func:`config.machine.get_machine_name` (the
+    canonical hub), matches against the 'machine' field in
+    ~/Desktop/Valor/projects.json, and returns the matched projects.
     """
     import json
 
-    # Get this machine's name
-    try:
-        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
-    except Exception as e:
-        return {"error": f"Could not read ComputerName: {e}"}
+    from config.machine import get_machine_name
+
+    # Get this machine's name ("" on any scutil failure → error dict)
+    hostname = get_machine_name()
+    if not hostname:
+        return {"error": "Could not read ComputerName"}
 
     # Find projects.json
     config_path = Path.home() / "Desktop" / "Valor" / "projects.json"

@@ -39,6 +39,19 @@ projects.<key>.machine
 
 Adding a new machine costs zero edits to existing whitelist entries, group declarations, or email patterns. Move a project from one machine to another by changing one line: the `machine` field on that project. Everything follows.
 
+## Machine identity resolution
+
+[`config/machine.py`](../../config/machine.py) is the single source for "what machine am I / what do I own" — the lowest shared layer (stdlib only, plus `config.paths`). Every `scutil --get ComputerName` call and every `projects.json` ownership match resolves through it, so a fix to the resolution logic propagates everywhere instead of drifting across copies (issue #1997 consolidated the drifted copies across `ui/`, `monitoring/`, `bridge/`, `reflections/`, `scripts/update/`, and `tools/`, and retired the earlier `tools/machine_identity.py` hub into this module).
+
+Four functions, each fail-soft (never raises on a read failure):
+
+- **`get_machine_name() -> str`** — stripped `scutil --get ComputerName`, `""` on any failure. It deliberately has **no** `platform.node()` fallback: the `""` is the "unknown host → do not match / skip" signal the ownership and README-check consumers depend on. A fallback here would let an unresolved host silently match a `"machine": ""` entry.
+- **`get_machine_slug() -> str`** — filesystem-safe, guaranteed **non-empty** variant (lowercased, spaces→hyphens, with a `platform.node()` fallback) used for per-machine token filenames (`tools/google_workspace/auth.py`), where an empty slug would collapse every host's token onto one path.
+- **`get_machine_project_keys(machine=None) -> list[str]`** — case-insensitive match of each `projects.<key>.machine`, `[]` on any read failure. Applies the **empty-machine fail-to-development guard** (#1834): an unresolved `machine` (`""`) returns `[]` before any file read, so it can never mis-tag a dev/misconfigured host as an owner. `monitoring/sentry_config.py::_owned_project_key` is a thin first-or-`None` adapter over it.
+- **`get_machine_display_name() -> str`** — human-facing label with a ComputerName → OS hostname → `"unknown"` fallback chain, for triage stamps, issue bodies, and `/update` replies (e.g. `reflections/docs_auditor.py`, `bridge/update.py`). Never use it for ownership matching — the hostname fallback is a different identifier than the `machine` field. `get_machine_slug()` slugifies this chain when the ComputerName is unresolved, which is what makes its non-empty guarantee real.
+
+Note: `scripts/update/readme_check.py` reads the **repo-local** `config/projects.json` (different shape, with `working_directory`), so it borrows only `get_machine_name()`, not the project-key logic.
+
 ## What the validator catches
 
 [`bridge/config_validation.py`](../../bridge/config_validation.py) — `validate_projects_config(cfg)` aggregates errors from every shape into one report:

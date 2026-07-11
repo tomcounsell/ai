@@ -65,7 +65,7 @@ def _names(path):
     return [r["name"] for r in data["reflections"]]
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_owner_registers_missing_entry_in_vault(mock_machine, tmp_path, monkeypatch):
     """The entry lands in the resolved (vault) file specifically — critique C6."""
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
@@ -87,7 +87,7 @@ def test_owner_registers_missing_entry_in_vault(mock_machine, tmp_path, monkeypa
     assert entry["enabled"] is True
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_already_registered_is_noop(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(
         tmp_path, registry=REGISTRY_WITH_CRASH, repo_registry=REGISTRY_WITH_CRASH
@@ -102,7 +102,7 @@ def test_already_registered_is_noop(mock_machine, tmp_path, monkeypatch):
     assert _names(vault_path).count("crash-recovery") == 1
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_register_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -115,7 +115,7 @@ def test_register_is_idempotent_across_two_runs(mock_machine, tmp_path, monkeypa
     assert _names(vault_path).count("crash-recovery") == 1
 
 
-@patch("tools.machine_identity.computer_name", return_value="Some Other Machine")
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
 def test_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(
         tmp_path, projects=PROJECTS_OWNED, repo_registry=REGISTRY_WITHOUT_CRASH
@@ -128,7 +128,7 @@ def test_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
     assert "crash-recovery" not in _names(vault_path)
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_missing_vault_file_skips(mock_machine, tmp_path, monkeypatch):
     _, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(tmp_path / "does-not-exist.yaml"))
@@ -139,7 +139,7 @@ def test_missing_vault_file_skips(mock_machine, tmp_path, monkeypatch):
     assert "not found" in result.detail
 
 
-@patch("tools.machine_identity.computer_name", return_value="")
+@patch("config.machine.get_machine_name", return_value="")
 def test_unresolvable_machine_name_fails_closed(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -167,7 +167,7 @@ reflections:
 """
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_append_preserves_comments_and_formatting(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     vault_path.write_text(COMMENTED_VAULT)
@@ -202,7 +202,7 @@ BASELINE_REFRESH_KWARGS = {
 }
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_register_reflection_registers_arbitrary_entry(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -222,7 +222,7 @@ def test_register_reflection_registers_arbitrary_entry(mock_machine, tmp_path, m
     assert entry["enabled"] is True
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_register_reflection_is_idempotent(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -235,7 +235,7 @@ def test_register_reflection_is_idempotent(mock_machine, tmp_path, monkeypatch):
     assert _names(vault_path).count("test-baseline-refresh") == 1
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_register_reflection_second_entry_coexists_with_crash_recovery(
     mock_machine, tmp_path, monkeypatch
 ):
@@ -254,7 +254,7 @@ def test_register_reflection_second_entry_coexists_with_crash_recovery(
     assert register_reflection(project_dir, **BASELINE_REFRESH_KWARGS).action == "noop"
 
 
-@patch("tools.machine_identity.computer_name", return_value="Some Other Machine")
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
 def test_register_reflection_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_registry=REGISTRY_WITHOUT_CRASH)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -265,7 +265,7 @@ def test_register_reflection_non_owner_skips_without_mutating(mock_machine, tmp_
     assert "test-baseline-refresh" not in _names(vault_path)
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_register_reflection_entry_loads_via_scheduler_registry(
     mock_machine, tmp_path, monkeypatch
 ):
@@ -284,7 +284,7 @@ def test_register_reflection_entry_loads_via_scheduler_registry(
     assert entry.callable == "reflections.housekeeping.test_baseline_refresh_check.run"
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_registered_entry_loads_via_scheduler_registry(mock_machine, tmp_path, monkeypatch):
     """After registration, the scheduler's registry loader lists crash-recovery.
 

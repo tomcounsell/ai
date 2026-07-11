@@ -45,7 +45,8 @@ def _resolve_project_keys(project_key: str | None = None) -> list[str]:
         return [env_key]
 
     # No env var — resolve from machine config (same source as the dashboard).
-    from ui.data.machine import get_machine_name, get_machine_projects
+    from config.machine import get_machine_name
+    from ui.data.machine import get_machine_projects
 
     projects = get_machine_projects()
     if projects:

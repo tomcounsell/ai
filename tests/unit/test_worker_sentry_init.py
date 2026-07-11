@@ -14,7 +14,6 @@ depend on whether the test host owns a project in the real `projects.json`.
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
 from monitoring.sentry_config import (
@@ -154,50 +153,37 @@ def test_explicit_sentry_environment_overrides(monkeypatch):
 
 
 def test_owned_project_key_empty_machine_returns_none():
-    """Load-bearing guard (critique concern #1): an empty ComputerName must NOT
-    match a projects.json entry whose `machine` field is also empty (`"" == ""`)."""
-    fake_config = json.dumps({"projects": {"p1": {"machine": ""}, "p2": {"machine": "Prod-Box"}}})
-    with patch("monitoring.sentry_config.Path") as mock_path:
-        instance = mock_path.return_value.expanduser.return_value
-        instance.exists.return_value = True
-        instance.read_text.return_value = fake_config
-        # Empty machine short-circuits to None despite the empty-`machine` entry.
-        assert _owned_project_key("") is None
+    """Load-bearing guard (critique concern #1, #1834): an empty ComputerName
+    must NOT own a project. The guard now lives in
+    ``config.machine.get_machine_project_keys`` (short-circuits before any file
+    read), and ``_owned_project_key`` inherits it as a thin adapter — so this
+    holds regardless of the real projects.json on the test host."""
+    assert _owned_project_key("") is None
 
 
-def test_owned_project_key_matches_case_insensitive():
-    """A machine that owns a project resolves to that project key (case-insensitive)."""
-    fake_config = json.dumps({"projects": {"p1": {"machine": "Prod-Box"}}})
-    with patch("monitoring.sentry_config.Path") as mock_path:
-        instance = mock_path.return_value.expanduser.return_value
-        instance.exists.return_value = True
-        instance.read_text.return_value = fake_config
+def test_owned_project_key_returns_first_owned_key():
+    """The adapter returns the first key ``get_machine_project_keys`` reports."""
+    with patch("monitoring.sentry_config.get_machine_project_keys", return_value=["p1", "p2"]):
         assert _owned_project_key("prod-box") == "p1"
+
+
+def test_owned_project_key_no_owned_keys_returns_none():
+    """No owned keys (unowned host or read failure → []) resolves to None."""
+    with patch("monitoring.sentry_config.get_machine_project_keys", return_value=[]):
         assert _owned_project_key("Unowned-Laptop") is None
-
-
-def test_owned_project_key_read_failure_returns_none():
-    """A projects.json read error resolves to None (fail-to-development)."""
-    with patch("monitoring.sentry_config.Path") as mock_path:
-        instance = mock_path.return_value.expanduser.return_value
-        instance.exists.return_value = True
-        instance.read_text.side_effect = OSError("boom")
-        assert _owned_project_key("Prod-Box") is None
 
 
 def test_is_designated_bridge_machine_false_on_empty_computer_name():
     """Fail-to-development: an unresolved ComputerName is never a bridge machine."""
-    with patch("monitoring.sentry_config._get_machine_name", return_value=""):
+    with patch("monitoring.sentry_config.get_machine_name", return_value=""):
         assert _is_designated_bridge_machine() is False
 
 
 def test_is_designated_bridge_machine_false_on_read_failure():
-    """Fail-to-development: an unreadable projects.json is never a bridge machine."""
+    """Fail-to-development: no owned keys (e.g. unreadable projects.json → [])
+    means this host is never a designated bridge machine."""
     with (
-        patch("monitoring.sentry_config._get_machine_name", return_value="Dev-Laptop"),
-        patch("monitoring.sentry_config.Path") as mock_path,
+        patch("monitoring.sentry_config.get_machine_name", return_value="Dev-Laptop"),
+        patch("monitoring.sentry_config.get_machine_project_keys", return_value=[]),
     ):
-        instance = mock_path.return_value.expanduser.return_value
-        instance.exists.return_value = True
-        instance.read_text.side_effect = OSError("boom")
         assert _is_designated_bridge_machine() is False

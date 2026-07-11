@@ -1,16 +1,15 @@
-"""Data access layer for machine-specific project config."""
+"""Data access layer for machine-specific project config.
+
+Machine-name and ownership resolution live in :mod:`config.machine` (the lowest
+shared layer). This module keeps only the ui-specific ``get_machine_projects``
+view (exploded per-Telegram-group rows), which borrows ``get_machine_name``
+from there.
+"""
 
 import json
-import subprocess
 from pathlib import Path
 
-
-def get_machine_name() -> str:
-    try:
-        result = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True)
-        return result.stdout.strip()
-    except Exception:
-        return ""
+from config.machine import get_machine_name
 
 
 def get_machine_projects() -> list[dict]:
@@ -55,29 +54,3 @@ def get_machine_projects() -> list[dict]:
     }
     rows.sort(key=lambda r: (r["project_name"].lower(), persona_order.get(r["persona"], 99)))
     return rows
-
-
-def get_machine_project_keys() -> list[str]:
-    """Return the ``project_key``s owned by this machine (``projects.<key>.machine`` match).
-
-    Used to scope machine-local Redis counter aggregation (e.g. the
-    ``slot_reclaims`` self-heal counter, issue #1820) to the projects this
-    worker actually serves — the same machine filter ``get_machine_projects()``
-    already applies, but returning raw project_key strings instead of exploded
-    per-Telegram-group rows.
-    """
-    config_path = Path("~/Desktop/Valor/projects.json").expanduser()
-    if not config_path.exists():
-        return []
-
-    try:
-        config = json.loads(config_path.read_text())
-    except Exception:
-        return []
-
-    machine = get_machine_name().lower()
-    return [
-        project_key
-        for project_key, project in config.get("projects", {}).items()
-        if project.get("machine", "").lower() == machine
-    ]

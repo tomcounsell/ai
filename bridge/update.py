@@ -15,13 +15,13 @@ import asyncio
 import json
 import logging
 import os
-import platform
 import subprocess
 import time
 import uuid
 from pathlib import Path
 
 from bridge.response import set_reaction
+from config.machine import get_machine_display_name
 
 _PROJECT_DIR = Path(__file__).parent.parent
 
@@ -83,22 +83,6 @@ async def _verify_release_after_update(
     head_short = get_short_sha(_PROJECT_DIR)
     machine_check = check_machine_identity(_PROJECT_DIR)
     return verify_running_release(_PROJECT_DIR, head_short, machine_check)
-
-
-def _get_machine_name() -> str:
-    """Get the macOS Computer Name, falling back to hostname."""
-    try:
-        result = subprocess.run(
-            ["scutil", "--get", "ComputerName"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except Exception:  # noqa: S110 -- falls back to hostname
-        pass
-    return platform.node().split(".")[0]
 
 
 def _get_running_sessions_info() -> tuple[int, list[str]]:
@@ -166,7 +150,7 @@ async def handle_update_command(tg_client, event):
     ``❌ update FAILED`` naming its lagging short-SHA, with per-process reload
     state appended.
     """
-    machine = _get_machine_name()
+    machine = get_machine_display_name()
     logger.info(f"[update] /update received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
@@ -342,7 +326,7 @@ async def run_boot_release_check(tg_client) -> None:
        and delete the file — but leave it in place when the fresh bridge
        classified stale, so the watchdog's undrained-report read can escalate.
     """
-    machine = _get_machine_name()
+    machine = get_machine_display_name()
     check: dict = {}
     head_short = "?"
     bridge_stale = False
@@ -456,7 +440,7 @@ async def handle_force_update_command(tg_client, event):
     Unlike normal /update which waits for running sessions to finish,
     this immediately kills everything and applies the update.
     """
-    machine = _get_machine_name()
+    machine = get_machine_display_name()
     logger.info(f"[update] /update --force received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "🔥")

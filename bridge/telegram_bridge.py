@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from bridge.utc import utc_iso, utc_now
+from config.machine import get_machine_name
 
 # Ensure user site-packages is available for claude_agent_sdk
 # Add user site-packages as fallback (after venv packages take priority)
@@ -484,13 +485,8 @@ def _get_active_projects() -> list[str]:
 
     config = _guarded_json_load(config_path)
 
-    # Get this machine's name (e.g. "Valor the Captain")
-    try:
-        hostname = subprocess.check_output(["scutil", "--get", "ComputerName"], text=True).strip()
-    except Exception:
-        hostname = ""
-
-    hostname_normalized = hostname.lower()
+    # Get this machine's name (e.g. "Valor the Captain") via the canonical hub
+    hostname_normalized = get_machine_name().lower()
 
     # Match projects where machine field matches this hostname
     matched = []

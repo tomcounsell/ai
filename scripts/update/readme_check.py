@@ -9,9 +9,10 @@ blocking updates.
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from config.machine import get_machine_name
 
 REQUIRED_HEADING = "## Running"
 # Regex: heading must be at the start of a line (with optional trailing whitespace)
@@ -51,15 +52,6 @@ class ReadmeCheckResult:
     missing_section: list[ProjectReadmeStatus] = field(default_factory=list)
     missing_readme: list[ProjectReadmeStatus] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-
-
-def _get_machine_name() -> str:
-    result = subprocess.run(
-        ["scutil", "--get", "ComputerName"],
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
 
 
 def _resolve_dir(working_directory: str) -> Path:
@@ -104,7 +96,7 @@ def check_project_readmes(project_dir: Path) -> ReadmeCheckResult:
         result.warnings.append(f"README check skipped: could not read projects.json: {e}")
         return result
 
-    machine_name = _get_machine_name()
+    machine_name = get_machine_name()
     if not machine_name:
         result.warnings.append("README check skipped: could not determine ComputerName")
         return result

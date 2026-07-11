@@ -100,7 +100,7 @@ class TestMachineOwnsProject:
 
     def test_owned_project_returns_true(self):
         with (
-            patch("tools.machine_identity.computer_name", return_value="My-Machine"),
+            patch("config.machine.get_machine_name", return_value="My-Machine"),
             patch(
                 "tools.reflection_machine_filter._load_project_machines",
                 return_value={"myproj": "my-machine"},
@@ -110,7 +110,7 @@ class TestMachineOwnsProject:
 
     def test_project_owned_by_other_machine_returns_false(self):
         with (
-            patch("tools.machine_identity.computer_name", return_value="My-Machine"),
+            patch("config.machine.get_machine_name", return_value="My-Machine"),
             patch(
                 "tools.reflection_machine_filter._load_project_machines",
                 return_value={"myproj": "some-other-box"},
@@ -120,7 +120,7 @@ class TestMachineOwnsProject:
 
     def test_unknown_project_key_is_not_owned(self):
         with (
-            patch("tools.machine_identity.computer_name", return_value="My-Machine"),
+            patch("config.machine.get_machine_name", return_value="My-Machine"),
             patch(
                 "tools.reflection_machine_filter._load_project_machines",
                 return_value={"otherproj": "my-machine"},

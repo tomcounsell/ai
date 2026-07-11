@@ -26,18 +26,18 @@ Design notes:
     (one that owns >=1 project in ``projects.json``) reports as ``production`` and
     every other machine reports as ``development``. This keeps the production
     Sentry project clean of events from dev/misconfigured machines that start a
-    real bridge/worker outside pytest. The machine-ownership check is a
-    self-contained copy of the ``projects.json`` + ``scutil`` predicate (it does
-    NOT import the ui-layer machine helper — that would invert the layer direction).
+    real bridge/worker outside pytest. The machine-ownership check resolves
+    through :mod:`config.machine` (the lowest shared layer — importing it is the
+    correct layer direction, and it carries the #1834 empty-machine guard).
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
-from pathlib import Path
+
+from config.machine import get_machine_name, get_machine_project_keys
 
 logger = logging.getLogger(__name__)
 
@@ -96,51 +96,16 @@ def drop_orphan_noise(event, hint):
     return event
 
 
-def _get_machine_name() -> str:
-    """Return the local ComputerName via ``scutil``; ``""`` on any failure.
-
-    Self-contained copy of the ui-layer ``get_machine_name`` — ``monitoring``
-    must not import that layer (wrong direction). ``""`` on failure is the
-    fail-to-development signal consumed by :func:`_owned_project_key`.
-    """
-    try:
-        result = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True)
-        return result.stdout.strip()
-    except Exception:
-        return ""
-
-
 def _owned_project_key(machine: str) -> str | None:
-    """Return the first ``projects.json`` key whose ``machine`` field matches
-    ``machine`` (case-insensitive), or ``None`` if this host owns no project.
+    """Return the first ``projects.json`` key this ``machine`` owns, else ``None``.
 
-    Mirrors the ui-layer ``get_machine_project_keys`` and the predicate
-    ``bridge.config_validation.validate_projects_config`` enforces
-    (``proj_cfg.get("machine")``), kept as a self-contained copy to avoid the
-    ``monitoring``->``ui`` import inversion. Any failure (missing/unreadable
-    file, malformed JSON) returns ``None`` — fail-to-development.
+    Thin first-or-``None`` adapter over :func:`config.machine.get_machine_project_keys`,
+    which owns the case-insensitive match, the fail-soft ``[]`` on any read
+    failure, and the #1834 empty-machine fail-to-development guard (an unresolved
+    ComputerName never matches a ``"machine": ""`` entry).
     """
-    # Fail-to-development guard (issue #1834, critique concern #1): an unresolved
-    # ComputerName must never match a project. Without this, an empty machine
-    # name would match any projects.json entry that has an empty `machine` field
-    # (`"" == ""`), mis-tagging a dev/misconfigured host as `production` — the
-    # exact bug this gate exists to eliminate. A real production bridge machine
-    # always resolves a non-empty ComputerName and a readable projects.json (it
-    # cannot route messages otherwise), so only dev/misconfigured hosts hit this.
-    if not machine:
-        return None
-    config_path = Path("~/Desktop/Valor/projects.json").expanduser()
-    if not config_path.exists():
-        return None
-    try:
-        config = json.loads(config_path.read_text())
-    except Exception:
-        return None
-    machine_lower = machine.lower()
-    for project_key, project in config.get("projects", {}).items():
-        if project.get("machine", "").lower() == machine_lower:
-            return project_key
-    return None
+    keys = get_machine_project_keys(machine)
+    return keys[0] if keys else None
 
 
 def _is_designated_bridge_machine() -> bool:
@@ -149,7 +114,7 @@ def _is_designated_bridge_machine() -> bool:
     Any failure resolves to ``False`` (fail-to-development) — see
     :func:`_owned_project_key`.
     """
-    return _owned_project_key(_get_machine_name()) is not None
+    return _owned_project_key(get_machine_name()) is not None
 
 
 def _resolve_environment(owned_project_key: str | None) -> str:
@@ -199,7 +164,7 @@ def configure_sentry(component: str, before_send=None) -> bool:
 
     # Resolve the ownership inputs exactly once and reuse them for both the
     # environment tag and the observability log line (no double scutil/file read).
-    machine = _get_machine_name()
+    machine = get_machine_name()
     owned_key = _owned_project_key(machine)
     environment = _resolve_environment(owned_key)
     # Observability (issue #1834, critique concern #2): make a wrong environment

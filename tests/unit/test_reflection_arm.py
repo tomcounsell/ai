@@ -62,7 +62,7 @@ def _states(path):
 
 
 @patch("scripts.update.reflection_arm.subprocess.run")
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_owner_arms_disabled_reflection(mock_machine, mock_run, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_reflections=REFLECTIONS_DISABLED)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -76,7 +76,7 @@ def test_owner_arms_disabled_reflection(mock_machine, mock_run, tmp_path, monkey
     mock_run.assert_called_once()
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_already_enabled_is_noop(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(
         tmp_path, reflections=REFLECTIONS_ENABLED, repo_reflections=REFLECTIONS_ENABLED
@@ -89,7 +89,7 @@ def test_already_enabled_is_noop(mock_machine, tmp_path, monkeypatch):
     assert result.action == "noop"
 
 
-@patch("tools.machine_identity.computer_name", return_value="Some Other Machine")
+@patch("config.machine.get_machine_name", return_value="Some Other Machine")
 def test_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(
         tmp_path, projects=PROJECTS_OWNED, repo_reflections=REFLECTIONS_DISABLED
@@ -103,7 +103,7 @@ def test_non_owner_skips_without_mutating(mock_machine, tmp_path, monkeypatch):
     assert _states(project_dir / "config" / "reflections.yaml")["merged-branch-cleanup"] is False
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_missing_vault_file_skips(mock_machine, tmp_path, monkeypatch):
     _, project_dir = _setup(tmp_path, repo_reflections=REFLECTIONS_DISABLED)
     monkeypatch.setenv("REFLECTIONS_YAML", str(tmp_path / "does-not-exist.yaml"))
@@ -114,7 +114,7 @@ def test_missing_vault_file_skips(mock_machine, tmp_path, monkeypatch):
     assert "not found" in result.detail
 
 
-@patch("tools.machine_identity.computer_name", return_value="")
+@patch("config.machine.get_machine_name", return_value="")
 def test_unresolvable_machine_name_fails_closed(mock_machine, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_reflections=REFLECTIONS_DISABLED)
     monkeypatch.setenv("REFLECTIONS_YAML", str(vault_path))
@@ -149,7 +149,7 @@ reflections:
 
 
 @patch("scripts.update.reflection_arm.subprocess.run")
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_flip_preserves_comments_and_formatting(mock_machine, mock_run, tmp_path, monkeypatch):
     vault_path, project_dir = _setup(tmp_path, repo_reflections=REFLECTIONS_DISABLED)
     vault_path.write_text(COMMENTED_VAULT)
@@ -173,7 +173,7 @@ def test_flip_preserves_comments_and_formatting(mock_machine, mock_run, tmp_path
 
 
 @patch("scripts.update.reflection_arm.subprocess.run")
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_arm_is_one_shot_and_respects_human_disarm(mock_machine, mock_run, tmp_path, monkeypatch):
     """After the arm fires once, a human `enabled: false` must stick.
 
@@ -197,7 +197,7 @@ def test_arm_is_one_shot_and_respects_human_disarm(mock_machine, mock_run, tmp_p
     assert _states(vault_path)["merged-branch-cleanup"] is False
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_noop_also_stamps_marker(mock_machine, tmp_path, monkeypatch):
     """An already-enabled entry still stamps the marker: from that point on
     the flag is human-owned either way."""
@@ -212,7 +212,7 @@ def test_noop_also_stamps_marker(mock_machine, tmp_path, monkeypatch):
     assert (project_dir / "data" / "reflection-armed-merged-branch-cleanup").exists()
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_missing_vault_entry_is_retryable_error(mock_machine, tmp_path, monkeypatch):
     """A vault file without the merged-branch-cleanup entry must NOT be
     reported as noop and must NOT stamp the marker -- once a human adds the
@@ -241,7 +241,7 @@ def test_missing_vault_entry_is_retryable_error(mock_machine, tmp_path, monkeypa
     assert _states(vault_path)["merged-branch-cleanup"] is True
 
 
-@patch("tools.machine_identity.computer_name", return_value="Tom's MacBook Pro")
+@patch("config.machine.get_machine_name", return_value="Tom's MacBook Pro")
 def test_write_failure_is_retryable_error(mock_machine, tmp_path, monkeypatch):
     """An atomic-write failure (read-only dir, disk full, sync lock) must
     surface as an error without the marker, never as a silent noop."""

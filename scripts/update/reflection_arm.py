@@ -83,7 +83,7 @@ def _this_machine_owns_valor(project_dir: Path) -> bool:
     Fails closed (returns False) on any missing file/field so a
     misconfigured or partial checkout never mutates the vault file.
     """
-    from tools.machine_identity import computer_name
+    from config.machine import get_machine_name
 
     projects_path = project_dir / "config" / "projects.json"
     if not projects_path.exists():
@@ -97,7 +97,7 @@ def _this_machine_owns_valor(project_dir: Path) -> bool:
     if not isinstance(owner, str) or not owner.strip():
         return False
 
-    machine = computer_name()
+    machine = get_machine_name()
     if not machine:
         return False
 
