@@ -351,6 +351,18 @@ Lead agent orchestrates; deploys a builder + validator pair and a documentarian.
 
 *Investigated and cleared (not a defect):* Scope & Value flagged that Fix B might mask a distinct new cluster if `signal_name` were a shared signal-type. Verified against `memory_quality_audit.py:350` — `signal_name = f"agent-id-cluster-{aid_suffix}"` is cluster-specific, so the title prefix uniquely identifies one agent_id cluster.
 
+### Re-Critique Addendum (2026-07-11, FULL war room)
+
+**Verdict: READY TO BUILD (with concerns)** — 0 blockers, 2 concerns, 1 nit. The prior revision's resolutions all hold; these two concerns are narrower edge cases the earlier round did not cover. `plan_revising` was intentionally NOT set (the plan already carries `revision_applied: true`); the builder must honor these Implementation Notes during BUILD.
+
+| Severity | Critic | Finding | Implementation Note (builder must apply) |
+|----------|--------|---------|------------------------------------------|
+| CONCERN | Risk & Robustness (Adversary) | Fix A's `isinstance(observation, str)` guard protects only `observation`. The sibling line `category = item.get("category", "").lower()` runs **before** it (memory_extraction.py L629), so a `{"category": null, ...}` or non-string-category item raises the same uncaught `AttributeError` that crashes the whole batch — falsifying the plan's "no `AttributeError` can escape the JSON branch" claim. | Fetch category raw first and type-guard it before `.lower()`: `category_raw = item.get("category", "")`; `if not isinstance(category_raw, str): continue`; then `category = category_raw.lower()`. Add a test: a JSON item with `"category": null` (or dict/list) alongside a legitimate sibling — batch must not raise, malformed item skipped, sibling survives. |
+| CONCERN | Risk & Robustness (Adversary) | Fix B Technical Approach step 3 bullet 1 ORs "`state == "OPEN"`" with "`closedAt` empty/missing" **unconditionally**, so a `CLOSED` issue with an empty/null `closedAt` (gh data anomaly) routes to the "return positive int, suppress forever" path — reproducing the permanent-suppression failure the resolved BLOCKER guarded against, via a data edge instead of a naive first-match bug. | Use non-overlapping branches keyed on state: `if state == "OPEN": return issue["number"]`; `elif state == "CLOSED" and closed_at: <tz-aware window compare>`; `else: continue` — a `CLOSED` issue with falsy `closed_at` falls through to "keep scanning" (non-suppressing), never to permanent suppression. |
+| NIT | Risk & Robustness (Operator) | Fix A's drop breadcrumb uses `logger.debug`, typically off in production, so the observability gap behind four historical misdiagnoses may persist in practice. | Consider `logger.info` for Fix A drops, or note in docs that debug logging must be enabled when investigating this signal. (NIT — non-blocking.) |
+
+*Scope & Value* and *History & Consistency* returned **No findings** on re-critique — both independently re-verified all cited file:line anchors against source with no drift, and confirmed Fix A closes the whole-text-vs-per-record asymmetry and Fix B avoids the prior BLOCKER's first-match trap.
+
 ---
 
 ## Resolved Decisions
