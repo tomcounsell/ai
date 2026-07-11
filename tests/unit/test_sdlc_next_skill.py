@@ -225,7 +225,9 @@ def test_decide_warm_cache_open_pr_defers_to_pr_review_not_plan(monkeypatch):
     monkeypatch.setattr(
         sdlc_next_skill,
         "_build_context",
-        lambda proposed_skill, issue_number: {"current_plan_hash": plan_hash},
+        lambda proposed_skill, issue_number, stage_states=None, meta=None: {
+            "current_plan_hash": plan_hash
+        },
     )
 
     result = sdlc_next_skill.decide(issue_number=6789)
@@ -291,7 +293,9 @@ class TestIssueLockPreCheck:
             lambda issue_number, session_id: {"stages": {}, "_meta": {}},
         )
         monkeypatch.setattr(
-            sdlc_next_skill, "_build_context", lambda proposed_skill, issue_number: {}
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
         )
 
         lock_result = IssueLockResult(acquired=True, owner_session_id=None)
@@ -316,7 +320,9 @@ class TestIssueLockPreCheck:
             lambda issue_number, session_id: {"stages": {}, "_meta": {}},
         )
         monkeypatch.setattr(
-            sdlc_next_skill, "_build_context", lambda proposed_skill, issue_number: {}
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
         )
 
         lock_mock = MagicMock()
@@ -352,7 +358,9 @@ class TestIssueLockPreCheck:
             lambda issue_number, session_id: {"stages": states, "_meta": meta},
         )
         monkeypatch.setattr(
-            sdlc_next_skill, "_build_context", lambda proposed_skill, issue_number: {}
+            sdlc_next_skill,
+            "_build_context",
+            lambda proposed_skill, issue_number, stage_states=None, meta=None: {},
         )
 
         expected = decide_next_dispatch(states, meta, {})
