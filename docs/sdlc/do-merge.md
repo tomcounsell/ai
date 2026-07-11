@@ -47,6 +47,20 @@ generic steps as follows:
   verdict legs). Do NOT re-implement any of these checks inline in this file —
   the helper is the single source; the parity test
   (`tests/unit/test_do_merge_docs_gate.py`) breaks on drift.
+  - **Tracked-issue resolution for (b)/(c) (#2034).** Groups (b) and (c) key
+    on the SDLC-tracked issue derived from the PR's branch slug
+    (`session/{slug}` → the live, project-scoped `AgentSession.issue_number`),
+    not the first `Closes #N` in the PR body. A PR that closes several
+    sub-issues under an umbrella tracking issue records its DOCS marker and
+    REVIEW verdict on the umbrella; keying on the first-match body issue
+    false-fails the gate for that shape. When no tracked issue resolves (no
+    session for the slug, project unresolved, or the lookup degrades), groups
+    (b)/(c) fall back to the first-match body issue — single-issue PRs are
+    unaffected. When more than one distinct tracked issue is found for the
+    slug, the predicate **fails closed** with an explicit
+    `tracked-issue lookup ambiguous` entry in `failed_checks` rather than
+    guessing. Group (a)'s body-link presence check always uses the raw
+    first-match body issue, unchanged.
 - **Step 4 merge-authorization guard.** The merge-guard hook
   (`.claude/hooks/validators/validate_merge_guard.py`) evaluates the SAME live
   predicate (`tools.merge_predicate`) when the merge command runs. On the happy
