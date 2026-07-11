@@ -553,7 +553,7 @@ async def get_response_via_harness(
         _store_claude_session_uuid(session_id, session_id_from_harness)
 
     # Accumulate tokens + cost on the AgentSession (issue #1128). Mirrors
-    # the (deleted) SDK path's in-handler call, formerly in `get_agent_response_sdk`. Invoked
+    # the (deleted) SDK client path's equivalent in-handler call. Invoked
     # here as a side effect so the public signature stays `-> str` and
     # no caller of `get_response_via_harness` has to change. `usage` /
     # `cost_usd` may be None on harness error paths or older CLI
@@ -1126,8 +1126,8 @@ async def build_harness_turn_input(
 ) -> str:
     """Build context-enriched message for CLI harness execution.
 
-    Extracts the message enrichment logic that was previously inside
-    get_agent_response_sdk() into a standalone function. Produces a
+    Extracts the message enrichment logic that was previously inline in
+    the (deleted) SDK client's response handler into a standalone function. Produces a
     context-prefixed message with PROJECT, FROM, SESSION_ID, TASK_SCOPE,
     and SCOPE headers suitable for any session type.
 

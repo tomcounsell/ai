@@ -119,6 +119,19 @@ The issue framing ("only two legacy tests reference it") is **understated**. Gro
 - **The two named tests only reference the dead symbol in comments:** `test_pm_channels.py:136,162`
   and `test_error_summary_enforcement.py:40` mention `get_agent_response_sdk` in prose comments, not
   imports/calls — comment cleanup only.
+
+**Build-time scope correction (Task 2.2, 2026-07-12):** the plan's "drop the whole `claude-agent-sdk`
+dependency" framing is **too broad**. `claude_agent_sdk` (the installed package) has genuine live
+consumers **outside** the dead `ValorAgent`/`get_agent_response_sdk` path: `agent/health_check.py`,
+`agent/hooks/{__init__,post_tool_use,pre_tool_use,pre_compact,stop}.py`, and
+`agent/agent_definitions.py` all import SDK hook-config types (`HookContext`, `HookMatcher`,
+`AgentDefinition`, `PostToolUseHookInput`, `PreToolUseHookInput`, `PreCompactHookInput`,
+`StopHookInput`) that are unrelated to the persistent-`ClaudeSDKClient` substrate being deleted here —
+these are Claude Code's own hook-registration types, consumed regardless of which harness drives a
+turn. **Corrected scope:** delete the `claude_agent_sdk` import **from `agent/sdk_client.py` only**
+(confirmed clean — zero references remain there); the `claude-agent-sdk==0.2.116` **dependency stays**
+in `pyproject.toml` because the hook-type consumers still need it. Every place below that says "drop
+the `claude-agent-sdk` dependency" or "claude-agent-sdk dep dropped" is superseded by this correction.
 This drift does not change the premise; it enlarges Test Impact and adds three prod-couple edits.
 The plan scopes to the **real** blast radius below.
 
@@ -323,7 +336,9 @@ step 5):
 
 ## Architectural Impact
 
-- **New dependencies**: none. **Removed dependency**: `claude-agent-sdk==0.2.116` (`pyproject.toml:9`).
+- **New dependencies**: none. **Removed**: the `claude_agent_sdk` import from `agent/sdk_client.py`
+  only. **Dependency kept**: `claude-agent-sdk==0.2.116` (`pyproject.toml:9`) stays — live hook-type
+  consumers outside the deleted path (see Freshness Check build-time scope correction).
 - **Interface changes**: `get_response_via_harness` (the free function) becomes
   `ClaudeHarnessAdapter.run_turn`; `get_agent_response_sdk`, `ValorAgent`, `get_active_client`,
   `get_all_active_sessions`, and `run_idle_sweep` are **deleted**. `agent/__init__.py` exports shrink.
@@ -382,8 +397,9 @@ Run via `python scripts/check_prerequisites.py docs/plans/harness-adapter-seam.m
   flowing onto the canonical outbox path. #1802 is confirmed and closed at this PR's merge.
 - **Dead SDK path deletion**: remove `ValorAgent`, `get_agent_response_sdk`, `_active_clients` +
   `get_active_client`/`get_all_active_sessions`, `worker/idle_sweeper.py` (and its `worker/__main__.py`
-  wiring), the `claude_agent_sdk` import, and the `claude-agent-sdk` dependency. Prune the
-  `agent/health_check.py` `get_active_client` branch and `agent/__init__.py` exports.
+  wiring), and the `claude_agent_sdk` import from `agent/sdk_client.py` (the dependency itself stays —
+  see build-time scope correction). Prune the `agent/health_check.py` `get_active_client` branch and
+  `agent/__init__.py` exports.
 
 ### Flow
 
@@ -424,9 +440,10 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
   `_active_clients` machinery (59, 1771, 2012 and the num_turns/stop_reason scratch state that only the
   SDK loop wrote — verify each is SDK-only before removing).
 - Delete `worker/idle_sweeper.py` and remove its supervision block in `worker/__main__.py:906-916`.
-- Remove the `claude_agent_sdk` import (36-42) once no in-file references remain (verified: the kept
-  harness path uses no SDK types); drop `claude-agent-sdk==0.2.116` from `pyproject.toml:9` and update
-  the `mcp>=1.8.0` comment at `:10` (mcp stays — used by `mcp_servers/`).
+- Remove the `claude_agent_sdk` import (36-42) once no in-file references remain in `sdk_client.py`
+  (verified: the kept harness path uses no SDK types). Per the build-time scope correction, the
+  `claude-agent-sdk==0.2.116` dependency in `pyproject.toml:9` **stays** — `agent/health_check.py` and
+  `agent/hooks/*.py` still import SDK hook-config types. No `pyproject.toml` edit needed here.
 - In `agent/health_check.py::_handle_steering` (the sole steering-injection/delivery path for all
   CLI-harness production sessions, NOT a liveness check), delete **only** the dead `if client:` SDK arm
   (the `get_active_client(session_id)` call + its `from agent.sdk_client import get_active_client`
@@ -625,10 +642,10 @@ removed atomically in the same PR.
 
 - **No update-script changes required for this phase** — the seam extraction, SDK deletion, and schema
   routing are internal; existing launchd plists and env are untouched.
-- **Dependency change to propagate:** dropping `claude-agent-sdk==0.2.116` from `pyproject.toml` means
-  `/update` (`scripts/remote-update.sh` → `pip install`/`uv sync`) will uninstall it on the next run on
-  every machine. No action needed beyond the pyproject edit — the standard dependency-sync step handles
-  removal. State in the PR that the dep is dropped so operators expect the uninstall.
+- **Dependency change to propagate:** none. Per the build-time scope correction (Freshness Check), the
+  `claude-agent-sdk==0.2.116` dependency in `pyproject.toml` **stays** — `agent/health_check.py` and
+  `agent/hooks/*.py` still import SDK hook-config types outside the deleted path. Only the
+  `claude_agent_sdk` import inside `agent/sdk_client.py` is removed; no `/update` action needed.
 - **Popoto migration:** none. No model fields are added or removed (`claude_session_uuid` keeps its name,
   meaning generalized to "resume handle"). No `MIGRATIONS` entry required; state this in the PR.
 
@@ -678,8 +695,10 @@ removed atomically in the same PR.
 - [ ] `file_paths` carried through the schema onto the canonical delivery path; #1802 verified and closed
   at merge.
 - [ ] The dead SDK path is gone: `ValorAgent`, `get_agent_response_sdk`, `_active_clients` (+ accessors),
-  `worker/idle_sweeper.py` and its wiring, the `claude_agent_sdk` import, and the `claude-agent-sdk`
-  dependency are all deleted; no dangling references (grep gates green).
+  `worker/idle_sweeper.py` and its wiring, and the `claude_agent_sdk` import from `agent/sdk_client.py`
+  are all deleted; no dangling references (grep gates green). The `claude-agent-sdk` **dependency
+  itself stays** in `pyproject.toml` (build-time scope correction: live hook-type consumers outside
+  this path).
 - [ ] Resume-id behavior empirically recorded; the `_claude_session_id` reassignment simplified to
   assert-and-alarm (or kept if forked), while `_transcript_path` is still set on every init event
   (mid-turn-preempt retargeting preserved).
@@ -738,7 +757,8 @@ removed atomically in the same PR.
 - **Delete the dead SDK path in the same PR:** `ValorAgent` (1511-2338), `get_agent_response_sdk`
   (3355-end), `_active_clients` + `get_active_client`/`get_all_active_sessions` (59, 656, 666, 1771,
   2012), `worker/idle_sweeper.py` + its `worker/__main__.py:906-916` wiring; remove the `claude_agent_sdk`
-  import (36-42) and drop `claude-agent-sdk==0.2.116` from `pyproject.toml:9` (update the `mcp` comment).
+  import (36-42) from `agent/sdk_client.py` only — the `claude-agent-sdk==0.2.116` dependency in
+  `pyproject.toml:9` stays (build-time scope correction: hook-type consumers outside this path).
   In `agent/health_check.py::_handle_steering`, delete ONLY the dead `if client:` SDK arm + the
   `get_active_client` import/call — **KEEP the `else` Redis re-push body** (the live CLI-harness
   steering fallback) as the unconditional body. Shrink the `agent/__init__.py` exports. Scrub the stale
@@ -811,8 +831,8 @@ removed atomically in the same PR.
 | No SDK-response symbol refs (real or stale name) | `grep -rn "get_agent_response_sdk\|get_response_via_sdk" agent/ worker/ --include="*.py"` | match count == 0 |
 | _active_clients registry deleted | `grep -rn "_active_clients" agent/ worker/ --include="*.py"` | match count == 0 |
 | idle_sweeper deleted | `test -f worker/idle_sweeper.py && echo present \|\| echo gone` | output contains gone |
-| claude_agent_sdk import gone | `grep -rn "import claude_agent_sdk\|from claude_agent_sdk" agent/ worker/ bridge/ tools/ --include="*.py"` | match count == 0 |
-| claude-agent-sdk dep dropped | `grep -c "claude-agent-sdk" pyproject.toml` | match count == 0 |
+| claude_agent_sdk import gone from sdk_client.py | `grep -c "claude_agent_sdk" agent/sdk_client.py` | match count == 0 |
+| claude-agent-sdk dependency retained (build-time scope correction — live hook-type consumers) | `grep -c "claude-agent-sdk" pyproject.toml` | match count == 2 (dep line + mcp comment) |
 | No dangling get_active_client callers | `grep -rn "get_active_client\|get_all_active_sessions" agent/ worker/ bridge/ tools/ --include="*.py" \| grep -vc "session_runner/harness/"` | match count == 0 |
 
 ## Critique Results
