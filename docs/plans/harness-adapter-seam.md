@@ -186,6 +186,119 @@ this machine). The runtime-semantics probes remain **build-time gates** (Task 2.
   self-contained once those three couplers are pruned.
 - **Confidence**: high.
 
+### Task 2.1 empirical results (2026-07-11/12, claude 2.1.207)
+
+**Method**: live shell execution of `claude -p` (not code-reading) on this machine, claude CLI
+**2.1.207** (plan's spikes were recorded against 2.1.204 help-text; re-verified live). Both spike-1
+and spike-2 hypotheses are **confirmed**, with one important runtime-mechanics correction to spike-1's
+open question (where the validated object lands and how invalid output surfaces). Neither probe
+invalidates the plan's approach — no STOP triggered.
+
+#### Probe A: `--json-schema` under `--output-format stream-json`
+
+Schema used: `{"type":"object","properties":{"route":{"type":"string","enum":["user","complete","continue"]},"message":{"type":"string"}},"required":["route","message"]}`.
+
+**Mechanism — this is a synthetic tool call, not inline text.** The CLI injects a synthetic
+`StructuredOutput` tool into the tool list (visible in the `system/init` event's `"tools"` array) when
+`--json-schema` is passed. The model must emit a `tool_use` block naming it; the CLI validates the
+tool's `input` against the schema out-of-band, and closes the tool_use with a synthetic `tool_result`.
+Observed on a valid run:
+
+```json
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01HRmQ4vRzRCcHpTJDPEMv3g","name":"StructuredOutput","input":{"route":"complete","message":"probe ok"}}]}, ...}
+{"type":"user","message":{"content":[{"tool_use_id":"toolu_01HRmQ4vRzRCcHpTJDPEMv3g","type":"tool_result","content":"Structured output provided successfully"}]}, ...}
+```
+
+**Where the validated object lands**: the terminal `result` event (`{"type":"result","subtype":"success",...}`)
+carries a top-level **`structured_output`** key with the parsed, schema-validated object, alongside the
+usual `result` key holding the same object JSON-stringified:
+
+```json
+{"type":"result","subtype":"success","is_error":false,"result":"{\"route\":\"complete\",\"message\":\"probe ok\"}","stop_reason":"tool_use","structured_output":{"route":"complete","message":"probe ok"},"terminal_reason":"completed", ...}
+```
+
+This confirms the adapter's `TurnResult.structured_output` should be sourced from `result.structured_output`
+on the terminal event — not scraped from assistant-text content.
+
+**Invalid-output behavior — three sub-cases probed, all against a live CLI, not simulated:**
+
+1. **Model-chosen invalid enum value** (asked the model to deliberately set `route:"banana"`): the model
+   *itself* refused (safety/instruction-following behavior, not a CLI mechanism) and self-corrected to a
+   valid value before calling the tool. Inconclusive for CLI-level enforcement by itself — see (2).
+2. **Genuinely unsatisfiable schema** (`minProperties: 5` + `additionalProperties: false` on a
+   2-property schema — no object can ever validate): the CLI performed **real JSON-Schema validation on
+   the tool_use input** and rejected it with an `is_error:true` tool_result fed back to the model:
+   `"Output does not match required schema: root: must NOT have fewer than 5 properties"`, then
+   `"...must NOT have additional properties"` on the model's retry. After the model gave up (explained in
+   prose why the schema was impossible instead of calling the tool again), the CLI injected exactly
+   **one synthetic compliance nudge** as an `isSynthetic:true` user turn:
+   `"[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now."`
+   The model tried once more, failed validation again, then gave up for good. **The process still exited
+   with `subtype:"success"`, `is_error:false`, `stop_reason:"end_turn"` — and the terminal `result` event
+   had no `structured_output` key at all** (present in every valid run, absent here).
+3. **Model refuses to call the tool at all** (instructed to answer in plain prose only): the CLI fired
+   the same single `[structured-output-enforce] ... Call this tool now.` synthetic nudge once, the model
+   repeated its refusal, and the CLI then terminated normally: `subtype:"success"`, `is_error:false`,
+   `stop_reason:"end_turn"`, `result:"I refuse to use the StructuredOutput tool."`, **no `structured_output`
+   key**.
+
+**Conclusion — the concrete fallback-detection signal for the runner**: neither process exit code nor
+`is_error` distinguishes schema success from schema failure — both are `is_error:false` and the process
+exits 0 either way. **The adapter/router must detect schema-validation failure by checking whether the
+terminal `result` event's `structured_output` key is present.** If present, route on it. If absent, fall
+back to prefix-regex on `result.result` (the final text) exactly as the plan's Risk 1 / Solution
+"Schema routing" section describes, and emit `schema_routing_fallback` telemetry. This also means the CLI
+itself already implements a one-shot internal compliance nudge (`[structured-output-enforce]`) *before*
+giving up — the runner's own compliance-nudge backstop only needs to trigger after the terminal
+`structured_output`-absent signal, not duplicate the CLI's internal retry.
+
+**`--include-partial-messages` interaction** (secondary, verified): adding this flag emits a long run of
+`{"type":"stream_event","event":{...raw Anthropic streaming deltas...}}` events between `init` and
+`result` — `message_start`, `content_block_start`/`delta`/`stop` (including `input_json_delta` chunks
+that incrementally build the `StructuredOutput` tool's `input` JSON), `message_delta`, `message_stop`.
+The terminal `result` event's `structured_output` field is unaffected — same shape, same location. No
+interaction risk: partial-message streaming is additive telemetry only, safe to normalize into
+`TurnEvent`s or ignore.
+
+#### Probe B: `--resume` session-id stability (two-turn, then extended to three + a fork control)
+
+Turn 1 (no `--resume`): `claude -p --output-format stream-json "Say the single word: ping"` →
+`init.session_id` = `result.session_id` = **`1e7048ef-9ea2-49e4-b225-eee31f298200`**.
+
+Turn 2 (`claude -p --resume 1e7048ef-9ea2-49e4-b225-eee31f298200 ...`, no `--fork-session`): both
+`init.session_id` and `result.session_id` on the second turn were **identical**:
+`1e7048ef-9ea2-49e4-b225-eee31f298200`. **Confirmed: default `--resume` reuses the id, does not fork.**
+
+Turn 3 (repeated `--resume` on the same original id a second time, a third independent process): still
+identical: `1e7048ef-9ea2-49e4-b225-eee31f298200`. Stability holds across repeated resumes, not just a
+single one.
+
+Turn 4 (control: `claude -p --resume 1e7048ef-9ea2-49e4-b225-eee31f298200 --fork-session ...`): produced
+a **new, different** session id: `18f40925-f4af-4e7f-8089-9e1a204f1565`, distinct from the original.
+This confirms `--fork-session` is the only path that forks; plain `--resume` is stable.
+
+`claude --help` exact text on 2.1.207 (unchanged from the 2.1.204 wording the plan's spike-2 cited):
+
+```
+--fork-session                        When resuming, create a new session ID
+                                      instead of reusing the original (use
+                                      with --resume or --continue)
+```
+
+**Conclusion**: spike-2's hypothesis is **empirically confirmed, not just help-text-inferred**. The
+`_claude_session_id` reassignment in `_handle_init` (`role_driver.py:238-257`) is compensating for
+behavior that does not occur under plain `--resume` on this CLI version. Per the plan's Technical
+Approach, this clears Task 2.2 to simplify that reassignment to **assert-and-alarm** (log + Sentry keyed
+to persisted `claude_version` if an observed id ever differs from the expected one), while leaving
+`self._transcript_path` retargeted unconditionally on every init event (the separate, still-valid
+mid-turn-preempt rationale — untouched by this finding).
+
+**No STOP triggered.** Both probes support the plan's approach as designed:
+- Schema routing is usable as planned, with the refinement that fallback detection keys on
+  `structured_output` presence/absence in the terminal event, not on exit code or `is_error`.
+- Resume-id is stable under plain `--resume`, confirming capture-at-init's `_claude_session_id` half can
+  be simplified to assert-and-alarm.
+
 ## Data Flow
 
 Target flow after this PR (today's flow is identical minus the seam and with prefix-token routing at
