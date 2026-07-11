@@ -50,7 +50,9 @@ async def test_sentinel_fires_full_context_message(monkeypatch):
             0,
         )
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
 
     result = await get_response_via_harness(
@@ -84,7 +86,9 @@ async def test_sentinel_no_full_context_message(monkeypatch):
             0,
         )
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
 
     result = await get_response_via_harness(
@@ -117,7 +121,9 @@ async def test_sentinel_does_not_fire_on_first_turn(monkeypatch):
         call_count += 1
         return (sentinel_text, None, 0, None, None, None, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
 
     result = await get_response_via_harness(
@@ -142,7 +148,9 @@ async def test_sentinel_does_not_fire_on_empty_result(monkeypatch):
         call_count += 1
         return ("", None, 0, None, None, None, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
 
     from agent.sdk_client import get_response_via_harness
@@ -168,7 +176,9 @@ async def test_sentinel_does_not_fire_on_normal_resume(monkeypatch):
         call_count += 1
         return (normal_response, "new-uuid", 0, None, None, None, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
 
     from agent.sdk_client import get_response_via_harness

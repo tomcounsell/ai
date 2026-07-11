@@ -1,7 +1,8 @@
 """Regression tests for issue #1980 — the stale-UUID fallback must not clobber
 a valid ``result`` event.
 
-Root cause: ``get_response_via_harness`` (``agent/sdk_client.py``) ran a
+Root cause: ``get_response_via_harness`` (``agent/session_runner/harness/claude.py``,
+extracted from ``agent/sdk_client.py`` by plan #2000 Task 2.2) ran a
 destructive fresh-session retry whenever a resumed (``--resume``) subprocess
 exited non-zero, WITHOUT checking whether that subprocess had already emitted a
 ``result`` event. A resumed wrap-up turn that produced a valid ``[/complete]``
@@ -103,7 +104,10 @@ class TestStaleUuidFallbackGate:
                 {"result_text": "", "returncode": 0, "fired": False},
             ]
         )
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake),
+        ):
             reply = await get_response_via_harness(
                 message="wrap it up",
                 working_dir="/tmp",
@@ -129,7 +133,10 @@ class TestStaleUuidFallbackGate:
                 {"result_text": "SHOULD-NOT-APPEAR", "returncode": 0, "fired": True},
             ]
         )
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake),
+        ):
             reply = await get_response_via_harness(
                 message="wrap it up",
                 working_dir="/tmp",
@@ -161,7 +168,10 @@ class TestStaleUuidFallbackGate:
                 },
             ]
         )
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake),
+        ):
             reply = await get_response_via_harness(
                 message="wrap it up",
                 working_dir="/tmp",
@@ -193,7 +203,10 @@ class TestStaleUuidFallbackGate:
                 },
             ]
         )
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake),
+        ):
             reply = await get_response_via_harness(
                 message="wrap it up",
                 working_dir="/tmp",
@@ -243,7 +256,10 @@ class TestRunTurnPropagatesCompletion:
         # Ride --resume so prior_uuid is set (the fallback only runs on resume).
         driver.seed_resume(VALID_UUID)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake),
+        ):
             outcome = await driver.run_turn("send your wrap-up now")
 
         assert outcome.reply_text == COMPLETION_TEXT, "real completion must reach run_turn's return"
@@ -293,7 +309,10 @@ class TestRunTurnPropagatesCompletion:
         # The floor's resume_session drives --resume on the persisted UUID.
         driver.seed_resume(VALID_UUID)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake),
+        ):
             outcome = await driver.run_turn("continue")
 
         assert outcome.reply_text == COMPLETION_TEXT, (

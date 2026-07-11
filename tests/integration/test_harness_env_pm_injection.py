@@ -109,7 +109,7 @@ class TestEngHarnessFullChain:
             return ("ok", None, 0, None, None, None, 0, 0)
 
         with patch(
-            "agent.sdk_client._run_harness_subprocess",
+            "agent.session_runner.harness.claude._run_harness_subprocess",
             new=AsyncMock(side_effect=fake_run),
         ):
             await get_response_via_harness(
@@ -174,7 +174,7 @@ class TestEngHarnessFullChain:
             return ("ok", None, 0, None, None, None, 0, 0)
 
         with patch(
-            "agent.sdk_client._run_harness_subprocess",
+            "agent.session_runner.harness.claude._run_harness_subprocess",
             new=AsyncMock(side_effect=fake_run),
         ):
             await get_response_via_harness(

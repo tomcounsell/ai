@@ -32,12 +32,14 @@ async def test_sentinel_in_stderr_with_nonzero_exit_raises(monkeypatch):
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         return (None, None, 1, None, None, stderr_snippet, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client.accumulate_session_tokens", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client._store_exit_returncode", lambda *a, **kw: None)
     # Ensure the env-gated kill switch is OFF for this test.
-    monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", False)
+    monkeypatch.setattr("agent.session_runner.harness.claude._DISABLE_THINKING_SENTINEL", False)
 
     with pytest.raises(HarnessThinkingBlockCorruptionError) as exc_info:
         await get_response_via_harness(
@@ -62,11 +64,13 @@ async def test_sentinel_message_is_user_facing(monkeypatch):
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         return (None, None, 1, None, None, stderr_snippet, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client.accumulate_session_tokens", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client._store_exit_returncode", lambda *a, **kw: None)
-    monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", False)
+    monkeypatch.setattr("agent.session_runner.harness.claude._DISABLE_THINKING_SENTINEL", False)
 
     with pytest.raises(HarnessThinkingBlockCorruptionError) as exc_info:
         await get_response_via_harness(
@@ -89,11 +93,13 @@ async def test_healthy_run_no_sentinel_returns_normally(monkeypatch):
         # returncode 0 — _run_harness_subprocess returns stderr_snippet=None.
         return (expected, "uuid-1", 0, None, None, None, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client.accumulate_session_tokens", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client._store_exit_returncode", lambda *a, **kw: None)
-    monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", False)
+    monkeypatch.setattr("agent.session_runner.harness.claude._DISABLE_THINKING_SENTINEL", False)
 
     result = await get_response_via_harness(message="hello", working_dir="/tmp")
     assert result == expected
@@ -107,12 +113,14 @@ async def test_disable_env_var_skips_sentinel_check(monkeypatch):
     async def fake_subprocess(cmd, working_dir, proc_env, **kwargs):
         return (None, None, 1, None, None, stderr_snippet, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client.accumulate_session_tokens", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client._store_exit_returncode", lambda *a, **kw: None)
     # Operator escape hatch: kill switch ON.
-    monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", True)
+    monkeypatch.setattr("agent.session_runner.harness.claude._DISABLE_THINKING_SENTINEL", True)
 
     # Should NOT raise — falls through to the empty/None return path.
     result = await get_response_via_harness(message="hello", working_dir="/tmp")
@@ -135,11 +143,13 @@ async def test_sentinel_no_raise_on_zero_exit(monkeypatch):
         # detector is rc-gated regardless of stderr content.
         return ("Healthy result.", "uuid-1", 0, None, None, None, 0, 0)
 
-    monkeypatch.setattr("agent.sdk_client._run_harness_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        "agent.session_runner.harness.claude._run_harness_subprocess", fake_subprocess
+    )
     monkeypatch.setattr("agent.sdk_client._store_claude_session_uuid", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client.accumulate_session_tokens", lambda *a, **kw: None)
     monkeypatch.setattr("agent.sdk_client._store_exit_returncode", lambda *a, **kw: None)
-    monkeypatch.setattr("agent.sdk_client._DISABLE_THINKING_SENTINEL", False)
+    monkeypatch.setattr("agent.session_runner.harness.claude._DISABLE_THINKING_SENTINEL", False)
 
     result = await get_response_via_harness(message="hello", working_dir="/tmp")
     assert result == "Healthy result."

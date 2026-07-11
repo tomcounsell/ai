@@ -330,7 +330,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             captured["cmd"] = cmd
             return ("done", None, 0, None, None, None, 0, 0)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -353,7 +356,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             captured["cmd"] = cmd
             return ("done", None, 0, None, None, None, 0, 0)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -383,7 +389,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             captured["cmd"] = cmd
             return ("done", None, 0, None, None, None, 0, 0)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="user-message-tail",
                 working_dir="/tmp",
@@ -420,7 +429,10 @@ class TestGetResponseViaHarnessSystemPrompt:
         oversize = "x" * 600_000
         caplog.set_level(logging.WARNING, logger="agent.sdk_client")
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -453,7 +465,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             captured["cmd"] = cmd
             return ("done", None, 0, None, None, None, 0, 0)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -491,7 +506,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             captured["cmd"] = cmd
             return ("done", None, 0, None, None, None, 0, 0)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -520,7 +538,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             captured["cmd"] = cmd
             return ("done", None, 0, None, None, None, 0, 0)
 
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -554,7 +575,10 @@ class TestGetResponseViaHarnessSystemPrompt:
             return ("done", None, 0, None, None, None, 0, 0)
 
         oversize = "x" * 600_000
-        with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+        with patch(
+            "agent.session_runner.harness.claude._run_harness_subprocess",
+            new=AsyncMock(side_effect=fake_run),
+        ):
             await get_response_via_harness(
                 message="hi",
                 working_dir="/tmp",
@@ -599,7 +623,10 @@ async def test_pm_persona_overlay_present():
         captured["cmd"] = cmd
         return ("done", None, 0, None, None, None, 0, 0)
 
-    with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+    with patch(
+        "agent.session_runner.harness.claude._run_harness_subprocess",
+        new=AsyncMock(side_effect=fake_run),
+    ):
         await get_response_via_harness(
             message="hi",
             working_dir="/tmp",
@@ -631,7 +658,10 @@ async def test_arg_max_guard_trips():
         return ("done", None, 0, None, None, None, 0, 0)
 
     oversize = "x" * 600_000
-    with patch("agent.sdk_client._run_harness_subprocess", new=AsyncMock(side_effect=fake_run)):
+    with patch(
+        "agent.session_runner.harness.claude._run_harness_subprocess",
+        new=AsyncMock(side_effect=fake_run),
+    ):
         await get_response_via_harness(
             message="hi",
             working_dir="/tmp",
