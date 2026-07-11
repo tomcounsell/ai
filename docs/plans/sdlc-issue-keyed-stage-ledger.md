@@ -365,7 +365,7 @@ REVIEW verdict + pr_number present → merge decision made.
   `GATES_FAILED` reason, logged), never a silent stall against a phantom key. When a
   lease is live, reader and writer key identically because both read the one pinned value;
   on the cold path both derive from the same `GH_REPO`, so they agree. This reader guard
-  is covered by ACs #6/#7 and a dedicated test (below), not by AC #5's writer-only grep.
+  is covered by ACs #5c/#6 and a dedicated test (below), not by AC #5's writer-only grep.
 - **`find_session_by_issue()` demotion (round-2 correction)**: its retained callers are
   the routing/ownership path (`tools/sdlc_session_ensure.py`, `tools/sdlc_next_skill.py`,
   `tools/sdlc_dispatch.py`) and the reader's cold-path *session* fallback
