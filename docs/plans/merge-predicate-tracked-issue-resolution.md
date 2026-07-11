@@ -219,14 +219,14 @@ No agent integration required — `tools/merge_predicate.py` is already reachabl
 
 ## Success Criteria
 
-- [ ] The resolver returns the umbrella `issue_number` for a `session/{slug}` head ref whose single live, same-project `AgentSession` carries it; yields **no signal** for no-slug, no-session, project-unresolved, and cross-project-only cases; yields **ambiguous** for >1 distinct `issue_number` among live same-project sessions.
-- [ ] `evaluate_merge_predicate` keys groups (b)/(c) on the tracked issue when resolved, else the body `Closes #N`; on **ambiguous** it appends an explicit fail-closed gate failure and does not guess; group (a) body-link presence check unchanged.
-- [ ] Regression test reproduces the PR #2033 shape (body `Closes #1871/#1267/#1760`, session slug → #2029) and asserts DOCS/REVIEW checks query #2029, not #1871.
-- [ ] Ambiguity, terminal-session filtering, and cross-project scoping each have a passing unit test (critique concerns #1, #2); no-session vs project-unresolved notes are distinct strings.
-- [ ] Single-issue-PR invariance test passes (tracked == body, and session-absent fallback == body).
-- [ ] Change is confined to `tools/merge_predicate.py` + `tests/unit/test_merge_predicate.py` (git diff touches no other source files).
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] The resolver returns the umbrella `issue_number` for a `session/{slug}` head ref whose single live, same-project `AgentSession` carries it; yields **no signal** for no-slug, no-session, project-unresolved, and cross-project-only cases; yields **ambiguous** for >1 distinct `issue_number` among live same-project sessions.
+- [x] `evaluate_merge_predicate` keys groups (b)/(c) on the tracked issue when resolved, else the body `Closes #N`; on **ambiguous** it appends an explicit fail-closed gate failure and does not guess; group (a) body-link presence check unchanged.
+- [x] Regression test reproduces the PR #2033 shape (body `Closes #1871/#1267/#1760`, session slug → #2029) and asserts DOCS/REVIEW checks query #2029, not #1871.
+- [x] Ambiguity, terminal-session filtering, and cross-project scoping each have a passing unit test (critique concerns #1, #2); no-session vs project-unresolved notes are distinct strings.
+- [x] Single-issue-PR invariance test passes (tracked == body, and session-absent fallback == body).
+- [x] Change is confined to `tools/merge_predicate.py` + `tests/unit/test_merge_predicate.py` (git diff touches no other source files).
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
