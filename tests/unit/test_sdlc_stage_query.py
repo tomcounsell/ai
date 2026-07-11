@@ -948,3 +948,136 @@ class TestResolveTargetRepo:
         assert len(call_count) == 1, (
             f"_resolve_target_repo called {len(call_count)} times, expected 1"
         )
+
+
+class TestResolveIssueRecord:
+    """Issue #2012 task 2: the reader's issue-keyed resolution --
+    ledger-first with a retained session fallback, guarded against ever
+    reading a phantom ``PipelineLedger[(None, issue)]`` key (Risk 5,
+    reader side / the BLOCKER round-2 gap)."""
+
+    def test_target_repo_unresolved_returns_none_never_touches_ledger(self):
+        """The defined empty-ledger outcome: when target_repo cannot be
+        resolved at all, _resolve_issue_record returns None without ever
+        constructing a PipelineLedger key."""
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        with (
+            patch("tools.sdlc_stage_query._resolve_target_repo_for_read", return_value=None),
+            patch("agent.pipeline_ledger.PipelineLedger.get_or_create") as mock_get_or_create,
+        ):
+            result = _resolve_issue_record(999888)
+
+        assert result is None
+        mock_get_or_create.assert_not_called()
+
+    def test_query_stage_states_returns_empty_dict_when_target_repo_unresolved(self):
+        """CLI contract: stage-query on an unresolvable repo context stays
+        {} -- unchanged shape, never a crash."""
+        from tools.sdlc_stage_query import query_stage_states
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo_for_read", return_value=None):
+            result = query_stage_states(issue_number=999888)
+
+        assert result == {}
+
+    def test_query_enriched_returns_default_meta_when_target_repo_unresolved(self):
+        """CLI contract: enriched query on an unresolvable repo context
+        stays {"stages": {}, "_meta": {...defaults}} -- unchanged shape."""
+        from tools.sdlc_stage_query import _default_meta, query_enriched
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo_for_read", return_value=None):
+            result = query_enriched(issue_number=999888)
+
+        assert result == {"stages": {}, "_meta": _default_meta()}
+
+    def test_reads_ledger_when_target_repo_resolves_and_ledger_has_data(self):
+        """A ledger that resolves and carries recorded stage state is read
+        directly -- no session fallback needed."""
+        from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        ledger = PipelineLedger.get_or_create("owner/resolve-issue-record", 700501)
+        ledger.stage_states_json = json.dumps({"ISSUE": "completed", "PLAN": "in_progress"})
+        ledger.save()
+
+        with (
+            patch(
+                "tools.sdlc_stage_query._resolve_target_repo_for_read",
+                return_value="owner/resolve-issue-record",
+            ),
+            patch("tools.sdlc_stage_query._find_session_by_issue") as mock_find_session,
+        ):
+            result = _resolve_issue_record(700501)
+
+        assert result.ledger_key == ledger.ledger_key
+        mock_find_session.assert_not_called()
+
+    def test_falls_back_to_session_when_ledger_resolves_but_empty(self):
+        """target_repo resolves and the ledger loads (get_or_create never
+        fails), but it carries no recorded stage state yet -- retained
+        cold-path session fallback (issues that started before this
+        migration, or a session created between a backfill run and this
+        deploy)."""
+        from tools.sdlc_stage_query import _resolve_issue_record
+
+        class _FakeSession:
+            stage_states = json.dumps({"ISSUE": "completed"})
+
+        fallback_session = _FakeSession()
+
+        with (
+            patch(
+                "tools.sdlc_stage_query._resolve_target_repo_for_read",
+                return_value="owner/empty-ledger-fallback",
+            ),
+            patch(
+                "tools.sdlc_stage_query._find_session_by_issue", return_value=fallback_session
+            ) as mock_find_session,
+        ):
+            result = _resolve_issue_record(700502)
+
+        assert result is fallback_session
+        mock_find_session.assert_called_once_with(700502)
+
+    def test_query_stage_states_reads_via_ledger_end_to_end(self):
+        """query_stage_states(issue_number=...) reads a real PipelineLedger
+        end to end -- no session involved at all."""
+        from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_stage_query import query_stage_states
+
+        ledger = PipelineLedger.get_or_create("owner/qss-ledger", 700503)
+        ledger.stage_states_json = json.dumps({"ISSUE": "completed", "PLAN": "ready"})
+        ledger.save()
+
+        with patch(
+            "tools.sdlc_stage_query._resolve_target_repo_for_read",
+            return_value="owner/qss-ledger",
+        ):
+            result = query_stage_states(issue_number=700503)
+
+        assert result["ISSUE"] == "completed"
+        assert result["PLAN"] == "ready"
+
+    def test_query_enriched_reads_pr_number_from_ledger_field(self):
+        """_compute_meta's session-derived pr_number lookup works
+        unmodified against a PipelineLedger (field-compatible via
+        getattr)."""
+        from agent.pipeline_ledger import PipelineLedger
+        from tools.sdlc_stage_query import query_enriched
+
+        ledger = PipelineLedger.get_or_create("owner/qse-ledger", 700504)
+        ledger.stage_states_json = json.dumps({"ISSUE": "completed"})
+        ledger.pr_number = 777
+        ledger.save()
+
+        with (
+            patch(
+                "tools.sdlc_stage_query._resolve_target_repo_for_read",
+                return_value="owner/qse-ledger",
+            ),
+            patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)),
+        ):
+            result = query_enriched(issue_number=700504)
+
+        assert result["_meta"]["pr_number"] == 777
