@@ -377,6 +377,183 @@ class TestRunPostSessionExtraction:
         mock_llm.assert_called_once()
 
 
+class TestRefusalLLMComplement:
+    """Test the optional LLM refusal-detector complement (issue #1829).
+
+    Wraps (never replaces) the closed-vocab ``_looks_like_refusal`` check on
+    the post-LLM extraction path. Gated behind ``MEMORY_REFUSAL_LLM_ENABLED``,
+    default-OFF. Fail-open on any classifier error.
+    """
+
+    # A genuine-looking primary-extraction payload that passes the closed-vocab
+    # refusal check and the "NONE" short-circuit, so extraction reaches the
+    # point where the complement would fire if the flag is enabled. Mirrors
+    # the DECISION: line-format idiom used throughout
+    # TestParseCategorizedObservations.
+    _PRIMARY_OUTPUT = (
+        "DECISION: chose blue-green deployment over rolling updates for zero-downtime releases"
+    )
+
+    # Real-looking input passes all three pre-LLM guards (length, refusal
+    # patterns, whitespace ratio) — copied from
+    # TestRunPostSessionExtraction.test_refusal_output_not_saved.
+    _REAL_INPUT = (
+        "Worker finished session sess-real-1234 in 12.4s. "
+        "Migrated three tables and deployed the new API server. "
+        "All tests pass on green."
+    )
+
+    @pytest.mark.asyncio
+    async def test_flag_off_complement_never_invoked(self, monkeypatch):
+        """Flag OFF (default): exactly one Haiku call, complement never fires."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        monkeypatch.delenv("MEMORY_REFUSAL_LLM_ENABLED", raising=False)
+
+        mock_llm = AsyncMock(return_value=self._PRIMARY_OUTPUT)
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            await extract_observations_async("sess-flag-off", self._REAL_INPUT, project_key="test")
+
+        mock_llm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_flag_on_refusal_verdict_returns_empty(self, monkeypatch):
+        """Flag ON + complement returns REFUSAL: extraction returns []."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        monkeypatch.setenv("MEMORY_REFUSAL_LLM_ENABLED", "true")
+
+        mock_llm = AsyncMock(side_effect=[self._PRIMARY_OUTPUT, "REFUSAL"])
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(
+                "sess-flag-on-refusal", self._REAL_INPUT, project_key="test"
+            )
+
+        assert result == []
+        assert mock_llm.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_flag_on_content_verdict_saves_observations(self, monkeypatch):
+        """Flag ON + complement returns CONTENT: observations are saved."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        monkeypatch.setenv("MEMORY_REFUSAL_LLM_ENABLED", "true")
+
+        mock_llm = AsyncMock(side_effect=[self._PRIMARY_OUTPUT, "CONTENT"])
+        mock_memory = MagicMock()
+        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
+
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+        ):
+            result = await extract_observations_async(
+                "sess-flag-on-content", self._REAL_INPUT, project_key="test"
+            )
+
+        assert result != []
+        assert mock_llm.call_count == 2
+        mock_memory.safe_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_flag_on_complement_timeout_fails_open(self, monkeypatch):
+        """Flag ON + complement raises TimeoutError: fail-open, still saves,
+        AND _record_extraction_error is invoked."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        monkeypatch.setenv("MEMORY_REFUSAL_LLM_ENABLED", "true")
+
+        mock_llm = AsyncMock(side_effect=[self._PRIMARY_OUTPUT, TimeoutError()])
+        mock_memory = MagicMock()
+        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
+        mock_record_error = MagicMock()
+
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+            patch("agent.memory_extraction._record_extraction_error", mock_record_error),
+        ):
+            result = await extract_observations_async(
+                "sess-flag-on-timeout", self._REAL_INPUT, project_key="test"
+            )
+
+        assert result != []  # fail-open: observations still saved
+        assert mock_llm.call_count == 2
+        mock_record_error.assert_called_once()
+        assert mock_record_error.call_args[0][0] == "TimeoutError"
+
+    @pytest.mark.asyncio
+    async def test_flag_on_complement_generic_exception_fails_open(self, monkeypatch):
+        """Flag ON + complement raises a generic Exception: fail-open, still
+        saves, AND _record_extraction_error is invoked with the class name."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        monkeypatch.setenv("MEMORY_REFUSAL_LLM_ENABLED", "true")
+
+        mock_llm = AsyncMock(side_effect=[self._PRIMARY_OUTPUT, Exception("boom")])
+        mock_memory = MagicMock()
+        mock_memory.safe_save.return_value = MagicMock(memory_id="test-id")
+        mock_record_error = MagicMock()
+
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+            patch("models.memory.Memory", mock_memory),
+            patch("models.memory.SOURCE_AGENT", "agent"),
+            patch("agent.memory_extraction._record_extraction_error", mock_record_error),
+        ):
+            result = await extract_observations_async(
+                "sess-flag-on-exception", self._REAL_INPUT, project_key="test"
+            )
+
+        assert result != []  # fail-open: observations still saved
+        assert mock_llm.call_count == 2
+        mock_record_error.assert_called_once()
+        assert mock_record_error.call_args[0][0] == "Exception"
+
+    @pytest.mark.asyncio
+    async def test_flag_on_empty_extraction_never_reaches_complement(self, monkeypatch):
+        """Flag ON but primary extraction returns NONE: the NONE short-circuit
+        happens before the complement, so the complement is never reached."""
+        from unittest.mock import AsyncMock, patch
+
+        from agent.memory_extraction import extract_observations_async
+
+        monkeypatch.setenv("MEMORY_REFUSAL_LLM_ENABLED", "true")
+
+        mock_llm = AsyncMock(return_value="NONE")
+        with (
+            patch("agent.memory_extraction._llm_call", mock_llm),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="fake-key"),
+        ):
+            result = await extract_observations_async(
+                "sess-flag-on-none", self._REAL_INPUT, project_key="test"
+            )
+
+        assert result == []
+        mock_llm.assert_called_once()
+
+
 class TestParseCategorizedObservations:
     """Test agent/memory_extraction.py _parse_categorized_observations()."""
 

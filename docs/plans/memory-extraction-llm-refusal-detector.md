@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: docs_complete
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -337,21 +337,21 @@ through the env flag, which an operator sets on the worker environment.
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/subconscious-memory.md` — the "Refusal-pattern filter"
+- [x] Update `docs/features/subconscious-memory.md` — the "Refusal-pattern filter"
   subsection (around `:186-194`) already forward-references #1829 ("A follow-up
   (issue #1829) tracks an optional, default-off LLM refusal-complement so future
   rephrasings self-heal without a manual append"). Replace that forward-reference
   with a description of the shipped `MEMORY_REFUSAL_LLM_ENABLED` flag: what it
   does, that it defaults OFF, the one-extra-Haiku-call cost, the fail-open error
   behavior, and that it complements (never replaces) `_looks_like_refusal`.
-- [ ] Update the maintenance-contract paragraph (`:194`) to note the LLM
+- [x] Update the maintenance-contract paragraph (`:194`) to note the LLM
   complement as the self-healing alternative to manual pattern appends when the
   flag is enabled.
 
 ### Inline Documentation
-- [ ] Module-level comment block above the new helpers explaining the default-OFF
+- [x] Module-level comment block above the new helpers explaining the default-OFF
   rationale, the fail-open contract, and the single-call guarantee.
-- [ ] Docstring on `_looks_like_refusal_llm` documenting the yes/no contract and
+- [x] Docstring on `_looks_like_refusal_llm` documenting the yes/no contract and
   that it wraps (does not replace) the closed-vocab check.
 
 `docs/features/README.md` needs no new row — `subconscious-memory.md` is already
@@ -359,23 +359,23 @@ indexed; this updates an existing feature.
 
 ## Success Criteria
 
-- [ ] `MEMORY_REFUSAL_LLM_ENABLED` defaults OFF; with the flag unset,
+- [x] `MEMORY_REFUSAL_LLM_ENABLED` defaults OFF; with the flag unset,
   `extract_observations` makes exactly one Haiku call (unit test asserts the
   complement is never invoked).
-- [ ] With the flag ON and a novel refusal phrasing NOT in `_REFUSAL_PATTERNS`,
+- [x] With the flag ON and a novel refusal phrasing NOT in `_REFUSAL_PATTERNS`,
   `extract_observations` returns `[]` (the complement caught it).
-- [ ] With the flag ON and genuine observation text, observations are parsed and
+- [x] With the flag ON and genuine observation text, observations are parsed and
   saved (no false drop).
-- [ ] Complement raising `TimeoutError`/`Exception` fails open (observations
+- [x] Complement raising `TimeoutError`/`Exception` fails open (observations
   saved) and records `memory.extraction.error` (unit test asserts both).
-- [ ] `_looks_like_refusal`, `_REFUSAL_PATTERNS`, and `_parse_categorized_observations`
+- [x] `_looks_like_refusal`, `_REFUSAL_PATTERNS`, and `_parse_categorized_observations`
   bodies are unchanged (anti-criterion, grep-verified).
-- [ ] A REAL integration test (gated on `ANTHROPIC_API_KEY`) drives the flag-ON
+- [x] A REAL integration test (gated on `ANTHROPIC_API_KEY`) drives the flag-ON
   path against live Haiku over a fixture set of novel refusals + genuine
   observations, and an independent AI-judge Haiku call grades the detector's
   drop/keep decisions as correct — no keyword-only assertions.
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
+- [x] Tests pass (`/do-test`)
+- [x] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
