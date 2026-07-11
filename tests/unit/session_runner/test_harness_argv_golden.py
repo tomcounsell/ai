@@ -17,6 +17,16 @@ behavioral-parity fixtures the plan calls out:
     *after* a valid ``result`` does NOT retry (that fuller matrix also
     lives in ``tests/unit/test_harness_stale_uuid_result_preservation.py``;
     this file pins the minimal argv-level assertion of the same contract).
+(d) ``ClaudeHarnessAdapter.run_turn`` actually threads the harness's
+    ``structured_output`` (the terminal ``result`` event's schema payload)
+    through to the returned ``TurnResult`` -- a REVIEW-stage regression
+    test for PR #2038's blocker (the ``TurnResult(...)`` constructor call
+    silently dropped the ``nonlocal structured_output`` variable populated
+    by the ``on_structured_output`` callback). Unlike
+    ``test_schema_routing.py``'s ``ScriptedDriver``, this drives the real
+    adapter + real ``get_response_via_harness`` call path (subprocess layer
+    mocked, same technique as the golden argv tests above) so a broken
+    callback-to-dataclass wire would have failed this test.
 """
 
 from __future__ import annotations
@@ -26,7 +36,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent.session_runner.harness.claude import get_response_via_harness
+from agent.session_runner.harness.base import TurnRequest
+from agent.session_runner.harness.claude import ClaudeHarnessAdapter, get_response_via_harness
+from agent.session_runner.router import validate_structured_route
 
 VALID_UUID = "36514af3-c4e9-455d-9087-f5850101990e"
 
@@ -303,3 +315,80 @@ class TestRetryWithoutResumeBranchParity:
 
         assert reply == "the real completion"
         assert fake.state["calls"] == 1, "no retry once a result event has fired"
+
+
+# ---------------------------------------------------------------------------
+# Behavioral parity (d): ClaudeHarnessAdapter.run_turn threads
+# structured_output through to TurnResult (PR #2038 REVIEW-blocker
+# regression test)
+# ---------------------------------------------------------------------------
+
+
+def _result_stdout_with_structured_output(
+    structured_output: dict,
+    result: str = "ok",
+    session_id: str = "sess_structured",
+) -> str:
+    """Same shape as _result_stdout, plus a `structured_output` key on the
+    terminal `result` event -- the schema-first routing payload (plan #2000
+    Task 2.3). See agent/session_runner/harness/claude.py around line 904:
+    the parser reads `data.get("structured_output")` off the `type=="result"`
+    event."""
+    lines = [
+        json.dumps({"type": "system", "subtype": "init", "session_id": session_id}),
+        json.dumps(
+            {
+                "type": "result",
+                "result": result,
+                "session_id": session_id,
+                "structured_output": structured_output,
+            }
+        ),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class TestClaudeHarnessAdapterStructuredOutputParity:
+    """Drives ClaudeHarnessAdapter.run_turn (the actual adapter, not a
+    scripted fake) with the subprocess layer mocked, so a broken wire
+    between the `on_structured_output` callback and the returned
+    `TurnResult` fails here -- unlike test_schema_routing.py's
+    ScriptedDriver, which constructs HeadlessTurnOutcome directly and never
+    touches this module."""
+
+    @pytest.mark.asyncio
+    async def test_run_turn_carries_structured_output_into_turn_result(self):
+        schema_payload = {"route": "user", "message": "hello from schema", "file_paths": []}
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = _make_mock_proc(
+                _result_stdout_with_structured_output(schema_payload)
+            )
+
+            adapter = ClaudeHarnessAdapter()
+            result = await adapter.run_turn(
+                TurnRequest(message="do the thing", working_dir="/tmp/work")
+            )
+
+        assert result.structured_output == schema_payload
+
+        # Bonus: prove the field flows all the way to routing, not just that
+        # it's populated on the dataclass.
+        classification = validate_structured_route(result.structured_output)
+        assert classification is not None
+        assert classification.destination == "user"
+        assert classification.payload == "hello from schema"
+
+    @pytest.mark.asyncio
+    async def test_run_turn_structured_output_none_when_absent(self):
+        """No structured_output key on the result event (schema validation
+        fell back, or no --json-schema was requested): the field stays
+        None -- proves the regression test isn't vacuously true."""
+        with patch("asyncio.create_subprocess_exec") as mock_exec:
+            mock_exec.return_value = _make_mock_proc(_result_stdout(session_id="sess_plain"))
+
+            adapter = ClaudeHarnessAdapter()
+            result = await adapter.run_turn(
+                TurnRequest(message="do the thing", working_dir="/tmp/work")
+            )
+
+        assert result.structured_output is None

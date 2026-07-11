@@ -1395,6 +1395,7 @@ class ClaudeHarnessAdapter:
         return TurnResult(
             resume_handle=resume_handle,
             final_text=final_text,
+            structured_output=structured_output,
             events=collected_events,
             usage=usage,
             cost_usd=cost_usd,

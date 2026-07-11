@@ -171,12 +171,13 @@ def query_metric_total(name: str, days: int = 1) -> float:
         return 0.0
 
 
-def query_metric_count(name: str, days: int = 1) -> int:
+def query_metric_count(name: str, days: float = 1) -> int:
     """Get the count of metric events over the last N days.
 
     Args:
         name: Metric name.
-        days: Number of days to look back.
+        days: Number of days to look back (fractional values are valid --
+            e.g. an hourly rolling window passes days < 1).
 
     Returns:
         Count of events, or 0 if no data.
