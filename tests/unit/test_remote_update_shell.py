@@ -62,7 +62,11 @@ if [ "$cmd" = "kickstart" ]; then
     exit 0
 fi
 if [ "$cmd" = "bootstrap" ]; then
-    if [ -n "${BOOTSTRAP_FAIL:-}" ]; then exit 1; fi
+    if [ -n "${BOOTSTRAP_FAIL:-}" ]; then
+        # Mimic the real launchd EIO message on the classic stale-label failure.
+        echo "Bootstrap failed: 5: Input/output error" >&2
+        exit 1
+    fi
     exit 0
 fi
 exit 0
@@ -271,6 +275,9 @@ def test_worker_bootstrap_eio_recovers_via_kickstart(tmp_path):
     assert "RESTART FAILED" not in result.stdout
     assert result.returncode == 0
     assert "Worker restarted" in result.stdout
+    # The recovery sets VERIFY_SINCE=$RESTART_TS just like the loaded branch, so
+    # the #1898 release verify still runs exactly once against the restart moment.
+    assert len(harness.verify_lines()) == 1
 
 
 def test_worker_bootstrap_and_kickstart_both_fail_reports_failure(tmp_path):
@@ -289,6 +296,8 @@ def test_worker_bootstrap_and_kickstart_both_fail_reports_failure(tmp_path):
     )
     assert result.returncode != 0
     assert "RESTART FAILED: worker bootstrap/kickstart failed" in result.stdout
+    # The raw launchd errno/message is surfaced for diagnosability, not swallowed.
+    assert "Bootstrap failed: 5: Input/output error" in result.stdout
 
 
 def test_bridge_kickstart_failure_exits_nonzero_and_withdraws_marker(harness):

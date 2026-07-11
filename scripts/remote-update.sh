@@ -281,17 +281,27 @@ PYEOF
         # bootstrap and the kickstart fallback fail. Suppress bootstrap stderr
         # so a recoverable EIO doesn't leak the raw launchd error into the
         # update summary (issue: stale-worker bootstrap EIO on "Valor the Bald").
-        if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST" 2>/dev/null; then
+        # Capture bootstrap stderr so a recoverable EIO stays out of the summary
+        # but the raw launchd error (errno + message) is available to surface if
+        # BOTH the bootstrap and the kickstart fallback fail.
+        WORKER_UID=$(id -u)
+        # `|| true` keeps a failing bootstrap from tripping `set -e` before we
+        # can inspect BOOTSTRAP_RC and attempt the kickstart recovery below.
+        BOOTSTRAP_ERR=$(launchctl bootstrap "gui/$WORKER_UID" "$WORKER_DST" 2>&1) && BOOTSTRAP_RC=0 || BOOTSTRAP_RC=$?
+        if [ "$BOOTSTRAP_RC" -eq 0 ]; then
             WORKER_STATE="worker restarted"
             VERIFY_SINCE=$RESTART_TS
-        elif launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+        elif launchctl kickstart -k "gui/$WORKER_UID/$WORKER_LABEL" 2>/dev/null; then
             # Bootstrap hit EIO because the label was already registered
             # (false-negative grep). kickstart -k reloads the running job onto
             # the freshly-written plist without the bootout/bootstrap race.
             WORKER_STATE="worker restarted"
             VERIFY_SINCE=$RESTART_TS
         else
-            echo "RESTART FAILED: worker bootstrap/kickstart failed for $WORKER_LABEL"
+            # Both failed — genuinely broken. Surface the launchd errno/message
+            # (e.g. "Bootstrap failed: 5: Input/output error") so the failure is
+            # diagnosable from the update summary, not just a generic line.
+            echo "RESTART FAILED: worker bootstrap/kickstart failed for $WORKER_LABEL: ${BOOTSTRAP_ERR:-unknown launchd error}"
             WORKER_STATE="worker restart FAILED"
             RESTART_FAILED=1
         fi
