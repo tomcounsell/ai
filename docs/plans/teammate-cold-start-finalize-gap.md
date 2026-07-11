@@ -1,12 +1,12 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
 created: 2026-07-11
 tracking: https://github.com/tomcounsell/ai/issues/2007
 last_comment_id: null
-revision_applied: false
+revision_applied: true
 ---
 
 # Teammate cold-start session never finalizes to a terminal status
@@ -78,8 +78,11 @@ stayed `running` forever, `claude_pid` was `None`, `last_heartbeat_at` went stal
 - `agent/agent_session_queue.py:1533-1550` — pop-loop `StatusConflictError` handler,
   logs WARNING + `continue`, no counter/escalation — **still holds**.
 - `agent/agent_session_queue.py:303-331` — `enqueue_agent_session` `_mark_superseded`
-  supersedes only `completed` duplicates, leaving `failed`/other divergent records —
-  **still holds** (this is Defect A's duplicate-creation mechanism).
+  targets only `completed` duplicates and even that branch is a documented no-op (the
+  in-source #730 comment at lines 319-322 records the `reject_from_terminal` override was
+  removed, so `completed→superseded` is guard-rejected). Net: it reconciles nothing, so
+  every divergent record (including the stale `failed`) survives — **still holds** (this
+  is Defect A's duplicate-creation mechanism).
 - `agent/session_runner/runner.py` cold-start-with-prime fallback — **still holds**
   (intentional recovery tier; issue's line range `392-422` drifted under commit
   `ffed9ba0` which touched this file, but the fallback logic is unchanged).
@@ -267,23 +270,34 @@ to the worker/queue/lifecycle code and testable against the local Redis test DB.
   record.
 - **Correct record selection in `complete_transcript` (Defect B)**: replace the blind
   `sessions[0]` with `get_authoritative_session`, which prefers the `running` record.
-- **Duplicate reconciliation at enqueue (Defect A)**: `_mark_superseded` reconciles ALL
-  terminal duplicates (`failed`/`killed`/`abandoned`/`completed`) before creating a new
-  `pending` record, so a divergent `(terminal, pending)` pair is never born.
+- **Duplicate reconciliation at enqueue (Defect A)**: the current `_mark_superseded` is a
+  no-op — `transition_status(completed→superseded)` is rejected by the terminal-status
+  guard (#730 removed the `reject_from_terminal=False` override, and re-adding it would
+  re-introduce the #730 terminal-re-activation bug). Replace it with a reconciler that
+  **deletes** stale terminal duplicates via ORM `instance.delete()`, child-guarded (skip
+  the delete if `get_child_sessions()` is non-empty), before creating the new `pending`
+  record, so a divergent `(terminal, pending)` pair is never born. Never touch
+  `running`/`pending` records; never use raw Redis.
 - **Bounded escalation in the pop loop (Defect A)**: count consecutive
-  `StatusConflictError`s per `session_id`; after N (proposed: 3) attempts, escalate to
-  ERROR-level log plus a health/reflection signal and trigger a one-shot reconciliation
-  of that `session_id`, instead of spinning silently.
+  `StatusConflictError`s per `session_id`; at threshold N=3, if not already escalated, log
+  ERROR **once**, record the `session_id` in an `escalated` set, and strike the stuck
+  `pending` record from the pending index via a terminal ORM transition
+  (`transition_status(→cancelled)` / the `cancel_pending_session` path) so the loop stops
+  re-popping it. Reset the counter and the `escalated` entry on any successful pop. No
+  health/reflection signal and no in-loop reconciler (keeps the pop loop's blast radius
+  minimal).
 
 ### Flow
 
 Runner completes → executor re-reads authoritative session → if still `running`,
 `finalize_session(...)` (belt-and-suspenders) → terminal status logged → worker moves on.
 
-Re-enqueue → reconcile all terminal duplicates → single `pending` record → clean pickup.
+Re-enqueue → child-guarded delete of stale terminal duplicates → single `pending`
+record → clean pickup.
 
-Pop hits repeated conflict → counter increments → at threshold: ERROR + reconcile +
-health flag → loop no longer spins silently.
+Pop hits repeated conflict → counter increments → at threshold N=3: one ERROR log,
+`session_id` added to `escalated`, stuck `pending` record struck from the index via a
+terminal transition → loop no longer spins silently.
 
 ### Technical Approach
 
@@ -297,18 +311,24 @@ health flag → loop no longer spins silently.
   catching `StatusConflictError` as success. This subsumes the current exception-only
   fallback at 2188 (which only fires when `complete_transcript` *raises*). Keep the
   `defer_reaction` guard so the nudge path is untouched.
-- **`agent/agent_session_queue.py:306` `_mark_superseded`**: broaden the predicate from
-  `s.status == "completed"` to `s.status in TERMINAL_STATUSES`. For a `failed`/`killed`/
-  `abandoned` duplicate, `superseded` transition may be rejected by the terminal guard —
-  use `transition_status(..., reject_from_terminal=False)` OR delete the stale terminal
-  duplicate via `instance.delete()` (through the ORM, never raw Redis). Decide in build;
-  prefer supersede-with-override to preserve audit trail. Never touch `running`/`pending`.
-- **`agent/agent_session_queue.py:1534` pop-loop handler**: maintain a `dict[str, int]`
-  of consecutive conflict counts keyed by `session_id`, local to `_run_worker_loop`
-  (reset on any successful pop of that session_id). At threshold, log ERROR, set a
-  health/reflection signal (reuse the existing `agent-session-cleanup` reflection
-  surface), and invoke a one-shot reconciliation for that session_id. Threshold and
-  escalation surface to be confirmed with PM (Open Question 1).
+- **`agent/agent_session_queue.py:306` `_mark_superseded` (currently a no-op)**: replace
+  the rejected `transition_status(completed→superseded)` with a reconciler that iterates
+  ALL terminal duplicates (`failed`/`killed`/`abandoned`/`completed`/`cancelled`) for the
+  `session_id` and **deletes** each via ORM `instance.delete()`, guarded by
+  `get_child_sessions()` (skip the delete when children exist so a parent-of-children is
+  never orphaned). Do NOT use `reject_from_terminal=False` (#730 — that override was
+  removed on purpose; re-adding it re-opens terminal re-activation). Keep the surrounding
+  `try/except` WARNING so a delete failure never blocks the new record's creation. Never
+  touch `running`/`pending`; ORM-only, never raw Redis.
+- **`agent/agent_session_queue.py:1534` pop-loop handler**: maintain a `dict[str, int]` of
+  consecutive conflict counts AND an `escalated: set[str]`, both local to
+  `_run_worker_loop` (reset the counter and drop the `escalated` entry on any successful
+  pop of that `session_id`). At threshold N=3, if the `session_id` is not already in
+  `escalated`: log ERROR once, add it to `escalated`, and strike the stuck `pending`
+  record from the pending index via a terminal ORM transition
+  (`transition_status(→cancelled)` / the `cancel_pending_session` path). No
+  health/reflection signal and no in-loop reconciler — the ERROR log plus the index-strike
+  make the wedge operator-visible and self-clearing within a bounded number of ticks.
 - Reference `docs/infra/` scan: no `docs/infra/` entries constrain this work.
 
 ## Failure Path Test Strategy
@@ -515,12 +535,12 @@ records). Integration coverage is via the regression tests, not a new agent capa
 - **Task ID**: build-queue
 - **Depends On**: none
 - **Validates**: tests/unit/test_agent_session_queue.py, tests/unit/test_teammate_cold_start_finalize.py (create)
-- **Informed By**: spike-3 (supersede-only-completed leaves divergent pairs)
+- **Informed By**: spike-3 (`_mark_superseded` is a no-op; #730 forbids terminal re-activation)
 - **Assigned To**: queue-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Broaden `_mark_superseded` (agent_session_queue.py:306) to reconcile all terminal duplicates before `async_create`; never touch `running`/`pending`; ORM-only mutations.
-- Add a loop-local per-`session_id` consecutive-conflict counter in `_run_worker_loop`'s `StatusConflictError` handler (agent_session_queue.py:1534); at threshold N, log ERROR + set health/reflection signal + one-shot reconcile; reset on successful pop.
+- Replace the no-op `_mark_superseded` (agent_session_queue.py:306) with a reconciler that **deletes** stale terminal duplicates via ORM `instance.delete()`, guarded by `get_child_sessions()` (skip delete if children exist), before `async_create`; never touch `running`/`pending`; ORM-only mutations. Do NOT use `reject_from_terminal=False` (#730). Keep the surrounding `try/except` WARNING so a delete failure never blocks record creation.
+- Add a loop-local per-`session_id` consecutive-conflict counter AND an `escalated: set[str]` in `_run_worker_loop`'s `StatusConflictError` handler (agent_session_queue.py:1534); at threshold N=3, if not already escalated: log ERROR once, add to `escalated`, and strike the stuck `pending` record from the pending index via a terminal ORM transition (e.g. `transition_status(→cancelled)` / the `cancel_pending_session` path). Reset counter and `escalated` entry on any successful pop. No health/reflection signal, no in-loop reconciler.
 
 ### 3. Regression tests (Defect A + B)
 - **Task ID**: build-tests
@@ -529,7 +549,7 @@ records). Integration coverage is via the regression tests, not a new agent capa
 - **Agent Type**: test-engineer
 - **Parallel**: false
 - Defect B: teammate session, invalid resume scalars and/or a `(running, failed)` divergent pair → run completion path → assert authoritative record reaches terminal (a `LIFECYCLE running→terminal` line; `status != running`).
-- Defect A: `(pending, failed)` divergent pair → assert enqueue reconciliation removes/supersedes the stale terminal record AND the pop loop escalates (ERROR + signal) within N conflicts instead of spinning.
+- Defect A: `(pending, failed)` divergent pair → assert enqueue reconciliation **deletes** the stale terminal record (and the child-guarded skip path leaves a parent-of-children intact) AND, for a residual pair, the pop loop escalates to a single ERROR within N conflicts, records the session_id in `escalated`, and strikes it from the pending index instead of spinning.
 - Cover the failure-path cases from Failure Path Test Strategy.
 
 ### 4. Validation
@@ -552,31 +572,44 @@ records). Integration coverage is via the regression tests, not a new agent capa
 
 | Check | Command | Expected |
 |-------|---------|----------|
-| Tests pass | `pytest tests/unit/test_teammate_cold_start_finalize.py tests/unit/test_session_transcript.py tests/unit/test_agent_session_queue.py -q` | exit code 0 |
-| Full unit suite | `pytest tests/unit/ -q` | exit code 0 |
-| Lint clean | `python -m ruff check agent/ bridge/ models/` | exit code 0 |
+| Tests pass (narrow-scope) | `pytest tests/unit/test_teammate_cold_start_finalize.py tests/unit/test_session_transcript.py tests/unit/test_agent_session_queue.py -q` | exit code 0 |
 | Format clean | `python -m ruff format --check agent/ bridge/ models/` | exit code 0 |
 | complete_transcript no longer blind-[0] | `grep -n "get_authoritative_session" bridge/session_transcript.py` | output contains get_authoritative_session |
 | No blind [0] in complete_transcript body | `sed -n '252,334p' bridge/session_transcript.py \| grep -c "query.filter(session_id=session_id))\[0\]"` | match count == 0 |
-| Reconcile broadened | `grep -n "TERMINAL_STATUSES" agent/agent_session_queue.py` | output contains TERMINAL_STATUSES |
+| Reconcile deletes terminal dups | `grep -n "get_child_sessions\|\.delete()" agent/agent_session_queue.py` | reconciler calls child-guard + delete |
+| No re-introduced #730 override in queue | `grep -n "reject_from_terminal=False" agent/agent_session_queue.py` | no match (empty output) |
+| Pop-loop escalation bounded | `grep -n "escalated" agent/agent_session_queue.py` | output contains escalated |
 | Docs updated | `grep -ci "cold-start\|divergent\|phantom running\|finalize gap" docs/features/session-lifecycle.md` | output > 0 |
 
 ## Critique Results
 
-<!-- Populated by /do-plan-critique (war room). Leave empty until critique is run. -->
-| Severity | Critic | Finding | Addressed By | Implementation Note |
-|----------|--------|---------|--------------|---------------------|
+| Severity | Finding | Addressed By | Implementation Note |
+|----------|---------|--------------|---------------------|
+| BLOCKER | Defect A reconciliation re-introduced the #730 `reject_from_terminal=False` override, re-activating terminal records | Solution → Duplicate reconciliation; Technical Approach `_mark_superseded`; Risk 1; Resolved Decision 1 | Reconcile via child-guarded ORM `instance.delete()`; override dropped and explicitly forbidden with a #730 citation; Open Question 2 resolved in-plan (delete, not supersede). |
+| CONCERN | Wrong baseline: `_mark_superseded` "only supersedes completed" — but `completed→superseded` is guard-rejected, so it supersedes nothing (no-op) | Root cause pattern; spike-3; Data Flow step 2; Freshness Check bullet | Corrected everywhere to state the current body is a documented no-op that reconciles nothing; every divergent record survives. |
+| CONCERN | `complete_transcript` migration not load-bearing; the unconditional executor guard alone closes the bug; migration only affects summary placement | Solution Key Elements; spike-1 impact; Technical Approach; Success Criteria | Executor guard reframed as the load-bearing fix; migration reframed as a summary-placement correctness follow-on. |
+| CONCERN | Pop-loop escalation unbounded on the reconcile-failure branch (ERROR every tick forever) | Solution → Bounded escalation; Technical Approach pop-loop; Data Flow step 4; Risk 4 (new); Failure Path Test Strategy | Added a loop-local `escalated` set + a terminal strike-the-pending-index action so ERROR fires once and the loop stops re-popping the stuck record. |
+| CONCERN | Defect A over-built (four remediations) | Solution → Bounded escalation; Technical Approach; Step 2 task | Downscoped to loop-local counter + single ERROR at threshold + strike-index terminal action, plus the enqueue-time delete. Dropped the health/reflection signal and the in-loop one-shot reconciler. |
 
 ---
 
-## Open Questions
+## Resolved Decisions (from critique revision)
 
-1. **Escalation surface for Defect A**: at the conflict threshold, is an ERROR log +
-   the existing `agent-session-cleanup` reflection flag sufficient, or should it also set
-   a dashboard health signal? Proposed threshold N=3 consecutive conflicts — acceptable?
-2. **Reconcile: supersede vs. delete**: for stale `failed`/`killed`/`abandoned` duplicates
-   at enqueue, prefer `transition_status(→superseded, reject_from_terminal=False)` to
-   preserve audit history, or `instance.delete()` to keep the record set clean? (Plan leans
-   supersede-with-override.)
-3. **Split vs. single PR**: ship both defects in one PR (shared reconciliation logic argues
-   for it), or split A and B into two PRs given their distinct blast radii?
+1. **Reconcile: delete, not supersede** (was Open Question 2; critique BLOCKER). Stale
+   terminal duplicates are reconciled by ORM `instance.delete()` guarded by a
+   child-reference check (`get_child_sessions()`), **not** by
+   `transition_status(→superseded, reject_from_terminal=False)`. #730 intentionally removed
+   that override so terminal records are never re-activated, and `→superseded` from a
+   terminal state is guard-rejected regardless — reusing it would re-introduce the exact
+   behavior #730 forbids. The `instance.delete()` of a stale terminal duplicate (a record
+   whose `session_id` already has a live successor) has low residual audit value; the
+   child-guard prevents orphaning any child sessions.
+2. **Escalation surface: ERROR + strike-index, bounded** (was Open Question 1; critique
+   concern — downscoped). At threshold N=3 consecutive conflicts, the pop loop logs a
+   single ERROR (gated by a loop-local `escalated` set) and strikes the stuck record from
+   the pending index. No dashboard health signal, no `agent-session-cleanup` reflection
+   flag, no in-loop reconciler — the enqueue-time delete is the real remediation and this
+   is the bounded, self-terminating safety net.
+3. **Ship in one PR** (was Open Question 3; PM decision). Both defects ship in a single PR
+   on the session branch — they share the divergent-duplicate-record root cause, and
+   splitting would fragment a coherent fix.
