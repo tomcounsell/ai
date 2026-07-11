@@ -518,6 +518,28 @@ The no-progress detector in `_has_progress` (`agent/session_health.py`) includes
 
 **Confirmed Branch 2 failure mode (#1614):** The worker process remained alive (`worker_alive=True` on every health tick). The harness subprocess had exited or hung without producing SDK output, and the executor's heartbeat loop had silently stopped. But `claude_session_uuid` — written at SDK authentication time — was set. Because the own-progress check was ungated, it returned `True` unconditionally, blocking the branch-2 recovery path indefinitely.
 
+### Reporting-layer taxonomies enumerate only headless-observed classes (#1926)
+
+`agent/session_stall_classifier.py::classify_session_stall` and
+`agent/crash_signature.py::extract_signature` are pure, zero-write, read-only
+reporting modules that consume the same `derive_sdk_ever_output` /
+`has_demonstrable_activity` leaves as the recovery paths above. Neither
+imports `agent.session_health` (enforced by an import-isolation guard test).
+As of #1926, both taxonomies enumerate only failure classes actually
+observed post-headless-cutover (`never_started`, `idle_gap_exceeded_*`,
+`status_transition`, plus the `ceiling`/`ceiling_timeout` prefix kept for
+backward-compatible classification of pre-cutover rows) — every PTY-specific
+class (`granite_wedged`, PTY-pool/granite-container/deadman signatures) was
+already deleted by the #1930 teardown. See the [Removed Defenses
+Ledger](../removed-defenses.md) for the full record of what was removed and
+why, and [Stall Recovery](stall-recovery.md) for the action-mode gate ladder
+that consumes the classifier's verdicts.
+
+The `monitoring/worker_watchdog.py` W1-W5 kill ladder is unchanged by #1926
+— it carries no PTY-specific text (its U-state rationale is the
+substrate-agnostic issue-#1767 hung-worker recovery mechanism, not PTY
+archaeology) — see [Bridge Self-Healing](bridge-self-healing.md).
+
 **Fix:** the own-progress fields are now gated on `last_heartbeat_at` freshness using `NO_OUTPUT_BUDGET_SECONDS` (1800s). The gate logic:
 
 - If `last_heartbeat_at` is within the last 1800s, own-progress fields are honoured as before.

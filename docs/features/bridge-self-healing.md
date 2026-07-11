@@ -512,6 +512,18 @@ signal existed to prompt operator PTY-fd cleanup, which has no analog for a
 child; there is no long-lived PTY master fd for a U-state hang to be blocked
 on in the first place, issue #1924).
 
+**Confirmed KEPT, unchanged (#1926 post-teardown scar-tissue removal):** the
+W1-W5 verified-kill ladder above and its issue-#1767 U-state rationale carry
+no PTY-specific narrative (`grep -ni "pty master|master fd"
+monitoring/worker_watchdog.py` == 0) — the mechanism is substrate-agnostic. A
+headless `claude -p` subprocess can still wedge in uninterruptible sleep on a
+blocking syscall exactly as any process can, so the ladder is a confirmation
+surface, not an edit target. Likewise the bridge watchdog's 5-level
+escalation ladder + revert-commit (Component 3 above) is kept unchanged —
+orthogonal to PTY, it supervises the bridge process (Telethon connectivity,
+hibernation). See the [Removed Defenses Ledger](../removed-defenses.md) for
+what #1926 actually removed elsewhere (the stall-recovery dry-run flag).
+
 **Post-restart dead-worker session sweep (issue #1767):** When the worker restarts after a hung-worker incident, `_sweep_dead_worker_sessions()` in `agent/session_health.py` runs as **Step 3a** in `worker/__main__.py`, **before** `_recover_interrupted_agent_sessions_startup` (Step 3b). The ordering is critical: Step 3b transitions all remaining `running` sessions → `pending` without checking PID liveness; if the sweep ran after, there would be no `running` sessions left to inspect. The sweep handles the dead-worker subset (dead `claude_pid`) first, finalizing those sessions to `killed`; Step 3b then re-queues the remaining genuinely-interruptible sessions (alive PID or no PID yet). The sweep:
 
 1. Enumerates all sessions with `status="running"`.

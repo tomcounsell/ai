@@ -391,7 +391,9 @@ this PR ships.
   the authoritative liveness leaf. The change removes *enum members / verdict
   reasons / signature classes* that map to PTY-era events with zero post-cutover
   occurrences, plus their now-dead threshold constants. The `ceiling` /
-  `ceiling_timeout` prefix is a live headless class and is retained (critique #3).
+  `ceiling_timeout` prefix is retained for backward-compatible classification
+  of pre-cutover rows (critique #3, round-3 correction) — not because headless
+  execution still emits it.
 - **Watchdog: confirmation only, no edit.** `worker_watchdog.py` has no PTY-fd
   narrative to remove (verified 0 matches). Its U-state text is generic #1767
   hung-worker rationale for a KEPT mechanism; a headless `claude -p` subprocess can
@@ -786,7 +788,8 @@ Tier 1 `builder` + `code-reviewer` (+ `cruft-auditor` for the deletion diff).
 - **Parallel**: false
 - Prune `session_stall_classifier.py` + `crash_signature.py` to observed classes;
   remove dead threshold constants; **KEEP the `ceiling`/`ceiling_timeout` prefix
-  (lines ~296-297, 329-330) — live headless class, not scar tissue.** Trim residual
+  (lines ~296-297, 329-330) — retained for backward-compatible classification
+  of pre-cutover rows (round-3 correction), not scar tissue.** Trim residual
   duplicate liveness inference in `session_health.py` only if any remains
   (subtraction only, no wider spread). Update the two affected test files.
 
