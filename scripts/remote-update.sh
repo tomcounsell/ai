@@ -270,12 +270,28 @@ PYEOF
             echo "[update] No worker-relevant changes detected — skipping restart"
         fi
     else
-        # Service not yet loaded (first install) — always bootstrap.
-        if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST"; then
+        # `launchctl list | grep` reported the label absent — treat as a first
+        # install and bootstrap. But that grep can false-negative while the
+        # label is in fact still registered in the domain (e.g. a stale worker
+        # process still holding it): the bare bootstrap then fails with
+        # `Bootstrap failed: 5: Input/output error` (errno 5 = label already
+        # bootstrapped in target domain). EIO here means the service IS loaded,
+        # so kickstart -k is the correct atomic recovery — the same primitive
+        # the loaded branch above prefers. Only declare failure if BOTH the
+        # bootstrap and the kickstart fallback fail. Suppress bootstrap stderr
+        # so a recoverable EIO doesn't leak the raw launchd error into the
+        # update summary (issue: stale-worker bootstrap EIO on "Valor the Bald").
+        if launchctl bootstrap "gui/$(id -u)" "$WORKER_DST" 2>/dev/null; then
+            WORKER_STATE="worker restarted"
+            VERIFY_SINCE=$RESTART_TS
+        elif launchctl kickstart -k "gui/$(id -u)/$WORKER_LABEL" 2>/dev/null; then
+            # Bootstrap hit EIO because the label was already registered
+            # (false-negative grep). kickstart -k reloads the running job onto
+            # the freshly-written plist without the bootout/bootstrap race.
             WORKER_STATE="worker restarted"
             VERIFY_SINCE=$RESTART_TS
         else
-            echo "RESTART FAILED: worker bootstrap failed for $WORKER_LABEL"
+            echo "RESTART FAILED: worker bootstrap/kickstart failed for $WORKER_LABEL"
             WORKER_STATE="worker restart FAILED"
             RESTART_FAILED=1
         fi

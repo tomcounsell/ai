@@ -43,7 +43,15 @@ LOCKSTATE=released
 echo "LAUNCHCTL $* lock=$LOCKSTATE" >> "$CALL_LOG"
 cmd="${1:-}"
 if [ "$cmd" = "list" ]; then
-    printf 'com.valor.worker\\ncom.valor.bridge\\n'
+    # WORKER_NOT_LISTED simulates the false-negative grep: the worker label is
+    # in fact still registered in the domain, but `launchctl list` momentarily
+    # doesn't report it (e.g. a stale worker process mid-transition). This
+    # drives the "not loaded → bootstrap" branch of remote-update.sh.
+    if [ -n "${WORKER_NOT_LISTED:-}" ]; then
+        printf 'com.valor.bridge\\n'
+    else
+        printf 'com.valor.worker\\ncom.valor.bridge\\n'
+    fi
     exit 0
 fi
 if [ "$cmd" = "kickstart" ]; then
@@ -240,6 +248,47 @@ def test_worker_kickstart_failure_exits_nonzero_even_with_passing_verify(tmp_pat
     assert "RESTART FAILED: worker" in result.stdout
     # The verify still ran and passed — and did not mask the failure.
     assert len(harness.verify_lines()) == 1
+
+
+def test_worker_bootstrap_eio_recovers_via_kickstart(tmp_path):
+    """Not-loaded branch: a false-negative `launchctl list` sends the script down
+    the bootstrap path, but the label is actually still registered so bootstrap
+    hits EIO (errno 5). The script must recover with `kickstart -k` rather than
+    reporting a spurious RESTART FAILED. Regression for the stale-worker
+    bootstrap EIO seen on "Valor the Bald"."""
+    harness = Harness(tmp_path, bridge_plist=False)
+    harness.push_upstream_commit("worker/mod.py", "worker-relevant")
+    result = harness.run(
+        extra_env={"WORKER_NOT_LISTED": "1", "BOOTSTRAP_FAIL": "1", "VERIFY_RC": "0"}
+    )
+    # bootstrap was attempted and failed; kickstart -k recovered it.
+    calls = harness.calls()
+    assert any("bootstrap" in line for line in calls.splitlines())
+    assert any("kickstart" in line and "com.valor.worker" in line for line in calls.splitlines()), (
+        f"kickstart recovery not invoked; calls:\n{calls}"
+    )
+    # No spurious failure line, clean exit, worker reported restarted.
+    assert "RESTART FAILED" not in result.stdout
+    assert result.returncode == 0
+    assert "Worker restarted" in result.stdout
+
+
+def test_worker_bootstrap_and_kickstart_both_fail_reports_failure(tmp_path):
+    """Not-loaded branch: when BOTH the bootstrap and the kickstart fallback
+    fail, the script surfaces a distinct scannable failure line and exits
+    non-zero — the EIO recovery must not mask a genuinely dead worker."""
+    harness = Harness(tmp_path, bridge_plist=False)
+    harness.push_upstream_commit("worker/mod.py", "worker-relevant")
+    result = harness.run(
+        extra_env={
+            "WORKER_NOT_LISTED": "1",
+            "BOOTSTRAP_FAIL": "1",
+            "WORKER_KICKSTART_FAIL": "1",
+            "VERIFY_RC": "0",
+        }
+    )
+    assert result.returncode != 0
+    assert "RESTART FAILED: worker bootstrap/kickstart failed" in result.stdout
 
 
 def test_bridge_kickstart_failure_exits_nonzero_and_withdraws_marker(harness):
