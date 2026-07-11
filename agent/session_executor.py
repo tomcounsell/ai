@@ -2171,45 +2171,13 @@ async def _execute_agent_session(session: AgentSession) -> None:
                     f"session {session.session_id} (operation: finalize status to "
                     f"{_runner_final_status(task.error, agent_session)}): {e}"
                 )
-                # Defensive fallback: if complete_transcript failed and the session is
-                # still running, finalize directly so we never leave a ghost `running`
-                # state.  Scoped to the completion/delivery exit only (not the nudge
-                # path, which is protected by the defer_reaction guard above).
-                # get_authoritative_session re-read + StatusConflictError guard ensure
-                # we never stomp a concurrent nudge or health-checker transition.
-                if not chat_state.defer_reaction:
-                    try:
-                        from models.session_lifecycle import (  # noqa: PLC0415
-                            StatusConflictError,
-                            finalize_session,
-                            get_authoritative_session,
-                        )
-
-                        _auth = get_authoritative_session(session.session_id)
-                        if _auth is not None and _auth.status == "running":
-                            _fallback_status = _runner_final_status(task.error, agent_session)
-                            finalize_session(
-                                _auth,
-                                _fallback_status,
-                                reason=(
-                                    f"completion-exit fallback finalize after "
-                                    f"complete_transcript failure: {e}"
-                                ),
-                            )
-                            logger.info(
-                                "[executor] Defensive completion finalize: session %s → %s",
-                                session.session_id,
-                                _fallback_status,
-                            )
-                    except StatusConflictError:
-                        # CAS conflict = another process already finalized. Success.
-                        pass
-                    except Exception as _fb_err:
-                        logger.warning(
-                            "[executor] Defensive completion finalize failed for %s: %s",
-                            session.session_id,
-                            _fb_err,
-                        )
+                # No fallback-finalize here: the unconditional completion-exit
+                # guard below (after this whole if/else block) re-reads the
+                # authoritative session and finalizes it if still `running`. It
+                # subsumes what used to be a duplicate defensive fallback in this
+                # except-only branch -- see the guard's comment for the full
+                # rationale (round-2 CONCERN 3: this exception-only branch never
+                # covered the `else:` / agent_session-is-None exit below anyway).
         else:
             # agent_session lookup returned None (race on status="running" filter,
             # e.g. after health-check recovery). Finalize using outer `session`
@@ -2245,6 +2213,66 @@ async def _execute_agent_session(session: AgentSession) -> None:
                         session.agent_session_id,
                         e,
                     )
+
+        # Unconditional completion-exit finalize guard (Defect B, #2007).
+        #
+        # (a) Scope: this covers the non-deferred completion exit only, gated by
+        #     `not chat_state.defer_reaction` -- the nudge / unconsumed-steering
+        #     re-enqueue path (defer_reaction=True) is untouched, since
+        #     `_enqueue_nudge` already writes the authoritative post-nudge state
+        #     (status=pending) itself; finalizing here would clobber it.
+        #
+        # (b) Placement: this runs AFTER the entire `if agent_session: / else:`
+        #     block above closes -- deliberately NOT nested inside the
+        #     `if agent_session:` branch. A prior version of this fallback lived
+        #     only inside that branch's `except Exception` handler, which meant
+        #     the `else:` exit (agent_session lookup returned None, e.g. a race
+        #     on the status="running" filter -- see #917) had no re-read+finalize
+        #     backstop at all: if `complete_transcript` silently no-op'd there
+        #     instead of raising, the authoritative record stayed `running`
+        #     forever. Placing the guard after the whole if/else covers both exits.
+        #
+        # (c) Unconditional: this guard runs every time regardless of whether
+        #     `complete_transcript` succeeded, raised, or (in the `else` branch)
+        #     already ran its own fallback -- it re-reads the authoritative
+        #     record fresh and only acts if it is still `running`, making it a
+        #     safe no-op on the ordinary happy path. It subsumes the old
+        #     exception-only fallback that used to live inside the
+        #     `if agent_session:` branch (that one only fired when
+        #     `complete_transcript` itself raised); this is the single
+        #     finalize-guarantee mechanism for the completion exit now.
+        if not chat_state.defer_reaction:
+            try:
+                from models.session_lifecycle import (  # noqa: PLC0415
+                    StatusConflictError,
+                    finalize_session,
+                    get_authoritative_session,
+                )
+
+                _auth = get_authoritative_session(session.session_id)
+                if _auth is not None and _auth.status == "running":
+                    _guard_status = _runner_final_status(task.error, agent_session)
+                    finalize_session(
+                        _auth,
+                        _guard_status,
+                        reason="unconditional completion-exit finalize guard (#2007)",
+                    )
+                    logger.info(
+                        "[executor] Completion-exit guard finalized session %s → %s",
+                        session.session_id,
+                        _guard_status,
+                    )
+            except StatusConflictError:
+                # CAS conflict = another actor (complete_transcript, a concurrent
+                # finalize, the health-checker) already finalized this session.
+                # Treat as success -- do not re-raise, do not log as error.
+                pass
+            except Exception as _guard_err:
+                logger.warning(
+                    "[executor] Completion-exit finalize guard failed for %s: %s",
+                    session.session_id,
+                    _guard_err,
+                )
 
         # Schedule post-session memory extraction (hotfix #1055) — fire-and-forget.
         #
