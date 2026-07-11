@@ -302,17 +302,17 @@ async def _push_agent_session(
 
     # Reconcile stale terminal duplicates before creating the new pending record,
     # so a divergent (terminal, pending) pair is never born (Defect A / spike-3).
-    # This used to be "_mark_superseded", which attempted
-    # transition_status(completed→superseded, reject_from_terminal=False) —
-    # (#730) that override was intentionally removed to stop terminal records
-    # being re-activated, so the old body silently reconciled nothing (every
-    # divergent duplicate, including stale failed/killed/abandoned ones,
-    # survived). Delete the stale terminal records instead — never
-    # re-transition them. Child-guarded and shared with the pop-loop
-    # escalation via _delete_stale_terminal_duplicates(). ORM-only, never raw
-    # Redis. Kept inside this try/except so a reconciliation failure (Race 2:
-    # a concurrent reconciler already deleted the record) never blocks the
-    # new record's creation below.
+    # This used to be "_mark_superseded", which attempted a
+    # completed->superseded transition using the terminal-reactivation
+    # override (#730) that was intentionally removed to stop terminal
+    # records being re-activated, so the old body silently reconciled
+    # nothing (every divergent duplicate, including stale
+    # failed/killed/abandoned ones, survived). Delete the stale terminal
+    # records instead — never re-transition them. Child-guarded and shared
+    # with the pop-loop escalation via _delete_stale_terminal_duplicates().
+    # ORM-only, never raw Redis. Kept inside this try/except so a
+    # reconciliation failure (Race 2: a concurrent reconciler already
+    # deleted the record) never blocks the new record's creation below.
     try:
         deleted_count = await asyncio.to_thread(_delete_stale_terminal_duplicates, session_id)
         if deleted_count:
@@ -1298,8 +1298,8 @@ def _delete_stale_terminal_duplicates(session_id: str) -> int:
     is never orphaned. That residual case (a terminal duplicate that cannot be
     deleted) is left for the pop-loop's last-resort escalation to handle.
 
-    Deliberately does NOT use ``transition_status(..., reject_from_terminal=False)``
-    to "supersede" the duplicate — #730 removed that override specifically to
+    Deliberately does NOT use ``transition_status()``'s terminal-reactivation
+    override to "supersede" the duplicate — #730 removed that override specifically to
     stop terminal records from being re-activated, and a ``completed→superseded``
     transition is guard-rejected regardless. Deleting the stale record (rather
     than re-transitioning it) respects that constraint.
@@ -1353,6 +1353,70 @@ def _delete_stale_terminal_duplicates(session_id: str) -> int:
                 exc,
             )
     return deleted
+
+
+def _cancel_stuck_pending_on_conflict(session_id: str) -> bool:
+    """Last-resort pop-loop escalation (Defect A, N=6): cancel the stuck
+    ``pending`` record for ``session_id``.
+
+    Reached only in the residual case where the primary remediation
+    (``_delete_stale_terminal_duplicates``, run every tick from N=3) could
+    not clear the ambiguity because the stale terminal duplicate has child
+    sessions and the child-guard skipped its delete, so the
+    ``StatusConflictError`` keeps recurring. This is the only escalation
+    branch that touches the ``pending`` (work-bearing) record, and only after
+    the primary delete provably could not resolve the conflict (Risk 1c).
+
+    Uses ``finalize_session`` — not ``transition_status`` — because
+    ``"cancelled"`` is itself a member of ``TERMINAL_STATUSES``, and
+    ``transition_status()`` is for non-terminal targets only (raises
+    ``ValueError`` on a terminal target; see ``cancel_agent_session`` above
+    for the identical pattern). Writes
+    ``cancel_reason="conflict_escalation"`` via
+    ``agent.cancel_reason.set_cancel_reason`` before finalizing, for
+    operator visibility (round-2 NIT 1).
+
+    Idempotent: if no ``pending`` record for ``session_id`` remains (already
+    cancelled by an earlier tick, or resolved by another actor), this is a
+    no-op returning False. A ``StatusConflictError`` raised by
+    ``finalize_session``'s own CAS re-read (a genuine concurrent transition
+    by another actor) is treated as success — the conflict is resolved
+    either way.
+
+    Returns:
+        True if a pending record was found and cancelled (or the conflict
+        was independently resolved by a racing actor), False if there was
+        nothing to cancel.
+    """
+    from agent.cancel_reason import set_cancel_reason
+    from models.session_lifecycle import StatusConflictError, finalize_session
+
+    pending = [s for s in AgentSession.query.filter(session_id=session_id) if s.status == "pending"]
+    if not pending:
+        return False
+
+    cancelled_any = False
+    for stuck in pending:
+        try:
+            # Written before finalize (agent/cancel_reason.py convention) so
+            # any reader that inspects the signal after the cancel sees it.
+            set_cancel_reason(session_id, "conflict_escalation")
+            finalize_session(
+                stuck,
+                "cancelled",
+                reason=(
+                    "Bounded pop-loop escalation: repeated StatusConflictError "
+                    "and the stale terminal duplicate could not be deleted "
+                    "(has child sessions) — cancelling the stuck pending "
+                    "record to stop the pop-loop spin"
+                ),
+            )
+            cancelled_any = True
+        except StatusConflictError:
+            # Another actor (kill, revival, a racing worker tick) already
+            # transitioned this record out from under us — resolved either way.
+            cancelled_any = True
+    return cancelled_any
 
 
 async def enqueue_agent_session(
@@ -1559,6 +1623,19 @@ def _session_progress_ts(session: AgentSession, acquired_at: float) -> float:
     return max(c for c in candidates if c is not None)
 
 
+# === Bounded pop-loop StatusConflictError escalation (Defect A) ===
+# Two-stage thresholds for the loop-local consecutive-conflict counter in
+# _worker_loop, keyed off StatusConflictError.session_id (spike-4: the
+# exception already carries this attribute — no raise-site change needed).
+# Primary (delete the stale terminal duplicate, the ambiguity cause) fires
+# every tick from this threshold onward, ungated/idempotent. Last resort
+# (cancel the stuck pending record) fires only in the residual case where the
+# terminal duplicate has children and the child-guard skipped the delete, so
+# the conflict persists past the primary remediation.
+CONFLICT_ESCALATION_PRIMARY_N = 3
+CONFLICT_ESCALATION_LAST_RESORT_N = 6
+
+
 async def _worker_loop(
     worker_key: str, event: asyncio.Event, is_project_keyed: bool = False
 ) -> None:
@@ -1574,6 +1651,16 @@ async def _worker_loop(
     """
     standalone = os.environ.get("VALOR_WORKER_MODE") == "standalone"
     from models.session_lifecycle import StatusConflictError
+
+    # Loop-local bounded-escalation state (Defect A), keyed off
+    # StatusConflictError.session_id. `_conflict_counts` tracks consecutive
+    # conflicts per session_id; `_conflict_escalated` gates the primary-tier
+    # ERROR log to fire once (never the remediation itself — Risk 1b); both
+    # are pruned on any successful pop of that session_id (Risk 3) so neither
+    # grows unbounded across the worker's lifetime.
+    _conflict_counts: dict[str, int] = {}
+    _conflict_escalated: set[str] = set()
+    _conflict_last_resort: set[str] = set()
 
     try:
         while True:
@@ -1610,6 +1697,84 @@ async def _worker_loop(
                     worker_key,
                     e,
                 )
+
+                # Bounded escalation (Defect A) — StatusConflictError already
+                # carries session_id (spike-4), populated at the pop-path
+                # raise site (models/session_lifecycle.py). .get(..., 0)
+                # tolerates an unknown/empty session_id ("?" or "") without a
+                # KeyError; it just accumulates under that literal key.
+                _conflict_sid = e.session_id
+                _conflict_counts[_conflict_sid] = _conflict_counts.get(_conflict_sid, 0) + 1
+                _count = _conflict_counts[_conflict_sid]
+
+                if _count >= CONFLICT_ESCALATION_PRIMARY_N:
+                    # Primary remediation: delete the stale terminal duplicate
+                    # that is causing the index ambiguity — every tick,
+                    # unconditionally (idempotent; a transient delete failure
+                    # simply retries next tick instead of wedging — Risk 1b).
+                    # This is NOT gated by _conflict_escalated; only the log
+                    # below is.
+                    try:
+                        _deleted = await offload_redis(
+                            _delete_stale_terminal_duplicates, _conflict_sid
+                        )
+                    except Exception as _exc:
+                        _deleted = 0
+                        logger.warning(
+                            "[worker:%s] Escalation delete of terminal duplicates "
+                            "failed for session_id=%s (will retry next tick): %s",
+                            worker_key,
+                            _conflict_sid,
+                            _exc,
+                        )
+                    if _conflict_sid not in _conflict_escalated:
+                        logger.error(
+                            "[worker:%s] StatusConflictError repeated %d times for "
+                            "session_id=%s — deleted %d stale terminal duplicate(s) "
+                            "to clear the pop-loop ambiguity",
+                            worker_key,
+                            _count,
+                            _conflict_sid,
+                            _deleted,
+                        )
+                        _conflict_escalated.add(_conflict_sid)
+
+                if _count >= CONFLICT_ESCALATION_LAST_RESORT_N:
+                    # Last resort, residual case only: the terminal duplicate
+                    # has child sessions, so the child-guard above skipped its
+                    # delete and the conflict persists. Cancel the stuck
+                    # pending record so the loop stops spinning, and record
+                    # why via cancel_reason for operator visibility (round-2
+                    # NIT 1). finalize_session() is idempotent, so a repeat
+                    # call after a successful cancel is a safe no-op; the log
+                    # is gated by _conflict_last_resort so it fires once even
+                    # if this branch keeps re-firing.
+                    try:
+                        _cancelled = await offload_redis(
+                            _cancel_stuck_pending_on_conflict, _conflict_sid
+                        )
+                    except Exception as _exc:
+                        _cancelled = False
+                        logger.warning(
+                            "[worker:%s] Last-resort cancel failed for session_id=%s "
+                            "(will retry next tick): %s",
+                            worker_key,
+                            _conflict_sid,
+                            _exc,
+                        )
+                    if _conflict_sid not in _conflict_last_resort:
+                        logger.error(
+                            "[worker:%s] StatusConflictError repeated %d times for "
+                            "session_id=%s and the terminal duplicate could not be "
+                            "deleted (has child sessions) — cancelled the stuck "
+                            "pending record (cancelled=%s) as a last resort",
+                            worker_key,
+                            _count,
+                            _conflict_sid,
+                            _cancelled,
+                        )
+                        _conflict_last_resort.add(_conflict_sid)
+
                 if _slot_acquired:
                     registry.release_unbound()
                     _slot_acquired = False
@@ -1762,6 +1927,16 @@ async def _worker_loop(
                         if _check_restart_flag():
                             _trigger_restart()
                         break
+
+            # Bounded escalation reset (Defect A, Risk 3): `session` is
+            # guaranteed non-None here (every None branch above `continue`s
+            # or `break`s), so this is the single convergence point for every
+            # pop path (fast, drain-guard, and exit-time fallback). Drop this
+            # session_id's conflict-tracking state on any successful pop so
+            # it never grows unbounded across the worker's lifetime.
+            _conflict_counts.pop(session.session_id, None)
+            _conflict_escalated.discard(session.session_id)
+            _conflict_last_resort.discard(session.session_id)
 
             session_failed = False
             session_completed = False
