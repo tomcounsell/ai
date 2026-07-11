@@ -132,6 +132,21 @@ _TERMINAL_ISSUE_LOOKUP_STATUSES = frozenset({"failed", "completed", "killed"})
 def find_session_by_issue(issue_number: int, include_terminal: bool = False):
     """Find an eng session tracking the given issue number.
 
+    Demoted scope (issue #2012): since the durable pipeline ledger moved to
+    the issue-keyed ``PipelineLedger`` (``agent/pipeline_ledger.py``), this
+    function is no longer part of any writer's state-integrity path. Its
+    remaining callers are routing/ownership (``tools/sdlc_session_ensure.py``,
+    ``tools/sdlc_next_skill.py``, and the routing bits of
+    ``tools/sdlc_dispatch.py``) plus the reader's cold-path session fallback
+    (``tools/sdlc_stage_query.py::_find_session_by_issue()``, reached only
+    when the ledger resolves but is empty -- a belt for pre-cutover issues,
+    NOT the takeover mechanism). It is NOT a dashboard caller
+    (``ui/data/sdlc.py`` reads ``session.stage_states``/
+    ``PipelineStateMachine(session)`` or the ledger directly) and it is NOT
+    called by any of the four writer CLIs (``stage-marker``, ``verdict
+    record``, ``meta-set``, ``dispatch record``) anymore -- see
+    ``docs/features/sdlc-issue-keyed-stage-ledger.md``.
+
     Two-pass match over eng sessions:
 
     1. Primary pass: ``issue_url`` endswith ``/issues/{issue_number}``.
