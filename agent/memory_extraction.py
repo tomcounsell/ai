@@ -118,6 +118,48 @@ _JSON_SHRAPNEL_RE = re.compile(r'^"[a-z_]+"\s*:\s*.*,?\s*$')
 # the boundary (25% rejected, 35% accepted).
 _MIN_NON_WHITESPACE_RATIO = 0.3
 
+# -----------------------------------------------------------------------------
+# LLM-based refusal-detector complement (issue #1829).
+#
+# Default-OFF: the closed-vocabulary ``_REFUSAL_PATTERNS`` check above is a
+# fundamentally finite vocabulary — whenever Haiku phrases a refusal in a way
+# that isn't a listed substring, the novel phrasing escapes and gets persisted
+# as noise (the recurring #1497/#1786/#1931/#2016 anomaly-cluster). This
+# complement adds one optional yes/no Haiku call (via the existing
+# ``_llm_call`` helper) that classifies the post-LLM extraction output as
+# REFUSAL or CONTENT, generalizing beyond the enumerated phrasings. It is
+# gated behind ``MEMORY_REFUSAL_LLM_ENABLED``, which defaults to False — zero
+# cost, zero behavior change until an operator opts in.
+#
+# Fail-open contract: any error raised by the complement call (``TimeoutError``
+# or otherwise) is caught, recorded via ``_record_extraction_error``, and
+# extraction PROCEEDS to parse — a classifier failure must never discard a
+# legitimate extraction. Likewise, any unexpected/malformed model output is
+# treated as CONTENT (not REFUSAL) at the parse boundary.
+#
+# Call-count guarantee: at most one extra Haiku call per non-empty extraction,
+# and only when the flag is ON AND the closed-vocab ``_looks_like_refusal``
+# check already returned False (obvious refusals never reach this call).
+# -----------------------------------------------------------------------------
+_REFUSAL_LLM_ENV_VAR = "MEMORY_REFUSAL_LLM_ENABLED"
+
+
+def _refusal_llm_enabled() -> bool:
+    """Return True if the LLM refusal-detector complement is enabled.
+
+    Read from ``os.environ`` at call time (not module-capture) so tests can
+    toggle it with ``monkeypatch.setenv``. Defaults to False. Mirrors
+    ``agent/tool_budget.py``'s ``_env_true`` true-value parsing (a local copy,
+    not an import, to avoid new coupling): any value except ``""``, ``"0"``,
+    ``"false"``, ``"no"`` (case-insensitive) is truthy.
+    """
+    return os.environ.get(_REFUSAL_LLM_ENV_VAR, "false").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+    )
+
 
 def extract_json_payload(raw_text: str) -> str | None:
     r"""Strip markdown code fences and slice to outermost JSON brackets.
@@ -335,6 +377,40 @@ def _record_extraction_error(
         )
 
 
+async def _looks_like_refusal_llm(text: str) -> bool:
+    """Ask Haiku whether ``text`` is a refusal (yes/no complement).
+
+    This WRAPS the closed-vocabulary ``_looks_like_refusal`` check — it never
+    replaces it, and is only invoked when ``_refusal_llm_enabled()`` is True
+    AND the closed-vocab check already returned False (obvious refusals are
+    caught earlier and never reach this call). Issues exactly one
+    ``_llm_call`` against a bounded slice of ``text`` and expects exactly one
+    of two tokens back: ``REFUSAL`` or ``CONTENT``.
+
+    Returns True only when the model's reply starts with ``REFUSAL``
+    (case-insensitive). Any other output — including unexpected or malformed
+    text — is treated as ``CONTENT`` (fail-open at the parse boundary; a
+    classifier that returns garbage must never suppress a legitimate
+    extraction).
+    """
+    from config.models import MODEL_FAST
+
+    prompt = (
+        "Is the following text a refusal or meta-commentary about the ABSENCE "
+        "of content (e.g. 'there is nothing to extract', 'no observations "
+        "found'), as opposed to a genuine observation about a real event, "
+        "decision, or pattern?\n\n"
+        "Reply with EXACTLY one word: REFUSAL or CONTENT.\n\n"
+        f"---\n\n{text[:4000]}"
+    )
+    raw = await _llm_call(
+        model=MODEL_FAST,
+        max_tokens=5,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return raw.strip().upper().startswith("REFUSAL")
+
+
 # Extraction prompt for Haiku — structured JSON output
 EXTRACTION_PROMPT = (
     "Extract novel observations from this agent session response.\n"
@@ -498,6 +574,33 @@ async def extract_observations_async(
                 session_id,
             )
             return []
+
+        # LLM refusal-detector complement (issue #1829) — optional, default-OFF.
+        # Wraps (never replaces) the closed-vocab check above. Only runs when
+        # the flag is on AND the closed-vocab check did not already
+        # short-circuit. Any error fails open: extraction proceeds to parse.
+        if _refusal_llm_enabled():
+            try:
+                if await _looks_like_refusal_llm(raw_text):
+                    logger.debug(
+                        "[memory_extraction] LLM refusal-complement match — skipping save "
+                        "for session_id=%s",
+                        session_id,
+                    )
+                    return []
+            except TimeoutError:
+                logger.warning(
+                    "[memory_extraction] Refusal-complement call exceeded hard timeout "
+                    "(non-fatal, fail-open); extraction proceeds for session_id=%s",
+                    session_id,
+                )
+                _record_extraction_error("TimeoutError", session_id, project_key)
+            except Exception as e:
+                logger.debug(
+                    "[memory_extraction] Refusal-complement failed (non-fatal, fail-open): %s",
+                    e,
+                )
+                _record_extraction_error(type(e).__name__, session_id, project_key)
 
         # Parse observations with category-aware importance
         parsed = _parse_categorized_observations(raw_text)
