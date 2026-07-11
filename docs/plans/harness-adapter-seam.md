@@ -6,6 +6,7 @@ owner: Valor Engels
 created: 2026-07-11
 tracking: https://github.com/tomcounsell/ai/issues/2000
 last_comment_id:
+revision_applied: true
 ---
 
 # Phase 2: HarnessAdapter Seam — Normalized Turn Events + JSON-Schema Routing for `claude -p`
@@ -65,7 +66,7 @@ structured-output validation and we still route by regex.
 | TurnResult | Normalized return type: `{resume_handle, structured_output \| final_text, events, usage, exit_reason}` — delivers program item T2.4 | Solution; #2004 scope revision |
 | Normalized TurnEvents | Thin event model aligned with codex ThreadEvent names (`turn.started`, `item.*`, `turn.completed{usage}`, `turn.failed`) — only what the runner consumes | master plan, Data Flow |
 | Prefix-token routing | `^\[/(dev\|user\|complete)\]` regex classifying the PM's final text | `agent/session_runner/router.py` |
-| Capture-at-init | Re-reading the freshest session uuid from each turn's `system/init` event because `--resume` historically forked ids | `agent/session_runner/role_driver.py:210-254` |
+| Capture-at-init | On each turn's `system/init` event, retargeting `_transcript_path` (mid-turn-preempt safety) *and* reassigning `_claude_session_id` (historically because `--resume` forked ids) — two independent rationales | `agent/session_runner/role_driver.py:238-257` |
 | Dead SDK path | `ValorAgent` + `get_agent_response_sdk` + `_active_clients` + `idle_sweeper` — the persistent-`ClaudeSDKClient` substrate, superseded by the `claude -p` harness | `agent/sdk_client.py`, `worker/idle_sweeper.py` |
 
 ## Freshness Check
@@ -107,7 +108,9 @@ structured-output validation and we still route by regex.
 The issue framing ("only two legacy tests reference it") is **understated**. Ground-truth grep found:
 - **Live production couplers beyond `sdk_client.py`:** `agent/__init__.py` re-exports
   `ValorAgent`/`get_active_client`/`get_all_active_sessions`; `worker/__main__.py:906-916` supervises
-  `idle_sweeper`; `agent/health_check.py:546-548` calls `get_active_client(session_id)`.
+  `idle_sweeper`; `agent/health_check.py::_handle_steering` calls `get_active_client(session_id)` in a
+  dead `if client:` arm — the surrounding `else` re-push body is the live CLI-harness steering path and
+  is KEPT (only the arm is pruned).
 - **Test surface (11 files + conftest), not two:** `tests/conftest.py` (centralized
   `claude_agent_sdk` MagicMock, lines 94-153), `test_agent_session_hierarchy.py`,
   `test_cross_repo_gh_resolution.py`, `test_cross_wire_fixes.py`, `test_persona_substitution.py`,
@@ -250,13 +253,18 @@ Run via `python scripts/check_prerequisites.py docs/plans/harness-adapter-seam.m
 ### Key Elements
 
 - **`agent/session_runner/harness/` package (new)**: `base.py` (protocol + `TurnRequest`/`TurnResult`/
-  `TurnEvent`/`HarnessCapabilities`), `claude.py` (the extracted claude adapter), `events.py`
-  (normalized event model, codex-ThreadEvent-aligned names).
+  `TurnEvent`), `claude.py` (the extracted claude adapter), `events.py` (normalized event model,
+  codex-ThreadEvent-aligned names). `HarnessCapabilities` is **deferred** — it is speculative infra
+  with no consumer in this PR (its only reader would be the Phase 3 codex adapter / auto-selection
+  policy). It ships with #2001, not here.
 - **`TurnResult`**: the normalized return type (delivers program item T2.4). `exit_reason` is #2004's
   `ExitReason` StrEnum — no parallel taxonomy.
 - **Schema routing**: PM turn schema `{route: user|complete|continue, message: str, file_paths?: [str]}`
   passed via `--json-schema`; `router.py` prefers the validated object, falls back to prefix regex
-  (emitting `schema_routing_fallback` telemetry), then compliance nudge.
+  (emitting `schema_routing_fallback` telemetry), then compliance nudge. A `schema_routing_fallback`
+  **alert threshold** fires when the fallback rate exceeds **5% of turns over a rolling 1h window** (a
+  healthy schema path is ~0%); a sustained breach means the schema contract has silently regressed and
+  routing has degraded to regex. Wire the threshold into the existing analytics/alerting surface.
 - **`file_paths` slot**: delivers #1802 natively — the PM's schema output can name files to attach,
   flowing onto the canonical outbox path. #1802 is confirmed and closed at this PR's merge.
 - **Dead SDK path deletion**: remove `ValorAgent`, `get_agent_response_sdk`, `_active_clients` +
@@ -276,14 +284,26 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
 - Create `agent/session_runner/harness/{base,claude,events}.py`. Move argv/env assembly + stream-json
   parsing from `get_response_via_harness` (2339-2803) into `claude.py`. A **golden argv/env test**
   asserts the extracted adapter produces byte-identical argv and environment to the pre-extraction
-  function for a representative `TurnRequest` — the extraction is provably behavior-preserving before
-  any semantics change.
+  function for a representative `TurnRequest`. The golden test alone does not prove *behavior*
+  preservation, so pair it with **behavioral-parity fixtures** asserting: (a) the final assembled argv
+  **string** on both the first-turn (no `--resume`) and resume (`--resume <uuid>`) paths; (b)
+  `_store_claude_session_uuid` fires with the harness-reported session id on turn completion
+  (`sdk_client.py:2706`); and (c) the **#1980 retry-without-`--resume` branch** — a resumed subprocess
+  that exits non-zero *without* a `result` event re-runs once with the full-context message and
+  `--resume` stripped (`sdk_client.py:2379-2392, 2528-2536`), while a non-zero exit *after* a valid
+  `result` does NOT retry. Together these make the extraction provably behavior-preserving before any
+  semantics change.
 - The runner (`role_driver.py`, `session_completion.py`) call sites switch from
   `get_response_via_harness` to the adapter. Runner consumes normalized `TurnEvent`s for
   liveness/telemetry; the adapter emits `session.started{handle}` as its first event so the runner
   persists the resume handle at first sight (Race 1).
-- Apply spike-2's finding inside `claude.py` only: assert-and-alarm on a stable id (log + Sentry keyed
-  to the persisted `claude_version` on drift), or keep re-capture private to the adapter if forked.
+- Apply spike-2's finding to the `_claude_session_id` reassignment **only**. `_handle_init`
+  (`role_driver.py:238-257`) carries a second, independent rationale the resume-id question does not
+  touch: it retargets `self._transcript_path` on every init so a mid-turn preempt/kill resumes the
+  *partial* transcript, never the stale pre-turn uuid. So **keep `self._transcript_path` set on every
+  init event unconditionally**; gate only the `self._claude_session_id` reassignment behind the
+  resume-drift check (assert-and-alarm on a stable id — log + Sentry keyed to persisted `claude_version`
+  on drift — or keep the reassignment if forked). Do not collapse both assignments behind one guard.
 
 **Dead SDK path deletion (same PR, no legacy tolerance):**
 - Delete `get_agent_response_sdk` (3355-end), `ValorAgent` (1511-2338), `_active_clients` and its
@@ -294,9 +314,15 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
 - Remove the `claude_agent_sdk` import (36-42) once no in-file references remain (verified: the kept
   harness path uses no SDK types); drop `claude-agent-sdk==0.2.116` from `pyproject.toml:9` and update
   the `mcp>=1.8.0` comment at `:10` (mcp stays — used by `mcp_servers/`).
-- Prune `agent/health_check.py:546-548` (`get_active_client` branch) — the SDK-client liveness check
-  is meaningless once no persistent clients exist; replace with the harness-path health signal or
-  remove the branch.
+- In `agent/health_check.py::_handle_steering` (the sole steering-injection/delivery path for all
+  CLI-harness production sessions, NOT a liveness check), delete **only** the dead `if client:` SDK arm
+  (the `get_active_client(session_id)` call + its `from agent.sdk_client import get_active_client`
+  import, and the `interrupt()`/`query()` injection body). **KEEP the `else` body** — the
+  `_repush_messages` Redis re-push that hands steering messages to the worker's turn-boundary drain. It
+  is the live production steering fallback for every CLI-harness session. After the edit the re-push
+  becomes the unconditional body (no `client` local remains); the surrounding `try/except`
+  re-push-on-failure guard stays untouched. Regression-test that a steering message injected while a
+  CLI-harness session runs still lands on the Redis list and is drained next turn.
 - Shrink `agent/__init__.py` exports (`ValorAgent`, `get_active_client`, `get_all_active_sessions`).
 - Coordinate scope with #1925: comment that this PR completes its harness half; #1925 keeps only the
   PydanticAI/non-harness-LLM lane.
@@ -381,9 +407,13 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
 
 **NEW:**
 - [ ] `tests/unit/session_runner/test_harness_argv_golden.py` — CREATE: byte-equivalence golden test
-  for the extraction.
+  for the extraction, PLUS behavioral-parity fixtures asserting the final argv string on first-turn and
+  resume paths, `_store_claude_session_uuid` firing on completion, and the #1980
+  retry-without-`--resume` branch (and its no-retry-after-valid-`result` counterpart).
 - [ ] `tests/unit/session_runner/test_schema_routing.py` — CREATE: schema-first routing + fallback +
-  `schema_routing_fallback` telemetry + `file_paths` passthrough.
+  `schema_routing_fallback` telemetry + `file_paths` passthrough. The `file_paths` case asserts a real
+  **file-delivery behavior** (a named file becomes an attachment on the outbox record), not just that
+  the slot is parsed — the plumbing-only assertion is what let #1802 be closed prematurely once.
 
 ## Rabbit Holes
 
@@ -393,8 +423,10 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
   sessions stay raw CLI subprocesses (two-transport rule). Don't blend them in this PR.
 - **Reviving the idle-sweeper for the harness path.** The sweeper solves a persistent-client staleness
   problem the `claude -p` subprocess model does not have. Delete it; do not "generalize" it.
-- **Chasing every `_active_clients` reader.** Confirm each reader is SDK-only (health_check, steering,
-  exports) and prune deliberately; do not leave a half-removed registry with a lone accessor.
+- **Deleting the `_handle_steering` `else` body along with the SDK arm.** Only the `if client:` arm is
+  SDK-only; the `else` Redis re-push is the live CLI-harness steering path and MUST survive. Prune the
+  arm, keep the fallback. Confirm each remaining `_active_clients` reader (the `agent/__init__.py`
+  exports) is SDK-only before removing; do not leave a half-removed registry with a lone accessor.
 - **Rewriting the whole `sdk_client.py`.** Extract the harness path and delete the dead path; do not
   re-architect the surviving helper functions (`build_harness_turn_input`, `verify_harness_health`)
   beyond what the seam requires.
@@ -408,7 +440,11 @@ updated, `file_paths` wired) → apply the resume-id finding → live probe one 
 degrades latency.
 **Mitigation:** Task 2.1 is a standalone empirical probe BEFORE the routing rewrite. If unusable, ship
 the seam + normalized events + SDK deletion and keep prefix routing; schema routing moves to a
-follow-up.
+follow-up. Schema routing is **separable by construction** — Task 2.3 depends only on the seam
+(Task 2.2), touches disjoint files (`router.py`, `prime-pm-role.md`, the schema-routing tests), and can
+be lifted into its own PR without reworking 2.2. The default remains one PR (the `file_paths` slot that
+closes #1802 rides on the schema), but the split is the pre-authorized fallback the moment Task 2.1
+finds the flag unusable OR review deems the combined diff too large — no re-plan needed.
 
 ### Risk 2: The extraction destabilizes the hottest path in the system
 **Impact:** every production session flows through this code; a subtle env/argv drift breaks all
@@ -501,8 +537,8 @@ removed atomically in the same PR.
 
 ### Feature Documentation
 - [ ] Create `docs/features/harness-adapter.md` — the seam: `HarnessAdapter` protocol, `TurnRequest`/
-  `TurnResult`, normalized `TurnEvent` model, `HarnessCapabilities`, schema routing, the resume-handle
-  contract, and the claude adapter's specifics.
+  `TurnResult`, normalized `TurnEvent` model, schema routing, the resume-handle contract, and the
+  claude adapter's specifics. (`HarnessCapabilities` is deferred to Phase 3 / #2001 — out of scope here.)
 - [ ] Update `docs/features/headless-session-runner.md` — routing section (schema replaces prefix
   tokens), resume-id findings, the adapter extraction, and the removal of the SDK path.
 - [ ] Update `docs/features/session-lifecycle.md` — resume-handle generalization of
@@ -518,18 +554,22 @@ removed atomically in the same PR.
 ## Success Criteria
 
 - [ ] `agent/session_runner/harness/{base,claude,events}.py` exist; the golden argv/env test proves the
-  extraction is byte-identical (behavior-preserving).
+  extraction is byte-identical, and behavioral-parity fixtures prove the final argv string (first-turn +
+  resume), `_store_claude_session_uuid` firing, and the #1980 retry-without-`--resume` branch are all
+  preserved.
 - [ ] `TurnResult` is the runner's return type; `exit_reason` uses #2004's `ExitReason` StrEnum (no
   parallel taxonomy); the "no raw exit-reason literals outside router" verification still passes.
 - [ ] PM routing driven by `--json-schema` with prefix-regex fallback emitting `schema_routing_fallback`
-  telemetry; `[/user]` teaching absent from `prime-pm-role.md`.
+  telemetry, and an alert threshold fires when the fallback rate exceeds 5% over a rolling 1h window;
+  `[/user]` teaching absent from `prime-pm-role.md`.
 - [ ] `file_paths` carried through the schema onto the canonical delivery path; #1802 verified and closed
   at merge.
 - [ ] The dead SDK path is gone: `ValorAgent`, `get_agent_response_sdk`, `_active_clients` (+ accessors),
   `worker/idle_sweeper.py` and its wiring, the `claude_agent_sdk` import, and the `claude-agent-sdk`
   dependency are all deleted; no dangling references (grep gates green).
-- [ ] Resume-id behavior empirically recorded; capture-at-init simplified to assert-and-alarm or kept
-  private inside `claude.py`.
+- [ ] Resume-id behavior empirically recorded; the `_claude_session_id` reassignment simplified to
+  assert-and-alarm (or kept if forked), while `_transcript_path` is still set on every init event
+  (mid-turn-preempt retargeting preserved).
 - [ ] A live eng session completes a real turn end-to-end through the adapter with schema routing on this
   machine before deploy.
 - [ ] Tests pass (`/do-test`).
@@ -580,12 +620,17 @@ removed atomically in the same PR.
   argv/env pre/post.
 - Runner consumes normalized `TurnEvent`s; adapter emits `session.started{handle}` first (Race 1).
   `TurnResult.exit_reason` uses #2004's `ExitReason` enum. Note T2.4 delivered on the program plan.
-- Apply spike-2 finding (assert-and-alarm or retained re-capture) inside `claude.py` only.
+- Apply spike-2 finding to the `_claude_session_id` reassignment only (assert-and-alarm or retained
+  re-capture); keep `_transcript_path` retargeted on every init event (mid-turn-preempt rationale).
 - **Delete the dead SDK path in the same PR:** `ValorAgent` (1511-2338), `get_agent_response_sdk`
   (3355-end), `_active_clients` + `get_active_client`/`get_all_active_sessions` (59, 656, 666, 1771,
   2012), `worker/idle_sweeper.py` + its `worker/__main__.py:906-916` wiring; remove the `claude_agent_sdk`
   import (36-42) and drop `claude-agent-sdk==0.2.116` from `pyproject.toml:9` (update the `mcp` comment).
-  Prune `agent/health_check.py:546-548` and the `agent/__init__.py` exports. Run grep gates for zero
+  In `agent/health_check.py::_handle_steering`, delete ONLY the dead `if client:` SDK arm + the
+  `get_active_client` import/call — **KEEP the `else` Redis re-push body** (the live CLI-harness
+  steering fallback) as the unconditional body. Shrink the `agent/__init__.py` exports. Scrub the stale
+  `get_response_via_sdk` comment references (the harness path at `sdk_client.py:2709` and the
+  `idle_sweeper` docstring name the deleted function under a wrong name). Run grep gates for zero
   dangling references. Comment on #1925 that its harness half is done here.
 
 ### 2.3 Schema routing + `file_paths` (#1802)
@@ -613,6 +658,12 @@ removed atomically in the same PR.
 - **Parallel**: false
 - Run all Verification rows; grep gates for deleted symbols; a live eng session end-to-end on this
   machine before deploy.
+- **#1802 real file-delivery assertion (not plumbing):** #1802 was closed once on a plumbing-only
+  assertion — do not repeat that. Drive one real turn whose schema output names an actual file in
+  `file_paths`, and assert the file is **delivered as an attachment** on the transport (the outbox
+  record carries the file / the recipient receives it), not merely that `file_paths` reached the
+  router. Capture the delivered-artifact evidence in the validation report before posting the #1802
+  close note.
 
 ### N-1. Documentation
 - **Task ID**: document-feature
@@ -644,6 +695,7 @@ removed atomically in the same PR.
 | No claude argv outside adapter | `grep -rn '"claude", "-p"' agent/ --include="*.py" \| grep -vc harness/` | match count == 0 |
 | ValorAgent deleted | `grep -rn "class ValorAgent" agent/ --include="*.py"` | match count == 0 |
 | get_agent_response_sdk deleted | `grep -rn "def get_agent_response_sdk" agent/ --include="*.py"` | match count == 0 |
+| No SDK-response symbol refs (real or stale name) | `grep -rn "get_agent_response_sdk\|get_response_via_sdk" agent/ worker/ --include="*.py"` | match count == 0 |
 | _active_clients registry deleted | `grep -rn "_active_clients" agent/ worker/ --include="*.py"` | match count == 0 |
 | idle_sweeper deleted | `test -f worker/idle_sweeper.py && echo present \|\| echo gone` | output contains gone |
 | claude_agent_sdk import gone | `grep -rn "import claude_agent_sdk\|from claude_agent_sdk" agent/ worker/ bridge/ tools/ --include="*.py"` | match count == 0 |
@@ -654,7 +706,13 @@ removed atomically in the same PR.
 
 | Severity | Critic | Finding | Addressed By | Implementation Note |
 |----------|--------|---------|--------------|---------------------|
-| | | | | |
+| BLOCKER | war-room | `health_check.py:538-560` mischaracterized as the SDK-client liveness check; it is the sole steering-injection/delivery path for all CLI-harness (production) sessions | Technical Approach (SDK deletion) + Task 2.2 + Freshness Check + Rabbit Holes | Delete ONLY the dead `if client:` SDK arm + `get_active_client` import; KEEP the `else` Redis re-push body as the unconditional CLI-harness steering fallback; regression-test the re-push path |
+| Concern | war-room | Golden argv/env test alone does not prove behavior preservation | Technical Approach (extraction) + Test Impact NEW + Success Criteria | Added behavioral-parity fixtures: final argv string (first-turn + resume), `_store_claude_session_uuid` firing, #1980 retry-without-`--resume` branch (+ no-retry-after-valid-`result`) |
+| Concern | war-room | `_handle_init` capture-at-init has a second rationale (mid-turn preempt transcript retargeting) the plan dropped | Technical Approach + Definitions + Task 2.2 + Success Criteria | Keep `_transcript_path` set on every init unconditionally; gate ONLY the `_claude_session_id` reassignment behind the resume-drift check |
+| Concern | war-room | `HarnessCapabilities` speculative with no consumer; schema routing separable — consider split | Solution Key Elements + Risk 1 + Documentation | Deferred `HarnessCapabilities` to Phase 3 / #2001; documented schema routing as separable-by-construction, pre-authorized PR split |
+| Concern | war-room | #1802 was closed once on a plumbing assertion — need a real file-delivery assertion | Task 2.4 + Test Impact NEW | Task 2.4 drives a real file into `file_paths` and asserts attachment delivery on the transport, not plumbing; test asserts file-delivery behavior |
+| Nit | war-room | Missing `schema_routing_fallback` alert threshold | Solution (Schema routing) + Success Criteria | Alert fires at >5% fallback rate over a rolling 1h window |
+| Nit | war-room | `get_response_via_sdk` vs `get_agent_response_sdk` grep-gate name mismatch | Verification + Task 2.2 | Grep gate now catches both names; scrub stale `get_response_via_sdk` comments (`sdk_client.py:2709`, idle_sweeper docstring) |
 
 ---
 
@@ -664,9 +722,6 @@ removed atomically in the same PR.
    file_paths?: [str]}` — is `continue` the right third route value (vs. reusing the existing nudge
    semantics), and should `file_paths` carry captions/alt-text or bare paths (bearing on the #1370
    delivery contract)? Finalized in build after Task 2.1, but a preferred shape now saves a round.
-2. **`health_check.py` `get_active_client` branch.** Confirm the intended replacement: drop the branch
-   entirely, or repoint it to a harness-path liveness signal (the runner already owns the single
-   authoritative liveness signal, so dropping is the likely answer).
-3. **Fallback removal timing.** Owner decision defers prefix-regex-fallback removal to a Phase 3
+2. **Fallback removal timing.** Owner decision defers prefix-regex-fallback removal to a Phase 3
    follow-up. Confirm this PR ships the fallback as a permanent-for-now runtime guard (no deprecation
    warning here).
