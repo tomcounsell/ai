@@ -369,10 +369,10 @@ extracted path, and it absorbs the seam + `TurnResult` + schema routing + a whol
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| claude CLI ≥ 2.1.x with `--json-schema` | `claude --help \| grep -q -- --json-schema` | schema routing |
+| claude CLI ≥ 2.1.x with `--json-schema` | `case "$(claude --help)" in *--json-schema*) exit 0;; *) exit 1;; esac` | schema routing |
 | #1999 (Phase 1) merged | `gh issue view 1999 --json state -q .state` → CLOSED | resume/liveness baseline |
 | #2004 (`ExitReason` StrEnum) merged | `grep -q "class ExitReason" agent/session_runner/router.py` | one exit-reason taxonomy |
-| Heartbeat suite green (entry gate) | `pytest tests/unit/test_session_heartbeat_progress.py -q` | regression baseline |
+| Heartbeat suite green (entry gate) | `pytest tests/integration/test_session_heartbeat_progress.py -q` | regression baseline |
 
 Run via `python scripts/check_prerequisites.py docs/plans/harness-adapter-seam.md`.
 
@@ -821,7 +821,7 @@ removed atomically in the same PR.
 | Tests pass | `pytest tests/ -x -q` | exit code 0 |
 | Lint clean | `python -m ruff check .` | exit code 0 |
 | Format clean | `python -m ruff format --check .` | exit code 0 |
-| Heartbeat suite green (entry gate) | `pytest tests/unit/test_session_heartbeat_progress.py -q` | exit code 0 |
+| Heartbeat suite green (entry gate) | `pytest tests/integration/test_session_heartbeat_progress.py -q` | exit code 0 |
 | Golden argv test exists | `pytest tests/unit/session_runner/test_harness_argv_golden.py -q` | exit code 0 |
 | Schema routing test exists | `pytest tests/unit/session_runner/test_schema_routing.py -q` | exit code 0 |
 | No prefix-token teaching in PM prime | `grep -c "\[/user\]" .claude/commands/roles/prime-pm-role.md` | match count == 0 |
