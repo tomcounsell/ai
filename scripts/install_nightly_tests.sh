@@ -7,6 +7,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/launchctl.sh"
+
 set -a
 # shellcheck disable=SC1091
 [ -f "$PROJECT_DIR/.env" ] && source "$PROJECT_DIR/.env"
@@ -98,7 +101,7 @@ sed "s|__PROJECT_DIR__|$PROJECT_DIR|g; s|__HOME_DIR__|$HOME|g; s|__SERVICE_LABEL
 
 # Load new version
 echo "Loading $LABEL..."
-launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
+launchctl_bootstrap_fail_soft "gui/$(id -u)" "$PLIST_DST" "$LABEL" || exit 1
 
 echo ""
 echo "Nightly regression test service installed successfully."
