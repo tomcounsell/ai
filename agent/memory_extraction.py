@@ -656,7 +656,11 @@ def _parse_categorized_observations(raw_text: str) -> list[tuple[str, float, dic
                     # JSON-shrapnel-shaped values (e.g. '"category": "decision"')
                     # never get saved and later superseded by the audit.
                     if _looks_like_refusal(observation):
-                        logger.debug(
+                        # NIT (#2016 re-critique): logger.info, not logger.debug —
+                        # debug is typically off in production, and that blind
+                        # spot is exactly what caused four historical
+                        # misdiagnoses of this recurring signal.
+                        logger.info(
                             "Fix A (#2016) dropped JSON-branch observation: category=%s preview=%r",
                             category,
                             observation[:60],
