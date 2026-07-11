@@ -14,6 +14,7 @@ used by the router's Legal Dispatch Guards::
             "latest_critique_verdict": "NEEDS REVISION",
             "latest_review_verdict": null,
             "revision_applied": false,
+            "revision_applied_at": null,
             "pr_number": null,
             "same_stage_dispatch_count": 2,
             "last_dispatched_skill": "/do-plan-critique"
@@ -44,6 +45,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from tools._sdlc_utils import _resolve_target_repo
@@ -391,6 +393,48 @@ def _parse_revision_applied(plan_path: Path | None) -> bool:
     return match.group(1).lower() == "true"
 
 
+_FRONTMATTER_REVISION_APPLIED_AT_RE = re.compile(
+    r"^revision_applied_at:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def _parse_revision_applied_at(plan_path: Path | None) -> str | None:
+    """Read the plan frontmatter and return the ``revision_applied_at`` timestamp.
+
+    Structural twin of :func:`_parse_revision_applied` (#1760): the sticky
+    ``revision_applied: true`` boolean alone can't distinguish "this is the
+    settle-and-build dispatch" from "this is some later unrelated /do-plan
+    dispatch" because /do-plan sets it on every revision pass. Pairing it with
+    an event-scoped ``revision_applied_at:`` ISO-8601 timestamp lets the
+    router's convergence latch (``_critique_verdict_is_stale``) compare it
+    against dispatch history instead of trusting the boolean alone.
+
+    Returns ``None`` (latch inert, fail-safe) when the plan is missing, the
+    field is absent, or the value fails ``datetime.fromisoformat`` parsing —
+    never raises.
+    """
+    if plan_path is None:
+        return None
+    try:
+        text = plan_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        frontmatter = text[: end if end > 0 else len(text)]
+    else:
+        frontmatter = text[:2000]  # first ~2k chars as a cheap fallback
+    match = _FRONTMATTER_REVISION_APPLIED_AT_RE.search(frontmatter)
+    if not match:
+        return None
+    raw_value = match.group(1)
+    try:
+        datetime.fromisoformat(raw_value)
+    except Exception:
+        return None
+    return raw_value
+
+
 def _extract_verdict_text(record) -> str | None:
     """Read a verdict text from a _verdicts[stage] entry (dict or str)."""
     if isinstance(record, dict):
@@ -462,9 +506,11 @@ def _compute_meta(
 
     plan_path = None
     revision_applied = False
+    revision_applied_at = None
     if issue_number:
         plan_path = _find_plan_path(issue_number)
         revision_applied = _parse_revision_applied(plan_path)
+        revision_applied_at = _parse_revision_applied_at(plan_path)
 
     # plan_exists: True when a plan doc was found on disk (#1640).
     # Used by the router to distinguish "PLAN=ready with a real doc" from
@@ -485,6 +531,7 @@ def _compute_meta(
         "latest_critique_verdict": latest_critique,
         "latest_review_verdict": latest_review,
         "revision_applied": revision_applied,
+        "revision_applied_at": revision_applied_at,
         "pr_number": pr_number,
         "pr_merge_state": pr_merge_state,
         "ci_all_passing": ci_all_passing,
@@ -506,6 +553,7 @@ def _default_meta() -> dict:
         "latest_critique_verdict": None,
         "latest_review_verdict": None,
         "revision_applied": False,
+        "revision_applied_at": None,
         "pr_number": None,
         "pr_merge_state": None,
         "ci_all_passing": None,

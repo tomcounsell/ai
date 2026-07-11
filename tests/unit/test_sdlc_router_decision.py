@@ -13,6 +13,7 @@ from agent.sdlc_router import (
     SKILL_DO_PR_REVIEW,
     Blocked,
     Dispatch,
+    _critique_verdict_is_stale,
     decide_next_dispatch,
 )
 
@@ -744,6 +745,138 @@ class TestCritiqueVerdictStaleness:
         result = decide_next_dispatch(states, meta)
         assert isinstance(result, Dispatch)
         assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+
+class TestConvergenceLatchRevisionAppliedAt:
+    """Event-scoped convergence latch (#1760).
+
+    A bare ``revision_applied`` boolean can't distinguish "this is the
+    settle-and-build dispatch" from "this is some later unrelated /do-plan
+    dispatch" -- /do-plan sets it true on every revision pass. Pairing it
+    with an event-scoped ``meta["revision_applied_at"]`` timestamp lets
+    ``_critique_verdict_is_stale`` suppress staleness only when the latest
+    ``/do-plan`` dispatch is NOT LATER than ``revision_applied_at``.
+    """
+
+    def test_1760_loop_replay_settles_to_build(self):
+        """The exact #1760 loop replay: notes-only revision converges to
+        /do-build instead of re-dispatching /do-plan-critique forever.
+
+        READY TO BUILD verdict recorded at T0. A notes-only revision runs
+        /do-plan (dispatch at T0.5, postdating the verdict) and sets
+        revision_applied_at to T1 (postdating the dispatch). The latch must
+        suppress staleness so row 2b steps aside and row 4a routes to
+        /do-build.
+        """
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "in_progress",
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": "2026-01-01T10:00:00",  # T0
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-plan", "at": "2026-01-01T10:30:00"},  # T0.5 > T0
+            ],
+        }
+        meta = {
+            "last_dispatched_skill": SKILL_DO_PLAN,
+            "latest_critique_verdict": "READY TO BUILD",
+            "revision_applied": True,
+            "revision_applied_at": "2026-01-01T11:00:00",  # T1 > T0.5 (dispatch)
+        }
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_BUILD
+        assert result.skill != SKILL_DO_PLAN_CRITIQUE
+
+    def test_predicate_returns_false_on_settle_and_build_case(self):
+        """Isolated-predicate test: calling _critique_verdict_is_stale directly
+        (not via the row-2b wrapper) proves the PREDICATE changed, not just a
+        caller.
+        """
+        states = {
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": "2026-01-01T10:00:00",  # T0
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-plan", "at": "2026-01-01T10:30:00"},  # T0.5 > T0
+            ],
+        }
+        meta = {"revision_applied_at": "2026-01-01T11:00:00"}  # T1 > T0.5
+        assert _critique_verdict_is_stale(states, meta) is False
+
+    def test_later_unrelated_dispatch_re_stales_normally(self):
+        """A /do-plan dispatch postdating revision_applied_at must re-stale
+        normally -- a genuinely-stale verdict must not be routed to BUILD
+        just because revision_applied happens to still read true.
+        """
+        states = {
+            "PLAN": "completed",
+            "CRITIQUE": "in_progress",
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": "2026-01-01T10:00:00",  # T0
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-plan", "at": "2026-01-02T00:00:00"},  # T2 > T1
+            ],
+        }
+        meta = {
+            "last_dispatched_skill": SKILL_DO_PLAN,
+            "latest_critique_verdict": "READY TO BUILD",
+            "revision_applied": True,
+            "revision_applied_at": "2026-01-01T11:00:00",  # T1 < T2 (dispatch)
+        }
+        assert _critique_verdict_is_stale(states, meta) is True
+        result = decide_next_dispatch(states, meta)
+        assert isinstance(result, Dispatch)
+        assert result.skill == SKILL_DO_PLAN_CRITIQUE
+
+    def test_predicate_malformed_recorded_at_still_false(self):
+        """Existing fail-safe preserved: malformed recorded_at → False, even
+        with a well-formed revision_applied_at present in meta.
+        """
+        states = {
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": "not-a-date",
+                }
+            },
+            "_sdlc_dispatches": [{"skill": "/do-plan", "at": "2026-01-01T11:00:00"}],
+        }
+        meta = {"revision_applied_at": "2026-01-01T11:30:00"}
+        assert _critique_verdict_is_stale(states, meta) is False
+
+    def test_predicate_malformed_revision_applied_at_falls_back_to_timestamp_only(self):
+        """Malformed/absent revision_applied_at leaves the latch inert -- the
+        predicate falls back to the pre-#1760 timestamp-only staleness check
+        (never wrongly reports "not stale" when the latch signal is missing).
+        """
+        states = {
+            "_verdicts": {
+                "CRITIQUE": {
+                    "verdict": "READY TO BUILD",
+                    "recorded_at": "2026-01-01T10:00:00",  # T0
+                }
+            },
+            "_sdlc_dispatches": [
+                {"skill": "/do-plan", "at": "2026-01-01T11:00:00"},  # T1 > T0
+            ],
+        }
+        # Malformed revision_applied_at -> latch inert -> normal staleness (True).
+        assert _critique_verdict_is_stale(states, {"revision_applied_at": "not-a-date"}) is True
+        # Absent revision_applied_at -> latch inert -> normal staleness (True).
+        assert _critique_verdict_is_stale(states, {}) is True
+        assert _critique_verdict_is_stale(states, None) is True
 
 
 class TestCritiqueInProgressNoVerdictDeadEnd:

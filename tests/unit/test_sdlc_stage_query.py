@@ -734,6 +734,66 @@ class TestEnrichedPayload:
 
         assert result["_meta"]["plan_hash_at_build_start"] is None
 
+    def test_compute_meta_parses_revision_applied_at_from_frontmatter(self, tmp_path):
+        """_compute_meta surfaces revision_applied_at parsed from plan frontmatter (#1760)."""
+        from tools.sdlc_stage_query import _compute_meta
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text(
+            "---\n"
+            "status: Ready\n"
+            "revision_applied: true\n"
+            "revision_applied_at: 2026-07-11T16:19:28Z\n"
+            "---\n\n# Plan\n"
+        )
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
+                        meta = _compute_meta({}, None, 1760)
+
+        assert meta["revision_applied_at"] == "2026-07-11T16:19:28Z"
+
+    def test_compute_meta_revision_applied_at_none_when_absent(self, tmp_path):
+        """_compute_meta surfaces revision_applied_at=None when the frontmatter field
+        is absent (latch inert, fail-safe)."""
+        from tools.sdlc_stage_query import _compute_meta
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("---\nstatus: Ready\nrevision_applied: true\n---\n\n# Plan\n")
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
+                        meta = _compute_meta({}, None, 1760)
+
+        assert meta["revision_applied_at"] is None
+
+    def test_compute_meta_revision_applied_at_none_when_unparseable(self, tmp_path):
+        """A malformed revision_applied_at value fails safe to None."""
+        from tools.sdlc_stage_query import _compute_meta
+
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("---\nstatus: Ready\nrevision_applied_at: not-a-date\n---\n\n# Plan\n")
+
+        with patch("tools.sdlc_stage_query._resolve_target_repo", return_value=None):
+            with patch("tools.sdlc_stage_query._fetch_pr_merge_state", return_value=(None, None)):
+                with patch("tools.sdlc_stage_query._lookup_pr", return_value=None):
+                    with patch("tools.sdlc_stage_query._find_plan_path", return_value=plan_path):
+                        meta = _compute_meta({}, None, 1760)
+
+        assert meta["revision_applied_at"] is None
+
+    def test_default_meta_includes_revision_applied_at(self):
+        """_default_meta always includes revision_applied_at, defaulting to None."""
+        from tools.sdlc_stage_query import _default_meta
+
+        meta = _default_meta()
+        assert "revision_applied_at" in meta
+        assert meta["revision_applied_at"] is None
+
 
 class TestFetchPrMergeState:
     """Tests for the _fetch_pr_merge_state helper."""

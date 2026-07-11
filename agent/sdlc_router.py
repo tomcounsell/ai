@@ -791,7 +791,7 @@ def _rule_critique_needs_revision(stage_states: dict, meta: dict, context: dict)
     """
     if meta.get("pr_number"):
         return False
-    if _critique_verdict_is_stale(stage_states):
+    if _critique_verdict_is_stale(stage_states, meta):
         return False
     verdict = normalize_verdict(_latest_critique_verdict(stage_states, meta))
     return CRITIQUE_NEEDS_REVISION in verdict
@@ -911,7 +911,7 @@ def _review_verdict_is_stale(stage_states: dict) -> bool:
         return False
 
 
-def _critique_verdict_is_stale(stage_states: dict) -> bool:
+def _critique_verdict_is_stale(stage_states: dict, meta: dict | None = None) -> bool:
     """Return True if the CRITIQUE verdict predates the latest /do-plan dispatch (stale).
 
     Structural twin of :func:`_review_verdict_is_stale` (mirrors PR #1657's
@@ -921,6 +921,26 @@ def _critique_verdict_is_stale(stage_states: dict) -> bool:
     verdict must route back to ``/do-plan-critique`` (row 2b) rather than
     dead-ending on ``/do-plan`` (row 3).
 
+    Event-scoped convergence latch (#1760): ``meta["revision_applied_at"]`` is
+    an ISO-8601 timestamp written by ``/do-plan`` on the settle-and-build
+    revision pass (structural twin of the existing sticky ``revision_applied``
+    boolean, but event-scoped rather than sticky — see
+    :func:`tools.sdlc_stage_query._parse_revision_applied_at`). A bare boolean
+    is insufficient: ``/do-plan`` sets ``revision_applied: true`` on *every*
+    revision pass, so it can't distinguish "this is the settle-and-build
+    dispatch" from "this is some later unrelated ``/do-plan`` dispatch".
+
+    When present, staleness is suppressed ONLY when the latest ``/do-plan``
+    dispatch (``_latest_dispatch_at``) is NOT LATER than
+    ``revision_applied_at`` — i.e. the dispatch that produced the revision is
+    the one being judged, not a subsequent one. Any ``/do-plan`` dispatch
+    whose ``at`` postdates ``revision_applied_at`` re-stales NORMALLY,
+    regardless of the (still sticky) boolean, so a later unrelated revision
+    never gets a free pass to BUILD. When ``revision_applied_at`` is absent,
+    unparseable, or ``meta`` is not supplied, the latch is inert and this
+    falls back to the original timestamp-only staleness check (fail-safe to
+    pre-#1760 behavior).
+
     Fails safe to False (not stale) on any missing data or parse error.
 
     Edge cases:
@@ -929,6 +949,12 @@ def _critique_verdict_is_stale(stage_states: dict) -> bool:
     - no prior ``/do-plan`` dispatch → False (not stale)
     - equal timestamps → False (not stale, strict ``<``)
     - parse failure (non-iso timestamp) → False (not stale)
+    - latch: latest ``/do-plan`` dispatch <= ``revision_applied_at`` → False
+      (not stale, converged)
+    - latch: latest ``/do-plan`` dispatch > ``revision_applied_at`` → normal
+      timestamp staleness applies (re-stales if genuinely stale)
+    - latch: malformed/absent ``revision_applied_at`` → latch inert, normal
+      timestamp staleness applies
     """
     try:
         verdict_dict = stage_states.get("_verdicts", {}).get("CRITIQUE", {})
@@ -942,6 +968,16 @@ def _critique_verdict_is_stale(stage_states: dict) -> bool:
             return False
         verdict_dt = datetime.fromisoformat(recorded_at)
         plan_dt = datetime.fromisoformat(latest_plan_at)
+
+        revision_applied_at = (meta or {}).get("revision_applied_at")
+        if revision_applied_at:
+            try:
+                revision_dt = datetime.fromisoformat(revision_applied_at)
+            except Exception:
+                revision_dt = None  # malformed -> latch inert, fall through
+            if revision_dt is not None and not (plan_dt > revision_dt):
+                return False  # latest /do-plan dispatch settled this verdict
+
         return verdict_dt < plan_dt
     except Exception:
         return False
@@ -959,7 +995,7 @@ def _rule_critique_verdict_stale(stage_states: dict, meta: dict, context: dict) 
     short-circuits re-critique when the plan hash is unchanged, so this rule can
     only progress on a genuinely revised plan. See the docstring on row 2b.
     """
-    if not _critique_verdict_is_stale(stage_states):
+    if not _critique_verdict_is_stale(stage_states, meta):
         return False
     return bool(_latest_critique_verdict(stage_states, meta).strip())
 
