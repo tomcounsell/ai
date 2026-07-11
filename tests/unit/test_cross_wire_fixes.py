@@ -50,25 +50,13 @@ class TestSessionIsolation:
         result = _has_prior_session("")
         assert result is False
 
-    def test_create_options_fresh_session_no_continue(self):
-        """Fresh sessions should not set continue_conversation=True."""
-        from agent.sdk_client import ValorAgent
-
-        agent = ValorAgent()
-        # Use a session_id that has no prior AgentSession in Redis
-        options = agent._create_options(session_id="fresh_session_no_prior_232")
-        assert options.continue_conversation is False, (
-            "Fresh session should not continue conversation"
-        )
-        assert options.resume is None, "Fresh session should not resume"
-
-    def test_create_options_no_session_id(self):
-        """No session_id should not set continue_conversation."""
-        from agent.sdk_client import ValorAgent
-
-        agent = ValorAgent()
-        options = agent._create_options(session_id=None)
-        assert options.continue_conversation is False
+    # test_create_options_fresh_session_no_continue and
+    # test_create_options_no_session_id (ValorAgent._create_options) were
+    # removed here (plan #2000 Task 2.2 dead-SDK-path deletion) -- ValorAgent
+    # has no production caller after get_agent_response_sdk's deletion.
+    # continue_conversation/resume are CLI-harness concepts now expressed as
+    # get_response_via_harness's `prior_uuid` kwarg, covered by
+    # tests/unit/session_runner/test_harness_argv_golden.py.
 
 
 # === Fix 3: Non-SDLC auto-continue guard ===
